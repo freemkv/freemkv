@@ -1,0 +1,14 @@
+[package]
+name = "freemkv"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+description = "Open source 4K UHD / Blu-ray / DVD backup tool"
+repository = "https://github.com/freemkv/freemkv"
+
+[[bin]]
+name = "freemkv"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
