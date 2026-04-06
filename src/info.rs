@@ -127,9 +127,13 @@ pub fn run(args: &[String]) {
 
     // ---- Share: save profile ----
     if let Some(dir) = share_dir {
-        let profile_name = format!("{}-{}",
+        let profile_name = format!("{}-{}-{}-{}",
             vendor.to_lowercase().trim(),
-            product.to_lowercase().trim().replace(' ', "-"));
+            product.to_lowercase().trim().replace(' ', "-"),
+            revision.to_lowercase().trim(),
+            fw_type.to_lowercase().trim())
+            .replace('/', "-")
+            .replace("--", "-");
         let profile_dir = Path::new(&dir).join(&profile_name);
         std::fs::create_dir_all(&profile_dir).expect("Cannot create profile directory");
 
@@ -257,23 +261,18 @@ pub fn run(args: &[String]) {
             return;
         }
 
-        // Zip the profile directory
+        // Zip the profile directory in memory
         print!("  Packaging profile... ");
-        let zip_path = format!("{}.zip", profile_dir.display());
-        let zip_ok = std::process::Command::new("zip")
-            .args(["-r", "-j", &zip_path, &profile_dir.to_string_lossy()])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        let zip_b64 = if zip_ok {
-            let zip_data = std::fs::read(&zip_path).unwrap_or_default();
-            let encoded = base64_encode(&zip_data);
-            println!("{} bytes ({} encoded)", zip_data.len(), encoded.len());
-            Some(encoded)
-        } else {
-            println!("zip not available, submitting text only");
-            None
+        let zip_b64 = match zip_directory(&profile_dir) {
+            Ok(zip_data) => {
+                let encoded = base64_encode(&zip_data);
+                println!("{} bytes ({} encoded)", zip_data.len(), encoded.len());
+                Some(encoded)
+            }
+            Err(e) => {
+                println!("zip failed ({}), submitting text only", e);
+                None
+            }
         };
 
         // Build issue body
@@ -312,9 +311,8 @@ pub fn run(args: &[String]) {
         // Submit via GitHub Issues API
         submit_issue(&title, &body);
 
-        // Clean up
+        // Clean up temp profile dir
         let _ = std::fs::remove_dir_all(&profile_dir);
-        let _ = std::fs::remove_file(&zip_path);
     }
 }
 
@@ -322,42 +320,26 @@ fn submit_issue(title: &str, body: &str) {
     // Bot token: issues-only, scoped to freemkv/bdemu. Obfuscated to avoid scanners.
     const BOT_TOKEN_B64: &str = "Z2l0aHViX3BhdF8xMUFBSUpERlkweHJyd3NBaXI1SUhwXzBMcVowWERYejhxdVR6QUQyUllQSEFHYnN0OTlzc0gzaXJnWDJFWXB3aldZUEZNUzdFN0FIQ2ZqcEpx";
     let bot_token = String::from_utf8(base64_decode(BOT_TOKEN_B64)).unwrap_or_default();
-    const REPO: &str = "freemkv/bdemu";
 
-    let payload = format!(
-        r#"{{"title":"{}","body":"{}","labels":["drive-profile"]}}"#,
-        title.replace('"', "\\\""),
-        body.replace('"', "\\\"").replace('\n', "\\n")
-    );
+    let payload = serde_json::json!({
+        "title": title,
+        "body": body,
+        "labels": ["drive-profile"]
+    });
 
-    // Use std::process::Command to call curl (no HTTP dependency needed)
-    let output = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "-X", "POST",
-            &format!("https://api.github.com/repos/{}/issues", REPO),
-            "-H", &format!("Authorization: token {}", bot_token),
-            "-H", "Accept: application/vnd.github.v3+json",
-            "-H", "User-Agent: freemkv-info",
-            "-d", &payload,
-        ])
-        .output();
-
-    match output {
-        Ok(out) => {
-            let response = String::from_utf8_lossy(&out.stdout);
-            // Extract issue URL from response
-            if let Some(url_start) = response.find("\"html_url\":\"") {
-                let url = &response[url_start + 12..];
-                if let Some(url_end) = url.find('"') {
-                    let issue_url = &url[..url_end];
-                    // Only show issue URLs (not user/repo URLs)
-                    if issue_url.contains("/issues/") {
-                        println!();
-                        println!("Submitted. Thank you!");
-                        println!("{}", issue_url);
-                        return;
-                    }
+    match ureq::post("https://api.github.com/repos/freemkv/bdemu/issues")
+        .set("Authorization", &format!("token {}", bot_token))
+        .set("Accept", "application/vnd.github.v3+json")
+        .set("User-Agent", "freemkv")
+        .send_json(&payload)
+    {
+        Ok(resp) => {
+            if let Ok(json) = resp.into_json::<serde_json::Value>() {
+                if let Some(url) = json["html_url"].as_str() {
+                    println!();
+                    println!("Submitted. Thank you!");
+                    println!("{}", url);
+                    return;
                 }
             }
             eprintln!("Submission may have failed. Please try again or submit manually:");
@@ -368,6 +350,27 @@ fn submit_issue(title: &str, body: &str) {
             eprintln!("  https://github.com/freemkv/bdemu/issues/new");
         }
     }
+}
+
+fn zip_directory(dir: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use std::io::{Write, Cursor};
+    let buf = Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(buf);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            zip.start_file(&name, options)?;
+            let data = std::fs::read(entry.path())?;
+            zip.write_all(&data)?;
+        }
+    }
+
+    let cursor = zip.finish()?;
+    Ok(cursor.into_inner())
 }
 
 /// Mask a string: letters → A, digits → 0, keep everything else
