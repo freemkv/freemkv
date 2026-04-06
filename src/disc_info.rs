@@ -113,7 +113,7 @@ pub fn run(args: &[String]) {
         let size_mb = title.size_bytes / (1024 * 1024);
 
         let main_tag = if (title.duration_secs - main_duration).abs() < 1.0 && i == 0 {
-            format!("  ({})", strings::get("disc.title_main"))
+            format!("  ({})", strings::get("disc.main_feature"))
         } else {
             String::new()
         };
@@ -445,16 +445,18 @@ fn parse_mpls_title(name: &str, data: &[u8], dev: &ScsiDevice, udf: &UdfInfo) ->
         }
 
         // Parse streams from STN table (first play item only)
-        if item_idx == 0 && item.len() > 26 {
-            let stn_off = 22; // STN table offset within play item (after UO mask + flags)
+        // PlayItem layout: clip(5) + codec(4) + flags(2) + stc(1) + in(4) + out(4) + UO_mask(64) + flags(2) + still(2) = 88 bytes before STN
+        if item_idx == 0 && item.len() > 90 {
+            let stn_off = 88; // STN table starts after 88 bytes of play item data
             if stn_off + 16 < item.len() {
                 let stn_len = u16::from_be_bytes([item[stn_off], item[stn_off+1]]) as usize;
-                if stn_len > 12 {
+                if stn_len > 14 {
+                    // STN header: length(2) + reserved(2) + counts(8) + reserved(4) = 16 bytes
                     let n_video = item[stn_off + 4] as usize;
                     let n_audio = item[stn_off + 5] as usize;
                     let n_pg = item[stn_off + 6] as usize;
 
-                    // Parse stream entries after STN header (16 bytes)
+                    // Stream entries start after 16-byte STN header
                     let mut spos = stn_off + 16;
 
                     // Video streams
