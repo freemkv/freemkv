@@ -257,6 +257,25 @@ pub fn run(args: &[String]) {
             return;
         }
 
+        // Zip the profile directory
+        print!("  Packaging profile... ");
+        let zip_path = format!("{}.zip", profile_dir.display());
+        let zip_ok = std::process::Command::new("zip")
+            .args(["-r", "-j", &zip_path, &profile_dir.to_string_lossy()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        let zip_b64 = if zip_ok {
+            let zip_data = std::fs::read(&zip_path).unwrap_or_default();
+            let encoded = base64_encode(&zip_data);
+            println!("{} bytes ({} encoded)", zip_data.len(), encoded.len());
+            Some(encoded)
+        } else {
+            println!("zip not available, submitting text only");
+            None
+        };
+
         // Build issue body
         let serial_submit = if mask { mask_str(&serial_raw) } else { serial_raw.clone() };
         let mut body = String::new();
@@ -271,16 +290,31 @@ pub fn run(args: &[String]) {
         body.push_str(&format!("Firmware:        {}/{}\n", revision.trim(), fw_type));
         body.push_str(&format!("Bus encryption:  {}\n", bus_enc));
         body.push_str("```\n\n");
-        body.push_str(&format!("Features captured: {}\n", feat_lines.len()));
-        body.push_str("\n---\n*Submitted by `freemkv info --share`*\n");
+        body.push_str(&format!("Features captured: {}\n\n", feat_lines.len()));
+
+        // Include zip as base64 in a hidden details block
+        if let Some(ref b64) = zip_b64 {
+            body.push_str("<details><summary>Profile data (base64 zip)</summary>\n\n");
+            body.push_str("```\n");
+            // Split into 76-char lines
+            for chunk in b64.as_bytes().chunks(76) {
+                body.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+                body.push('\n');
+            }
+            body.push_str("```\n\n");
+            body.push_str("</details>\n\n");
+        }
+
+        body.push_str("---\n*Submitted by `freemkv info --share`*\n");
 
         let title = format!("Drive profile: {} {}", vendor.trim(), product.trim());
 
         // Submit via GitHub Issues API
         submit_issue(&title, &body);
 
-        // Clean up temp profile dir
+        // Clean up
         let _ = std::fs::remove_dir_all(&profile_dir);
+        let _ = std::fs::remove_file(&zip_path);
     }
 }
 
@@ -376,6 +410,22 @@ fn format_date(fw_date: &str) -> String {
 
 fn urlenc(s: &str) -> String {
     s.replace(' ', "+").replace('/', "%2F")
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 { out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char); } else { out.push('='); }
+        if chunk.len() > 2 { out.push(TABLE[(triple & 0x3F) as usize] as char); } else { out.push('='); }
+    }
+    out
 }
 
 fn base64_decode(input: &str) -> Vec<u8> {
