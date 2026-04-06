@@ -393,6 +393,7 @@ enum StreamKind { Video, Audio, Subtitle }
 #[derive(Clone)]
 struct StreamInfo {
     kind: StreamKind,
+    pid: u16,
     description: String,
 }
 
