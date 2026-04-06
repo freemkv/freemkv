@@ -36,18 +36,22 @@ fn main() {
 fn usage() {
     println!("freemkv {}", env!("CARGO_PKG_VERSION"));
     println!();
-    println!("Usage:");
+    println!("Commands:");
     println!("  freemkv info                     Show drive information");
-    println!("  freemkv info --share             Share profile to help expand drive support");
-    println!("  freemkv info --mask              Mask serial numbers in output");
     println!("  freemkv rip [--output /path]     Back up a disc (coming soon)");
     println!("  freemkv version                  Show version");
     println!("  freemkv help                     Show this help");
     println!();
-    println!("Options:");
+    println!("Info options:");
+    println!("  --share                          Share your profile to help expand drive support");
+    println!("  --mask                           Mask serial numbers (combines with --share)");
     println!("  --device /dev/sgN                Specify device (default: auto-detect)");
-    println!("  --mask                           Mask serial numbers (A=alpha, 0=digit)");
     println!("  --quiet                          Minimal output");
+    println!();
+    println!("Examples:");
+    println!("  freemkv info                     Check your drive");
+    println!("  freemkv info --share             Share profile (submits to GitHub)");
+    println!("  freemkv info --share --mask      Share with serial numbers masked");
     println!();
     println!("https://github.com/freemkv");
 }
