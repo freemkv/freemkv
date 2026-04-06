@@ -1,3 +1,5 @@
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+
 # freemkv
 
 Open source 4K UHD / Blu-ray / DVD backup tool for Linux. Built in Rust.

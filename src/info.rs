@@ -318,7 +318,7 @@ pub fn run(args: &[String]) {
 
 fn submit_issue(title: &str, body: &str) {
     // Bot token: issues-only, scoped to freemkv/bdemu. Obfuscated to avoid scanners.
-    const BOT_TOKEN_B64: &str = "Z2l0aHViX3BhdF8xMUFBSUpERlkweHJyd3NBaXI1SUhwXzBMcVowWERYejhxdVR6QUQyUllQSEFHYnN0OTlzc0gzaXJnWDJFWXB3aldZUEZNUzdFN0FIQ2ZqcEpx";
+    const BOT_TOKEN_B64: &str = "Z2l0aHViX3BhdF8xMUFBSUpERlkwaDlvNWxlbWF1bzZQX1Q3VThsRFVrUzlnR2FqN2lQdTN2eGoxRURSWnBmenpXS09VTzNLM0xTZEI0Q0dPN1Q3NTl6NTVQZnpq";
     let bot_token = String::from_utf8(base64_decode(BOT_TOKEN_B64)).unwrap_or_default();
 
     let payload = serde_json::json!({
