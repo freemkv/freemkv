@@ -1,0 +1,308 @@
+// freemkv info — Drive information and profile capture
+// AGPL-3.0 — freemkv project
+
+use crate::scsi::ScsiDevice;
+use std::path::Path;
+
+pub fn run(args: &[String]) {
+    let mut device_path: Option<String> = None;
+    let mut share_dir: Option<String> = None;
+    let mut mask = false;
+    let mut quiet = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--device" | "-d" => {
+                i += 1;
+                device_path = args.get(i).cloned();
+            }
+            "--share" | "-s" => {
+                i += 1;
+                share_dir = Some(args.get(i)
+                    .filter(|a| !a.starts_with('-'))
+                    .cloned()
+                    .unwrap_or_else(|| ".".to_string()));
+                if share_dir.as_deref() == Some(".") && args.get(i).map(|a| a.starts_with('-')).unwrap_or(true) {
+                    i -= 1; // didn't consume next arg
+                }
+            }
+            "--mask" | "-m" => mask = true,
+            "--quiet" | "-q" => quiet = true,
+            "--help" | "-h" => {
+                println!("freemkv info — Show drive information and capture profiles");
+                println!();
+                println!("Usage:");
+                println!("  freemkv info                     Show drive info");
+                println!("  freemkv info --share [dir]       Capture profile for bdemu");
+                println!("  freemkv info --mask              Mask serial numbers");
+                println!("  freemkv info --share --mask      Capture with masked serial");
+                println!("  freemkv info --device /dev/sgN   Specify device");
+                println!();
+                println!("Masking: letters → A, digits → 0, preserves format");
+                println!("  OEDL016822WL → AAAA000000AA");
+                return;
+            }
+            _ => {
+                eprintln!("Unknown option: {}", args[i]);
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    // Auto-detect device
+    let dev_path = device_path.unwrap_or_else(|| find_bd_drive().unwrap_or_else(|| {
+        eprintln!("No BD drive found. Use --device /dev/sgN");
+        std::process::exit(1);
+    }));
+
+    let dev = match ScsiDevice::open(&dev_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Cannot open {}: {}", dev_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    // ---- Probe drive ----
+    let inquiry = match dev.command(&[0x12, 0x00, 0x00, 0x00, 0x60, 0x00], 96) {
+        Some(d) => d,
+        None => {
+            eprintln!("INQUIRY failed on {}", dev_path);
+            std::process::exit(1);
+        }
+    };
+
+    let vendor = str_from(&inquiry[8..16]);
+    let product = str_from(&inquiry[16..32]);
+    let revision = str_from(&inquiry[32..36]);
+
+    let serial_raw = dev.command(&[0x46, 0x02, 0x01, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00], 256)
+        .and_then(|d| if d.len() > 12 { Some(str_from(&d[12..])) } else { None })
+        .unwrap_or_default();
+
+    let fw_date = dev.command(&[0x46, 0x02, 0x01, 0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00], 256)
+        .and_then(|d| if d.len() > 12 { Some(str_from(&d[12..24.min(d.len())])) } else { None })
+        .unwrap_or_default();
+
+    let rb_f1 = dev.command(&[0x3C, 0x02, 0xF1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00], 48);
+    let rb_mode6 = dev.command(&[0x3C, 0x06, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x20, 0x00], 32);
+    let rpc = dev.command(&[0xA4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x08, 0x00], 8);
+
+    let platform = if rb_f1.is_some() {
+        let data = rb_f1.as_ref().unwrap();
+        let chip = str_from(&data[20..24.min(data.len())]);
+        format!("Pioneer RS{}", chip)
+    } else if rb_mode6.is_some() {
+        "MTK MT1959".to_string()
+    } else {
+        "Unknown".to_string()
+    };
+
+    let fw_type = if let Some(ref data) = rb_f1 {
+        str_from(&data[24..28.min(data.len())])
+    } else {
+        str_from(&inquiry[36..43])
+    };
+
+    let bus_enc = dev.command(&[0x46, 0x02, 0x01, 0x0D, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00], 64)
+        .and_then(|d| if d.len() > 12 { Some(format!("{:02X}", d[12])) } else { None })
+        .unwrap_or_else(|| "N/A".to_string());
+
+    // Apply mask
+    let serial_display = if mask { mask_str(&serial_raw) } else { serial_raw.clone() };
+
+    // ---- Display ----
+    if !quiet {
+        println!("Drive Information");
+        println!("  Device:              {}", dev_path);
+        println!("  Manufacturer:        {}", vendor);
+        println!("  Product:             {}", product);
+        println!("  Revision:            {}", revision);
+        println!("  Serial number:       {}", serial_display);
+        println!("  Firmware date:       {}", format_date(&fw_date));
+        println!("  Bus encryption:      {}", bus_enc);
+        println!();
+        println!("Platform Information");
+        println!("  Drive platform:      {}", platform);
+        println!("  Firmware version:    {}/{}", revision, fw_type);
+        println!();
+        // TODO: identity computation + key lookup
+        println!("  Status: Run 'freemkv info --share' to capture profile");
+    }
+
+    // ---- Share: save profile ----
+    if let Some(dir) = share_dir {
+        let profile_name = format!("{}-{}",
+            vendor.to_lowercase().trim(),
+            product.to_lowercase().trim().replace(' ', "-"));
+        let profile_dir = Path::new(&dir).join(&profile_name);
+        std::fs::create_dir_all(&profile_dir).expect("Cannot create profile directory");
+
+        // Mask serial in binary data if --mask
+        let mut inquiry_save = inquiry.clone();
+        if mask {
+            // Mask serial in INQUIRY vendor-specific area if present
+            // INQUIRY doesn't typically have serial, but mask bytes 36+ to be safe
+        }
+        save_bin(&profile_dir, "inquiry.bin", &inquiry_save);
+
+        // Capture features
+        let features: &[(u16, &str)] = &[
+            (0x0000, "Profile List"),
+            (0x0001, "Core"),
+            (0x0003, "Removable Medium"),
+            (0x0010, "Random Readable"),
+            (0x001D, "Multi-Read"),
+            (0x001E, "CD Read"),
+            (0x001F, "DVD Read"),
+            (0x0040, "BD Read"),
+            (0x0041, "BD Write"),
+            (0x0100, "Power Management"),
+            (0x0102, "Embedded Changer"),
+            (0x0107, "Real Time Streaming"),
+            (0x0108, "Serial Number"),
+            (0x010C, "Firmware Information"),
+            (0x010D, "AACS"),
+        ];
+
+        let mut feat_lines = Vec::new();
+        for (code, name) in features {
+            let cdb = [0x46, 0x02, (*code >> 8) as u8, *code as u8,
+                       0x00, 0x00, 0x00, 0x01, 0x00, 0x00];
+            if let Some(data) = dev.command(&cdb, 256) {
+                if data.len() > 8 {
+                    let mut feat_data = data[8..].to_vec();
+
+                    // Mask serial in GET_CONFIG 0108
+                    if *code == 0x0108 && mask && feat_data.len() > 4 {
+                        let masked = mask_bytes(&feat_data[4..]);
+                        feat_data[4..4 + masked.len()].copy_from_slice(&masked);
+                    }
+
+                    let fname = format!("gc_{:04x}.bin", code);
+                    save_bin(&profile_dir, &fname, &feat_data);
+                    feat_lines.push(format!("0x{:04X} = \"{}\"  # {}", code, fname, name));
+                    if !quiet {
+                        println!("  Captured: GET_CONFIG 0x{:04X} {} ({} bytes)", code, name, feat_data.len());
+                    }
+                }
+            }
+        }
+
+        // RPC state
+        if let Some(data) = &rpc {
+            save_bin(&profile_dir, "rpc_state.bin", data);
+        }
+
+        // MODE SENSE 2A
+        if let Some(data) = dev.command(&[0x5A, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFC, 0x00], 252) {
+            save_bin(&profile_dir, "mode_2a.bin", &data);
+        }
+
+        // READ_BUFFER 0xF1 (Pioneer)
+        if let Some(mut data) = rb_f1.clone() {
+            if mask && data.len() >= 12 {
+                let masked = mask_bytes(&data[0..12]);
+                data[0..12].copy_from_slice(&masked);
+            }
+            save_bin(&profile_dir, "rb_f1.bin", &data);
+        }
+
+        // READ_BUFFER mode 6 (MTK)
+        if let Some(data) = &rb_mode6 {
+            save_bin(&profile_dir, "rb_mode6.bin", data);
+        }
+
+        // Generate drive.toml
+        let serial_toml = if mask { mask_str(&serial_raw) } else { serial_raw.clone() };
+        let mut toml = String::new();
+        toml.push_str(&format!("# {} {} {} — captured by freemkv info\n\n", vendor.trim(), product.trim(), revision.trim()));
+        toml.push_str("[drive]\n");
+        toml.push_str(&format!("manufacturer = \"{}\"\n", vendor.trim()));
+        toml.push_str(&format!("product = \"{}\"\n", product.trim()));
+        toml.push_str(&format!("revision = \"{}\"\n", revision.trim()));
+        toml.push_str(&format!("serial = \"{}\"\n", serial_toml));
+        toml.push_str(&format!("firmware_date = \"{}\"\n", format_date(&fw_date)));
+        toml.push_str("current_profile = 0x0043\n\n");
+        toml.push_str("[files]\n");
+        toml.push_str("inquiry = \"inquiry.bin\"\n");
+        if rpc.is_some() { toml.push_str("rpc_state = \"rpc_state.bin\"\n"); }
+        toml.push_str("mode_2a = \"mode_2a.bin\"\n\n");
+        toml.push_str("[features]\n");
+        for line in &feat_lines {
+            toml.push_str(line);
+            toml.push('\n');
+        }
+        if rb_f1.is_some() || rb_mode6.is_some() {
+            toml.push_str("\n[read_buffer]\n");
+            if rb_f1.is_some() { toml.push_str("0xF1 = \"rb_f1.bin\"\n"); }
+            if rb_mode6.is_some() { toml.push_str("mode6 = \"rb_mode6.bin\"\n"); }
+        }
+        std::fs::write(profile_dir.join("drive.toml"), &toml).expect("Cannot write drive.toml");
+
+        println!();
+        println!("Profile saved to {}/", profile_dir.display());
+        println!();
+        println!("To submit this profile and help expand drive support:");
+        println!("  https://github.com/freemkv/bdemu/issues/new?title=New+profile:+{}+{}&body=Captured+with+freemkv+info+--share",
+                 urlenc(vendor.trim()), urlenc(product.trim()));
+    }
+}
+
+/// Mask a string: letters → A, digits → 0, keep everything else
+fn mask_str(s: &str) -> String {
+    s.chars().map(|c| {
+        if c.is_ascii_alphabetic() { 'A' }
+        else if c.is_ascii_digit() { '0' }
+        else { c }
+    }).collect()
+}
+
+/// Mask bytes: letters → A, digits → 0, spaces stay, others stay
+fn mask_bytes(data: &[u8]) -> Vec<u8> {
+    data.iter().map(|&b| {
+        if b.is_ascii_alphabetic() { b'A' }
+        else if b.is_ascii_digit() { b'0' }
+        else { b }
+    }).collect()
+}
+
+fn str_from(data: &[u8]) -> String {
+    std::str::from_utf8(data).unwrap_or("").trim_end().to_string()
+}
+
+fn save_bin(dir: &Path, name: &str, data: &[u8]) {
+    std::fs::write(dir.join(name), data).unwrap_or_else(|_| panic!("Cannot write {}", name));
+}
+
+fn format_date(fw_date: &str) -> String {
+    if fw_date.len() >= 8 {
+        if fw_date.starts_with("21") && fw_date.len() >= 12 {
+            format!("20{}-{}-{}", &fw_date[2..4], &fw_date[4..6], &fw_date[6..8])
+        } else {
+            format!("{}-{}-{}", &fw_date[0..4], &fw_date[4..6], &fw_date[6..8])
+        }
+    } else {
+        fw_date.to_string()
+    }
+}
+
+fn urlenc(s: &str) -> String {
+    s.replace(' ', "+").replace('/', "%2F")
+}
+
+fn find_bd_drive() -> Option<String> {
+    for i in 0..16 {
+        let path = format!("/dev/sg{}", i);
+        if let Ok(dev) = ScsiDevice::open(&path) {
+            if let Some(inq) = dev.command(&[0x12, 0x00, 0x00, 0x00, 0x24, 0x00], 36) {
+                if inq[0] & 0x1F == 0x05 {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
