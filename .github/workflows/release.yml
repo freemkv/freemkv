@@ -9,7 +9,21 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Cargo.toml version matches tag
+        run: |
+          CARGO_VER="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
+          if [ "$CARGO_VER" != "${{ github.ref_name }}" ]; then
+            echo "::error::Cargo.toml says $CARGO_VER but tag is ${{ github.ref_name }}"
+            exit 1
+          fi
+          echo "Version match: $CARGO_VER"
+
   build:
+    needs: verify
     strategy:
       matrix:
         include:
