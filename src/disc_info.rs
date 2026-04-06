@@ -445,9 +445,21 @@ fn parse_mpls_title(name: &str, data: &[u8], dev: &ScsiDevice, udf: &UdfInfo) ->
         }
 
         // Parse streams from STN table (first play item only)
-        // PlayItem layout: clip(5) + codec(4) + flags(2) + stc(1) + in(4) + out(4) + UO_mask(64) + flags(2) + still(2) = 88 bytes before STN
-        if item_idx == 0 && item.len() > 90 {
-            let stn_off = 88; // STN table starts after 88 bytes of play item data
+        // PlayItem layout:
+        //   [0:5]   clip_id (5)
+        //   [5:9]   codec_id (4)
+        //   [9:11]  flags (2: reserved + is_multi_angle + connection_condition)
+        //   [11]    stc_id (1)
+        //   [12:16] in_time (4)
+        //   [16:20] out_time (4)
+        //   [20:28] UO mask (8 bytes = 64 bits)
+        //   [28]    flags (1: random_access etc)
+        //   [29]    still_mode (1)
+        //   [30:32] still_time (2)
+        //   [32:]   STN table
+        const STN_OFFSET: usize = 32;
+        if item_idx == 0 && item.len() > STN_OFFSET + 16 {
+            let stn_off = STN_OFFSET;
             if stn_off + 16 < item.len() {
                 let stn_len = u16::from_be_bytes([item[stn_off], item[stn_off+1]]) as usize;
                 if stn_len > 14 {
