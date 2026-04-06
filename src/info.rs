@@ -123,7 +123,9 @@ pub fn run(args: &[String]) {
         println!("  Drive platform:      {}", platform);
         println!("  Firmware version:    {}/{}", revision, fw_type);
         println!();
-        println!("Run 'freemkv info --share' to share your profile and help expand drive support.");
+        if share_dir.is_none() {
+            println!("Run 'freemkv info --share' to share your profile and help expand drive support.");
+        }
     }
 
     // ---- Share: save profile ----
