@@ -2,7 +2,9 @@
 // AGPL-3.0 — freemkv project
 
 mod info;
+mod disc_info;
 mod scsi;
+mod strings;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -13,7 +15,8 @@ fn main() {
     }
 
     match args[1].as_str() {
-        "info" => info::run(&args[2..]),
+        "drive-info" | "info" => info::run(&args[2..]),
+        "disc-info" => disc_info::run(&args[2..]),
         "rip" => {
             eprintln!("freemkv rip: not yet implemented");
             eprintln!();
@@ -39,21 +42,23 @@ fn usage() {
     println!("Usage: freemkv <command> [options]");
     println!();
     println!("Commands:");
-    println!("  info                Show drive information");
+    println!("  drive-info            Show drive hardware and profile match");
+    println!("  disc-info             Show disc titles, streams, and sizes");
     println!("  rip [--output /path]  Back up a disc (coming soon)");
-    println!("  version             Show version");
-    println!("  help                Show this help");
+    println!("  version               Show version");
+    println!("  help                  Show this help");
     println!();
     println!("Global options:");
-    println!("  --device /dev/sgN   Specify device (default: auto-detect)");
-    println!("  --quiet             Minimal output");
+    println!("  --device /dev/sgN     Specify device (default: auto-detect)");
+    println!("  --quiet               Minimal output");
     println!();
-    println!("Info options:");
-    println!("  --share             Share your drive profile to help expand drive support");
-    println!("  --mask              Mask serial numbers (use with --share)");
+    println!("Drive-info options:");
+    println!("  --share               Share profile to help expand drive support");
+    println!("  --mask                Mask serial numbers (use with --share)");
     println!();
     println!("Examples:");
-    println!("  freemkv info");
-    println!("  freemkv info --share");
-    println!("  freemkv info --share --mask");
+    println!("  freemkv drive-info");
+    println!("  freemkv drive-info --share --mask");
+    println!("  freemkv disc-info");
+    println!("  freemkv rip --output ~/backups/");
 }
