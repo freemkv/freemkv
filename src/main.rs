@@ -34,7 +34,7 @@ fn main() {
 }
 
 fn usage() {
-    println!("freemkv {} — Open source 4K UHD / Blu-ray / DVD backup tool", env!("CARGO_PKG_VERSION"));
+    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
     println!();
     println!("Usage:");
     println!("  freemkv info                     Show drive information");
