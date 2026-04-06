@@ -11,6 +11,7 @@ name = "freemkv"
 path = "src/main.rs"
 
 [dependencies]
+libfreemkv = { path = "../libfreemkv" }
 libc = "0.2"
 ureq = { version = "2", features = ["json"] }
 serde_json = "1"

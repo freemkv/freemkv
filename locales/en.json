@@ -1,0 +1,47 @@
+{
+  "disc": {
+    "scanning": "Scanning disc...",
+    "capacity": "Capacity",
+    "titles": "Titles",
+    "main_feature": "main feature",
+    "no_titles": "No titles found",
+    "streams": "Streams",
+    "short_titles": "+{count} short titles",
+    "clip": "clip",
+    "clips": "clips"
+  },
+  "drive": {
+    "header": "Drive Information",
+    "device": "Device",
+    "manufacturer": "Manufacturer",
+    "product": "Product",
+    "revision": "Revision",
+    "serial": "Serial number",
+    "firmware_date": "Firmware date",
+    "bus_encryption": "Bus encryption",
+    "platform_header": "Platform Information",
+    "platform": "Drive platform",
+    "firmware_version": "Firmware version",
+    "share_hint": "Run 'freemkv drive-info --share' to share your profile and help expand drive support."
+  },
+  "rip": {
+    "select_title": "Select title",
+    "starting": "Ripping title {num}",
+    "progress": "{percent}% | {done} / {total} | {speed} | ETA {eta}",
+    "complete": "Complete. {size} written to {path}",
+    "failed": "Failed: {error}",
+    "retrying": "Retrying sector {lba} (attempt {n})",
+    "speed_reduced": "Speed reduced to {speed}"
+  },
+  "stream": {
+    "video": "Video",
+    "audio": "Audio",
+    "subtitle": "Subtitle"
+  },
+  "error": {
+    "no_drive": "No optical drive found. Use --device /dev/sgN",
+    "no_disc": "No disc in drive",
+    "open_failed": "Cannot open {device}: {error}",
+    "not_bluray": "Not a Blu-ray disc"
+  }
+}
