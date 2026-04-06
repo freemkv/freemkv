@@ -23,13 +23,13 @@ pub fn run(args: &[String]) {
             "--mask" | "-m" => mask = true,
             "--quiet" | "-q" => quiet = true,
             "--help" | "-h" => {
-                println!("freemkv info — Show drive information and capture profiles");
+                println!("freemkv info — Show drive information");
                 println!();
                 println!("Usage:");
                 println!("  freemkv info                     Show drive info");
-                println!("  freemkv info --share [dir]       Capture profile for bdemu");
+                println!("  freemkv info --share             Share profile to help expand drive support");
                 println!("  freemkv info --mask              Mask serial numbers");
-                println!("  freemkv info --share --mask      Capture with masked serial");
+                println!("  freemkv info --share --mask      Share with masked serial");
                 println!("  freemkv info --device /dev/sgN   Specify device");
                 println!();
                 println!("Masking: letters → A, digits → 0, preserves format");
@@ -108,6 +108,8 @@ pub fn run(args: &[String]) {
 
     // ---- Display ----
     if !quiet {
+        println!("freemkv {}", env!("CARGO_PKG_VERSION"));
+        println!();
         println!("Drive Information");
         println!("  Device:              {}", dev_path);
         println!("  Manufacturer:        {}", vendor);
@@ -121,8 +123,7 @@ pub fn run(args: &[String]) {
         println!("  Drive platform:      {}", platform);
         println!("  Firmware version:    {}/{}", revision, fw_type);
         println!();
-        // TODO: identity computation + key lookup
-        println!("  Status: Run 'freemkv info --share' to capture profile");
+        println!("Run 'freemkv info --share' to share your profile and help expand drive support.");
     }
 
     // ---- Share: save profile ----
@@ -327,7 +328,7 @@ fn submit_issue(title: &str, body: &str) {
         "labels": ["drive-profile"]
     });
 
-    match ureq::post("https://api.github.com/repos/freemkv/bdemu/issues")
+    match ureq::post("https://api.github.com/repos/freemkv/freemkv/issues")
         .set("Authorization", &format!("token {}", bot_token))
         .set("Accept", "application/vnd.github.v3+json")
         .set("User-Agent", "freemkv")
@@ -343,11 +344,11 @@ fn submit_issue(title: &str, body: &str) {
                 }
             }
             eprintln!("Submission may have failed. Please try again or submit manually:");
-            eprintln!("  https://github.com/freemkv/bdemu/issues/new");
+            eprintln!("  https://github.com/freemkv/freemkv/issues/new");
         }
         Err(e) => {
             eprintln!("Could not submit ({}). Please submit manually:", e);
-            eprintln!("  https://github.com/freemkv/bdemu/issues/new");
+            eprintln!("  https://github.com/freemkv/freemkv/issues/new");
         }
     }
 }
