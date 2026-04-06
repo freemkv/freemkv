@@ -11,6 +11,7 @@ pub fn run(args: &[String]) {
     let mut device_path: Option<String> = None;
     let mut quiet = false;
     let mut full = false;
+    let mut basic = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -21,6 +22,7 @@ pub fn run(args: &[String]) {
             }
             "--quiet" | "-q" => quiet = true,
             "--full" | "-f" => full = true,
+            "--basic" | "-b" => basic = true,
             "--help" | "-h" => {
                 println!("freemkv disc-info — {}", strings::get("disc.scanning"));
                 println!();
@@ -68,6 +70,13 @@ pub fn run(args: &[String]) {
             std::process::exit(1);
         }
     };
+
+    // Try to extract track labels from BD-J JAR files (skip with --basic)
+    let jar_labels = if basic { Vec::new() } else { read_jar_labels(&dev, &udf) };
+    let mut audio_jar: Vec<libfreemkv::jar::TrackLabel> = jar_labels.iter()
+        .filter(|l| !l.hint.starts_with("PGStream")).cloned().collect();
+    let sub_jar: Vec<&libfreemkv::jar::TrackLabel> = jar_labels.iter()
+        .filter(|l| l.hint.starts_with("PGStream")).collect();
 
     // Find and parse all playlists
     let mut titles = Vec::new();
@@ -132,18 +141,58 @@ pub fn run(args: &[String]) {
 
         // Show streams for all visible titles
         if !quiet && !title.streams.is_empty() {
+            // Build stream descriptions: JAR mode (enhanced) or basic (disc only)
+            let has_jar = !basic && (!audio_jar.is_empty() || !sub_jar.is_empty());
+
+            // Reset audio JAR labels for each title (clone from original)
+            let mut title_audio_jar: Vec<libfreemkv::jar::TrackLabel> = if has_jar {
+                jar_labels.iter()
+                    .filter(|l| !l.hint.starts_with("PGStream"))
+                    .cloned().collect()
+            } else {
+                Vec::new()
+            };
+
             println!();
+            let mut sub_count = 0;
             for stream in &title.streams {
                 let kind = match stream.kind {
                     StreamKind::Video => strings::get("stream.video"),
                     StreamKind::Audio => strings::get("stream.audio"),
                     StreamKind::Subtitle => strings::get("stream.subtitle"),
                 };
-                if stream.pid > 0 {
-                    println!("      {}: {} [0x{:04X}]", kind, stream.description, stream.pid);
-                } else {
-                    println!("      {}: {}", kind, stream.description);
-                }
+                let pid_str = if stream.pid > 0 { format!(" [0x{:04X}]", stream.pid) } else { String::new() };
+
+                // JAR label matching (consume-based)
+                let jar_extra = if has_jar {
+                    match stream.kind {
+                        StreamKind::Audio => {
+                            let lang = extract_lang(&stream.description);
+                            let is_truehd = stream.description.contains("TrueHD");
+                            let idx = if is_truehd {
+                                title_audio_jar.iter().position(|l| l.language == lang && l.hint == "MLP")
+                            } else {
+                                title_audio_jar.iter().position(|l| l.language == lang && l.hint == "AC3")
+                                    .or_else(|| title_audio_jar.iter().position(|l| l.language == lang && l.hint == "ADES"))
+                                    .or_else(|| title_audio_jar.iter().position(|l| l.language == lang && l.hint.starts_with("AudioStream")))
+                            };
+                            if let Some(i) = idx {
+                                let label = title_audio_jar.remove(i);
+                                if label.description.is_empty() { None } else { Some(label.description) }
+                            } else { None }
+                        }
+                        StreamKind::Subtitle => {
+                            sub_count += 1;
+                            if sub_count > sub_jar.len() && !sub_jar.is_empty() {
+                                Some("forced".to_string())
+                            } else { None }
+                        }
+                        _ => None,
+                    }
+                } else { None };
+
+                let jar_str = jar_extra.map(|l| format!(" — {}", l)).unwrap_or_default();
+                println!("      {}: {}{}{}", kind, stream.description, pid_str, jar_str);
             }
             println!();
         }
@@ -162,6 +211,7 @@ struct UdfInfo {
     metadata_start: u32,
     mpls_files: Vec<FileRef>,
     clpi_files: Vec<FileRef>,
+    jar_files: Vec<FileRef>,
 }
 
 struct FileRef {
@@ -265,6 +315,7 @@ fn parse_udf(dev: &ScsiDevice) -> Result<UdfInfo, String> {
     // Walk directories to find BDMV/PLAYLIST and BDMV/CLIPINF
     let mut mpls_files = Vec::new();
     let mut clpi_files = Vec::new();
+    let mut jar_files = Vec::new();
 
     // Read root dir
     let root_entries = read_dir_entries(dev, metadata_start, root_lba)?;
@@ -292,9 +343,19 @@ fn parse_udf(dev: &ScsiDevice) -> Result<UdfInfo, String> {
                 }
             }
         }
+
+        // JAR (BD-J menu applications — contain track labels)
+        if let Some(jar_dir) = bdmv_entries.iter().find(|e| e.name.eq_ignore_ascii_case("JAR") && e.is_dir) {
+            let jar_entries = read_dir_entries(dev, metadata_start, jar_dir.lba)?;
+            for e in jar_entries {
+                if e.name.ends_with(".jar") {
+                    jar_files.push(FileRef { name: e.name, lba: e.lba, size: e.size });
+                }
+            }
+        }
     }
 
-    Ok(UdfInfo { partition_start, metadata_start, mpls_files, clpi_files })
+    Ok(UdfInfo { partition_start, metadata_start, mpls_files, clpi_files, jar_files })
 }
 
 struct DirEntryInfo {
@@ -665,4 +726,120 @@ fn find_bd_drive() -> Option<String> {
         }
     }
     None
+}
+
+// ── JAR label extraction ────────────────────────────────────────────────────
+
+fn read_jar_labels(dev: &ScsiDevice, udf: &UdfInfo) -> Vec<libfreemkv::jar::TrackLabel> {
+    for entry in &udf.jar_files {
+        let jar_data = match udf.read_file(dev, &entry.lba, entry.size) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        if let Some(labels) = libfreemkv::jar::extract_labels(&jar_data) {
+            let mut all = labels.audio;
+            all.extend(labels.subtitle);
+            return all;
+        }
+    }
+    Vec::new()
+}
+
+fn find_jar_audio_label(labels: &[libfreemkv::jar::TrackLabel], stream: &StreamInfo) -> Option<String> {
+    // Find audio labels only
+    let audio_labels: Vec<&libfreemkv::jar::TrackLabel> = labels.iter()
+        .filter(|l| !l.hint.starts_with("PGStream"))
+        .collect();
+
+    if audio_labels.is_empty() { return None; }
+
+    // Match by language + codec type
+    // For each stream, find the corresponding label
+    // Strategy: filter labels by language, then match by codec hint
+    let lang = extract_lang(&stream.description);
+    let is_truehd = stream.description.contains("TrueHD");
+    let is_ac3 = stream.description.contains("AC-3");
+
+    let matching: Vec<&&libfreemkv::jar::TrackLabel> = audio_labels.iter()
+        .filter(|l| l.language == lang)
+        .collect();
+
+    if matching.is_empty() { return None; }
+
+    // If TrueHD, find MLP label
+    if is_truehd {
+        if let Some(l) = matching.iter().find(|l| l.hint == "MLP") {
+            if !l.description.is_empty() { return Some(l.description.clone()); }
+        }
+    }
+
+    // If AC-3, match by position among same-lang AC-3 labels
+    if is_ac3 {
+        let ac3_labels: Vec<&&libfreemkv::jar::TrackLabel> = matching.iter()
+            .filter(|l| l.hint == "AC3" || l.hint == "ADES" || l.hint.starts_with("AudioStream"))
+            .cloned()
+            .collect();
+
+        // We need to know which AC-3 stream this is (1st, 2nd, 3rd for this language)
+        // Use the PID to determine position — but we don't have all PIDs here
+        // For now, return the ADES labels if they exist (those are the important ones)
+        for l in &ac3_labels {
+            if l.hint == "ADES" && !l.description.is_empty() {
+                // Check if this stream's PID matches the ADES position
+                // We can't perfectly match without tracking position, but if there are
+                // ADES labels, show them for the higher-PID AC-3 streams
+                return Some(l.description.clone());
+            }
+        }
+
+        // First AC-3 of this language = compatibility track
+        if let Some(l) = ac3_labels.first() {
+            if l.hint == "AC3" && !l.description.is_empty() {
+                return Some(l.description.clone());
+            }
+        }
+    }
+
+    None
+}
+
+fn find_jar_subtitle_label(labels: &[libfreemkv::jar::TrackLabel], stream: &StreamInfo) -> Option<String> {
+    // Subtitle labels are simple — just lang_PGStream{n}
+    // The duplicate fra/spa at the end with no labels are likely forced
+    let sub_labels: Vec<&libfreemkv::jar::TrackLabel> = labels.iter()
+        .filter(|l| l.hint.starts_with("PGStream"))
+        .collect();
+
+    if sub_labels.is_empty() { return None; }
+
+    let lang = extract_lang(&stream.description);
+
+    // Check if this language has a PGStream label
+    let has_label = sub_labels.iter().any(|l| l.language == lang);
+
+    if !has_label && !lang.is_empty() {
+        // Language appears in stream but NOT in JAR labels
+        // If there's another stream with this language that IS labeled,
+        // this one is likely a forced subtitle
+        let labeled_langs: Vec<&str> = sub_labels.iter().map(|l| l.language.as_str()).collect();
+        if labeled_langs.contains(&lang.as_str()) {
+            return Some("forced".to_string());
+        }
+    }
+
+    None
+}
+
+fn extract_lang(description: &str) -> String {
+    // Extract 3-letter language code from description like "AC-3 5.1 48kHz (eng)"
+    if let Some(start) = description.rfind('(') {
+        if let Some(end) = description.rfind(')') {
+            let lang = &description[start+1..end];
+            if lang.len() == 3 && lang.chars().all(|c| c.is_ascii_lowercase()) {
+                return lang.to_string();
+            }
+        }
+    }
+    String::new()
 }
