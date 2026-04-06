@@ -112,7 +112,7 @@ pub fn run(args: &[String]) {
 
         let hrs = (title.duration_secs / 3600.0) as u32;
         let mins = ((title.duration_secs % 3600.0) / 60.0) as u32;
-        let size_mb = title.size_bytes / (1024 * 1024);
+        let size_gb = title.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
 
         let clip_word = if title.clip_count == 1 {
@@ -121,11 +121,11 @@ pub fn run(args: &[String]) {
             strings::get("disc.clips")
         };
 
-        println!("  {:2}. {:14}  {:1}h {:02}m  {:>8} MB  {} {}",
+        println!("  {:2}. {:14}  {:1}h {:02}m  {:>5.1} GB  {} {}",
             i + 1,
             title.playlist_name,
             hrs, mins,
-            fmt_num(size_mb),
+            size_gb,
             title.clip_count,
             clip_word,
         );
