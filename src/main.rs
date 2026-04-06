@@ -36,22 +36,24 @@ fn main() {
 fn usage() {
     println!("freemkv {}", env!("CARGO_PKG_VERSION"));
     println!();
+    println!("Usage: freemkv <command> [options]");
+    println!();
     println!("Commands:");
-    println!("  freemkv info                     Show drive information");
-    println!("  freemkv rip [--output /path]     Back up a disc (coming soon)");
-    println!("  freemkv version                  Show version");
-    println!("  freemkv help                     Show this help");
+    println!("  info                Show drive information");
+    println!("  rip [--output /path]  Back up a disc (coming soon)");
+    println!("  version             Show version");
+    println!("  help                Show this help");
+    println!();
+    println!("Global options:");
+    println!("  --device /dev/sgN   Specify device (default: auto-detect)");
+    println!("  --quiet             Minimal output");
     println!();
     println!("Info options:");
-    println!("  --share                          Share your profile to help expand drive support");
-    println!("  --mask                           Mask serial numbers (combines with --share)");
-    println!("  --device /dev/sgN                Specify device (default: auto-detect)");
-    println!("  --quiet                          Minimal output");
+    println!("  --share             Share your drive profile to help expand drive support");
+    println!("  --mask              Mask serial numbers (use with --share)");
     println!();
     println!("Examples:");
-    println!("  freemkv info                     Check your drive");
-    println!("  freemkv info --share             Share profile (submits to GitHub)");
-    println!("  freemkv info --share --mask      Share with serial numbers masked");
-    println!();
-    println!("https://github.com/freemkv");
+    println!("  freemkv info");
+    println!("  freemkv info --share");
+    println!("  freemkv info --share --mask");
 }
