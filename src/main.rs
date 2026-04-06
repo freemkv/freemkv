@@ -21,7 +21,7 @@ fn main() {
             std::process::exit(1);
         }
         "version" | "--version" | "-V" => {
-            println!("freemkv {}", env!("CARGO_PKG_VERSION"));
+            println!("{}", env!("CARGO_PKG_VERSION"));
         }
         "help" | "--help" | "-h" => usage(),
         _ => {
