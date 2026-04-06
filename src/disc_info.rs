@@ -139,7 +139,11 @@ pub fn run(args: &[String]) {
                     StreamKind::Audio => strings::get("stream.audio"),
                     StreamKind::Subtitle => strings::get("stream.subtitle"),
                 };
-                println!("      {}: {}", kind, stream.description);
+                if stream.pid > 0 {
+                    println!("      {}: {} [0x{:04X}]", kind, stream.description, stream.pid);
+                } else {
+                    println!("      {}: {}", kind, stream.description);
+                }
             }
             println!();
         }
@@ -611,7 +615,14 @@ fn parse_stream_entry(item: &[u8], pos: usize, kind: StreamKind) -> Option<(Stre
         }
     };
 
-    Some((StreamInfo { kind, description: desc }, sa_end))
+    // Extract PID from stream entry (type 0x01: PID at bytes 2-3)
+    let pid = if item[pos + 1] == 0x01 && pos + 4 <= item.len() {
+        u16::from_be_bytes([item[pos + 2], item[pos + 3]])
+    } else {
+        0
+    };
+
+    Some((StreamInfo { kind, pid, description: desc }, sa_end))
 }
 
 // ── Sector I/O ──────────────────────────────────────────────────────────────
