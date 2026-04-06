@@ -176,7 +176,7 @@ struct FileRef {
 
 impl UdfInfo {
     fn read_file(&self, dev: &ScsiDevice, meta_lba: &u32, size: u32) -> Result<Vec<u8>, String> {
-        // Read ICB to get data extent
+        // Read ICB from metadata partition
         let icb = read_sector_raw(dev, self.metadata_start + meta_lba)?;
         let tag = u16::from_le_bytes([icb[0], icb[1]]);
 
@@ -194,7 +194,8 @@ impl UdfInfo {
 
         let data_len = u32::from_le_bytes([icb[ad_off], icb[ad_off+1], icb[ad_off+2], icb[ad_off+3]]) & 0x3FFFFFFF;
         let data_lba = u32::from_le_bytes([icb[ad_off+4], icb[ad_off+5], icb[ad_off+6], icb[ad_off+7]]);
-        let abs_start = self.metadata_start + data_lba;
+        // File data lives on the PHYSICAL partition, not the metadata partition
+        let abs_start = self.partition_start + data_lba;
 
         let sector_count = (data_len + 2047) / 2048;
         let mut data = vec![0u8; sector_count as usize * 2048];
