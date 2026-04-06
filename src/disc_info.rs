@@ -456,30 +456,84 @@ fn parse_mpls_title(name: &str, data: &[u8], dev: &ScsiDevice, udf: &UdfInfo) ->
                 let stn_len = u16::from_be_bytes([item[stn_off], item[stn_off+1]]) as usize;
                 if stn_len > 14 {
                     // STN header: length(2) + reserved(2) + counts(8) + reserved(4) = 16 bytes
+                    //   [+4] primary_video  [+5] primary_audio  [+6] pg_subtitle
+                    //   [+7] ig_interactive  [+8] secondary_audio  [+9] secondary_video
+                    //   [+10] pip_pg  [+11] dolby_vision_el
                     let n_video = item[stn_off + 4] as usize;
                     let n_audio = item[stn_off + 5] as usize;
                     let n_pg = item[stn_off + 6] as usize;
+                    let n_ig = item[stn_off + 7] as usize;
+                    let n_sec_audio = item[stn_off + 8] as usize;
+                    let n_sec_video = item[stn_off + 9] as usize;
+                    let _n_pip_pg = item[stn_off + 10] as usize;
+                    let n_dv = item[stn_off + 11] as usize;
 
                     // Stream entries start after 16-byte STN header
                     let mut spos = stn_off + 16;
 
-                    // Video streams
+                    // Primary video
                     for _ in 0..n_video {
                         if let Some((s, next)) = parse_stream_entry(item, spos, StreamKind::Video) {
                             streams.push(s);
                             spos = next;
                         } else { break; }
                     }
-                    // Audio streams
+                    // Primary audio
                     for _ in 0..n_audio {
                         if let Some((s, next)) = parse_stream_entry(item, spos, StreamKind::Audio) {
                             streams.push(s);
                             spos = next;
                         } else { break; }
                     }
-                    // PG (subtitle) streams
+                    // PG subtitles
                     for _ in 0..n_pg {
                         if let Some((s, next)) = parse_stream_entry(item, spos, StreamKind::Subtitle) {
+                            streams.push(s);
+                            spos = next;
+                        } else { break; }
+                    }
+                    // IG (interactive graphics / menus) — skip but advance position
+                    for _ in 0..n_ig {
+                        if let Some((_, next)) = parse_stream_entry(item, spos, StreamKind::Subtitle) {
+                            spos = next;
+                        } else { break; }
+                    }
+                    // Secondary audio (e.g. commentary with Atmos)
+                    for _ in 0..n_sec_audio {
+                        if let Some((mut s, next)) = parse_stream_entry(item, spos, StreamKind::Audio) {
+                            s.description = format!("{} [secondary]", s.description);
+                            streams.push(s);
+                            // Skip the extra ref bytes after secondary audio entries
+                            // num_primary_audio_ref(1) + reserved(1) + refs(N) + padding
+                            let refs_start = next;
+                            if refs_start < item.len() {
+                                let n_refs = item[refs_start] as usize;
+                                let padded = 2 + n_refs + (n_refs % 2);
+                                spos = refs_start + padded;
+                            } else { spos = next; }
+                        } else { break; }
+                    }
+                    // Secondary video (PiP)
+                    for _ in 0..n_sec_video {
+                        if let Some((mut s, next)) = parse_stream_entry(item, spos, StreamKind::Video) {
+                            s.description = format!("{} [secondary]", s.description);
+                            streams.push(s);
+                            // Skip extra ref bytes
+                            let refs_start = next;
+                            if refs_start + 2 < item.len() {
+                                let n_arefs = item[refs_start] as usize;
+                                let after_arefs = refs_start + 2 + n_arefs + (n_arefs % 2);
+                                if after_arefs < item.len() {
+                                    let n_prefs = item[after_arefs] as usize;
+                                    spos = after_arefs + 2 + n_prefs + (n_prefs % 2);
+                                } else { spos = after_arefs; }
+                            } else { spos = next; }
+                        } else { break; }
+                    }
+                    // Dolby Vision enhancement layer
+                    for _ in 0..n_dv {
+                        if let Some((mut s, next)) = parse_stream_entry(item, spos, StreamKind::Video) {
+                            s.description = format!("{} [Dolby Vision EL]", s.description);
                             streams.push(s);
                             spos = next;
                         } else { break; }
@@ -531,7 +585,9 @@ fn parse_stream_entry(item: &[u8], pos: usize, kind: StreamKind) -> Option<(Stre
             let mut extra = String::new();
             if coding_type == 0x24 && sa.len() > 2 {
                 let dr = (sa[2] >> 4) & 0x0F;
-                match dr { 1 => extra = " HDR10".into(), 2 => extra = " Dolby Vision".into(), _ => {} }
+                let cs = (sa[2]) & 0x0F;
+                match dr { 1 => extra.push_str(" HDR10"), 2 => extra.push_str(" Dolby Vision"), _ => {} }
+                match cs { 2 => extra.push_str(" BT.2020"), _ => {} }
             }
             format!("{} {} {}fps{}", codec, res, fps, extra)
         }
