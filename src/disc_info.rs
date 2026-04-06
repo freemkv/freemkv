@@ -86,7 +86,7 @@ pub fn run(args: &[String]) {
     if !quiet {
         if let Some(cap) = capacity {
             let gb = cap as f64 * 2048.0 / (1024.0 * 1024.0 * 1024.0);
-            println!("{}: {} sectors ({:.1} GB)", strings::get("disc.capacity"), cap, gb);
+            println!("{}: {} sectors ({:.1} GB)", strings::get("disc.capacity"), fmt_num(cap as u64), gb);
             println!();
         }
     }
@@ -99,24 +99,13 @@ pub fn run(args: &[String]) {
     println!("{}", strings::get("disc.titles"));
     println!();
 
-    let main_duration = titles.first().map(|t| t.duration_secs).unwrap_or(0.0);
-    let mut shown = 0;
 
     for (i, title) in titles.iter().enumerate() {
-        // Show titles longer than 1 minute, or all if quiet
-        if title.duration_secs < 60.0 && !quiet {
-            continue;
-        }
 
         let hrs = (title.duration_secs / 3600.0) as u32;
         let mins = ((title.duration_secs % 3600.0) / 60.0) as u32;
         let size_mb = title.size_bytes / (1024 * 1024);
 
-        let main_tag = if (title.duration_secs - main_duration).abs() < 1.0 && i == 0 {
-            format!("  ({})", strings::get("disc.main_feature"))
-        } else {
-            String::new()
-        };
 
         let clip_word = if title.clip_count == 1 {
             strings::get("disc.clip")
@@ -124,14 +113,13 @@ pub fn run(args: &[String]) {
             strings::get("disc.clips")
         };
 
-        println!("  {:2}. {:14}  {:1}h {:02}m  {:>6} MB  {} {}{}",
+        println!("  {:2}. {:14}  {:1}h {:02}m  {:>8} MB  {} {}",
             i + 1,
             title.playlist_name,
             hrs, mins,
-            size_mb,
+            fmt_num(size_mb),
             title.clip_count,
             clip_word,
-            main_tag,
         );
 
         // Show streams for the main title
@@ -148,15 +136,8 @@ pub fn run(args: &[String]) {
             println!();
         }
 
-        shown += 1;
     }
 
-    let short_count = titles.len() - shown;
-    if short_count > 0 && !quiet {
-        println!("      {} {}",
-            strings::fmt("disc.short_titles", &[("count", &short_count.to_string())]),
-            "");
-    }
 }
 
 // ── UDF structures ──────────────────────────────────────────────────────────
@@ -580,6 +561,17 @@ fn read_capacity(dev: &ScsiDevice) -> Option<u32> {
     let cdb = [0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     let data = dev.command(&cdb, 8)?;
     Some(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+}
+
+/// Format a number with comma separators: 41288703 → "41,288,703"
+fn fmt_num(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 { result.push(','); }
+        result.push(c);
+    }
+    result.chars().rev().collect()
 }
 
 fn find_bd_drive() -> Option<String> {
