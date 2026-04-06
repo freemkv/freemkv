@@ -10,6 +10,7 @@ pub fn run(args: &[String]) {
 
     let mut device_path: Option<String> = None;
     let mut quiet = false;
+    let mut full = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -19,6 +20,7 @@ pub fn run(args: &[String]) {
                 device_path = args.get(i).cloned();
             }
             "--quiet" | "-q" => quiet = true,
+            "--full" | "-f" => full = true,
             "--help" | "-h" => {
                 println!("freemkv disc-info — {}", strings::get("disc.scanning"));
                 println!();
@@ -79,8 +81,12 @@ pub fn run(args: &[String]) {
         }
     }
 
-    // Sort by duration, longest first
-    titles.sort_by(|a, b| b.duration_secs.partial_cmp(&a.duration_secs).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort by duration (longest first), then playlist name as tiebreaker (stable, deterministic)
+    titles.sort_by(|a, b| {
+        b.duration_secs.partial_cmp(&a.duration_secs)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.playlist_name.cmp(&b.playlist_name))
+    });
 
     // Display
     if !quiet {
@@ -100,7 +106,9 @@ pub fn run(args: &[String]) {
     println!();
 
 
-    for (i, title) in titles.iter().enumerate() {
+    let max_titles = if full { titles.len() } else { 5.min(titles.len()) };
+
+    for (i, title) in titles.iter().enumerate().take(max_titles) {
 
         let hrs = (title.duration_secs / 3600.0) as u32;
         let mins = ((title.duration_secs % 3600.0) / 60.0) as u32;
@@ -122,8 +130,8 @@ pub fn run(args: &[String]) {
             clip_word,
         );
 
-        // Show streams for the main title
-        if i == 0 && !quiet {
+        // Show streams for all visible titles
+        if !quiet && !title.streams.is_empty() {
             println!();
             for stream in &title.streams {
                 let kind = match stream.kind {
@@ -138,6 +146,9 @@ pub fn run(args: &[String]) {
 
     }
 
+    if !full && titles.len() > max_titles {
+        println!("      +{} more (use --full to show all)", titles.len() - max_titles);
+    }
 }
 
 // ── UDF structures ──────────────────────────────────────────────────────────
