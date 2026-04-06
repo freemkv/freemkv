@@ -34,13 +34,13 @@ fn main() {
 }
 
 fn usage() {
-    println!("freemkv — Open source 4K UHD / Blu-ray / DVD backup tool");
+    println!("freemkv {} — Open source 4K UHD / Blu-ray / DVD backup tool", env!("CARGO_PKG_VERSION"));
     println!();
     println!("Usage:");
     println!("  freemkv info                     Show drive information");
-    println!("  freemkv info --share [dir]       Capture drive profile for bdemu");
-    println!("  freemkv info --mask              Mask serial number in output");
-    println!("  freemkv rip disc:0 [--output /]  Back up a disc (not yet implemented)");
+    println!("  freemkv info --share             Share profile to help expand drive support");
+    println!("  freemkv info --mask              Mask serial numbers in output");
+    println!("  freemkv rip [--output /path]     Back up a disc (coming soon)");
     println!("  freemkv version                  Show version");
     println!("  freemkv help                     Show this help");
     println!();
@@ -49,5 +49,5 @@ fn usage() {
     println!("  --mask                           Mask serial numbers (A=alpha, 0=digit)");
     println!("  --quiet                          Minimal output");
     println!();
-    println!("https://github.com/freemkv/freemkv");
+    println!("https://github.com/freemkv");
 }
