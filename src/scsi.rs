@@ -7,7 +7,7 @@ use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::io::AsRawFd;
 
-const SG_IO: libc::c_ulong = 0x2285;
+const SG_IO: u32 = 0x2285;
 const SG_DXFER_FROM_DEV: i32 = -3;
 
 #[repr(C)]
@@ -83,7 +83,7 @@ impl ScsiDevice {
         };
 
         let ret = unsafe {
-            libc::ioctl(self.fd, SG_IO, &hdr as *const sg_io_hdr)
+            libc::ioctl(self.fd, SG_IO as _, &hdr as *const sg_io_hdr)
         };
 
         if ret < 0 || hdr.status != 0 {
