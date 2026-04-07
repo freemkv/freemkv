@@ -1,9 +1,26 @@
 // freemkv disc-info — Show disc titles, streams, and sizes
 // AGPL-3.0 — freemkv project
 
-use crate::scsi::ScsiDevice;
 use crate::strings;
-use std::path::Path;
+
+/// Thin wrapper around DriveSession for our read functions
+struct DiscReader<'a>(&'a mut libfreemkv::DriveSession);
+
+impl<'a> DiscReader<'a> {
+    fn read_sector(&mut self, lba: u32) -> Result<Vec<u8>, String> {
+        let mut buf = vec![0u8; 2048];
+        self.0.read_disc(lba, 1, &mut buf)
+            .map_err(|e| format!("read sector {}: {}", lba, e))?;
+        Ok(buf)
+    }
+
+    fn read_capacity(&mut self) -> Option<u32> {
+        let cdb = [0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut buf = [0u8; 8];
+        self.0.scsi_execute(&cdb, libfreemkv::scsi::DataDirection::FromDevice, &mut buf, 5000).ok()?;
+        Some(u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]))
+    }
+}
 
 pub fn run(args: &[String]) {
     strings::init();
@@ -50,20 +67,23 @@ pub fn run(args: &[String]) {
         println!();
     }
 
-    // Open device for raw SCSI
-    let dev = match ScsiDevice::open(&dev_path) {
-        Ok(d) => d,
+    // Open drive via libfreemkv — unlocks automatically
+    let mut session = match libfreemkv::DriveSession::open(std::path::Path::new(&dev_path)) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("{}: {}", strings::fmt("error.open_failed", &[("device", &dev_path), ("error", &e.to_string())]), "");
+            // Fallback to raw SCSI if libfreemkv can't match the drive
+            eprintln!("{}", e);
             std::process::exit(1);
         }
     };
 
+    let mut dev = DiscReader(&mut session);
+
     // Read capacity
-    let capacity = read_capacity(&dev);
+    let capacity = read_capacity(&mut dev);
 
     // Read UDF structure
-    let udf = match parse_udf(&dev) {
+    let udf = match parse_udf(&mut dev) {
         Ok(u) => u,
         Err(e) => {
             eprintln!("{}: {}", strings::get("error.not_bluray"), e);
@@ -72,10 +92,10 @@ pub fn run(args: &[String]) {
     };
 
     // Read disc title from META/DL/bdmt_eng.xml
-    let disc_title = read_disc_title(&dev, &udf);
+    let disc_title = read_disc_title(&mut dev, &udf);
 
     // Try to extract track labels from BD-J JAR files (skip with --basic)
-    let jar_labels = if basic { Vec::new() } else { read_jar_labels(&dev, &udf) };
+    let jar_labels = if basic { Vec::new() } else { read_jar_labels(&mut dev, &udf) };
     let mut audio_jar: Vec<libfreemkv::jar::TrackLabel> = jar_labels.iter()
         .filter(|l| !l.hint.starts_with("PGStream")).cloned().collect();
     let sub_jar: Vec<&libfreemkv::jar::TrackLabel> = jar_labels.iter()
@@ -84,11 +104,11 @@ pub fn run(args: &[String]) {
     // Find and parse all playlists
     let mut titles = Vec::new();
     for mpls_entry in &udf.mpls_files {
-        let mpls_data = match udf.read_file(&dev, &mpls_entry.lba, mpls_entry.size) {
+        let mpls_data = match udf.read_file(&mut dev, &mpls_entry.lba, mpls_entry.size) {
             Ok(d) => d,
             Err(_) => continue,
         };
-        if let Some(title) = parse_mpls_title(&mpls_entry.name, &mpls_data, &dev, &udf) {
+        if let Some(title) = parse_mpls_title(&mpls_entry.name, &mpls_data, &mut dev, &udf) {
             titles.push(title);
         }
     }
@@ -250,7 +270,7 @@ struct FileRef {
 }
 
 impl UdfInfo {
-    fn read_file(&self, dev: &ScsiDevice, meta_lba: &u32, size: u32) -> Result<Vec<u8>, String> {
+    fn read_file(&self, dev: &mut DiscReader, meta_lba: &u32, size: u32) -> Result<Vec<u8>, String> {
         // Read ICB from metadata partition
         let icb = read_sector_raw(dev, self.metadata_start + meta_lba)?;
         let tag = u16::from_le_bytes([icb[0], icb[1]]);
@@ -290,7 +310,7 @@ impl UdfInfo {
 
 // ── UDF parser ──────────────────────────────────────────────────────────────
 
-fn parse_udf(dev: &ScsiDevice) -> Result<UdfInfo, String> {
+fn parse_udf(dev: &mut DiscReader) -> Result<UdfInfo, String> {
     // AVDP at sector 256
     let avdp = read_sector_raw(dev, 256)?;
     if u16::from_le_bytes([avdp[0], avdp[1]]) != 2 {
@@ -408,7 +428,7 @@ struct DirEntryInfo {
     size: u32,
 }
 
-fn read_dir_entries(dev: &ScsiDevice, meta_start: u32, dir_meta_lba: u32) -> Result<Vec<DirEntryInfo>, String> {
+fn read_dir_entries(dev: &mut DiscReader, meta_start: u32, dir_meta_lba: u32) -> Result<Vec<DirEntryInfo>, String> {
     let icb = read_sector_raw(dev, meta_start + dir_meta_lba)?;
     let tag = u16::from_le_bytes([icb[0], icb[1]]);
 
@@ -457,7 +477,7 @@ fn read_dir_entries(dev: &ScsiDevice, meta_start: u32, dir_meta_lba: u32) -> Res
     Ok(entries)
 }
 
-fn read_file_size(dev: &ScsiDevice, meta_start: u32, meta_lba: u32) -> Result<u32, String> {
+fn read_file_size(dev: &mut DiscReader, meta_start: u32, meta_lba: u32) -> Result<u32, String> {
     let icb = read_sector_raw(dev, meta_start + meta_lba)?;
     let tag = u16::from_le_bytes([icb[0], icb[1]]);
     match tag {
@@ -505,7 +525,7 @@ struct StreamInfo {
     description: String,
 }
 
-fn parse_mpls_title(name: &str, data: &[u8], dev: &ScsiDevice, udf: &UdfInfo) -> Option<TitleInfo> {
+fn parse_mpls_title(name: &str, data: &[u8], dev: &mut DiscReader, udf: &UdfInfo) -> Option<TitleInfo> {
     if data.len() < 40 || &data[0..4] != b"MPLS" { return None; }
 
     let pl_start = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
@@ -731,19 +751,12 @@ fn parse_stream_entry(item: &[u8], pos: usize, kind: StreamKind) -> Option<(Stre
 
 // ── Sector I/O ──────────────────────────────────────────────────────────────
 
-fn read_sector_raw(dev: &ScsiDevice, lba: u32) -> Result<Vec<u8>, String> {
-    let cdb = [
-        0x28, 0x00,
-        (lba >> 24) as u8, (lba >> 16) as u8, (lba >> 8) as u8, lba as u8,
-        0x00, 0x00, 0x01, 0x00,
-    ];
-    dev.command(&cdb, 2048).ok_or_else(|| format!("read failed at sector {}", lba))
+fn read_sector_raw(dev: &mut DiscReader, lba: u32) -> Result<Vec<u8>, String> {
+    dev.read_sector(lba)
 }
 
-fn read_capacity(dev: &ScsiDevice) -> Option<u32> {
-    let cdb = [0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-    let data = dev.command(&cdb, 8)?;
-    Some(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+fn read_capacity(dev: &mut DiscReader) -> Option<u32> {
+    dev.read_capacity()
 }
 
 /// Format a number with comma separators: 41288703 → "41,288,703"
@@ -760,11 +773,10 @@ fn fmt_num(n: u64) -> String {
 fn find_bd_drive() -> Option<String> {
     for i in 0..16 {
         let path = format!("/dev/sg{}", i);
-        if let Ok(dev) = ScsiDevice::open(&path) {
-            if let Some(inq) = dev.command(&[0x12, 0x00, 0x00, 0x00, 0x24, 0x00], 36) {
-                if inq[0] & 0x1F == 0x05 {
-                    return Some(path);
-                }
+        if std::path::Path::new(&path).exists() {
+            // Try to open as a drive — if it works, it's our device
+            if libfreemkv::DriveSession::open(std::path::Path::new(&path)).is_ok() {
+                return Some(path);
             }
         }
     }
@@ -897,7 +909,7 @@ fn format_sub_basic(s: &StreamInfo) -> String {
     lang_name(&lang).to_string()
 }
 
-fn read_disc_title(dev: &ScsiDevice, udf: &UdfInfo) -> Option<String> {
+fn read_disc_title(dev: &mut DiscReader, udf: &UdfInfo) -> Option<String> {
     for entry in &udf.meta_files {
         let data = udf.read_file(dev, &entry.lba, entry.size).ok()?;
         let xml = String::from_utf8_lossy(&data);
@@ -915,7 +927,7 @@ fn read_disc_title(dev: &ScsiDevice, udf: &UdfInfo) -> Option<String> {
     None
 }
 
-fn read_jar_labels(dev: &ScsiDevice, udf: &UdfInfo) -> Vec<libfreemkv::jar::TrackLabel> {
+fn read_jar_labels(dev: &mut DiscReader, udf: &UdfInfo) -> Vec<libfreemkv::jar::TrackLabel> {
     for entry in &udf.jar_files {
         let jar_data = match udf.read_file(dev, &entry.lba, entry.size) {
             Ok(d) => d,
