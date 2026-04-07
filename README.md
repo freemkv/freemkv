@@ -17,7 +17,7 @@ Download a prebuilt binary from [releases](https://github.com/freemkv/freemkv/re
 cargo install freemkv
 ```
 
-Requires Linux with SG_IO SCSI passthrough. macOS and Windows planned.
+Requires Linux (SG_IO) or macOS (IOKit). Windows planned.
 
 ## Commands
 
