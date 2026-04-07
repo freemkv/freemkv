@@ -4,8 +4,6 @@
 mod info;
 mod disc_info;
 mod rip;
-mod scsi;
-mod strings;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
