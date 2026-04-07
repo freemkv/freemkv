@@ -3,6 +3,7 @@
 
 mod info;
 mod disc_info;
+mod rip;
 mod scsi;
 mod strings;
 
@@ -17,12 +18,7 @@ fn main() {
     match args[1].as_str() {
         "drive-info" | "info" => info::run(&args[2..]),
         "disc-info" => disc_info::run(&args[2..]),
-        "rip" => {
-            eprintln!("freemkv rip: not yet implemented");
-            eprintln!();
-            eprintln!("Track progress at https://github.com/freemkv/freemkv");
-            std::process::exit(1);
-        }
+        "rip" => rip::run(&args[2..]),
         "version" | "--version" | "-V" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
         }

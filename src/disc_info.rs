@@ -79,23 +79,28 @@ pub fn run(args: &[String]) {
 
     let mut dev = DiscReader(&mut session);
 
-    // Read capacity
+    eprintln!("  [dbg] reading capacity...");
     let capacity = read_capacity(&mut dev);
+    eprintln!("  [dbg] capacity: {:?}", capacity);
 
-    // Read UDF structure
+    eprintln!("  [dbg] parsing UDF...");
     let udf = match parse_udf(&mut dev) {
-        Ok(u) => u,
+        Ok(u) => { eprintln!("  [dbg] UDF: {} mpls, {} clpi, {} jar", u.mpls_files.len(), u.clpi_files.len(), u.jar_files.len()); u }
         Err(e) => {
             eprintln!("{}: {}", strings::get("error.not_bluray"), e);
             std::process::exit(1);
         }
     };
 
-    // Read disc title from META/DL/bdmt_eng.xml
+    eprintln!("  [dbg] reading disc title...");
     let disc_title = read_disc_title(&mut dev, &udf);
+    eprintln!("  [dbg] title: {:?}", disc_title);
 
     // Try to extract track labels from BD-J JAR files (skip with --basic)
+    eprintln!("  [dbg] reading JAR labels...");
     let jar_labels = if basic { Vec::new() } else { read_jar_labels(&mut dev, &udf) };
+    eprintln!("  [dbg] JAR: {} labels", jar_labels.len());
+    eprintln!("  [dbg] parsing playlists...");
     let mut audio_jar: Vec<libfreemkv::jar::TrackLabel> = jar_labels.iter()
         .filter(|l| !l.hint.starts_with("PGStream")).cloned().collect();
     let sub_jar: Vec<&libfreemkv::jar::TrackLabel> = jar_labels.iter()
