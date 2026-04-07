@@ -3,56 +3,63 @@
 
 # freemkv
 
-Command-line tool for 4K UHD / Blu-ray / DVD drive identification and disc backup.
+Open source command-line tool for 4K UHD / Blu-ray disc backup.
 
-**[Downloads and quick start at github.com/freemkv](https://github.com/freemkv)**
+**[Download latest release](https://github.com/freemkv/freemkv/releases/latest)**
 
-## Build from Source
+Part of the [freemkv](https://github.com/freemkv) project. Built on [libfreemkv](https://github.com/freemkv/libfreemkv).
+
+## Install
+
+Download a prebuilt binary from [releases](https://github.com/freemkv/freemkv/releases/latest), or build from source:
 
 ```bash
 cargo install freemkv
 ```
 
-Or:
+Requires Linux with SG_IO SCSI passthrough. macOS and Windows planned.
 
-```bash
-git clone https://github.com/freemkv/freemkv.git
-cd freemkv
-cargo build --release
-```
-
-Requires Linux (SG_IO SCSI passthrough). macOS and Windows planned.
-
-## All Options
+## Commands
 
 ```
-freemkv <version>
-
-Usage: freemkv <command> [options]
+freemkv <command> [options]
 
 Commands:
-  info                Show drive information
-  rip [--output /path]  Back up a disc (coming soon)
-  version             Show version
-  help                Show this help
+  drive-info            Show drive hardware and profile
+  disc-info             Show disc titles, streams, and sizes
+  rip [--output /path]  Back up a disc
+  version               Show version
+  help                  Show this help
 
-Global options:
-  --device /dev/sgN   Specify device (default: auto-detect)
-  --quiet             Minimal output
+Options:
+  --device /dev/sgN     Specify device (default: auto-detect)
+  --keydb /path         Path to KEYDB.cfg for AACS decryption
+  --quiet               Minimal output
 
-Info options:
-  --share             Share your drive profile to help expand drive support
-  --mask              Mask serial numbers (use with --share)
+Drive-info options:
+  --share               Share your drive profile to expand support
+  --mask                Mask serial numbers (use with --share)
+```
 
-Examples:
-  freemkv info
-  freemkv info --share
-  freemkv info --share --mask
+## Examples
+
+```bash
+# Show drive info
+freemkv drive-info
+
+# Show disc contents
+freemkv disc-info
+
+# Back up the main title
+freemkv rip --output ~/backups/
+
+# Share your drive profile (helps everyone)
+freemkv drive-info --share --mask
 ```
 
 ## Contributing
 
-Run `freemkv info --share` to submit your drive profile. 206 drives supported (LG, ASUS, HP). Built on [libfreemkv](https://github.com/freemkv/libfreemkv).
+Run `freemkv drive-info --share` to submit your drive's profile. Supports LG, ASUS, HP, and other MediaTek-based drives. Pioneer support planned.
 
 ## License
 
