@@ -109,7 +109,7 @@ pub fn run(args: &[String]) {
         if !audios.is_empty() {
             println!();
             for (ai, a) in audios.iter().enumerate() {
-                let line = format_audio(a, &disc.jar_labels, ai);
+                let line = format_audio(a);
                 if ai == 0 { println!("      Audio:     {}", line); }
                 else { println!("                 {}", line); }
             }
@@ -147,12 +147,11 @@ fn format_video(v: &VideoStream) -> String {
     parts.join(" ")
 }
 
-fn format_audio(a: &AudioStream, jar: &libfreemkv::jar::JarLabels, index: usize) -> String {
+fn format_audio(a: &AudioStream) -> String {
     let lang = lang_name(&a.language);
     let codec = codec_name(a.codec);
-    let jar_label = jar.audio.get(index).map(|l| &l.description).filter(|d| !d.is_empty());
-    if let Some(label) = jar_label {
-        format!("{} {} {} ({})", lang, codec, a.channels, label)
+    if !a.label.is_empty() {
+        format!("{} {} {} ({})", lang, codec, a.channels, a.label)
     } else {
         format!("{} {} {}", lang, codec, a.channels)
     }
@@ -177,17 +176,12 @@ fn hdr_name(h: HdrFormat) -> &'static str {
     match h { HdrFormat::Sdr => "SDR", HdrFormat::Hdr10 => "HDR10", HdrFormat::DolbyVision => "Dolby Vision" }
 }
 
-fn lang_name(code: &str) -> &str {
-    match code {
-        "eng" => "English", "fra" | "fre" => "French", "deu" | "ger" => "German",
-        "spa" => "Spanish", "ita" => "Italian", "jpn" => "Japanese",
-        "zho" | "chi" => "Chinese", "kor" => "Korean", "por" => "Portuguese",
-        "rus" => "Russian", "nld" | "dut" => "Dutch", "dan" => "Danish",
-        "fin" => "Finnish", "nor" => "Norwegian", "swe" => "Swedish",
-        "pol" => "Polish", "ces" | "cze" => "Czech", "hun" => "Hungarian",
-        "ron" | "rum" => "Romanian", "tha" => "Thai", "ara" => "Arabic",
-        "hin" => "Hindi", "ell" | "gre" => "Greek", "" => "?", other => other,
-    }
+fn lang_name(code: &str) -> String {
+    if code.is_empty() { return "?".to_string(); }
+    isolang::Language::from_639_3(code)
+        .or_else(|| isolang::Language::from_639_1(code))
+        .map(|l| l.to_name().to_string())
+        .unwrap_or_else(|| code.to_string())
 }
 
 fn format_volume_id(vol_id: &str) -> String {
