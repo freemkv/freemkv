@@ -71,6 +71,9 @@ pub fn run(args: &[String]) {
         }
     };
 
+    // Read disc title from META/DL/bdmt_eng.xml
+    let disc_title = read_disc_title(&dev, &udf);
+
     // Try to extract track labels from BD-J JAR files (skip with --basic)
     let jar_labels = if basic { Vec::new() } else { read_jar_labels(&dev, &udf) };
     let mut audio_jar: Vec<libfreemkv::jar::TrackLabel> = jar_labels.iter()
@@ -99,11 +102,14 @@ pub fn run(args: &[String]) {
 
     // Display
     if !quiet {
+        if let Some(ref title) = disc_title {
+            println!("Disc: {}", title);
+        }
         if let Some(cap) = capacity {
             let gb = cap as f64 * 2048.0 / (1024.0 * 1024.0 * 1024.0);
             println!("{}: {} sectors ({:.1} GB)", strings::get("disc.capacity"), fmt_num(cap as u64), gb);
-            println!();
         }
+        println!();
     }
 
     if titles.is_empty() {
@@ -154,47 +160,69 @@ pub fn run(args: &[String]) {
             };
 
             println!();
-            let mut sub_count = 0;
-            for stream in &title.streams {
-                let kind = match stream.kind {
-                    StreamKind::Video => strings::get("stream.video"),
-                    StreamKind::Audio => strings::get("stream.audio"),
-                    StreamKind::Subtitle => strings::get("stream.subtitle"),
-                };
-                let pid_str = if stream.pid > 0 { format!(" [0x{:04X}]", stream.pid) } else { String::new() };
 
-                // JAR label matching (consume-based)
-                let jar_extra = if has_jar {
-                    match stream.kind {
-                        StreamKind::Audio => {
-                            let lang = extract_lang(&stream.description);
-                            let is_truehd = stream.description.contains("TrueHD");
-                            let idx = if is_truehd {
-                                title_audio_jar.iter().position(|l| l.language == lang && l.hint == "MLP")
-                            } else {
-                                title_audio_jar.iter().position(|l| l.language == lang && l.hint == "AC3")
-                                    .or_else(|| title_audio_jar.iter().position(|l| l.language == lang && l.hint == "ADES"))
-                                    .or_else(|| title_audio_jar.iter().position(|l| l.language == lang && l.hint.starts_with("AudioStream")))
-                            };
-                            if let Some(i) = idx {
-                                let label = title_audio_jar.remove(i);
-                                if label.description.is_empty() { None } else { Some(label.description) }
-                            } else { None }
-                        }
-                        StreamKind::Subtitle => {
-                            sub_count += 1;
-                            if sub_count > sub_jar.len() && !sub_jar.is_empty() {
-                                Some("forced".to_string())
-                            } else { None }
-                        }
-                        _ => None,
+            // Group streams by kind
+            let videos: Vec<&StreamInfo> = title.streams.iter().filter(|s| s.kind == StreamKind::Video).collect();
+            let audios: Vec<&StreamInfo> = title.streams.iter().filter(|s| s.kind == StreamKind::Audio).collect();
+            let subs: Vec<&StreamInfo> = title.streams.iter().filter(|s| s.kind == StreamKind::Subtitle).collect();
+
+            // Reset JAR audio labels for this title
+            let mut title_audio_jar: Vec<libfreemkv::jar::TrackLabel> = if has_jar {
+                jar_labels.iter().filter(|l| !l.hint.starts_with("PGStream")).cloned().collect()
+            } else { Vec::new() };
+
+            let indent = "                 ";
+
+            // Video
+            if !videos.is_empty() {
+                for (vi, v) in videos.iter().enumerate() {
+                    let line = if has_jar && v.description.contains("[Dolby Vision EL]") {
+                        format_video_jar(v, true)
+                    } else {
+                        format_video_jar(v, false)
+                    };
+                    if vi == 0 {
+                        println!("      Video:     {}", line);
+                    } else {
+                        println!("{}{}", indent, line);
                     }
-                } else { None };
-
-                let jar_str = jar_extra.map(|l| format!(" — {}", l)).unwrap_or_default();
-                println!("      {}: {}{}{}", kind, stream.description, pid_str, jar_str);
+                }
+                println!();
             }
-            println!();
+
+            // Audio
+            if !audios.is_empty() {
+                for (ai, a) in audios.iter().enumerate() {
+                    let line = if has_jar {
+                        format_audio_jar(a, &mut title_audio_jar)
+                    } else {
+                        format_audio_basic(a)
+                    };
+                    if ai == 0 {
+                        println!("      Audio:     {}", line);
+                    } else {
+                        println!("{}{}", indent, line);
+                    }
+                }
+                println!();
+            }
+
+            // Subtitle
+            if !subs.is_empty() {
+                for (si, s) in subs.iter().enumerate() {
+                    let line = if has_jar {
+                        format_sub_jar(s, si, sub_jar.len())
+                    } else {
+                        format_sub_basic(s)
+                    };
+                    if si == 0 {
+                        println!("      Subtitle:  {}", line);
+                    } else {
+                        println!("{}{}", indent, line);
+                    }
+                }
+                println!();
+            }
         }
 
     }
@@ -212,6 +240,7 @@ struct UdfInfo {
     mpls_files: Vec<FileRef>,
     clpi_files: Vec<FileRef>,
     jar_files: Vec<FileRef>,
+    meta_files: Vec<FileRef>,
 }
 
 struct FileRef {
@@ -316,6 +345,7 @@ fn parse_udf(dev: &ScsiDevice) -> Result<UdfInfo, String> {
     let mut mpls_files = Vec::new();
     let mut clpi_files = Vec::new();
     let mut jar_files = Vec::new();
+    let mut meta_files = Vec::new();
 
     // Read root dir
     let root_entries = read_dir_entries(dev, metadata_start, root_lba)?;
@@ -353,9 +383,22 @@ fn parse_udf(dev: &ScsiDevice) -> Result<UdfInfo, String> {
                 }
             }
         }
+
+        // META/DL (disc title, thumbnails)
+        if let Some(meta_dir) = bdmv_entries.iter().find(|e| e.name.eq_ignore_ascii_case("META") && e.is_dir) {
+            let meta_entries = read_dir_entries(dev, metadata_start, meta_dir.lba)?;
+            if let Some(dl_dir) = meta_entries.iter().find(|e| e.name.eq_ignore_ascii_case("DL") && e.is_dir) {
+                let dl_entries = read_dir_entries(dev, metadata_start, dl_dir.lba)?;
+                for e in dl_entries {
+                    if e.name.ends_with(".xml") {
+                        meta_files.push(FileRef { name: e.name, lba: e.lba, size: e.size });
+                    }
+                }
+            }
+        }
     }
 
-    Ok(UdfInfo { partition_start, metadata_start, mpls_files, clpi_files, jar_files })
+    Ok(UdfInfo { partition_start, metadata_start, mpls_files, clpi_files, jar_files, meta_files })
 }
 
 struct DirEntryInfo {
@@ -452,7 +495,7 @@ struct TitleInfo {
     streams: Vec<StreamInfo>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, PartialEq)]
 enum StreamKind { Video, Audio, Subtitle }
 
 #[derive(Clone)]
@@ -729,6 +772,148 @@ fn find_bd_drive() -> Option<String> {
 }
 
 // ── JAR label extraction ────────────────────────────────────────────────────
+
+// ── Stream formatting ───────────────────────────────────────────────────────
+
+/// Language code → full name
+fn lang_name(code: &str) -> &str {
+    match code {
+        "eng" => "English", "fra" | "fre" => "French", "spa" => "Spanish",
+        "deu" | "ger" => "German", "ita" => "Italian", "por" => "Portuguese",
+        "jpn" => "Japanese", "zho" | "chi" => "Chinese", "kor" => "Korean",
+        "rus" => "Russian", "ara" => "Arabic", "hin" => "Hindi",
+        "dan" => "Danish", "fin" => "Finnish", "nor" => "Norwegian", "swe" => "Swedish",
+        "nld" | "dut" => "Dutch", "pol" => "Polish", "tur" => "Turkish",
+        "tha" => "Thai", "ces" | "cze" => "Czech", "hun" => "Hungarian",
+        "ron" | "rum" => "Romanian", "hrv" => "Croatian", "slk" | "slo" => "Slovak",
+        "bul" => "Bulgarian", "ukr" => "Ukrainian", "heb" => "Hebrew",
+        "ell" | "gre" => "Greek", "cat" => "Catalan", "ind" => "Indonesian",
+        "msa" | "may" => "Malay", "vie" => "Vietnamese",
+        _ => code,
+    }
+}
+
+/// Codec display name (menu style)
+fn codec_display(desc: &str) -> &str {
+    if desc.contains("TrueHD") { "TrueHD" }
+    else if desc.contains("DTS-HD MA") { "DTS-HD MA" }
+    else if desc.contains("DTS-HD HR") { "DTS-HD HR" }
+    else if desc.contains("DTS") { "DTS" }
+    else if desc.contains("AC-3+") { "DD+" }
+    else if desc.contains("AC-3") { "DD" }
+    else if desc.contains("LPCM") { "LPCM" }
+    else if desc.contains("HEVC") { "HEVC" }
+    else if desc.contains("H.264") { "H.264" }
+    else if desc.contains("VC-1") { "VC-1" }
+    else if desc.contains("MPEG-2") { "MPEG-2" }
+    else { "?" }
+}
+
+/// Extract channels from description (e.g. "5.1", "7.1", "stereo")
+fn extract_channels(desc: &str) -> &str {
+    if desc.contains("7.1") { "7.1" }
+    else if desc.contains("5.1") { "5.1" }
+    else if desc.contains("stereo") { "stereo" }
+    else if desc.contains("mono") { "mono" }
+    else { "" }
+}
+
+fn format_video_jar(v: &StreamInfo, is_dv_el: bool) -> String {
+    if is_dv_el {
+        // DV enhancement layer
+        let res = if v.description.contains("2160p") { "2160p" }
+                  else if v.description.contains("1080p") { "1080p" }
+                  else { "" };
+        format!("Dolby Vision EL {}", res)
+    } else {
+        // Primary video — keep technical details
+        let codec = codec_display(&v.description);
+        let mut parts = vec![codec.to_string()];
+        if v.description.contains("2160p") { parts.push("2160p".into()); }
+        else if v.description.contains("1080p") { parts.push("1080p".into()); }
+        else if v.description.contains("1080i") { parts.push("1080i".into()); }
+        else if v.description.contains("720p") { parts.push("720p".into()); }
+        if v.description.contains("HDR10") { parts.push("HDR10".into()); }
+        if v.description.contains("Dolby Vision") { parts.push("Dolby Vision".into()); }
+        if v.description.contains("BT.2020") { parts.push("BT.2020".into()); }
+        parts.join(" ")
+    }
+}
+
+fn format_audio_jar(a: &StreamInfo, jar: &mut Vec<libfreemkv::jar::TrackLabel>) -> String {
+    let lang = extract_lang(&a.description);
+    let full_lang = lang_name(&lang);
+    let codec = codec_display(&a.description);
+    let ch = extract_channels(&a.description);
+
+    // Match JAR label
+    let is_truehd = a.description.contains("TrueHD");
+    let idx = if is_truehd {
+        jar.iter().position(|l| l.language == lang && l.hint == "MLP")
+    } else {
+        jar.iter().position(|l| l.language == lang && l.hint == "AC3")
+            .or_else(|| jar.iter().position(|l| l.language == lang && l.hint == "ADES"))
+            .or_else(|| jar.iter().position(|l| l.language == lang && l.hint.starts_with("AudioStream")))
+    };
+
+    let extra = if let Some(i) = idx {
+        let label = jar.remove(i);
+        if label.description.is_empty() { String::new() }
+        else { format!(" ({})", label.description) }
+    } else { String::new() };
+
+    if ch.is_empty() {
+        format!("{} {}{}", full_lang, codec, extra)
+    } else {
+        format!("{} {} {}{}", full_lang, codec, ch, extra)
+    }
+}
+
+fn format_audio_basic(a: &StreamInfo) -> String {
+    let lang = extract_lang(&a.description);
+    let full_lang = lang_name(&lang);
+    let codec = codec_display(&a.description);
+    let ch = extract_channels(&a.description);
+
+    if ch.is_empty() {
+        format!("{} {}", full_lang, codec)
+    } else {
+        format!("{} {} {}", full_lang, codec, ch)
+    }
+}
+
+fn format_sub_jar(s: &StreamInfo, idx: usize, labeled_count: usize) -> String {
+    let lang = extract_lang(&s.description);
+    let full_lang = lang_name(&lang);
+    if labeled_count > 0 && idx >= labeled_count {
+        format!("{} (forced)", full_lang)
+    } else {
+        full_lang.to_string()
+    }
+}
+
+fn format_sub_basic(s: &StreamInfo) -> String {
+    let lang = extract_lang(&s.description);
+    lang_name(&lang).to_string()
+}
+
+fn read_disc_title(dev: &ScsiDevice, udf: &UdfInfo) -> Option<String> {
+    for entry in &udf.meta_files {
+        let data = udf.read_file(dev, &entry.lba, entry.size).ok()?;
+        let xml = String::from_utf8_lossy(&data);
+        // Extract <di:name>...</di:name>
+        if let Some(start) = xml.find("<di:name>") {
+            let start = start + "<di:name>".len();
+            if let Some(end) = xml[start..].find("</di:name>") {
+                let title = xml[start..start + end].trim().to_string();
+                if !title.is_empty() {
+                    return Some(title);
+                }
+            }
+        }
+    }
+    None
+}
 
 fn read_jar_labels(dev: &ScsiDevice, udf: &UdfInfo) -> Vec<libfreemkv::jar::TrackLabel> {
     for entry in &udf.jar_files {

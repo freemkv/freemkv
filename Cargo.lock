@@ -366,8 +366,6 @@ checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
 [[package]]
 name = "libfreemkv"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca74fc99ba584fbe1642d6ed8530e2799d7cad465534f4f78de16eac19370ff1"
 dependencies = [
  "aes",
  "cbc",
@@ -376,6 +374,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "zip",
 ]
 
 [[package]]
