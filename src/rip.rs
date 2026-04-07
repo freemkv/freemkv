@@ -120,9 +120,11 @@ pub fn run(args: &[String]) {
             marker, i, title.duration_display(), title.size_gb(),
             title.clips.len(), title.playlist);
 
-        if !title.streams.is_empty() {
-            for stream in &title.streams {
-                println!("       {} {}", stream.kind_name(), stream.display());
+        for stream in &title.streams {
+            match stream {
+                libfreemkv::Stream::Video(v) => println!("       Video: {:?} {}", v.codec, v.resolution),
+                libfreemkv::Stream::Audio(a) => println!("       Audio: {:?} {} {}", a.codec, a.channels, a.language),
+                libfreemkv::Stream::Subtitle(s) => println!("       Sub:   {}", s.language),
             }
         }
     }
