@@ -89,8 +89,8 @@ pub fn run(args: &[String]) {
 
             println!("  {:2}. {:14}  {:1}h {:02}m  {:>5.1} GB  {} clip{}",
                 idx + 1, title.playlist, hours, mins, gb,
-                title.clip_count,
-                if title.clip_count != 1 { "s" } else { "" });
+                title.clips.len(),
+                if title.clips.len() != 1 { "s" } else { "" });
 
             // Video streams
             let videos: Vec<_> = title.streams.iter()

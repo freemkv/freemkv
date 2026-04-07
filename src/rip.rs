@@ -118,7 +118,7 @@ pub fn run(args: &[String]) {
         let marker = if Some(i) == title_idx { ">" } else { " " };
         println!("{} {:2}. {} — {:.1} GB — {} clip(s) — {}",
             marker, i, title.duration_display(), title.size_gb(),
-            title.clip_count, title.playlist);
+            title.clips.len(), title.playlist);
 
         if !title.streams.is_empty() {
             for stream in &title.streams {
