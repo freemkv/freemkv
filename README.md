@@ -4,7 +4,7 @@
 
 # freemkv
 
-Open source 4K UHD / Blu-ray / DVD backup tool. One binary, no dependencies.
+Open source 4K UHD / Blu-ray / DVD backup tool. One binary, no dependencies. Multi-lingual — the library outputs structured data and error codes, not English text. Build any UI on top.
 
 ## Quick Start
 
@@ -24,12 +24,12 @@ curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-aar
 
 Or install from source: `cargo install freemkv`
 
-## Example Output
+## disc-info
 
 ```
 $ freemkv disc-info
 
-freemkv 0.3.0
+freemkv 0.3.1
 
 Scanning disc...
 
@@ -56,21 +56,40 @@ Titles
                  Spanish
 ```
 
-Labels like `TrueHD`, `Descriptive Audio (US)`, and `forced` are extracted from the disc's BD-J authoring files — data that standard tools can't see.
+## drive-info
+
+```
+$ freemkv drive-info
+
+freemkv 0.3.1
+
+Drive Information
+  Device:              /dev/sg4
+  Manufacturer:        HL-DT-ST
+  Product:             BD-RE BU40N
+  Revision:            1.03
+  Firmware date:       2018-10-24
+
+Platform Information
+  Drive platform:      MediaTek
+  Firmware version:    1.03/NM00000
+
+Run 'freemkv drive-info --share' to help expand drive support.
+```
 
 ## Stream Labels
 
-freemkv automatically extracts rich stream metadata that other tools can't see. Standard Blu-ray tools only read MPLS data (language code + codec). freemkv goes further — it reads BD-J authoring files on the disc to identify:
+freemkv automatically extracts rich stream metadata that other tools can't see. Standard tools only read MPLS data (language code + codec). freemkv reads BD-J authoring files on the disc to identify:
 
-- **Audio purpose** — Commentary, Descriptive Audio, Score, IME
-- **Codec detail** — TrueHD, Dolby Digital, Dolby Atmos, DTS
-- **Forced subtitles** — which subtitle tracks are forced/narrative
+- **Audio purpose** — Commentary, Descriptive Audio, Score
+- **Codec detail** — TrueHD, Dolby Digital, Dolby Atmos
+- **Forced subtitles** — which tracks are forced/narrative
 - **Language variants** — US vs UK English, Castilian vs Latin Spanish
 - **SDH** — subtitles for deaf/hard of hearing
 
-Five BD-J format parsers are built in (Paramount, Criterion, Pixelogic, Warner CTRM, Deluxe). Detection is automatic — the right parser runs based on what files exist on the disc.
+Five BD-J format parsers built in (Paramount, Criterion, Pixelogic, Warner CTRM, Deluxe). Detection is automatic.
 
-If no BD-J data is found, streams still have full MPLS data (language, codec, channels). Labels are purely additive.
+If no BD-J data is found, streams still have full MPLS data. Labels are purely additive — they never break anything.
 
 ## Commands
 
