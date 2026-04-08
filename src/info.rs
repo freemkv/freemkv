@@ -95,16 +95,5 @@ fn format_date(fw_date: &str) -> String {
 }
 
 fn find_bd_drive() -> Option<String> {
-    for i in 0..16 {
-        let path = format!("/dev/sg{}", i);
-        if Path::new(&path).exists() {
-            if let Ok(session) = DriveSession::open_no_unlock(Path::new(&path)) {
-                let vendor = session.drive_id.vendor_id.trim().to_lowercase();
-                if vendor.contains("hl-dt") || vendor.contains("pioneer") || vendor.contains("asus") {
-                    return Some(path);
-                }
-            }
-        }
-    }
-    None
+    libfreemkv::find_drive()
 }
