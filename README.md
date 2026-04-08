@@ -8,15 +8,15 @@ Open source 4K UHD / Blu-ray / DVD backup tool. One binary, no dependencies.
 
 ## Quick Start
 
-**Linux:**
+**Linux (x86_64):**
 ```bash
-wget -qO- https://github.com/freemkv/freemkv/releases/latest/download/freemkv-linux-x86_64.tar.gz | tar xz
+curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86_64-linux.tar.gz | tar xz
 ./freemkv disc-info
 ```
 
-**macOS:**
+**macOS (Apple Silicon):**
 ```bash
-curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-macos-arm64.tar.gz | tar xz
+curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-aarch64-macos.tar.gz | tar xz
 ./freemkv disc-info
 ```
 
@@ -27,37 +27,36 @@ Or install from source: `cargo install freemkv`
 ## Example Output
 
 ```
+$ freemkv disc-info
+
 freemkv 0.3.0
 
 Scanning disc...
 
-Disc: Barbie
-Format: 4K UHD (2L, 76.4 GB)
+Disc: Dune: Part Two
+Format: 4K UHD (2L, 78.8 GB)
 AACS: Encrypted
 
 Titles
 
-   1. 00350.mpls      1h 54m   69.0 GB  1 clip
+   1. 00800.mpls      2h 45m   72.0 GB  1 clip
 
       Video:     HEVC 2160p HDR10 BT.2020
+                 HEVC 1080p Dolby Vision BT.2020 Dolby Vision EL
 
       Audio:     English TrueHD 5.1 (TrueHD)
                  English DD 5.1 (Dolby Digital)
                  English DD 5.1 (Descriptive Audio (US))
                  English DD 5.1 (Descriptive Audio (UK))
                  French DD 5.1
-                 Italian TrueHD 5.1 (TrueHD)
-                 Italian DD 5.1 (Dolby Digital)
                  Spanish DD 5.1
 
-      Subtitle:  English
-                 French
-                 Italian
+      Subtitle:  English (forced)
+                 French (forced)
                  Spanish
-                 Danish (forced)
-                 Finnish (forced)
-                 Norwegian (forced)
 ```
+
+Labels like `TrueHD`, `Descriptive Audio (US)`, and `forced` are extracted from the disc's BD-J authoring files — data that standard tools can't see.
 
 ## Stream Labels
 
