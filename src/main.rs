@@ -17,6 +17,7 @@ fn main() {
         "drive-info" | "info" => info::run(&args[2..]),
         "disc-info" => disc_info::run(&args[2..]),
         "rip" => rip::run(&args[2..]),
+        "update-keys" => update_keys(&args[2..]),
         "version" | "--version" | "-V" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
         }
@@ -39,6 +40,7 @@ fn usage() {
     println!("  drive-info            Show drive hardware and profile match");
     println!("  disc-info             Show disc titles, streams, and sizes");
     println!("  rip [--output /path]  Back up a disc (coming soon)");
+    println!("  update-keys --url <url>  Download and update KEYDB.cfg");
     println!("  version               Show version");
     println!("  help                  Show this help");
     println!();
@@ -55,4 +57,36 @@ fn usage() {
     println!("  freemkv drive-info --share --mask");
     println!("  freemkv disc-info");
     println!("  freemkv rip --output ~/backups/");
+    println!("  freemkv update-keys --url http://example.com/keydb.zip");
+}
+
+fn update_keys(args: &[String]) {
+    let mut url: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--url" | "-u" => { i += 1; url = args.get(i).map(|s| s.as_str()); }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let url = match url {
+        Some(u) => u,
+        None => {
+            eprintln!("Usage: freemkv update-keys --url <url>");
+            std::process::exit(1);
+        }
+    };
+
+    match libfreemkv::keydb::update(url) {
+        Ok(result) => {
+            println!("Updated: {} entries, {} bytes", result.entries, result.bytes);
+            println!("Saved: {}", result.path.display());
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
