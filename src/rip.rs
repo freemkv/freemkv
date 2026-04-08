@@ -3,7 +3,22 @@
 //! Opens the drive, scans the disc (UDF, playlists, AACS — all automatic),
 //! shows what's on it, and backs up selected titles.
 
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Install SIGINT handler that sets the INTERRUPTED flag.
+fn install_signal_handler() {
+    unsafe {
+        libc::signal(libc::SIGINT, handle_sigint as *const () as libc::sighandler_t);
+    }
+}
+
+extern "C" fn handle_sigint(_sig: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::Relaxed);
+}
 
 pub fn run(args: &[String]) {
     let mut device_path: Option<String> = None;
@@ -47,17 +62,33 @@ pub fn run(args: &[String]) {
         i += 1;
     }
 
-    // Auto-detect device
-    let device = device_path.unwrap_or_else(|| auto_detect_device());
-    if device.is_empty() {
-        eprintln!("No optical drive found. Specify with --device /dev/sr0");
-        std::process::exit(1);
-    }
+    // Resolve device — auto-detect or validate user input
+    let device = if let Some(user_path) = device_path {
+        match libfreemkv::resolve_device(&user_path) {
+            Ok((resolved, Some(warning))) => {
+                eprintln!("  {}", warning);
+                resolved
+            }
+            Ok((resolved, None)) => resolved,
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        match libfreemkv::find_drive() {
+            Some(d) => d,
+            None => {
+                eprintln!("No optical drive found. Specify with --device /dev/sgN");
+                std::process::exit(1);
+            }
+        }
+    };
 
     println!("freemkv rip v{}", env!("CARGO_PKG_VERSION"));
     println!();
 
-    // Step 1: Open drive
+    // Step 1: Open drive (scan() handles AACS → unlock internally)
     print!("Opening {}... ", device);
     let mut session = match libfreemkv::DriveSession::open(Path::new(&device)) {
         Ok(s) => {
@@ -177,19 +208,17 @@ pub fn run(args: &[String]) {
 
     println!();
     println!("Ripping title {} ({}) -> {}", target_idx + 1, title.duration_display(), out_file.display());
-    println!("  {} extents, {:.1} GB", title.extents.len(), title.size_gb());
-    for (i, ext) in title.extents.iter().enumerate() {
-        println!("    extent {}: LBA {} + {} sectors ({:.1} MB)",
-            i, ext.start_lba, ext.sector_count,
-            ext.sector_count as f64 * 2048.0 / 1e6);
-    }
+    println!("  {} extent(s), {:.1} GB", title.extents.len(), title.size_gb());
 
     if title.extents.is_empty() {
         eprintln!("No sector extents found for this title.");
         std::process::exit(1);
     }
 
-    // Step 6: Read and write
+    // Step 6: Install signal handler for clean interrupt
+    install_signal_handler();
+
+    // Step 7: Read and write
     let mut reader = match disc.open_title(&mut session, target_idx) {
         Ok(r) => r,
         Err(e) => {
@@ -198,61 +227,92 @@ pub fn run(args: &[String]) {
         }
     };
 
-    let mut outfile = match std::fs::File::create(&out_file) {
+    let total_bytes = reader.total_bytes();
+
+    let outfile = match std::fs::File::create(&out_file) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("Cannot create {}: {}", out_file.display(), e);
             std::process::exit(1);
         }
     };
+    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, outfile); // 4MB write buffer
 
-    use std::io::Write;
-    let mut units_read = 0u64;
     let mut bytes_written = 0u64;
     let start = std::time::Instant::now();
 
+    let mut interrupted = false;
+
     loop {
-        match reader.read_unit() {
-            Ok(Some(unit)) => {
-                outfile.write_all(&unit).unwrap_or_else(|e| {
+        // Check for interrupt
+        if INTERRUPTED.load(Ordering::Relaxed) {
+            interrupted = true;
+            break;
+        }
+
+        match reader.read_batch() {
+            Ok(Some(batch)) => {
+                let batch_len = batch.len() as u64;
+                writer.write_all(batch).unwrap_or_else(|e| {
                     eprintln!("\nWrite error: {}", e);
                     std::process::exit(1);
                 });
-                units_read += 1;
-                bytes_written += unit.len() as u64;
+                bytes_written += batch_len;
 
-                // Progress every 1000 units (~6MB)
-                if units_read % 1000 == 0 {
+                // Progress every ~6MB
+                if bytes_written % (6144 * 1000) < batch_len {
                     let elapsed = start.elapsed().as_secs_f64();
                     let mb = bytes_written as f64 / (1024.0 * 1024.0);
                     let speed = mb / elapsed;
-                    eprint!("\r  {:.0} MB ({:.1} MB/s)  ", mb, speed);
+                    let pct = if total_bytes > 0 {
+                        (bytes_written as f64 / total_bytes as f64 * 100.0).min(100.0)
+                    } else {
+                        0.0
+                    };
+                    let eta = if speed > 0.0 && total_bytes > 0 {
+                        let remaining_mb = (total_bytes - bytes_written) as f64 / (1024.0 * 1024.0);
+                        let secs = remaining_mb / speed;
+                        format!("{}:{:02}", (secs / 60.0) as u32, (secs % 60.0) as u32)
+                    } else {
+                        "--:--".into()
+                    };
+                    eprint!("\r  {:.0} MB / {:.0} MB  ({:.0}%)  {:.1} MB/s  ETA {}   ",
+                        mb, total_bytes as f64 / (1024.0 * 1024.0), pct, speed, eta);
                 }
             }
             Ok(None) => break,
             Err(e) => {
-                eprintln!("\nRead error at unit {}: {}", units_read, e);
-                // Continue on read errors (skip bad sectors)
-                units_read += 1;
+                eprintln!("\nRead error: {}", e);
             }
         }
     }
 
+    let errors = reader.errors;
+
+    // Flush remaining buffered data
+    drop(reader); // release session borrow
+    let _ = writer.flush();
+
     let elapsed = start.elapsed().as_secs_f64();
     let mb = bytes_written as f64 / (1024.0 * 1024.0);
+
+    if interrupted {
+        eprintln!("\n\nInterrupted — ejecting disc...");
+        let _ = session.eject();
+        println!("Partial: {:.0} MB in {:.0}s ({:.1} MB/s)", mb, elapsed, mb / elapsed);
+        println!("Output:  {}", out_file.display());
+        std::process::exit(130);
+    }
 
     println!();
     println!();
     println!("Complete: {:.0} MB in {:.0}s ({:.1} MB/s)", mb, elapsed, mb / elapsed);
-    println!("Output: {}", out_file.display());
+    if errors > 0 {
+        println!("Errors:   {} (sectors skipped)", errors);
+    }
+    println!("Output:   {}", out_file.display());
 }
 
 fn auto_detect_device() -> String {
-    // Try common Linux device paths
-    for dev in &["/dev/sr0", "/dev/sr1", "/dev/sg4", "/dev/sg5"] {
-        if Path::new(dev).exists() {
-            return dev.to_string();
-        }
-    }
-    String::new()
+    libfreemkv::find_drive().unwrap_or_default()
 }

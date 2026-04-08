@@ -13,3 +13,4 @@ path = "src/main.rs"
 [dependencies]
 libfreemkv = "0.4"
 isolang = "2"
+libc = "0.2"
