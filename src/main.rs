@@ -39,7 +39,7 @@ fn usage() {
     println!("Commands:");
     println!("  drive-info            Show drive hardware and profile match");
     println!("  disc-info             Show disc titles, streams, and sizes");
-    println!("  rip [--output /path]  Back up a disc (coming soon)");
+    println!("  rip [options]         Back up a disc title");
     println!("  update-keys --url <url>  Download and update KEYDB.cfg");
     println!("  version               Show version");
     println!("  help                  Show this help");
@@ -56,7 +56,9 @@ fn usage() {
     println!("  freemkv drive-info");
     println!("  freemkv drive-info --share --mask");
     println!("  freemkv disc-info");
-    println!("  freemkv rip --output ~/backups/");
+    println!("  freemkv rip                              Rip title 1 (main feature)");
+    println!("  freemkv rip --title 2 --output ~/Movies/  Rip specific title");
+    println!("  freemkv rip --raw                         Raw m2ts output");
     println!("  freemkv update-keys --url http://example.com/keydb.zip");
 }
 

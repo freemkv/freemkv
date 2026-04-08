@@ -9,8 +9,9 @@ pub fn run(args: &[String]) {
     let mut device_path: Option<String> = None;
     let mut output_dir: Option<String> = None;
     let mut keydb_path: Option<String> = None;
-    let mut title_idx: Option<usize> = None;
+    let mut title_num: Option<usize> = None;
     let mut list_only = false;
+    let mut _raw = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -29,10 +30,13 @@ pub fn run(args: &[String]) {
             }
             "--title" | "-t" => {
                 i += 1;
-                title_idx = args.get(i).and_then(|s| s.parse().ok());
+                title_num = args.get(i).and_then(|s| s.parse().ok());
             }
             "--list" | "-l" => {
                 list_only = true;
+            }
+            "--raw" => {
+                _raw = true;
             }
             _ => {
                 if device_path.is_none() && args[i].starts_with("/dev/") {
@@ -114,10 +118,14 @@ pub fn run(args: &[String]) {
     println!("Titles ({}):", disc.titles.len());
     println!();
 
+    // Title numbering is 1-based for users. Title 1 = longest (main feature).
+    let target_idx = title_num.unwrap_or(1).saturating_sub(1);
+
     for (i, title) in disc.titles.iter().enumerate() {
-        let marker = if Some(i) == title_idx { ">" } else { " " };
+        let num = i + 1;
+        let marker = if i == target_idx { ">" } else { " " };
         println!("{} {:2}. {} — {:.1} GB — {} clip(s) — {}",
-            marker, i, title.duration_display(), title.size_gb(),
+            marker, num, title.duration_display(), title.size_gb(),
             title.clips.len(), title.playlist);
 
         for stream in &title.streams {
@@ -141,12 +149,11 @@ pub fn run(args: &[String]) {
         std::process::exit(1);
     }
 
-    // Step 4: Select title
-    let target_idx = title_idx.unwrap_or(0);
+    // Step 4: Select title (already computed target_idx above)
     let title = match disc.titles.get(target_idx) {
         Some(t) => t,
         None => {
-            eprintln!("Title {} not found (have {})", target_idx, disc.titles.len());
+            eprintln!("Title {} not found (have {})", target_idx + 1, disc.titles.len());
             std::process::exit(1);
         }
     };
@@ -155,10 +162,21 @@ pub fn run(args: &[String]) {
     let out_dir = output_dir.map(PathBuf::from).unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     });
-    let out_file = out_dir.join(format!("title_{:05}.m2ts", title.playlist_id));
+
+    // Name from disc title: "Dune Part Two_t01.m2ts"
+    let disc_name = disc.meta_title.as_deref()
+        .unwrap_or(&disc.volume_id)
+        .replace(|c: char| !c.is_ascii_alphanumeric() && c != ' ' && c != '-', "")
+        .trim().to_string();
+    let filename = if disc_name.is_empty() {
+        format!("title_{:05}.m2ts", title.playlist_id)
+    } else {
+        format!("{}_t{:02}.m2ts", disc_name, target_idx + 1)
+    };
+    let out_file = out_dir.join(&filename);
 
     println!();
-    println!("Ripping title {} ({}) -> {}", target_idx, title.duration_display(), out_file.display());
+    println!("Ripping title {} ({}) -> {}", target_idx + 1, title.duration_display(), out_file.display());
     println!("  {} extents, {:.1} GB", title.extents.len(), title.size_gb());
 
     if title.extents.is_empty() {
