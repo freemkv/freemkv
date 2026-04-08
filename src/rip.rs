@@ -178,6 +178,11 @@ pub fn run(args: &[String]) {
     println!();
     println!("Ripping title {} ({}) -> {}", target_idx + 1, title.duration_display(), out_file.display());
     println!("  {} extents, {:.1} GB", title.extents.len(), title.size_gb());
+    for (i, ext) in title.extents.iter().enumerate() {
+        println!("    extent {}: LBA {} + {} sectors ({:.1} MB)",
+            i, ext.start_lba, ext.sector_count,
+            ext.sector_count as f64 * 2048.0 / 1e6);
+    }
 
     if title.extents.is_empty() {
         eprintln!("No sector extents found for this title.");
