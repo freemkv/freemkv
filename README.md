@@ -29,30 +29,35 @@ Or install from source: `cargo install freemkv`
 ```
 $ freemkv disc-info
 
-freemkv 0.4.0
+freemkv 0.5.0
 
 Scanning disc...
 
-Disc: Dune: Part Two
-Format: 4K UHD (2L, 78.8 GB)
+Disc: V For Vendetta
+Format: Blu-ray (1L, 25.5 GB)
 AACS: Encrypted
 
 Titles
 
-   1. 00800.mpls      2h 45m   72.0 GB  1 clip
+   1. 00003.mpls      2h 12m   21.3 GB  1 clip
 
-      Video:     HEVC 2160p HDR10 BT.2020
-                 HEVC 1080p Dolby Vision BT.2020 Dolby Vision EL
+      Video:     VC-1 1080p
 
-      Audio:     English TrueHD 5.1 (TrueHD)
-                 English DD 5.1 (Dolby Digital)
-                 English DD 5.1 (Descriptive Audio (US))
-                 English DD 5.1 (Descriptive Audio (UK))
-                 French DD 5.1
-                 Spanish DD 5.1
+      Audio:     English DD 5.1 (AudioEnglish)
+                 English TrueHD 5.1 (AudioEnglishDolby)
+                 French DD 5.1 (AudioFrenchHD)
+                 French DD 5.1 (AudioFrench)
+                 German DD 5.1 (AudioDeutsch)
+                 Italian DD 5.1 (AudioItaliano)
+                 Spanish DD 5.1 (AudioCastellano)
+                 Japanese DD 5.1
 
-      Subtitle:  English (forced)
-                 French (forced)
+      Subtitle:  English
+                 French
+                 German
+                 German
+                 Italian
+                 Italian
                  Spanish
 ```
 
@@ -61,20 +66,43 @@ Titles
 ```
 $ freemkv drive-info
 
-freemkv 0.4.0
+freemkv 0.5.0
 
 Drive Information
-  Device:              /dev/sg5
+  Device:              /dev/sg4
   Manufacturer:        HL-DT-ST
   Product:             BD-RE BU40N
   Revision:            1.03
+  Serial number:       MO6J7HB1010
   Firmware date:       2018-10-24
 
 Platform Information
-  Drive platform:      MediaTek
+  Drive platform:      MediaTek MT1959
   Firmware version:    1.03/NM00000
 
 Run 'freemkv drive-info --share' to help expand drive support.
+```
+
+## rip
+
+```
+$ freemkv rip --output ~/Movies/
+
+freemkv rip v0.5.0
+
+Opening /dev/sg4... OK
+  HL-DT-ST BD-RE BU40N
+Waiting for disc... OK
+Initializing drive... OK
+Probing disc... OK
+Scanning disc... OK
+
+  Capacity: 25.5 GB (13368800 sectors)
+  AACS:     encrypted (keys found)
+
+Ripping title 1 (2h 12m) -> ~/Movies/V For Vendetta_t01.m2ts
+  1 extent(s), 21.3 GB
+  8532 MB / 21767 MB  (39%)  13.4 MB/s (cur: 15.8)  ETA 16:28
 ```
 
 ## Stream Labels
@@ -89,8 +117,6 @@ freemkv automatically extracts rich stream metadata that other tools can't see. 
 
 Five BD-J format parsers built in (Paramount, Criterion, Pixelogic, Warner CTRM, Deluxe). Detection is automatic.
 
-If no BD-J data is found, streams still have full MPLS data. Labels are purely additive — they never break anything.
-
 ## Commands
 
 ```
@@ -98,7 +124,8 @@ freemkv <command> [options]
 
   drive-info            Show drive hardware and profile
   disc-info             Show disc titles, streams, and sizes
-  rip [--output /path]  Back up a disc (12-23 MB/s on BD)
+  rip [--output /path]  Back up a disc (12+ MB/s on BD)
+  bench-speed           Test drive read speed
   version               Show version
 
 Options:

@@ -27,6 +27,7 @@ pub fn run(args: &[String]) {
     let mut title_num: Option<usize> = None;
     let mut list_only = false;
     let mut _raw = false;
+    let mut duration_secs: Option<u64> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -52,6 +53,10 @@ pub fn run(args: &[String]) {
             }
             "--raw" => {
                 _raw = true;
+            }
+            "--duration" => {
+                i += 1;
+                duration_secs = args.get(i).and_then(|s| s.parse().ok());
             }
             _ => {
                 if device_path.is_none() && args[i].starts_with("/dev/") {
@@ -88,7 +93,7 @@ pub fn run(args: &[String]) {
     println!("freemkv rip v{}", env!("CARGO_PKG_VERSION"));
     println!();
 
-    // Step 1: Open drive + wait for disc (pure OEM, no custom firmware)
+    // Step 1: Open drive + wait for disc
     print!("Opening {}... ", device);
     let mut session = match libfreemkv::DriveSession::open(Path::new(&device)) {
         Ok(s) => s,
@@ -111,7 +116,29 @@ pub fn run(args: &[String]) {
         }
     }
 
-    // Step 2: Scan disc (UDF + playlists + AACS — all automatic)
+    // Step 2: Init (unlock + firmware) + probe disc
+    print!("Initializing drive... ");
+    match session.init() {
+        Ok(_) => {
+            println!("OK");
+
+            print!("Probing disc... ");
+            match session.probe_disc() {
+                Ok(_) => println!("OK"),
+                Err(e) => {
+                    println!("FAILED");
+                    eprintln!("  {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            println!("FAILED");
+            eprintln!("  {}", e);
+            eprintln!("  Continuing without init (OEM speed)");
+        }
+    }
+
+    // Step 3: Scan disc (UDF + playlists + AACS — all automatic)
     print!("Scanning disc... ");
     let scan_opts = if let Some(kp) = &keydb_path {
         libfreemkv::ScanOptions::with_keydb(kp)
@@ -131,7 +158,7 @@ pub fn run(args: &[String]) {
         }
     };
 
-    // Step 3: Show disc info
+    // Step 4: Show disc info
     println!();
     println!("  Capacity: {:.1} GB ({} sectors)", disc.capacity_gb(), disc.capacity_sectors);
     if disc.encrypted {
@@ -188,7 +215,7 @@ pub fn run(args: &[String]) {
         std::process::exit(1);
     }
 
-    // Step 4: Select title (already computed target_idx above)
+    // Step 5: Select title (already computed target_idx above)
     let title = match disc.titles.get(target_idx) {
         Some(t) => t,
         None => {
@@ -197,7 +224,7 @@ pub fn run(args: &[String]) {
         }
     };
 
-    // Step 5: Output path — create directory if needed
+    // Step 6: Output path — create directory if needed
     let out_dir = output_dir.map(PathBuf::from).unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     });
@@ -227,10 +254,10 @@ pub fn run(args: &[String]) {
         std::process::exit(1);
     }
 
-    // Step 6: Install signal handler for clean interrupt
+    // Step 7: Install signal handler for clean interrupt
     install_signal_handler();
 
-    // Step 7: Read and write
+    // Step 8: Read and write
     let mut reader = match disc.open_title(&mut session, target_idx) {
         Ok(r) => r,
         Err(e) => {
@@ -252,14 +279,23 @@ pub fn run(args: &[String]) {
 
     let mut bytes_written = 0u64;
     let start = std::time::Instant::now();
+    let mut last_progress = std::time::Instant::now();
+    let mut last_bytes = 0u64;
+    let mut peak_speed = 0.0f64;
 
     let mut interrupted = false;
 
     loop {
-        // Check for interrupt
+        // Check for interrupt or duration limit
         if INTERRUPTED.load(Ordering::Relaxed) {
             interrupted = true;
             break;
+        }
+        if let Some(max_secs) = duration_secs {
+            if start.elapsed().as_secs() >= max_secs {
+                interrupted = true;
+                break;
+            }
         }
 
         match reader.read_batch() {
@@ -271,25 +307,44 @@ pub fn run(args: &[String]) {
                 });
                 bytes_written += batch_len;
 
-                // Progress every ~6MB
-                if bytes_written % (6144 * 1000) < batch_len {
+                // Progress every ~2 seconds (more responsive than byte-based)
+                let now = std::time::Instant::now();
+                if now.duration_since(last_progress).as_secs_f64() >= 2.0 {
                     let elapsed = start.elapsed().as_secs_f64();
                     let mb = bytes_written as f64 / (1024.0 * 1024.0);
-                    let speed = mb / elapsed;
+                    let avg_speed = mb / elapsed;
+
+                    // Recent speed (since last update)
+                    let interval = now.duration_since(last_progress).as_secs_f64();
+                    let recent_mb = (bytes_written - last_bytes) as f64 / (1024.0 * 1024.0);
+                    let recent_speed = recent_mb / interval;
+                    if recent_speed > peak_speed { peak_speed = recent_speed; }
+
                     let pct = if total_bytes > 0 {
                         (bytes_written as f64 / total_bytes as f64 * 100.0).min(100.0)
                     } else {
                         0.0
                     };
-                    let eta = if speed > 0.0 && total_bytes > 0 {
+                    let eta = if avg_speed > 0.0 && total_bytes > 0 {
                         let remaining_mb = (total_bytes - bytes_written) as f64 / (1024.0 * 1024.0);
-                        let secs = remaining_mb / speed;
+                        let secs = remaining_mb / avg_speed;
                         format!("{}:{:02}", (secs / 60.0) as u32, (secs % 60.0) as u32)
                     } else {
                         "--:--".into()
                     };
-                    eprint!("\r  {:.0} MB / {:.0} MB  ({:.0}%)  {:.1} MB/s  ETA {}   ",
-                        mb, total_bytes as f64 / (1024.0 * 1024.0), pct, speed, eta);
+
+                    let err_str = if reader.errors > 0 {
+                        format!("  err:{}", reader.errors)
+                    } else {
+                        String::new()
+                    };
+
+                    eprint!("\r  {:.0} MB / {:.0} MB  ({:.0}%)  {:.1} MB/s (cur: {:.1})  ETA {}{}   ",
+                        mb, total_bytes as f64 / (1024.0 * 1024.0), pct,
+                        avg_speed, recent_speed, eta, err_str);
+
+                    last_progress = now;
+                    last_bytes = bytes_written;
                 }
             }
             Ok(None) => break,
@@ -318,13 +373,11 @@ pub fn run(args: &[String]) {
 
     println!();
     println!();
-    println!("Complete: {:.0} MB in {:.0}s ({:.1} MB/s)", mb, elapsed, mb / elapsed);
+    println!("Complete: {:.0} MB in {:.0}s", mb, elapsed);
+    println!("Speed:    {:.1} MB/s avg, {:.1} MB/s peak", mb / elapsed, peak_speed);
     if errors > 0 {
         println!("Errors:   {} (sectors skipped)", errors);
     }
     println!("Output:   {}", out_file.display());
 }
 
-fn auto_detect_device() -> String {
-    libfreemkv::find_drive().unwrap_or_default()
-}
