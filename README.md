@@ -98,7 +98,7 @@ freemkv <command> [options]
 
   drive-info            Show drive hardware and profile
   disc-info             Show disc titles, streams, and sizes
-  rip [--output /path]  Back up a disc (coming soon)
+  rip [--output /path]  Back up a disc (12-23 MB/s on BD)
   version               Show version
 
 Options:

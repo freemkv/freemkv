@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 (2026-04-09)
+
+### Rip command — working end-to-end
+
+- **`freemkv rip`** — fully functional disc backup: scan → decrypt → write m2ts
+- **12.5-23 MB/s read speed** on real hardware (BU40N, V for Vendetta BD)
+- **AACS 1.0 decryption** — transparent, automatic when KEYDB.cfg available
+- **Adaptive error handling** — batch size ramp-down, speed tier reduction, zero-fill skip
+- **Progress display** — MB/s, ETA, percentage, error count
+- **SIGINT handling** — clean interrupt, partial file preserved, disc ejected
+
+### Stream display improvements
+
+- No more phantom "Unknown(0)" video streams
+- Subtitle languages correct (was truncating: "ng " → "eng")
+- Secondary streams (commentary, PiP) parsed correctly
+
+### Dependencies
+
+- libfreemkv 0.5.0
+
 ## 0.3.0 (2026-04-07)
 
 ### Stream labels
