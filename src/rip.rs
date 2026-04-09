@@ -26,8 +26,6 @@ pub fn run(args: &[String]) {
     let mut keydb_path: Option<String> = None;
     let mut title_num: Option<usize> = None;
     let mut list_only = false;
-    let mut _raw = false;
-    let mut duration_secs: Option<u64> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -50,13 +48,6 @@ pub fn run(args: &[String]) {
             }
             "--list" | "-l" => {
                 list_only = true;
-            }
-            "--raw" => {
-                _raw = true;
-            }
-            "--duration" => {
-                i += 1;
-                duration_secs = args.get(i).and_then(|s| s.parse().ok());
             }
             _ => {
                 if device_path.is_none() && args[i].starts_with("/dev/") {
@@ -290,12 +281,6 @@ pub fn run(args: &[String]) {
         if INTERRUPTED.load(Ordering::Relaxed) {
             interrupted = true;
             break;
-        }
-        if let Some(max_secs) = duration_secs {
-            if start.elapsed().as_secs() >= max_secs {
-                interrupted = true;
-                break;
-            }
         }
 
         match reader.read_batch() {

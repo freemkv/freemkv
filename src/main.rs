@@ -18,8 +18,8 @@ fn main() {
         "drive-info" | "info" => info::run(&args[2..]),
         "disc-info" => disc_info::run(&args[2..]),
         "rip" => rip::run(&args[2..]),
-        "bench-speed" => bench::run(&args[2..]),
         "update-keys" => update_keys(&args[2..]),
+        "bench-speed" => bench::run(&args[2..]),
         "version" | "--version" | "-V" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
         }
@@ -46,21 +46,18 @@ fn usage() {
     println!("  version               Show version");
     println!("  help                  Show this help");
     println!();
-    println!("Global options:");
+    println!("Rip options:");
     println!("  --device /dev/sgN     Specify device (default: auto-detect)");
-    println!("  --quiet               Minimal output");
-    println!();
-    println!("Drive-info options:");
-    println!("  --share               Share profile to help expand drive support");
-    println!("  --mask                Mask serial numbers (use with --share)");
+    println!("  --output /path        Output directory (default: current)");
+    println!("  --title N             Title number (default: 1 = main feature)");
+    println!("  --keydb /path         Path to KEYDB.cfg for AACS decryption");
+    println!("  --list                List titles only, don't rip");
     println!();
     println!("Examples:");
     println!("  freemkv drive-info");
-    println!("  freemkv drive-info --share --mask");
     println!("  freemkv disc-info");
-    println!("  freemkv rip                              Rip title 1 (main feature)");
-    println!("  freemkv rip --title 2 --output ~/Movies/  Rip specific title");
-    println!("  freemkv rip --raw                         Raw m2ts output");
+    println!("  freemkv rip");
+    println!("  freemkv rip --title 2 --output ~/Movies/");
     println!("  freemkv update-keys --url http://example.com/keydb.zip");
 }
 
