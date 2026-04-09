@@ -162,13 +162,13 @@ fn format_subtitle(s: &SubtitleStream) -> String {
     if s.forced { format!("{} (forced)", lang) } else { lang.to_string() }
 }
 
-fn codec_name(c: Codec) -> &'static str {
+fn codec_name(c: Codec) -> String {
     match c {
-        Codec::Hevc => "HEVC", Codec::H264 => "H.264", Codec::Vc1 => "VC-1",
-        Codec::Mpeg2 => "MPEG-2", Codec::TrueHd => "TrueHD", Codec::DtsHdMa => "DTS-HD MA",
-        Codec::DtsHdHr => "DTS-HD HR", Codec::Dts => "DTS", Codec::Ac3 => "DD",
-        Codec::Ac3Plus => "DD+", Codec::Lpcm => "LPCM", Codec::Pgs => "PGS",
-        Codec::Unknown(_) => "?",
+        Codec::Hevc => "HEVC".into(), Codec::H264 => "H.264".into(), Codec::Vc1 => "VC-1".into(),
+        Codec::Mpeg2 => "MPEG-2".into(), Codec::TrueHd => "TrueHD".into(), Codec::DtsHdMa => "DTS-HD MA".into(),
+        Codec::DtsHdHr => "DTS-HD HR".into(), Codec::Dts => "DTS".into(), Codec::Ac3 => "DD".into(),
+        Codec::Ac3Plus => "DD+".into(), Codec::Lpcm => "LPCM".into(), Codec::Pgs => "PGS".into(),
+        Codec::Unknown(ct) => format!("Unknown (0x{:02x})", ct),
     }
 }
 
