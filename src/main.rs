@@ -4,6 +4,7 @@
 mod info;
 mod disc_info;
 mod rip;
+mod bench;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -17,6 +18,7 @@ fn main() {
         "drive-info" | "info" => info::run(&args[2..]),
         "disc-info" => disc_info::run(&args[2..]),
         "rip" => rip::run(&args[2..]),
+        "bench-speed" => bench::run(&args[2..]),
         "update-keys" => update_keys(&args[2..]),
         "version" | "--version" | "-V" => {
             println!("{}", env!("CARGO_PKG_VERSION"));

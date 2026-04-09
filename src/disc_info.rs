@@ -43,6 +43,11 @@ pub fn run(args: &[String]) {
         Err(e) => { eprintln!("{}", e); std::process::exit(1); }
     };
 
+    if let Err(e) = session.wait_ready() {
+        eprintln!("Drive not ready: {}", e);
+        std::process::exit(1);
+    }
+
     let disc = match Disc::scan(&mut session, &ScanOptions::default()) {
         Ok(d) => d,
         Err(e) => { eprintln!("Scan failed: {}", e); std::process::exit(1); }
