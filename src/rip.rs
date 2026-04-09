@@ -88,20 +88,28 @@ pub fn run(args: &[String]) {
     println!("freemkv rip v{}", env!("CARGO_PKG_VERSION"));
     println!();
 
-    // Step 1: Open drive (scan() handles AACS → unlock internally)
+    // Step 1: Open drive + wait for disc (pure OEM, no custom firmware)
     print!("Opening {}... ", device);
     let mut session = match libfreemkv::DriveSession::open(Path::new(&device)) {
-        Ok(s) => {
-            println!("OK");
-            s
-        }
+        Ok(s) => s,
         Err(e) => {
             println!("FAILED");
             eprintln!("  {}", e);
             std::process::exit(1);
         }
     };
+    println!("OK");
     println!("  {} {}", session.drive_id.vendor_id.trim(), session.drive_id.product_id.trim());
+
+    print!("Waiting for disc... ");
+    match session.wait_ready() {
+        Ok(_) => println!("OK"),
+        Err(e) => {
+            println!("FAILED");
+            eprintln!("  {}", e);
+            std::process::exit(1);
+        }
+    }
 
     // Step 2: Scan disc (UDF + playlists + AACS — all automatic)
     print!("Scanning disc... ");
@@ -189,10 +197,14 @@ pub fn run(args: &[String]) {
         }
     };
 
-    // Step 5: Output path
+    // Step 5: Output path — create directory if needed
     let out_dir = output_dir.map(PathBuf::from).unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     });
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("Cannot create output directory {}: {}", out_dir.display(), e);
+        std::process::exit(1);
+    }
 
     // Name from disc title: "Dune Part Two_t01.m2ts"
     let disc_name = disc.meta_title.as_deref()

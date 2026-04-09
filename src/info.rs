@@ -33,8 +33,8 @@ pub fn run(args: &[String]) {
         std::process::exit(1);
     }));
 
-    // Open drive via libfreemkv — no unlock needed for info
-    let session = match DriveSession::open_no_unlock(Path::new(&dev_path)) {
+    // Open drive via libfreemkv — identify only, no disc needed
+    let session = match DriveSession::open(Path::new(&dev_path)) {
         Ok(s) => s,
         Err(e) => { eprintln!("Cannot open {}: {}", dev_path, e); std::process::exit(1); }
     };
@@ -43,7 +43,7 @@ pub fn run(args: &[String]) {
     let profile = &session.profile;
 
     let serial_display = if mask { mask_str(&id.serial_number) } else { id.serial_number.clone() };
-    let platform = format!("{:?}", profile.chipset);
+    let platform = session.platform_name().to_string();
     let fw_version = format!("{}/{}", id.product_revision.trim(), id.vendor_specific.trim());
 
     if !quiet {
