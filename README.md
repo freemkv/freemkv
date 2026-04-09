@@ -29,7 +29,7 @@ Or install from source: `cargo install freemkv`
 ```
 $ freemkv disc-info
 
-freemkv 0.3.1
+freemkv 0.4.0
 
 Scanning disc...
 
@@ -61,10 +61,10 @@ Titles
 ```
 $ freemkv drive-info
 
-freemkv 0.3.1
+freemkv 0.4.0
 
 Drive Information
-  Device:              /dev/sg4
+  Device:              /dev/sg5
   Manufacturer:        HL-DT-ST
   Product:             BD-RE BU40N
   Revision:            1.03
