@@ -57,6 +57,13 @@ fn usage() {
     println!("  -l, --list              {}", strings::get("app.opt_list"));
     println!("      --raw               {}", strings::get("app.opt_raw"));
     println!();
+    println!("{}:", strings::get("app.drive_info_options"));
+    println!("  -s, --share             {}", strings::get("app.opt_share"));
+    println!("  -m, --mask              {}", strings::get("app.opt_mask"));
+    println!();
+    println!("{}:", strings::get("app.global_options"));
+    println!("  -q, --quiet             {}", strings::get("app.opt_quiet"));
+    println!();
     println!("{}:", strings::get("app.examples"));
     println!("  freemkv rip");
     println!("  freemkv rip --title 2 --output ~/Movies/");

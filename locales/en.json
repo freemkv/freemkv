@@ -17,6 +17,11 @@
     "opt_list": "List titles only, don't rip",
     "opt_raw": "Output raw m2ts instead of MKV",
     "examples": "Examples",
+    "drive_info_options": "Drive-info options",
+    "opt_share": "Capture and submit drive profile",
+    "opt_mask": "Mask serial numbers",
+    "global_options": "Global options",
+    "opt_quiet": "Suppress output",
     "unknown_command": "Unknown command: {cmd}",
     "unknown_option": "Unknown option: {opt}"
   },
@@ -70,7 +75,7 @@
     "audio": "Audio",
     "subtitle": "Subtitle",
     "forced": "forced",
-    "usage": "Usage: freemkv disc-info [--device /dev/sgN] [--full] [--quiet]"
+    "usage": "Usage: freemkv disc-info [--device /dev/sgN] [--full] [--basic] [--quiet]"
   },
   "rip": {
     "opening": "Opening {device}...",

@@ -11,6 +11,7 @@ pub fn run(args: &[String]) {
     let mut device_path: Option<String> = None;
     let mut quiet = false;
     let mut full = false;
+    let mut basic = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -18,6 +19,7 @@ pub fn run(args: &[String]) {
             "--device" | "-d" => { i += 1; device_path = args.get(i).cloned(); }
             "--quiet" | "-q" => quiet = true,
             "--full" | "-f" => full = true,
+            "--basic" | "-b" => basic = true,
             "--help" | "-h" => {
                 println!("{}", strings::get("disc.usage"));
                 return;
@@ -122,7 +124,7 @@ pub fn run(args: &[String]) {
         if !audios.is_empty() {
             println!();
             for (ai, a) in audios.iter().enumerate() {
-                let line = format_audio(a);
+                let line = format_audio(a, basic);
                 let label = strings::get("disc.audio");
                 if ai == 0 { println!("      {}:     {}", label, line); }
                 else { println!("                 {}", line); }
@@ -162,10 +164,10 @@ fn format_video(v: &VideoStream) -> String {
     parts.join(" ")
 }
 
-fn format_audio(a: &AudioStream) -> String {
+fn format_audio(a: &AudioStream, basic: bool) -> String {
     let lang = lang_name(&a.language);
     let codec = codec_name(a.codec);
-    if !a.label.is_empty() {
+    if !basic && !a.label.is_empty() {
         format!("{} {} {} ({})", lang, codec, a.channels, a.label)
     } else {
         format!("{} {} {}", lang, codec, a.channels)
