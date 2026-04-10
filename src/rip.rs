@@ -1,7 +1,8 @@
 //! freemkv rip — Back up a disc.
 
 use crate::strings;
-use std::io::{BufWriter, Write, stdout};
+use crate::output::{Output, Level::{Normal, Verbose}};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -22,6 +23,7 @@ pub fn run(args: &[String]) {
     let mut list_only = false;
     let mut raw_mode = false;
     let mut verbose = false;
+    let mut quiet = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -33,6 +35,7 @@ pub fn run(args: &[String]) {
             "--list" | "-l" => { list_only = true; }
             "--raw" => { raw_mode = true; }
             "--verbose" | "-v" => { verbose = true; }
+            "--quiet" | "-q" => { quiet = true; }
             _ => {
                 if device_path.is_none() && args[i].starts_with("/dev/") {
                     device_path = Some(args[i].clone());
@@ -54,115 +57,106 @@ pub fn run(args: &[String]) {
         },
     };
 
-    println!("freemkv rip v{}", env!("CARGO_PKG_VERSION"));
-    println!();
+    let out = Output::new(verbose, quiet);
+
+    out.raw(Normal, &format!("freemkv rip v{}", env!("CARGO_PKG_VERSION")));
+    out.blank(Normal);
 
     // Open drive
-    let ok = strings::get("rip.ok");
-    let failed = strings::get("rip.failed");
-
-    print!("{} ", strings::fmt("rip.opening", &[("device", &device)]));
-    let _ = stdout().flush();
+    out.raw_inline(Normal, &format!("{} ", strings::fmt("rip.opening", &[("device", &device)])));
     let mut session = match libfreemkv::DriveSession::open(Path::new(&device)) {
-        Ok(s) => { println!("{}", ok); s }
-        Err(e) => { println!("{}", failed); eprintln!("  {}", e); std::process::exit(1); }
+        Ok(s) => { out.print(Normal, "rip.ok"); s }
+        Err(e) => { out.print(Normal, "rip.failed"); eprintln!("  {}", e); std::process::exit(1); }
     };
-    println!("  {} {}", session.drive_id.vendor_id.trim(), session.drive_id.product_id.trim());
+    out.raw(Normal, &format!("  {} {}", session.drive_id.vendor_id.trim(), session.drive_id.product_id.trim()));
 
     // Wait for disc
-    print!("{} ", strings::get("rip.waiting"));
-    let _ = stdout().flush();
+    out.print_inline(Normal, "rip.waiting");
+    out.raw_inline(Normal, " ");
     match session.wait_ready() {
-        Ok(_) => println!("{}", ok),
-        Err(e) => { println!("{}", failed); eprintln!("  {}", e); std::process::exit(1); }
+        Ok(_) => out.print(Normal, "rip.ok"),
+        Err(e) => { out.print(Normal, "rip.failed"); eprintln!("  {}", e); std::process::exit(1); }
     }
 
     // Init + probe
-    print!("{} ", strings::get("rip.initializing"));
-    let _ = stdout().flush();
+    out.print_inline(Normal, "rip.initializing");
+    out.raw_inline(Normal, " ");
     match session.init() {
         Ok(_) => {
-            println!("{}", ok);
-            print!("{} ", strings::get("rip.probing"));
-            let _ = stdout().flush();
+            out.print(Normal, "rip.ok");
+            out.print_inline(Normal, "rip.probing");
+            out.raw_inline(Normal, " ");
             match session.probe_disc() {
-                Ok(_) => println!("{}", ok),
-                Err(e) => { println!("{}", failed); eprintln!("  {}", e); }
+                Ok(_) => out.print(Normal, "rip.ok"),
+                Err(e) => { out.print(Normal, "rip.failed"); eprintln!("  {}", e); }
             }
         }
         Err(e) => {
-            println!("{}", failed);
-            eprintln!("  {}", strings::fmt("rip.continuing_oem", &[("error", &e.to_string())]));
+            out.print(Normal, "rip.failed");
+            out.fmt(Normal, "rip.continuing_oem", &[("error", &e.to_string())]);
         }
     }
 
     // Scan
-    print!("{} ", strings::get("rip.scanning"));
-    let _ = stdout().flush();
+    out.print_inline(Normal, "rip.scanning");
+    out.raw_inline(Normal, " ");
     let opts = match keydb_path {
         Some(ref kp) => libfreemkv::ScanOptions::with_keydb(kp),
         None => libfreemkv::ScanOptions::default(),
     };
     let disc = match libfreemkv::Disc::scan(&mut session, &opts) {
-        Ok(d) => { println!("{}", ok); d }
-        Err(e) => { println!("{}", failed); eprintln!("  {}", e); std::process::exit(1); }
+        Ok(d) => { out.print(Normal, "rip.ok"); d }
+        Err(e) => { out.print(Normal, "rip.failed"); eprintln!("  {}", e); std::process::exit(1); }
     };
 
     // Disc info
-    println!();
-    println!("  {}: {:.1} GB", strings::get("rip.capacity"), disc.capacity_gb());
+    out.blank(Normal);
+    out.raw(Normal, &format!("  {}: {:.1} GB", strings::get("rip.capacity"), disc.capacity_gb()));
     if disc.encrypted {
         if let Some(ref aacs) = disc.aacs {
-            println!("  {}", strings::get("rip.aacs_keys_found"));
-            println!("  VUK:      {:02x}{:02x}{:02x}{:02x}...",
-                aacs.vuk[0], aacs.vuk[1], aacs.vuk[2], aacs.vuk[3]);
-            if verbose {
-                println!();
-                println!("  {}:   {}", strings::get("rip.verbose_aacs_version"), aacs.version);
-                println!("  {}:     {:?}", strings::get("rip.verbose_key_source"), aacs.key_source);
-                println!("  {}:      {}", strings::get("rip.verbose_disc_hash"), aacs.disc_hash);
-                if let Some(v) = aacs.mkb_version {
-                    println!("  {}:    {}", strings::get("rip.verbose_mkb_version"), v);
-                }
-                println!("  {}: {}", strings::get("rip.verbose_bus_encryption"), aacs.bus_encryption);
-                println!("  {}:      {}", strings::get("rip.verbose_volume_id"), hex(&aacs.volume_id));
-                println!("  {}:      {}", strings::get("rip.verbose_unit_keys"), aacs.unit_keys.len());
-                if let Some(ref rdk) = aacs.read_data_key {
-                    println!("  {}:  {:02x}{:02x}{:02x}{:02x}...",
-                        strings::get("rip.verbose_read_data_key"), rdk[0], rdk[1], rdk[2], rdk[3]);
-                }
+            out.print(Normal, "rip.aacs_keys_found");
+            out.raw(Normal, &format!("  VUK:      {:02x}{:02x}{:02x}{:02x}...",
+                aacs.vuk[0], aacs.vuk[1], aacs.vuk[2], aacs.vuk[3]));
+            out.blank(Verbose);
+            out.raw(Verbose, &format!("  {}:   {}", strings::get("rip.verbose_aacs_version"), aacs.version));
+            out.raw(Verbose, &format!("  {}:     {:?}", strings::get("rip.verbose_key_source"), aacs.key_source));
+            out.raw(Verbose, &format!("  {}:      {}", strings::get("rip.verbose_disc_hash"), aacs.disc_hash));
+            if let Some(v) = aacs.mkb_version {
+                out.raw(Verbose, &format!("  {}:    {}", strings::get("rip.verbose_mkb_version"), v));
+            }
+            out.raw(Verbose, &format!("  {}: {}", strings::get("rip.verbose_bus_encryption"), aacs.bus_encryption));
+            out.raw(Verbose, &format!("  {}:      {}", strings::get("rip.verbose_volume_id"), hex(&aacs.volume_id)));
+            out.raw(Verbose, &format!("  {}:      {}", strings::get("rip.verbose_unit_keys"), aacs.unit_keys.len()));
+            if let Some(ref rdk) = aacs.read_data_key {
+                out.raw(Verbose, &format!("  {}:  {:02x}{:02x}{:02x}{:02x}...",
+                    strings::get("rip.verbose_read_data_key"), rdk[0], rdk[1], rdk[2], rdk[3]));
+            }
+            if let Some(ref err) = aacs.handshake_error {
+                out.raw(Verbose, &format!("  {}: {} ({})",
+                    strings::get("rip.verbose_handshake_error"), err.code(), err));
             }
         } else {
-            println!("  {}", strings::get("rip.aacs_no_keys"));
-        }
-    }
-
-    // Show handshake error in verbose mode (even when keys were found via KEYDB)
-    if verbose {
-        if let Some(ref aacs) = disc.aacs {
-            if let Some(ref err) = aacs.handshake_error {
-                println!("  {}: {} ({})", strings::get("rip.verbose_handshake_error"), err.code(), err);
-            }
-        }
-        if disc.aacs.is_none() {
-            println!("  ({})", strings::get("rip.verbose_handshake_hint"));
+            out.print(Normal, "rip.aacs_no_keys");
+            out.raw(Verbose, &format!("  ({})", strings::get("rip.verbose_handshake_hint")));
         }
     }
 
     // Titles
-    println!();
-    println!("{} ({}):", strings::get("rip.titles"), disc.titles.len());
-    println!();
+    out.blank(Normal);
+    out.raw(Normal, &format!("{} ({}):", strings::get("rip.titles"), disc.titles.len()));
+    out.blank(Normal);
     let target_idx = title_num.unwrap_or(1).saturating_sub(1);
     for (i, title) in disc.titles.iter().enumerate() {
         let marker = if i == target_idx { ">" } else { " " };
-        println!("{} {:2}. {} — {:.1} GB — {}", marker, i + 1,
-            title.duration_display(), title.size_gb(), title.playlist);
-        for stream in &title.streams {
-            match stream {
-                libfreemkv::Stream::Video(v) => println!("       {:?} {}", v.codec, v.resolution),
-                libfreemkv::Stream::Audio(a) => println!("       {:?} {} {}", a.codec, a.channels, a.language),
-                libfreemkv::Stream::Subtitle(s) => println!("       {}", s.language),
+        out.raw(Normal, &format!("{} {:2}. {} — {:.1} GB — {}", marker, i + 1,
+            title.duration_display(), title.size_gb(), title.playlist));
+        if out.enabled(Normal) {
+            for stream in &title.streams {
+                match stream {
+                    libfreemkv::Stream::Video(v) => out.raw(Normal, &format!("       {:?} {}", v.codec, v.resolution)),
+                    libfreemkv::Stream::Audio(a) => out.raw(Normal, &format!("       {:?} {} {}", a.codec, a.channels, a.language)),
+                    libfreemkv::Stream::Subtitle(s) => out.raw(Normal, &format!("       {}", s.language)),
+                }
             }
         }
     }
@@ -192,13 +186,13 @@ pub fn run(args: &[String]) {
     };
     let out_file = out_dir.join(&filename);
 
-    println!();
-    println!("{}", strings::fmt("rip.ripping", &[
+    out.blank(Normal);
+    out.fmt(Normal, "rip.ripping", &[
         ("num", &(target_idx + 1).to_string()),
         ("duration", &title.duration_display()),
         ("size", &format!("{:.1}", title.size_gb())),
         ("file", &out_file.display().to_string()),
-    ]));
+    ]);
 
     if title.extents.is_empty() {
         eprintln!("{}", strings::get("rip.no_extents")); std::process::exit(1);
