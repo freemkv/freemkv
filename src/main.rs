@@ -6,6 +6,7 @@ mod disc_info;
 mod rip;
 mod remux;
 mod strings;
+mod output;
 
 fn main() {
     strings::init();
