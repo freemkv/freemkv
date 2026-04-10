@@ -40,7 +40,6 @@ pub fn run(args: &[String]) {
     };
 
     let id = &session.drive_id;
-    let profile = &session.profile;
 
     let serial_display = if mask { mask_str(&id.serial_number) } else { id.serial_number.clone() };
     let platform = session.platform_name().to_string();
