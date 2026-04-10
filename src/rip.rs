@@ -146,8 +146,9 @@ pub fn run(args: &[String]) {
 
     let ext = if raw_mode { "m2ts" } else { "mkv" };
     let name = disc.meta_title.as_deref().unwrap_or(&disc.volume_id)
-        .replace(|c: char| !c.is_ascii_alphanumeric() && c != ' ' && c != '-', "")
-        .trim().to_string();
+        .replace(|c: char| !c.is_ascii_alphanumeric() && c != ' ' && c != '-' && c != '_', "")
+        .trim()
+        .replace(' ', "_");
     let filename = if name.is_empty() {
         format!("title_{:05}.{}", title.playlist_id, ext)
     } else {
