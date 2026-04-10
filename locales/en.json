@@ -107,6 +107,7 @@
     "verbose_volume_id": "Volume ID",
     "verbose_unit_keys": "Unit keys",
     "verbose_read_data_key": "Read data key",
+    "verbose_handshake_error": "Handshake failed",
     "verbose_handshake_hint": "Handshake may have failed — no host cert, or drive rejected"
   },
   "remux": {

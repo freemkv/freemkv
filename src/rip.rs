@@ -134,9 +134,18 @@ pub fn run(args: &[String]) {
             }
         } else {
             println!("  {}", strings::get("rip.aacs_no_keys"));
-            if verbose {
-                println!("  ({})", strings::get("rip.verbose_handshake_hint"));
+        }
+    }
+
+    // Show handshake error in verbose mode (even when keys were found via KEYDB)
+    if verbose {
+        if let Some(ref aacs) = disc.aacs {
+            if let Some(ref err) = aacs.handshake_error {
+                println!("  {}: {} ({})", strings::get("rip.verbose_handshake_error"), err.code(), err);
             }
+        }
+        if disc.aacs.is_none() {
+            println!("  ({})", strings::get("rip.verbose_handshake_hint"));
         }
     }
 
