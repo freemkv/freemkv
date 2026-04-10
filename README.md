@@ -122,15 +122,18 @@ Five BD-J format parsers built in (Paramount, Criterion, Pixelogic, Warner CTRM,
 ```
 freemkv <command> [options]
 
-  drive-info            Show drive hardware and profile
+  drive-info            Show drive hardware and profile match
   disc-info             Show disc titles, streams, and sizes
-  rip [--output /path]  Back up a disc (12+ MB/s on BD)
-  bench-speed           Test drive read speed
+  rip [options]         Back up a disc title
+  remux <in.m2ts>       Convert m2ts to MKV (no drive needed)
+  update-keys --url <u> Download and update KEYDB.cfg
   version               Show version
 
 Options:
-  --device /dev/sgN     Specify device (default: auto-detect)
-  --keydb /path         Path to KEYDB.cfg for AACS decryption
+  -d, --device /dev/sgN   Specify device (default: auto-detect)
+  -k, --keydb /path       Path to KEYDB.cfg for AACS decryption
+  -o, --output /path      Output directory
+  -t, --title N           Title number (default: 1 = main feature)
 ```
 
 ## Supported Drives

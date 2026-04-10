@@ -28,7 +28,7 @@ pub fn run(args: &[String]) {
         i += 1;
     }
 
-    let dev_path = device_path.unwrap_or_else(|| find_bd_drive().unwrap_or_else(|| {
+    let dev_path = device_path.unwrap_or_else(|| libfreemkv::find_drive().unwrap_or_else(|| {
         eprintln!("No BD drive found. Use --device /dev/sgN");
         std::process::exit(1);
     }));
@@ -81,19 +81,15 @@ fn mask_str(s: &str) -> String {
 }
 
 fn format_date(fw_date: &str) -> String {
-    if fw_date.len() >= 8 {
-        if fw_date.starts_with("21") && fw_date.len() >= 12 {
-            format!("20{}-{}-{}", &fw_date[2..4], &fw_date[4..6], &fw_date[6..8])
-        } else if fw_date.len() >= 8 {
-            format!("{}-{}-{}", &fw_date[0..4], &fw_date[4..6], &fw_date[6..8])
-        } else {
-            fw_date.to_string()
-        }
+    if fw_date.len() < 8 {
+        return fw_date.to_string();
+    }
+    // MMC-6 firmware dates use CCYYMMDD format (12 chars total with HHMI).
+    // Some drives report "21YYMMDD..." — normalize to "20YY-MM-DD".
+    if fw_date.starts_with("21") && fw_date.len() >= 12 {
+        format!("20{}-{}-{}", &fw_date[2..4], &fw_date[4..6], &fw_date[6..8])
     } else {
-        fw_date.to_string()
+        format!("{}-{}-{}", &fw_date[0..4], &fw_date[4..6], &fw_date[6..8])
     }
 }
 
-fn find_bd_drive() -> Option<String> {
-    libfreemkv::find_drive()
-}
