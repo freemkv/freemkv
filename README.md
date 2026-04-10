@@ -146,6 +146,10 @@ Global options:
   -q, --quiet             Suppress output
 ```
 
+## Binary Size
+
+The release binary is ~5 MB. Most of the size comes from the TLS stack (rustls/ring) used by `--share` for HTTPS to GitHub. The `--share` dependencies (ureq, zip, serde_json) could be moved behind a feature flag to produce a ~2 MB binary for users who don't need profile sharing.
+
 ## Supported Drives
 
 Works with LG, ASUS, HP, and other MediaTek-based BD-RE drives. Run `freemkv drive-info` to check your drive. Pioneer support planned.
