@@ -1,10 +1,11 @@
 //! freemkv remux — Convert m2ts to MKV without a disc drive.
 
+use crate::strings;
 use std::io::{BufWriter, BufReader, Read, Write};
 
 pub fn run(args: &[String]) {
     if args.is_empty() {
-        eprintln!("Usage: freemkv remux <input.m2ts> [output.mkv]");
+        eprintln!("{}", strings::get("remux.usage"));
         std::process::exit(1);
     }
 
@@ -12,60 +13,55 @@ pub fn run(args: &[String]) {
     let output_path = if args.len() > 1 {
         args[1].clone()
     } else {
-        // Replace .m2ts with .mkv
         input_path.replace(".m2ts", ".mkv")
     };
 
     if output_path == *input_path {
-        eprintln!("Output path same as input. Specify a different output file.");
+        eprintln!("{}", strings::get("remux.same_path"));
         std::process::exit(1);
     }
 
     // Open input
     let infile = match std::fs::File::open(input_path) {
         Ok(f) => f,
-        Err(e) => { eprintln!("Cannot open {}: {}", input_path, e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("{}", strings::fmt("error.open_failed", &[("device", input_path), ("error", &e.to_string())]));
+            std::process::exit(1);
+        }
     };
     let file_size = infile.metadata().map(|m| m.len()).unwrap_or(0);
     let mut reader = BufReader::with_capacity(4 * 1024 * 1024, infile);
 
-    // We need stream metadata to set up MKV tracks.
-    // For now, scan the first few MB to find PAT/PMT and extract PIDs + codecs.
-    // TODO: parse PAT/PMT from transport stream for full auto-detection.
-    // For now, require that the user provides stream info or we do a quick pre-scan.
-
-    // Quick pre-scan: read first 1MB, parse TS packets to find PMT
     println!("freemkv remux v{}", env!("CARGO_PKG_VERSION"));
     println!();
-    println!("Input:  {} ({:.1} GB)", input_path, file_size as f64 / (1024.0 * 1024.0 * 1024.0));
-    println!("Output: {}", output_path);
+    println!("{}:  {} ({:.1} GB)", strings::get("remux.input"), input_path, file_size as f64 / (1024.0 * 1024.0 * 1024.0));
+    println!("{}: {}", strings::get("remux.output_label"), output_path);
 
-    print!("Scanning streams... ");
+    print!("{} ", strings::get("remux.scanning_streams"));
     let _ = std::io::stdout().flush();
-    let mut scan_buf = vec![0u8; 1024 * 1024]; // 1MB
+    let mut scan_buf = vec![0u8; 1024 * 1024];
     let scan_bytes = reader.read(&mut scan_buf).unwrap_or(0);
 
     let streams = match scan_ts_streams(&scan_buf[..scan_bytes]) {
         Some(s) if !s.is_empty() => {
-            println!("OK ({} streams)", s.len());
+            println!("{} ({} streams)", strings::get("rip.ok"), s.len());
             s
         }
         _ => {
-            println!("FAILED");
-            eprintln!("Could not detect streams. Is this a valid BD m2ts file?");
+            println!("{}", strings::get("rip.failed"));
+            eprintln!("{}", strings::get("remux.scan_failed"));
             std::process::exit(1);
         }
     };
 
     for s in &streams {
         match s {
-            libfreemkv::Stream::Video(v) => println!("  Video: {:?} {}", v.codec, v.resolution),
-            libfreemkv::Stream::Audio(a) => println!("  Audio: {:?} {} {}", a.codec, a.channels, a.language),
-            libfreemkv::Stream::Subtitle(s) => println!("  Sub:   {:?} {}", s.codec, s.language),
+            libfreemkv::Stream::Video(v) => println!("  {:?} {}", v.codec, v.resolution),
+            libfreemkv::Stream::Audio(a) => println!("  {:?} {} {}", a.codec, a.channels, a.language),
+            libfreemkv::Stream::Subtitle(s) => println!("  {:?} {}", s.codec, s.language),
         }
     }
 
-    // Build a dummy title for MkvStream
     let title = libfreemkv::Title {
         playlist: String::new(),
         playlist_id: 0,
@@ -76,10 +72,12 @@ pub fn run(args: &[String]) {
         extents: Vec::new(),
     };
 
-    // Create output
     let outfile = match std::fs::File::create(&output_path) {
         Ok(f) => f,
-        Err(e) => { eprintln!("Cannot create {}: {}", output_path, e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("{}", strings::fmt("rip.cannot_create", &[("path", &output_path), ("error", &e.to_string())]));
+            std::process::exit(1);
+        }
     };
     let buf_writer = BufWriter::with_capacity(4 * 1024 * 1024, outfile);
     let mut mkv = libfreemkv::MkvStream::new(buf_writer)
@@ -87,17 +85,15 @@ pub fn run(args: &[String]) {
         .max_buffer(10 * 1024 * 1024);
 
     println!();
-    print!("Remuxing... ");
+    print!("{} ", strings::get("remux.remuxing"));
     let _ = std::io::stdout().flush();
 
     let start = std::time::Instant::now();
     let mut total_read = scan_bytes as u64;
 
-    // Write the scan buffer we already read
     mkv.write_all(&scan_buf[..scan_bytes]).unwrap();
 
-    // Stream the rest
-    let mut buf = vec![0u8; 192 * 1024]; // 192KB chunks (1024 TS packets)
+    let mut buf = vec![0u8; 192 * 1024];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
@@ -105,7 +101,10 @@ pub fn run(args: &[String]) {
                 mkv.write_all(&buf[..n]).unwrap();
                 total_read += n as u64;
             }
-            Err(e) => { eprintln!("\nRead error: {}", e); break; }
+            Err(e) => {
+                eprintln!("\n{}", strings::fmt("rip.read_error", &[("error", &e.to_string())]));
+                break;
+            }
         }
     }
 
@@ -113,22 +112,22 @@ pub fn run(args: &[String]) {
 
     let elapsed = start.elapsed().as_secs_f64();
     let mb = total_read as f64 / (1024.0 * 1024.0);
-    println!("done");
+    println!("{}", strings::get("remux.done"));
     println!();
-    println!("Remuxed: {:.1} GB in {:.0}s ({:.0} MB/s)",
-        mb / 1024.0, elapsed, mb / elapsed);
-    println!("Output:  {}", output_path);
+    println!("{}", strings::fmt("remux.remuxed", &[
+        ("size", &format!("{:.1}", mb / 1024.0)),
+        ("time", &format!("{:.0}", elapsed)),
+        ("speed", &format!("{:.0}", mb / elapsed)),
+    ]));
+    println!("{}: {}", strings::get("remux.output_label"), output_path);
 }
 
 /// Quick scan of TS data to find streams via PAT/PMT.
-/// Returns detected streams, or None if no PMT found.
 fn scan_ts_streams(data: &[u8]) -> Option<Vec<libfreemkv::Stream>> {
-    // BD TS uses 192-byte packets. PAT is at PID 0x0000, PMT PID from PAT.
     let mut pat_pmt_pid: Option<u16> = None;
     let mut streams = Vec::new();
     let mut offset = 0;
 
-    // Find PAT (PID 0)
     while offset + 192 <= data.len() {
         if data[offset + 4] != 0x47 {
             offset += 1;
@@ -138,17 +137,15 @@ fn scan_ts_streams(data: &[u8]) -> Option<Vec<libfreemkv::Stream>> {
         let pusi = data[offset + 5] & 0x40 != 0;
 
         if pid == 0 && pusi {
-            // PAT found — extract PMT PID
-            let payload_start = offset + 4 + 4; // skip TP_extra + TS header
+            let payload_start = offset + 4 + 4;
             if payload_start + 12 < data.len() {
                 let pointer = data[payload_start] as usize;
                 let pat_start = payload_start + 1 + pointer;
                 if pat_start + 12 < data.len() && data[pat_start] == 0x00 {
-                    // PAT table: skip 8 bytes header, then program entries (4 bytes each)
                     let section_len = (((data[pat_start + 1] & 0x0F) as usize) << 8) | data[pat_start + 2] as usize;
                     let entries_start = pat_start + 8;
-                    let entries_end = pat_start + 3 + section_len - 4; // minus CRC
-                    if entries_start + 4 <= data.len() && entries_start < entries_end {
+                    let _entries_end = pat_start + 3 + section_len - 4;
+                    if entries_start + 4 <= data.len() {
                         let pmt_pid = (((data[entries_start + 2] & 0x1F) as u16) << 8) | data[entries_start + 3] as u16;
                         pat_pmt_pid = Some(pmt_pid);
                     }
@@ -160,7 +157,6 @@ fn scan_ts_streams(data: &[u8]) -> Option<Vec<libfreemkv::Stream>> {
 
     let pmt_pid = pat_pmt_pid?;
 
-    // Find PMT
     offset = 0;
     while offset + 192 <= data.len() {
         if data[offset + 4] != 0x47 { offset += 1; continue; }

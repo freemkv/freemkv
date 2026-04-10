@@ -1,5 +1,6 @@
 //! freemkv rip — Back up a disc.
 
+use crate::strings;
 use std::io::{BufWriter, Write, stdout};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,7 +48,7 @@ pub fn run(args: &[String]) {
         },
         None => match libfreemkv::find_drive() {
             Some(d) => d,
-            None => { eprintln!("No optical drive found. Use -d /dev/sgN"); std::process::exit(1); }
+            None => { eprintln!("{}", strings::get("error.no_drive")); std::process::exit(1); }
         },
     };
 
@@ -55,67 +56,72 @@ pub fn run(args: &[String]) {
     println!();
 
     // Open drive
-    print!("Opening {}... ", device);
+    let ok = strings::get("rip.ok");
+    let failed = strings::get("rip.failed");
+
+    print!("{} ", strings::fmt("rip.opening", &[("device", &device)]));
     let _ = stdout().flush();
     let mut session = match libfreemkv::DriveSession::open(Path::new(&device)) {
-        Ok(s) => { println!("OK"); s }
-        Err(e) => { println!("FAILED"); eprintln!("  {}", e); std::process::exit(1); }
+        Ok(s) => { println!("{}", ok); s }
+        Err(e) => { println!("{}", failed); eprintln!("  {}", e); std::process::exit(1); }
     };
     println!("  {} {}", session.drive_id.vendor_id.trim(), session.drive_id.product_id.trim());
 
     // Wait for disc
-    print!("Waiting for disc... ");
+    print!("{} ", strings::get("rip.waiting"));
     let _ = stdout().flush();
     match session.wait_ready() {
-        Ok(_) => println!("OK"),
-        Err(e) => { println!("FAILED"); eprintln!("  {}", e); std::process::exit(1); }
+        Ok(_) => println!("{}", ok),
+        Err(e) => { println!("{}", failed); eprintln!("  {}", e); std::process::exit(1); }
     }
 
     // Init + probe
-    print!("Initializing drive... ");
+    print!("{} ", strings::get("rip.initializing"));
     let _ = stdout().flush();
     match session.init() {
         Ok(_) => {
-            println!("OK");
-            print!("Probing disc... ");
+            println!("{}", ok);
+            print!("{} ", strings::get("rip.probing"));
             let _ = stdout().flush();
             match session.probe_disc() {
-                Ok(_) => println!("OK"),
-                Err(e) => { println!("FAILED"); eprintln!("  {}", e); }
+                Ok(_) => println!("{}", ok),
+                Err(e) => { println!("{}", failed); eprintln!("  {}", e); }
             }
         }
-        Err(e) => { println!("FAILED"); eprintln!("  {} (continuing at OEM speed)", e); }
+        Err(e) => {
+            println!("{}", failed);
+            eprintln!("  {}", strings::fmt("rip.continuing_oem", &[("error", &e.to_string())]));
+        }
     }
 
     // Scan
-    print!("Scanning disc... ");
+    print!("{} ", strings::get("rip.scanning"));
     let _ = stdout().flush();
     let opts = match keydb_path {
         Some(ref kp) => libfreemkv::ScanOptions::with_keydb(kp),
         None => libfreemkv::ScanOptions::default(),
     };
     let disc = match libfreemkv::Disc::scan(&mut session, &opts) {
-        Ok(d) => { println!("OK"); d }
-        Err(e) => { println!("FAILED"); eprintln!("  {}", e); std::process::exit(1); }
+        Ok(d) => { println!("{}", ok); d }
+        Err(e) => { println!("{}", failed); eprintln!("  {}", e); std::process::exit(1); }
     };
 
     // Disc info
     println!();
-    println!("  Capacity: {:.1} GB", disc.capacity_gb());
+    println!("  {}: {:.1} GB", strings::get("rip.capacity"), disc.capacity_gb());
     if disc.encrypted {
         if let Some(ref aacs) = disc.aacs {
-            println!("  AACS:     encrypted (keys found)");
+            println!("  {}", strings::get("rip.aacs_keys_found"));
             println!("  VUK:      {:02x}{:02x}{:02x}{:02x}...",
                 aacs.vuk[0], aacs.vuk[1], aacs.vuk[2], aacs.vuk[3]);
-            println!("  Keys:     {} unit key(s)", aacs.unit_keys.len());
         } else {
-            println!("  AACS:     encrypted (NO KEYS)");
+            println!("  {}", strings::get("rip.aacs_no_keys"));
         }
     }
 
     // Titles
     println!();
-    println!("Titles ({}):", disc.titles.len());
+    println!("{} ({}):", strings::get("rip.titles"), disc.titles.len());
     println!();
     let target_idx = title_num.unwrap_or(1).saturating_sub(1);
     for (i, title) in disc.titles.iter().enumerate() {
@@ -124,16 +130,16 @@ pub fn run(args: &[String]) {
             title.duration_display(), title.size_gb(), title.playlist);
         for stream in &title.streams {
             match stream {
-                libfreemkv::Stream::Video(v) => println!("       Video: {:?} {}", v.codec, v.resolution),
-                libfreemkv::Stream::Audio(a) => println!("       Audio: {:?} {} {}", a.codec, a.channels, a.language),
-                libfreemkv::Stream::Subtitle(s) => println!("       Sub:   {}", s.language),
+                libfreemkv::Stream::Video(v) => println!("       {:?} {}", v.codec, v.resolution),
+                libfreemkv::Stream::Audio(a) => println!("       {:?} {} {}", a.codec, a.channels, a.language),
+                libfreemkv::Stream::Subtitle(s) => println!("       {}", s.language),
             }
         }
     }
 
     if list_only { return; }
     if disc.encrypted && disc.aacs.is_none() {
-        eprintln!("\nCannot rip — no AACS keys. Use --keydb");
+        eprintln!("\n{}", strings::get("rip.cannot_rip_no_keys"));
         std::process::exit(1);
     }
 
@@ -150,25 +156,35 @@ pub fn run(args: &[String]) {
         .trim()
         .replace(' ', "_");
     let filename = if name.is_empty() {
-        format!("title_{:05}.{}", title.playlist_id, ext)
+        format!("disc.{}", ext)
     } else {
-        format!("{}_t{:02}.{}", name, target_idx + 1, ext)
+        format!("{}.{}", name, ext)
     };
     let out_file = out_dir.join(&filename);
 
     println!();
-    println!("Ripping title {} ({}, {:.1} GB) -> {}",
-        target_idx + 1, title.duration_display(), title.size_gb(), out_file.display());
+    println!("{}", strings::fmt("rip.ripping", &[
+        ("num", &(target_idx + 1).to_string()),
+        ("duration", &title.duration_display()),
+        ("size", &format!("{:.1}", title.size_gb())),
+        ("file", &out_file.display().to_string()),
+    ]));
 
     if title.extents.is_empty() {
-        eprintln!("No extents."); std::process::exit(1);
+        eprintln!("{}", strings::get("rip.no_extents")); std::process::exit(1);
     }
 
     install_signal_handler();
 
     let file = match std::fs::File::create(&out_file) {
         Ok(f) => f,
-        Err(e) => { eprintln!("Cannot create {}: {}", out_file.display(), e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("{}", strings::fmt("rip.cannot_create", &[
+                ("path", &out_file.display().to_string()),
+                ("error", &e.to_string()),
+            ]));
+            std::process::exit(1);
+        }
     };
 
     let total_bytes = title.size_bytes;
@@ -204,7 +220,7 @@ fn rip_loop(reader: &mut libfreemkv::ContentReader, output: &mut impl Write) {
                 if output.write_all(batch).is_err() { break; }
             }
             Ok(None) => break,
-            Err(e) => eprintln!("\nRead error: {}", e),
+            Err(e) => eprintln!("\n{}", strings::fmt("rip.read_error", &[("error", &e.to_string())])),
         }
     }
 }
@@ -213,10 +229,16 @@ fn print_summary(path: &std::path::Path, start: std::time::Instant, bytes: u64, 
     let elapsed = start.elapsed().as_secs_f64();
     let mb = bytes as f64 / (1024.0 * 1024.0);
     let (sz, unit) = if mb >= 1024.0 { (mb / 1024.0, "GB") } else { (mb, "MB") };
+    let time = format!("{}:{:02}", (elapsed / 60.0) as u32, (elapsed % 60.0) as u32);
     println!("\n");
-    println!("Complete: {:.1} {} in {}:{:02}", sz, unit, (elapsed / 60.0) as u32, (elapsed % 60.0) as u32);
-    println!("Speed:    {:.1} MB/s avg, {:.1} MB/s peak", mb / elapsed, peak);
-    println!("Output:   {}", path.display());
+    println!("{}", strings::fmt("rip.complete", &[
+        ("size", &format!("{:.1}", sz)), ("unit", unit), ("time", &time),
+    ]));
+    println!("{}", strings::fmt("rip.speed", &[
+        ("avg", &format!("{:.1}", mb / elapsed)),
+        ("peak", &format!("{:.1}", peak)),
+    ]));
+    println!("{}", strings::fmt("rip.output", &[("path", &path.display().to_string())]));
 }
 
 /// Progress wrapper — sits between rip and output, tracks bytes and prints status.
