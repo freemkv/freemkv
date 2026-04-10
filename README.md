@@ -29,36 +29,38 @@ Or install from source: `cargo install freemkv`
 ```
 $ freemkv disc-info
 
-freemkv 0.5.0
+freemkv 0.6.0
 
 Scanning disc...
 
-Disc: V For Vendetta
-Format: Blu-ray (1L, 25.5 GB)
+Disc: Dune
+Format: 4K UHD (2L, 90.7 GB)
 AACS: Encrypted
 
 Titles
 
-   1. 00003.mpls      2h 12m   21.3 GB  1 clip
+   1. 00800.mpls      2h 35m   88.8 GB  1 clip
 
-      Video:     VC-1 1080p
+      Video:     HEVC 2160p HDR10 BT.2020
+                 HEVC 1080p Dolby Vision BT.2020 Dolby Vision EL
 
-      Audio:     English DD 5.1 (AudioEnglish)
-                 English TrueHD 5.1 (AudioEnglishDolby)
-                 French DD 5.1 (AudioFrenchHD)
-                 French DD 5.1 (AudioFrench)
-                 German DD 5.1 (AudioDeutsch)
-                 Italian DD 5.1 (AudioItaliano)
-                 Spanish DD 5.1 (AudioCastellano)
-                 Japanese DD 5.1
+      Audio:     English TrueHD 5.1
+                 English DD 5.1
+                 French DD 5.1
+                 German TrueHD 5.1
+                 Italian TrueHD 5.1
+                 Spanish DD 5.1
+                 Hindi DD 5.1
 
       Subtitle:  English
                  French
                  German
-                 German
-                 Italian
                  Italian
                  Spanish
+                 Chinese
+                 Korean
+
+      +2 more (use --full to show all)
 ```
 
 ## drive-info
@@ -66,7 +68,7 @@ Titles
 ```
 $ freemkv drive-info
 
-freemkv 0.5.0
+freemkv 0.6.0
 
 Drive Information
   Device:              /dev/sg4
@@ -79,6 +81,7 @@ Drive Information
 Platform Information
   Drive platform:      MediaTek MT1959
   Firmware version:    1.03/NM00000
+  Profile:             Supported
 
 Run 'freemkv drive-info --share' to help expand drive support.
 ```
@@ -88,7 +91,7 @@ Run 'freemkv drive-info --share' to help expand drive support.
 ```
 $ freemkv rip --output ~/Movies/
 
-freemkv rip v0.5.0
+freemkv rip v0.6.0
 
 Opening /dev/sg4... OK
   HL-DT-ST BD-RE BU40N
@@ -97,12 +100,11 @@ Initializing drive... OK
 Probing disc... OK
 Scanning disc... OK
 
-  Capacity: 25.5 GB (13368800 sectors)
+  Capacity: 90.7 GB
   AACS:     encrypted (keys found)
 
-Ripping title 1 (2h 12m) -> ~/Movies/V For Vendetta_t01.m2ts
-  1 extent(s), 21.3 GB
-  8532 MB / 21767 MB  (39%)  13.4 MB/s (cur: 15.8)  ETA 16:28
+Ripping title 1 (2h 35m, 88.8 GB) -> Dune.mkv
+  22.1 GB / 88.8 GB  (25%)  17.2 MB/s  ETA 65:23
 ```
 
 ## Stream Labels
@@ -124,16 +126,24 @@ freemkv <command> [options]
 
   drive-info            Show drive hardware and profile match
   disc-info             Show disc titles, streams, and sizes
-  rip [options]         Back up a disc title
+  rip [options]         Back up a disc title (MKV default, --raw for m2ts)
   remux <in.m2ts>       Convert m2ts to MKV (no drive needed)
   update-keys --url <u> Download and update KEYDB.cfg
-  version               Show version
 
-Options:
+Rip options:
   -d, --device /dev/sgN   Specify device (default: auto-detect)
   -k, --keydb /path       Path to KEYDB.cfg for AACS decryption
   -o, --output /path      Output directory
   -t, --title N           Title number (default: 1 = main feature)
+  -l, --list              List titles only, don't rip
+      --raw               Output raw m2ts instead of MKV
+
+Drive-info options:
+  -s, --share             Capture and submit drive profile
+  -m, --mask              Mask serial numbers
+
+Global options:
+  -q, --quiet             Suppress output
 ```
 
 ## Supported Drives
