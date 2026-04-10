@@ -26,7 +26,7 @@ pub fn run(args: &[String]) {
         i += 1;
     }
 
-    let dev_path = device_path.unwrap_or_else(|| find_bd_drive().unwrap_or_else(|| {
+    let dev_path = device_path.unwrap_or_else(|| libfreemkv::find_drive().unwrap_or_else(|| {
         eprintln!("No Blu-ray drive found");
         std::process::exit(1);
     }));
@@ -197,6 +197,3 @@ fn format_volume_id(vol_id: &str) -> String {
         }}).collect::<Vec<_>>().join(" ")
 }
 
-fn find_bd_drive() -> Option<String> {
-    libfreemkv::find_drive()
-}
