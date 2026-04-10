@@ -23,17 +23,8 @@ use std::sync::OnceLock;
 static STRINGS: OnceLock<Value> = OnceLock::new();
 static LANG_OVERRIDE: OnceLock<String> = OnceLock::new();
 
-// ── Shipped languages (compiled into the binary) ───────────────────────────
-const EN_JSON: &str = include_str!("../locales/en.json");
-const ES_JSON: &str = include_str!("../locales/es.json");
-
-fn bundled_locale(code: &str) -> Option<&'static str> {
-    match code {
-        "en" => Some(EN_JSON),
-        "es" => Some(ES_JSON),
-        _ => None,
-    }
-}
+// ── Shipped languages (auto-generated from locales/*.json by build.rs) ─────
+include!(concat!(env!("OUT_DIR"), "/locales_generated.rs"));
 
 /// Set language override from --language flag. Call before init().
 pub fn set_language(lang: &str) {
@@ -52,7 +43,7 @@ pub fn init() {
         v
     } else {
         // Fallback
-        serde_json::from_str(EN_JSON).expect("invalid en.json")
+        serde_json::from_str(LOCALE_EN).expect("invalid en.json")
     };
     let _ = STRINGS.set(json);
 }
@@ -61,7 +52,7 @@ pub fn init() {
 /// Returns the path itself if not found — makes missing translations visible.
 pub fn get(path: &str) -> String {
     let strings = STRINGS.get_or_init(|| {
-        serde_json::from_str(EN_JSON).expect("invalid en.json")
+        serde_json::from_str(LOCALE_EN).expect("invalid en.json")
     });
     lookup(strings, path)
 }
