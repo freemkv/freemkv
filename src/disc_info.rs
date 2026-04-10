@@ -3,6 +3,7 @@
 //
 // CLI is dumb — all logic in libfreemkv. This file only formats output.
 
+use crate::strings;
 use libfreemkv::{Disc, DiscFormat, DriveSession, ScanOptions, Stream,
                   VideoStream, AudioStream, SubtitleStream, Codec, HdrFormat, ColorSpace};
 
@@ -18,23 +19,26 @@ pub fn run(args: &[String]) {
             "--quiet" | "-q" => quiet = true,
             "--full" | "-f" => full = true,
             "--help" | "-h" => {
-                println!("Usage: freemkv disc-info [--device /dev/sgN] [--full] [--quiet]");
+                println!("{}", strings::get("disc.usage"));
                 return;
             }
-            _ => { eprintln!("Unknown option: {}", args[i]); std::process::exit(1); }
+            _ => {
+                eprintln!("{}", strings::fmt("app.unknown_option", &[("opt", &args[i])]));
+                std::process::exit(1);
+            }
         }
         i += 1;
     }
 
     let dev_path = device_path.unwrap_or_else(|| libfreemkv::find_drive().unwrap_or_else(|| {
-        eprintln!("No Blu-ray drive found");
+        eprintln!("{}", strings::get("error.no_bluray_drive"));
         std::process::exit(1);
     }));
 
     if !quiet {
         println!("freemkv {}", env!("CARGO_PKG_VERSION"));
         println!();
-        println!("Scanning disc...");
+        println!("{}", strings::get("disc.scanning"));
         println!();
     }
 
@@ -44,22 +48,25 @@ pub fn run(args: &[String]) {
     };
 
     if let Err(e) = session.wait_ready() {
-        eprintln!("Drive not ready: {}", e);
+        eprintln!("{}", strings::fmt("error.not_ready", &[("error", &e.to_string())]));
         std::process::exit(1);
     }
 
     let disc = match Disc::scan(&mut session, &ScanOptions::default()) {
         Ok(d) => d,
-        Err(e) => { eprintln!("Scan failed: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("{}", strings::fmt("error.scan_failed", &[("error", &e.to_string())]));
+            std::process::exit(1);
+        }
     };
 
     if quiet { return; }
 
     // Disc title
     if let Some(ref title) = disc.meta_title {
-        println!("Disc: {}", title);
+        println!("{}: {}", strings::get("disc.disc"), title);
     } else if !disc.volume_id.is_empty() {
-        println!("Disc: {}", format_volume_id(&disc.volume_id));
+        println!("{}: {}", strings::get("disc.disc"), format_volume_id(&disc.volume_id));
     }
 
     // Format and capacity
@@ -70,16 +77,16 @@ pub fn run(args: &[String]) {
         DiscFormat::Unknown => "Blu-ray",
     };
     let gb = disc.capacity_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-    println!("Format: {} ({}L, {:.1} GB)", format, disc.layers, gb);
-    if disc.encrypted { println!("AACS: Encrypted"); }
+    println!("{}: {} ({}L, {:.1} GB)", strings::get("disc.format"), format, disc.layers, gb);
+    if disc.encrypted { println!("{}", strings::get("disc.aacs_encrypted")); }
     println!();
 
     if disc.titles.is_empty() {
-        println!("No titles found");
+        println!("{}", strings::get("disc.no_titles"));
         return;
     }
 
-    println!("Titles");
+    println!("{}", strings::get("disc.titles"));
     println!();
 
     let max_titles = if full { disc.titles.len() } else { 5 };
@@ -88,11 +95,11 @@ pub fn run(args: &[String]) {
         let hours = (title.duration_secs / 3600.0) as u32;
         let mins = ((title.duration_secs % 3600.0) / 60.0) as u32;
         let gb = title.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let clip_word = if title.clips.len() != 1 { strings::get("disc.clips") } else { strings::get("disc.clip") };
 
-        println!("  {:2}. {:14}  {:1}h {:02}m  {:>5.1} GB  {} clip{}",
+        println!("  {:2}. {:14}  {:1}h {:02}m  {:>5.1} GB  {} {}",
             idx + 1, title.playlist, hours, mins, gb,
-            title.clips.len(),
-            if title.clips.len() != 1 { "s" } else { "" });
+            title.clips.len(), clip_word);
 
         // Video
         let videos: Vec<&VideoStream> = title.streams.iter()
@@ -102,7 +109,8 @@ pub fn run(args: &[String]) {
             println!();
             for (vi, v) in videos.iter().enumerate() {
                 let line = format_video(v);
-                if vi == 0 { println!("      Video:     {}", line); }
+                let label = strings::get("disc.video");
+                if vi == 0 { println!("      {}:     {}", label, line); }
                 else { println!("                 {}", line); }
             }
         }
@@ -115,7 +123,8 @@ pub fn run(args: &[String]) {
             println!();
             for (ai, a) in audios.iter().enumerate() {
                 let line = format_audio(a);
-                if ai == 0 { println!("      Audio:     {}", line); }
+                let label = strings::get("disc.audio");
+                if ai == 0 { println!("      {}:     {}", label, line); }
                 else { println!("                 {}", line); }
             }
         }
@@ -128,7 +137,8 @@ pub fn run(args: &[String]) {
             println!();
             for (si, s) in subs.iter().enumerate() {
                 let line = format_subtitle(s);
-                if si == 0 { println!("      Subtitle:  {}", line); }
+                let label = strings::get("disc.subtitle");
+                if si == 0 { println!("      {}:  {}", label, line); }
                 else { println!("                 {}", line); }
             }
         }
@@ -137,7 +147,7 @@ pub fn run(args: &[String]) {
     }
 
     if disc.titles.len() > max_titles {
-        println!("      +{} more (use --full to show all)", disc.titles.len() - max_titles);
+        println!("      {}", strings::fmt("disc.more_titles", &[("count", &(disc.titles.len() - max_titles).to_string())]));
         println!();
     }
 }
@@ -164,7 +174,11 @@ fn format_audio(a: &AudioStream) -> String {
 
 fn format_subtitle(s: &SubtitleStream) -> String {
     let lang = lang_name(&s.language);
-    if s.forced { format!("{} (forced)", lang) } else { lang.to_string() }
+    if s.forced {
+        format!("{} ({})", lang, strings::get("disc.forced"))
+    } else {
+        lang.to_string()
+    }
 }
 
 fn codec_name(c: Codec) -> String {
@@ -173,7 +187,7 @@ fn codec_name(c: Codec) -> String {
         Codec::Mpeg2 => "MPEG-2".into(), Codec::TrueHd => "TrueHD".into(), Codec::DtsHdMa => "DTS-HD MA".into(),
         Codec::DtsHdHr => "DTS-HD HR".into(), Codec::Dts => "DTS".into(), Codec::Ac3 => "DD".into(),
         Codec::Ac3Plus => "DD+".into(), Codec::Lpcm => "LPCM".into(), Codec::Pgs => "PGS".into(),
-        Codec::Unknown(ct) => format!("Unknown (0x{:02x})", ct),
+        Codec::Unknown(ct) => format!("0x{:02x}", ct),
     }
 }
 
@@ -196,4 +210,3 @@ fn format_volume_id(vol_id: &str) -> String {
             None => String::new(),
         }}).collect::<Vec<_>>().join(" ")
 }
-

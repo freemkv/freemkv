@@ -1,10 +1,13 @@
-// freemkv drive-info — Show drive information
+// freemkv drive-info — Show drive information and capture profiles
 // AGPL-3.0 — freemkv project
 //
 // CLI is dumb — all drive data from libfreemkv.
 
+use crate::strings;
 use libfreemkv::DriveSession;
+use libfreemkv::scsi::DataDirection;
 use std::path::Path;
+use std::io::Write;
 
 pub fn run(args: &[String]) {
     let mut device_path: Option<String> = None;
@@ -20,55 +23,337 @@ pub fn run(args: &[String]) {
             "--mask" | "-m" => mask = true,
             "--quiet" | "-q" => quiet = true,
             "--help" | "-h" => {
-                println!("Usage: freemkv drive-info [--share] [--mask] [--device /dev/sgN]");
+                println!("{}", strings::get("drive.share_usage"));
+                println!();
+                println!("  --share    {}", strings::get("drive.share_desc"));
+                println!("  --mask     {}", strings::get("drive.mask_desc"));
+                println!("  --device   {}", strings::get("drive.device_desc"));
                 return;
             }
-            _ => { eprintln!("Unknown option: {}", args[i]); std::process::exit(1); }
+            _ => {
+                eprintln!("{}", strings::fmt("app.unknown_option", &[("opt", &args[i])]));
+                std::process::exit(1);
+            }
         }
         i += 1;
     }
 
     let dev_path = device_path.unwrap_or_else(|| libfreemkv::find_drive().unwrap_or_else(|| {
-        eprintln!("No BD drive found. Use --device /dev/sgN");
+        eprintln!("{}", strings::get("error.no_drive"));
         std::process::exit(1);
     }));
 
-    // Open drive via libfreemkv — identify only, no disc needed
-    let session = match DriveSession::open(Path::new(&dev_path)) {
+    let mut session = match DriveSession::open(Path::new(&dev_path)) {
         Ok(s) => s,
-        Err(e) => { eprintln!("Cannot open {}: {}", dev_path, e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("{}", strings::fmt("error.open_failed", &[("device", &dev_path), ("error", &e.to_string())]));
+            std::process::exit(1);
+        }
     };
 
-    let id = &session.drive_id;
-
+    let id = session.drive_id.clone();
     let serial_display = if mask { mask_str(&id.serial_number) } else { id.serial_number.clone() };
     let platform = session.platform_name().to_string();
     let fw_version = format!("{}/{}", id.product_revision.trim(), id.vendor_specific.trim());
+    let profile_status = if session.has_profile() { strings::get("drive.supported") } else { strings::get("drive.unknown") };
 
     if !quiet {
         println!("freemkv {}", env!("CARGO_PKG_VERSION"));
         println!();
-        println!("Drive Information");
-        println!("  Device:              {}", dev_path);
-        println!("  Manufacturer:        {}", id.vendor_id.trim());
-        println!("  Product:             {}", id.product_id.trim());
-        println!("  Revision:            {}", id.product_revision.trim());
-        println!("  Serial number:       {}", serial_display);
-        println!("  Firmware date:       {}", format_date(&id.firmware_date));
+        println!("{}", strings::get("drive.header"));
+        println!("  {}:              {}", strings::get("drive.device"), dev_path);
+        println!("  {}:        {}", strings::get("drive.manufacturer"), id.vendor_id.trim());
+        println!("  {}:             {}", strings::get("drive.product"), id.product_id.trim());
+        println!("  {}:            {}", strings::get("drive.revision"), id.product_revision.trim());
+        println!("  {}:       {}", strings::get("drive.serial"), serial_display);
+        println!("  {}:       {}", strings::get("drive.firmware_date"), format_date(&id.firmware_date));
         println!();
-        println!("Platform Information");
-        println!("  Drive platform:      {}", platform);
-        println!("  Firmware version:    {}", fw_version);
+        println!("{}", strings::get("drive.platform_header"));
+        println!("  {}:      {}", strings::get("drive.platform"), platform);
+        println!("  {}:    {}", strings::get("drive.firmware_version"), fw_version);
+        println!("  {}:             {}", strings::get("drive.profile"), profile_status);
         println!();
         if !share {
-            println!("Run 'freemkv drive-info --share' to help expand drive support.");
+            println!("{}", strings::get("drive.share_hint"));
         }
     }
 
-    if share {
-        // TODO: profile capture and submission via lib API
-        println!("Profile sharing not yet implemented in new CLI.");
+    if !share { return; }
+
+    // ── Capture raw SCSI features ──────────────────────────────────────────
+
+    let profile_name = format!("{}-{}-{}-{}",
+        id.vendor_id.to_lowercase().trim(),
+        id.product_id.to_lowercase().trim().replace(' ', "-"),
+        id.product_revision.to_lowercase().trim(),
+        id.vendor_specific.to_lowercase().trim())
+        .replace('/', "-")
+        .replace("--", "-");
+
+    let profile_dir = std::path::PathBuf::from(&profile_name);
+    std::fs::create_dir_all(&profile_dir).expect("Cannot create profile directory");
+
+    // Save raw INQUIRY
+    save_bin(&profile_dir, "inquiry.bin", &id.raw_inquiry);
+
+    // Capture GET_CONFIG features
+    const FEATURES: &[(u16, &str)] = &[
+        (0x0000, "Profile List"),
+        (0x0001, "Core"),
+        (0x0003, "Removable Medium"),
+        (0x0010, "Random Readable"),
+        (0x001D, "Multi-Read"),
+        (0x001E, "CD Read"),
+        (0x001F, "DVD Read"),
+        (0x0040, "BD Read"),
+        (0x0041, "BD Write"),
+        (0x0100, "Power Management"),
+        (0x0102, "Embedded Changer"),
+        (0x0107, "Real Time Streaming"),
+        (0x0108, "Serial Number"),
+        (0x010C, "Firmware Information"),
+        (0x010D, "AACS"),
+    ];
+
+    let mut feat_lines = Vec::new();
+    for &(code, name) in FEATURES {
+        let cdb = [
+            0x46u8, 0x02,
+            (code >> 8) as u8, code as u8,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        ];
+        let mut buf = vec![0u8; 256];
+        if let Ok(r) = session.scsi_execute(&cdb, DataDirection::FromDevice, &mut buf, 5000) {
+            if r.bytes_transferred > 8 {
+                let mut feat_data = buf[8..r.bytes_transferred].to_vec();
+
+                // Mask serial in GET_CONFIG 0108
+                if code == 0x0108 && mask && feat_data.len() > 4 {
+                    let masked = mask_bytes(&feat_data[4..]);
+                    feat_data[4..4 + masked.len()].copy_from_slice(&masked);
+                }
+
+                let fname = format!("gc_{:04x}.bin", code);
+                save_bin(&profile_dir, &fname, &feat_data);
+                feat_lines.push(format!("0x{:04X} = \"{}\"  # {}", code, fname, name));
+                if !quiet {
+                    println!("  {}", strings::fmt("drive.captured", &[
+                        ("code", &format!("{:04X}", code)),
+                        ("name", name),
+                        ("bytes", &feat_data.len().to_string()),
+                    ]));
+                }
+            }
+        }
     }
+
+    // READ_BUFFER 0xF1 (Pioneer)
+    let mut rb_f1_data = None;
+    let cdb_f1 = [0x3Cu8, 0x02, 0xF1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00];
+    let mut buf = vec![0u8; 48];
+    if let Ok(r) = session.scsi_execute(&cdb_f1, DataDirection::FromDevice, &mut buf, 5000) {
+        if r.bytes_transferred > 0 {
+            let mut data = buf[..r.bytes_transferred].to_vec();
+            if mask && data.len() >= 12 {
+                let masked = mask_bytes(&data[0..12]);
+                data[0..12].copy_from_slice(&masked);
+            }
+            save_bin(&profile_dir, "rb_f1.bin", &data);
+            rb_f1_data = Some(data);
+        }
+    }
+
+    // READ_BUFFER mode 6 (MTK)
+    let mut rb_mode6_data = None;
+    let cdb_m6 = [0x3Cu8, 0x06, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x20, 0x00];
+    let mut buf = vec![0u8; 32];
+    if let Ok(r) = session.scsi_execute(&cdb_m6, DataDirection::FromDevice, &mut buf, 5000) {
+        if r.bytes_transferred > 0 {
+            save_bin(&profile_dir, "rb_mode6.bin", &buf[..r.bytes_transferred]);
+            rb_mode6_data = Some(buf[..r.bytes_transferred].to_vec());
+        }
+    }
+
+    // RPC state
+    let cdb_rpc = [0xA4u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x08, 0x00];
+    let mut buf = vec![0u8; 8];
+    if let Ok(r) = session.scsi_execute(&cdb_rpc, DataDirection::FromDevice, &mut buf, 5000) {
+        if r.bytes_transferred > 0 {
+            save_bin(&profile_dir, "rpc_state.bin", &buf[..r.bytes_transferred]);
+        }
+    }
+
+    // MODE SENSE 2A
+    let cdb_ms = [0x5Au8, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFC, 0x00];
+    let mut buf = vec![0u8; 252];
+    if let Ok(r) = session.scsi_execute(&cdb_ms, DataDirection::FromDevice, &mut buf, 5000) {
+        if r.bytes_transferred > 0 {
+            save_bin(&profile_dir, "mode_2a.bin", &buf[..r.bytes_transferred]);
+        }
+    }
+
+    // ── Generate drive.toml ────────────────────────────────────────────────
+
+    let serial_toml = if mask { mask_str(&id.serial_number) } else { id.serial_number.clone() };
+    let mut toml = String::new();
+    toml.push_str(&format!("# {} {} {} — freemkv drive-info\n\n",
+        id.vendor_id.trim(), id.product_id.trim(), id.product_revision.trim()));
+    toml.push_str("[drive]\n");
+    toml.push_str(&format!("manufacturer = \"{}\"\n", id.vendor_id.trim()));
+    toml.push_str(&format!("product = \"{}\"\n", id.product_id.trim()));
+    toml.push_str(&format!("revision = \"{}\"\n", id.product_revision.trim()));
+    toml.push_str(&format!("serial = \"{}\"\n", serial_toml));
+    toml.push_str(&format!("firmware_date = \"{}\"\n", format_date(&id.firmware_date)));
+    toml.push_str(&format!("platform = \"{}\"\n", platform));
+    toml.push_str(&format!("profile_matched = {}\n\n", session.has_profile()));
+    toml.push_str("[files]\n");
+    toml.push_str("inquiry = \"inquiry.bin\"\n");
+    toml.push_str("mode_2a = \"mode_2a.bin\"\n\n");
+    toml.push_str("[features]\n");
+    for line in &feat_lines {
+        toml.push_str(line);
+        toml.push('\n');
+    }
+    if rb_f1_data.is_some() || rb_mode6_data.is_some() {
+        toml.push_str("\n[read_buffer]\n");
+        if rb_f1_data.is_some() { toml.push_str("0xF1 = \"rb_f1.bin\"\n"); }
+        if rb_mode6_data.is_some() { toml.push_str("mode6 = \"rb_mode6.bin\"\n"); }
+    }
+    std::fs::write(profile_dir.join("drive.toml"), &toml).expect("Cannot write drive.toml");
+
+    // ── Confirm + submit ───────────────────────────────────────────────────
+
+    println!();
+    println!("{}:", strings::get("drive.submit_header"));
+    println!("  {}:    {} {} {}", strings::get("drive.submit_drive"), id.vendor_id.trim(), id.product_id.trim(), id.product_revision.trim());
+    println!("  {}:   {}", strings::get("drive.submit_serial"), serial_toml);
+    println!("  {}: {}", strings::get("drive.submit_platform"), platform);
+    println!("  {}: {}", strings::get("drive.submit_firmware"), fw_version);
+    println!("  {}:  {}", strings::get("drive.submit_profile"), profile_status);
+    println!("  {}: {} captured", strings::get("drive.submit_features"), feat_lines.len());
+    println!();
+
+    eprint!("{}", strings::get("drive.submit_confirm"));
+    let _ = std::io::stderr().flush();
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap_or(0);
+    if !input.trim().eq_ignore_ascii_case("y") {
+        println!("{}", strings::fmt("drive.submit_not_sent", &[("dir", &profile_name)]));
+        return;
+    }
+
+    // Zip profile directory
+    print!("  {}  ", strings::get("drive.submit_packaging"));
+    let _ = std::io::stdout().flush();
+    let zip_b64 = match zip_directory(&profile_dir) {
+        Ok(zip_data) => {
+            let encoded = base64_encode(&zip_data);
+            println!("{} bytes", zip_data.len());
+            Some(encoded)
+        }
+        Err(e) => {
+            println!("{}", strings::fmt("drive.zip_failed", &[("error", &e.to_string())]));
+            None
+        }
+    };
+
+    // Build issue body
+    let mut body = String::new();
+    body.push_str("## Drive Profile\n\n");
+    body.push_str("```\n");
+    body.push_str(&format!("Manufacturer:    {}\n", id.vendor_id.trim()));
+    body.push_str(&format!("Product:         {}\n", id.product_id.trim()));
+    body.push_str(&format!("Revision:        {}\n", id.product_revision.trim()));
+    body.push_str(&format!("Serial:          {}\n", serial_toml));
+    body.push_str(&format!("Firmware date:   {}\n", format_date(&id.firmware_date)));
+    body.push_str(&format!("Platform:        {}\n", platform));
+    body.push_str(&format!("Firmware:        {}\n", fw_version));
+    body.push_str(&format!("Profile:         {}\n", profile_status));
+    body.push_str("```\n\n");
+    body.push_str(&format!("Features captured: {}\n\n", feat_lines.len()));
+
+    if let Some(ref b64) = zip_b64 {
+        body.push_str("<details><summary>Profile data (base64 zip)</summary>\n\n");
+        body.push_str("```\n");
+        for chunk in b64.as_bytes().chunks(76) {
+            body.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+            body.push('\n');
+        }
+        body.push_str("```\n\n");
+        body.push_str("</details>\n\n");
+    }
+
+    body.push_str("---\n*Submitted by `freemkv drive-info --share`*\n");
+
+    let title = format!("Drive profile: {} {}", id.vendor_id.trim(), id.product_id.trim());
+
+    submit_issue(&title, &body);
+
+    // Clean up temp profile dir
+    let _ = std::fs::remove_dir_all(&profile_dir);
+}
+
+fn submit_issue(title: &str, body: &str) {
+    // Bot token: issues-only, scoped to freemkv/freemkv.
+    const BOT_TOKEN_B64: &str = "Z2l0aHViX3BhdF8xMUFBSUpERlkweHJyd3NBaXI1SUhwXzBMcVowWERYejhxdVR6QUQyUllQSEFHYnN0OTlzc0gzaXJnWDJFWXB3aldZUEZNUzdFN0FIQ2ZqcEpx";
+    let bot_token = String::from_utf8(base64_decode(BOT_TOKEN_B64)).unwrap_or_default();
+
+    let payload = serde_json::json!({
+        "title": title,
+        "body": body,
+        "labels": ["drive-profile"]
+    });
+
+    print!("  {}  ", strings::get("drive.submit_sending"));
+    let _ = std::io::stdout().flush();
+
+    match ureq::post("https://api.github.com/repos/freemkv/freemkv/issues")
+        .set("Authorization", &format!("token {}", bot_token))
+        .set("Accept", "application/vnd.github.v3+json")
+        .set("User-Agent", "freemkv")
+        .send_json(&payload)
+    {
+        Ok(resp) => {
+            if let Ok(json) = resp.into_json::<serde_json::Value>() as Result<serde_json::Value, _> {
+                if let Some(url) = json["html_url"].as_str() {
+                    println!("{}", strings::get("rip.ok"));
+                    println!();
+                    println!("{}", strings::get("drive.submit_ok"));
+                    println!("{}", url);
+                    return;
+                }
+            }
+            println!("{}", strings::get("rip.failed"));
+            eprintln!("{}", strings::get("drive.submit_failed"));
+            eprintln!("  https://github.com/freemkv/freemkv/issues/new");
+        }
+        Err(e) => {
+            println!("{}", strings::get("rip.failed"));
+            eprintln!("{}", strings::fmt("drive.submit_net_error", &[("error", &e.to_string())]));
+            eprintln!("  https://github.com/freemkv/freemkv/issues/new");
+        }
+    }
+}
+
+fn zip_directory(dir: &std::path::Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use std::io::Cursor;
+    let buf = Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(buf);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            zip.start_file(&name, options)?;
+            let data = std::fs::read(entry.path())?;
+            zip.write_all(&data)?;
+        }
+    }
+
+    let cursor = zip.finish()?;
+    Ok(cursor.into_inner())
 }
 
 fn mask_str(s: &str) -> String {
@@ -79,12 +364,22 @@ fn mask_str(s: &str) -> String {
     }).collect()
 }
 
+fn mask_bytes(data: &[u8]) -> Vec<u8> {
+    data.iter().map(|&b| {
+        if b.is_ascii_alphabetic() { b'A' }
+        else if b.is_ascii_digit() { b'0' }
+        else { b }
+    }).collect()
+}
+
+fn save_bin(dir: &std::path::Path, name: &str, data: &[u8]) {
+    std::fs::write(dir.join(name), data).unwrap_or_else(|_| panic!("Cannot write {}", name));
+}
+
 fn format_date(fw_date: &str) -> String {
     if fw_date.len() < 8 {
         return fw_date.to_string();
     }
-    // MMC-6 firmware dates use CCYYMMDD format (12 chars total with HHMI).
-    // Some drives report "21YYMMDD..." — normalize to "20YY-MM-DD".
     if fw_date.starts_with("21") && fw_date.len() >= 12 {
         format!("20{}-{}-{}", &fw_date[2..4], &fw_date[4..6], &fw_date[6..8])
     } else {
@@ -92,3 +387,40 @@ fn format_date(fw_date: &str) -> String {
     }
 }
 
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 { out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char); } else { out.push('='); }
+        if chunk.len() > 2 { out.push(TABLE[(triple & 0x3F) as usize] as char); } else { out.push('='); }
+    }
+    out
+}
+
+fn base64_decode(input: &str) -> Vec<u8> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in input.as_bytes() {
+        if b == b'=' { break; }
+        let val = match TABLE.iter().position(|&c| c == b) {
+            Some(v) => v as u32,
+            None => continue,
+        };
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    out
+}

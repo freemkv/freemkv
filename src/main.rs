@@ -5,8 +5,10 @@ mod info;
 mod disc_info;
 mod rip;
 mod remux;
+mod strings;
 
 fn main() {
+    strings::init();
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
@@ -25,7 +27,7 @@ fn main() {
         }
         "help" | "--help" | "-h" => usage(),
         _ => {
-            eprintln!("Unknown command: {}", args[1]);
+            eprintln!("{}", strings::fmt("app.unknown_command", &[("cmd", &args[1])]));
             eprintln!();
             usage();
             std::process::exit(1);
@@ -36,26 +38,26 @@ fn main() {
 fn usage() {
     println!("freemkv {}", env!("CARGO_PKG_VERSION"));
     println!();
-    println!("Usage: freemkv <command> [options]");
+    println!("{}", strings::get("app.usage"));
     println!();
-    println!("Commands:");
-    println!("  drive-info            Show drive hardware and profile match");
-    println!("  disc-info             Show disc titles, streams, and sizes");
-    println!("  rip [options]         Back up a disc title");
-    println!("  remux <in.m2ts>      Convert m2ts to MKV (no drive needed)");
-    println!("  update-keys --url <url>  Download and update KEYDB.cfg");
-    println!("  version               Show version");
-    println!("  help                  Show this help");
+    println!("{}:", strings::get("app.commands"));
+    println!("  drive-info            {}", strings::get("app.cmd_drive_info"));
+    println!("  disc-info             {}", strings::get("app.cmd_disc_info"));
+    println!("  rip [options]         {}", strings::get("app.cmd_rip"));
+    println!("  remux <in.m2ts>      {}", strings::get("app.cmd_remux"));
+    println!("  update-keys --url     {}", strings::get("app.cmd_update_keys"));
+    println!("  version               {}", strings::get("app.cmd_version"));
+    println!("  help                  {}", strings::get("app.cmd_help"));
     println!();
-    println!("Rip options:");
-    println!("  -d, --device /dev/sgN   Specify device (default: auto-detect)");
-    println!("  -o, --output /path      Output directory (default: current)");
-    println!("  -t, --title N           Title number (default: 1 = main feature)");
-    println!("  -k, --keydb /path       Path to KEYDB.cfg for AACS decryption");
-    println!("  -l, --list              List titles only, don't rip");
-    println!("      --raw               Output raw m2ts instead of MKV");
+    println!("{}:", strings::get("app.rip_options"));
+    println!("  -d, --device /dev/sgN   {}", strings::get("app.opt_device"));
+    println!("  -o, --output /path      {}", strings::get("app.opt_output"));
+    println!("  -t, --title N           {}", strings::get("app.opt_title"));
+    println!("  -k, --keydb /path       {}", strings::get("app.opt_keydb"));
+    println!("  -l, --list              {}", strings::get("app.opt_list"));
+    println!("      --raw               {}", strings::get("app.opt_raw"));
     println!();
-    println!("Examples:");
+    println!("{}:", strings::get("app.examples"));
     println!("  freemkv rip");
     println!("  freemkv rip --title 2 --output ~/Movies/");
     println!("  freemkv rip --raw");
@@ -77,18 +79,21 @@ fn update_keys(args: &[String]) {
     let url = match url {
         Some(u) => u,
         None => {
-            eprintln!("Usage: freemkv update-keys --url <url>");
+            eprintln!("{}", strings::get("keys.usage"));
             std::process::exit(1);
         }
     };
 
     match libfreemkv::keydb::update(url) {
         Ok(result) => {
-            println!("Updated: {} entries, {} bytes", result.entries, result.bytes);
-            println!("Saved: {}", result.path.display());
+            println!("{}", strings::fmt("keys.updated", &[
+                ("entries", &result.entries.to_string()),
+                ("bytes", &result.bytes.to_string()),
+            ]));
+            println!("{}", strings::fmt("keys.saved", &[("path", &result.path.display().to_string())]));
         }
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("{}", e);
             std::process::exit(1);
         }
     }
