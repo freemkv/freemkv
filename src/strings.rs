@@ -1,16 +1,21 @@
 // freemkv — i18n string loader
 // AGPL-3.0 — freemkv project
 //
-// All user-facing text loaded from locales/*.json files.
-// Files are compiled into the binary via include_str!().
+// English is compiled into the binary (always available).
+// Other languages loaded from disk at runtime — drop a JSON file, done.
 //
 // Language priority:
 //   1. --language flag (set via set_language() before init())
 //   2. LANG / LC_MESSAGES env var
 //   3. English fallback
 //
-// To add a language: copy locales/en.json → locales/xx.json and translate.
-// The new file is compiled in automatically via the match below.
+// Search paths for locale files:
+//   1. ./locales/xx.json (next to binary)
+//   2. ~/.config/freemkv/locales/xx.json
+//   3. /usr/share/freemkv/locales/xx.json
+//
+// To add a language: create locales/xx.json (copy en.json structure) and
+// place it in any search path. No code changes needed.
 
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -18,19 +23,8 @@ use std::sync::OnceLock;
 static STRINGS: OnceLock<Value> = OnceLock::new();
 static LANG_OVERRIDE: OnceLock<String> = OnceLock::new();
 
-// ── Compiled-in locale files ───────────────────────────────────────────────
-
+/// English — always available, compiled in.
 const EN_JSON: &str = include_str!("../locales/en.json");
-const ES_JSON: &str = include_str!("../locales/es.json");
-
-fn locale_data(code: &str) -> &'static str {
-    match code {
-        "es" => ES_JSON,
-        _ => EN_JSON,
-    }
-}
-
-// ── Public API ─────────────────────────────────────────────────────────────
 
 /// Set language override from --language flag. Call before init().
 pub fn set_language(lang: &str) {
@@ -38,11 +32,16 @@ pub fn set_language(lang: &str) {
 }
 
 /// Initialize strings for the current locale.
-/// Call once at startup after set_language() (if any).
 pub fn init() {
     let code = detect_language();
-    let data = locale_data(&code);
-    let json: Value = serde_json::from_str(data).expect("invalid locale json");
+    let json = if code == "en" {
+        serde_json::from_str(EN_JSON).expect("invalid en.json")
+    } else {
+        match load_locale_file(&code) {
+            Some(v) => v,
+            None => serde_json::from_str(EN_JSON).expect("invalid en.json"),
+        }
+    };
     let _ = STRINGS.set(json);
 }
 
@@ -67,12 +66,9 @@ pub fn fmt(path: &str, args: &[(&str, &str)]) -> String {
 // ── Internal ───────────────────────────────────────────────────────────────
 
 fn detect_language() -> String {
-    // 1. Explicit override from --language flag
     if let Some(lang) = LANG_OVERRIDE.get() {
         return normalize_code(lang);
     }
-
-    // 2. Environment: LC_MESSAGES, LC_ALL, LANG
     for var in &["LC_MESSAGES", "LC_ALL", "LANG"] {
         if let Ok(val) = std::env::var(var) {
             if !val.is_empty() && val != "C" && val != "POSIX" {
@@ -80,20 +76,49 @@ fn detect_language() -> String {
             }
         }
     }
-
-    // 3. English fallback
     "en".to_string()
 }
 
-/// Extract 2-letter language code from locale string.
-/// "fr_FR.UTF-8" → "fr", "es" → "es", "en_US" → "en"
+/// Try to load xx.json from search paths.
+fn load_locale_file(code: &str) -> Option<Value> {
+    let filename = format!("{}.json", code);
+
+    // 1. Next to the binary
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let path = dir.join("locales").join(&filename);
+            if let Some(v) = try_load(&path) { return Some(v); }
+        }
+    }
+
+    // 2. Working directory
+    let path = std::path::PathBuf::from("locales").join(&filename);
+    if let Some(v) = try_load(&path) { return Some(v); }
+
+    // 3. ~/.config/freemkv/locales/
+    if let Ok(home) = std::env::var("HOME") {
+        let path = std::path::PathBuf::from(home)
+            .join(".config/freemkv/locales")
+            .join(&filename);
+        if let Some(v) = try_load(&path) { return Some(v); }
+    }
+
+    // 4. /usr/share/freemkv/locales/
+    let path = std::path::PathBuf::from("/usr/share/freemkv/locales").join(&filename);
+    if let Some(v) = try_load(&path) { return Some(v); }
+
+    None
+}
+
+fn try_load(path: &std::path::Path) -> Option<Value> {
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+/// "fr_FR.UTF-8" → "fr"
 fn normalize_code(s: &str) -> String {
     let s = s.trim().to_lowercase();
-    if s.len() >= 2 {
-        s[..2].to_string()
-    } else {
-        "en".to_string()
-    }
+    if s.len() >= 2 { s[..2].to_string() } else { "en".to_string() }
 }
 
 fn lookup(strings: &Value, path: &str) -> String {
