@@ -4,7 +4,7 @@
 mod info;
 mod disc_info;
 mod rip;
-mod bench;
+mod remux;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -18,8 +18,8 @@ fn main() {
         "drive-info" | "info" => info::run(&args[2..]),
         "disc-info" => disc_info::run(&args[2..]),
         "rip" => rip::run(&args[2..]),
+        "remux" => remux::run(&args[2..]),
         "update-keys" => update_keys(&args[2..]),
-        "bench-speed" => bench::run(&args[2..]),
         "version" | "--version" | "-V" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
         }
@@ -42,23 +42,25 @@ fn usage() {
     println!("  drive-info            Show drive hardware and profile match");
     println!("  disc-info             Show disc titles, streams, and sizes");
     println!("  rip [options]         Back up a disc title");
+    println!("  remux <in.m2ts>      Convert m2ts to MKV (no drive needed)");
     println!("  update-keys --url <url>  Download and update KEYDB.cfg");
     println!("  version               Show version");
     println!("  help                  Show this help");
     println!();
     println!("Rip options:");
-    println!("  --device /dev/sgN     Specify device (default: auto-detect)");
-    println!("  --output /path        Output directory (default: current)");
-    println!("  --title N             Title number (default: 1 = main feature)");
-    println!("  --keydb /path         Path to KEYDB.cfg for AACS decryption");
-    println!("  --list                List titles only, don't rip");
+    println!("  -d, --device /dev/sgN   Specify device (default: auto-detect)");
+    println!("  -o, --output /path      Output directory (default: current)");
+    println!("  -t, --title N           Title number (default: 1 = main feature)");
+    println!("  -k, --keydb /path       Path to KEYDB.cfg for AACS decryption");
+    println!("  -l, --list              List titles only, don't rip");
+    println!("      --raw               Output raw m2ts instead of MKV");
     println!();
     println!("Examples:");
-    println!("  freemkv drive-info");
-    println!("  freemkv disc-info");
     println!("  freemkv rip");
     println!("  freemkv rip --title 2 --output ~/Movies/");
-    println!("  freemkv update-keys --url http://example.com/keydb.zip");
+    println!("  freemkv rip --raw");
+    println!("  freemkv disc-info");
+    println!("  freemkv drive-info");
 }
 
 fn update_keys(args: &[String]) {

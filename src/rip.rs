@@ -1,21 +1,14 @@
 //! freemkv rip — Back up a disc.
-//!
-//! Opens the drive, scans the disc (UDF, playlists, AACS — all automatic),
-//! shows what's on it, and backs up selected titles.
 
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Write, stdout};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
-/// Install SIGINT handler that sets the INTERRUPTED flag.
 fn install_signal_handler() {
-    unsafe {
-        libc::signal(libc::SIGINT, handle_sigint as *const () as libc::sighandler_t);
-    }
+    unsafe { libc::signal(libc::SIGINT, handle_sigint as *const () as libc::sighandler_t); }
 }
-
 extern "C" fn handle_sigint(_sig: libc::c_int) {
     INTERRUPTED.store(true, Ordering::Relaxed);
 }
@@ -26,29 +19,17 @@ pub fn run(args: &[String]) {
     let mut keydb_path: Option<String> = None;
     let mut title_num: Option<usize> = None;
     let mut list_only = false;
+    let mut raw_mode = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--device" | "-d" => {
-                i += 1;
-                device_path = args.get(i).cloned();
-            }
-            "--output" | "-o" => {
-                i += 1;
-                output_dir = args.get(i).cloned();
-            }
-            "--keydb" | "-k" => {
-                i += 1;
-                keydb_path = args.get(i).cloned();
-            }
-            "--title" | "-t" => {
-                i += 1;
-                title_num = args.get(i).and_then(|s| s.parse().ok());
-            }
-            "--list" | "-l" => {
-                list_only = true;
-            }
+            "--device" | "-d" => { i += 1; device_path = args.get(i).cloned(); }
+            "--output" | "-o" => { i += 1; output_dir = args.get(i).cloned(); }
+            "--keydb" | "-k" => { i += 1; keydb_path = args.get(i).cloned(); }
+            "--title" | "-t" => { i += 1; title_num = args.get(i).and_then(|s| s.parse().ok()); }
+            "--list" | "-l" => { list_only = true; }
+            "--raw" => { raw_mode = true; }
             _ => {
                 if device_path.is_none() && args[i].starts_with("/dev/") {
                     device_path = Some(args[i].clone());
@@ -58,133 +39,89 @@ pub fn run(args: &[String]) {
         i += 1;
     }
 
-    // Resolve device — auto-detect or validate user input
-    let device = if let Some(user_path) = device_path {
-        match libfreemkv::resolve_device(&user_path) {
-            Ok((resolved, Some(warning))) => {
-                eprintln!("  {}", warning);
-                resolved
-            }
+    let device = match device_path {
+        Some(p) => match libfreemkv::resolve_device(&p) {
+            Ok((resolved, Some(w))) => { eprintln!("  {}", w); resolved }
             Ok((resolved, None)) => resolved,
-            Err(e) => {
-                eprintln!("{}", e);
-                std::process::exit(1);
-            }
-        }
-    } else {
-        match libfreemkv::find_drive() {
+            Err(e) => { eprintln!("{}", e); std::process::exit(1); }
+        },
+        None => match libfreemkv::find_drive() {
             Some(d) => d,
-            None => {
-                eprintln!("No optical drive found. Specify with --device /dev/sgN");
-                std::process::exit(1);
-            }
-        }
+            None => { eprintln!("No optical drive found. Use -d /dev/sgN"); std::process::exit(1); }
+        },
     };
 
     println!("freemkv rip v{}", env!("CARGO_PKG_VERSION"));
     println!();
 
-    // Step 1: Open drive + wait for disc
+    // Open drive
     print!("Opening {}... ", device);
+    let _ = stdout().flush();
     let mut session = match libfreemkv::DriveSession::open(Path::new(&device)) {
-        Ok(s) => s,
-        Err(e) => {
-            println!("FAILED");
-            eprintln!("  {}", e);
-            std::process::exit(1);
-        }
+        Ok(s) => { println!("OK"); s }
+        Err(e) => { println!("FAILED"); eprintln!("  {}", e); std::process::exit(1); }
     };
-    println!("OK");
     println!("  {} {}", session.drive_id.vendor_id.trim(), session.drive_id.product_id.trim());
 
+    // Wait for disc
     print!("Waiting for disc... ");
+    let _ = stdout().flush();
     match session.wait_ready() {
         Ok(_) => println!("OK"),
-        Err(e) => {
-            println!("FAILED");
-            eprintln!("  {}", e);
-            std::process::exit(1);
-        }
+        Err(e) => { println!("FAILED"); eprintln!("  {}", e); std::process::exit(1); }
     }
 
-    // Step 2: Init (unlock + firmware) + probe disc
+    // Init + probe
     print!("Initializing drive... ");
+    let _ = stdout().flush();
     match session.init() {
         Ok(_) => {
             println!("OK");
-
             print!("Probing disc... ");
+            let _ = stdout().flush();
             match session.probe_disc() {
                 Ok(_) => println!("OK"),
-                Err(e) => {
-                    println!("FAILED");
-                    eprintln!("  {}", e);
-                }
+                Err(e) => { println!("FAILED"); eprintln!("  {}", e); }
             }
         }
-        Err(e) => {
-            println!("FAILED");
-            eprintln!("  {}", e);
-            eprintln!("  Continuing without init (OEM speed)");
-        }
+        Err(e) => { println!("FAILED"); eprintln!("  {} (continuing at OEM speed)", e); }
     }
 
-    // Step 3: Scan disc (UDF + playlists + AACS — all automatic)
+    // Scan
     print!("Scanning disc... ");
-    let scan_opts = if let Some(kp) = &keydb_path {
-        libfreemkv::ScanOptions::with_keydb(kp)
-    } else {
-        libfreemkv::ScanOptions::default()
+    let _ = stdout().flush();
+    let opts = match keydb_path {
+        Some(ref kp) => libfreemkv::ScanOptions::with_keydb(kp),
+        None => libfreemkv::ScanOptions::default(),
+    };
+    let disc = match libfreemkv::Disc::scan(&mut session, &opts) {
+        Ok(d) => { println!("OK"); d }
+        Err(e) => { println!("FAILED"); eprintln!("  {}", e); std::process::exit(1); }
     };
 
-    let disc = match libfreemkv::Disc::scan(&mut session, &scan_opts) {
-        Ok(d) => {
-            println!("OK");
-            d
-        }
-        Err(e) => {
-            println!("FAILED");
-            eprintln!("  {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // Step 4: Show disc info
+    // Disc info
     println!();
-    println!("  Capacity: {:.1} GB ({} sectors)", disc.capacity_gb(), disc.capacity_sectors);
+    println!("  Capacity: {:.1} GB", disc.capacity_gb());
     if disc.encrypted {
-        if disc.aacs.is_some() {
+        if let Some(ref aacs) = disc.aacs {
             println!("  AACS:     encrypted (keys found)");
+            println!("  VUK:      {:02x}{:02x}{:02x}{:02x}...",
+                aacs.vuk[0], aacs.vuk[1], aacs.vuk[2], aacs.vuk[3]);
+            println!("  Keys:     {} unit key(s)", aacs.unit_keys.len());
         } else {
-            println!("  AACS:     encrypted (NO KEYS — cannot decrypt)");
-        }
-    } else {
-        println!("  AACS:     not encrypted");
-    }
-
-    if let Some(ref aacs) = disc.aacs {
-        println!("  VUK:      {:02x}{:02x}{:02x}{:02x}...",
-            aacs.vuk[0], aacs.vuk[1], aacs.vuk[2], aacs.vuk[3]);
-        println!("  Keys:     {} unit key(s)", aacs.unit_keys.len());
-        if aacs.bus_encryption {
-            println!("  Bus enc:  yes (AACS 2.0)");
+            println!("  AACS:     encrypted (NO KEYS)");
         }
     }
 
+    // Titles
     println!();
     println!("Titles ({}):", disc.titles.len());
     println!();
-
-    // Title numbering is 1-based for users. Title 1 = longest (main feature).
     let target_idx = title_num.unwrap_or(1).saturating_sub(1);
-
     for (i, title) in disc.titles.iter().enumerate() {
-        let num = i + 1;
         let marker = if i == target_idx { ">" } else { " " };
-        println!("{} {:2}. {} — {:.1} GB — {} clip(s) — {}",
-            marker, num, title.duration_display(), title.size_gb(),
-            title.clips.len(), title.playlist);
-
+        println!("{} {:2}. {} — {:.1} GB — {}", marker, i + 1,
+            title.duration_display(), title.size_gb(), title.playlist);
         for stream in &title.streams {
             match stream {
                 libfreemkv::Stream::Video(v) => println!("       Video: {:?} {}", v.codec, v.resolution),
@@ -194,175 +131,146 @@ pub fn run(args: &[String]) {
         }
     }
 
-    if list_only {
-        return;
-    }
-
-    // Check if we can decrypt
+    if list_only { return; }
     if disc.encrypted && disc.aacs.is_none() {
-        println!();
-        eprintln!("Cannot rip — disc is encrypted and no AACS keys found.");
-        eprintln!("Provide KEYDB.cfg with --keydb or place at ~/.config/aacs/KEYDB.cfg");
+        eprintln!("\nCannot rip — no AACS keys. Use --keydb");
         std::process::exit(1);
     }
 
-    // Step 5: Select title (already computed target_idx above)
-    let title = match disc.titles.get(target_idx) {
-        Some(t) => t,
-        None => {
-            eprintln!("Title {} not found (have {})", target_idx + 1, disc.titles.len());
-            std::process::exit(1);
-        }
-    };
+    let title = disc.titles[target_idx].clone();
 
-    // Step 6: Output path — create directory if needed
-    let out_dir = output_dir.map(PathBuf::from).unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    });
-    if let Err(e) = std::fs::create_dir_all(&out_dir) {
-        eprintln!("Cannot create output directory {}: {}", out_dir.display(), e);
-        std::process::exit(1);
-    }
+    // Output path
+    let out_dir = output_dir.map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let _ = std::fs::create_dir_all(&out_dir);
 
-    // Name from disc title: "Dune Part Two_t01.m2ts"
-    let disc_name = disc.meta_title.as_deref()
-        .unwrap_or(&disc.volume_id)
+    let ext = if raw_mode { "m2ts" } else { "mkv" };
+    let name = disc.meta_title.as_deref().unwrap_or(&disc.volume_id)
         .replace(|c: char| !c.is_ascii_alphanumeric() && c != ' ' && c != '-', "")
         .trim().to_string();
-    let filename = if disc_name.is_empty() {
-        format!("title_{:05}.m2ts", title.playlist_id)
+    let filename = if name.is_empty() {
+        format!("title_{:05}.{}", title.playlist_id, ext)
     } else {
-        format!("{}_t{:02}.m2ts", disc_name, target_idx + 1)
+        format!("{}_t{:02}.{}", name, target_idx + 1, ext)
     };
     let out_file = out_dir.join(&filename);
 
     println!();
-    println!("Ripping title {} ({}) -> {}", target_idx + 1, title.duration_display(), out_file.display());
-    println!("  {} extent(s), {:.1} GB", title.extents.len(), title.size_gb());
+    println!("Ripping title {} ({}, {:.1} GB) -> {}",
+        target_idx + 1, title.duration_display(), title.size_gb(), out_file.display());
 
     if title.extents.is_empty() {
-        eprintln!("No sector extents found for this title.");
-        std::process::exit(1);
+        eprintln!("No extents."); std::process::exit(1);
     }
 
-    // Step 7: Install signal handler for clean interrupt
     install_signal_handler();
 
-    // Step 8: Read and write
-    let mut reader = match disc.open_title(&mut session, target_idx) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Failed to open title: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let total_bytes = reader.total_bytes();
-
-    let outfile = match std::fs::File::create(&out_file) {
+    let file = match std::fs::File::create(&out_file) {
         Ok(f) => f,
-        Err(e) => {
-            eprintln!("Cannot create {}: {}", out_file.display(), e);
-            std::process::exit(1);
-        }
+        Err(e) => { eprintln!("Cannot create {}: {}", out_file.display(), e); std::process::exit(1); }
     };
-    let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, outfile); // 4MB write buffer
 
-    let mut bytes_written = 0u64;
+    let total_bytes = title.size_bytes;
     let start = std::time::Instant::now();
-    let mut last_progress = std::time::Instant::now();
-    let mut last_bytes = 0u64;
-    let mut peak_speed = 0.0f64;
 
-    let mut interrupted = false;
-
-    loop {
-        // Check for interrupt or duration limit
-        if INTERRUPTED.load(Ordering::Relaxed) {
-            interrupted = true;
-            break;
-        }
-
-        match reader.read_batch() {
-            Ok(Some(batch)) => {
-                let batch_len = batch.len() as u64;
-                writer.write_all(batch).unwrap_or_else(|e| {
-                    eprintln!("\nWrite error: {}", e);
-                    std::process::exit(1);
-                });
-                bytes_written += batch_len;
-
-                // Progress every ~2 seconds (more responsive than byte-based)
-                let now = std::time::Instant::now();
-                if now.duration_since(last_progress).as_secs_f64() >= 2.0 {
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let mb = bytes_written as f64 / (1024.0 * 1024.0);
-                    let avg_speed = mb / elapsed;
-
-                    // Recent speed (since last update)
-                    let interval = now.duration_since(last_progress).as_secs_f64();
-                    let recent_mb = (bytes_written - last_bytes) as f64 / (1024.0 * 1024.0);
-                    let recent_speed = recent_mb / interval;
-                    if recent_speed > peak_speed { peak_speed = recent_speed; }
-
-                    let pct = if total_bytes > 0 {
-                        (bytes_written as f64 / total_bytes as f64 * 100.0).min(100.0)
-                    } else {
-                        0.0
-                    };
-                    let eta = if avg_speed > 0.0 && total_bytes > 0 {
-                        let remaining_mb = (total_bytes - bytes_written) as f64 / (1024.0 * 1024.0);
-                        let secs = remaining_mb / avg_speed;
-                        format!("{}:{:02}", (secs / 60.0) as u32, (secs % 60.0) as u32)
-                    } else {
-                        "--:--".into()
-                    };
-
-                    let err_str = if reader.errors > 0 {
-                        format!("  err:{}", reader.errors)
-                    } else {
-                        String::new()
-                    };
-
-                    eprint!("\r  {:.0} MB / {:.0} MB  ({:.0}%)  {:.1} MB/s (cur: {:.1})  ETA {}{}   ",
-                        mb, total_bytes as f64 / (1024.0 * 1024.0), pct,
-                        avg_speed, recent_speed, eta, err_str);
-
-                    last_progress = now;
-                    last_bytes = bytes_written;
-                }
-            }
-            Ok(None) => break,
-            Err(e) => {
-                eprintln!("\nRead error: {}", e);
-            }
-        }
+    // Build the output stream chain
+    if raw_mode {
+        let mut output = ProgressWriter::new(
+            BufWriter::with_capacity(4 * 1024 * 1024, file),
+            total_bytes, &INTERRUPTED,
+        );
+        let mut reader = disc.open_title(&mut session, target_idx).unwrap();
+        rip_loop(&mut reader, &mut output);
+        let _ = output.inner.flush();
+        print_summary(&out_file, start, output.bytes_written, output.peak_speed);
+    } else {
+        let mkv = libfreemkv::MkvStream::new(BufWriter::with_capacity(4 * 1024 * 1024, file))
+            .title(&title)
+            .max_buffer(10 * 1024 * 1024);
+        let mut output = ProgressWriter::new(mkv, total_bytes, &INTERRUPTED);
+        let mut reader = disc.open_title(&mut session, target_idx).unwrap();
+        rip_loop(&mut reader, &mut output);
+        let _ = output.inner.finish();
+        print_summary(&out_file, start, output.bytes_written, output.peak_speed);
     }
-
-    let errors = reader.errors;
-
-    // Flush remaining buffered data
-    drop(reader); // release session borrow
-    let _ = writer.flush();
-
-    let elapsed = start.elapsed().as_secs_f64();
-    let mb = bytes_written as f64 / (1024.0 * 1024.0);
-
-    if interrupted {
-        eprintln!("\n\nInterrupted — ejecting disc...");
-        let _ = session.eject();
-        println!("Partial: {:.0} MB in {:.0}s ({:.1} MB/s)", mb, elapsed, mb / elapsed);
-        println!("Output:  {}", out_file.display());
-        std::process::exit(130);
-    }
-
-    println!();
-    println!();
-    println!("Complete: {:.0} MB in {:.0}s", mb, elapsed);
-    println!("Speed:    {:.1} MB/s avg, {:.1} MB/s peak", mb / elapsed, peak_speed);
-    if errors > 0 {
-        println!("Errors:   {} (sectors skipped)", errors);
-    }
-    println!("Output:   {}", out_file.display());
 }
 
+fn rip_loop(reader: &mut libfreemkv::ContentReader, output: &mut impl Write) {
+    loop {
+        if INTERRUPTED.load(Ordering::Relaxed) { break; }
+        match reader.read_batch() {
+            Ok(Some(batch)) => {
+                if output.write_all(batch).is_err() { break; }
+            }
+            Ok(None) => break,
+            Err(e) => eprintln!("\nRead error: {}", e),
+        }
+    }
+}
+
+fn print_summary(path: &std::path::Path, start: std::time::Instant, bytes: u64, peak: f64) {
+    let elapsed = start.elapsed().as_secs_f64();
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    let (sz, unit) = if mb >= 1024.0 { (mb / 1024.0, "GB") } else { (mb, "MB") };
+    println!("\n");
+    println!("Complete: {:.1} {} in {}:{:02}", sz, unit, (elapsed / 60.0) as u32, (elapsed % 60.0) as u32);
+    println!("Speed:    {:.1} MB/s avg, {:.1} MB/s peak", mb / elapsed, peak);
+    println!("Output:   {}", path.display());
+}
+
+/// Progress wrapper — sits between rip and output, tracks bytes and prints status.
+struct ProgressWriter<W: Write> {
+    inner: W,
+    bytes_written: u64,
+    total_bytes: u64,
+    start: std::time::Instant,
+    last_update: std::time::Instant,
+    last_bytes: u64,
+    peak_speed: f64,
+    interrupt_flag: &'static AtomicBool,
+}
+
+impl<W: Write> ProgressWriter<W> {
+    fn new(inner: W, total_bytes: u64, interrupt_flag: &'static AtomicBool) -> Self {
+        let now = std::time::Instant::now();
+        Self { inner, bytes_written: 0, total_bytes, start: now, last_update: now, last_bytes: 0, peak_speed: 0.0, interrupt_flag }
+    }
+}
+
+impl<W: Write> Write for ProgressWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.interrupt_flag.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "interrupted"));
+        }
+        let n = self.inner.write(buf)?;
+        self.bytes_written += n as u64;
+
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_update).as_secs_f64() >= 2.0 {
+            let elapsed = self.start.elapsed().as_secs_f64();
+            let mb = self.bytes_written as f64 / (1024.0 * 1024.0);
+            let avg = mb / elapsed;
+            let interval = now.duration_since(self.last_update).as_secs_f64();
+            let recent = (self.bytes_written - self.last_bytes) as f64 / (1024.0 * 1024.0) / interval;
+            if recent > self.peak_speed { self.peak_speed = recent; }
+            let pct = if self.total_bytes > 0 { (self.bytes_written as f64 / self.total_bytes as f64 * 100.0).min(100.0) } else { 0.0 };
+            let eta = if avg > 0.0 && self.total_bytes > 0 {
+                let s = (self.total_bytes - self.bytes_written) as f64 / (1024.0 * 1024.0) / avg;
+                format!("{}:{:02}", (s / 60.0) as u32, (s % 60.0) as u32)
+            } else { "--:--".into() };
+            let total_mb = self.total_bytes as f64 / (1024.0 * 1024.0);
+            let (d, t) = if total_mb >= 1024.0 {
+                (format!("{:.1} GB", mb / 1024.0), format!("{:.1} GB", total_mb / 1024.0))
+            } else {
+                (format!("{:.0} MB", mb), format!("{:.0} MB", total_mb))
+            };
+            eprint!("\r  {} / {}  ({:.0}%)  {:.1} MB/s  ETA {}   ", d, t, pct, avg, eta);
+            let _ = std::io::stderr().flush();
+            self.last_update = now;
+            self.last_bytes = self.bytes_written;
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> { self.inner.flush() }
+}
