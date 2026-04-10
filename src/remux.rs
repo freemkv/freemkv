@@ -1,6 +1,7 @@
 //! freemkv remux — Convert m2ts to MKV without a disc drive.
 
 use crate::strings;
+use crate::output::{Output, Level::Normal};
 use std::io::{BufWriter, BufReader, Read, Write};
 
 pub fn run(args: &[String]) {
@@ -21,7 +22,8 @@ pub fn run(args: &[String]) {
         std::process::exit(1);
     }
 
-    // Open input
+    let out = Output::new(false, false);
+
     let infile = match std::fs::File::open(input_path) {
         Ok(f) => f,
         Err(e) => {
@@ -32,23 +34,23 @@ pub fn run(args: &[String]) {
     let file_size = infile.metadata().map(|m| m.len()).unwrap_or(0);
     let mut reader = BufReader::with_capacity(4 * 1024 * 1024, infile);
 
-    println!("freemkv remux v{}", env!("CARGO_PKG_VERSION"));
-    println!();
-    println!("{}:  {} ({:.1} GB)", strings::get("remux.input"), input_path, file_size as f64 / (1024.0 * 1024.0 * 1024.0));
-    println!("{}: {}", strings::get("remux.output_label"), output_path);
+    out.raw(Normal, &format!("freemkv remux v{}", env!("CARGO_PKG_VERSION")));
+    out.blank(Normal);
+    out.raw(Normal, &format!("{}:  {} ({:.1} GB)", strings::get("remux.input"), input_path, file_size as f64 / (1024.0 * 1024.0 * 1024.0)));
+    out.raw(Normal, &format!("{}: {}", strings::get("remux.output_label"), output_path));
 
-    print!("{} ", strings::get("remux.scanning_streams"));
-    let _ = std::io::stdout().flush();
+    out.print_inline(Normal, "remux.scanning_streams");
+    out.raw_inline(Normal, " ");
     let mut scan_buf = vec![0u8; 1024 * 1024];
     let scan_bytes = reader.read(&mut scan_buf).unwrap_or(0);
 
     let streams = match scan_ts_streams(&scan_buf[..scan_bytes]) {
         Some(s) if !s.is_empty() => {
-            println!("{} ({} streams)", strings::get("rip.ok"), s.len());
+            out.raw(Normal, &format!("{} ({} streams)", strings::get("rip.ok"), s.len()));
             s
         }
         _ => {
-            println!("{}", strings::get("rip.failed"));
+            out.print(Normal, "rip.failed");
             eprintln!("{}", strings::get("remux.scan_failed"));
             std::process::exit(1);
         }
@@ -56,9 +58,9 @@ pub fn run(args: &[String]) {
 
     for s in &streams {
         match s {
-            libfreemkv::Stream::Video(v) => println!("  {:?} {}", v.codec, v.resolution),
-            libfreemkv::Stream::Audio(a) => println!("  {:?} {} {}", a.codec, a.channels, a.language),
-            libfreemkv::Stream::Subtitle(s) => println!("  {:?} {}", s.codec, s.language),
+            libfreemkv::Stream::Video(v) => out.raw(Normal, &format!("  {:?} {}", v.codec, v.resolution)),
+            libfreemkv::Stream::Audio(a) => out.raw(Normal, &format!("  {:?} {} {}", a.codec, a.channels, a.language)),
+            libfreemkv::Stream::Subtitle(s) => out.raw(Normal, &format!("  {:?} {}", s.codec, s.language)),
         }
     }
 
@@ -84,9 +86,9 @@ pub fn run(args: &[String]) {
         .title(&title)
         .max_buffer(10 * 1024 * 1024);
 
-    println!();
-    print!("{} ", strings::get("remux.remuxing"));
-    let _ = std::io::stdout().flush();
+    out.blank(Normal);
+    out.print_inline(Normal, "remux.remuxing");
+    out.raw_inline(Normal, " ");
 
     let start = std::time::Instant::now();
     let mut total_read = scan_bytes as u64;
@@ -112,14 +114,14 @@ pub fn run(args: &[String]) {
 
     let elapsed = start.elapsed().as_secs_f64();
     let mb = total_read as f64 / (1024.0 * 1024.0);
-    println!("{}", strings::get("remux.done"));
-    println!();
-    println!("{}", strings::fmt("remux.remuxed", &[
+    out.print(Normal, "remux.done");
+    out.blank(Normal);
+    out.fmt(Normal, "remux.remuxed", &[
         ("size", &format!("{:.1}", mb / 1024.0)),
         ("time", &format!("{:.0}", elapsed)),
         ("speed", &format!("{:.0}", mb / elapsed)),
-    ]));
-    println!("{}: {}", strings::get("remux.output_label"), output_path);
+    ]);
+    out.raw(Normal, &format!("{}: {}", strings::get("remux.output_label"), output_path));
 }
 
 /// Quick scan of TS data to find streams via PAT/PMT.

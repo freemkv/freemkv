@@ -4,6 +4,7 @@
 // CLI is dumb — all drive data from libfreemkv.
 
 use crate::strings;
+use crate::output::{Output, Level::Normal};
 use libfreemkv::DriveSession;
 use libfreemkv::scsi::DataDirection;
 use std::path::Path;
@@ -14,6 +15,7 @@ pub fn run(args: &[String]) {
     let mut share = false;
     let mut mask = false;
     let mut quiet = false;
+    let mut verbose = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -22,6 +24,7 @@ pub fn run(args: &[String]) {
             "--share" | "-s" => share = true,
             "--mask" | "-m" => mask = true,
             "--quiet" | "-q" => quiet = true,
+            "--verbose" | "-v" => verbose = true,
             "--help" | "-h" => {
                 println!("{}", strings::get("drive.share_usage"));
                 println!();
@@ -57,25 +60,25 @@ pub fn run(args: &[String]) {
     let fw_version = format!("{}/{}", id.product_revision.trim(), id.vendor_specific.trim());
     let profile_status = if session.has_profile() { strings::get("drive.supported") } else { strings::get("drive.unknown") };
 
-    if !quiet {
-        println!("freemkv {}", env!("CARGO_PKG_VERSION"));
-        println!();
-        println!("{}", strings::get("drive.header"));
-        println!("  {}:              {}", strings::get("drive.device"), dev_path);
-        println!("  {}:        {}", strings::get("drive.manufacturer"), id.vendor_id.trim());
-        println!("  {}:             {}", strings::get("drive.product"), id.product_id.trim());
-        println!("  {}:            {}", strings::get("drive.revision"), id.product_revision.trim());
-        println!("  {}:       {}", strings::get("drive.serial"), serial_display);
-        println!("  {}:       {}", strings::get("drive.firmware_date"), format_date(&id.firmware_date));
-        println!();
-        println!("{}", strings::get("drive.platform_header"));
-        println!("  {}:      {}", strings::get("drive.platform"), platform);
-        println!("  {}:    {}", strings::get("drive.firmware_version"), fw_version);
-        println!("  {}:             {}", strings::get("drive.profile"), profile_status);
-        println!();
-        if !share {
-            println!("{}", strings::get("drive.share_hint"));
-        }
+    let out = Output::new(verbose, quiet);
+
+    out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
+    out.blank(Normal);
+    out.print(Normal, "drive.header");
+    out.raw(Normal, &format!("  {}:              {}", strings::get("drive.device"), dev_path));
+    out.raw(Normal, &format!("  {}:        {}", strings::get("drive.manufacturer"), id.vendor_id.trim()));
+    out.raw(Normal, &format!("  {}:             {}", strings::get("drive.product"), id.product_id.trim()));
+    out.raw(Normal, &format!("  {}:            {}", strings::get("drive.revision"), id.product_revision.trim()));
+    out.raw(Normal, &format!("  {}:       {}", strings::get("drive.serial"), serial_display));
+    out.raw(Normal, &format!("  {}:       {}", strings::get("drive.firmware_date"), format_date(&id.firmware_date)));
+    out.blank(Normal);
+    out.print(Normal, "drive.platform_header");
+    out.raw(Normal, &format!("  {}:      {}", strings::get("drive.platform"), platform));
+    out.raw(Normal, &format!("  {}:    {}", strings::get("drive.firmware_version"), fw_version));
+    out.raw(Normal, &format!("  {}:             {}", strings::get("drive.profile"), profile_status));
+    out.blank(Normal);
+    if !share {
+        out.print(Normal, "drive.share_hint");
     }
 
     if !share { return; }
