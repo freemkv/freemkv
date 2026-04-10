@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.0 (2026-04-10)
+
+### MKV output
+
+- **MKV is now the default output format** — `freemkv rip` produces `.mkv` files
+- **`--raw` flag** — use `--raw` for original `.m2ts` output
+- **`freemkv remux`** — convert existing `.m2ts` files to MKV without a drive
+
+### Restored features
+
+- **`--share` restored** — full drive profile capture + GitHub issue submission (INQUIRY, GET_CONFIG features, READ_BUFFER, zip, base64)
+- **i18n string table restored** — `strings.rs` + `locales/en.json`, zero hardcoded English in CLI
+- **`disc-info --basic` restored** — show disc info without BD-J labels
+
+### Improvements
+
+- **Safe output filenames** — spaces replaced with underscores, no track numbers (`Dune.mkv`)
+- **`--share`/`--mask`/`--quiet` in top-level help** — discoverable from `freemkv help`
+- **Works with all drives** — uses new `open()` API that doesn't require profile match
+- **Profile status shown** — drive-info shows "Supported" or "Unknown"
+
+### Dependencies
+
+- Added `ureq`, `zip`, `serde_json` for `--share` functionality
+
 ## 0.4.0 (2026-04-09)
 
 ### Rip command — working end-to-end
