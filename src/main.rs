@@ -9,8 +9,23 @@ mod strings;
 mod output;
 
 fn main() {
-    strings::init();
     let args: Vec<String> = std::env::args().collect();
+
+    // Parse --language before init so strings load in the right locale.
+    // Strip --language/--lang + value from args so they don't reach subcommands.
+    let mut filtered_args = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if (args[i] == "--language" || args[i] == "--lang") && i + 1 < args.len() {
+            strings::set_language(&args[i + 1]);
+            i += 2;
+        } else {
+            filtered_args.push(args[i].clone());
+            i += 1;
+        }
+    }
+    let args = filtered_args;
+    strings::init();
 
     if args.len() < 2 {
         usage();
