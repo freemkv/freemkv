@@ -23,8 +23,17 @@ use std::sync::OnceLock;
 static STRINGS: OnceLock<Value> = OnceLock::new();
 static LANG_OVERRIDE: OnceLock<String> = OnceLock::new();
 
-/// English — always available, compiled in.
+// ── Shipped languages (compiled into the binary) ───────────────────────────
 const EN_JSON: &str = include_str!("../locales/en.json");
+const ES_JSON: &str = include_str!("../locales/es.json");
+
+fn bundled_locale(code: &str) -> Option<&'static str> {
+    match code {
+        "en" => Some(EN_JSON),
+        "es" => Some(ES_JSON),
+        _ => None,
+    }
+}
 
 /// Set language override from --language flag. Call before init().
 pub fn set_language(lang: &str) {
@@ -32,15 +41,18 @@ pub fn set_language(lang: &str) {
 }
 
 /// Initialize strings for the current locale.
+/// Priority: bundled locale → disk locale → English fallback.
 pub fn init() {
     let code = detect_language();
-    let json = if code == "en" {
-        serde_json::from_str(EN_JSON).expect("invalid en.json")
+    let json = if let Some(data) = bundled_locale(&code) {
+        // Shipped language — compiled in
+        serde_json::from_str(data).expect("invalid bundled locale")
+    } else if let Some(v) = load_locale_file(&code) {
+        // Community language — loaded from disk
+        v
     } else {
-        match load_locale_file(&code) {
-            Some(v) => v,
-            None => serde_json::from_str(EN_JSON).expect("invalid en.json"),
-        }
+        // Fallback
+        serde_json::from_str(EN_JSON).expect("invalid en.json")
     };
     let _ = STRINGS.set(json);
 }
