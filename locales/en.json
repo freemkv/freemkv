@@ -22,6 +22,7 @@
     "opt_mask": "Mask serial numbers",
     "global_options": "Global options",
     "opt_quiet": "Suppress output",
+    "opt_verbose": "Verbose output (AACS, drive, debug info)",
     "unknown_command": "Unknown command: {cmd}",
     "unknown_option": "Unknown option: {opt}"
   },
@@ -97,7 +98,16 @@
     "complete": "Complete: {size} {unit} in {time}",
     "speed": "Speed:    {avg} MB/s avg, {peak} MB/s peak",
     "output": "Output:   {path}",
-    "continuing_oem": "{error} (continuing at OEM speed)"
+    "continuing_oem": "{error} (continuing at OEM speed)",
+    "verbose_aacs_version": "AACS version",
+    "verbose_key_source": "Key source",
+    "verbose_disc_hash": "Disc hash",
+    "verbose_mkb_version": "MKB version",
+    "verbose_bus_encryption": "Bus encryption",
+    "verbose_volume_id": "Volume ID",
+    "verbose_unit_keys": "Unit keys",
+    "verbose_read_data_key": "Read data key",
+    "verbose_handshake_hint": "Handshake may have failed — no host cert, or drive rejected"
   },
   "remux": {
     "input": "Input",

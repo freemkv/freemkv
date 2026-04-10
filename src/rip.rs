@@ -21,6 +21,7 @@ pub fn run(args: &[String]) {
     let mut title_num: Option<usize> = None;
     let mut list_only = false;
     let mut raw_mode = false;
+    let mut verbose = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -31,6 +32,7 @@ pub fn run(args: &[String]) {
             "--title" | "-t" => { i += 1; title_num = args.get(i).and_then(|s| s.parse().ok()); }
             "--list" | "-l" => { list_only = true; }
             "--raw" => { raw_mode = true; }
+            "--verbose" | "-v" => { verbose = true; }
             _ => {
                 if device_path.is_none() && args[i].starts_with("/dev/") {
                     device_path = Some(args[i].clone());
@@ -114,8 +116,27 @@ pub fn run(args: &[String]) {
             println!("  {}", strings::get("rip.aacs_keys_found"));
             println!("  VUK:      {:02x}{:02x}{:02x}{:02x}...",
                 aacs.vuk[0], aacs.vuk[1], aacs.vuk[2], aacs.vuk[3]);
+            if verbose {
+                println!();
+                println!("  {}:   {}", strings::get("rip.verbose_aacs_version"), aacs.version);
+                println!("  {}:     {:?}", strings::get("rip.verbose_key_source"), aacs.key_source);
+                println!("  {}:      {}", strings::get("rip.verbose_disc_hash"), aacs.disc_hash);
+                if let Some(v) = aacs.mkb_version {
+                    println!("  {}:    {}", strings::get("rip.verbose_mkb_version"), v);
+                }
+                println!("  {}: {}", strings::get("rip.verbose_bus_encryption"), aacs.bus_encryption);
+                println!("  {}:      {}", strings::get("rip.verbose_volume_id"), hex(&aacs.volume_id));
+                println!("  {}:      {}", strings::get("rip.verbose_unit_keys"), aacs.unit_keys.len());
+                if let Some(ref rdk) = aacs.read_data_key {
+                    println!("  {}:  {:02x}{:02x}{:02x}{:02x}...",
+                        strings::get("rip.verbose_read_data_key"), rdk[0], rdk[1], rdk[2], rdk[3]);
+                }
+            }
         } else {
             println!("  {}", strings::get("rip.aacs_no_keys"));
+            if verbose {
+                println!("  ({})", strings::get("rip.verbose_handshake_hint"));
+            }
         }
     }
 
@@ -239,6 +260,10 @@ fn print_summary(path: &std::path::Path, start: std::time::Instant, bytes: u64, 
         ("peak", &format!("{:.1}", peak)),
     ]));
     println!("{}", strings::fmt("rip.output", &[("path", &path.display().to_string())]));
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("")
 }
 
 /// Progress wrapper — sits between rip and output, tracks bytes and prints status.

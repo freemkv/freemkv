@@ -63,6 +63,7 @@ fn usage() {
     println!();
     println!("{}:", strings::get("app.global_options"));
     println!("  -q, --quiet             {}", strings::get("app.opt_quiet"));
+    println!("  -v, --verbose           {}", strings::get("app.opt_verbose"));
     println!();
     println!("{}:", strings::get("app.examples"));
     println!("  freemkv rip");
