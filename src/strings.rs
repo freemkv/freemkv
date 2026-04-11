@@ -51,9 +51,7 @@ pub fn init() {
 /// Get a string by dotted path (e.g. "disc.scanning", "error.no_drive").
 /// Returns the path itself if not found — makes missing translations visible.
 pub fn get(path: &str) -> String {
-    let strings = STRINGS.get_or_init(|| {
-        serde_json::from_str(LOCALE_EN).expect("invalid en.json")
-    });
+    let strings = STRINGS.get_or_init(|| serde_json::from_str(LOCALE_EN).expect("invalid en.json"));
     lookup(strings, path)
 }
 
@@ -90,25 +88,33 @@ fn load_locale_file(code: &str) -> Option<Value> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let path = dir.join("locales").join(&filename);
-            if let Some(v) = try_load(&path) { return Some(v); }
+            if let Some(v) = try_load(&path) {
+                return Some(v);
+            }
         }
     }
 
     // 2. Working directory
     let path = std::path::PathBuf::from("locales").join(&filename);
-    if let Some(v) = try_load(&path) { return Some(v); }
+    if let Some(v) = try_load(&path) {
+        return Some(v);
+    }
 
     // 3. ~/.config/freemkv/locales/
     if let Ok(home) = std::env::var("HOME") {
         let path = std::path::PathBuf::from(home)
             .join(".config/freemkv/locales")
             .join(&filename);
-        if let Some(v) = try_load(&path) { return Some(v); }
+        if let Some(v) = try_load(&path) {
+            return Some(v);
+        }
     }
 
     // 4. /usr/share/freemkv/locales/
     let path = std::path::PathBuf::from("/usr/share/freemkv/locales").join(&filename);
-    if let Some(v) = try_load(&path) { return Some(v); }
+    if let Some(v) = try_load(&path) {
+        return Some(v);
+    }
 
     None
 }
@@ -121,7 +127,11 @@ fn try_load(path: &std::path::Path) -> Option<Value> {
 /// "fr_FR.UTF-8" → "fr"
 fn normalize_code(s: &str) -> String {
     let s = s.trim().to_lowercase();
-    if s.len() >= 2 { s[..2].to_string() } else { "en".to_string() }
+    if s.len() >= 2 {
+        s[..2].to_string()
+    } else {
+        "en".to_string()
+    }
 }
 
 fn lookup(strings: &Value, path: &str) -> String {

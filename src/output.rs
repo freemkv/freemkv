@@ -20,9 +20,13 @@ pub struct Output {
 
 impl Output {
     pub fn new(verbose: bool, quiet: bool) -> Self {
-        let level = if quiet { Level::Quiet }
-                    else if verbose { Level::Verbose }
-                    else { Level::Normal };
+        let level = if quiet {
+            Level::Quiet
+        } else if verbose {
+            Level::Verbose
+        } else {
+            Level::Normal
+        };
         Output { level }
     }
 

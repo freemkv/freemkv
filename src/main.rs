@@ -11,13 +11,13 @@
 //   freemkv disc:// network://10.1.7.11:9000
 //   freemkv info disc://
 
-mod info;
 mod disc_info;
-mod rip;
-mod remux;
-mod strings;
+mod info;
 mod output;
 mod pipe;
+mod remux;
+mod rip;
+mod strings;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -52,7 +52,13 @@ fn main() {
         _ => {
             // Flags that consume the next argument as a value
             const VALUE_FLAGS: &[&str] = &[
-                "-t", "--title", "-k", "--keydb", "--min", "--language", "--lang",
+                "-t",
+                "--title",
+                "-k",
+                "--keydb",
+                "--min",
+                "--language",
+                "--lang",
             ];
 
             // Collect URLs (non-flag args) and flags
@@ -119,17 +125,30 @@ fn info_cmd(args: &[String]) {
                     println!("File: {}", parsed.path);
                     if meta.duration_secs > 0.0 {
                         let d = meta.duration_secs;
-                        println!("Duration: {}:{:02}:{:02}", d as u64 / 3600, (d as u64 % 3600) / 60, d as u64 % 60);
+                        println!(
+                            "Duration: {}:{:02}:{:02}",
+                            d as u64 / 3600,
+                            (d as u64 % 3600) / 60,
+                            d as u64 % 60
+                        );
                     }
                     println!("Streams: {}", meta.streams.len());
                     for s in &meta.streams {
                         match s {
                             libfreemkv::Stream::Video(v) => {
-                                let label = if v.label.is_empty() { String::new() } else { format!(" — {}", v.label) };
+                                let label = if v.label.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" — {}", v.label)
+                                };
                                 println!("  {:?} {}{}", v.codec, v.resolution, label);
                             }
                             libfreemkv::Stream::Audio(a) => {
-                                let label = if a.label.is_empty() { String::new() } else { format!(" — {}", a.label) };
+                                let label = if a.label.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" — {}", a.label)
+                                };
                                 println!("  {:?} {} {}{}", a.codec, a.channels, a.language, label);
                             }
                             libfreemkv::Stream::Subtitle(s) => {
@@ -138,7 +157,10 @@ fn info_cmd(args: &[String]) {
                         }
                     }
                 }
-                Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
         _ => {
@@ -201,23 +223,44 @@ fn update_keys(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--url" | "-u" => { i += 1; url = args.get(i).map(|s| s.as_str()); }
+            "--url" | "-u" => {
+                i += 1;
+                url = args.get(i).map(|s| s.as_str());
+            }
             _ => {}
         }
         i += 1;
     }
     let url = match url {
         Some(u) => u,
-        None => { eprintln!("{}", strings::get("keys.usage")); std::process::exit(1); }
+        None => {
+            eprintln!("{}", strings::get("keys.usage"));
+            std::process::exit(1);
+        }
     };
     match libfreemkv::keydb::update(url) {
         Ok(result) => {
-            println!("{}", strings::fmt("keys.updated", &[
-                ("entries", &result.entries.to_string()),
-                ("bytes", &result.bytes.to_string()),
-            ]));
-            println!("{}", strings::fmt("keys.saved", &[("path", &result.path.display().to_string())]));
+            println!(
+                "{}",
+                strings::fmt(
+                    "keys.updated",
+                    &[
+                        ("entries", &result.entries.to_string()),
+                        ("bytes", &result.bytes.to_string()),
+                    ]
+                )
+            );
+            println!(
+                "{}",
+                strings::fmt(
+                    "keys.saved",
+                    &[("path", &result.path.display().to_string())]
+                )
+            );
         }
-        Err(e) => { eprintln!("{}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
     }
 }

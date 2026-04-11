@@ -3,10 +3,10 @@
 //! Input: M2tsReader (reads m2ts with metadata header or bare m2ts)
 //! Output: MkvStream (writes Matroska container)
 
+use crate::output::{Level::Normal, Output};
 use crate::strings;
-use crate::output::{Output, Level::Normal};
-use std::io::{BufWriter, BufReader, Read, Write};
 use libfreemkv::IOStream;
+use std::io::{BufReader, BufWriter, Read, Write};
 
 /// I/O buffer size for file read/write (4 MB).
 const IO_BUF_SIZE: usize = 4 * 1024 * 1024;
@@ -40,32 +40,63 @@ pub fn run(args: &[String]) {
     let infile = match std::fs::File::open(input_path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("{}", strings::fmt("error.open_failed", &[("device", input_path), ("error", &e.to_string())]));
+            eprintln!(
+                "{}",
+                strings::fmt(
+                    "error.open_failed",
+                    &[("device", input_path), ("error", &e.to_string())]
+                )
+            );
             std::process::exit(1);
         }
     };
     let file_size = infile.metadata().map(|m| m.len()).unwrap_or(0);
 
-    out.raw(Normal, &format!("freemkv remux v{}", env!("CARGO_PKG_VERSION")));
+    out.raw(
+        Normal,
+        &format!("freemkv remux v{}", env!("CARGO_PKG_VERSION")),
+    );
     out.blank(Normal);
-    out.raw(Normal, &format!("{}:  {} ({:.1} GB)", strings::get("remux.input"), input_path, file_size as f64 / (1024.0 * 1024.0 * 1024.0)));
-    out.raw(Normal, &format!("{}: {}", strings::get("remux.output_label"), output_path));
+    out.raw(
+        Normal,
+        &format!(
+            "{}:  {} ({:.1} GB)",
+            strings::get("remux.input"),
+            input_path,
+            file_size as f64 / (1024.0 * 1024.0 * 1024.0)
+        ),
+    );
+    out.raw(
+        Normal,
+        &format!("{}: {}", strings::get("remux.output_label"), output_path),
+    );
 
     // Open input stream — handles FMKV metadata header or bare m2ts fallback
     out.print_inline(Normal, "remux.scanning_streams");
     out.raw_inline(Normal, " ");
 
-    let mut input = match libfreemkv::M2tsStream::open(BufReader::with_capacity(IO_BUF_SIZE, infile)) {
-        Ok(r) => {
-            out.raw(Normal, &format!("{} ({} streams)", strings::get("rip.ok"), r.info().streams.len()));
-            r
-        }
-        Err(e) => {
-            out.print(Normal, "rip.failed");
-            eprintln!("{}", strings::fmt("remux.scan_failed", &[("error", &e.to_string())]));
-            std::process::exit(1);
-        }
-    };
+    let mut input =
+        match libfreemkv::M2tsStream::open(BufReader::with_capacity(IO_BUF_SIZE, infile)) {
+            Ok(r) => {
+                out.raw(
+                    Normal,
+                    &format!(
+                        "{} ({} streams)",
+                        strings::get("rip.ok"),
+                        r.info().streams.len()
+                    ),
+                );
+                r
+            }
+            Err(e) => {
+                out.print(Normal, "rip.failed");
+                eprintln!(
+                    "{}",
+                    strings::fmt("remux.scan_failed", &[("error", &e.to_string())])
+                );
+                std::process::exit(1);
+            }
+        };
 
     let meta = input.info().clone();
 
@@ -73,27 +104,56 @@ pub fn run(args: &[String]) {
     for s in &meta.streams {
         match s {
             libfreemkv::Stream::Video(v) => {
-                let label = if v.label.is_empty() { String::new() } else { format!(" — {}", v.label) };
-                out.raw(Normal, &format!("  {:?} {}{}", v.codec, v.resolution, label));
+                let label = if v.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", v.label)
+                };
+                out.raw(
+                    Normal,
+                    &format!("  {:?} {}{}", v.codec, v.resolution, label),
+                );
             }
             libfreemkv::Stream::Audio(a) => {
-                let label = if a.label.is_empty() { String::new() } else { format!(" — {}", a.label) };
-                out.raw(Normal, &format!("  {:?} {} {}{}", a.codec, a.channels, a.language, label));
+                let label = if a.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", a.label)
+                };
+                out.raw(
+                    Normal,
+                    &format!("  {:?} {} {}{}", a.codec, a.channels, a.language, label),
+                );
             }
-            libfreemkv::Stream::Subtitle(s) => out.raw(Normal, &format!("  {:?} {}", s.codec, s.language)),
+            libfreemkv::Stream::Subtitle(s) => {
+                out.raw(Normal, &format!("  {:?} {}", s.codec, s.language))
+            }
         }
     }
     if meta.duration_secs > 0.0 {
         let dur = meta.duration_secs;
-        out.raw(Normal, &format!("  Duration: {}:{:02}:{:02}",
-            dur as u64 / 3600, (dur as u64 % 3600) / 60, dur as u64 % 60));
+        out.raw(
+            Normal,
+            &format!(
+                "  Duration: {}:{:02}:{:02}",
+                dur as u64 / 3600,
+                (dur as u64 % 3600) / 60,
+                dur as u64 % 60
+            ),
+        );
     }
 
     // Create output stream
     let outfile = match std::fs::File::create(&output_path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("{}", strings::fmt("rip.cannot_create", &[("path", &output_path), ("error", &e.to_string())]));
+            eprintln!(
+                "{}",
+                strings::fmt(
+                    "rip.cannot_create",
+                    &[("path", &output_path), ("error", &e.to_string())]
+                )
+            );
             std::process::exit(1);
         }
     };
@@ -118,7 +178,10 @@ pub fn run(args: &[String]) {
                 total_read += n as u64;
             }
             Err(e) => {
-                eprintln!("\n{}", strings::fmt("rip.read_error", &[("error", &e.to_string())]));
+                eprintln!(
+                    "\n{}",
+                    strings::fmt("rip.read_error", &[("error", &e.to_string())])
+                );
                 break;
             }
         }
@@ -130,10 +193,17 @@ pub fn run(args: &[String]) {
     let mb = total_read as f64 / (1024.0 * 1024.0);
     out.print(Normal, "remux.done");
     out.blank(Normal);
-    out.fmt(Normal, "remux.remuxed", &[
-        ("size", &format!("{:.1}", mb / 1024.0)),
-        ("time", &format!("{:.0}", elapsed)),
-        ("speed", &format!("{:.0}", mb / elapsed)),
-    ]);
-    out.raw(Normal, &format!("{}: {}", strings::get("remux.output_label"), output_path));
+    out.fmt(
+        Normal,
+        "remux.remuxed",
+        &[
+            ("size", &format!("{:.1}", mb / 1024.0)),
+            ("time", &format!("{:.0}", elapsed)),
+            ("speed", &format!("{:.0}", mb / elapsed)),
+        ],
+    );
+    out.raw(
+        Normal,
+        &format!("{}: {}", strings::get("remux.output_label"), output_path),
+    );
 }
