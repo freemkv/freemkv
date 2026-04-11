@@ -5,7 +5,6 @@
 
 use crate::output::{Level::Normal, Output};
 use crate::strings;
-use libfreemkv::scsi::DataDirection;
 use libfreemkv::DriveSession;
 use std::io::Write;
 use std::path::Path;
@@ -70,7 +69,7 @@ pub fn run(args: &[String]) {
 
     let id = session.drive_id.clone();
     let serial_display = if mask {
-        mask_str(&id.serial_number)
+        libfreemkv::mask_string(&id.serial_number)
     } else {
         id.serial_number.clone()
     };
@@ -170,7 +169,15 @@ pub fn run(args: &[String]) {
         return;
     }
 
-    // ── Capture raw SCSI features ──────────────────────────────────────────
+    // ── Capture raw drive data via library ─────────────────────────────────
+
+    let capture = match libfreemkv::capture_drive_data(&mut session) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Capture failed: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let profile_name = format!(
         "{}-{}-{}-{}",
@@ -186,123 +193,66 @@ pub fn run(args: &[String]) {
     std::fs::create_dir_all(&profile_dir).expect("Cannot create profile directory");
 
     // Save raw INQUIRY
-    save_bin(&profile_dir, "inquiry.bin", &id.raw_inquiry);
+    save_bin(&profile_dir, "inquiry.bin", &capture.inquiry);
 
-    // Capture GET_CONFIG features
-    const FEATURES: &[(u16, &str)] = &[
-        (0x0000, "Profile List"),
-        (0x0001, "Core"),
-        (0x0003, "Removable Medium"),
-        (0x0010, "Random Readable"),
-        (0x001D, "Multi-Read"),
-        (0x001E, "CD Read"),
-        (0x001F, "DVD Read"),
-        (0x0040, "BD Read"),
-        (0x0041, "BD Write"),
-        (0x0100, "Power Management"),
-        (0x0102, "Embedded Changer"),
-        (0x0107, "Real Time Streaming"),
-        (0x0108, "Serial Number"),
-        (0x010C, "Firmware Information"),
-        (0x010D, "AACS"),
-    ];
-
+    // Save captured features
     let mut feat_lines = Vec::new();
-    for &(code, name) in FEATURES {
-        let cdb = [
-            0x46u8,
-            0x02,
-            (code >> 8) as u8,
-            code as u8,
-            0x00,
-            0x00,
-            0x00,
-            0x01,
-            0x00,
-            0x00,
-        ];
-        let mut buf = vec![0u8; 256];
-        if let Ok(r) = session.scsi_execute(&cdb, DataDirection::FromDevice, &mut buf, 5000) {
-            if r.bytes_transferred > 8 {
-                let mut feat_data = buf[8..r.bytes_transferred].to_vec();
+    for feat in &capture.features {
+        let mut feat_data = feat.data.clone();
 
-                // Mask serial in GET_CONFIG 0108
-                if code == 0x0108 && mask && feat_data.len() > 4 {
-                    let masked = mask_bytes(&feat_data[4..]);
-                    feat_data[4..4 + masked.len()].copy_from_slice(&masked);
-                }
+        // Mask serial in GET_CONFIG 0108
+        if feat.code == 0x0108 && mask && feat_data.len() > 4 {
+            let masked = libfreemkv::mask_bytes(&feat_data[4..]);
+            feat_data[4..4 + masked.len()].copy_from_slice(&masked);
+        }
 
-                let fname = format!("gc_{:04x}.bin", code);
-                save_bin(&profile_dir, &fname, &feat_data);
-                feat_lines.push(format!("0x{:04X} = \"{}\"  # {}", code, fname, name));
-                if !quiet {
-                    println!(
-                        "  {}",
-                        strings::fmt(
-                            "drive.captured",
-                            &[
-                                ("code", &format!("{:04X}", code)),
-                                ("name", name),
-                                ("bytes", &feat_data.len().to_string()),
-                            ]
-                        )
-                    );
-                }
-            }
+        let fname = format!("gc_{:04x}.bin", feat.code);
+        save_bin(&profile_dir, &fname, &feat_data);
+        feat_lines.push(format!("0x{:04X} = \"{}\"  # {}", feat.code, fname, feat.name));
+        if !quiet {
+            println!(
+                "  {}",
+                strings::fmt(
+                    "drive.captured",
+                    &[
+                        ("code", &format!("{:04X}", feat.code)),
+                        ("name", feat.name),
+                        ("bytes", &feat_data.len().to_string()),
+                    ]
+                )
+            );
         }
     }
 
-    // READ_BUFFER 0xF1 (Pioneer)
-    let mut rb_f1_data = None;
-    let cdb_f1 = [0x3Cu8, 0x02, 0xF1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00];
-    let mut buf = vec![0u8; 48];
-    if let Ok(r) = session.scsi_execute(&cdb_f1, DataDirection::FromDevice, &mut buf, 5000) {
-        if r.bytes_transferred > 0 {
-            let mut data = buf[..r.bytes_transferred].to_vec();
-            if mask && data.len() >= 12 {
-                let masked = mask_bytes(&data[0..12]);
-                data[0..12].copy_from_slice(&masked);
-            }
-            save_bin(&profile_dir, "rb_f1.bin", &data);
-            rb_f1_data = Some(data);
+    // Save READ_BUFFER 0xF1 (Pioneer)
+    if let Some(ref data) = capture.rb_f1 {
+        let mut data = data.clone();
+        if mask && data.len() >= 12 {
+            let masked = libfreemkv::mask_bytes(&data[0..12]);
+            data[0..12].copy_from_slice(&masked);
         }
+        save_bin(&profile_dir, "rb_f1.bin", &data);
     }
 
-    // READ_BUFFER mode 6 (MTK)
-    let mut rb_mode6_data = None;
-    let cdb_m6 = [0x3Cu8, 0x06, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x20, 0x00];
-    let mut buf = vec![0u8; 32];
-    if let Ok(r) = session.scsi_execute(&cdb_m6, DataDirection::FromDevice, &mut buf, 5000) {
-        if r.bytes_transferred > 0 {
-            save_bin(&profile_dir, "rb_mode6.bin", &buf[..r.bytes_transferred]);
-            rb_mode6_data = Some(buf[..r.bytes_transferred].to_vec());
-        }
+    // Save READ_BUFFER mode 6 (MTK)
+    if let Some(ref data) = capture.rb_mode6 {
+        save_bin(&profile_dir, "rb_mode6.bin", data);
     }
 
-    // RPC state
-    let cdb_rpc = [
-        0xA4u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x08, 0x00,
-    ];
-    let mut buf = vec![0u8; 8];
-    if let Ok(r) = session.scsi_execute(&cdb_rpc, DataDirection::FromDevice, &mut buf, 5000) {
-        if r.bytes_transferred > 0 {
-            save_bin(&profile_dir, "rpc_state.bin", &buf[..r.bytes_transferred]);
-        }
+    // Save RPC state
+    if let Some(ref data) = capture.rpc_state {
+        save_bin(&profile_dir, "rpc_state.bin", data);
     }
 
-    // MODE SENSE 2A
-    let cdb_ms = [0x5Au8, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFC, 0x00];
-    let mut buf = vec![0u8; 252];
-    if let Ok(r) = session.scsi_execute(&cdb_ms, DataDirection::FromDevice, &mut buf, 5000) {
-        if r.bytes_transferred > 0 {
-            save_bin(&profile_dir, "mode_2a.bin", &buf[..r.bytes_transferred]);
-        }
+    // Save MODE SENSE 2A
+    if let Some(ref data) = capture.mode_2a {
+        save_bin(&profile_dir, "mode_2a.bin", data);
     }
 
     // ── Generate drive.toml ────────────────────────────────────────────────
 
     let serial_toml = if mask {
-        mask_str(&id.serial_number)
+        libfreemkv::mask_string(&id.serial_number)
     } else {
         id.serial_number.clone()
     };
@@ -332,12 +282,12 @@ pub fn run(args: &[String]) {
         toml.push_str(line);
         toml.push('\n');
     }
-    if rb_f1_data.is_some() || rb_mode6_data.is_some() {
+    if capture.rb_f1.is_some() || capture.rb_mode6.is_some() {
         toml.push_str("\n[read_buffer]\n");
-        if rb_f1_data.is_some() {
+        if capture.rb_f1.is_some() {
             toml.push_str("0xF1 = \"rb_f1.bin\"\n");
         }
-        if rb_mode6_data.is_some() {
+        if capture.rb_mode6.is_some() {
             toml.push_str("mode6 = \"rb_mode6.bin\"\n");
         }
     }
@@ -433,22 +383,22 @@ pub fn run(args: &[String]) {
     body.push_str("```\n");
     body.push_str(&format!(
         "INQUIRY[4] (additional length): 0x{:02X}\n",
-        if id.raw_inquiry.len() > 4 {
-            id.raw_inquiry[4]
+        if capture.inquiry.len() > 4 {
+            capture.inquiry[4]
         } else {
             0
         }
     ));
     body.push_str(&format!(
         "INQUIRY ({} bytes):\n  {}\n",
-        id.raw_inquiry.len(),
-        hex_dump(&id.raw_inquiry)
+        capture.inquiry.len(),
+        hex_dump(&capture.inquiry)
     ));
-    if !id.raw_gc_010c.is_empty() {
+    if !capture.gc_010c.is_empty() {
         body.push_str(&format!(
             "GET_CONFIG 010C ({} bytes):\n  {}\n",
-            id.raw_gc_010c.len(),
-            hex_dump(&id.raw_gc_010c)
+            capture.gc_010c.len(),
+            hex_dump(&capture.gc_010c)
         ));
     } else {
         body.push_str("GET_CONFIG 010C: not available\n");
@@ -545,34 +495,6 @@ fn zip_directory(dir: &std::path::Path) -> Result<Vec<u8>, Box<dyn std::error::E
 
     let cursor = zip.finish()?;
     Ok(cursor.into_inner())
-}
-
-fn mask_str(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphabetic() {
-                'A'
-            } else if c.is_ascii_digit() {
-                '0'
-            } else {
-                c
-            }
-        })
-        .collect()
-}
-
-fn mask_bytes(data: &[u8]) -> Vec<u8> {
-    data.iter()
-        .map(|&b| {
-            if b.is_ascii_alphabetic() {
-                b'A'
-            } else if b.is_ascii_digit() {
-                b'0'
-            } else {
-                b
-            }
-        })
-        .collect()
 }
 
 fn save_bin(dir: &std::path::Path, name: &str, data: &[u8]) {
