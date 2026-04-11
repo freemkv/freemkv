@@ -3,10 +3,17 @@
 use crate::strings;
 use crate::output::{Output, Level::{Normal, Verbose}};
 use std::io::{BufWriter, Write};
+use libfreemkv::IOStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// I/O buffer size for file read/write (4 MB).
+const IO_BUF_SIZE: usize = 4 * 1024 * 1024;
+
+/// MKV lookahead buffer for codec header detection (10 MB).
+const MKV_LOOKAHEAD: usize = 10 * 1024 * 1024;
 
 fn install_signal_handler() {
     unsafe { libc::signal(libc::SIGINT, handle_sigint as *const () as libc::sighandler_t); }
@@ -167,7 +174,7 @@ pub fn run(args: &[String]) {
         std::process::exit(1);
     }
 
-    let title = disc.titles[target_idx].clone();
+    let meta = disc.titles[target_idx].clone();
 
     // Output path
     let out_dir = output_dir.map(PathBuf::from)
@@ -189,12 +196,12 @@ pub fn run(args: &[String]) {
     out.blank(Normal);
     out.fmt(Normal, "rip.ripping", &[
         ("num", &(target_idx + 1).to_string()),
-        ("duration", &title.duration_display()),
-        ("size", &format!("{:.1}", title.size_gb())),
+        ("duration", &meta.duration_display()),
+        ("size", &format!("{:.1}", meta.size_gb())),
         ("file", &out_file.display().to_string()),
     ]);
 
-    if title.extents.is_empty() {
+    if meta.extents.is_empty() {
         eprintln!("{}", strings::get("rip.no_extents")); std::process::exit(1);
     }
 
@@ -211,23 +218,22 @@ pub fn run(args: &[String]) {
         }
     };
 
-    let total_bytes = title.size_bytes;
+    let total_bytes = meta.size_bytes;
     let start = std::time::Instant::now();
 
     // Build the output stream chain
     if raw_mode {
-        let mut output = ProgressWriter::new(
-            BufWriter::with_capacity(4 * 1024 * 1024, file),
-            total_bytes, &INTERRUPTED,
-        );
+        let raw = libfreemkv::M2tsStream::new(BufWriter::with_capacity(IO_BUF_SIZE, file))
+            .meta(&meta);
+        let mut output = ProgressWriter::new(raw, total_bytes, &INTERRUPTED);
         let mut reader = disc.open_title(&mut session, target_idx).unwrap();
         rip_loop(&mut reader, &mut output);
-        let _ = output.inner.flush();
+        let _ = output.inner.finish();
         print_summary(&out_file, start, output.bytes_written, output.peak_speed);
     } else {
-        let mkv = libfreemkv::MkvStream::new(BufWriter::with_capacity(4 * 1024 * 1024, file))
-            .title(&title)
-            .max_buffer(10 * 1024 * 1024);
+        let mkv = libfreemkv::MkvStream::new(BufWriter::with_capacity(IO_BUF_SIZE, file))
+            .meta(&meta)
+            .max_buffer(MKV_LOOKAHEAD);
         let mut output = ProgressWriter::new(mkv, total_bytes, &INTERRUPTED);
         let mut reader = disc.open_title(&mut session, target_idx).unwrap();
         rip_loop(&mut reader, &mut output);
