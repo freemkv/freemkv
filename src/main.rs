@@ -50,12 +50,25 @@ fn main() {
 
         // Everything else: freemkv <source> <dest>
         _ => {
+            // Flags that consume the next argument as a value
+            const VALUE_FLAGS: &[&str] = &[
+                "-t", "--title", "-k", "--keydb", "--min", "--language", "--lang",
+            ];
+
             // Collect URLs (non-flag args) and flags
             let mut urls = Vec::new();
             let mut flags = Vec::new();
+            let mut skip_next = false;
             for arg in &args[1..] {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
                 if arg.starts_with('-') {
                     flags.push(arg.clone());
+                    if VALUE_FLAGS.contains(&arg.as_str()) {
+                        skip_next = true;
+                    }
                 } else {
                     urls.push(arg.clone());
                 }
@@ -172,7 +185,9 @@ fn usage() {
     println!("  freemkv info mkv://Dune.mkv                        Show file metadata");
     println!();
     println!("Flags:");
-    println!("  -t, --title N       Which title (default: longest)");
+    println!("  -t, --title N       Title number (repeatable)");
+    println!("  -a, --all           Rip all titles");
+    println!("      --min N         Minimum duration in minutes (with --all)");
     println!("  -k, --keydb PATH    KEYDB.cfg path");
     println!("  -v, --verbose       Show AACS debug info");
     println!("  -q, --quiet         Suppress output");

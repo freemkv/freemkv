@@ -190,7 +190,7 @@ fn codec_name(c: Codec) -> String {
         Codec::Mpeg2 => "MPEG-2".into(), Codec::TrueHd => "TrueHD".into(), Codec::DtsHdMa => "DTS-HD MA".into(),
         Codec::DtsHdHr => "DTS-HD HR".into(), Codec::Dts => "DTS".into(), Codec::Ac3 => "DD".into(),
         Codec::Ac3Plus => "DD+".into(), Codec::Lpcm => "LPCM".into(), Codec::Pgs => "PGS".into(),
-        Codec::Unknown(ct) => format!("0x{:02x}", ct),
+        Codec::DvdSub => "DVD Sub".into(), Codec::Unknown(ct) => format!("0x{:02x}", ct),
     }
 }
 
