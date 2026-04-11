@@ -84,12 +84,17 @@ pub fn run(source: &str, dest: &str, args: &[String]) {
         std::process::exit(1);
     }
 
-    let parsed_source = libfreemkv::parse_url(source);
-    let is_disc = parsed_source.scheme == "disc";
+    // Warn if --min is used without --all
+    if min_minutes.is_some() && !all {
+        eprintln!("Warning: --min has no effect without --all");
+    }
 
-    // --all requires disc:// source
+    let parsed_source = libfreemkv::parse_url(source);
+    let is_disc = parsed_source.scheme == "disc" || parsed_source.scheme == "iso";
+
+    // --all requires disc:// or iso:// source
     if all && !is_disc {
-        eprintln!("--all requires disc:// source");
+        eprintln!("--all requires disc:// or iso:// source");
         std::process::exit(1);
     }
 

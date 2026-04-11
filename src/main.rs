@@ -15,8 +15,6 @@ mod disc_info;
 mod info;
 mod output;
 mod pipe;
-mod remux;
-mod rip;
 mod strings;
 
 fn main() {
