@@ -34,5 +34,5 @@
 - [ ] Interactive title selection
 - [ ] Pioneer Renesas platform support
 - [ ] macOS native support (IOKit backend)
-- [ ] Windows support (SPTI backend)
+- [ ] Windows testing on real hardware
 - [ ] DVD CSS decryption
