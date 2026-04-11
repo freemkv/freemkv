@@ -16,8 +16,21 @@ const IO_BUF_SIZE: usize = 4 * 1024 * 1024;
 const MKV_LOOKAHEAD: usize = 10 * 1024 * 1024;
 
 fn install_signal_handler() {
+    #[cfg(unix)]
     unsafe { libc::signal(libc::SIGINT, handle_sigint as *const () as libc::sighandler_t); }
+
+    #[cfg(windows)]
+    unsafe {
+        extern "system" fn handler(_: u32) -> i32 {
+            INTERRUPTED.store(true, Ordering::Relaxed);
+            1 // TRUE = handled
+        }
+        extern "system" { fn SetConsoleCtrlHandler(handler: unsafe extern "system" fn(u32) -> i32, add: i32) -> i32; }
+        SetConsoleCtrlHandler(handler, 1);
+    }
 }
+
+#[cfg(unix)]
 extern "C" fn handle_sigint(_sig: libc::c_int) {
     INTERRUPTED.store(true, Ordering::Relaxed);
 }
