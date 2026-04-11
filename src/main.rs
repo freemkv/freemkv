@@ -5,9 +5,9 @@
 //        freemkv info <url> [flags]
 //
 // Examples:
-//   freemkv disc:// Dune.mkv
-//   freemkv disc:///dev/sg4 Dune.m2ts
-//   freemkv Dune.m2ts Dune.mkv
+//   freemkv disc:// mkv://Dune.mkv
+//   freemkv disc:///dev/sg4 m2ts://Dune.m2ts
+//   freemkv m2ts://Dune.m2ts mkv://Dune.mkv
 //   freemkv disc:// network://10.1.7.11:9000
 //   freemkv info disc://
 
@@ -97,7 +97,7 @@ fn info_cmd(args: &[String]) {
             disc_args.extend_from_slice(&args[1..]);
             disc_info::run(&disc_args);
         }
-        "m2ts" | "mkv" => {
+        "m2ts" | "mkv" | "iso" => {
             // Show stream metadata
             use libfreemkv::IOStream;
             match libfreemkv::open_input(url, &libfreemkv::InputOptions::default()) {
@@ -142,24 +142,33 @@ fn usage() {
     println!("       freemkv info <url> [flags]");
     println!();
     println!("Stream URLs:");
-    println!("  disc://                Optical drive (auto-detect)");
-    println!("  disc:///dev/sg4        Optical drive (specific device)");
-    println!("  m2ts://path.m2ts      BD transport stream file");
-    println!("  mkv://path.mkv        Matroska container file");
-    println!("  network://host:port   TCP stream");
+    println!("  disc://                  Optical drive (auto-detect)");
+    println!("  disc:///dev/sg4          Optical drive (specific device)");
+    println!("  mkv://path.mkv           Matroska file");
+    println!("  m2ts://path.m2ts         BD transport stream file");
+    println!("  network://host:port      TCP stream");
+    println!("  stdio://                 Stdin/stdout pipe");
+    println!("  iso://image.iso          Blu-ray ISO image");
+    println!("  null://                  Discard (benchmarking)");
     println!();
-    println!("  Bare paths infer scheme from extension:");
-    println!("  Dune.mkv  →  mkv://Dune.mkv");
-    println!("  Dune.m2ts →  m2ts://Dune.m2ts");
+    println!("  All URLs require a scheme:// prefix.");
+    println!("  File paths follow the scheme: mkv://./Dune.mkv, m2ts:///tmp/Dune.m2ts");
     println!();
     println!("Examples:");
-    println!("  freemkv disc:// Dune.mkv                    Rip to MKV");
-    println!("  freemkv disc:// Dune.m2ts                   Rip to raw");
-    println!("  freemkv disc:// network://10.1.7.11:9000    Rip to network");
-    println!("  freemkv Dune.m2ts Dune.mkv                  Remux file");
-    println!("  freemkv network://0.0.0.0:9000 Dune.mkv     Remux from network");
-    println!("  freemkv info disc://                         Show disc info");
-    println!("  freemkv info Dune.m2ts                       Show file info");
+    println!("  freemkv disc:// mkv://Dune.mkv                     Rip disc to MKV");
+    println!("  freemkv disc:// m2ts://Dune.m2ts                   Rip disc to m2ts");
+    println!("  freemkv disc:///dev/sg4 mkv://Dune.mkv             Rip specific drive");
+    println!("  freemkv disc:// mkv://Dune.mkv -t 2                Rip title 2");
+    println!("  freemkv m2ts://Dune.m2ts mkv://Dune.mkv            Remux m2ts to MKV");
+    println!("  freemkv mkv://Dune.mkv m2ts://Dune.m2ts            Remux MKV to m2ts");
+    println!("  freemkv disc:// network://10.1.7.11:9000           Stream to network");
+    println!("  freemkv network://0.0.0.0:9000 mkv://Dune.mkv     Receive from network");
+    println!("  freemkv iso://Dune.iso mkv://Dune.mkv                ISO image to MKV");
+    println!("  freemkv disc:// stdio://                            Pipe to stdout");
+    println!("  freemkv stdio:// mkv://Dune.mkv                    Pipe from stdin");
+    println!("  freemkv disc:// null://                             Benchmark read speed");
+    println!("  freemkv info disc://                                Show disc info");
+    println!("  freemkv info mkv://Dune.mkv                        Show file metadata");
     println!();
     println!("Flags:");
     println!("  -t, --title N       Which title (default: longest)");
