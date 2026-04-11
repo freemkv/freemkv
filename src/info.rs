@@ -275,6 +275,21 @@ pub fn run(args: &[String]) {
     body.push_str("```\n\n");
     body.push_str(&format!("Features captured: {}\n\n", feat_lines.len()));
 
+    // Inline raw identity data — readable without downloading the zip
+    body.push_str("### Raw identity\n\n");
+    body.push_str("```\n");
+    body.push_str(&format!("INQUIRY[4] (additional length): 0x{:02X}\n",
+        if id.raw_inquiry.len() > 4 { id.raw_inquiry[4] } else { 0 }));
+    body.push_str(&format!("INQUIRY ({} bytes):\n  {}\n",
+        id.raw_inquiry.len(), hex_dump(&id.raw_inquiry)));
+    if !id.raw_gc_010c.is_empty() {
+        body.push_str(&format!("GET_CONFIG 010C ({} bytes):\n  {}\n",
+            id.raw_gc_010c.len(), hex_dump(&id.raw_gc_010c)));
+    } else {
+        body.push_str("GET_CONFIG 010C: not available\n");
+    }
+    body.push_str("```\n\n");
+
     if let Some(ref b64) = zip_b64 {
         body.push_str("<details><summary>Profile data (base64 zip)</summary>\n\n");
         body.push_str("```\n");
@@ -377,6 +392,13 @@ fn mask_bytes(data: &[u8]) -> Vec<u8> {
 
 fn save_bin(dir: &std::path::Path, name: &str, data: &[u8]) {
     std::fs::write(dir.join(name), data).unwrap_or_else(|_| panic!("Cannot write {}", name));
+}
+
+fn hex_dump(data: &[u8]) -> String {
+    data.chunks(32)
+        .map(|chunk| chunk.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n  ")
 }
 
 fn format_date(fw_date: &str) -> String {
