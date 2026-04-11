@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.1 (2026-04-11)
+
+### ISO support + SectorReader refactor
+
+- **`iso://` stream** — read Blu-ray ISO images with full title/stream/label scanning
+- **`stdio://` stream** — pipe to/from stdin/stdout
+- **Raw INQUIRY + GET_CONFIG 010C** in `--share` issue body (inline hex, no download needed)
+- libfreemkv 0.7.1 (SectorReader trait, `Disc::scan_image()`, `resolve_encryption()`)
+
+## 0.7.0 (2026-04-11)
+
+### Stream architecture
+
+- **`freemkv <source> <dest>`** — two arguments, any input to any output
+- **7 stream types** — `disc://`, `iso://`, `mkv://`, `m2ts://`, `network://`, `stdio://`, `null://`
+- **Strict URL format** — all URLs require `scheme://path`, bare paths rejected
+- **Pipe mode** (`pipe.rs`) — generic source→dest copy with metadata flow
+- **Network streaming** — rip on one machine, remux on another
+- **`build.rs`** — auto-generates bundled locale code from `locales/*.json`
+- **Updated CLI dispatcher** — URL routing replaces subcommand-based routing
+- **FEATURES.md** updated to v0.7.0
+
 ## 0.6.0 (2026-04-10)
 
 ### MKV output
