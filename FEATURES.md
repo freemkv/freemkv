@@ -1,30 +1,38 @@
 # freemkv — Feature List
 
-## v0.1.0 (current)
+## v0.6.0 (current)
 
 ### Done
-- [x] `freemkv info` — display drive information
-- [x] `freemkv info --share` — capture bdemu-compatible profile
-- [x] `freemkv info --mask` — format-preserving serial masking
+- [x] `freemkv drive-info` — display drive hardware and profile match
+- [x] `freemkv drive-info --share` — capture and submit drive profile to GitHub
+- [x] `freemkv drive-info --mask` — mask serial numbers for privacy
+- [x] `freemkv disc-info` — show disc titles, streams, sizes, labels
+- [x] `freemkv disc-info --full` — show all titles (not just top 5)
+- [x] `freemkv disc-info --basic` — show disc info without BD-J labels
+- [x] `freemkv rip` — full disc backup with AACS decryption
+- [x] MKV output (default) with native muxer
+- [x] m2ts output via `--raw` flag
+- [x] `freemkv remux` — convert m2ts to MKV without a drive
+- [x] `freemkv update-keys` — download and update KEYDB.cfg
+- [x] Title selection (`--title N`) and listing (`--list`)
 - [x] Auto-detect BD drives on /dev/sg0-15
-- [x] Platform detection: Pioneer (RB 0xF1), MTK (RB mode 6)
-- [x] Captures 15 GET_CONFIG features
-- [x] Captures MODE_SENSE, REPORT_KEY, vendor READ_BUFFER
+- [x] Progress display: speed, ETA, percentage
+- [x] SIGINT handling: clean interrupt, disc ejected
+- [x] Adaptive error handling: batch ramp-down, speed reduction
+- [x] i18n string table (en + es bundled, runtime locale loading)
+- [x] Safe output filenames (spaces → underscores)
+- [x] Works with all drives (profile match optional)
+- [x] Stream labels from 5 BD-J format parsers
+- [x] Platform detection: MediaTek MT1959 (A + B variants)
+- [x] Captures 15 GET_CONFIG features for profile sharing
 - [x] Auto-generates drive.toml with feature mapping
-- [x] Submit link to GitHub Issues for profile sharing
+- [x] Profile submission via GitHub API
 
-### v0.2.0 (planned)
-- [ ] `freemkv rip` — disc backup
-- [ ] Identity fingerprint computation (SHA1)
-- [ ] Keys database lookup: supported / not supported / unknown
+### Planned
 - [ ] `--json` output format
-- [ ] HL-DT-ST Renesas platform detection (RB mode 5)
-- [ ] Automated profile submission via GitHub API
-
-### v0.3.0 (future)
-- [ ] `freemkv rip` — full disc backup with libfreemkv
-- [ ] Title selection and metadata display
-- [ ] Progress reporting
 - [ ] Resume interrupted rips
-- [ ] Windows support
-- [ ] macOS support
+- [ ] Interactive title selection
+- [ ] Pioneer Renesas platform support
+- [ ] macOS native support (IOKit backend)
+- [ ] Windows support (SPTI backend)
+- [ ] DVD CSS decryption

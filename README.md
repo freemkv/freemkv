@@ -13,13 +13,13 @@ Open source 4K UHD / Blu-ray / DVD backup tool. Two arguments — source and des
 curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86_64-linux.tar.gz | tar xz
 
 # Rip a disc to MKV
-./freemkv disc:// Dune.mkv
+./freemkv disc:// mkv://Dune.mkv
 
 # Rip to raw transport stream
-./freemkv disc:// Dune.m2ts
+./freemkv disc:// m2ts://Dune.m2ts
 
-# Remux a file
-./freemkv Dune.m2ts Dune.mkv
+# Remux m2ts to MKV
+./freemkv m2ts://Dune.m2ts mkv://Dune.mkv
 
 # Show disc info
 ./freemkv info disc://
@@ -27,33 +27,46 @@ curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86
 
 ## How It Works
 
-Every operation is `freemkv <source> <dest>`. Sources and destinations are stream URLs:
+Every operation is `freemkv <source> <dest>`. Sources and destinations are stream URLs.
 
-| URL | Direction | Description |
-|-----|-----------|-------------|
-| `disc://` | Read | Optical drive (auto-detect) |
-| `disc:///dev/sg4` | Read | Optical drive (specific device) |
-| `Dune.mkv` | Read/Write | Matroska file |
-| `Dune.m2ts` | Read/Write | BD transport stream file |
-| `network://host:9000` | Read/Write | TCP stream |
+### Streams
 
-Bare file paths infer the format from the extension.
+| Stream | Input | Output | URL |
+|--------|-------|--------|-----|
+| Disc | Yes | -- | `disc://` or `disc:///dev/sg4` |
+| ISO | Yes | -- | `iso://path.iso` |
+| MKV | Yes | Yes | `mkv://path` |
+| M2TS | Yes | Yes | `m2ts://path` |
+| Network | Yes (listen) | Yes (connect) | `network://host:port` |
+| Stdio | Yes (stdin) | Yes (stdout) | `stdio://` |
+| Null | -- | Yes | `null://` |
+
+All URLs use the `scheme://path` format. No bare paths — always include the scheme prefix.
 
 ## Examples
 
 ### Rip a disc
 
 ```bash
-freemkv disc:// Dune.mkv                     # MKV output
-freemkv disc:// Dune.m2ts                     # Raw transport stream
-freemkv disc:///dev/sg4 Dune.mkv              # Specific drive
-freemkv disc:// Dune.mkv -t 2                 # Title 2
+freemkv disc:// mkv://Dune.mkv                     # MKV output
+freemkv disc:// m2ts://Dune.m2ts                    # Raw transport stream
+freemkv disc:///dev/sg4 mkv://Dune.mkv              # Specific drive
+freemkv disc:// mkv://Dune.mkv -t 2                 # Title 2
+freemkv disc:// mkv:///media/movies/Dune.mkv        # Absolute path
+```
+
+### Rip from ISO image
+
+```bash
+freemkv iso://Dune.iso mkv://Dune.mkv               # ISO → MKV
+freemkv iso://Dune.iso m2ts://Dune.m2ts              # ISO → m2ts
 ```
 
 ### Remux between formats
 
 ```bash
-freemkv Dune.m2ts Dune.mkv                   # m2ts → MKV
+freemkv m2ts://Dune.m2ts mkv://Dune.mkv             # m2ts → MKV
+freemkv mkv://Dune.mkv m2ts://Dune.m2ts             # MKV → m2ts
 ```
 
 ### Network streaming (two machines)
@@ -65,12 +78,12 @@ Rip on a low-power machine with a disc drive, remux on a high-power server:
   [Ripper]  ──────────────────────►  [Transcoder]
   disc drive                          fast CPU
   freemkv disc://                     freemkv network://
-    network://10.1.7.11:9000            0.0.0.0:9000 Dune.mkv
+    network://10.1.7.11:9000            0.0.0.0:9000 mkv://Dune.mkv
 ```
 
 **On the transcoder** (start first — it listens):
 ```bash
-freemkv network://0.0.0.0:9000 Dune.mkv
+freemkv network://0.0.0.0:9000 mkv://Dune.mkv
 ```
 
 **On the ripper** (connects and streams):
@@ -80,12 +93,25 @@ freemkv disc:// network://10.1.7.11:9000
 
 The metadata header flows first — labels, languages, duration, stream layout. The transcoder has everything it needs without touching the disc.
 
+### Pipe to other tools
+
+```bash
+freemkv disc:// stdio:// | ffmpeg -i pipe:0 -c copy output.mkv
+cat raw.m2ts | freemkv stdio:// mkv://Dune.mkv
+```
+
+### Benchmark read speed
+
+```bash
+freemkv disc:// null://
+```
+
 ### Inspect metadata
 
 ```bash
-freemkv info disc://                          # Disc info
-freemkv info Dune.m2ts                        # File metadata
-freemkv info Dune.mkv                         # MKV track info
+freemkv info disc://                                # Disc info
+freemkv info m2ts://Dune.m2ts                       # File metadata
+freemkv info mkv://Dune.mkv                         # MKV track info
 ```
 
 ### Disc info
