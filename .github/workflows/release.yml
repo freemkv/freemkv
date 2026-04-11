@@ -35,6 +35,8 @@ jobs:
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -67,18 +69,26 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: cross build --release --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          # Versioned archive (for release history)
           tar czf "../../../freemkv-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" freemkv
-          # Stable-name archive (for /latest/ URLs that never change)
           tar czf "../../../freemkv-${{ matrix.target }}.tar.gz" freemkv
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/freemkv.exe" -DestinationPath "freemkv-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/freemkv.exe" -DestinationPath "freemkv-${{ matrix.target }}.zip"
 
       - name: Upload
         uses: softprops/action-gh-release@v2
         with:
-          files: '*.tar.gz'
+          files: |
+            *.tar.gz
+            *.zip
 
   update-homepage:
     needs: build

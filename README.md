@@ -180,7 +180,7 @@ cargo build --release
 
 ## Supported Drives
 
-Works with LG, ASUS, HP, and other MediaTek-based BD-RE drives. Run `freemkv info disc://` to check. Pioneer support planned.
+Works with LG, ASUS, HP, and other MediaTek-based BD-RE drives on Linux, macOS, and Windows. Run `freemkv info disc://` to check. Pioneer support planned.
 
 ## Contributing
 
