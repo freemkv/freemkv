@@ -143,7 +143,8 @@ fn usage() {
     println!();
     println!("Stream URLs:");
     println!("  disc://                  Optical drive (auto-detect)");
-    println!("  disc:///dev/sg4          Optical drive (specific device)");
+    println!("  disc:///dev/sg4          Optical drive (Linux)");
+    println!("  disc://D:                Optical drive (Windows)");
     println!("  mkv://path.mkv           Matroska file");
     println!("  m2ts://path.m2ts         BD transport stream file");
     println!("  network://host:port      TCP stream");
