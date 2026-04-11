@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.2 (2026-04-11)
+
+### Windows support
+
+- **Windows build target** — x86_64-pc-windows-msvc in release workflow
+- **Windows SIGINT** — SetConsoleCtrlHandler for Ctrl+C handling
+- **Stable download URLs** — both versioned + stable-name archives per release
+- **CI** — cargo check on windows-latest, actions/checkout@v5
+- libc dependency gated to unix only
+
 ## 0.7.1 (2026-04-11)
 
 ### ISO support + SectorReader refactor
