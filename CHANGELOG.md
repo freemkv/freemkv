@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.0 (2026-04-11)
+
+### DVD + batch ripping
+- **DVD support** — insert a DVD, get an MKV. Same command as BD/UHD.
+- **`--all`** — rip every title from a disc
+- **`--min N`** — minimum duration in minutes (with --all)
+- **`-t N` repeatable** — rip specific titles
+- **Chapters** — MPLS marks flow through to MKV Chapters element
+- **Progress for all sources** — percentage + ETA for disc, ISO, m2ts, mkv
+- **Ctrl+C handling** in pipe path
+- **`iso://` with --all** — batch rip from ISO images
+
+### Cleanup
+- Removed dead code (rip.rs, remux.rs — superseded by pipe.rs)
+- `--min` warns when used without `--all`
+
 ## 0.7.2 (2026-04-11)
 
 ### Windows support
