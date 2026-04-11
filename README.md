@@ -4,34 +4,94 @@
 
 # freemkv
 
-Open source 4K UHD / Blu-ray / DVD backup tool. One binary, no dependencies. Multi-lingual — the library outputs structured data and error codes, not English text. Build any UI on top.
+Open source 4K UHD / Blu-ray / DVD backup tool. Two arguments — source and destination. Stream URLs let you rip, remux, and transfer between any combination of disc, file, and network.
 
 ## Quick Start
 
-**Linux (x86_64):**
 ```bash
+# Linux
 curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86_64-linux.tar.gz | tar xz
-./freemkv disc-info
+
+# Rip a disc to MKV
+./freemkv disc:// Dune.mkv
+
+# Rip to raw transport stream
+./freemkv disc:// Dune.m2ts
+
+# Remux a file
+./freemkv Dune.m2ts Dune.mkv
+
+# Show disc info
+./freemkv info disc://
 ```
 
-**macOS (Apple Silicon):**
+## How It Works
+
+Every operation is `freemkv <source> <dest>`. Sources and destinations are stream URLs:
+
+| URL | Direction | Description |
+|-----|-----------|-------------|
+| `disc://` | Read | Optical drive (auto-detect) |
+| `disc:///dev/sg4` | Read | Optical drive (specific device) |
+| `Dune.mkv` | Read/Write | Matroska file |
+| `Dune.m2ts` | Read/Write | BD transport stream file |
+| `network://host:9000` | Read/Write | TCP stream |
+
+Bare file paths infer the format from the extension.
+
+## Examples
+
+### Rip a disc
+
 ```bash
-curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-aarch64-macos.tar.gz | tar xz
-./freemkv disc-info
+freemkv disc:// Dune.mkv                     # MKV output
+freemkv disc:// Dune.m2ts                     # Raw transport stream
+freemkv disc:///dev/sg4 Dune.mkv              # Specific drive
+freemkv disc:// Dune.mkv -t 2                 # Title 2
 ```
 
-**Windows:** Coming soon.
+### Remux between formats
 
-Or install from source: `cargo install freemkv`
+```bash
+freemkv Dune.m2ts Dune.mkv                   # m2ts → MKV
+```
 
-## disc-info
+### Network streaming (two machines)
+
+Rip on a low-power machine with a disc drive, remux on a high-power server:
 
 ```
-$ freemkv disc-info
+                           TCP
+  [Ripper]  ──────────────────────►  [Transcoder]
+  disc drive                          fast CPU
+  freemkv disc://                     freemkv network://
+    network://10.1.7.11:9000            0.0.0.0:9000 Dune.mkv
+```
 
-freemkv 0.6.0
+**On the transcoder** (start first — it listens):
+```bash
+freemkv network://0.0.0.0:9000 Dune.mkv
+```
 
-Scanning disc...
+**On the ripper** (connects and streams):
+```bash
+freemkv disc:// network://10.1.7.11:9000
+```
+
+The metadata header flows first — labels, languages, duration, stream layout. The transcoder has everything it needs without touching the disc.
+
+### Inspect metadata
+
+```bash
+freemkv info disc://                          # Disc info
+freemkv info Dune.m2ts                        # File metadata
+freemkv info Dune.mkv                         # MKV track info
+```
+
+### Disc info
+
+```
+$ freemkv info disc://
 
 Disc: Dune
 Format: 4K UHD (2L, 90.7 GB)
@@ -50,113 +110,55 @@ Titles
                  German TrueHD 5.1
                  Italian TrueHD 5.1
                  Spanish DD 5.1
-                 Hindi DD 5.1
 
       Subtitle:  English
                  French
                  German
-                 Italian
-                 Spanish
-                 Chinese
-                 Korean
-
-      +2 more (use --full to show all)
-```
-
-## drive-info
-
-```
-$ freemkv drive-info
-
-freemkv 0.6.0
-
-Drive Information
-  Device:              /dev/sg4
-  Manufacturer:        HL-DT-ST
-  Product:             BD-RE BU40N
-  Revision:            1.03
-  Serial number:       MO6J7HB1010
-  Firmware date:       2018-10-24
-
-Platform Information
-  Drive platform:      MediaTek MT1959
-  Firmware version:    1.03/NM00000
-  Profile:             Supported
-
-Run 'freemkv drive-info --share' to help expand drive support.
-```
-
-## rip
-
-```
-$ freemkv rip --output ~/Movies/
-
-freemkv rip v0.6.0
-
-Opening /dev/sg4... OK
-  HL-DT-ST BD-RE BU40N
-Waiting for disc... OK
-Initializing drive... OK
-Probing disc... OK
-Scanning disc... OK
-
-  Capacity: 90.7 GB
-  AACS:     encrypted (keys found)
-
-Ripping title 1 (2h 35m, 88.8 GB) -> Dune.mkv
-  22.1 GB / 88.8 GB  (25%)  17.2 MB/s  ETA 65:23
 ```
 
 ## Stream Labels
 
-freemkv automatically extracts rich stream metadata that other tools can't see. Standard tools only read MPLS data (language code + codec). freemkv reads BD-J authoring files on the disc to identify:
+freemkv reads BD-J authoring files on the disc — metadata that other tools can't see. Standard tools only read MPLS data (language code + codec). freemkv identifies:
 
 - **Audio purpose** — Commentary, Descriptive Audio, Score
-- **Codec detail** — TrueHD, Dolby Digital, Dolby Atmos
-- **Forced subtitles** — which tracks are forced/narrative
+- **Codec detail** — TrueHD, Dolby Atmos, DTS-HD MA
+- **Forced subtitles** — narrative/foreign language tracks
 - **Language variants** — US vs UK English, Castilian vs Latin Spanish
-- **SDH** — subtitles for deaf/hard of hearing
 
-Five BD-J format parsers built in (Paramount, Criterion, Pixelogic, Warner CTRM, Deluxe). Detection is automatic.
+Labels are preserved in all output formats — MKV track names and M2TS metadata headers carry them through.
 
-## Commands
+## Flags
 
 ```
-freemkv <command> [options]
-
-  drive-info            Show drive hardware and profile match
-  disc-info             Show disc titles, streams, and sizes
-  rip [options]         Back up a disc title (MKV default, --raw for m2ts)
-  remux <in.m2ts>       Convert m2ts to MKV (no drive needed)
-  update-keys --url <u> Download and update KEYDB.cfg
-
-Rip options:
-  -d, --device /dev/sgN   Specify device (default: auto-detect)
-  -k, --keydb /path       Path to KEYDB.cfg for AACS decryption
-  -o, --output /path      Output directory
-  -t, --title N           Title number (default: 1 = main feature)
-  -l, --list              List titles only, don't rip
-      --raw               Output raw m2ts instead of MKV
-
-Drive-info options:
-  -s, --share             Capture and submit drive profile
-  -m, --mask              Mask serial numbers
-
-Global options:
-  -q, --quiet             Suppress output
+-t, --title N       Which title (default: longest)
+-k, --keydb PATH    KEYDB.cfg path
+-v, --verbose       AACS debug info
+-q, --quiet         Suppress output
+-l, --list          List titles only (with disc://)
+-s, --share         Submit drive profile (with info disc://)
+-m, --mask          Mask serial numbers
 ```
 
-## Binary Size
+## Building from Source
 
-The release binary is ~5 MB. Most of the size comes from the TLS stack (rustls/ring) used by `--share` for HTTPS to GitHub. The `--share` dependencies (ureq, zip, serde_json) could be moved behind a feature flag to produce a ~2 MB binary for users who don't need profile sharing.
+```bash
+cargo install freemkv
+```
+
+Or clone and build:
+```bash
+git clone https://github.com/freemkv/freemkv
+cd freemkv/freemkv
+cargo build --release
+```
 
 ## Supported Drives
 
-Works with LG, ASUS, HP, and other MediaTek-based BD-RE drives. Run `freemkv drive-info` to check your drive. Pioneer support planned.
+Works with LG, ASUS, HP, and other MediaTek-based BD-RE drives. Run `freemkv info disc://` to check. Pioneer support planned.
 
 ## Contributing
 
-Run `freemkv drive-info --share` to submit your drive's profile and help expand hardware support.
+Run `freemkv info disc:// --share` to submit your drive's profile and help expand hardware support.
 
 ## License
 
