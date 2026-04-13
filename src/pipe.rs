@@ -116,6 +116,15 @@ pub fn run(source: &str, dest: &str, args: &[String]) {
         return;
     }
 
+    // Disc-to-ISO: raw sector dump (full disc clone)
+    let parsed_dest = libfreemkv::parse_url(dest);
+    if matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. })
+        && matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. })
+    {
+        run_disc_to_iso(source, dest, &keydb_path, verbose, quiet);
+        return;
+    }
+
     // Single title mode (original behavior)
     let title_num = title_nums.first().map(|n| n - 1); // convert 1-based to 0-based
 
@@ -595,4 +604,183 @@ fn run_batch(
         Normal,
         &format!("Batch complete: {} titles ripped", title_indices.len()),
     );
+}
+
+/// Raw disc-to-ISO: read every sector from the drive and write to file.
+/// No demuxing, no title selection — full disc clone with decryption.
+fn run_disc_to_iso(
+    source: &str,
+    dest: &str,
+    keydb_path: &Option<String>,
+    verbose: bool,
+    quiet: bool,
+) {
+    let out = Output::new(verbose, quiet);
+    out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
+    out.blank(Normal);
+
+    // Open drive
+    let parsed_source = libfreemkv::parse_url(source);
+    out.raw_inline(Normal, "Opening drive... ");
+    let mut drive = match &parsed_source {
+        libfreemkv::StreamUrl::Disc { device: Some(p) } => {
+            libfreemkv::Drive::open(p).unwrap_or_else(|e| {
+                out.raw(Normal, "FAILED");
+                eprintln!("  {}", e);
+                std::process::exit(1);
+            })
+        }
+        _ => libfreemkv::find_drive().unwrap_or_else(|| {
+            out.raw(Normal, "FAILED");
+            eprintln!("{}", strings::get("error.no_drive"));
+            std::process::exit(1);
+        }),
+    };
+    out.raw(Normal, "OK");
+
+    let _ = drive.wait_ready();
+    let _ = drive.init();
+    let _ = drive.probe_disc();
+
+    // AACS handshake if needed
+    let scan_opts = match keydb_path {
+        Some(ref kp) => libfreemkv::ScanOptions::with_keydb(kp),
+        None => libfreemkv::ScanOptions::default(),
+    };
+    // Scan disc to trigger AACS key resolution (needed for decrypted reads)
+    out.raw_inline(Normal, "Scanning disc... ");
+    let disc = match libfreemkv::Disc::scan(&mut drive, &scan_opts) {
+        Ok(d) => {
+            out.raw(Normal, "OK");
+            d
+        }
+        Err(e) => {
+            out.raw(Normal, "FAILED");
+            eprintln!("  {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Read capacity
+    let total_sectors = match drive.read_capacity() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("Cannot read disc capacity: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let total_bytes = total_sectors as u64 * 2048;
+    let disc_name = disc.volume_id.trim().to_string();
+    let disc_name = if disc_name.is_empty() { "disc".to_string() } else { disc_name };
+
+    out.raw(Normal, &format!(
+        "Disc: {} ({:.1} GB, {} sectors)",
+        disc_name,
+        total_bytes as f64 / 1_073_741_824.0,
+        total_sectors
+    ));
+
+    // Open output file
+    let iso_path = match libfreemkv::parse_url(dest) {
+        libfreemkv::StreamUrl::Iso { ref path } => path.clone(),
+        _ => {
+            eprintln!("Destination must be iso://path");
+            std::process::exit(1);
+        }
+    };
+    let file = match std::fs::File::create(&iso_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Cannot create {}: {}", iso_path.display(), e);
+            std::process::exit(1);
+        }
+    };
+    let mut writer = std::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
+
+    out.raw(Normal, &format!("Output: {}", iso_path.display()));
+    out.blank(Normal);
+
+    // Lock tray during dump
+    drive.lock_tray();
+
+    // Read all sectors in batches
+    let batch_sectors: u16 = 64;
+    let mut buf = vec![0u8; batch_sectors as usize * 2048];
+    let mut lba: u32 = 0;
+    let mut bytes_written: u64 = 0;
+    let start = std::time::Instant::now();
+    let mut last_report = std::time::Instant::now();
+
+    while lba < total_sectors {
+        if INTERRUPTED.load(Ordering::Relaxed) {
+            out.blank(Normal);
+            out.raw(Normal, "Interrupted.");
+            break;
+        }
+
+        let remaining = total_sectors - lba;
+        let count = (remaining as u16).min(batch_sectors);
+        let byte_count = count as usize * 2048;
+        buf.resize(byte_count, 0);
+
+        match drive.read_disc(lba, count, &mut buf[..byte_count]) {
+            Ok(_) => {
+                if let Err(e) = writer.write_all(&buf[..byte_count]) {
+                    eprintln!("\nWrite error: {}", e);
+                    break;
+                }
+                lba += count as u32;
+                bytes_written += byte_count as u64;
+            }
+            Err(_) => {
+                // Zero-fill unreadable sectors and continue
+                buf[..byte_count].fill(0);
+                if let Err(e) = writer.write_all(&buf[..byte_count]) {
+                    eprintln!("\nWrite error: {}", e);
+                    break;
+                }
+                lba += count as u32;
+                bytes_written += byte_count as u64;
+            }
+        }
+
+        // Progress every 500ms
+        if last_report.elapsed().as_millis() >= 500 {
+            let elapsed = start.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 { bytes_written as f64 / elapsed / 1_048_576.0 } else { 0.0 };
+            let pct = bytes_written as f64 / total_bytes as f64 * 100.0;
+            let eta = if speed > 0.0 {
+                let remaining_bytes = total_bytes - bytes_written;
+                let secs = remaining_bytes as f64 / (speed * 1_048_576.0);
+                format!("{}:{:02}", secs as u64 / 60, secs as u64 % 60)
+            } else {
+                "?:??".to_string()
+            };
+            eprint!(
+                "\r  {:.1}% | {:.1} GB / {:.1} GB | {:.1} MB/s | ETA {}    ",
+                pct,
+                bytes_written as f64 / 1_073_741_824.0,
+                total_bytes as f64 / 1_073_741_824.0,
+                speed,
+                eta
+            );
+            last_report = std::time::Instant::now();
+        }
+    }
+
+    let _ = writer.flush();
+    eprintln!();
+
+    // Unlock tray
+    drive.unlock_tray();
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let speed = if elapsed > 0.0 { bytes_written as f64 / elapsed / 1_048_576.0 } else { 0.0 };
+    out.raw(Normal, &format!(
+        "Complete: {:.1} GB in {:.0}s ({:.1} MB/s)",
+        bytes_written as f64 / 1_073_741_824.0,
+        elapsed,
+        speed,
+    ));
+    out.raw(Normal, &format!("Output: {}", iso_path.display()));
 }
