@@ -90,7 +90,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) {
     }
 
     let parsed_source = libfreemkv::parse_url(source);
-    let is_disc = parsed_source.scheme == "disc" || parsed_source.scheme == "iso";
+    let is_disc = parsed_source.is_disc_source();
 
     // --all requires disc:// or iso:// source
     if all && !is_disc {
@@ -320,26 +320,21 @@ fn run_batch(
     // Dest must be a directory-bearing URL (mkv:// or m2ts://) for batch output.
     // Parse dest to get scheme and directory.
     let parsed_dest = libfreemkv::parse_url(dest);
-    let dest_scheme = parsed_dest.scheme.clone();
-    let dest_dir = std::path::Path::new(&parsed_dest.path)
+    let dest_path_str = parsed_dest.path_str();
+    let dest_dir = std::path::Path::new(dest_path_str)
         .parent()
         .unwrap_or(std::path::Path::new("."));
 
-    // For batch mode, dest path must be a directory (or we use its parent).
-    // If the dest path itself looks like a directory (ends with / or has no extension),
-    // use it directly; otherwise use its parent.
-    let out_dir = if parsed_dest.path.ends_with('/')
-        || parsed_dest.path.ends_with(std::path::MAIN_SEPARATOR)
-        || std::path::Path::new(&parsed_dest.path)
-            .extension()
-            .is_none()
+    let out_dir = if dest_path_str.ends_with('/')
+        || dest_path_str.ends_with(std::path::MAIN_SEPARATOR)
+        || std::path::Path::new(dest_path_str).extension().is_none()
     {
-        std::path::PathBuf::from(&parsed_dest.path)
+        std::path::PathBuf::from(dest_path_str)
     } else {
         dest_dir.to_path_buf()
     };
 
-    let ext = match dest_scheme.as_str() {
+    let ext = match parsed_dest.scheme() {
         "mkv" => "mkv",
         "m2ts" => "m2ts",
         _ => {
@@ -352,28 +347,25 @@ fn run_batch(
 
     // Open disc and scan
     let parsed_source = libfreemkv::parse_url(source);
-    let device = if !parsed_source.path.is_empty() {
-        parsed_source.path.clone()
-    } else {
-        match libfreemkv::find_drive() {
-            Some(d) => d,
-            None => {
-                eprintln!("{}", strings::get("error.no_drive"));
+    out.raw_inline(Normal, &format!("Opening {}... ", source));
+    let source_path = parsed_source.path_str();
+    let mut session = if !source_path.is_empty() {
+        match libfreemkv::Drive::open(std::path::Path::new(source_path)) {
+            Ok(s) => { out.raw(Normal, "OK"); s }
+            Err(e) => {
+                out.raw(Normal, "FAILED");
+                eprintln!("  {}", e);
                 std::process::exit(1);
             }
         }
-    };
-
-    out.raw_inline(Normal, &format!("Opening {}... ", source));
-    let mut session = match libfreemkv::DriveSession::open(std::path::Path::new(&device)) {
-        Ok(s) => {
-            out.raw(Normal, "OK");
-            s
-        }
-        Err(e) => {
-            out.raw(Normal, "FAILED");
-            eprintln!("  {}", e);
-            std::process::exit(1);
+    } else {
+        match libfreemkv::find_drive() {
+            Some(d) => { out.raw(Normal, "OK"); d }
+            None => {
+                out.raw(Normal, "FAILED");
+                eprintln!("{}", strings::get("error.no_drive"));
+                std::process::exit(1);
+            }
         }
     };
 

@@ -6,7 +6,7 @@
 use crate::output::{Level::Normal, Output};
 use crate::strings;
 use libfreemkv::{
-    AudioStream, Codec, ColorSpace, Disc, DiscFormat, DriveSession, HdrFormat, ScanOptions, Stream,
+    AudioStream, Codec, ColorSpace, Disc, DiscFormat, Drive, HdrFormat, ScanOptions, Stream,
     SubtitleStream, VideoStream,
 };
 
@@ -45,25 +45,21 @@ pub fn run(args: &[String]) {
 
     let out = Output::new(verbose, quiet);
 
-    let dev_path = device_path.unwrap_or_else(|| {
-        libfreemkv::find_drive().unwrap_or_else(|| {
+    let mut session = match device_path {
+        Some(ref p) => Drive::open(std::path::Path::new(p)).unwrap_or_else(|e| {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }),
+        None => libfreemkv::find_drive().unwrap_or_else(|| {
             eprintln!("{}", strings::get("error.no_bluray_drive"));
             std::process::exit(1);
-        })
-    });
+        }),
+    };
 
     out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
     out.blank(Normal);
     out.print(Normal, "disc.scanning");
     out.blank(Normal);
-
-    let mut session = match DriveSession::open(std::path::Path::new(&dev_path)) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        }
-    };
 
     if let Err(e) = session.wait_ready() {
         eprintln!(

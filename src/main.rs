@@ -103,24 +103,24 @@ fn info_cmd(args: &[String]) {
     let url = &args[0];
     let parsed = libfreemkv::parse_url(url);
 
-    match parsed.scheme.as_str() {
-        "disc" => {
-            // Merge remaining flags into disc_info args
+    match &parsed {
+        libfreemkv::StreamUrl::Disc { device } => {
             let mut disc_args = Vec::new();
-            if !parsed.path.is_empty() {
+            if let Some(ref d) = device {
                 disc_args.push("-d".to_string());
-                disc_args.push(parsed.path);
+                disc_args.push(d.to_string_lossy().to_string());
             }
             disc_args.extend_from_slice(&args[1..]);
             disc_info::run(&disc_args);
         }
-        "m2ts" | "mkv" | "iso" => {
-            // Show stream metadata
+        libfreemkv::StreamUrl::M2ts { .. }
+        | libfreemkv::StreamUrl::Mkv { .. }
+        | libfreemkv::StreamUrl::Iso { .. } => {
             use libfreemkv::IOStream;
             match libfreemkv::open_input(url, &libfreemkv::InputOptions::default()) {
                 Ok(stream) => {
                     let meta = stream.info();
-                    println!("File: {}", parsed.path);
+                    println!("File: {}", parsed.path_str());
                     if meta.duration_secs > 0.0 {
                         let d = meta.duration_secs;
                         println!(
@@ -162,7 +162,7 @@ fn info_cmd(args: &[String]) {
             }
         }
         _ => {
-            eprintln!("Cannot get info for scheme: {}", parsed.scheme);
+            eprintln!("Cannot get info for scheme: {}", parsed.scheme());
             std::process::exit(1);
         }
     }

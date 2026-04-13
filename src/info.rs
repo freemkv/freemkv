@@ -5,7 +5,7 @@
 
 use crate::output::{Level::Normal, Output};
 use crate::strings;
-use libfreemkv::DriveSession;
+use libfreemkv::Drive;
 use std::io::Write;
 use std::path::Path;
 
@@ -46,25 +46,21 @@ pub fn run(args: &[String]) {
         i += 1;
     }
 
-    let dev_path = device_path.unwrap_or_else(|| {
-        libfreemkv::find_drive().unwrap_or_else(|| {
-            eprintln!("{}", strings::get("error.no_drive"));
-            std::process::exit(1);
-        })
-    });
-
-    let mut session = match DriveSession::open(Path::new(&dev_path)) {
-        Ok(s) => s,
-        Err(e) => {
+    let mut session = match device_path {
+        Some(ref p) => Drive::open(Path::new(p)).unwrap_or_else(|e| {
             eprintln!(
                 "{}",
                 strings::fmt(
                     "error.open_failed",
-                    &[("device", &dev_path), ("error", &e.to_string())]
+                    &[("device", p), ("error", &e.to_string())]
                 )
             );
             std::process::exit(1);
-        }
+        }),
+        None => libfreemkv::find_drive().unwrap_or_else(|| {
+            eprintln!("{}", strings::get("error.no_drive"));
+            std::process::exit(1);
+        }),
     };
 
     let id = session.drive_id.clone();
@@ -95,7 +91,7 @@ pub fn run(args: &[String]) {
         &format!(
             "  {}:              {}",
             strings::get("drive.device"),
-            dev_path
+            session.device_path()
         ),
     );
     out.raw(
