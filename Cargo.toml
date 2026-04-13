@@ -1,6 +1,6 @@
 [package]
 name = "freemkv"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2021"
 rust-version = "1.86"
 license = "AGPL-3.0"
@@ -12,7 +12,7 @@ name = "freemkv"
 path = "src/main.rs"
 
 [dependencies]
-libfreemkv = "0.8"
+libfreemkv = "0.9"
 isolang = "2"
 ureq = { version = "2", features = ["json"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
