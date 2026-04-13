@@ -54,9 +54,6 @@ fn main() {
                 "--title",
                 "-k",
                 "--keydb",
-                "--min",
-                "--language",
-                "--lang",
             ];
 
             // Collect URLs (non-flag args) and flags
@@ -192,28 +189,27 @@ fn usage() {
     println!("  freemkv disc:// mkv://Dune.mkv                     Rip disc to MKV");
     println!("  freemkv disc:// m2ts://Dune.m2ts                   Rip disc to m2ts");
     println!("  freemkv disc:///dev/sg4 mkv://Dune.mkv             Rip specific drive");
-    println!("  freemkv disc:// mkv://Dune.mkv -t 2                Rip title 2");
-    println!("  freemkv m2ts://Dune.m2ts mkv://Dune.mkv            Remux m2ts to MKV");
-    println!("  freemkv mkv://Dune.mkv m2ts://Dune.m2ts            Remux MKV to m2ts");
+    println!("  freemkv disc:// mkv://Movie.mkv                    Rip all titles");
+    println!("  freemkv disc:// mkv://Movie.mkv -t 1               Rip main feature only");
+    println!("  freemkv disc:// mkv://Movie.mkv -t 1 -t 3          Rip titles 1 and 3");
+    println!("  freemkv disc:// iso://Disc.iso                     Full disc to ISO");
+    println!("  freemkv disc:// iso://Disc.iso --raw               Full disc, no decryption");
+    println!("  freemkv iso://Disc.iso mkv://Movie.mkv             ISO to MKV");
+    println!("  freemkv m2ts://Movie.m2ts mkv://Movie.mkv          Remux m2ts to MKV");
     println!("  freemkv disc:// network://10.1.7.11:9000           Stream to network");
-    println!("  freemkv network://0.0.0.0:9000 mkv://Dune.mkv     Receive from network");
-    println!("  freemkv iso://Dune.iso mkv://Dune.mkv                ISO image to MKV");
-    println!("  freemkv disc:// stdio://                            Pipe to stdout");
-    println!("  freemkv stdio:// mkv://Dune.mkv                    Pipe from stdin");
-    println!("  freemkv disc:// null://                             Benchmark read speed");
-    println!("  freemkv info disc://                                Show disc info");
-    println!("  freemkv info mkv://Dune.mkv                        Show file metadata");
+    println!("  freemkv network://0.0.0.0:9000 mkv://Movie.mkv    Receive from network");
+    println!("  freemkv disc:// stdio://                           Pipe to stdout");
+    println!("  freemkv disc:// null://                            Benchmark read speed");
+    println!("  freemkv info disc://                               Show disc info");
     println!();
     println!("Flags:");
-    println!("  -t, --title N       Title number (repeatable)");
-    println!("  -a, --all           Rip all titles");
-    println!("      --min N         Minimum duration in minutes (with --all)");
+    println!("  -t, --title N       Select title (1-based, repeatable). Default: all.");
     println!("  -k, --keydb PATH    KEYDB.cfg path");
-    println!("  -v, --verbose       Show AACS debug info");
+    println!("  -v, --verbose       Show AACS/drive debug info");
     println!("  -q, --quiet         Suppress output");
-    println!("  -l, --list          List titles only (with disc://)");
+    println!("      --raw           Skip decryption (raw encrypted output)");
     println!("  -s, --share         Submit drive profile (with info disc://)");
-    println!("  -m, --mask          Mask serial numbers");
+    println!("  -m, --mask          Mask serial numbers (with --share)");
 }
 
 fn update_keys(args: &[String]) {
