@@ -46,23 +46,16 @@ pub fn run(source: &str, dest: &str, args: &[String]) {
     // Parse flags
     let mut verbose = false;
     let mut quiet = false;
+    let mut raw = false;
     let mut keydb_path: Option<String> = None;
     let mut title_nums: Vec<usize> = Vec::new();
-    let mut list_only = false;
-    let mut all = false;
-    let mut min_minutes: Option<u64> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "-v" | "--verbose" => verbose = true,
             "-q" | "--quiet" => quiet = true,
-            "-l" | "--list" => list_only = true,
-            "-a" | "--all" => all = true,
-            "--min" => {
-                i += 1;
-                min_minutes = args.get(i).and_then(|s| s.parse::<u64>().ok());
-            }
+            "--raw" => raw = true,
             "-t" | "--title" => {
                 i += 1;
                 if let Some(n) = args.get(i).and_then(|s| s.parse::<usize>().ok()) {
@@ -78,28 +71,10 @@ pub fn run(source: &str, dest: &str, args: &[String]) {
         i += 1;
     }
 
-    // Validate: --all and -t together is an error
-    if all && !title_nums.is_empty() {
-        eprintln!("Error: --all and -t cannot be used together");
-        std::process::exit(1);
-    }
-
-    // Warn if --min is used without --all
-    if min_minutes.is_some() && !all {
-        eprintln!("Warning: --min has no effect without --all");
-    }
-
     let parsed_source = libfreemkv::parse_url(source);
-    let is_disc = parsed_source.is_disc_source();
 
-    // --all requires disc:// or iso:// source
-    if all && !is_disc {
-        eprintln!("--all requires disc:// or iso:// source");
-        std::process::exit(1);
-    }
-
-    // Batch mode: --all or multiple -t values
-    let batch = all || title_nums.len() > 1;
+    // Default: all titles. -t narrows to specific titles.
+    let batch = title_nums.is_empty() || title_nums.len() > 1;
 
     if batch {
         run_batch(
@@ -107,25 +82,22 @@ pub fn run(source: &str, dest: &str, args: &[String]) {
             dest,
             &keydb_path,
             &title_nums,
-            all,
-            min_minutes,
             verbose,
             quiet,
-            list_only,
         );
         return;
     }
 
-    // Disc-to-ISO: raw sector dump (full disc clone)
+    // Disc-to-ISO: full disc dump with decrypt-on-read
     let parsed_dest = libfreemkv::parse_url(dest);
     if matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. })
         && matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. })
     {
-        run_disc_to_iso(source, dest, &keydb_path, verbose, quiet);
+        run_disc_to_iso(source, dest, &keydb_path, raw, verbose, quiet);
         return;
     }
 
-    // Single title mode (original behavior)
+    // Single title mode
     let title_num = title_nums.first().map(|n| n - 1); // convert 1-based to 0-based
 
     let out = Output::new(verbose, quiet);
@@ -155,10 +127,6 @@ pub fn run(source: &str, dest: &str, args: &[String]) {
 
     // Show metadata
     print_stream_info(&out, &meta);
-
-    if list_only {
-        return;
-    }
 
     // Open output stream
     out.raw_inline(Normal, &format!("Opening {}... ", dest));
@@ -315,11 +283,8 @@ fn run_batch(
     dest: &str,
     keydb_path: &Option<String>,
     title_nums: &[usize],
-    all: bool,
-    min_minutes: Option<u64>,
     verbose: bool,
     quiet: bool,
-    list_only: bool,
 ) {
     let out = Output::new(verbose, quiet);
 
@@ -422,17 +387,10 @@ fn run_batch(
         disc_name
     };
 
-    // Determine which titles to rip
-    let title_indices: Vec<usize> = if all {
-        let min_secs = min_minutes.map(|m| m as f64 * 60.0).unwrap_or(0.0);
-        disc.titles
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.duration_secs >= min_secs)
-            .map(|(i, _)| i)
-            .collect()
+    // Determine which titles to rip: default all, -t narrows
+    let title_indices: Vec<usize> = if title_nums.is_empty() {
+        (0..disc.titles.len()).collect()
     } else {
-        // Multiple -t values (1-based → 0-based)
         title_nums.iter().map(|n| n.saturating_sub(1)).collect()
     };
 
@@ -463,9 +421,6 @@ fn run_batch(
         }
     }
 
-    if list_only {
-        return;
-    }
     out.blank(Normal);
 
     // Rip each title
@@ -612,6 +567,7 @@ fn run_disc_to_iso(
     source: &str,
     dest: &str,
     keydb_path: &Option<String>,
+    raw: bool,
     verbose: bool,
     quiet: bool,
 ) {
@@ -659,6 +615,13 @@ fn run_disc_to_iso(
             eprintln!("  {}", e);
             std::process::exit(1);
         }
+    };
+
+    // Get decryption keys (unless --raw)
+    let decrypt_keys = if raw {
+        libfreemkv::DecryptKeys::None
+    } else {
+        disc.decrypt_keys()
     };
 
     // Read capacity
@@ -723,8 +686,10 @@ fn run_disc_to_iso(
         let byte_count = count as usize * 2048;
         buf.resize(byte_count, 0);
 
-        match drive.read_disc(lba, count, &mut buf[..byte_count]) {
+        match drive.read(lba, count, &mut buf[..byte_count]) {
             Ok(_) => {
+                // Decrypt on read
+                libfreemkv::decrypt_sectors(&mut buf[..byte_count], &decrypt_keys, 0);
                 if let Err(e) = writer.write_all(&buf[..byte_count]) {
                     eprintln!("\nWrite error: {}", e);
                     break;

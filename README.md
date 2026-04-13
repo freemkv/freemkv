@@ -66,25 +66,26 @@ All URLs use the `scheme://path` format. No bare paths — always include the sc
 ### Rip a disc
 
 ```bash
-freemkv disc:// mkv://Dune.mkv                     # MKV output
-freemkv disc:// m2ts://Dune.m2ts                    # Raw transport stream
-freemkv disc:///dev/sg4 mkv://Dune.mkv              # Specific drive
-freemkv disc:// mkv://Dune.mkv -t 2                 # Title 2
-freemkv disc:// mkv:///media/movies/Dune.mkv        # Absolute path
+freemkv disc:// mkv://Movie.mkv                     # All titles to MKV
+freemkv disc:// mkv://Movie.mkv -t 1                # Main feature only
+freemkv disc:// mkv://Movie.mkv -t 1 -t 3           # Titles 1 and 3
+freemkv disc:// iso://Disc.iso                      # Full disc to ISO (decrypted)
+freemkv disc:// iso://Disc.iso --raw                # Full disc to ISO (encrypted)
+freemkv disc:///dev/sg4 mkv://Movie.mkv -t 1        # Specific drive
 ```
 
 ### Rip from ISO image
 
 ```bash
-freemkv iso://Dune.iso mkv://Dune.mkv               # ISO → MKV
-freemkv iso://Dune.iso m2ts://Dune.m2ts              # ISO → m2ts
+freemkv iso://Disc.iso mkv://Movie.mkv              # ISO to MKV
+freemkv iso://Disc.iso mkv://Movie.mkv -t 1         # Main feature from ISO
 ```
 
 ### Remux between formats
 
 ```bash
-freemkv m2ts://Dune.m2ts mkv://Dune.mkv             # m2ts → MKV
-freemkv mkv://Dune.mkv m2ts://Dune.m2ts             # MKV → m2ts
+freemkv m2ts://Movie.m2ts mkv://Movie.mkv           # m2ts to MKV
+freemkv mkv://Movie.mkv m2ts://Movie.m2ts           # MKV to m2ts
 ```
 
 ### Network streaming (two machines)
@@ -174,13 +175,13 @@ Labels are preserved in all output formats — MKV track names and M2TS metadata
 ## Flags
 
 ```
--t, --title N       Which title (default: longest)
+-t, --title N       Select title (1-based, repeatable). Default: all.
 -k, --keydb PATH    KEYDB.cfg path
--v, --verbose       AACS debug info
+-v, --verbose       Show AACS/drive debug info
 -q, --quiet         Suppress output
--l, --list          List titles only (with disc://)
+    --raw           Skip decryption (raw encrypted output)
 -s, --share         Submit drive profile (with info disc://)
--m, --mask          Mask serial numbers
+-m, --mask          Mask serial numbers (with --share)
 ```
 
 ## Building from Source
