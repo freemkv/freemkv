@@ -131,6 +131,27 @@
     "no_bluray_drive": "No Blu-ray drive found",
     "open_failed": "Cannot open {device}: {error}",
     "not_ready": "Drive not ready: {error}",
-    "scan_failed": "Scan failed: {error}"
+    "scan_failed": "Scan failed: {error}",
+    "E1000": "Device not found: {detail}",
+    "E1001": "Permission denied: {detail}. Try: sudo chmod 666 /dev/sgN",
+    "E2000": "Unsupported drive: {detail}",
+    "E3000": "Drive unlock failed: {detail}",
+    "E4000": "SCSI command failed: {detail}",
+    "E4001": "SCSI timeout: {detail}",
+    "E5000": "I/O error: {detail}",
+    "E5001": "Disc read error at sector {detail}",
+    "E6000": "UDF file not found: {detail}",
+    "E6001": "No titles found on disc",
+    "E6002": "Title index out of range: {detail}",
+    "E7000": "Disc is AACS encrypted but no decryption keys found. Run: freemkv update-keys --url <keydb-url>",
+    "E7001": "AACS host certificate too short or invalid",
+    "E7002": "AACS handshake failed — could not allocate AGID",
+    "E7003": "AACS handshake failed",
+    "E7004": "AACS key derivation failed",
+    "E7010": "KEYDB parse error",
+    "E7011": "KEYDB is empty or invalid",
+    "E7012": "Cannot connect to KEYDB server: {detail}",
+    "E7013": "KEYDB download failed (HTTP {detail})",
+    "E7014": "Cannot write KEYDB: {detail}"
   }
 }

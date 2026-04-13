@@ -8,21 +8,39 @@ Open source 4K UHD / Blu-ray / DVD backup tool. Two arguments — source and des
 
 ## Quick Start
 
+### 1. Install
+
 ```bash
 # Linux
 curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86_64-linux.tar.gz | tar xz
+sudo mv freemkv /usr/local/bin/
 
-# Rip a disc to MKV
-./freemkv disc:// mkv://Dune.mkv
+# macOS
+curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86_64-apple-darwin.tar.gz | tar xz
+sudo mv freemkv /usr/local/bin/
 
-# Rip to raw transport stream
-./freemkv disc:// m2ts://Dune.m2ts
+# Windows — download .zip from https://github.com/freemkv/freemkv/releases/latest
+```
 
-# Remux m2ts to MKV
-./freemkv m2ts://Dune.m2ts mkv://Dune.mkv
+### 2. Set up decryption keys (one time)
 
-# Show disc info
-./freemkv info disc://
+**DVD:** No setup needed. CSS decryption works out of the box.
+
+**Blu-ray / 4K UHD:** You need a KEYDB.cfg file containing AACS decryption keys. This is a community-maintained key database — freemkv cannot ship keys due to legal restrictions.
+
+```bash
+freemkv update-keys --url <your-keydb-url>
+```
+
+The KEYDB is saved to `~/.config/freemkv/keydb.cfg` and used automatically from then on.
+
+### 3. Rip
+
+```bash
+freemkv disc:// mkv://Movie.mkv            # Disc to MKV
+freemkv disc:// m2ts://Movie.m2ts           # Disc to raw transport stream
+freemkv m2ts://Movie.m2ts mkv://Movie.mkv   # Remux m2ts to MKV
+freemkv info disc://                        # Show disc info
 ```
 
 ## How It Works

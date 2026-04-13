@@ -131,6 +131,27 @@
     "no_bluray_drive": "No se encontró unidad Blu-ray",
     "open_failed": "No se puede abrir {device}: {error}",
     "not_ready": "Unidad no lista: {error}",
-    "scan_failed": "Escaneo falló: {error}"
+    "scan_failed": "Escaneo falló: {error}",
+    "E1000": "Dispositivo no encontrado: {detail}",
+    "E1001": "Permiso denegado: {detail}. Intente: sudo chmod 666 /dev/sgN",
+    "E2000": "Unidad no compatible: {detail}",
+    "E3000": "Desbloqueo de unidad falló: {detail}",
+    "E4000": "Comando SCSI falló: {detail}",
+    "E4001": "Tiempo de espera SCSI agotado: {detail}",
+    "E5000": "Error de E/S: {detail}",
+    "E5001": "Error de lectura en sector {detail}",
+    "E6000": "Archivo UDF no encontrado: {detail}",
+    "E6001": "No se encontraron títulos en el disco",
+    "E6002": "Índice de título fuera de rango: {detail}",
+    "E7000": "El disco está cifrado con AACS pero no se encontraron claves. Ejecute: freemkv update-keys --url <url-keydb>",
+    "E7001": "Certificado de host AACS demasiado corto o inválido",
+    "E7002": "Autenticación AACS falló — no se pudo asignar AGID",
+    "E7003": "Autenticación AACS falló",
+    "E7004": "Derivación de clave AACS falló",
+    "E7010": "Error al analizar KEYDB",
+    "E7011": "KEYDB está vacío o es inválido",
+    "E7012": "No se puede conectar al servidor KEYDB: {detail}",
+    "E7013": "Descarga de KEYDB falló (HTTP {detail})",
+    "E7014": "No se puede escribir KEYDB: {detail}"
   }
 }
