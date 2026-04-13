@@ -2,6 +2,7 @@
 name = "freemkv"
 version = "0.8.2"
 edition = "2021"
+rust-version = "1.86"
 license = "AGPL-3.0"
 description = "Open source 4K UHD / Blu-ray / DVD backup tool"
 repository = "https://github.com/freemkv/freemkv"
