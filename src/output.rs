@@ -51,14 +51,6 @@ impl Output {
         }
     }
 
-    /// Print without newline (for progress-style "Opening... OK" lines).
-    pub fn print_inline(&self, level: Level, key: &str) {
-        if self.level >= level {
-            print!("{}", strings::get(key));
-            let _ = std::io::stdout().flush();
-        }
-    }
-
     /// Print raw text without newline.
     pub fn raw_inline(&self, level: Level, text: &str) {
         if self.level >= level {
@@ -67,15 +59,14 @@ impl Output {
         }
     }
 
+    pub fn is_quiet(&self) -> bool {
+        self.level == Level::Quiet
+    }
+
     /// Print a blank line.
     pub fn blank(&self, level: Level) {
         if self.level >= level {
             println!();
         }
-    }
-
-    /// Whether this level would be shown.
-    pub fn enabled(&self, level: Level) -> bool {
-        self.level >= level
     }
 }

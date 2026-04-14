@@ -49,12 +49,7 @@ fn main() {
         // Everything else: freemkv <source> <dest>
         _ => {
             // Flags that consume the next argument as a value
-            const VALUE_FLAGS: &[&str] = &[
-                "-t",
-                "--title",
-                "-k",
-                "--keydb",
-            ];
+            const VALUE_FLAGS: &[&str] = &["-t", "--title", "-k", "--keydb"];
 
             // Collect URLs (non-flag args) and flags
             let mut urls = Vec::new();
@@ -108,12 +103,16 @@ fn info_cmd(args: &[String]) {
                 disc_args.push(d.to_string_lossy().to_string());
             }
             disc_args.extend_from_slice(&args[1..]);
-            disc_info::run(&disc_args);
+            // --share routes to drive-info module (capture + GitHub submit)
+            if disc_args.iter().any(|a| a == "--share" || a == "-s") {
+                info::run(&disc_args);
+            } else {
+                disc_info::run(&disc_args);
+            }
         }
         libfreemkv::StreamUrl::M2ts { .. }
         | libfreemkv::StreamUrl::Mkv { .. }
         | libfreemkv::StreamUrl::Iso { .. } => {
-            use libfreemkv::IOStream;
             match libfreemkv::open_input(url, &libfreemkv::InputOptions::default()) {
                 Ok(stream) => {
                     let meta = stream.info();
@@ -136,7 +135,7 @@ fn info_cmd(args: &[String]) {
                                 } else {
                                     format!(" — {}", v.label)
                                 };
-                                println!("  {:?} {}{}", v.codec, v.resolution, label);
+                                println!("  {} {}{}", v.codec, v.resolution, label);
                             }
                             libfreemkv::Stream::Audio(a) => {
                                 let label = if a.label.is_empty() {
@@ -144,10 +143,10 @@ fn info_cmd(args: &[String]) {
                                 } else {
                                     format!(" — {}", a.label)
                                 };
-                                println!("  {:?} {} {}{}", a.codec, a.channels, a.language, label);
+                                println!("  {} {} {}{}", a.codec, a.channels, a.language, label);
                             }
                             libfreemkv::Stream::Subtitle(s) => {
-                                println!("  {:?} {}", s.codec, s.language);
+                                println!("  {} {}", s.codec, s.language);
                             }
                         }
                     }
@@ -158,8 +157,15 @@ fn info_cmd(args: &[String]) {
                 }
             }
         }
+        libfreemkv::StreamUrl::Unknown { .. } => {
+            eprintln!(
+                "'{}' is not a valid URL — use scheme://path (e.g. disc://, mkv://movie.mkv)",
+                url
+            );
+            std::process::exit(1);
+        }
         _ => {
-            eprintln!("Cannot get info for scheme: {}", parsed.scheme());
+            eprintln!("Cannot get info for {}", url);
             std::process::exit(1);
         }
     }
@@ -192,8 +198,8 @@ fn usage() {
     println!("  freemkv disc:// mkv://Movie.mkv                    Rip all titles");
     println!("  freemkv disc:// mkv://Movie.mkv -t 1               Rip main feature only");
     println!("  freemkv disc:// mkv://Movie.mkv -t 1 -t 3          Rip titles 1 and 3");
-    println!("  freemkv disc:// iso://Disc.iso                     Full disc to ISO");
-    println!("  freemkv disc:// iso://Disc.iso --raw               Full disc, no decryption");
+    println!("  freemkv disc:// iso://Disc.iso                     Full disc to ISO (auto-resumes)");
+    println!("  freemkv disc:// iso://Disc.iso --raw               Full disc, no decryption (auto-resumes)");
     println!("  freemkv iso://Disc.iso mkv://Movie.mkv             ISO to MKV");
     println!("  freemkv m2ts://Movie.m2ts mkv://Movie.mkv          Remux m2ts to MKV");
     println!("  freemkv disc:// network://10.0.0.1:9000           Stream to network");
