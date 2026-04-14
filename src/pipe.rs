@@ -157,10 +157,11 @@ fn pipe(
     let meta = input.info().clone();
     print_stream_info(out, &meta);
 
+    // The stream knows its own keys
     let keys = if raw {
         libfreemkv::DecryptKeys::None
     } else {
-        scan_keys(source, keydb_path)
+        input.keys()
     };
 
     out.raw_inline(Normal, &format!("Opening {}... ", dest));
