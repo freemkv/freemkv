@@ -184,6 +184,10 @@ Labels are preserved in all output formats — MKV track names and M2TS metadata
 -m, --mask          Mask serial numbers (with --share)
 ```
 
+## Multi-language
+
+freemkv is fully localized. All output — errors, status, labels — adapts to your locale. Currently ships with English and Spanish. Contributions for additional languages welcome.
+
 ## Building from Source
 
 ```bash
