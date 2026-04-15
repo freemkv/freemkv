@@ -114,7 +114,12 @@ pub fn run(source: &str, dest: &str, args: &[String]) {
     } else {
         // Single title
         let title_index = title_nums.first().map(|n| n - 1);
-        if let Err(e) = pipe(source, dest, &keydb_path, title_index, raw, &out) {
+        let opts = libfreemkv::InputOptions {
+            keydb_path: keydb_path.clone(),
+            title_index,
+            raw,
+        };
+        if let Err(e) = pipe(source, dest, &opts, &out) {
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }
@@ -123,23 +128,17 @@ pub fn run(source: &str, dest: &str, args: &[String]) {
 
 // ── The pipeline engine ─────────────────────────────────────────────────────
 
-/// The core pipeline. Opens source, opens dest, reads → decrypts → writes.
-/// One title, one stream. Called once per title.
+/// The pipeline. Opens input, opens output, streams PES frames.
+/// All streams produce/consume PES. No byte-level fallback.
 fn pipe(
     source: &str,
     dest: &str,
-    keydb_path: &Option<String>,
-    title_index: Option<usize>,
-    raw: bool,
+    opts: &libfreemkv::InputOptions,
     out: &Output,
 ) -> Result<(), String> {
+    // Open input
     out.raw_inline(Normal, &format!("Opening {}... ", source));
-    let input_opts = libfreemkv::InputOptions {
-        keydb_path: keydb_path.clone(),
-        title_index,
-        raw,
-    };
-    let mut input = match libfreemkv::open_input(source, &input_opts) {
+    let mut input = match libfreemkv::open_pes_input(source, opts) {
         Ok(s) => {
             out.raw(Normal, "OK");
             s
@@ -150,11 +149,27 @@ fn pipe(
         }
     };
 
-    let meta = input.info().clone();
-    print_stream_info(out, &meta);
+    let info = input.info().clone();
+    print_stream_info(out, &info);
 
+    // Read frames until codec headers are ready
+    let mut buffered = Vec::new();
+    while !input.headers_ready() {
+        match input.next_frame() {
+            Ok(Some(frame)) => buffered.push(frame),
+            Ok(None) => break,
+            Err(e) => return Err(format!("{}", e)),
+        }
+    }
+
+    // Collect codec_privates
+    let codec_privates: Vec<Option<Vec<u8>>> = (0..info.streams.len())
+        .map(|i| input.codec_private(i))
+        .collect();
+
+    // Open output with codec info
     out.raw_inline(Normal, &format!("Opening {}... ", dest));
-    let mut output = match libfreemkv::open_output(dest, &meta) {
+    let mut output = match libfreemkv::open_pes_output(dest, &info, &codec_privates) {
         Ok(s) => {
             out.raw(Normal, "OK");
             s
@@ -165,10 +180,56 @@ fn pipe(
         }
     };
 
-    let total_bytes = input.total_bytes().unwrap_or(0);
     out.blank(Normal);
-    copy_loop(&mut *input, &mut *output, total_bytes, 0, out);
-    let _ = output.finish();
+
+    let total_bytes = info.size_bytes;
+    let start = std::time::Instant::now();
+    let mut bytes_done: u64 = 0;
+    let mut last_update = start;
+
+    // Write buffered frames
+    for frame in &buffered {
+        bytes_done += frame.data.len() as u64;
+        output.write_frame(frame).map_err(|e| format!("{}", e))?;
+    }
+
+    // Stream remaining frames
+    loop {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            out.blank(Normal);
+            out.raw(Normal, "Interrupted.");
+            break;
+        }
+
+        match input.next_frame() {
+            Ok(Some(frame)) => {
+                bytes_done += frame.data.len() as u64;
+                output.write_frame(&frame).map_err(|e| format!("{}", e))?;
+
+                let now = std::time::Instant::now();
+                if !out.is_quiet() && now.duration_since(last_update).as_secs_f64() >= 0.5 {
+                    print_progress(bytes_done, total_bytes, 0, &start);
+                    last_update = now;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return Err(format!("{}", e)),
+        }
+    }
+
+    output.finish().map_err(|e| format!("{}", e))?;
+
+    if !out.is_quiet() {
+        eprint!("\r                                                                    \r");
+    }
+    let elapsed = start.elapsed().as_secs_f64();
+    let mb = bytes_done as f64 / (1024.0 * 1024.0);
+    let (sz, unit) = if mb >= 1024.0 { (mb / 1024.0, "GB") } else { (mb, "MB") };
+    out.raw(Normal, &format!(
+        "Complete: {:.1} {} in {:.0}s ({:.0} MB/s)",
+        sz, unit, elapsed,
+        if elapsed > 0.0 { mb / elapsed } else { 0.0 }
+    ));
     Ok(())
 }
 
@@ -469,7 +530,8 @@ fn batch_stream(
         Some(t) => t,
         None => {
             // Source doesn't have titles — treat as single
-            if let Err(e) = pipe(source, dest, keydb_path, None, raw, out) {
+            let opts = libfreemkv::InputOptions { keydb_path: keydb_path.clone(), title_index: None, raw };
+            if let Err(e) = pipe(source, dest, &opts, out) {
                 eprintln!("Error: {}", e);
             }
             return;
@@ -505,7 +567,8 @@ fn batch_stream(
         let dest_url = format!("{}://{}", ext, dir.join(filename).display());
 
         out.raw(Normal, &format!("Title {} → {}", idx + 1, dest_url));
-        if let Err(e) = pipe(source, &dest_url, keydb_path, Some(idx), raw, out) {
+        let opts = libfreemkv::InputOptions { keydb_path: keydb_path.clone(), title_index: Some(idx), raw };
+        if let Err(e) = pipe(source, &dest_url, &opts, out) {
             eprintln!("Error: {}", e);
         }
         out.blank(Normal);
