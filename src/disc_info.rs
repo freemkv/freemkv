@@ -45,7 +45,12 @@ pub fn run(args: &[String]) {
 
     let out = Output::new(verbose, quiet);
 
-    let mut session = match device_path {
+    out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
+    out.blank(Normal);
+    out.print(Normal, "disc.scanning");
+    out.blank(Normal);
+
+    let mut drive = match device_path {
         Some(ref p) => Drive::open(std::path::Path::new(p)).unwrap_or_else(|e| {
             eprintln!("{}", e);
             std::process::exit(1);
@@ -55,21 +60,11 @@ pub fn run(args: &[String]) {
             std::process::exit(1);
         }),
     };
+    let _ = drive.wait_ready();
+    let _ = drive.init();
+    let _ = drive.probe_disc();
 
-    out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
-    out.blank(Normal);
-    out.print(Normal, "disc.scanning");
-    out.blank(Normal);
-
-    if let Err(e) = session.wait_ready() {
-        eprintln!(
-            "{}",
-            strings::fmt("error.not_ready", &[("error", &e.to_string())])
-        );
-        std::process::exit(1);
-    }
-
-    let disc = match Disc::scan(&mut session, &ScanOptions::default()) {
+    let disc = match Disc::scan(&mut drive, &ScanOptions::default()) {
         Ok(d) => d,
         Err(e) => {
             eprintln!(
@@ -115,6 +110,43 @@ pub fn run(args: &[String]) {
     if disc.encrypted {
         out.print(Normal, "disc.aacs_encrypted");
     }
+
+    // Verbose: AACS details
+    if verbose {
+        if let Some(ref aacs) = disc.aacs {
+            out.raw(
+                Normal,
+                &format!(
+                    "AACS {}.0, MKB v{}",
+                    aacs.version,
+                    aacs.mkb_version.unwrap_or(0)
+                ),
+            );
+            out.raw(Normal, &format!("Disc hash: {}", aacs.disc_hash));
+            out.raw(
+                Normal,
+                &format!(
+                    "Keys: {} ({} unit keys)",
+                    aacs.key_source.name(),
+                    aacs.unit_keys.len()
+                ),
+            );
+        }
+        out.raw(
+            Normal,
+            &format!(
+                "Drive: {} {} {}",
+                drive.drive_id.vendor_id.trim(),
+                drive.drive_id.product_id.trim(),
+                drive.drive_id.product_revision.trim()
+            ),
+        );
+        out.raw(Normal, &format!("Device: {}", drive.device_path()));
+    }
+
+    // Release the drive fd before printing titles
+    drive.close();
+
     out.blank(Normal);
 
     if disc.titles.is_empty() {
@@ -151,6 +183,10 @@ pub fn run(args: &[String]) {
             ),
         );
 
+        if basic {
+            continue;
+        }
+
         // Video
         let videos: Vec<&VideoStream> = title
             .streams
@@ -167,7 +203,7 @@ pub fn run(args: &[String]) {
             out.blank(Normal);
             let label = strings::get("disc.video");
             for (vi, v) in videos.iter().enumerate() {
-                let line = format_video(v);
+                let line = format_video(v, verbose);
                 if vi == 0 {
                     out.raw(Normal, &format!("      {}:     {}", label, line));
                 } else {
@@ -192,7 +228,7 @@ pub fn run(args: &[String]) {
             out.blank(Normal);
             let label = strings::get("disc.audio");
             for (ai, a) in audios.iter().enumerate() {
-                let line = format_audio(a, basic);
+                let line = format_audio(a, verbose);
                 if ai == 0 {
                     out.raw(Normal, &format!("      {}:     {}", label, line));
                 } else {
@@ -241,8 +277,11 @@ pub fn run(args: &[String]) {
 
 // ── Formatting ──────────────────────────────────────────────────────────────
 
-fn format_video(v: &VideoStream) -> String {
-    let mut parts = vec![codec_name(v.codec).to_string(), v.resolution.clone()];
+fn format_video(v: &VideoStream, verbose: bool) -> String {
+    let mut parts = vec![codec_name(v.codec).to_string(), v.resolution.to_string()];
+    if v.frame_rate != libfreemkv::FrameRate::Unknown {
+        parts.push(format!("{}fps", v.frame_rate));
+    }
     if v.hdr != HdrFormat::Sdr {
         parts.push(hdr_name(v.hdr).to_string());
     }
@@ -252,17 +291,23 @@ fn format_video(v: &VideoStream) -> String {
     if v.secondary && !v.label.is_empty() {
         parts.push(v.label.clone());
     }
+    if verbose {
+        parts.push(format!("[PID 0x{:04X}]", v.pid));
+    }
     parts.join(" ")
 }
 
-fn format_audio(a: &AudioStream, basic: bool) -> String {
+fn format_audio(a: &AudioStream, verbose: bool) -> String {
     let lang = lang_name(&a.language);
     let codec = codec_name(a.codec);
-    if !basic && !a.label.is_empty() {
-        format!("{} {} {} ({})", lang, codec, a.channels, a.label)
-    } else {
-        format!("{} {} {}", lang, codec, a.channels)
+    let mut s = format!("{} {} {}", lang, codec, a.channels);
+    if verbose {
+        s.push_str(&format!(" {} [PID 0x{:04X}]", a.sample_rate, a.pid));
     }
+    if !a.label.is_empty() {
+        s.push_str(&format!(" ({})", a.label));
+    }
+    s
 }
 
 fn format_subtitle(s: &SubtitleStream) -> String {
@@ -276,29 +321,16 @@ fn format_subtitle(s: &SubtitleStream) -> String {
 
 fn codec_name(c: Codec) -> String {
     match c {
-        Codec::Hevc => "HEVC".into(),
-        Codec::H264 => "H.264".into(),
-        Codec::Vc1 => "VC-1".into(),
-        Codec::Mpeg2 => "MPEG-2".into(),
-        Codec::TrueHd => "TrueHD".into(),
-        Codec::DtsHdMa => "DTS-HD MA".into(),
-        Codec::DtsHdHr => "DTS-HD HR".into(),
-        Codec::Dts => "DTS".into(),
         Codec::Ac3 => "DD".into(),
         Codec::Ac3Plus => "DD+".into(),
-        Codec::Lpcm => "LPCM".into(),
-        Codec::Pgs => "PGS".into(),
         Codec::DvdSub => "DVD Sub".into(),
         Codec::Unknown(ct) => format!("0x{:02x}", ct),
+        other => other.name().into(),
     }
 }
 
 fn hdr_name(h: HdrFormat) -> &'static str {
-    match h {
-        HdrFormat::Sdr => "SDR",
-        HdrFormat::Hdr10 => "HDR10",
-        HdrFormat::DolbyVision => "Dolby Vision",
-    }
+    h.name()
 }
 
 fn lang_name(code: &str) -> String {

@@ -204,7 +204,10 @@ pub fn run(args: &[String]) {
 
         let fname = format!("gc_{:04x}.bin", feat.code);
         save_bin(&profile_dir, &fname, &feat_data);
-        feat_lines.push(format!("0x{:04X} = \"{}\"  # {}", feat.code, fname, feat.name));
+        feat_lines.push(format!(
+            "0x{:04X} = \"{}\"  # {}",
+            feat.code, fname, feat.name
+        ));
         if !quiet {
             println!(
                 "  {}",
