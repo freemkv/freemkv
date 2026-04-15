@@ -1,18 +1,11 @@
-//! Pipe — stream in, decrypt, stream out.
+//! Pipe — stream in, stream out.
 //!
-//! freemkv <source_url> <dest_url> [flags]
+//! The pipeline: open input → open output → read → write.
+//! Streams handle their own decryption internally.
+//! The pipeline just moves bytes.
 //!
-//! The pipeline:
-//!   1. open_input(source, title)
-//!   2. scan_keys(source) — for encrypted sources
-//!   3. open_output(dest)
-//!   4. loop: read → decrypt → write
-//!
-//! Streams are dumb pipes — they read/write bytes. They don't know
-//! about encryption. Decryption is a pipeline step, not a stream concern.
-//!
-//! Batch (multiple titles) is a CLI concern — the CLI calls pipe()
-//! once per title. The pipeline handles one stream at a time.
+//! Batch (multiple titles) is a CLI concern — run() calls pipe()
+//! once per title.
 //!
 //! Disc-to-ISO is a special case: raw sector copy with resume support.
 //! Still uses the same read → write loop, just with a file instead of
@@ -157,13 +150,6 @@ fn pipe(
     let meta = input.info().clone();
     print_stream_info(out, &meta);
 
-    // The stream knows its own keys
-    let keys = if raw {
-        libfreemkv::DecryptKeys::None
-    } else {
-        input.keys()
-    };
-
     out.raw_inline(Normal, &format!("Opening {}... ", dest));
     let mut output = match libfreemkv::open_output(dest, &meta) {
         Ok(s) => {
@@ -179,7 +165,7 @@ fn pipe(
 
     let total_bytes = input.total_bytes().unwrap_or(0);
     out.blank(Normal);
-    copy_loop(&mut *input, &mut *output, &keys, total_bytes, 0, out);
+    copy_loop(&mut *input, &mut *output, total_bytes, 0, out);
     let _ = output.finish();
 }
 
@@ -233,11 +219,6 @@ fn disc_to_iso(
     };
 
     let disc = &result.disc;
-    let keys = if raw {
-        libfreemkv::DecryptKeys::None
-    } else {
-        disc.decrypt_keys()
-    };
     let mut drive = result.stream.into_drive();
     let disc_name = sanitize_name(
         disc.meta_title.as_deref().unwrap_or(&disc.volume_id),
@@ -314,7 +295,7 @@ fn disc_to_iso(
 
     out.raw(Normal, &format!("Output: {}", iso_path.display()));
     out.blank(Normal);
-    copy_loop(&mut input, &mut output, &keys, total_bytes, resume_bytes, out);
+    copy_loop(&mut input, &mut output, total_bytes, resume_bytes, out);
     let _ = output.flush();
     input.unlock_tray();
 }
@@ -371,11 +352,6 @@ fn disc_to_stream(
     };
 
     let disc = &result.disc;
-    let keys = if raw {
-        libfreemkv::DecryptKeys::None
-    } else {
-        disc.decrypt_keys()
-    };
     let mut drive = result.stream.into_drive();
     let disc_name = sanitize_name(
         disc.meta_title.as_deref().unwrap_or(&disc.volume_id),
@@ -464,7 +440,7 @@ fn disc_to_stream(
 
         out.blank(Normal);
         let mut input = input;
-        copy_loop(&mut input, &mut *output, &keys, total_bytes, 0, out);
+        copy_loop(&mut input, &mut *output, total_bytes, 0, out);
         let _ = output.finish();
 
         drive = input.into_drive();
@@ -552,33 +528,10 @@ fn scan_titles(source: &str, keydb_path: &Option<String>) -> Option<Vec<libfreem
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
 
-/// Scan a source for decryption keys. Returns DecryptKeys::None for
-/// sources that don't have encryption metadata.
-fn scan_keys(source: &str, keydb_path: &Option<String>) -> libfreemkv::DecryptKeys {
-    let parsed = libfreemkv::parse_url(source);
-    match parsed {
-        libfreemkv::StreamUrl::Iso { ref path } => {
-            let scan_opts = match keydb_path {
-                Some(p) => libfreemkv::ScanOptions::with_keydb(p),
-                None => libfreemkv::ScanOptions::default(),
-            };
-            if let Ok(mut reader) = libfreemkv::mux::iso::IsoSectorReader::open(&path.to_string_lossy()) {
-                let capacity = reader.capacity();
-                if let Ok(disc) = libfreemkv::Disc::scan_image(&mut reader, capacity, &scan_opts) {
-                    return disc.decrypt_keys();
-                }
-            }
-            libfreemkv::DecryptKeys::None
-        }
-        _ => libfreemkv::DecryptKeys::None,
-    }
-}
-
-/// The copy loop: read → decrypt → write, with progress.
+/// The copy loop: read → write, with progress.
 fn copy_loop(
     input: &mut dyn Read,
     output: &mut dyn Write,
-    keys: &libfreemkv::DecryptKeys,
     total_bytes: u64,
     bytes_already: u64,
     out: &Output,
@@ -598,8 +551,6 @@ fn copy_loop(
         match input.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                libfreemkv::decrypt_sectors(&mut buf[..n], keys, 0);
-
                 if output.write_all(&buf[..n]).is_err() {
                     break;
                 }
