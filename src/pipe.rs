@@ -209,10 +209,7 @@ fn pipe(
         }
     };
 
-    let info = input.info().clone();
-    print_stream_info(out, &info);
-
-    // Read frames until codec headers are ready
+    // Read frames until codec headers are ready (also parses metadata headers for stdio/network)
     let mut buffered = Vec::new();
     while !input.headers_ready() {
         match input.read() {
@@ -221,6 +218,10 @@ fn pipe(
             Err(e) => return Err(format!("{}", e)),
         }
     }
+
+    // Get info after header scanning (stdio/network populate info during read)
+    let info = input.info().clone();
+    print_stream_info(out, &info);
 
     // Build output title with codec_privates from input
     let mut title = info.clone();
@@ -360,7 +361,8 @@ fn disc_to_iso(
         print_progress(done, total, 0, &start);
     };
 
-    match disc.copy(&mut drive, &iso_path, !raw, true, Some(&progress)) {
+    let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
+    match disc.copy(&mut drive, &iso_path, !raw, true, Some(batch), Some(&progress)) {
         Ok(()) => {
             if !out.is_quiet() {
                 eprint!("\r                                                                    \r");
