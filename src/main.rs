@@ -115,7 +115,7 @@ fn info_cmd(args: &[String]) {
         libfreemkv::StreamUrl::M2ts { .. }
         | libfreemkv::StreamUrl::Mkv { .. }
         | libfreemkv::StreamUrl::Iso { .. } => {
-            match libfreemkv::open_input(url, &libfreemkv::InputOptions::default()) {
+            match libfreemkv::input(url, &libfreemkv::InputOptions::default()) {
                 Ok(stream) => {
                     let meta = stream.info();
                     println!("File: {}", parsed.path_str());

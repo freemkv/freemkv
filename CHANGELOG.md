@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.10.1 (2026-04-15)
+
+### Clean architecture
+- **One pipeline for everything** — `run()` builds job list, loops `pipe()` per title. No separate batch/single paths.
+- **CountingStream for progress** — bytes written tracked via wrapper, not baked into streams
+- **disc_to_iso uses Disc::copy()** — sector dump, not a stream
+
+### i18n only — zero hardcoded English
+- All user-facing strings through `strings::get()` / `strings::fmt()`
+- CLI tests check error codes (E9002, E9001) not English messages
+- New locale keys: rip.interrupted, rip.drive, rip.disc_label, rip.title_info, etc.
+
+### Cleanup
+- Deleted `disc_batch()`, `batch_stream()`, `copy_loop()` — all replaced by single `run()` flow
+- Updated error section in en.json to match new error codes
+
+## 0.10.0 (2026-04-15)
+
+### PES pipeline
+- **pipe() is 100% PES** — unified `Stream::read()` / `Stream::write()` API, no byte-level fallback
+- **codec_privates from DiscTitle** — no separate collection pass in pipe.rs
+- **pipe() returns Result** — proper error propagation, no process::exit in pipeline
+
+### Testing + audit
+- **122-test plan** (TESTPLAN.md) — full stream matrix UHD/BD/DVD
+- **CLI integration tests** — 9 tests covering error handling, help, quiet mode
+- **Codebase audit** — all findings fixed
+- **CI lint job** — clippy in CI
+
+### Cleanup
+- Signal handler uses SeqCst ordering
+- Fix clippy warnings in pipe.rs
+- Improved disc info output
+
+## 0.9.0 (2026-04-13)
+
+### Pipeline refactor + decrypt-on-read
+- **pipe() engine** — single pipeline function for all source→dest combinations
+- **Decrypt-on-read** — automatic decryption by default, `--raw` to skip
+- **Disc-to-ISO** — `freemkv disc:// iso://Disc.iso` (decrypted or --raw)
+- **5 flags** — simplified CLI: `-t`, `-k`, `-v`, `-q`, `--raw`
+- **Default all titles** — rips everything unless `-t` specified
+- **Fix double-decrypt bug** — IsoStream no longer decrypts when pipeline also decrypts
+- **Quiet mode** — `-q` suppresses all output
+- **Error code translations** — en + es locale support
+- **Honest Quick Start** — README documents KEYDB setup requirement
+
+### Platform
+- **Rust 1.86 MSRV** pinned
+- **aarch64 build fix** — install cross from prebuilt binary
+
 ## 0.8.0 (2026-04-11)
 
 ### DVD + batch ripping

@@ -1,19 +1,15 @@
 //! Pipe — stream in, stream out.
 //!
-//! The pipeline: open input → open output → read → write.
-//! Streams handle their own decryption internally.
-//! The pipeline just moves bytes.
+//! One pipeline for everything:
+//!   1. disc→ISO: Disc::copy() (not a stream)
+//!   2. Everything else: input → PES → output, one title at a time
 //!
-//! Batch (multiple titles) is a CLI concern — run() calls pipe()
-//! once per title.
-//!
-//! Disc-to-ISO is a special case: raw sector copy with resume support.
-//! Still uses the same read → write loop, just with a file instead of
-//! a muxed output stream.
+//! Batch (multiple titles) is just a for loop calling pipe() per title.
 
 use crate::output::{Level::Normal, Output};
 use crate::strings;
-use std::io::{Read, Write};
+use libfreemkv::pes::Stream as PesStream;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -46,10 +42,14 @@ fn install_signal_handler() {
 #[cfg(unix)]
 extern "C" fn handle_sigint(_sig: libc::c_int) {
     if INTERRUPTED.load(Ordering::SeqCst) {
-        // Second Ctrl+C: force exit immediately (async-signal-safe)
         unsafe { libc::_exit(130) };
     }
     INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+/// Format an error for display using i18n strings.
+fn fmt_err(e: &dyn std::fmt::Display) -> String {
+    strings::fmt("error.generic", &[("detail", &e.to_string())])
 }
 
 // ── CLI entry point ─────────────────────────────────────────────────────────
@@ -92,47 +92,104 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
 
     let parsed_source = libfreemkv::parse_url(source);
     let parsed_dest = libfreemkv::parse_url(dest);
-    let is_disc = matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. });
-    let is_iso_dest = matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. });
 
-    // Disc → ISO: special case (raw sector copy with resume)
-    if is_disc && is_iso_dest {
+    // Disc → ISO: not a stream, use Disc::copy()
+    if matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. })
+        && matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. })
+    {
         disc_to_iso(source, dest, &keydb_path, raw, &out);
-        return true; // disc_to_iso handles its own errors
+        return true;
     }
 
-    // Disc source: open drive, get title list, then pipe each title
-    if is_disc {
-        return disc_to_stream(source, dest, &parsed_dest, &keydb_path, &title_nums, raw, &out);
+    // Everything else: figure out titles, pipe each one
+    let titles = scan_titles(source, &keydb_path);
+    let is_dir_dest = dest.ends_with('/') || std::path::Path::new(parsed_dest.path_str()).is_dir();
+
+    // Build the list of (title_index, dest_url) pairs
+    let jobs: Vec<(Option<usize>, String)> = match &titles {
+        Some(t) if !t.is_empty() => {
+            // Source has titles — select which ones
+            let indices: Vec<usize> = if title_nums.is_empty() {
+                (0..t.len()).collect()
+            } else {
+                title_nums.iter().map(|n| n.saturating_sub(1)).collect()
+            };
+
+            if indices.len() == 1 && !is_dir_dest {
+                // Single title to a single file
+                vec![(Some(indices[0]), dest.to_string())]
+            } else {
+                // Multiple titles → directory
+                let ext = parsed_dest.scheme();
+                let dest_dir = std::path::Path::new(parsed_dest.path_str());
+                let _ = std::fs::create_dir_all(dest_dir);
+                let disc_name = t.first()
+                    .and_then(|ti| if ti.playlist.is_empty() { None } else { Some(sanitize_name(&ti.playlist)) })
+                    .unwrap_or_else(|| "disc".to_string());
+
+                indices.iter().map(|&idx| {
+                    let filename = format!("{}_t{}.{}", disc_name, idx + 1, ext);
+                    let url = format!("{}://{}", ext, dest_dir.join(filename).display());
+                    (Some(idx), url)
+                }).collect()
+            }
+        }
+        _ => {
+            // No title list — single pass, no title index
+            let idx = title_nums.first().map(|n| n - 1);
+            vec![(idx, dest.to_string())]
+        }
+    };
+
+    // Show summary for multi-title
+    if let Some(ref t) = titles {
+        if jobs.len() > 1 {
+            out.raw(Normal, &strings::fmt("rip.titles_summary", &[
+                ("total", &t.len().to_string()),
+                ("selected", &jobs.len().to_string()),
+            ]));
+            out.blank(Normal);
+        }
     }
 
-    // Non-disc source: determine titles and pipe each one
-    let is_batch = dest.ends_with('/') || std::path::Path::new(parsed_dest.path_str()).is_dir();
+    // Pipe each title
+    let mut ok = true;
+    for (title_idx, dest_url) in &jobs {
+        // Print title info if we have it
+        if let (Some(idx), Some(ref t)) = (title_idx, &titles) {
+            if *idx >= t.len() {
+                eprintln!("{}", strings::fmt("rip.warning_title_range", &[
+                    ("num", &(idx + 1).to_string()),
+                    ("count", &t.len().to_string()),
+                ]));
+                continue;
+            }
+            let title = &t[*idx];
+            out.raw(Normal, &strings::fmt("rip.title_info", &[
+                ("num", &(idx + 1).to_string()),
+                ("duration", &title.duration_display()),
+                ("size", &format!("{:.1}", title.size_gb())),
+            ]));
+        }
 
-    if is_batch {
-        // Batch: need title list from source
-        batch_stream(source, dest, &parsed_dest, &keydb_path, &title_nums, raw, &out);
-        true
-    } else {
-        // Single title
-        let title_index = title_nums.first().map(|n| n - 1);
         let opts = libfreemkv::InputOptions {
             keydb_path: keydb_path.clone(),
-            title_index,
+            title_index: *title_idx,
             raw,
         };
-        if let Err(e) = pipe(source, dest, &opts, &out) {
-            out.raw(Normal, &format!("Error: {}", e));
-            return false;
+        if let Err(e) = pipe(source, dest_url, &opts, &out) {
+            out.raw(Normal, &fmt_err(&e));
+            ok = false;
         }
-        true
+        out.blank(Normal);
     }
+
+    ok
 }
 
 // ── The pipeline engine ─────────────────────────────────────────────────────
 
-/// The pipeline. Opens input, opens output, streams PES frames.
-/// All streams produce/consume PES. No byte-level fallback.
+/// One title: open input, open output, stream PES frames.
 fn pipe(
     source: &str,
     dest: &str,
@@ -140,14 +197,14 @@ fn pipe(
     out: &Output,
 ) -> Result<(), String> {
     // Open input
-    out.raw_inline(Normal, &format!("Opening {}... ", source));
+    out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", source)]));
     let mut input = match libfreemkv::input(source, opts) {
         Ok(s) => {
-            out.raw(Normal, "OK");
+            out.raw(Normal, &strings::get("rip.ok"));
             s
         }
         Err(e) => {
-            out.raw(Normal, "FAILED");
+            out.raw(Normal, &strings::get("rip.failed"));
             return Err(format!("{}", e));
         }
     };
@@ -171,29 +228,28 @@ fn pipe(
         .map(|i| input.codec_private(i))
         .collect();
 
-    // Open output
-    out.raw_inline(Normal, &format!("Opening {}... ", dest));
-    let mut output = match libfreemkv::output(dest, &title) {
+    // Open output, wrapped with byte counter for progress
+    out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", dest)]));
+    let raw_output = match libfreemkv::output(dest, &title) {
         Ok(s) => {
-            out.raw(Normal, "OK");
+            out.raw(Normal, &strings::get("rip.ok"));
             s
         }
         Err(e) => {
-            out.raw(Normal, "FAILED");
+            out.raw(Normal, &strings::get("rip.failed"));
             return Err(format!("{}", e));
         }
     };
+    let mut output = libfreemkv::pes::CountingStream::new(raw_output);
 
     out.blank(Normal);
 
     let total_bytes = info.size_bytes;
     let start = std::time::Instant::now();
-    let mut bytes_done: u64 = 0;
     let mut last_update = start;
 
     // Write buffered frames
     for frame in &buffered {
-        bytes_done += frame.data.len() as u64;
         output.write(frame).map_err(|e| format!("{}", e))?;
     }
 
@@ -201,18 +257,17 @@ fn pipe(
     loop {
         if INTERRUPTED.load(Ordering::SeqCst) {
             out.blank(Normal);
-            out.raw(Normal, "Interrupted.");
+            out.raw(Normal, &strings::get("rip.interrupted"));
             break;
         }
 
         match input.read() {
             Ok(Some(frame)) => {
-                bytes_done += frame.data.len() as u64;
                 output.write(&frame).map_err(|e| format!("{}", e))?;
 
                 let now = std::time::Instant::now();
                 if !out.is_quiet() && now.duration_since(last_update).as_secs_f64() >= 0.5 {
-                    print_progress(bytes_done, total_bytes, 0, &start);
+                    print_progress(output.bytes_written(), total_bytes, 0, &start);
                     last_update = now;
                 }
             }
@@ -226,24 +281,27 @@ fn pipe(
     if !out.is_quiet() {
         eprint!("\r                                                                    \r");
     }
+    let done = output.bytes_written();
     let elapsed = start.elapsed().as_secs_f64();
-    let mb = bytes_done as f64 / (1024.0 * 1024.0);
+    let mb = done as f64 / (1024.0 * 1024.0);
     let (sz, unit) = if mb >= 1024.0 { (mb / 1024.0, "GB") } else { (mb, "MB") };
-    out.raw(Normal, &format!(
-        "Complete: {:.1} {} in {:.0}s ({:.0} MB/s)",
-        sz, unit, elapsed,
-        if elapsed > 0.0 { mb / elapsed } else { 0.0 }
-    ));
+    let speed = if elapsed > 0.0 { mb / elapsed } else { 0.0 };
+    out.raw(Normal, &strings::fmt("rip.complete", &[
+        ("size", &format!("{sz:.1}")),
+        ("unit", unit),
+        ("time", &format!("{elapsed:.0}")),
+        ("speed", &format!("{speed:.0}")),
+    ]));
     Ok(())
 }
 
-// ── Disc → ISO (special case: raw sector copy with resume) ──────────────────
+// ── Disc → ISO (raw sector copy, not a stream) ────────────────────────────
 
 fn disc_to_iso(
     source: &str,
     dest: &str,
     keydb_path: &Option<String>,
-    _raw: bool,
+    raw: bool,
     out: &Output,
 ) {
     let parsed_source = libfreemkv::parse_url(source);
@@ -252,422 +310,113 @@ fn disc_to_iso(
         _ => None,
     };
 
-    let event_handler = |event: libfreemkv::Event| {
-        use libfreemkv::EventKind::*;
-        match event.kind {
-            DriveOpened { ref device } => {
-                out.raw(Normal, &strings::fmt("rip.opening", &[("device", device)]));
-            }
-            DriveReady => {
-                out.raw(Normal, &strings::get("rip.ok"));
-            }
-            InitComplete { success } => {
-                if !success {
-                    out.raw(Normal, &strings::fmt("rip.continuing_oem", &[("error", "init")]));
-                }
-            }
-            ScanComplete { titles } => {
-                out.raw(Normal, &strings::fmt("rip.titles", &[("count", &titles.to_string())]));
-            }
-            _ => {}
-        }
+    let mut drive = match device {
+        Some(ref d) => match libfreemkv::Drive::open(d) {
+            Ok(d) => d,
+            Err(e) => { out.raw(Normal, &fmt_err(&e)); return; }
+        },
+        None => match libfreemkv::find_drive() {
+            Some(d) => d,
+            None => { out.raw(Normal, &strings::get("error.no_drive")); return; }
+        },
+    };
+    out.raw(Normal, &strings::fmt("rip.drive", &[("device", drive.device_path())]));
+    let _ = drive.wait_ready();
+    let _ = drive.init();
+    let _ = drive.probe_disc();
+
+    let scan_opts = match keydb_path {
+        Some(p) => libfreemkv::ScanOptions::with_keydb(p),
+        None => libfreemkv::ScanOptions::default(),
+    };
+    let disc = match libfreemkv::Disc::scan(&mut drive, &scan_opts) {
+        Ok(d) => d,
+        Err(e) => { out.raw(Normal, &strings::fmt("error.scan_failed", &[("detail", &e.to_string())])); return; }
     };
 
-    let result = match libfreemkv::DiscStream::open(
-        device.as_deref(),
-        keydb_path.as_deref(),
-        0,
-        Some(&event_handler),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            out.raw(Normal, &format!("Error: {}", e));
-            return;
-        }
-    };
-
-    let disc = &result.disc;
-    let drive = result.stream.into_drive();
-    let disc_name = sanitize_name(
-        disc.meta_title.as_deref().unwrap_or(&disc.volume_id),
-    );
-
+    let disc_name = sanitize_name(disc.meta_title.as_deref().unwrap_or(&disc.volume_id));
     let iso_path = match libfreemkv::parse_url(dest) {
         libfreemkv::StreamUrl::Iso { ref path } => path.clone(),
         _ => unreachable!(),
     };
 
     let total_bytes = disc.capacity_sectors as u64 * 2048;
-
-    // Resume: check for existing partial ISO
-    let (start_lba, resume_bytes) = match std::fs::metadata(&iso_path) {
-        Ok(meta) if meta.len() > 0 => {
-            let existing = meta.len();
-            let safe_sectors = (existing / 2048).saturating_sub(5) as u32;
-            let resume_from = safe_sectors as u64 * 2048;
-            out.raw(
-                Normal,
-                &format!(
-                    "Resuming: {:.1} GB already written, starting at sector {}",
-                    resume_from as f64 / 1_073_741_824.0,
-                    safe_sectors
-                ),
-            );
-            (safe_sectors, resume_from)
-        }
-        _ => (0u32, 0u64),
-    };
-
-    let title = libfreemkv::DiscTitle::empty();
-    let mut input = if start_lba > 0 {
-        libfreemkv::DiscStream::full_disc_resume(drive, title, disc.capacity_sectors, start_lba)
-    } else {
-        libfreemkv::DiscStream::full_disc(drive, title, disc.capacity_sectors)
-    };
-    input.lock_tray();
-
-    out.raw(
-        Normal,
-        &format!(
-            "Disc: {} ({:.1} GB, {} sectors)",
-            disc_name,
-            total_bytes as f64 / 1_073_741_824.0,
-            disc.capacity_sectors
-        ),
-    );
-
-    // Open file: append if resuming, create if new
-    let file = if start_lba > 0 {
-        let f = match std::fs::OpenOptions::new().write(true).open(&iso_path) {
-            Ok(f) => f,
-            Err(e) => {
-                out.raw(Normal, &format!("Cannot open {}: {}", iso_path.display(), e));
-                return;
-            }
-        };
-        if let Err(e) = f.set_len(resume_bytes) {
-            out.raw(Normal, &format!("Cannot truncate {}: {}", iso_path.display(), e));
-            return;
-        }
-        use std::io::Seek;
-        let mut f = f;
-        f.seek(std::io::SeekFrom::End(0)).unwrap();
-        f
-    } else {
-        match std::fs::File::create(&iso_path) {
-            Ok(f) => f,
-            Err(e) => {
-                out.raw(Normal, &format!("Cannot create {}: {}", iso_path.display(), e));
-                return;
-            }
-        }
-    };
-    let mut output = std::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
-
-    out.raw(Normal, &format!("Output: {}", iso_path.display()));
+    out.raw(Normal, &strings::fmt("rip.disc_label", &[
+        ("name", &disc_name),
+        ("size", &format!("{:.1}", total_bytes as f64 / 1_073_741_824.0)),
+    ]));
+    out.raw(Normal, &strings::fmt("rip.output", &[("path", &iso_path.display().to_string())]));
     out.blank(Normal);
-    copy_loop(&mut input, &mut output, total_bytes, resume_bytes, out);
-    let _ = output.flush();
-    input.unlock_tray();
-}
-
-// ── Disc → stream (title extraction with batch support) ─────────────────────
-
-fn disc_to_stream(
-    source: &str,
-    dest: &str,
-    parsed_dest: &libfreemkv::StreamUrl,
-    keydb_path: &Option<String>,
-    title_nums: &[usize],
-    raw: bool,
-    out: &Output,
-) -> bool {
-    let parsed_source = libfreemkv::parse_url(source);
-    let device = match &parsed_source {
-        libfreemkv::StreamUrl::Disc { device: Some(p) } => Some(p.clone()),
-        _ => None,
-    };
-
-    let event_handler = |event: libfreemkv::Event| {
-        use libfreemkv::EventKind::*;
-        match event.kind {
-            DriveOpened { ref device } => {
-                out.raw(Normal, &strings::fmt("rip.opening", &[("device", device)]));
-            }
-            DriveReady => {
-                out.raw(Normal, &strings::get("rip.ok"));
-            }
-            InitComplete { success } => {
-                if !success {
-                    out.raw(Normal, &strings::fmt("rip.continuing_oem", &[("error", "init")]));
-                }
-            }
-            ScanComplete { titles } => {
-                out.raw(Normal, &strings::fmt("rip.titles", &[("count", &titles.to_string())]));
-            }
-            _ => {}
-        }
-    };
-
-    let result = match libfreemkv::DiscStream::open(
-        device.as_deref(),
-        keydb_path.as_deref(),
-        0,
-        Some(&event_handler),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            out.raw(Normal, &format!("Error: {}", e));
-            return false;
-        }
-    };
-
-    let disc = &result.disc;
-    let mut drive = result.stream.into_drive();
-    let disc_name = sanitize_name(
-        disc.meta_title.as_deref().unwrap_or(&disc.volume_id),
-    );
-
-    let title_indices: Vec<usize> = if title_nums.is_empty() {
-        (0..disc.titles.len()).collect()
-    } else {
-        title_nums.iter().map(|n| n.saturating_sub(1)).collect()
-    };
-
-    let batch = title_indices.len() > 1;
-    let ext = parsed_dest.scheme();
-
-    if batch {
-        out.raw(
-            Normal,
-            &format!("Titles ({} total, {} selected):", disc.titles.len(), title_indices.len()),
-        );
-        out.blank(Normal);
-        for &idx in &title_indices {
-            if idx < disc.titles.len() {
-                let t = &disc.titles[idx];
-                out.raw(
-                    Normal,
-                    &format!("  {:2}. {} — {:.1} GB — {}", idx + 1, t.duration_display(), t.size_gb(), t.playlist),
-                );
-            }
-        }
-        out.blank(Normal);
-    }
-
-    let dest_path = parsed_dest.path_str();
-    let out_dir = if batch {
-        let p = std::path::Path::new(dest_path);
-        let dir = if p.extension().is_none() || dest_path.ends_with('/') {
-            p.to_path_buf()
-        } else {
-            p.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()
-        };
-        let _ = std::fs::create_dir_all(&dir);
-        Some(dir)
-    } else {
-        None
-    };
 
     drive.lock_tray();
+    let start = std::time::Instant::now();
+    let last_update = std::cell::Cell::new(start);
 
-    for &idx in &title_indices {
-        if idx >= disc.titles.len() {
-            eprintln!("Warning: title {} out of range (disc has {}), skipping", idx + 1, disc.titles.len());
-            continue;
-        }
+    let progress = |done: u64, total: u64| {
+        if out.is_quiet() { return; }
+        let now = std::time::Instant::now();
+        if now.duration_since(last_update.get()).as_secs_f64() < 0.5 { return; }
+        last_update.set(now);
+        print_progress(done, total, 0, &start);
+    };
 
-        let title = disc.titles[idx].clone();
-        let total_bytes = title.size_bytes;
-
-        let dest_url = if let Some(ref dir) = out_dir {
-            let filename = format!("{}_t{}.{}", disc_name, idx + 1, ext);
-            format!("{}://{}", ext, dir.join(filename).display())
-        } else {
-            dest.to_string()
-        };
-
-        if batch {
-            out.raw(Normal, &format!("Ripping title {} ({}, {:.1} GB)", idx + 1, title.duration_display(), title.size_gb()));
-        } else {
-            print_stream_info(out, &title);
-        }
-
-        let mut input = libfreemkv::DiscStream::title(drive, title.clone());
-        if raw {
-            input.set_raw();
-        }
-        let input = input;
-
-        out.raw_inline(Normal, &format!("Opening {}... ", dest_url));
-        let mut output = match libfreemkv::open_output(&dest_url, &title) {
-            Ok(s) => {
-                out.raw(Normal, "OK");
-                s
+    match disc.copy(&mut drive, &iso_path, !raw, true, Some(&progress)) {
+        Ok(()) => {
+            if !out.is_quiet() {
+                eprint!("\r                                                                    \r");
             }
-            Err(e) => {
-                out.raw(Normal, "FAILED");
-                eprintln!("  {}", e);
-                drive = input.into_drive();
-                continue;
-            }
-        };
-
-        out.blank(Normal);
-        let mut input = input;
-        copy_loop(&mut input, &mut *output, total_bytes, 0, out);
-        let _ = output.finish();
-
-        drive = input.into_drive();
-        out.blank(Normal);
+            let elapsed = start.elapsed().as_secs_f64();
+            let mb = total_bytes as f64 / (1024.0 * 1024.0);
+            let speed = if elapsed > 0.0 { mb / elapsed } else { 0.0 };
+            out.raw(Normal, &strings::fmt("rip.complete", &[
+                ("size", &format!("{:.1}", mb / 1024.0)),
+                ("unit", "GB"),
+                ("time", &format!("{elapsed:.0}")),
+                ("speed", &format!("{speed:.0}")),
+            ]));
+        }
+        Err(e) => {
+            out.raw(Normal, &fmt_err(&e));
+        }
     }
 
     drive.unlock_tray();
-    true
 }
 
-// ── Batch from non-disc source (ISO, etc.) ──────────────────────────────────
+// ── Title scanning ──────────────────────────────────────────────────────────
 
-fn batch_stream(
-    source: &str,
-    dest: &str,
-    parsed_dest: &libfreemkv::StreamUrl,
-    keydb_path: &Option<String>,
-    title_nums: &[usize],
-    raw: bool,
-    out: &Output,
-) {
-    // Scan the source for title list
-    let titles = match scan_titles(source, keydb_path) {
-        Some(t) => t,
-        None => {
-            // Source doesn't have titles — treat as single
-            let opts = libfreemkv::InputOptions { keydb_path: keydb_path.clone(), title_index: None, raw };
-            if let Err(e) = pipe(source, dest, &opts, out) {
-                eprintln!("Error: {}", e);
-            }
-            return;
-        }
-    };
-
-    let title_indices: Vec<usize> = if title_nums.is_empty() {
-        (0..titles.len()).collect()
-    } else {
-        title_nums.iter().map(|n| n.saturating_sub(1)).collect()
-    };
-
-    let ext = parsed_dest.scheme();
-    let dest_path = parsed_dest.path_str();
-    let dir = std::path::Path::new(dest_path);
-    let _ = std::fs::create_dir_all(dir);
-
-    let disc_name = "disc"; // TODO: get from scan
-
-    out.raw(
-        Normal,
-        &format!("Titles ({} total, {} selected):", titles.len(), title_indices.len()),
-    );
-    out.blank(Normal);
-
-    for &idx in &title_indices {
-        if idx >= titles.len() {
-            eprintln!("Warning: title {} out of range (has {}), skipping", idx + 1, titles.len());
-            continue;
-        }
-
-        let filename = format!("{}_t{}.{}", disc_name, idx + 1, ext);
-        let dest_url = format!("{}://{}", ext, dir.join(filename).display());
-
-        out.raw(Normal, &format!("Title {} → {}", idx + 1, dest_url));
-        let opts = libfreemkv::InputOptions { keydb_path: keydb_path.clone(), title_index: Some(idx), raw };
-        if let Err(e) = pipe(source, &dest_url, &opts, out) {
-            eprintln!("Error: {}", e);
-        }
-        out.blank(Normal);
-    }
-}
-
-/// Scan a source for its title list. Returns None if source doesn't have titles.
+/// Scan any source for its title list. Returns None if source has no titles
+/// (e.g. a single M2TS file, network stream).
 fn scan_titles(source: &str, keydb_path: &Option<String>) -> Option<Vec<libfreemkv::DiscTitle>> {
     let parsed = libfreemkv::parse_url(source);
+    let scan_opts = match keydb_path {
+        Some(p) => libfreemkv::ScanOptions::with_keydb(p),
+        None => libfreemkv::ScanOptions::default(),
+    };
+
     match parsed {
         libfreemkv::StreamUrl::Iso { ref path } => {
-            let scan_opts = match keydb_path {
-                Some(p) => libfreemkv::ScanOptions::with_keydb(p),
-                None => libfreemkv::ScanOptions::default(),
+            let mut reader = libfreemkv::mux::iso::IsoSectorReader::open(&path.to_string_lossy()).ok()?;
+            let capacity = reader.capacity();
+            let disc = libfreemkv::Disc::scan_image(&mut reader, capacity, &scan_opts).ok()?;
+            Some(disc.titles)
+        }
+        libfreemkv::StreamUrl::Disc { ref device } => {
+            let mut drive = match device {
+                Some(d) => libfreemkv::Drive::open(d).ok()?,
+                None => libfreemkv::find_drive()?,
             };
-            if let Ok(mut reader) = libfreemkv::mux::iso::IsoSectorReader::open(&path.to_string_lossy()) {
-                let capacity = reader.capacity();
-                if let Ok(disc) = libfreemkv::Disc::scan_image(&mut reader, capacity, &scan_opts) {
-                    return Some(disc.titles);
-                }
-            }
-            None
+            let _ = drive.wait_ready();
+            let _ = drive.init();
+            let _ = drive.probe_disc();
+            let disc = libfreemkv::Disc::scan(&mut drive, &scan_opts).ok()?;
+            Some(disc.titles)
         }
         _ => None,
     }
 }
 
-// ── Shared helpers ──────────────────────────────────────────────────────────
-
-/// The copy loop: read → write, with progress.
-fn copy_loop(
-    input: &mut dyn Read,
-    output: &mut dyn Write,
-    total_bytes: u64,
-    bytes_already: u64,
-    out: &Output,
-) {
-    let start = std::time::Instant::now();
-    let mut total: u64 = bytes_already;
-    let mut buf = vec![0u8; 192 * 1024];
-    let mut last_update = start;
-
-    loop {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            out.blank(Normal);
-            out.raw(Normal, "Interrupted.");
-            break;
-        }
-
-        match input.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                if output.write_all(&buf[..n]).is_err() {
-                    break;
-                }
-                total += n as u64;
-
-                let now = std::time::Instant::now();
-                if !out.is_quiet() && now.duration_since(last_update).as_secs_f64() >= 0.5 {
-                    print_progress(total, total_bytes, bytes_already, &start);
-                    last_update = now;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-
-    if !out.is_quiet() {
-        eprint!("\r                                                                    \r");
-    }
-    let elapsed = start.elapsed().as_secs_f64();
-    let session_mb = (total - bytes_already) as f64 / (1024.0 * 1024.0);
-    let total_mb = total as f64 / (1024.0 * 1024.0);
-    let (sz, unit) = if total_mb >= 1024.0 {
-        (total_mb / 1024.0, "GB")
-    } else {
-        (total_mb, "MB")
-    };
-    out.raw(
-        Normal,
-        &format!(
-            "Complete: {:.1} {} in {:.0}s ({:.0} MB/s)",
-            sz, unit, elapsed,
-            if elapsed > 0.0 { session_mb / elapsed } else { 0.0 }
-        ),
-    );
-}
+// ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn print_progress(done: u64, total: u64, resumed_from: u64, start: &std::time::Instant) {
     let elapsed = start.elapsed().as_secs_f64();
@@ -705,7 +454,7 @@ fn print_progress(done: u64, total: u64, resumed_from: u64, start: &std::time::I
 }
 
 fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
-    out.raw(Normal, &format!("  Streams: {}", meta.streams.len()));
+    out.raw(Normal, &format!("  {}: {}", strings::get("disc.titles"), meta.streams.len()));
     for s in &meta.streams {
         match s {
             libfreemkv::Stream::Video(v) => {
@@ -723,7 +472,9 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
     }
     if meta.duration_secs > 0.0 {
         let d = meta.duration_secs;
-        out.raw(Normal, &format!("  Duration: {}:{:02}:{:02}", d as u64 / 3600, (d as u64 % 3600) / 60, d as u64 % 60));
+        out.raw(Normal, &format!("  {}: {}:{:02}:{:02}",
+            strings::get("disc.format"),
+            d as u64 / 3600, (d as u64 % 3600) / 60, d as u64 % 60));
     }
 }
 

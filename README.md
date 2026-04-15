@@ -52,7 +52,7 @@ Every operation is `freemkv <source> <dest>`. Sources and destinations are strea
 | Stream | Input | Output | URL |
 |--------|-------|--------|-----|
 | Disc | Yes | -- | `disc://` or `disc:///dev/sg4` |
-| ISO | Yes | -- | `iso://path.iso` |
+| ISO | Yes | Yes | `iso://path.iso` |
 | MKV | Yes | Yes | `mkv://path` |
 | M2TS | Yes | Yes | `m2ts://path` |
 | Network | Yes (listen) | Yes (connect) | `network://host:port` |
