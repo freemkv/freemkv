@@ -71,7 +71,9 @@ fn main() {
             }
 
             if urls.len() == 2 {
-                pipe::run(&urls[0], &urls[1], &args[1..]);
+                if !pipe::run(&urls[0], &urls[1], &args[1..]) {
+                    std::process::exit(1);
+                }
             } else if urls.len() == 1 {
                 // Single URL with no dest — show info
                 info_cmd(&args[1..]);

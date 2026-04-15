@@ -46,14 +46,16 @@ fn install_signal_handler() {
 #[cfg(unix)]
 extern "C" fn handle_sigint(_sig: libc::c_int) {
     if INTERRUPTED.load(Ordering::SeqCst) {
-        std::process::exit(130);
+        // Second Ctrl+C: force exit immediately (async-signal-safe)
+        unsafe { libc::_exit(130) };
     }
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
 // ── CLI entry point ─────────────────────────────────────────────────────────
 
-pub fn run(source: &str, dest: &str, args: &[String]) {
+/// Returns true on success, false on error.
+pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     install_signal_handler();
 
     // Parse flags
@@ -96,13 +98,12 @@ pub fn run(source: &str, dest: &str, args: &[String]) {
     // Disc → ISO: special case (raw sector copy with resume)
     if is_disc && is_iso_dest {
         disc_to_iso(source, dest, &keydb_path, raw, &out);
-        return;
+        return true; // disc_to_iso handles its own errors
     }
 
     // Disc source: open drive, get title list, then pipe each title
     if is_disc {
-        disc_to_stream(source, dest, &parsed_dest, &keydb_path, &title_nums, raw, &out);
-        return;
+        return disc_to_stream(source, dest, &parsed_dest, &keydb_path, &title_nums, raw, &out);
     }
 
     // Non-disc source: determine titles and pipe each one
@@ -111,6 +112,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) {
     if is_batch {
         // Batch: need title list from source
         batch_stream(source, dest, &parsed_dest, &keydb_path, &title_nums, raw, &out);
+        true
     } else {
         // Single title
         let title_index = title_nums.first().map(|n| n - 1);
@@ -120,9 +122,10 @@ pub fn run(source: &str, dest: &str, args: &[String]) {
             raw,
         };
         if let Err(e) = pipe(source, dest, &opts, &out) {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
+            out.raw(Normal, &format!("Error: {}", e));
+            return false;
         }
+        true
     }
 }
 
@@ -277,8 +280,8 @@ fn disc_to_iso(
     ) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
+            out.raw(Normal, &format!("Error: {}", e));
+            return;
         }
     };
 
@@ -334,26 +337,29 @@ fn disc_to_iso(
 
     // Open file: append if resuming, create if new
     let file = if start_lba > 0 {
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&iso_path)
-            .unwrap_or_else(|e| {
-                eprintln!("Cannot open {}: {}", iso_path.display(), e);
-                std::process::exit(1);
-            });
-        f.set_len(resume_bytes).unwrap_or_else(|e| {
-            eprintln!("Cannot truncate {}: {}", iso_path.display(), e);
-            std::process::exit(1);
-        });
+        let f = match std::fs::OpenOptions::new().write(true).open(&iso_path) {
+            Ok(f) => f,
+            Err(e) => {
+                out.raw(Normal, &format!("Cannot open {}: {}", iso_path.display(), e));
+                return;
+            }
+        };
+        if let Err(e) = f.set_len(resume_bytes) {
+            out.raw(Normal, &format!("Cannot truncate {}: {}", iso_path.display(), e));
+            return;
+        }
         use std::io::Seek;
         let mut f = f;
         f.seek(std::io::SeekFrom::End(0)).unwrap();
         f
     } else {
-        std::fs::File::create(&iso_path).unwrap_or_else(|e| {
-            eprintln!("Cannot create {}: {}", iso_path.display(), e);
-            std::process::exit(1);
-        })
+        match std::fs::File::create(&iso_path) {
+            Ok(f) => f,
+            Err(e) => {
+                out.raw(Normal, &format!("Cannot create {}: {}", iso_path.display(), e));
+                return;
+            }
+        }
     };
     let mut output = std::io::BufWriter::with_capacity(4 * 1024 * 1024, file);
 
@@ -372,9 +378,9 @@ fn disc_to_stream(
     parsed_dest: &libfreemkv::StreamUrl,
     keydb_path: &Option<String>,
     title_nums: &[usize],
-    _raw: bool,
+    raw: bool,
     out: &Output,
-) {
+) -> bool {
     let parsed_source = libfreemkv::parse_url(source);
     let device = match &parsed_source {
         libfreemkv::StreamUrl::Disc { device: Some(p) } => Some(p.clone()),
@@ -410,8 +416,8 @@ fn disc_to_stream(
     ) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
+            out.raw(Normal, &format!("Error: {}", e));
+            return false;
         }
     };
 
@@ -486,7 +492,11 @@ fn disc_to_stream(
             print_stream_info(out, &title);
         }
 
-        let input = libfreemkv::DiscStream::title(drive, title.clone());
+        let mut input = libfreemkv::DiscStream::title(drive, title.clone());
+        if raw {
+            input.set_raw();
+        }
+        let input = input;
 
         out.raw_inline(Normal, &format!("Opening {}... ", dest_url));
         let mut output = match libfreemkv::open_output(&dest_url, &title) {
@@ -512,6 +522,7 @@ fn disc_to_stream(
     }
 
     drive.unlock_tray();
+    true
 }
 
 // ── Batch from non-disc source (ISO, etc.) ──────────────────────────────────
