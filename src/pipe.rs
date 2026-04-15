@@ -165,14 +165,15 @@ fn pipe(
         }
     }
 
-    // Collect codec_privates
-    let codec_privates: Vec<Option<Vec<u8>>> = (0..info.streams.len())
+    // Build output title with codec_privates from input
+    let mut title = info.clone();
+    title.codec_privates = (0..info.streams.len())
         .map(|i| input.codec_private(i))
         .collect();
 
-    // Open output with codec info
+    // Open output
     out.raw_inline(Normal, &format!("Opening {}... ", dest));
-    let mut output = match libfreemkv::output(dest, &info, &codec_privates) {
+    let mut output = match libfreemkv::output(dest, &title) {
         Ok(s) => {
             out.raw(Normal, "OK");
             s
