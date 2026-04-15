@@ -147,3 +147,108 @@ fn lookup(strings: &Value, path: &str) -> String {
         None => path.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Collect all dotted key paths from a JSON value (e.g. "app.usage", "error.E1000").
+    fn collect_keys(value: &Value, prefix: &str, out: &mut Vec<String>) {
+        if let Some(obj) = value.as_object() {
+            for (k, v) in obj {
+                let path = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{}.{}", prefix, k)
+                };
+                if v.is_object() {
+                    collect_keys(v, &path, out);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+    }
+
+    fn verify_locale(code: &str, data: &str) {
+        let locale: Value = serde_json::from_str(data)
+            .unwrap_or_else(|e| panic!("{}.json: invalid JSON: {}", code, e));
+
+        let en: Value = serde_json::from_str(LOCALE_EN).unwrap();
+        let mut en_keys = Vec::new();
+        collect_keys(&en, "", &mut en_keys);
+
+        let mut locale_keys = Vec::new();
+        collect_keys(&locale, "", &mut locale_keys);
+
+        // Every English key must exist in the locale
+        let mut missing = Vec::new();
+        for key in &en_keys {
+            if !locale_keys.contains(key) {
+                missing.push(key.clone());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "{}.json missing {} keys: {:?}",
+            code,
+            missing.len(),
+            missing
+        );
+
+        // Every {placeholder} in English must appear in the translation
+        for key in &en_keys {
+            let en_val = lookup(&en, key);
+            let locale_val = lookup(&locale, key);
+            // Find all {word} patterns in English
+            for cap in en_val.match_indices('{') {
+                if let Some(end) = en_val[cap.0..].find('}') {
+                    let placeholder = &en_val[cap.0..cap.0 + end + 1];
+                    assert!(
+                        locale_val.contains(placeholder),
+                        "{}.json key '{}': missing placeholder {} (got: '{}')",
+                        code,
+                        key,
+                        placeholder,
+                        locale_val
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn locale_en_loads() {
+        let _: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
+    }
+
+    #[test]
+    fn locale_es_loads() {
+        verify_locale("es", LOCALE_ES);
+    }
+
+    #[test]
+    fn locale_fr_loads() {
+        verify_locale("fr", LOCALE_FR);
+    }
+
+    #[test]
+    fn locale_de_loads() {
+        verify_locale("de", LOCALE_DE);
+    }
+
+    #[test]
+    fn locale_it_loads() {
+        verify_locale("it", LOCALE_IT);
+    }
+
+    #[test]
+    fn locale_pt_loads() {
+        verify_locale("pt", LOCALE_PT);
+    }
+
+    #[test]
+    fn locale_nl_loads() {
+        verify_locale("nl", LOCALE_NL);
+    }
+}
