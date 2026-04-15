@@ -123,15 +123,25 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                 let ext = parsed_dest.scheme();
                 let dest_dir = std::path::Path::new(parsed_dest.path_str());
                 let _ = std::fs::create_dir_all(dest_dir);
-                let disc_name = t.first()
-                    .and_then(|ti| if ti.playlist.is_empty() { None } else { Some(sanitize_name(&ti.playlist)) })
+                let disc_name = t
+                    .first()
+                    .and_then(|ti| {
+                        if ti.playlist.is_empty() {
+                            None
+                        } else {
+                            Some(sanitize_name(&ti.playlist))
+                        }
+                    })
                     .unwrap_or_else(|| "disc".to_string());
 
-                indices.iter().map(|&idx| {
-                    let filename = format!("{}_t{}.{}", disc_name, idx + 1, ext);
-                    let url = format!("{}://{}", ext, dest_dir.join(filename).display());
-                    (Some(idx), url)
-                }).collect()
+                indices
+                    .iter()
+                    .map(|&idx| {
+                        let filename = format!("{}_t{}.{}", disc_name, idx + 1, ext);
+                        let url = format!("{}://{}", ext, dest_dir.join(filename).display());
+                        (Some(idx), url)
+                    })
+                    .collect()
             }
         }
         _ => {
@@ -144,10 +154,16 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // Show summary for multi-title
     if let Some(ref t) = titles {
         if jobs.len() > 1 {
-            out.raw(Normal, &strings::fmt("rip.titles_summary", &[
-                ("total", &t.len().to_string()),
-                ("selected", &jobs.len().to_string()),
-            ]));
+            out.raw(
+                Normal,
+                &strings::fmt(
+                    "rip.titles_summary",
+                    &[
+                        ("total", &t.len().to_string()),
+                        ("selected", &jobs.len().to_string()),
+                    ],
+                ),
+            );
             out.blank(Normal);
         }
     }
@@ -158,18 +174,30 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         // Print title info if we have it
         if let (Some(idx), Some(ref t)) = (title_idx, &titles) {
             if *idx >= t.len() {
-                eprintln!("{}", strings::fmt("rip.warning_title_range", &[
-                    ("num", &(idx + 1).to_string()),
-                    ("count", &t.len().to_string()),
-                ]));
+                eprintln!(
+                    "{}",
+                    strings::fmt(
+                        "rip.warning_title_range",
+                        &[
+                            ("num", &(idx + 1).to_string()),
+                            ("count", &t.len().to_string()),
+                        ]
+                    )
+                );
                 continue;
             }
             let title = &t[*idx];
-            out.raw(Normal, &strings::fmt("rip.title_info", &[
-                ("num", &(idx + 1).to_string()),
-                ("duration", &title.duration_display()),
-                ("size", &format!("{:.1}", title.size_gb())),
-            ]));
+            out.raw(
+                Normal,
+                &strings::fmt(
+                    "rip.title_info",
+                    &[
+                        ("num", &(idx + 1).to_string()),
+                        ("duration", &title.duration_display()),
+                        ("size", &format!("{:.1}", title.size_gb())),
+                    ],
+                ),
+            );
         }
 
         let opts = libfreemkv::InputOptions {
@@ -285,26 +313,30 @@ fn pipe(
     let done = output.bytes_written();
     let elapsed = start.elapsed().as_secs_f64();
     let mb = done as f64 / (1024.0 * 1024.0);
-    let (sz, unit) = if mb >= 1024.0 { (mb / 1024.0, "GB") } else { (mb, "MB") };
+    let (sz, unit) = if mb >= 1024.0 {
+        (mb / 1024.0, "GB")
+    } else {
+        (mb, "MB")
+    };
     let speed = if elapsed > 0.0 { mb / elapsed } else { 0.0 };
-    out.raw(Normal, &strings::fmt("rip.complete", &[
-        ("size", &format!("{sz:.1}")),
-        ("unit", unit),
-        ("time", &format!("{elapsed:.0}")),
-        ("speed", &format!("{speed:.0}")),
-    ]));
+    out.raw(
+        Normal,
+        &strings::fmt(
+            "rip.complete",
+            &[
+                ("size", &format!("{sz:.1}")),
+                ("unit", unit),
+                ("time", &format!("{elapsed:.0}")),
+                ("speed", &format!("{speed:.0}")),
+            ],
+        ),
+    );
     Ok(())
 }
 
 // ── Disc → ISO (raw sector copy, not a stream) ────────────────────────────
 
-fn disc_to_iso(
-    source: &str,
-    dest: &str,
-    keydb_path: &Option<String>,
-    raw: bool,
-    out: &Output,
-) {
+fn disc_to_iso(source: &str, dest: &str, keydb_path: &Option<String>, raw: bool, out: &Output) {
     let parsed_source = libfreemkv::parse_url(source);
     let device = match &parsed_source {
         libfreemkv::StreamUrl::Disc { device: Some(p) } => Some(p.clone()),
@@ -314,14 +346,23 @@ fn disc_to_iso(
     let mut drive = match device {
         Some(ref d) => match libfreemkv::Drive::open(d) {
             Ok(d) => d,
-            Err(e) => { out.raw(Normal, &fmt_err(&e)); return; }
+            Err(e) => {
+                out.raw(Normal, &fmt_err(&e));
+                return;
+            }
         },
         None => match libfreemkv::find_drive() {
             Some(d) => d,
-            None => { out.raw(Normal, &strings::get("error.no_drive")); return; }
+            None => {
+                out.raw(Normal, &strings::get("error.no_drive"));
+                return;
+            }
         },
     };
-    out.raw(Normal, &strings::fmt("rip.drive", &[("device", drive.device_path())]));
+    out.raw(
+        Normal,
+        &strings::fmt("rip.drive", &[("device", drive.device_path())]),
+    );
     let _ = drive.wait_ready();
     let _ = drive.init();
     let _ = drive.probe_disc();
@@ -332,7 +373,13 @@ fn disc_to_iso(
     };
     let disc = match libfreemkv::Disc::scan(&mut drive, &scan_opts) {
         Ok(d) => d,
-        Err(e) => { out.raw(Normal, &strings::fmt("error.scan_failed", &[("detail", &e.to_string())])); return; }
+        Err(e) => {
+            out.raw(
+                Normal,
+                &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
+            );
+            return;
+        }
     };
 
     let disc_name = sanitize_name(disc.meta_title.as_deref().unwrap_or(&disc.volume_id));
@@ -342,11 +389,23 @@ fn disc_to_iso(
     };
 
     let total_bytes = disc.capacity_sectors as u64 * 2048;
-    out.raw(Normal, &strings::fmt("rip.disc_label", &[
-        ("name", &disc_name),
-        ("size", &format!("{:.1}", total_bytes as f64 / 1_073_741_824.0)),
-    ]));
-    out.raw(Normal, &strings::fmt("rip.output", &[("path", &iso_path.display().to_string())]));
+    out.raw(
+        Normal,
+        &strings::fmt(
+            "rip.disc_label",
+            &[
+                ("name", &disc_name),
+                (
+                    "size",
+                    &format!("{:.1}", total_bytes as f64 / 1_073_741_824.0),
+                ),
+            ],
+        ),
+    );
+    out.raw(
+        Normal,
+        &strings::fmt("rip.output", &[("path", &iso_path.display().to_string())]),
+    );
     out.blank(Normal);
 
     drive.lock_tray();
@@ -354,15 +413,26 @@ fn disc_to_iso(
     let last_update = std::cell::Cell::new(start);
 
     let progress = |done: u64, total: u64| {
-        if out.is_quiet() { return; }
+        if out.is_quiet() {
+            return;
+        }
         let now = std::time::Instant::now();
-        if now.duration_since(last_update.get()).as_secs_f64() < 0.5 { return; }
+        if now.duration_since(last_update.get()).as_secs_f64() < 0.5 {
+            return;
+        }
         last_update.set(now);
         print_progress(done, total, 0, &start);
     };
 
     let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
-    match disc.copy(&mut drive, &iso_path, !raw, true, Some(batch), Some(&progress)) {
+    match disc.copy(
+        &mut drive,
+        &iso_path,
+        !raw,
+        true,
+        Some(batch),
+        Some(&progress),
+    ) {
         Ok(()) => {
             if !out.is_quiet() {
                 eprint!("\r                                                                    \r");
@@ -370,12 +440,18 @@ fn disc_to_iso(
             let elapsed = start.elapsed().as_secs_f64();
             let mb = total_bytes as f64 / (1024.0 * 1024.0);
             let speed = if elapsed > 0.0 { mb / elapsed } else { 0.0 };
-            out.raw(Normal, &strings::fmt("rip.complete", &[
-                ("size", &format!("{:.1}", mb / 1024.0)),
-                ("unit", "GB"),
-                ("time", &format!("{elapsed:.0}")),
-                ("speed", &format!("{speed:.0}")),
-            ]));
+            out.raw(
+                Normal,
+                &strings::fmt(
+                    "rip.complete",
+                    &[
+                        ("size", &format!("{:.1}", mb / 1024.0)),
+                        ("unit", "GB"),
+                        ("time", &format!("{elapsed:.0}")),
+                        ("speed", &format!("{speed:.0}")),
+                    ],
+                ),
+            );
         }
         Err(e) => {
             out.raw(Normal, &fmt_err(&e));
@@ -398,7 +474,8 @@ fn scan_titles(source: &str, keydb_path: &Option<String>) -> Option<Vec<libfreem
 
     match parsed {
         libfreemkv::StreamUrl::Iso { ref path } => {
-            let mut reader = libfreemkv::mux::iso::IsoSectorReader::open(&path.to_string_lossy()).ok()?;
+            let mut reader =
+                libfreemkv::mux::iso::IsoSectorReader::open(&path.to_string_lossy()).ok()?;
             let capacity = reader.capacity();
             let disc = libfreemkv::Disc::scan_image(&mut reader, capacity, &scan_opts).ok()?;
             Some(disc.titles)
@@ -441,7 +518,11 @@ fn print_progress(done: u64, total: u64, resumed_from: u64, start: &std::time::I
         if mb_total >= 1024.0 {
             eprint!(
                 "\r  {:.1} GB / {:.1} GB  ({:.1}%)  {:.1} MB/s  ETA {}    ",
-                mb_done / 1024.0, mb_total / 1024.0, pct, avg, eta
+                mb_done / 1024.0,
+                mb_total / 1024.0,
+                pct,
+                avg,
+                eta
             );
         } else {
             eprint!(
@@ -456,16 +537,33 @@ fn print_progress(done: u64, total: u64, resumed_from: u64, start: &std::time::I
 }
 
 fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
-    out.raw(Normal, &format!("  {}: {}", strings::get("disc.titles"), meta.streams.len()));
+    out.raw(
+        Normal,
+        &format!("  {}: {}", strings::get("disc.titles"), meta.streams.len()),
+    );
     for s in &meta.streams {
         match s {
             libfreemkv::Stream::Video(v) => {
-                let label = if v.label.is_empty() { String::new() } else { format!(" — {}", v.label) };
-                out.raw(Normal, &format!("    {} {}{}", v.codec, v.resolution, label));
+                let label = if v.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", v.label)
+                };
+                out.raw(
+                    Normal,
+                    &format!("    {} {}{}", v.codec, v.resolution, label),
+                );
             }
             libfreemkv::Stream::Audio(a) => {
-                let label = if a.label.is_empty() { String::new() } else { format!(" — {}", a.label) };
-                out.raw(Normal, &format!("    {} {} {}{}", a.codec, a.channels, a.language, label));
+                let label = if a.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", a.label)
+                };
+                out.raw(
+                    Normal,
+                    &format!("    {} {} {}{}", a.codec, a.channels, a.language, label),
+                );
             }
             libfreemkv::Stream::Subtitle(s) => {
                 out.raw(Normal, &format!("    {} {}", s.codec, s.language));
@@ -474,16 +572,30 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
     }
     if meta.duration_secs > 0.0 {
         let d = meta.duration_secs;
-        out.raw(Normal, &format!("  {}: {}:{:02}:{:02}",
-            strings::get("disc.format"),
-            d as u64 / 3600, (d as u64 % 3600) / 60, d as u64 % 60));
+        out.raw(
+            Normal,
+            &format!(
+                "  {}: {}:{:02}:{:02}",
+                strings::get("disc.format"),
+                d as u64 / 3600,
+                (d as u64 % 3600) / 60,
+                d as u64 % 60
+            ),
+        );
     }
 }
 
 fn sanitize_name(name: &str) -> String {
     let s = name
-        .replace(|c: char| !c.is_ascii_alphanumeric() && c != ' ' && c != '-' && c != '_', "")
+        .replace(
+            |c: char| !c.is_ascii_alphanumeric() && c != ' ' && c != '-' && c != '_',
+            "",
+        )
         .trim()
         .replace(' ', "_");
-    if s.is_empty() { "disc".to_string() } else { s }
+    if s.is_empty() {
+        "disc".to_string()
+    } else {
+        s
+    }
 }

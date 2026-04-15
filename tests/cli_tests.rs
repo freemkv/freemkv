@@ -51,7 +51,10 @@ fn no_scheme_url_errors() {
         .expect("failed to run");
     assert!(!out.status.success());
     let combined = combined_output(&out);
-    assert!(combined.contains("E9002"), "expected E9002, got: {combined}");
+    assert!(
+        combined.contains("E9002"),
+        "expected E9002, got: {combined}"
+    );
 }
 
 #[test]
@@ -62,7 +65,10 @@ fn bad_scheme_errors() {
         .expect("failed to run");
     assert!(!out.status.success());
     let combined = combined_output(&out);
-    assert!(combined.contains("E9002"), "expected E9002, got: {combined}");
+    assert!(
+        combined.contains("E9002"),
+        "expected E9002, got: {combined}"
+    );
 }
 
 #[test]
@@ -91,7 +97,10 @@ fn null_input_errors() {
         .expect("failed to run");
     assert!(!out.status.success());
     let combined = combined_output(&out);
-    assert!(combined.contains("E9001"), "expected E9001, got: {combined}");
+    assert!(
+        combined.contains("E9001"),
+        "expected E9001, got: {combined}"
+    );
 }
 
 // ── Quiet mode ──────────────────────────────────────────────────────────────

@@ -200,7 +200,9 @@ fn usage() {
     println!("  freemkv disc:// mkv://Movie.mkv                    Rip all titles");
     println!("  freemkv disc:// mkv://Movie.mkv -t 1               Rip main feature only");
     println!("  freemkv disc:// mkv://Movie.mkv -t 1 -t 3          Rip titles 1 and 3");
-    println!("  freemkv disc:// iso://Disc.iso                     Full disc to ISO (auto-resumes)");
+    println!(
+        "  freemkv disc:// iso://Disc.iso                     Full disc to ISO (auto-resumes)"
+    );
     println!("  freemkv disc:// iso://Disc.iso --raw               Full disc, no decryption (auto-resumes)");
     println!("  freemkv iso://Disc.iso mkv://Movie.mkv             ISO to MKV");
     println!("  freemkv m2ts://Movie.m2ts mkv://Movie.mkv          Remux m2ts to MKV");
