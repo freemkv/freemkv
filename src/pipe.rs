@@ -138,7 +138,7 @@ fn pipe(
 ) -> Result<(), String> {
     // Open input
     out.raw_inline(Normal, &format!("Opening {}... ", source));
-    let mut input = match libfreemkv::open_pes_input(source, opts) {
+    let mut input = match libfreemkv::input(source, opts) {
         Ok(s) => {
             out.raw(Normal, "OK");
             s
@@ -155,7 +155,7 @@ fn pipe(
     // Read frames until codec headers are ready
     let mut buffered = Vec::new();
     while !input.headers_ready() {
-        match input.next_frame() {
+        match input.read() {
             Ok(Some(frame)) => buffered.push(frame),
             Ok(None) => break,
             Err(e) => return Err(format!("{}", e)),
@@ -169,7 +169,7 @@ fn pipe(
 
     // Open output with codec info
     out.raw_inline(Normal, &format!("Opening {}... ", dest));
-    let mut output = match libfreemkv::open_pes_output(dest, &info, &codec_privates) {
+    let mut output = match libfreemkv::output(dest, &info, &codec_privates) {
         Ok(s) => {
             out.raw(Normal, "OK");
             s
@@ -190,7 +190,7 @@ fn pipe(
     // Write buffered frames
     for frame in &buffered {
         bytes_done += frame.data.len() as u64;
-        output.write_frame(frame).map_err(|e| format!("{}", e))?;
+        output.write(frame).map_err(|e| format!("{}", e))?;
     }
 
     // Stream remaining frames
@@ -201,10 +201,10 @@ fn pipe(
             break;
         }
 
-        match input.next_frame() {
+        match input.read() {
             Ok(Some(frame)) => {
                 bytes_done += frame.data.len() as u64;
-                output.write_frame(&frame).map_err(|e| format!("{}", e))?;
+                output.write(&frame).map_err(|e| format!("{}", e))?;
 
                 let now = std::time::Instant::now();
                 if !out.is_quiet() && now.duration_since(last_update).as_secs_f64() >= 0.5 {
