@@ -134,6 +134,7 @@ fn pipe(
     let input_opts = libfreemkv::InputOptions {
         keydb_path: keydb_path.clone(),
         title_index,
+        raw,
     };
     let mut input = match libfreemkv::open_input(source, &input_opts) {
         Ok(s) => {
