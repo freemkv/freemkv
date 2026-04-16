@@ -209,7 +209,7 @@ Labels are preserved in all output formats — MKV track names and M2TS metadata
 
 ## Multi-language
 
-freemkv is fully localized. All output — errors, status, labels — adapts to your locale. Currently ships with English and Spanish. Contributions for additional languages welcome.
+freemkv is fully localized. All output — errors, status, labels — adapts to your locale. Ships with English, Spanish, French, German, Italian, Portuguese, and Dutch. Contributions for additional languages welcome.
 
 ## Building from Source
 
