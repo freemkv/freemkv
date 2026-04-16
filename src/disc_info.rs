@@ -108,7 +108,11 @@ pub fn run(args: &[String]) {
         ),
     );
     if disc.encrypted {
-        out.print(Normal, "disc.aacs_encrypted");
+        if disc.css.is_some() {
+            out.print(Normal, "disc.css_encrypted");
+        } else {
+            out.print(Normal, "disc.aacs_encrypted");
+        }
     }
 
     // Verbose: AACS details

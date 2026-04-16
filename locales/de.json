@@ -67,6 +67,7 @@
     "disc": "Disc",
     "format": "Format",
     "aacs_encrypted": "AACS: Verschluesselt",
+    "css_encrypted": "CSS: Verschluesselt",
     "titles": "Titel",
     "no_titles": "Keine Titel gefunden",
     "more_titles": "+{count} weitere (--full fuer alle anzeigen)",
