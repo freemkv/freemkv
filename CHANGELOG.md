@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.4 (2026-04-16)
+
+### DVD CSS decryption
+- **CSS: Encrypted** label for DVD discs (was showing "AACS: Encrypted")
+- Added `css_encrypted` locale key to all 7 languages
+
 ## 0.10.3 (2026-04-16)
 
 ### DVD support
