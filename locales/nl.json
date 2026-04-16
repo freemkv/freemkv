@@ -67,6 +67,7 @@
     "disc": "Disc",
     "format": "Formaat",
     "aacs_encrypted": "AACS: Versleuteld",
+    "css_encrypted": "CSS: Versleuteld",
     "titles": "Titels",
     "no_titles": "Geen titels gevonden",
     "more_titles": "+{count} meer (gebruik --full om alles te tonen)",

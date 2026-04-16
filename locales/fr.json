@@ -67,6 +67,7 @@
     "disc": "Disque",
     "format": "Format",
     "aacs_encrypted": "AACS : Chiffre",
+    "css_encrypted": "CSS : Chiffre",
     "titles": "Titres",
     "no_titles": "Aucun titre trouve",
     "more_titles": "+{count} de plus (utilisez --full pour tout afficher)",
