@@ -210,7 +210,14 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
 
         if is_disc {
             // Disc source: use open_drive() directly — one session, no double init.
-            if let Err(e) = pipe_disc(source, dest_url, title_idx.unwrap_or(0), &keydb_path, raw, &out) {
+            if let Err(e) = pipe_disc(
+                source,
+                dest_url,
+                title_idx.unwrap_or(0),
+                &keydb_path,
+                raw,
+                &out,
+            ) {
                 out.raw(Normal, &fmt_err(&e));
                 ok = false;
             }
@@ -234,7 +241,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
 
 // ── The pipeline engine ─────────────────────────────────────────────────────
 
-/// Disc source: open_drive() directly — one session, no double init.
+/// Disc source: one open, one scan, one stream. No double init.
 fn pipe_disc(
     source: &str,
     dest: &str,
@@ -258,10 +265,26 @@ fn pipe_disc(
     let _ = drive.probe_disc();
     drive.lock_tray();
 
-    let keydb = keydb_path.as_deref();
-    let (mut input, _disc) =
-        libfreemkv::DiscStream::open_drive(drive, keydb, title_idx)
-            .map_err(|e| format!("{}", e))?;
+    let scan_opts = match keydb_path {
+        Some(p) => libfreemkv::ScanOptions::with_keydb(p),
+        None => libfreemkv::ScanOptions::default(),
+    };
+    let disc = libfreemkv::Disc::scan(&mut drive, &scan_opts).map_err(|e| format!("{}", e))?;
+
+    if title_idx >= disc.titles.len() {
+        return Err(format!(
+            "Title {} out of range ({})",
+            title_idx + 1,
+            disc.titles.len()
+        ));
+    }
+
+    let title = disc.titles[title_idx].clone();
+    let keys = disc.decrypt_keys();
+    let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
+    let format = disc.content_format;
+
+    let mut input = libfreemkv::DiscStream::new(Box::new(drive), title, keys, batch, format);
 
     if raw {
         input.set_raw();
