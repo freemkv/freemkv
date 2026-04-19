@@ -12,10 +12,14 @@ Open source 4K UHD / Blu-ray / DVD backup tool. Two arguments — source and des
 
 ```bash
 # Linux
-curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86_64-linux.tar.gz | tar xz
+curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86_64-unknown-linux-musl.tar.gz | tar xz
 sudo mv freemkv /usr/local/bin/
 
-# macOS
+# macOS (Apple Silicon)
+curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv freemkv /usr/local/bin/
+
+# macOS (Intel)
 curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86_64-apple-darwin.tar.gz | tar xz
 sudo mv freemkv /usr/local/bin/
 
