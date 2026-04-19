@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.7 (2026-04-19)
+
+### TrueHD fix
+- libfreemkv 0.11.7: TrueHD parser rewrite. Zero decode errors on UHD and BD.
+
 ## 0.11.6 (2026-04-18)
 
 ### TrueHD fix
