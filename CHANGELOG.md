@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.9 (2026-04-20)
+
+### Fast verify
+- Verify uses fast 5s-timeout reads. Full disc check completes in ~50 min instead of hours.
+
 ## 0.11.8 (2026-04-20)
 
 ### Disc verify
