@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.8 (2026-04-20)
+
+### Disc verify
+- **freemkv verify disc://** — sector-by-sector health check. Reports Good/Slow/Recovered/Bad sectors with chapter mapping.
+
 ## 0.11.7 (2026-04-19)
 
 ### TrueHD fix
