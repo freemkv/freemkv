@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.11 (2026-04-20)
+
+### Binary search recovery
+- libfreemkv 0.11.11: binary search error recovery for marginal disc sectors.
+
 ## 0.11.10 (2026-04-20)
 
 ### Version sync
