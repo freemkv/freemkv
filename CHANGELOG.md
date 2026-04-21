@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.12 (2026-04-21)
+
+### Halt + events + light recovery
+- libfreemkv 0.11.12: drive halt, sector events, 15s light recovery in binary search.
+
 ## 0.11.11 (2026-04-20)
 
 ### Binary search recovery
