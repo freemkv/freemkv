@@ -180,15 +180,13 @@ fn verify_cmd(args: &[String]) {
 
     let device = match &parsed {
         libfreemkv::StreamUrl::Disc { device: Some(p) } => p.clone(),
-        libfreemkv::StreamUrl::Disc { device: None } => {
-            match libfreemkv::find_drive() {
-                Some(d) => std::path::PathBuf::from(d.device_path()),
-                None => {
-                    eprintln!("No drive found");
-                    std::process::exit(1);
-                }
+        libfreemkv::StreamUrl::Disc { device: None } => match libfreemkv::find_drive() {
+            Some(d) => std::path::PathBuf::from(d.device_path()),
+            None => {
+                eprintln!("No drive found");
+                std::process::exit(1);
             }
-        }
+        },
         _ => {
             eprintln!("verify only works with disc:// URLs");
             std::process::exit(1);
@@ -227,7 +225,10 @@ fn verify_cmd(args: &[String]) {
     let disc_name = disc.meta_title.as_deref().unwrap_or(&disc.volume_id);
     let total_sectors: u64 = title.extents.iter().map(|e| e.sector_count as u64).sum();
     let total_gb = total_sectors as f64 * 2048.0 / 1_073_741_824.0;
-    eprintln!("{} ({:.1} GB, {} sectors)", disc_name, total_gb, total_sectors);
+    eprintln!(
+        "{} ({:.1} GB, {} sectors)",
+        disc_name, total_gb, total_sectors
+    );
 
     let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
     let _ = drive.probe_disc();
@@ -245,14 +246,21 @@ fn verify_cmd(args: &[String]) {
             if lp.elapsed().as_secs_f64() >= 1.0 || done == total {
                 let pct = if total > 0 { done * 100 / total } else { 0 };
                 let elapsed = start.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 { done as f64 * 2048.0 / (1024.0 * 1024.0) / elapsed } else { 0.0 };
+                let speed = if elapsed > 0.0 {
+                    done as f64 * 2048.0 / (1024.0 * 1024.0) / elapsed
+                } else {
+                    0.0
+                };
                 let marker = match status {
                     libfreemkv::verify::SectorStatus::Good => "",
                     libfreemkv::verify::SectorStatus::Slow => " [SLOW]",
                     libfreemkv::verify::SectorStatus::Recovered => " [RECOVERED]",
                     libfreemkv::verify::SectorStatus::Bad => " [BAD]",
                 };
-                eprint!("\r  {}% · {:.1} MB/s · {} / {}{}", pct, speed, done, total, marker);
+                eprint!(
+                    "\r  {}% · {:.1} MB/s · {} / {}{}",
+                    pct, speed, done, total, marker
+                );
                 *lp = std::time::Instant::now();
             }
             true // continue
@@ -263,15 +271,31 @@ fn verify_cmd(args: &[String]) {
     // Results
     println!();
     println!("Results:");
-    println!("  Good:        {:>12}  ({:.4}%)", result.good, result.good as f64 / result.total_sectors as f64 * 100.0);
+    println!(
+        "  Good:        {:>12}  ({:.4}%)",
+        result.good,
+        result.good as f64 / result.total_sectors as f64 * 100.0
+    );
     if result.slow > 0 {
-        println!("  Slow:        {:>12}  ({:.4}%)", result.slow, result.slow as f64 / result.total_sectors as f64 * 100.0);
+        println!(
+            "  Slow:        {:>12}  ({:.4}%)",
+            result.slow,
+            result.slow as f64 / result.total_sectors as f64 * 100.0
+        );
     }
     if result.recovered > 0 {
-        println!("  Recovered:   {:>12}  ({:.4}%)", result.recovered, result.recovered as f64 / result.total_sectors as f64 * 100.0);
+        println!(
+            "  Recovered:   {:>12}  ({:.4}%)",
+            result.recovered,
+            result.recovered as f64 / result.total_sectors as f64 * 100.0
+        );
     }
     if result.bad > 0 {
-        println!("  Bad:         {:>12}  ({:.4}%)", result.bad, result.bad as f64 / result.total_sectors as f64 * 100.0);
+        println!(
+            "  Bad:         {:>12}  ({:.4}%)",
+            result.bad,
+            result.bad as f64 / result.total_sectors as f64 * 100.0
+        );
     }
 
     if !result.ranges.is_empty() {
@@ -285,7 +309,10 @@ fn verify_cmd(args: &[String]) {
             };
             let gb = range.byte_offset as f64 / 1_073_741_824.0;
             let chapter_info = libfreemkv::verify::VerifyResult::chapter_at_offset(
-                &title.chapters, range.byte_offset, title.duration_secs, title.size_bytes,
+                &title.chapters,
+                range.byte_offset,
+                title.duration_secs,
+                title.size_bytes,
             );
             let ch_str = match chapter_info {
                 Some((ch, secs)) => {
@@ -295,9 +322,15 @@ fn verify_cmd(args: &[String]) {
                 }
                 None => String::new(),
             };
-            println!("  {} sectors {}-{} ({:.1} GB{}): {} sectors",
-                status_str, range.start_lba, range.start_lba + range.count,
-                gb, ch_str, range.count);
+            println!(
+                "  {} sectors {}-{} ({:.1} GB{}): {} sectors",
+                status_str,
+                range.start_lba,
+                range.start_lba + range.count,
+                gb,
+                ch_str,
+                range.count
+            );
         }
     }
 
@@ -305,12 +338,25 @@ fn verify_cmd(args: &[String]) {
     let m = elapsed as u32 / 60;
     let s = elapsed as u32 % 60;
     println!();
-    println!("Verdict: {:.4}% readable in {}:{:02}", result.readable_pct(), m, s);
+    println!(
+        "Verdict: {:.4}% readable in {}:{:02}",
+        result.readable_pct(),
+        m,
+        s
+    );
 
     if result.is_perfect() {
         println!("         Disc is perfect.");
     } else if result.bad > 0 {
-        println!("         {} unrecoverable sectors in {} cluster(s).", result.bad, result.ranges.iter().filter(|r| r.status == libfreemkv::verify::SectorStatus::Bad).count());
+        println!(
+            "         {} unrecoverable sectors in {} cluster(s).",
+            result.bad,
+            result
+                .ranges
+                .iter()
+                .filter(|r| r.status == libfreemkv::verify::SectorStatus::Bad)
+                .count()
+        );
     }
 
     std::process::exit(if result.bad > 0 { 1 } else { 0 });

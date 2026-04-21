@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.15 (2026-04-21)
+
+### Lint cleanup
+- Fix all `cargo fmt` and `cargo clippy -D warnings` issues.
+
 ## 0.11.14 (2026-04-21)
 
 ### Audit fixes
