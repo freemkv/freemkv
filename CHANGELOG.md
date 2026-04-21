@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.16 (2026-04-21)
+
+### SectorReader API cleanup
+- libfreemkv 0.11.16: single `read_sectors()` method with recovery flag.
+
 ## 0.11.15 (2026-04-21)
 
 ### Lint cleanup
