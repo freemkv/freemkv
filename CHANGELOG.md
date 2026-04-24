@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.21 (2026-04-24)
+
+### Consume libfreemkv 0.11.21's new `Disc::copy` signature
+- `pipe.rs` rip path migrated from positional `disc.copy(…)` to `CopyOptions` struct. Behavior preserved: decrypt, resume, batch, progress callback.
+
+### License SPDX normalization
+- `Cargo.toml` license field: `AGPL-3.0` → `AGPL-3.0-only` (explicit SPDX; the bare form is deprecated in newer cargo/crates.io).
+
+### Version sync
+- 0.11.21 ecosystem release (libfreemkv + freemkv + bdemu + autorip).
+
 ## 0.11.16 (2026-04-21)
 
 ### SectorReader API cleanup

@@ -595,15 +595,15 @@ fn disc_to_iso(source: &str, dest: &str, keydb_path: &Option<String>, raw: bool,
     };
 
     let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
-    match disc.copy(
-        &mut drive,
-        &iso_path,
-        !raw,
-        true,
-        Some(batch),
-        Some(&progress),
-    ) {
-        Ok(()) => {
+    let copy_opts = libfreemkv::disc::CopyOptions {
+        decrypt: !raw,
+        resume: true,
+        batch_sectors: Some(batch),
+        on_progress: Some(&progress),
+        ..Default::default()
+    };
+    match disc.copy(&mut drive, &iso_path, &copy_opts) {
+        Ok(_) => {
             if !out.is_quiet() {
                 eprint!("\r                                                                    \r");
             }
