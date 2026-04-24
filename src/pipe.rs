@@ -180,7 +180,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
 
     for (title_idx, dest_url) in &jobs {
         // Print title info if we have it
-        if let (Some(idx), Some(ref t)) = (title_idx, &titles) {
+        if let (Some(idx), Some(t)) = (title_idx, &titles) {
             if *idx >= t.len() {
                 eprintln!(
                     "{}",

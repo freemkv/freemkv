@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "0.11.22"
+version = "0.12.0"
 dependencies = [
  "isolang",
  "libc",
