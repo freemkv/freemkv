@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.0 (2026-04-24)
+
+### Rust 2024 edition migration
+- Bumped `edition = "2024"`. Match-ergonomics fixes in `pipe.rs` and `main.rs` to drop redundant `ref` bindings.
+- Consumes libfreemkv 0.12.0.
+- No behavior change.
+
 ## 0.11.22 (2026-04-24)
 
 ### Version sync — no functional changes

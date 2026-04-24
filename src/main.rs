@@ -101,7 +101,7 @@ fn info_cmd(args: &[String]) {
     match &parsed {
         libfreemkv::StreamUrl::Disc { device } => {
             let mut disc_args = Vec::new();
-            if let Some(ref d) = device {
+            if let Some(d) = device {
                 disc_args.push("-d".to_string());
                 disc_args.push(d.to_string_lossy().to_string());
             }
