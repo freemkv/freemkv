@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.22 (2026-04-24)
+
+### Version sync — no functional changes
+Part of the 0.11.22 ecosystem release. Consumes libfreemkv 0.11.22.
+
 ## 0.11.21 (2026-04-24)
 
 ### Consume libfreemkv 0.11.21's new `Disc::copy` signature
