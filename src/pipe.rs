@@ -266,7 +266,9 @@ fn pipe_disc(
     drive.lock_tray();
 
     let scan_opts = match keydb_path {
-        Some(p) => libfreemkv::ScanOptions::with_keydb(p),
+        Some(p) => libfreemkv::ScanOptions {
+            keydb_path: Some(p.into()),
+        },
         None => libfreemkv::ScanOptions::default(),
     };
     let disc = libfreemkv::Disc::scan(&mut drive, &scan_opts).map_err(|e| format!("{}", e))?;
@@ -538,7 +540,9 @@ fn disc_to_iso(source: &str, dest: &str, keydb_path: &Option<String>, raw: bool,
     let _ = drive.probe_disc();
 
     let scan_opts = match keydb_path {
-        Some(p) => libfreemkv::ScanOptions::with_keydb(p),
+        Some(p) => libfreemkv::ScanOptions {
+            keydb_path: Some(p.into()),
+        },
         None => libfreemkv::ScanOptions::default(),
     };
     let disc = match libfreemkv::Disc::scan(&mut drive, &scan_opts) {
@@ -638,7 +642,9 @@ fn disc_to_iso(source: &str, dest: &str, keydb_path: &Option<String>, raw: bool,
 fn scan_titles(source: &str, keydb_path: &Option<String>) -> Option<Vec<libfreemkv::DiscTitle>> {
     let parsed = libfreemkv::parse_url(source);
     let scan_opts = match keydb_path {
-        Some(p) => libfreemkv::ScanOptions::with_keydb(p),
+        Some(p) => libfreemkv::ScanOptions {
+            keydb_path: Some(p.into()),
+        },
         None => libfreemkv::ScanOptions::default(),
     };
 
@@ -725,10 +731,20 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
                 );
             }
             libfreemkv::Stream::Audio(a) => {
-                let label = if a.label.is_empty() {
+                let mut tags: Vec<String> = Vec::new();
+                if let Some(key) = audio_purpose_key(a.purpose) {
+                    tags.push(strings::get(key));
+                }
+                if a.secondary {
+                    tags.push(strings::get("stream.secondary"));
+                }
+                if !a.label.is_empty() {
+                    tags.push(a.label.clone());
+                }
+                let label = if tags.is_empty() {
                     String::new()
                 } else {
-                    format!(" — {}", a.label)
+                    format!(" — {}", tags.join(", "))
                 };
                 out.raw(
                     Normal,
@@ -764,4 +780,15 @@ fn sanitize_name(name: &str) -> String {
         .trim()
         .replace(' ', "_");
     if s.is_empty() { "disc".to_string() } else { s }
+}
+
+/// Map `LabelPurpose` to its locale string key. `Normal` → no tag.
+fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
+    match p {
+        libfreemkv::LabelPurpose::Commentary => Some("stream.purpose.commentary"),
+        libfreemkv::LabelPurpose::Descriptive => Some("stream.purpose.descriptive"),
+        libfreemkv::LabelPurpose::Score => Some("stream.purpose.score"),
+        libfreemkv::LabelPurpose::Ime => Some("stream.purpose.ime"),
+        libfreemkv::LabelPurpose::Normal => None,
+    }
 }

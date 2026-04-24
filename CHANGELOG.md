@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.13.0 (2026-04-24)
+
+### Consume libfreemkv 0.13.0 (zero-English audit)
+
+- `ScanOptions::with_keydb()` constructor removed in libfreemkv 0.13.0;
+  three call sites in `pipe.rs` migrated to the struct literal
+  `ScanOptions { keydb_path: Some(p.into()) }`.
+- `AudioStream` and `SubtitleStream` gained `purpose: LabelPurpose` and
+  `qualifier: LabelQualifier` fields. `disc_info::format_audio` and
+  `pipe::print_stream_info` now render purpose + secondary tags via
+  `strings::get` (i18n keys: `stream.purpose.{commentary,descriptive,
+  score,ime}`, `stream.secondary`, `stream.qualifier.{sdh,
+  descriptive_service}`).
+- Locale keys added to all seven bundled locales (`en.json` and
+  `es.json` translated; `de`/`fr`/`it`/`nl`/`pt` carry the English
+  placeholder per the existing locale workflow).
+
+### Version sync
+0.13.0 ecosystem bump (libfreemkv + freemkv + bdemu + autorip).
+
 ## 0.12.0 (2026-04-24)
 
 ### Rust 2024 edition migration

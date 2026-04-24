@@ -79,6 +79,19 @@
     "forced": "forzado",
     "usage": "Uso: freemkv disc-info [--device /dev/sgN] [--full] [--basic] [--quiet]"
   },
+  "stream": {
+    "purpose": {
+      "commentary": "Comentario",
+      "descriptive": "Audiodescripción",
+      "score": "Banda sonora",
+      "ime": "IME"
+    },
+    "secondary": "Secundario",
+    "qualifier": {
+      "sdh": "SDH",
+      "descriptive_service": "Servicio descriptivo"
+    }
+  },
   "rip": {
     "opening": "Abriendo {device}...",
     "waiting": "Esperando disco...",

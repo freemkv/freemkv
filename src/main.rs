@@ -141,10 +141,31 @@ fn info_cmd(args: &[String]) {
                                 println!("  {} {}{}", v.codec, v.resolution, label);
                             }
                             libfreemkv::Stream::Audio(a) => {
-                                let label = if a.label.is_empty() {
+                                let mut tags: Vec<String> = Vec::new();
+                                let purpose_key = match a.purpose {
+                                    libfreemkv::LabelPurpose::Commentary => {
+                                        Some("stream.purpose.commentary")
+                                    }
+                                    libfreemkv::LabelPurpose::Descriptive => {
+                                        Some("stream.purpose.descriptive")
+                                    }
+                                    libfreemkv::LabelPurpose::Score => Some("stream.purpose.score"),
+                                    libfreemkv::LabelPurpose::Ime => Some("stream.purpose.ime"),
+                                    libfreemkv::LabelPurpose::Normal => None,
+                                };
+                                if let Some(k) = purpose_key {
+                                    tags.push(strings::get(k));
+                                }
+                                if a.secondary {
+                                    tags.push(strings::get("stream.secondary"));
+                                }
+                                if !a.label.is_empty() {
+                                    tags.push(a.label.clone());
+                                }
+                                let label = if tags.is_empty() {
                                     String::new()
                                 } else {
-                                    format!(" — {}", a.label)
+                                    format!(" — {}", tags.join(", "))
                                 };
                                 println!("  {} {} {}{}", a.codec, a.channels, a.language, label);
                             }

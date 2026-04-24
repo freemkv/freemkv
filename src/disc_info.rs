@@ -6,8 +6,8 @@
 use crate::output::{Level::Normal, Output};
 use crate::strings;
 use libfreemkv::{
-    AudioStream, Codec, ColorSpace, Disc, DiscFormat, Drive, HdrFormat, ScanOptions, Stream,
-    SubtitleStream, VideoStream,
+    AudioStream, Codec, ColorSpace, Disc, DiscFormat, Drive, HdrFormat, LabelPurpose,
+    LabelQualifier, ScanOptions, Stream, SubtitleStream, VideoStream,
 };
 
 pub fn run(args: &[String]) {
@@ -308,18 +308,59 @@ fn format_audio(a: &AudioStream, verbose: bool) -> String {
     if verbose {
         s.push_str(&format!(" {} [PID 0x{:04X}]", a.sample_rate, a.pid));
     }
+
+    // Combine label (codec/variant info from the library) with locale-rendered
+    // purpose / secondary tags. Library guarantees no English in `label`.
+    let mut tags: Vec<String> = Vec::new();
+    if let Some(key) = purpose_key(a.purpose) {
+        tags.push(strings::get(key));
+    }
+    if a.secondary {
+        tags.push(strings::get("stream.secondary"));
+    }
     if !a.label.is_empty() {
-        s.push_str(&format!(" ({})", a.label));
+        tags.push(a.label.clone());
+    }
+    if !tags.is_empty() {
+        s.push_str(&format!(" ({})", tags.join(", ")));
     }
     s
 }
 
 fn format_subtitle(s: &SubtitleStream) -> String {
     let lang = lang_name(&s.language);
+    let mut tags: Vec<String> = Vec::new();
     if s.forced {
-        format!("{} ({})", lang, strings::get("disc.forced"))
-    } else {
+        tags.push(strings::get("disc.forced"));
+    }
+    if let Some(key) = qualifier_key(s.qualifier) {
+        tags.push(strings::get(key));
+    }
+    if tags.is_empty() {
         lang.to_string()
+    } else {
+        format!("{} ({})", lang, tags.join(", "))
+    }
+}
+
+/// Map `LabelPurpose` to its locale string key. `Normal` returns None — no tag.
+fn purpose_key(p: LabelPurpose) -> Option<&'static str> {
+    match p {
+        LabelPurpose::Commentary => Some("stream.purpose.commentary"),
+        LabelPurpose::Descriptive => Some("stream.purpose.descriptive"),
+        LabelPurpose::Score => Some("stream.purpose.score"),
+        LabelPurpose::Ime => Some("stream.purpose.ime"),
+        LabelPurpose::Normal => None,
+    }
+}
+
+/// Map `LabelQualifier` to its locale string key. `Forced` is rendered via
+/// `disc.forced` from the existing forced flag, so we skip it here.
+fn qualifier_key(q: LabelQualifier) -> Option<&'static str> {
+    match q {
+        LabelQualifier::Sdh => Some("stream.qualifier.sdh"),
+        LabelQualifier::DescriptiveService => Some("stream.qualifier.descriptive_service"),
+        LabelQualifier::None | LabelQualifier::Forced => None,
     }
 }
 
