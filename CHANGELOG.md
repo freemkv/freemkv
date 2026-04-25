@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.5 (2026-04-25)
+
+### Version sync — consume libfreemkv 0.13.5
+No functional CLI changes. Ecosystem sync. Cargo.toml dep pin
+`0.13.4` → `0.13.5`.
+
 ## 0.13.4 (2026-04-25)
 
 ### Version sync — consume libfreemkv 0.13.4
