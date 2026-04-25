@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.13.4 (2026-04-25)
+
+### Version sync — consume libfreemkv 0.13.4
+No functional changes to the CLI. libfreemkv 0.13.4 rolls back its
+internal wedge-recovery escalation (affects `drive_has_disc` only) and
+adds sysfs-cached identity fallback to `list_drives`; the CLI's
+`Drive::open` + `Disc::scan` flow is unchanged. Cargo.toml dep pin
+`0.13.3` → `0.13.4`.
+
 ## 0.13.3 (2026-04-24)
 
 ### Version sync — consume libfreemkv 0.13.3
