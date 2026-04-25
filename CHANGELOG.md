@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.3 (2026-04-24)
+
+### Version sync — consume libfreemkv 0.13.3
+No functional changes to the CLI. libfreemkv 0.13.3 fixes a bug in
+`drive_has_disc` wedge recovery that only autorip consumes; the CLI's
+`Drive::open` + `Disc::scan` flow is unchanged. Cargo.toml dep pin
+`0.13.2` → `0.13.3`.
+
 ## 0.13.2 (2026-04-24)
 
 ### Version sync — consume libfreemkv 0.13.2
