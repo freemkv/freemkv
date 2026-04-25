@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.7 (2026-04-25)
+
+### Version sync — consume libfreemkv 0.13.7
+
+Version sync only — no functional changes in the CLI. Bump pulls in
+libfreemkv 0.13.7 (no API change vs 0.13.6); the actual functional
+fix in this release is autorip-side.
+
 ## 0.13.6 (2026-04-25)
 
 ### Version sync — consume libfreemkv 0.13.6
