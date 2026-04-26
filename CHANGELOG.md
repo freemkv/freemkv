@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.13.12 (2026-04-25)
+
+### Version sync — consume libfreemkv 0.13.12
+
+No functional changes. Picks up Fix 1 (stall-guard deletion), Fix 2
+(async SCSI recovery on Linux + cross-platform try_recover on Windows +
+macOS), Fix 4 (`PatchResult` instrumentation), and the
+`PatchOptions::full_recovery` honor.
+
 ## 0.13.11 (2026-04-25)
 
 ### Version sync — consume libfreemkv 0.13.11
