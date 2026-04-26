@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.13 (2026-04-25)
+
+### Version sync — consume libfreemkv 0.13.13
+
+No functional changes. Picks up the new `tracing` instrumentation in
+`SgIoTransport::execute` (Linux) + `Disc::copy` for in-flight rip-pipeline
+diagnosis.
+
 ## 0.13.12 (2026-04-25)
 
 ### Version sync — consume libfreemkv 0.13.12
