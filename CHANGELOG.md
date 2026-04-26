@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.17 (2026-04-26)
+
+### Sync release — no functional changes
+
+Bumped to satisfy the unified-versioning rule. Actual fix is in autorip
+(hot-plug rescan).
+
 ## 0.13.16 (2026-04-26)
 
 ### Fix: pipe.rs disc→ISO progress uses libfreemkv 0.13.16 `Progress` trait
