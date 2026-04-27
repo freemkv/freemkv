@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.23 (2026-04-27)
+
+### Sync release — picks up libfreemkv 0.13.23 SCSI sense plumbing
+
+libfreemkv 0.13.23 stops misclassifying drive-reported CHECK
+CONDITION replies as transport wedges, unblocking `Disc::copy`'s
+hysteresis on damaged discs. The CLI gains no new flags.
+
 ## 0.13.22 (2026-04-26)
 
 ### Sync release — picks up libfreemkv 0.13.22 hysteresis recovery
