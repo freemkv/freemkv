@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.24 (2026-04-27)
+
+### Sync release — picks up libfreemkv 0.13.24 MapStats split + fmt cleanup
+
+`MapStats` now exposes `bytes_nontried` + `bytes_retryable` separately
+from the aggregate `bytes_pending`, so UI consumers can build a clean
+"will retry" bucket. CLI surfaces are unchanged.
+
 ## 0.13.23 (2026-04-27)
 
 ### Sync release — picks up libfreemkv 0.13.23 SCSI sense plumbing
