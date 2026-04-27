@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.22 (2026-04-26)
+
+### Sync release — picks up libfreemkv 0.13.22 hysteresis recovery
+
+libfreemkv 0.13.22 replaces v0.13.21's bisect-on-fail with a hysteresis
+state machine (Block ↔ Single) for damaged-disc recovery. The CLI
+gains no new flags, but `--rip` (which uses `Disc::copy`) recovers
+dense damage clusters ~3× faster while still hitting 100% sector
+recovery.
+
 ## 0.13.21 (2026-04-26)
 
 ### Sync release — picks up libfreemkv 0.13.21 bisect-on-fail
