@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.13.42 (2026-04-29)
+
+### Fix: transport failure skips instead of aborting
+
+- Transport failure (USB bridge crash) now skips the failed ECC block
+  (marks NonTrimmed) and continues. 3 consecutive transport failures
+  still abort the copy. Previously, a single transport failure killed
+  the entire rip.
+
 ## 0.13.41 (2026-04-29)
 
 ### Debug logging for sector-0 regression diagnosis
