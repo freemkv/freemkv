@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.13.39 (2026-04-28)
+## 0.13.40 (2026-04-28)
 
 ### Sync release — picks up libfreemkv 0.13.39
 
