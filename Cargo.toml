@@ -1,6 +1,6 @@
 [package]
 name = "freemkv"
-version = "0.13.43"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.86"
 license = "AGPL-3.0-only"
@@ -12,15 +12,10 @@ name = "freemkv"
 path = "src/main.rs"
 
 [dependencies]
-libfreemkv = "0.13.43"
+libfreemkv = "0.14.0"
 isolang = "2"
 tracing-subscriber = "0.3"
 ureq = { version = "2", features = ["json"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 serde_json = "1"
-
-[target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[patch.crates-io]
-libfreemkv = { path = "../libfreemkv" }
