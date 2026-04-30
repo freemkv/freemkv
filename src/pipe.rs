@@ -650,7 +650,11 @@ fn disc_to_iso(source: &str, dest: &str, keydb_path: &Option<String>, raw: bool,
         last_speed_time: &last_speed_time,
     };
 
-    let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
+    let batch = if multipass {
+        libfreemkv::disc::ecc_sectors(disc.format)
+    } else {
+        libfreemkv::disc::detect_max_batch_sectors(drive.device_path())
+    };
     let copy_opts = libfreemkv::disc::CopyOptions {
         decrypt: !raw,
         resume: true,
