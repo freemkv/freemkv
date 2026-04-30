@@ -18,6 +18,9 @@ mod pipe;
 mod strings;
 
 fn main() {
+    if std::env::var("RUST_LOG").is_ok() {
+        tracing_subscriber::fmt::init();
+    }
     let args: Vec<String> = std::env::args().collect();
 
     // Parse --language before anything else
@@ -417,6 +420,12 @@ fn usage() {
     println!(
         "  freemkv disc:// iso://Disc.iso --raw               Full disc, no decryption (auto-resumes)"
     );
+    println!(
+        "  freemkv disc:// iso://Disc.iso --multipass        Sweep with mapfile for multipass recovery"
+    );
+    println!(
+        "  freemkv iso://Disc.iso iso://Disc.iso --multipass Patch bad sectors (one retry pass)"
+    );
     println!("  freemkv iso://Disc.iso mkv://Movie.mkv             ISO to MKV");
     println!("  freemkv m2ts://Movie.m2ts mkv://Movie.mkv          Remux m2ts to MKV");
     println!("  freemkv disc:// network://10.0.0.1:9000           Stream to network");
@@ -431,6 +440,7 @@ fn usage() {
     println!("  -v, --verbose       Show AACS/drive debug info");
     println!("  -q, --quiet         Suppress output");
     println!("      --raw           Skip decryption (raw encrypted output)");
+    println!("      --multipass    Write/update mapfile for multipass recovery");
     println!("  -s, --share         Submit drive profile (with info disc://)");
     println!("  -m, --mask          Mask serial numbers (with --share)");
 }

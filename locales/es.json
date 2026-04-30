@@ -131,7 +131,11 @@
     "verbose_unit_keys": "Claves de unidad",
     "verbose_read_data_key": "Clave de datos",
     "verbose_handshake_error": "Autenticación falló",
-    "verbose_handshake_hint": "La autenticación pudo haber fallado — sin certificado host, o unidad rechazó"
+    "verbose_handshake_hint": "La autenticación pudo haber fallado — sin certificado host, o unidad rechazó",
+    "mapfile_summary": "Mapfile: {good} GB buenos, {unreadable} MB ilegibles, {pending} MB pendientes",
+    "nothing_to_patch": "Nada que reparar — todos los sectores están buenos",
+    "patch_start": "Reparando: {good} GB buenos, {unreadable} MB ilegibles, {pending} MB pendientes",
+    "patch_done": "Reparación: recuperados {recovered} MB, {unreadable} MB ilegibles, {pending} MB pendientes ({time}s, {speed} MB/s)"
   },
   "remux": {
     "input": "Entrada",

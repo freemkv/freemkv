@@ -131,7 +131,11 @@
     "verbose_unit_keys": "Unit keys",
     "verbose_read_data_key": "Read data key",
     "verbose_handshake_error": "Handshake failed",
-    "verbose_handshake_hint": "Handshake may have failed — no host cert, or drive rejected"
+    "verbose_handshake_hint": "Handshake may have failed — no host cert, or drive rejected",
+    "mapfile_summary": "Mapfile: {good} GB good, {unreadable} MB unreadable, {pending} MB pending",
+    "nothing_to_patch": "Nothing to patch — all sectors are good",
+    "patch_start": "Patching: {good} GB good, {unreadable} MB unreadable, {pending} MB pending",
+    "patch_done": "Patch done: recovered {recovered} MB, {unreadable} MB unreadable, {pending} MB pending ({time}s, {speed} MB/s)"
   },
   "remux": {
     "input": "Input",

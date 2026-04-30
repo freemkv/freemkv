@@ -14,9 +14,13 @@ path = "src/main.rs"
 [dependencies]
 libfreemkv = "0.13.43"
 isolang = "2"
+tracing-subscriber = "0.3"
 ureq = { version = "2", features = ["json"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[patch.crates-io]
+libfreemkv = { path = "../libfreemkv" }
