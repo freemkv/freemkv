@@ -636,6 +636,7 @@ fn disc_to_iso(source: &str, dest: &str, keydb_path: &Option<String>, raw: bool,
             self.last_speed_time.set(now);
 
             print_disc_progress(
+                p.kind,
                 p.work_done,
                 p.work_total,
                 p.bytes_good_total,
@@ -792,6 +793,7 @@ fn fmt_eta(secs: f64) -> String {
 }
 
 fn print_disc_progress(
+    kind: libfreemkv::progress::PassKind,
     work_done: u64,
     work_total: u64,
     bytes_good: u64,
@@ -800,15 +802,37 @@ fn print_disc_progress(
     inst_speed_mbps: f64,
     bytes_per_sec: f64,
 ) {
-    if work_total == 0 || bytes_disc == 0 {
+    if bytes_disc == 0 {
         return;
     }
-    let pct = (work_done as f64 / work_total as f64 * 100.0).min(100.0);
-    let gb_done = work_done as f64 / 1_073_741_824.0;
-    let gb_total = work_total as f64 / 1_073_741_824.0;
+    let (gb_done, gb_total, pct) = match kind {
+        libfreemkv::progress::PassKind::Sweep | libfreemkv::progress::PassKind::Mux => {
+            let gb = work_done as f64 / 1_073_741_824.0;
+            let total = work_total as f64 / 1_073_741_824.0;
+            let p = (work_done as f64 / work_total as f64 * 100.0).min(100.0);
+            (gb, total, p)
+        }
+        _ => {
+            let gb = bytes_good as f64 / 1_073_741_824.0;
+            let total = bytes_disc as f64 / 1_073_741_824.0;
+            let p = if work_total > 0 {
+                work_done as f64 / work_total as f64 * 100.0
+            } else {
+                0.0
+            };
+            (gb, total, p)
+        }
+    };
     let eta = if inst_speed_mbps > 0.01 {
-        let s = (work_total - work_done) as f64 / 1_048_576.0 / inst_speed_mbps;
-        fmt_eta(s)
+        let remaining = match kind {
+            libfreemkv::progress::PassKind::Sweep | libfreemkv::progress::PassKind::Mux => {
+                work_total.saturating_sub(work_done) as f64 / 1_048_576.0
+            }
+            _ => {
+                work_total.saturating_sub(work_done) as f64 / 1_048_576.0
+            }
+        };
+        fmt_eta(remaining / inst_speed_mbps)
     } else {
         "?:??".into()
     };

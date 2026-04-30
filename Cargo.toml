@@ -1,6 +1,6 @@
 [package]
 name = "freemkv"
-version = "0.16.0"
+version = "0.16.1"
 edition = "2024"
 rust-version = "1.86"
 license = "AGPL-3.0-only"
@@ -12,7 +12,7 @@ name = "freemkv"
 path = "src/main.rs"
 
 [dependencies]
-libfreemkv = "0.16.0"
+libfreemkv = "0.16.1"
 isolang = "2"
 tracing-subscriber = "0.3"
 ureq = { version = "2", features = ["json"] }
