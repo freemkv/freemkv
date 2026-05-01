@@ -135,7 +135,11 @@
     "mapfile_summary": "Mapfile : {good} Go bons, {unreadable} Mo illisibles, {pending} Mo en attente",
     "nothing_to_patch": "Rien a corriger — tous les secteurs sont bons",
     "patch_start": "Correction : {good} Go bons, {unreadable} Mo illisibles, {pending} Mo en attente",
-    "patch_done": "Correction terminee : {recovered} Mo recuperes, {unreadable} Mo illisibles, {pending} Mo en attente ({time}s, {speed} Mo/s)"
+    "patch_done": "Correction terminee : {recovered} Mo recuperes, {unreadable} Mo illisibles, {pending} Mo en attente ({time}s, {speed} Mo/s)",
+    "damage_lost": "{time} lost ({movie_time} in movie)",
+    "damage_lost_movie": "{time} lost (in movie)",
+    "damage_lost_simple": "{time} lost",
+    "damage_none": "0s"
   },
   "remux": {
     "input": "Entree",

@@ -135,7 +135,11 @@
     "mapfile_summary": "Mapfile: {good} GB goed, {unreadable} MB onleesbaar, {pending} MB in behandeling",
     "nothing_to_patch": "Niets te patchen — alle sectoren zijn goed",
     "patch_start": "Patchen: {good} GB goed, {unreadable} MB onleesbaar, {pending} MB in behandeling",
-    "patch_done": "Patch voltooid: {recovered} MB hersteld, {unreadable} MB onleesbaar, {pending} MB in behandeling ({time}s, {speed} MB/s)"
+    "patch_done": "Patch voltooid: {recovered} MB hersteld, {unreadable} MB onleesbaar, {pending} MB in behandeling ({time}s, {speed} MB/s)",
+    "damage_lost": "{time} lost ({movie_time} in movie)",
+    "damage_lost_movie": "{time} lost (in movie)",
+    "damage_lost_simple": "{time} lost",
+    "damage_none": "0s"
   },
   "remux": {
     "input": "Invoer",

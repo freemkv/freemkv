@@ -839,19 +839,22 @@ fn print_disc_progress(
     }
 
     let damage = if bytes_worst_case > 0 {
+        let disc_str = fmt_damage_time(disc_damage_secs);
         if let Some(title_secs) = title_damage_secs {
-            let disc_str = fmt_damage_time(disc_damage_secs);
             if title_secs < disc_damage_secs * 0.99 {
                 let title_str = fmt_damage_time(title_secs);
-                format!("{} disc ({} title)", disc_str, title_str)
+                strings::fmt(
+                    "rip.damage_lost",
+                    &[("time", &disc_str), ("movie_time", &title_str)],
+                )
             } else {
-                format!("{} disc", disc_str)
+                strings::fmt("rip.damage_lost_movie", &[("time", &disc_str)])
             }
         } else {
-            format!("{} unreadable", fmt_damage_time(disc_damage_secs))
+            strings::fmt("rip.damage_lost_simple", &[("time", &disc_str)])
         }
     } else {
-        "0ms unreadable".into()
+        strings::get("rip.damage_none")
     };
     eprint!(
         "\r  {:.1}/{:.1} GB ({:.1}%)  {}  ETA {}    {}    ",

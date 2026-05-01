@@ -135,7 +135,11 @@
     "mapfile_summary": "Mapfile: {good} GB buenos, {unreadable} MB ilegibles, {pending} MB pendientes",
     "nothing_to_patch": "Nada que reparar — todos los sectores están buenos",
     "patch_start": "Reparando: {good} GB buenos, {unreadable} MB ilegibles, {pending} MB pendientes",
-    "patch_done": "Reparación: recuperados {recovered} MB, {unreadable} MB ilegibles, {pending} MB pendientes ({time}s, {speed} MB/s)"
+    "patch_done": "Reparación: recuperados {recovered} MB, {unreadable} MB ilegibles, {pending} MB pendientes ({time}s, {speed} MB/s)",
+    "damage_lost": "{time} lost ({movie_time} in movie)",
+    "damage_lost_movie": "{time} lost (in movie)",
+    "damage_lost_simple": "{time} lost",
+    "damage_none": "0s"
   },
   "remux": {
     "input": "Entrada",

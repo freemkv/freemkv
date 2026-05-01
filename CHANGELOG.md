@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.16.3 (2026-04-30)
+
+### i18n damage display
+
+- Progress bar shows "Xs lost (Y in movie)" instead of "Xs unreadable (Y title)"
+- Perfect rips show "0s" instead of "0s unreadable"
+- All damage strings use i18n keys: `rip.damage_lost`, `rip.damage_lost_movie`, `rip.damage_lost_simple`, `rip.damage_none`
+- Updated all 6 locale files (en, es, fr, de, it, pt, nl)
+
+## 0.16.2 (2026-04-30)
+
+### Bump libfreemkv to 0.16.2
+
 ## 0.16.1 (2026-04-30)
 
 ### Unified progress display for sweep and patch passes
