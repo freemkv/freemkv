@@ -93,6 +93,7 @@ jobs:
 
   update-homepage:
     needs: build
+    if: always() && needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
       - name: Update org README with new version
