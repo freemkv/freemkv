@@ -131,7 +131,11 @@
     "verbose_unit_keys": "Unit-Schluessel",
     "verbose_read_data_key": "Lesedaten-Schluessel",
     "verbose_handshake_error": "Handshake fehlgeschlagen",
-    "verbose_handshake_hint": "Handshake moeglicherweise fehlgeschlagen — kein Host-Zertifikat, oder Laufwerk hat abgelehnt"
+    "verbose_handshake_hint": "Handshake moeglicherweise fehlgeschlagen — kein Host-Zertifikat, oder Laufwerk hat abgelehnt",
+    "mapfile_summary": "Mapfile: {good} GB gut, {unreadable} MB unlesbar, {pending} MB ausstehend",
+    "nothing_to_patch": "Nichts zu patchen — alle Sektoren sind gut",
+    "patch_start": "Patchen: {good} GB gut, {unreadable} MB unlesbar, {pending} MB ausstehend",
+    "patch_done": "Patch fertig: {recovered} MB wiederhergestellt, {unreadable} MB unlesbar, {pending} MB ausstehend ({time}s, {speed} MB/s)"
   },
   "remux": {
     "input": "Eingabe",

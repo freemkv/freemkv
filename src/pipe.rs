@@ -515,7 +515,14 @@ fn pipe(
 
 // ── Disc → ISO (raw sector copy, not a stream) ────────────────────────────
 
-fn disc_to_iso(source: &str, dest: &str, keydb_path: &Option<String>, raw: bool, multipass: bool, out: &Output) {
+fn disc_to_iso(
+    source: &str,
+    dest: &str,
+    keydb_path: &Option<String>,
+    raw: bool,
+    multipass: bool,
+    out: &Output,
+) {
     let parsed_source = libfreemkv::parse_url(source);
     let parsed_dest = libfreemkv::parse_url(dest);
     let device = match &parsed_source {
@@ -635,25 +642,20 @@ fn disc_to_iso(source: &str, dest: &str, keydb_path: &Option<String>, raw: bool,
             self.last_work_done.set(Some(p.work_done));
             self.last_speed_time.set(now);
 
-            print_disc_progress(
-                p.kind,
-                p.work_done,
-                p.work_total,
-                p.bytes_good_total,
-                p.bytes_bad_total,
-                p.bytes_total_disc,
-                inst_speed,
-                self.bytes_per_sec,
-            );
+            print_disc_progress(p, inst_speed, self.bytes_per_sec);
         }
     }
-    let bytes_per_sec = disc.titles.first().map(|t| {
-        if t.duration_secs > 0.0 {
-            t.size_bytes as f64 / t.duration_secs
-        } else {
-            0.0
-        }
-    }).unwrap_or(0.0);
+    let bytes_per_sec = disc
+        .titles
+        .first()
+        .map(|t| {
+            if t.duration_secs > 0.0 {
+                t.size_bytes as f64 / t.duration_secs
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
     let progress = CliProgress {
         out,
         last_update: &last_update,
@@ -751,21 +753,6 @@ fn scan_titles(source: &str, keydb_path: &Option<String>) -> Option<Vec<libfreem
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn fmt_bytes(bytes: u64) -> String {
-    let gb = bytes as f64 / 1_073_741_824.0;
-    let mb = bytes as f64 / 1_048_576.0;
-    let kb = bytes as f64 / 1024.0;
-    if gb >= 1.0 {
-        format!("{:.2} GB", gb)
-    } else if mb >= 1.0 {
-        format!("{:.1} MB", mb)
-    } else if kb >= 1.0 {
-        format!("{:.0} KB", kb)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
 fn fmt_speed(mbps: f64) -> String {
     if mbps >= 1.0 {
         format!("{:.1} MB/s", mbps)
@@ -793,56 +780,87 @@ fn fmt_eta(secs: f64) -> String {
 }
 
 fn print_disc_progress(
-    kind: libfreemkv::progress::PassKind,
-    work_done: u64,
-    work_total: u64,
-    bytes_good: u64,
-    bytes_bad: u64,
-    bytes_disc: u64,
+    p: &libfreemkv::progress::PassProgress,
     inst_speed_mbps: f64,
-    bytes_per_sec: f64,
+    _bytes_per_sec: f64,
 ) {
+    let bytes_disc = p.bytes_total_disc;
     if bytes_disc == 0 {
         return;
     }
-    let gb_done = match kind {
+    let gb_done = match p.kind {
         libfreemkv::progress::PassKind::Sweep | libfreemkv::progress::PassKind::Mux => {
-            work_done as f64 / 1_073_741_824.0
+            p.work_done as f64 / 1_073_741_824.0
         }
-        _ => bytes_good as f64 / 1_073_741_824.0,
+        _ => p.bytes_good_total as f64 / 1_073_741_824.0,
     };
     let gb_total = bytes_disc as f64 / 1_073_741_824.0;
-    let pct = if work_total > 0 {
-        (work_done as f64 / work_total as f64 * 100.0).min(100.0)
+    let pct = if p.work_total > 0 {
+        (p.work_done as f64 / p.work_total as f64 * 100.0).min(100.0)
     } else {
         0.0
     };
-    let eta = if inst_speed_mbps > 0.01 && work_total > work_done {
-        let remaining_mb = (work_total - work_done) as f64 / 1_048_576.0;
+    let eta = if inst_speed_mbps > 0.01 && p.work_total > p.work_done {
+        let remaining_mb = (p.work_total - p.work_done) as f64 / 1_048_576.0;
         fmt_eta(remaining_mb / inst_speed_mbps)
     } else {
         "?:??".into()
     };
-    let unreadable = if bytes_bad > 0 && bytes_per_sec > 0.0 {
-        let secs = bytes_bad as f64 / bytes_per_sec;
+    let bytes_worst_case = p.bytes_unreadable_total + p.bytes_pending_total;
+    let disc_damage_secs = if bytes_worst_case > 0 {
+        p.disc_duration_secs
+            .filter(|&d| d > 0.0)
+            .map(|dur| bytes_worst_case as f64 / bytes_disc as f64 * dur)
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let title_damage_secs = if p.bytes_bad_in_main_title > 0 {
+        p.main_title_duration_secs
+            .zip(p.main_title_size_bytes)
+            .filter(|&(dur, sz)| dur > 0.0 && sz > 0)
+            .map(|(dur, sz)| p.bytes_bad_in_main_title as f64 / sz as f64 * dur)
+    } else {
+        None
+    };
+
+    fn fmt_damage_time(secs: f64) -> String {
         if secs >= 3600.0 {
-            format!("{:.1}h unreadable", secs / 3600.0)
+            format!("{:.1}h", secs / 3600.0)
         } else if secs >= 60.0 {
-            format!("{:.0}m unreadable", secs / 60.0)
+            format!("{:.0}m", secs / 60.0)
         } else if secs >= 1.0 {
-            format!("{:.0}s unreadable", secs)
+            format!("{:.0}s", secs)
+        } else if secs >= 0.01 {
+            format!("{:.2}s", secs)
         } else {
-            format!("{:.0}ms unreadable", secs * 1000.0)
+            format!("{:.0}ms", secs * 1000.0)
+        }
+    }
+
+    let damage = if bytes_worst_case > 0 {
+        if let Some(title_secs) = title_damage_secs {
+            let disc_str = fmt_damage_time(disc_damage_secs);
+            if title_secs < disc_damage_secs * 0.99 {
+                let title_str = fmt_damage_time(title_secs);
+                format!("{} disc ({} title)", disc_str, title_str)
+            } else {
+                format!("{} disc", disc_str)
+            }
+        } else {
+            format!("{} unreadable", fmt_damage_time(disc_damage_secs))
         }
     } else {
         "0ms unreadable".into()
     };
     eprint!(
         "\r  {:.1}/{:.1} GB ({:.1}%)  {}  ETA {}    {}    ",
-        gb_done, gb_total, pct,
+        gb_done,
+        gb_total,
+        pct,
         fmt_speed(inst_speed_mbps),
         eta,
-        unreadable,
+        damage,
     );
     let _ = std::io::stderr().flush();
 }
