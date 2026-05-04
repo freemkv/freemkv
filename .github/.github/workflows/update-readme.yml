@@ -1,0 +1,15 @@
+name: Release notification
+
+on:
+  repository_dispatch:
+    types: [new-release]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log release
+        run: |
+          echo "New release: ${{ github.event.client_payload.version }}"
+          echo "Org homepage uses /latest/ URLs and shields.io badges — auto-updates."
+          echo "Review https://github.com/freemkv for accuracy after major releases."
