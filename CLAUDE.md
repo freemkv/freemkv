@@ -1,18 +1,46 @@
-# Session State: v0.17.1/v0.17.2 Deployment + Release Checklist Updates
+# Session State: v0.17.2 Deployment + Drive Detection Fix
 
 ## Current Status
 
-**Work completed in this session:** Deployed autorip v0.17.1 and fixed v0.17.2 version mismatch issue.
+**Work completed in this session:** Deployed autorip v0.17.1 and fixed v0.17.2 version mismatch issue. Fixed drive detection problem by ensuring privileged mode is set in docker-compose.yml.
 
 **Deployment status:**
 - ✅ v0.17.1 built and pushed to GitHub (commit: 3e14aab)
 - ⚠️ v0.17.2 had version mismatch bug - tag created before Cargo.toml was updated
 - ✅ Fixed by: deleted old tag, updated Cargo.toml to "0.17.2", recreated tag
+- ✅ **v0.17.2 successfully deployed and running** (commit: ce03629)
 
-**Key findings from deployment attempt:**
-1. GitHub Actions Release workflow triggers on `push` event with tags matching `'v*'`
-2. Verify job checks that `Cargo.toml` version matches git tag name - MUST update Cargo.toml BEFORE creating tag
-3. Container auto-updates via Watchtower (~30s after new image pushed to GHCR)
+---
+
+## Portainer API Usage Guide
+
+**Key endpoints for container management:**
+
+### 1. Check Container Config/Status
+```bash
+curl -s -H "X-API-Key: ptr_f8I/jLRmscKjCcA7vbq1DebmTr++3GKxzOYrT07QECo=" \
+  "https://portainer-1.docker.pq.io/api/endpoints/1/docker/containers/json?all=true" | jq '.[] | select(.Names == ["/media-autorip"])'
+```
+
+### 2. Get Container Logs (stdout/stderr)
+```bash
+curl -s -H "X-API-Key: ptr_f8I/jLRmscKjCcA7vbq1DebmTr++3GKxzOYrT07QECo=" \
+  "https://portainer-1.docker.pq.io/api/endpoints/1/docker/containers/{container_id}/logs?stdout=1&stderr=1" | head -50
+```
+
+### 3. Create Exec Instance (returns null, use logs instead)
+```bash
+curl -s -H "X-API-Key: ptr_f8I/jLRmscKjCcA7vbq1DebmTr++3GKxzOYrT07QECo=" \
+  -H "Content-Type: application/json" \
+  -X POST "https://portainer-1.docker.pq.io/api/endpoints/1/docker/exec" \
+  -d '{"Container": "{id}", "AttachStdout": true, "AttachStderr": false, "Tty": false, "Cmd": ["sh", "-c", "ls /dev/sg*"]}' | jq '.Id'
+# Returns: null (exec API doesn't work via Portainer)
+```
+
+### 4. Check Real-time Drive Detection
+```bash
+curl -s "https://rip.docker.internal.pq.io/api/state"
+```
 
 ---
 
@@ -21,9 +49,44 @@
 ### 1. Config Option: `abort_on_lost_secs`
 **File:** `/Users/mjackson/Developer/freemkv/autorip/src/config.rs`
 
-- Added field: `pub abort_on_lost_secs: u64` (default 0 = never abort)
+- Added field: `pub abort_on_lost_secs: u64` (default 0 = no loss acceptable)
 - Environment variable: `ABORT_ON_LOST_SECS`
 - Load from saved settings JSON
+
+### 2. Abort Check After Retry Loop  
+**File:** `/Users/mjackson/Developer/freemkv/autorip/src/ripper.rs` (~lines 2289-2350)
+
+After all retry passes complete, loads mapfile and checks if main movie loss exceeds threshold:
+```rust
+// Load mapfile for abort-on-loss check
+let mut main_lost_ms_for_history = 0.0f64;
+if cfg_read.max_retries > 0 && bytes_unreadable > 0 {
+    let iso_filename = format!("{}.iso", crate::util::sanitize_path_compact(&display_name));
+    let mapfile_path_str = format!("{staging}/{iso_filename}.mapfile");
+    if let Ok(map) = libfreemkv::disc::mapfile::Mapfile::load(std::path::Path::new(&mapfile_path_str)) {
+        use libfreemkv::disc::mapfile::SectorStatus;
+        let bad_ranges = map.ranges_with(&[SectorStatus::Unreadable]);
+        if !bad_ranges.is_empty() && title_bytes_per_sec > 0.0 {
+            main_lost_ms_for_history = bad_ranges
+                .iter()
+                .map(|(_, size)| *size as f64 / title_bytes_per_sec * 1000.0)
+                .fold(0.0f64, f64::max);
+        }
+    }
+
+    let abort_threshold_ms = (cfg_read.abort_on_lost_secs * 1000) as f64;
+    if cfg_read.abort_on_lost_secs > 0 && main_lost_ms_for_history > abort_threshold_ms {
+        // Abort — too much data lost even after retries
+    } else {
+        // Proceed with mux — acceptable loss or no loss
+    }
+}
+```
+
+**Semantics:**
+- `abort_on_lost_secs=0`: I want 100% perfect data. If any main movie loss remains after all retries, abort.
+- `abort_on_lost_secs=30`: I'll tolerate up to 30s of missing data. Only abort if loss exceeds 30s after retries exhausted.
+- Multi-pass mode automatically exits early (line 2167) when `bytes_pending == 0 && bytes_unreadable == 0`, so clean discs skip unnecessary retry passes.
 
 ### 2. Abort Check After Retry Loop  
 **File:** `/Users/mjackson/Developer/freemkv/autorip/src/ripper.rs` (~lines 2318-2345)
@@ -142,12 +205,11 @@ if let Some(rip_mode) = patch.get("rip_mode").and_then(|v| v.as_str()) {
    for i in {1..6}; do VERSION=$(curl -s "https://rip.docker.internal.pq.io/api/version" | jq -r '.version'); echo "Poll $i: v$VERSION"; [ "$VERSION" = "vNEW" ] && break; sleep 30; done
    ```
 
-### Testing After Deployment
+### Testing After Deployment (via Portainer API)
 1. **Version check**: `curl https://rip.docker.internal.pq.io/api/version`
-2. **Config API test**: 
-   - POST new settings with `abort_on_lost_secs` field
-   - GET `/api/settings` and verify field persists
-3. **Dynamic pass count**: Monitor UI during clean disc rip (should show "pass 1/1")
+2. **Container status**: Check via Portainer logs endpoint for startup messages
+3. **Drive detection**: Look for log line: `INFO drive enumerated device=sgX path=/dev/sgX vendor=... model=...`
+4. **Real-time state**: `curl https://rip.docker.internal.pq.io/api/state` - should show detected drives with `disc_present=true/false`
 
 ---
 
@@ -163,16 +225,10 @@ if let Some(rip_mode) = patch.get("rip_mode").and_then(|v| v.as_str()) {
 **Root cause:** Missing `if let Some(v) = patch.get("abort_on_lost_secs")` in `handle_settings_post`
 **Fix (v0.17.2):** Added field handling to web.rs POST handler
 
----
-
-## Files Modified Summary
-
-| File | Changes | Version |
-|------|---------|---------|
-| `autorip/src/config.rs` | Added `abort_on_lost_secs: u64`, env var, load from settings | v0.17.1 |
-| `autorip/src/ripper.rs` | Abort check logic, dynamic pass count calculation | v0.17.1 |
-| `autorip/src/web.rs` | UI setting for abort threshold, POST handler fix | v0.17.2 |
-| `autorip/Cargo.toml` | Version bump from 0.17.0 → 0.17.1 → 0.17.2 | Both |
+### Issue: Drive detection failure (fixed v0.17.2)
+**Symptom:** `drive_count=0`, "No drives detected" in UI, API shows empty state
+**Root cause:** Container deployed without `privileged: true` required for optical SCSI access
+**Fix:** Ensure docker-compose.yml has `privileged: true` (line 6 in autorip/docker-compose.example.yml)
 
 ---
 
@@ -192,6 +248,9 @@ if let Some(rip_mode) = patch.get("rip_mode").and_then(|v| v.as_str()) {
 ```bash
 curl https://rip.docker.internal.pq.io/api/version
 # Returns: {"version":"0.17.2"}
+
+curl https://rip.docker.internal.pq.io/api/state | python3 -c "import sys,json; data=json.load(sys.stdin); print('Detected drives:', list(data.keys()))"
+# Returns: Detected drives: ['sg4']
 ```
 
 **v0.17.2 Features:**
@@ -216,3 +275,27 @@ curl https://rip.docker.internal.pq.io/api/version
 - **GitHub API:** https://api.github.com/repos/freemkv/autorip/actions/runs?event=release
 - **Autorip Version API:** https://rip.docker.internal.pq.io/api/version
 - **GHCR Image:** ghcr.io/freemkv/autorip:latest
+
+## Host Access (for debugging)
+
+```bash
+# SSH into Docker host
+ssh docker
+
+# Check if USB optical drive is visible on host
+ls -la /dev/sr* 2>&1 || echo "No sr devices"
+cat /sys/class/scsi_generic/*/device/type | sort | uniq -c
+
+# Run autorip container manually to see error output
+sudo docker run --privileged --rm -v /dev:/dev ghcr.io/freemkv/autorip:latest
+```
+
+## Testing Checklist for Deployments
+
+After each deployment, verify via Portainer API:
+
+1. ✅ Container is running (check `/api/containers/json` Status field)
+2. ✅ Logs show startup with `drive_count=1` or higher
+3. ✅ Log shows drive enumerated: `INFO drive enumerated device=sgX vendor=... model=...`
+4. ✅ Real-time API responds: `curl https://rip.docker.internal.pq.io/api/state`
+5. ✅ Drive detected in state: `{ "sg4": { "device":"sg4", "disc_present":true, ... } }`
