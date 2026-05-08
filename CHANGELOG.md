@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.7 (2026-05-08)
+
+### Sync release — picks up libfreemkv 0.17.7
+
+Sync release across all freemkv crates to version 0.17.7. No CLI functional changes. Picks up autorip's UI + audit-fix work for users running the CLI directly via `freemkv ... --multipass` (the new sliding-window display, ETA stability, and Pass N early-skip on full recovery all live in the lib path the CLI uses). See [autorip CHANGELOG](https://github.com/freemkv/autorip/blob/main/CHANGELOG.md#0177-2026-05-08) for details.
+
 ## 0.17.5 (2026-05-08)
 
 ### Sync release — picks up libfreemkv 0.17.5 Pass N recovery improvements
