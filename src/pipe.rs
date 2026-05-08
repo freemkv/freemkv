@@ -850,29 +850,14 @@ fn print_disc_progress(
     if bytes_disc == 0 {
         return;
     }
-    // For Patch modes (Trim/Scrape), show work_done/work_total percentage.
-    // bytes_good_total doesn't advance until sectors are recovered, leaving
-    // progress stuck at 0% even though patch is working through bad ranges.
-    let gb_done = match p.kind {
-        libfreemkv::progress::PassKind::Sweep | libfreemkv::progress::PassKind::Mux => {
-            p.work_done as f64 / 1_073_741_824.0
-        }
-        libfreemkv::progress::PassKind::Trim { .. } | libfreemkv::progress::PassKind::Scrape { .. } => {
-            // Show progress through bad ranges, not just recovered data
-            let pct = p.work_pct();
-            (pct / 100.0) * (bytes_disc as f64 / 1_073_741_824.0)
-        }
-        _ => p.bytes_good_total as f64 / 1_073_741_824.0,
-    };
+    // ONE metric across all pass types: cumulative recovered bytes vs disc
+    // total. Same scale every pass; bar always advances toward the same
+    // final target. Patch passes still emit useful motion because
+    // bytes_good_total grows as boundary sectors flip from NonTrimmed to
+    // Finished — even if slowly relative to disc total.
+    let gb_done = p.bytes_good_total as f64 / 1_073_741_824.0;
     let gb_total = bytes_disc as f64 / 1_073_741_824.0;
-    // For patch modes, show work percentage (progress through bad ranges)
-    // instead of good percentage (which stays at 0% until recovery succeeds)
-    let pct = match p.kind {
-        libfreemkv::progress::PassKind::Trim { .. } | libfreemkv::progress::PassKind::Scrape { .. } => {
-            p.work_pct()
-        }
-        _ => (p.work_done as f64 / p.work_total as f64 * 100.0).min(100.0),
-    };
+    let pct = (p.bytes_good_total as f64 / bytes_disc as f64 * 100.0).min(100.0);
     let eta = if inst_speed_mbps > 0.01 && p.work_total > p.work_done {
         let remaining_mb = (p.work_total - p.work_done) as f64 / 1_048_576.0;
         fmt_eta(remaining_mb / inst_speed_mbps)
@@ -898,14 +883,18 @@ fn print_disc_progress(
     };
 
     let damage = if bytes_worst_case > 0 {
+        // Always show BOTH numbers: total disc damage + main-title damage.
+        // They may be equal (whole-disc damage that's all in the main
+        // movie) — show both anyway so the user can see they matched.
+        // When main-title isn't computable (no title metadata), fall back
+        // to the disc-only string.
         let disc_str = fmt_damage_time(disc_damage_secs);
         match title_damage_secs {
-            Some(ms) if ms > 0.0 && ms < disc_damage_secs * 0.99 => {
-                strings::fmt("rip.damage_lost", &[("time", &disc_str), ("movie_time", &fmt_damage_time(ms))])
-            }
-            Some(_) | None => {
-                strings::fmt("rip.damage_lost_movie", &[("time", &disc_str)])
-            }
+            Some(ms) if ms > 0.0 => strings::fmt(
+                "rip.damage_lost",
+                &[("time", &disc_str), ("movie_time", &fmt_damage_time(ms))],
+            ),
+            _ => strings::fmt("rip.damage_lost_movie", &[("time", &disc_str)]),
         }
     } else {
         strings::get("rip.damage_none")
