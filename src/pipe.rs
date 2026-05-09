@@ -11,6 +11,8 @@
 //! `FrameSink` happens in a follow-up commit once the rest of the CLI is
 //! on libfreemkv 0.18 — see (internal)/memory/0_18_redesign.md.
 
+// Currently a no-op against libfreemkv 0.17.13; activates when the local
+// `[patch.crates-io]` points at the 0.18-dev tree.
 #![allow(deprecated)]
 
 use crate::output::{Level::Normal, Output};
