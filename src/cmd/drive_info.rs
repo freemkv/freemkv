@@ -9,7 +9,7 @@ use libfreemkv::Drive;
 use std::io::Write;
 use std::path::Path;
 
-pub fn run(args: &[String]) {
+pub(crate) fn run(args: &[String]) {
     let mut device_path: Option<String> = None;
     let mut share = false;
     let mut mask = false;

@@ -3,7 +3,7 @@
 //
 // CLI is dumb — all logic in libfreemkv::verify. This file only formats output.
 
-pub fn run(args: &[String]) {
+pub(crate) fn run(args: &[String]) {
     let url = args.first().map(|s| s.as_str()).unwrap_or("disc://");
     let parsed = libfreemkv::parse_url(url);
 

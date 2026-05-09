@@ -2,19 +2,22 @@
 // AGPL-3.0 — freemkv project
 //
 // Dispatches `freemkv info <url>` to the right renderer:
-//   disc:// → cmd::disc_info, or cmd::drive_info when --share / -s is set
-//   iso:// / mkv:// / m2ts:// → libfreemkv::input metadata dump
+//   disc://                     → cmd::disc_info
+//   disc:// with --share / -s   → cmd::drive_info
+//   iso:// / mkv:// / m2ts://   → libfreemkv::input metadata dump
 //
 // 0.18: still consumes libfreemkv's deprecated `pes::Stream` for the
 // stream-metadata dump path. The migration to `FrameSource` is a
 // follow-up commit. See freemkv-private/memory/0_18_redesign.md.
 
+// Currently a no-op against libfreemkv 0.17.13; activates when the local
+// `[patch.crates-io]` points at the 0.18-dev tree.
 #![allow(deprecated)]
 
 use crate::cmd::{disc_info, drive_info};
 use crate::strings;
 
-pub fn run(args: &[String]) {
+pub(crate) fn run(args: &[String]) {
     if args.is_empty() {
         eprintln!("Usage: freemkv info <url>");
         std::process::exit(1);

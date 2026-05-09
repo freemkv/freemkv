@@ -1,9 +1,13 @@
 // freemkv update-keys — Fetch and install AACS KEYDB.cfg
 // AGPL-3.0 — freemkv project
+//
+// Dispatches `freemkv update-keys --url <X>`. All logic lives in
+// libfreemkv::keydb::update; this file only handles arg parsing,
+// formatted output, and exit codes.
 
 use crate::strings;
 
-pub fn run(args: &[String]) {
+pub(crate) fn run(args: &[String]) {
     let mut url: Option<&str> = None;
     let mut i = 0;
     while i < args.len() {
