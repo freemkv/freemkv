@@ -6,20 +6,121 @@
 //!
 //! Batch (multiple titles) is just a for loop calling pipe() per title.
 //!
-//! 0.18: this file still consumes libfreemkv's deprecated `pes::Stream`
-//! trait (read+write combined). The trait migration to `FrameSource` /
-//! `FrameSink` happens in a follow-up commit once the rest of the CLI is
-//! on libfreemkv 0.18 — see (internal)/memory/0_18_redesign.md.
-
-// Currently a no-op against libfreemkv 0.17.13; activates when the local
-// `[patch.crates-io]` points at the 0.18-dev tree.
-#![allow(deprecated)]
+//! 0.18: the CLI is on the FrameSource / FrameSink trait surface. The
+//! `libfreemkv::input` / `libfreemkv::output` URL dispatchers still hand
+//! back `Box<dyn pes::Stream>` during the deprecation window; the local
+//! `PesSource` / `PesSink` adapters in this file bridge those values
+//! into the FrameSource / FrameSink shape so the rest of the pipeline
+//! never touches the deprecated trait.
 
 use crate::output::{Level::Normal, Output};
 use crate::strings;
-use libfreemkv::pes::Stream as PesStream;
+use libfreemkv::pes::{FrameSink, FrameSource, PesFrame};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+// ── PesSource / PesSink: local adapters over `libfreemkv::input/output` ─────
+//
+// `libfreemkv::input` and `libfreemkv::output` return `Box<dyn pes::Stream>`
+// during the 0.18 deprecation window. These adapters wrap that returned
+// box and expose the new FrameSource / FrameSink trait shape so the rest
+// of the CLI never touches the deprecated trait directly. The two
+// `#[allow(deprecated)]` markers are scoped to these adapter impls — the
+// rest of `pipe.rs` and `cmd/info.rs` see only FrameSource / FrameSink.
+//
+// `unsafe impl Send`: every concrete `pes::Stream` reachable through
+// `libfreemkv::input` / `output` (DiscStream, MkvStream, M2tsStream,
+// NetworkStream, NullStream, StdioStream) is itself `Send` — they store
+// `Box<dyn Read + Send>` / `Box<dyn Write + Send>` and Send-bounded
+// codec parsers. The trait object `dyn pes::Stream` lacks `Send` only
+// because adding the bound to a deprecated trait would force a wider
+// audit than the 0.18 window wants (see the comment above the
+// `Stream + Send => FrameSource` blanket impl in `libfreemkv/src/pes.rs`).
+// The CLI is single-threaded; the Send claim is conservative.
+//
+// When libfreemkv flips `input` / `output` to return `Box<dyn FrameSource>`
+// / `Box<dyn FrameSink>` directly (a later libfreemkv slice), these
+// adapters collapse to `pub type PesSource = Box<dyn FrameSource>` etc.
+// and call sites stay put.
+#[allow(deprecated)]
+struct PesSource {
+    inner: Box<dyn libfreemkv::PesStream>,
+}
+
+#[allow(deprecated)]
+impl PesSource {
+    fn new(inner: Box<dyn libfreemkv::PesStream>) -> Self {
+        Self { inner }
+    }
+}
+
+// SAFETY: see module comment above. All concrete `pes::Stream`
+// implementations behind `libfreemkv::input` are Send.
+#[allow(deprecated)]
+unsafe impl Send for PesSource {}
+
+#[allow(deprecated)]
+impl FrameSource for PesSource {
+    fn read(&mut self) -> std::io::Result<Option<PesFrame>> {
+        libfreemkv::PesStream::read(&mut *self.inner)
+    }
+
+    fn info(&self) -> &libfreemkv::DiscTitle {
+        libfreemkv::PesStream::info(&*self.inner)
+    }
+
+    fn codec_private(&self, track: usize) -> Option<Vec<u8>> {
+        libfreemkv::PesStream::codec_private(&*self.inner, track)
+    }
+
+    fn headers_ready(&self) -> bool {
+        libfreemkv::PesStream::headers_ready(&*self.inner)
+    }
+}
+
+#[allow(deprecated)]
+struct PesSink {
+    inner: Box<dyn libfreemkv::PesStream>,
+    bytes_written: u64,
+}
+
+#[allow(deprecated)]
+impl PesSink {
+    fn new(inner: Box<dyn libfreemkv::PesStream>) -> Self {
+        Self {
+            inner,
+            bytes_written: 0,
+        }
+    }
+
+    fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+}
+
+// SAFETY: see module comment above. All concrete `pes::Stream`
+// implementations behind `libfreemkv::output` are Send.
+#[allow(deprecated)]
+unsafe impl Send for PesSink {}
+
+#[allow(deprecated)]
+impl FrameSink for PesSink {
+    fn write(&mut self, frame: &PesFrame) -> std::io::Result<()> {
+        self.bytes_written += frame.data.len() as u64;
+        libfreemkv::PesStream::write(&mut *self.inner, frame)
+    }
+
+    fn finish(self: Box<Self>) -> std::io::Result<()> {
+        // Stream::finish takes &mut self, FrameSink::finish takes Box<Self>.
+        // Move out of the box, finish, drop.
+        let mut inner = self.inner;
+        libfreemkv::PesStream::finish(&mut *inner)
+    }
+
+    fn info(&self) -> &libfreemkv::DiscTitle {
+        libfreemkv::PesStream::info(&*self.inner)
+    }
+}
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -310,24 +411,31 @@ fn pipe_disc(
 
     out.raw(Normal, &strings::get("rip.ok"));
 
+    // `DiscStream` is Send and impls the deprecated `pes::Stream`; via the
+    // round-1 `Stream + Send => FrameSource` blanket it also satisfies
+    // `FrameSource`. The rest of the loop talks to it through the
+    // `FrameSource` trait method names, so the deprecation pressure stops
+    // at the `DiscStream::new` constructor call.
+    let input: &mut dyn FrameSource = &mut input;
+
     // From here, same as pipe(): headers → output → frame loop
     let mut buffered = Vec::new();
-    while !input.headers_ready() {
-        match input.read() {
+    while !FrameSource::headers_ready(input) {
+        match FrameSource::read(input) {
             Ok(Some(frame)) => buffered.push(frame),
             Ok(None) => break,
             Err(e) => return Err(format!("{}", e)),
         }
     }
 
-    let info = input.info().clone();
+    let info = FrameSource::info(input).clone();
     print_stream_info(out, &info);
 
     let mut title = info.clone();
     let disc_name = disc.meta_title.as_deref().unwrap_or(&disc.volume_id);
     title.playlist = disc_name.to_string();
     title.codec_privates = (0..info.streams.len())
-        .map(|i| input.codec_private(i))
+        .map(|i| FrameSource::codec_private(input, i))
         .collect();
 
     out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", dest)]));
@@ -341,7 +449,7 @@ fn pipe_disc(
             return Err(format!("{}", e));
         }
     };
-    let mut output = libfreemkv::pes::CountingStream::new(raw_output);
+    let mut output = PesSink::new(raw_output);
 
     out.blank(Normal);
 
@@ -350,7 +458,7 @@ fn pipe_disc(
     let mut last_update = start;
 
     for frame in &buffered {
-        output.write(frame).map_err(|e| format!("{}", e))?;
+        FrameSink::write(&mut output, frame).map_err(|e| format!("{}", e))?;
     }
 
     loop {
@@ -360,9 +468,9 @@ fn pipe_disc(
             break;
         }
 
-        match input.read() {
+        match FrameSource::read(input) {
             Ok(Some(frame)) => {
-                output.write(&frame).map_err(|e| format!("{}", e))?;
+                FrameSink::write(&mut output, &frame).map_err(|e| format!("{}", e))?;
 
                 let now = std::time::Instant::now();
                 if !out.is_quiet() && now.duration_since(last_update).as_secs_f64() >= 0.5 {
@@ -375,12 +483,13 @@ fn pipe_disc(
         }
     }
 
-    output.finish().map_err(|e| format!("{}", e))?;
+    // Capture the byte count before consuming the sink for finish.
+    let done = output.bytes_written();
+    FrameSink::finish(Box::new(output)).map_err(|e| format!("{}", e))?;
 
     if !out.is_quiet() {
         eprint!("\r                                                                    \r");
     }
-    let done = output.bytes_written();
     let elapsed = start.elapsed().as_secs_f64();
     let mb = done as f64 / (1024.0 * 1024.0);
     let (sz, unit) = if mb >= 1024.0 {
@@ -414,7 +523,7 @@ fn pipe(
 ) -> Result<(), String> {
     // Open input
     out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", source)]));
-    let mut input = match libfreemkv::input(source, opts) {
+    let raw_input = match libfreemkv::input(source, opts) {
         Ok(s) => {
             out.raw(Normal, &strings::get("rip.ok"));
             s
@@ -424,11 +533,12 @@ fn pipe(
             return Err(format!("{}", e));
         }
     };
+    let mut input = PesSource::new(raw_input);
 
     // Read frames until codec headers are ready (also parses metadata headers for stdio/network)
     let mut buffered = Vec::new();
-    while !input.headers_ready() {
-        match input.read() {
+    while !FrameSource::headers_ready(&input) {
+        match FrameSource::read(&mut input) {
             Ok(Some(frame)) => buffered.push(frame),
             Ok(None) => break,
             Err(e) => return Err(format!("{}", e)),
@@ -436,13 +546,13 @@ fn pipe(
     }
 
     // Get info after header scanning (stdio/network populate info during read)
-    let info = input.info().clone();
+    let info = FrameSource::info(&input).clone();
     print_stream_info(out, &info);
 
     // Build output title with codec_privates from input
     let mut title = info.clone();
     title.codec_privates = (0..info.streams.len())
-        .map(|i| input.codec_private(i))
+        .map(|i| FrameSource::codec_private(&input, i))
         .collect();
 
     // Open output, wrapped with byte counter for progress
@@ -457,7 +567,7 @@ fn pipe(
             return Err(format!("{}", e));
         }
     };
-    let mut output = libfreemkv::pes::CountingStream::new(raw_output);
+    let mut output = PesSink::new(raw_output);
 
     out.blank(Normal);
 
@@ -467,7 +577,7 @@ fn pipe(
 
     // Write buffered frames
     for frame in &buffered {
-        output.write(frame).map_err(|e| format!("{}", e))?;
+        FrameSink::write(&mut output, frame).map_err(|e| format!("{}", e))?;
     }
 
     // Stream remaining frames
@@ -478,9 +588,9 @@ fn pipe(
             break;
         }
 
-        match input.read() {
+        match FrameSource::read(&mut input) {
             Ok(Some(frame)) => {
-                output.write(&frame).map_err(|e| format!("{}", e))?;
+                FrameSink::write(&mut output, &frame).map_err(|e| format!("{}", e))?;
 
                 let now = std::time::Instant::now();
                 if !out.is_quiet() && now.duration_since(last_update).as_secs_f64() >= 0.5 {
@@ -493,12 +603,13 @@ fn pipe(
         }
     }
 
-    output.finish().map_err(|e| format!("{}", e))?;
+    // Capture the byte count before consuming the sink for finish.
+    let done = output.bytes_written();
+    FrameSink::finish(Box::new(output)).map_err(|e| format!("{}", e))?;
 
     if !out.is_quiet() {
         eprint!("\r                                                                    \r");
     }
-    let done = output.bytes_written();
     let elapsed = start.elapsed().as_secs_f64();
     let mb = done as f64 / (1024.0 * 1024.0);
     let (sz, unit) = if mb >= 1024.0 {
