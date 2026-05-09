@@ -5,6 +5,13 @@
 //!   2. Everything else: input → PES → output, one title at a time
 //!
 //! Batch (multiple titles) is just a for loop calling pipe() per title.
+//!
+//! 0.18: this file still consumes libfreemkv's deprecated `pes::Stream`
+//! trait (read+write combined). The trait migration to `FrameSource` /
+//! `FrameSink` happens in a follow-up commit once the rest of the CLI is
+//! on libfreemkv 0.18 — see (internal)/memory/0_18_redesign.md.
+
+#![allow(deprecated)]
 
 use crate::output::{Level::Normal, Output};
 use crate::strings;
