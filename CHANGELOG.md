@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.18.1 (2026-05-09)
+
+### Sync release — picks up libfreemkv 0.18.1
+
+Sync release across all freemkv crates to version 0.18.1. User-facing
+behavior is unchanged: same flags, same `--multipass` semantics (one
+invocation = one pass), same help output, same exit codes.
+
+**CLI source restructure.** The subcommand handlers moved into
+`src/cmd/{disc_info,drive_info,info,update_keys,verify}.rs`. `main.rs`
+is now a thin dispatcher (~150 LOC, was ~491).
+
+**Migrated off the deprecated `pes::Stream` trait.** The CLI now talks
+to libfreemkv via `FrameSource` / `FrameSink` directly. `disc_to_iso`
+no longer calls `Disc::copy` — the multipass dispatch (sweep vs patch)
+is the CLI's job, not the library's, and is now done inline based on
+mapfile state.
+
+See [libfreemkv CHANGELOG](https://github.com/freemkv/libfreemkv/blob/main/CHANGELOG.md#0181-2026-05-09)
+for the underlying I/O stack redesign.
+
 ## 0.17.7 (2026-05-08)
 
 ### Sync release — picks up libfreemkv 0.17.7
