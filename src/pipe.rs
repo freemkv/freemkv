@@ -785,13 +785,98 @@ fn disc_to_iso(
         halt: &std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
-    let copy_opts = libfreemkv::disc::CopyOptions {
-        decrypt: !raw,
-        multipass,
-        halt: None,
-        progress: Some(&progress),
-    };
-    match disc.copy(&mut drive, &iso_path, &copy_opts) {
+    // 0.18 round 3: Disc::copy is gone — the CLI dispatches sweep / patch
+    // directly based on mapfile state. The library only ships flat verbs;
+    // multipass policy ("one invocation = one pass") is the CLI's call.
+    let mapfile_path = disc.mapfile_for(&iso_path);
+    let dispatch_result: libfreemkv::Result<libfreemkv::disc::CopyResult> =
+        if multipass && mapfile_path.exists() {
+            // Existing mapfile — read state to pick sweep-resume vs patch.
+            match libfreemkv::disc::mapfile::Mapfile::load(&mapfile_path) {
+                Ok(map) => {
+                    let stats = map.stats();
+                    let disc_size = disc.capacity_bytes;
+                    let covers_disc = map.total_size() == disc_size;
+                    let bad_bytes = stats.bytes_pending + stats.bytes_unreadable;
+                    if covers_disc && bad_bytes == 0 {
+                        // Already done. Synthesize a CopyResult and short-circuit.
+                        Ok(libfreemkv::disc::CopyResult {
+                            bytes_total: disc_size,
+                            bytes_good: stats.bytes_good,
+                            bytes_unreadable: 0,
+                            bytes_pending: 0,
+                            recovered_this_pass: 0,
+                            complete: true,
+                            halted: false,
+                        })
+                    } else if !covers_disc {
+                        // Resume sweep (mapfile partial — Pass 1 was interrupted).
+                        let opts = libfreemkv::SweepOptions {
+                            decrypt: !raw,
+                            resume: true,
+                            batch_sectors: None,
+                            skip_on_error: true,
+                            progress: Some(&progress),
+                            halt: None,
+                        };
+                        disc.sweep(&mut drive, &iso_path, &opts)
+                    } else if stats.bytes_retryable > 0 {
+                        // Patch — bad ranges to retry.
+                        let opts = libfreemkv::PatchOptions {
+                            decrypt: !raw,
+                            block_sectors: Some(1),
+                            full_recovery: true,
+                            reverse: true,
+                            wedged_threshold: 50,
+                            progress: Some(&progress),
+                            halt: None,
+                        };
+                        disc.patch(&mut drive, &iso_path, &opts).map(|po| {
+                            // Translate PatchOutcome → CopyResult so the
+                            // existing post-rip reporting code reads the
+                            // same fields.
+                            libfreemkv::disc::CopyResult {
+                                bytes_total: po.bytes_total,
+                                bytes_good: po.bytes_good,
+                                bytes_unreadable: po.bytes_unreadable,
+                                bytes_pending: po.bytes_pending,
+                                recovered_this_pass: po.bytes_recovered_this_pass,
+                                complete: po.bytes_pending == 0,
+                                halted: po.halted,
+                            }
+                        })
+                    } else {
+                        // Catch-all: covers_disc but no retryable +
+                        // bad_bytes > 0 (only possible if bytes_unreadable
+                        // but no NonTrimmed). Resume sweep — same
+                        // fallthrough Disc::copy used.
+                        let opts = libfreemkv::SweepOptions {
+                            decrypt: !raw,
+                            resume: true,
+                            batch_sectors: None,
+                            skip_on_error: true,
+                            progress: Some(&progress),
+                            halt: None,
+                        };
+                        disc.sweep(&mut drive, &iso_path, &opts)
+                    }
+                }
+                Err(e) => Err(libfreemkv::Error::IoError { source: e }),
+            }
+        } else {
+            // No mapfile or single-pass mode: fresh sweep.
+            let opts = libfreemkv::SweepOptions {
+                decrypt: !raw,
+                resume: false,
+                batch_sectors: None,
+                skip_on_error: multipass,
+                progress: Some(&progress),
+                halt: None,
+            };
+            disc.sweep(&mut drive, &iso_path, &opts)
+        };
+
+    match dispatch_result {
         Ok(r) => {
             if !out.is_quiet() {
                 eprint!("\r                                                                    \r");
@@ -815,7 +900,6 @@ fn disc_to_iso(
                 let gb_good = r.bytes_good as f64 / 1_073_741_824.0;
                 let mb_bad = r.bytes_unreadable as f64 / 1_048_576.0;
                 let mb_pending = r.bytes_pending as f64 / 1_048_576.0;
-                let mapfile_path = disc.mapfile_for(&iso_path);
                 let main_title_bad = disc
                     .titles
                     .first()
