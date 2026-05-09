@@ -6,16 +6,51 @@
 //   disc:// with --share / -s   → cmd::drive_info
 //   iso:// / mkv:// / m2ts://   → libfreemkv::input metadata dump
 //
-// 0.18: still consumes libfreemkv's deprecated `pes::Stream` for the
-// stream-metadata dump path. The migration to `FrameSource` is a
-// follow-up commit. See freemkv-private/memory/0_18_redesign.md.
-
-// Currently a no-op against libfreemkv 0.17.13; activates when the local
-// `[patch.crates-io]` points at the 0.18-dev tree.
-#![allow(deprecated)]
+// 0.18: the metadata-dump path reads `info()` through `FrameSource`. The
+// `libfreemkv::input` URL dispatcher still hands back `Box<dyn pes::Stream>`
+// during the deprecation window — see `pipe.rs` for the local
+// `PesSource` adapter shape that bridges that into FrameSource. For
+// `info()`-only callers like this one, a tiny inline wrap-and-call is
+// enough; we don't pull in the full adapter just to read metadata.
 
 use crate::cmd::{disc_info, drive_info};
 use crate::strings;
+use libfreemkv::pes::FrameSource;
+
+/// Local adapter: wrap the boxed `pes::Stream` returned by
+/// `libfreemkv::input` and expose `FrameSource` so the rest of this file
+/// only sees the new trait surface. Mirror of `pipe::PesSource`, kept
+/// local because `cmd/info.rs` only needs the read half and only `info()`.
+#[allow(deprecated)]
+struct InfoSource {
+    inner: Box<dyn libfreemkv::PesStream>,
+}
+
+// SAFETY: every concrete `pes::Stream` returned by `libfreemkv::input`
+// (DiscStream, MkvStream, M2tsStream, NetworkStream, StdioStream) is
+// itself `Send` — see the long-form rationale in `pipe.rs`. CLI is
+// single-threaded; the Send claim is conservative.
+#[allow(deprecated)]
+unsafe impl Send for InfoSource {}
+
+#[allow(deprecated)]
+impl FrameSource for InfoSource {
+    fn read(&mut self) -> std::io::Result<Option<libfreemkv::pes::PesFrame>> {
+        libfreemkv::PesStream::read(&mut *self.inner)
+    }
+
+    fn info(&self) -> &libfreemkv::DiscTitle {
+        libfreemkv::PesStream::info(&*self.inner)
+    }
+
+    fn codec_private(&self, track: usize) -> Option<Vec<u8>> {
+        libfreemkv::PesStream::codec_private(&*self.inner, track)
+    }
+
+    fn headers_ready(&self) -> bool {
+        libfreemkv::PesStream::headers_ready(&*self.inner)
+    }
+}
 
 pub(crate) fn run(args: &[String]) {
     if args.is_empty() {
@@ -46,7 +81,8 @@ pub(crate) fn run(args: &[String]) {
         | libfreemkv::StreamUrl::Iso { .. } => {
             match libfreemkv::input(url, &libfreemkv::InputOptions::default()) {
                 Ok(stream) => {
-                    let meta = stream.info();
+                    let stream = InfoSource { inner: stream };
+                    let meta = FrameSource::info(&stream);
                     println!("File: {}", parsed.path_str());
                     if meta.duration_secs > 0.0 {
                         let d = meta.duration_secs;
