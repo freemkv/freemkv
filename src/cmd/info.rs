@@ -4,6 +4,12 @@
 // Dispatches `freemkv info <url>` to the right renderer:
 //   disc:// → cmd::disc_info, or cmd::drive_info when --share / -s is set
 //   iso:// / mkv:// / m2ts:// → libfreemkv::input metadata dump
+//
+// 0.18: still consumes libfreemkv's deprecated `pes::Stream` for the
+// stream-metadata dump path. The migration to `FrameSource` is a
+// follow-up commit. See freemkv-private/memory/0_18_redesign.md.
+
+#![allow(deprecated)]
 
 use crate::cmd::{disc_info, drive_info};
 use crate::strings;
