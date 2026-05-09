@@ -10,7 +10,7 @@ use libfreemkv::{
     LabelQualifier, ScanOptions, Stream, SubtitleStream, VideoStream,
 };
 
-pub fn run(args: &[String]) {
+pub(crate) fn run(args: &[String]) {
     let mut device_path: Option<String> = None;
     let mut quiet = false;
     let mut verbose = false;
