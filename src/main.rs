@@ -15,6 +15,7 @@ mod cmd;
 mod output;
 mod pipe;
 mod strings;
+mod style;
 
 fn main() {
     if std::env::var("RUST_LOG").is_ok() {
