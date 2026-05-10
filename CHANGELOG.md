@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.18.3 (2026-05-09)
+
+### Behaviour change (picked up from libfreemkv 0.18.3)
+
+- **`freemkv -t 1 disc:// …` now selects the canonical main feature
+  on branching UHDs.** Previously `-t 1` selected the longest title,
+  which on branching discs (alternate angles / seamless playback)
+  is often a "play-all" virtual playlist — a 4-hour composite of
+  the 2-hour movie's clips referenced multiple times. The fix is
+  in libfreemkv's title sort; the CLI surface is unchanged. See the
+  libfreemkv 0.18.3 changelog for the full rationale.
+
 ## 0.18.2 (2026-05-09)
 
 ### Bug fixes (CLI display)
