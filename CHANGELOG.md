@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.18.4 (2026-05-09)
+
+### Build / CI hardening — no CLI code changes
+
+- All `cargo` invocations in CI workflows now use `--locked`. See
+  libfreemkv 0.18.4 changelog for the dependency-race rationale.
+
 ## 0.18.3 (2026-05-09)
 
 ### Behaviour change (picked up from libfreemkv 0.18.3)
