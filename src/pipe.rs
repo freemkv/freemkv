@@ -1099,15 +1099,16 @@ fn print_disc_progress(
         // When main-title isn't computable (no title metadata), fall back
         // to the disc-only string.
         let disc_str = fmt_damage_time(disc_damage_secs);
-        match title_damage_secs {
+        let plain = match title_damage_secs {
             Some(ms) if ms > 0.0 => strings::fmt(
                 "rip.damage_lost",
                 &[("time", &disc_str), ("movie_time", &fmt_damage_time(ms))],
             ),
             _ => strings::fmt("rip.damage_lost_movie", &[("time", &disc_str)]),
-        }
+        };
+        crate::style::warn(&plain)
     } else {
-        strings::get("rip.damage_none")
+        crate::style::ok(&strings::get("rip.damage_none"))
     };
     let bar = crate::style::bar(24, pct / 100.0);
     eprint!(
@@ -1200,7 +1201,10 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
             };
             out.raw(
                 Normal,
-                &format!("    {} {}{}", v.codec, v.resolution, label),
+                &crate::style::highlight_codecs(&format!(
+                    "    {} {}{}",
+                    v.codec, v.resolution, label
+                )),
             );
         }
     }
@@ -1235,7 +1239,10 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
             };
             out.raw(
                 Normal,
-                &format!("    {} {} {}{}", a.codec, a.channels, a.language, label),
+                &crate::style::highlight_codecs(&format!(
+                    "    {} {} {}{}",
+                    a.codec, a.channels, a.language, label
+                )),
             );
         }
     }
