@@ -199,7 +199,10 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     }
 
     let out = Output::new(verbose, quiet);
-    out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
+    out.raw(
+        Normal,
+        &crate::style::dim(&format!("freemkv {}", env!("CARGO_PKG_VERSION"))),
+    );
     out.blank(Normal);
 
     let parsed_source = libfreemkv::parse_url(source);
@@ -312,14 +315,14 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
             let title = &t[*idx];
             out.raw(
                 Normal,
-                &strings::fmt(
+                &crate::style::hl(&strings::fmt(
                     "rip.title_info",
                     &[
                         ("num", &(idx + 1).to_string()),
                         ("duration", &title.duration_display()),
                         ("size", &format!("{:.1}", title.size_gb())),
                     ],
-                ),
+                )),
             );
         }
 
@@ -441,7 +444,7 @@ fn pipe_disc(
     out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", dest)]));
     let raw_output = match libfreemkv::output(dest, &title) {
         Ok(s) => {
-            out.raw(Normal, &strings::get("rip.ok"));
+            out.raw(Normal, &crate::style::ok(&strings::get("rip.ok")));
             s
         }
         Err(e) => {
@@ -525,7 +528,7 @@ fn pipe(
     out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", source)]));
     let raw_input = match libfreemkv::input(source, opts) {
         Ok(s) => {
-            out.raw(Normal, &strings::get("rip.ok"));
+            out.raw(Normal, &crate::style::ok(&strings::get("rip.ok")));
             s
         }
         Err(e) => {
@@ -559,7 +562,7 @@ fn pipe(
     out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", dest)]));
     let raw_output = match libfreemkv::output(dest, &title) {
         Ok(s) => {
-            out.raw(Normal, &strings::get("rip.ok"));
+            out.raw(Normal, &crate::style::ok(&strings::get("rip.ok")));
             s
         }
         Err(e) => {
@@ -1163,56 +1166,104 @@ fn print_progress(done: u64, total: u64, resumed_from: u64, start: &std::time::I
 }
 
 fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
-    out.raw(
-        Normal,
-        &format!("  {}: {}", strings::get("disc.titles"), meta.streams.len()),
-    );
+    // Partition by category so the user can scan Video / Audio /
+    // Subtitle separately. Per-section count replaces the previous
+    // misleading "Titles: N" total (which was actually a stream count).
+    let mut videos: Vec<&libfreemkv::VideoStream> = Vec::new();
+    let mut audios: Vec<&libfreemkv::AudioStream> = Vec::new();
+    let mut subs: Vec<&libfreemkv::SubtitleStream> = Vec::new();
     for s in &meta.streams {
         match s {
-            libfreemkv::Stream::Video(v) => {
-                let label = if v.label.is_empty() {
-                    String::new()
-                } else {
-                    format!(" — {}", v.label)
-                };
-                out.raw(
-                    Normal,
-                    &format!("    {} {}{}", v.codec, v.resolution, label),
-                );
-            }
-            libfreemkv::Stream::Audio(a) => {
-                let mut tags: Vec<String> = Vec::new();
-                if let Some(key) = audio_purpose_key(a.purpose) {
-                    tags.push(strings::get(key));
-                }
-                if a.secondary {
-                    tags.push(strings::get("stream.secondary"));
-                }
-                if !a.label.is_empty() {
-                    tags.push(a.label.clone());
-                }
-                let label = if tags.is_empty() {
-                    String::new()
-                } else {
-                    format!(" — {}", tags.join(", "))
-                };
-                out.raw(
-                    Normal,
-                    &format!("    {} {} {}{}", a.codec, a.channels, a.language, label),
-                );
-            }
-            libfreemkv::Stream::Subtitle(s) => {
-                out.raw(Normal, &format!("    {} {}", s.codec, s.language));
-            }
+            libfreemkv::Stream::Video(v) => videos.push(v),
+            libfreemkv::Stream::Audio(a) => audios.push(a),
+            libfreemkv::Stream::Subtitle(s) => subs.push(s),
         }
     }
+
+    if !videos.is_empty() {
+        out.raw(
+            Normal,
+            &format!(
+                "  {}",
+                crate::style::hl(&format!(
+                    "{} ({}):",
+                    strings::get("disc.video"),
+                    videos.len()
+                ))
+            ),
+        );
+        for v in &videos {
+            let label = if v.label.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", v.label)
+            };
+            out.raw(
+                Normal,
+                &format!("    {} {}{}", v.codec, v.resolution, label),
+            );
+        }
+    }
+
+    if !audios.is_empty() {
+        out.raw(
+            Normal,
+            &format!(
+                "  {}",
+                crate::style::hl(&format!(
+                    "{} ({}):",
+                    strings::get("disc.audio"),
+                    audios.len()
+                ))
+            ),
+        );
+        for a in &audios {
+            let mut tags: Vec<String> = Vec::new();
+            if let Some(key) = audio_purpose_key(a.purpose) {
+                tags.push(strings::get(key));
+            }
+            if a.secondary {
+                tags.push(strings::get("stream.secondary"));
+            }
+            if !a.label.is_empty() {
+                tags.push(a.label.clone());
+            }
+            let label = if tags.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", tags.join(", "))
+            };
+            out.raw(
+                Normal,
+                &format!("    {} {} {}{}", a.codec, a.channels, a.language, label),
+            );
+        }
+    }
+
+    if !subs.is_empty() {
+        out.raw(
+            Normal,
+            &format!(
+                "  {}",
+                crate::style::hl(&format!(
+                    "{} ({}):",
+                    strings::get("disc.subtitle"),
+                    subs.len()
+                ))
+            ),
+        );
+        for s in &subs {
+            out.raw(Normal, &format!("    {} {}", s.codec, s.language));
+        }
+    }
+
     if meta.duration_secs > 0.0 {
         let d = meta.duration_secs;
         out.raw(
             Normal,
             &format!(
                 "  {}: {}:{:02}:{:02}",
-                strings::get("disc.format"),
+                strings::get("disc.duration"),
                 d as u64 / 3600,
                 (d as u64 % 3600) / 60,
                 d as u64 % 60

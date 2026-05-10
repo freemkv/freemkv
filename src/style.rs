@@ -75,10 +75,12 @@ fn try_enable_vt() -> bool {
 
 // Palette — matches freemkv.org CSS variables.
 //   teal       #0D9488  filled progress bar
-//   teal-light #14B8A6  prompts / highlight / percentage
+//   teal-light #14B8A6  prompts / highlight / percentage / section headers
+//   green      #22c55e  success markers (OK)
 //   gray       #737373  dim text (version banners, secondary hints)
 const TEAL: (u8, u8, u8) = (13, 148, 136);
 const TEAL_LIGHT: (u8, u8, u8) = (20, 184, 166);
+const GREEN: (u8, u8, u8) = (34, 197, 94);
 const GRAY: (u8, u8, u8) = (115, 115, 115);
 
 fn paint(rgb: (u8, u8, u8), s: &str) -> String {
@@ -96,6 +98,12 @@ pub fn hl(s: &str) -> String {
 /// Gray — version banners, secondary information the reader can skim.
 pub fn dim(s: &str) -> String {
     paint(GRAY, s)
+}
+
+/// Green — success markers ("OK", "Done"). Used for the "Opening
+/// disc:///dev/sg1...OK" / "Opening null://...OK" status suffixes.
+pub fn ok(s: &str) -> String {
+    paint(GREEN, s)
 }
 
 /// Unicode-block progress bar with teal fill, gray empty. ASCII

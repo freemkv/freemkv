@@ -66,6 +66,7 @@
     "scanning": "Scanning disc...",
     "disc": "Disc",
     "format": "Format",
+    "duration": "Duration",
     "aacs_encrypted": "AACS: Encrypted",
     "css_encrypted": "CSS: Encrypted",
     "titles": "Titles",

@@ -22,7 +22,10 @@ pub(crate) fn run(args: &[String]) {
         }
     };
 
-    println!("freemkv {}\n", env!("CARGO_PKG_VERSION"));
+    println!(
+        "{}\n",
+        crate::style::dim(&format!("freemkv {}", env!("CARGO_PKG_VERSION")))
+    );
 
     // Open and scan
     eprint!("Opening drive...");
