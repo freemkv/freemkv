@@ -127,32 +127,47 @@ pub(crate) fn run(args: &[String]) {
         if let Some(ref aacs) = disc.aacs {
             out.raw(
                 Normal,
-                &format!(
-                    "AACS {}.0, MKB v{}",
-                    aacs.version,
-                    aacs.mkb_version.unwrap_or(0)
+                &strings::fmt(
+                    "disc.aacs_format",
+                    &[
+                        ("version", &aacs.version.to_string()),
+                        ("mkb", &aacs.mkb_version.unwrap_or(0).to_string()),
+                    ],
                 ),
             );
-            out.raw(Normal, &format!("Disc hash: {}", aacs.disc_hash));
             out.raw(
                 Normal,
-                &format!(
-                    "Keys: {} ({} unit keys)",
-                    aacs.key_source.name(),
-                    aacs.unit_keys.len()
+                &format!("{}: {}", strings::get("disc.disc_hash"), aacs.disc_hash),
+            );
+            out.raw(
+                Normal,
+                &strings::fmt(
+                    "disc.keys_format",
+                    &[
+                        ("source", aacs.key_source.name()),
+                        ("count", &aacs.unit_keys.len().to_string()),
+                    ],
                 ),
             );
         }
         out.raw(
             Normal,
             &format!(
-                "Drive: {} {} {}",
+                "{}: {} {} {}",
+                strings::get("disc.drive_label"),
                 drive.drive_id.vendor_id.trim(),
                 drive.drive_id.product_id.trim(),
                 drive.drive_id.product_revision.trim()
             ),
         );
-        out.raw(Normal, &format!("Device: {}", drive.device_path()));
+        out.raw(
+            Normal,
+            &format!(
+                "{}: {}",
+                strings::get("disc.device_label"),
+                drive.device_path()
+            ),
+        );
     }
 
     // Release the drive fd before printing titles

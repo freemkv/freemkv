@@ -15,6 +15,7 @@
 
 use crate::cmd::{disc_info, drive_info};
 use crate::strings;
+use crate::style;
 use libfreemkv::pes::FrameSource;
 
 /// Local adapter: wrap the boxed `pes::Stream` returned by
@@ -54,7 +55,7 @@ impl FrameSource for InfoSource {
 
 pub(crate) fn run(args: &[String]) {
     if args.is_empty() {
-        eprintln!("Usage: freemkv info <url>");
+        eprintln!("{}", strings::get("info.usage"));
         std::process::exit(1);
     }
 
@@ -83,77 +84,142 @@ pub(crate) fn run(args: &[String]) {
                 Ok(stream) => {
                     let stream = InfoSource { inner: stream };
                     let meta = FrameSource::info(&stream);
-                    println!("File: {}", parsed.path_str());
+
+                    // Dimmed version banner — same convention as
+                    // disc-info / drive-info / verify / rip path.
+                    println!(
+                        "{}",
+                        style::dim(&format!("freemkv {}", env!("CARGO_PKG_VERSION")))
+                    );
+                    println!();
+                    println!("{}: {}", strings::get("info.file"), parsed.path_str());
                     if meta.duration_secs > 0.0 {
                         let d = meta.duration_secs;
                         println!(
-                            "Duration: {}:{:02}:{:02}",
+                            "{}: {}:{:02}:{:02}",
+                            strings::get("disc.duration"),
                             d as u64 / 3600,
                             (d as u64 % 3600) / 60,
                             d as u64 % 60
                         );
                     }
-                    println!("Streams: {}", meta.streams.len());
+
+                    // Group streams Video / Audio / Subtitle with hl
+                    // section headers + per-stream highlight_codecs —
+                    // same shape as pipe.rs print_stream_info so a user
+                    // who runs `freemkv info` and a user who runs a rip
+                    // see the same layout for the same disc.
+                    let mut videos: Vec<&libfreemkv::VideoStream> = Vec::new();
+                    let mut audios: Vec<&libfreemkv::AudioStream> = Vec::new();
+                    let mut subs: Vec<&libfreemkv::SubtitleStream> = Vec::new();
                     for s in &meta.streams {
                         match s {
-                            libfreemkv::Stream::Video(v) => {
-                                let label = if v.label.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" — {}", v.label)
-                                };
-                                println!("  {} {}{}", v.codec, v.resolution, label);
-                            }
-                            libfreemkv::Stream::Audio(a) => {
-                                let mut tags: Vec<String> = Vec::new();
-                                let purpose_key = match a.purpose {
-                                    libfreemkv::LabelPurpose::Commentary => {
-                                        Some("stream.purpose.commentary")
-                                    }
-                                    libfreemkv::LabelPurpose::Descriptive => {
-                                        Some("stream.purpose.descriptive")
-                                    }
-                                    libfreemkv::LabelPurpose::Score => Some("stream.purpose.score"),
-                                    libfreemkv::LabelPurpose::Ime => Some("stream.purpose.ime"),
-                                    libfreemkv::LabelPurpose::Normal => None,
-                                };
-                                if let Some(k) = purpose_key {
-                                    tags.push(strings::get(k));
+                            libfreemkv::Stream::Video(v) => videos.push(v),
+                            libfreemkv::Stream::Audio(a) => audios.push(a),
+                            libfreemkv::Stream::Subtitle(s) => subs.push(s),
+                        }
+                    }
+
+                    if !videos.is_empty() {
+                        println!(
+                            "  {}",
+                            style::hl(&format!(
+                                "{} ({}):",
+                                strings::get("disc.video"),
+                                videos.len()
+                            ))
+                        );
+                        for v in &videos {
+                            let label = if v.label.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" — {}", v.label)
+                            };
+                            println!(
+                                "{}",
+                                style::highlight_codecs(&format!(
+                                    "    {} {}{}",
+                                    v.codec, v.resolution, label
+                                ))
+                            );
+                        }
+                    }
+
+                    if !audios.is_empty() {
+                        println!(
+                            "  {}",
+                            style::hl(&format!(
+                                "{} ({}):",
+                                strings::get("disc.audio"),
+                                audios.len()
+                            ))
+                        );
+                        for a in &audios {
+                            let mut tags: Vec<String> = Vec::new();
+                            let purpose_key = match a.purpose {
+                                libfreemkv::LabelPurpose::Commentary => {
+                                    Some("stream.purpose.commentary")
                                 }
-                                if a.secondary {
-                                    tags.push(strings::get("stream.secondary"));
+                                libfreemkv::LabelPurpose::Descriptive => {
+                                    Some("stream.purpose.descriptive")
                                 }
-                                if !a.label.is_empty() {
-                                    tags.push(a.label.clone());
-                                }
-                                let label = if tags.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" — {}", tags.join(", "))
-                                };
-                                println!("  {} {} {}{}", a.codec, a.channels, a.language, label);
+                                libfreemkv::LabelPurpose::Score => Some("stream.purpose.score"),
+                                libfreemkv::LabelPurpose::Ime => Some("stream.purpose.ime"),
+                                libfreemkv::LabelPurpose::Normal => None,
+                            };
+                            if let Some(k) = purpose_key {
+                                tags.push(strings::get(k));
                             }
-                            libfreemkv::Stream::Subtitle(s) => {
-                                println!("  {} {}", s.codec, s.language);
+                            if a.secondary {
+                                tags.push(strings::get("stream.secondary"));
                             }
+                            if !a.label.is_empty() {
+                                tags.push(a.label.clone());
+                            }
+                            let label = if tags.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" — {}", tags.join(", "))
+                            };
+                            println!(
+                                "{}",
+                                style::highlight_codecs(&format!(
+                                    "    {} {} {}{}",
+                                    a.codec, a.channels, a.language, label
+                                ))
+                            );
+                        }
+                    }
+
+                    if !subs.is_empty() {
+                        println!(
+                            "  {}",
+                            style::hl(&format!(
+                                "{} ({}):",
+                                strings::get("disc.subtitle"),
+                                subs.len()
+                            ))
+                        );
+                        for s in &subs {
+                            println!("    {} {}", s.codec, s.language);
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    eprintln!(
+                        "{}",
+                        strings::fmt("error.generic", &[("detail", &e.to_string())])
+                    );
                     std::process::exit(1);
                 }
             }
         }
         libfreemkv::StreamUrl::Unknown { .. } => {
-            eprintln!(
-                "'{}' is not a valid URL — use scheme://path (e.g. disc://, mkv://movie.mkv)",
-                url
-            );
+            eprintln!("{}", strings::fmt("error.invalid_url", &[("url", url)]));
             std::process::exit(1);
         }
         _ => {
-            eprintln!("Cannot get info for {}", url);
+            eprintln!("{}", strings::fmt("error.cannot_get_info", &[("url", url)]));
             std::process::exit(1);
         }
     }

@@ -24,7 +24,10 @@
     "opt_quiet": "Suprimir saida",
     "opt_verbose": "Saida detalhada (AACS, drive, info de depuracao)",
     "unknown_command": "Comando desconhecido: {cmd}",
-    "unknown_option": "Opcao desconhecida: {opt}"
+    "unknown_option": "Opcao desconhecida: {opt}",
+    "help_text": "Usage: freemkv <source> <dest> [flags]\n       freemkv info <url> [flags]\n       freemkv verify [disc://]\n\nStream URLs:\n  disc://                  Optical drive (auto-detect)\n  disc:///dev/sg4          Optical drive (Linux)\n  disc://D:                Optical drive (Windows)\n  mkv://path.mkv           Matroska file\n  m2ts://path.m2ts         BD transport stream file\n  network://host:port      TCP stream\n  stdio://                 Stdin/stdout pipe\n  iso://image.iso          Blu-ray ISO image\n  null://                  Discard (benchmarking)\n\n  All URLs require a scheme:// prefix.\n  File paths follow the scheme: mkv://./Dune.mkv, m2ts:///tmp/Dune.m2ts\n\nExamples:\n  freemkv disc:// mkv://Dune.mkv                     Rip disc to MKV\n  freemkv disc:// m2ts://Dune.m2ts                   Rip disc to m2ts\n  freemkv disc:///dev/sg4 mkv://Dune.mkv             Rip specific drive\n  freemkv disc:// mkv://Movie.mkv                    Rip all titles\n  freemkv disc:// mkv://Movie.mkv -t 1               Rip main feature only\n  freemkv disc:// mkv://Movie.mkv -t 1 -t 3          Rip titles 1 and 3\n  freemkv disc:// iso://Disc.iso                     Full disc to ISO (auto-resumes)\n  freemkv disc:// iso://Disc.iso --raw               Full disc, no decryption (auto-resumes)\n  freemkv disc:// iso://Disc.iso --multipass         Sweep with mapfile for multipass recovery\n  freemkv iso://Disc.iso iso://Disc.iso --multipass  Patch bad sectors (one retry pass)\n  freemkv iso://Disc.iso mkv://Movie.mkv             ISO to MKV\n  freemkv m2ts://Movie.m2ts mkv://Movie.mkv          Remux m2ts to MKV\n  freemkv disc:// network://10.0.0.1:9000           Stream to network\n  freemkv network://0.0.0.0:9000 mkv://Movie.mkv     Receive from network\n  freemkv disc:// stdio://                           Pipe to stdout\n  freemkv disc:// null://                            Benchmark read speed\n  freemkv info disc://                               Show disc info\n  freemkv --language fr disc:// mkv://Dune.mkv       Run in French (see --language)\n\nFlags:\n  -t, --title N        Select title (1-based, repeatable). Default: all.\n  -k, --keydb PATH     KEYDB.cfg path\n      --language CODE  UI language: en, es, fr, de, it, pt, nl. Default: en.\n      --lang CODE      Alias for --language.\n  -v, --verbose        Show AACS/drive debug info\n  -q, --quiet          Suppress output\n      --raw            Skip decryption (raw encrypted output)\n      --multipass      Write/update mapfile for multipass recovery\n  -s, --share          Submit drive profile (with info disc://)\n  -m, --mask           Mask serial numbers (with --share)\n\nEnvironment:\n  NO_COLOR             Disable ANSI colors regardless of TTY.\n",
+    "usage_brief": "Usage: freemkv <source> <dest> [flags]\n       freemkv info <url>",
+    "help_hint": "Try 'freemkv help' for more."
   },
   "drive": {
     "header": "Informacoes do Drive",
@@ -60,7 +63,8 @@
     "submit_ok": "Enviado! Obrigado por ajudar a expandir o suporte a drives.",
     "submit_failed": "O envio pode ter falhado. Por favor, envie manualmente:",
     "submit_net_error": "Nao foi possivel enviar ({error}). Por favor, envie manualmente:",
-    "zip_failed": "zip falhou ({error}), enviando apenas texto"
+    "zip_failed": "zip falhou ({error}), enviando apenas texto",
+    "capture_failed": "Captura falhou: {error}"
   },
   "disc": {
     "scanning": "Escaneando disco...",
@@ -78,7 +82,12 @@
     "audio": "Audio",
     "subtitle": "Legenda",
     "forced": "forcada",
-    "usage": "Uso: freemkv disc-info [--device /dev/sgN] [--full] [--basic] [--quiet]"
+    "usage": "Uso: freemkv disc-info [--device /dev/sgN] [--full] [--basic] [--quiet]",
+    "aacs_format": "AACS {version}.0, MKB v{mkb}",
+    "disc_hash": "Hash do disco",
+    "keys_format": "Chaves: {source} ({count} chaves de unidade)",
+    "drive_label": "Unidade",
+    "device_label": "Dispositivo"
   },
   "stream": {
     "purpose": {
@@ -192,6 +201,33 @@
     "E9002": "URL de stream invalida: {detail}",
     "E9003": "URL sem caminho: {detail}",
     "E9004": "URL sem porta: {detail}",
-    "E9007": "Imagem ISO muito grande: {detail}"
+    "E9007": "Imagem ISO muito grande: {detail}",
+    "open_failed": "Não é possível abrir {device}: {error}",
+    "invalid_url": "'{url}' não é um URL válido — use scheme://path (p. ex. disc://, mkv://movie.mkv)",
+    "cannot_get_info": "Não é possível obter informações para {url}"
+  },
+  "info": {
+    "file": "Ficheiro",
+    "usage": "Uso: freemkv info <url>"
+  },
+  "verify": {
+    "disc_only": "verify só funciona com URLs disc://",
+    "verifying": "A verificar...",
+    "results_header": "Resultados",
+    "verdict_header": "Veredicto",
+    "perfect": "O disco está perfeito.",
+    "bad_clusters": "{count} sectores irrecuperáveis em {clusters} cluster(s).",
+    "opening_drive": "A abrir unidade...",
+    "disc_summary": "{name} ({size} GB, {sectors} sectores)",
+    "count_good": "Bons",
+    "count_slow": "Lentos",
+    "count_recovered": "Recuperados",
+    "count_bad": "Maus",
+    "status_slow": "LENTO",
+    "status_recovered": "RECUPERADO",
+    "status_bad": "MAU",
+    "chapter_label": "Capítulo {ch}, {m}:{s}",
+    "verdict_format": "{pct}% legível em {m}:{s}",
+    "sectors_word": "sectores"
   }
 }
