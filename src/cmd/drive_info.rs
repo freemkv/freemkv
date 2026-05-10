@@ -83,7 +83,10 @@ pub(crate) fn run(args: &[String]) {
 
     let out = Output::new(verbose, quiet);
 
-    out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
+    out.raw(
+        Normal,
+        &crate::style::dim(&format!("freemkv {}", env!("CARGO_PKG_VERSION"))),
+    );
     out.blank(Normal);
     out.print(Normal, "drive.header");
     out.raw(

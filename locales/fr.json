@@ -66,6 +66,7 @@
     "scanning": "Analyse du disque...",
     "disc": "Disque",
     "format": "Format",
+    "duration": "Durée",
     "aacs_encrypted": "AACS : Chiffre",
     "css_encrypted": "CSS : Chiffre",
     "titles": "Titres",
