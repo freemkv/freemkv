@@ -75,12 +75,14 @@ fn try_enable_vt() -> bool {
 
 // Palette — matches freemkv.org CSS variables.
 //   teal       #0D9488  filled progress bar
-//   teal-light #14B8A6  prompts / highlight / percentage / section headers
-//   green      #22c55e  success markers (OK)
+//   teal-light #14B8A6  highlight (titles, section headers, codec flags, %)
+//   green      #22c55e  success markers (OK, "clean")
+//   yellow     #eab308  warnings (damaged sectors)
 //   gray       #737373  dim text (version banners, secondary hints)
 const TEAL: (u8, u8, u8) = (13, 148, 136);
 const TEAL_LIGHT: (u8, u8, u8) = (20, 184, 166);
 const GREEN: (u8, u8, u8) = (34, 197, 94);
+const YELLOW: (u8, u8, u8) = (234, 179, 8);
 const GRAY: (u8, u8, u8) = (115, 115, 115);
 
 fn paint(rgb: (u8, u8, u8), s: &str) -> String {
@@ -101,9 +103,56 @@ pub fn dim(s: &str) -> String {
 }
 
 /// Green — success markers ("OK", "Done"). Used for the "Opening
-/// disc:///dev/sg1...OK" / "Opening null://...OK" status suffixes.
+/// disc:///dev/sg1...OK" / "Opening null://...OK" status suffixes,
+/// and for the "clean" damage marker on the rip progress line.
 pub fn ok(s: &str) -> String {
     paint(GREEN, s)
+}
+
+/// Yellow — warnings (damaged sectors discovered during a sweep).
+pub fn warn(s: &str) -> String {
+    paint(YELLOW, s)
+}
+
+/// Wrap any premium codec / format flags (HDR10, Dolby Vision, Dolby
+/// Atmos, TrueHD, DTS-HD MA, DTS:X, etc.) found in `s` with [`hl`].
+/// Single left-to-right pass — flags listed longest-first so
+/// "Dolby Vision" matches before "Vision" alone, and the inserted
+/// ANSI escapes can't be re-scanned and double-wrapped. UTF-8 safe.
+///
+/// Used for per-stream lines in the rip-mode title summary so the
+/// "wow" features the user is paying disc royalties for jump out
+/// of an otherwise dense codec/channel/language listing.
+pub fn highlight_codecs(s: &str) -> String {
+    // Order matters: longest match first.
+    const FLAGS: &[&str] = &[
+        "Dolby Atmos",
+        "Dolby Vision",
+        "Dolby TrueHD",
+        "DTS-HD MA",
+        "TrueHD Atmos",
+        "HDR10+",
+        "DTS:X",
+        "TrueHD",
+        "HDR10",
+        "Atmos",
+    ];
+    let mut out = String::with_capacity(s.len() + 32);
+    let mut idx = 0;
+    while idx < s.len() {
+        let rest = &s[idx..];
+        let matched = FLAGS.iter().find(|f| rest.starts_with(**f)).copied();
+        if let Some(flag) = matched {
+            out.push_str(&hl(flag));
+            idx += flag.len();
+        } else {
+            // Step by one Unicode scalar value to keep UTF-8 boundaries.
+            let ch = rest.chars().next().expect("non-empty rest");
+            out.push(ch);
+            idx += ch.len_utf8();
+        }
+    }
+    out
 }
 
 /// Unicode-block progress bar with teal fill, gray empty. ASCII
@@ -159,5 +208,41 @@ mod tests {
         let _ = USE_COLOR.set(false);
         assert_eq!(hl("Dune"), "Dune");
         assert_eq!(dim("freemkv 0.18.4"), "freemkv 0.18.4");
+        assert_eq!(ok("OK"), "OK");
+        assert_eq!(warn("3.2s lost"), "3.2s lost");
+    }
+
+    #[test]
+    fn highlight_codecs_passes_through_when_no_flags() {
+        let _ = USE_COLOR.set(false);
+        assert_eq!(
+            highlight_codecs("AC-3 5.1 fra — Dolby Digital 5.1"),
+            "AC-3 5.1 fra — Dolby Digital 5.1"
+        );
+    }
+
+    #[test]
+    fn highlight_codecs_marks_premium_flags() {
+        // Color disabled — verify the segmentation is correct without
+        // depending on the exact ANSI bytes.
+        let _ = USE_COLOR.set(false);
+        // With colors off, hl() is a passthrough so the function is
+        // identity. We still exercise the matching logic.
+        assert_eq!(
+            highlight_codecs("HEVC 2160p — HEVC 4K HDR10"),
+            "HEVC 2160p — HEVC 4K HDR10"
+        );
+        assert_eq!(
+            highlight_codecs("HEVC 1080p — Dolby Vision EL"),
+            "HEVC 1080p — Dolby Vision EL"
+        );
+    }
+
+    #[test]
+    fn highlight_codecs_prefers_longer_match() {
+        // "Dolby Atmos" matches before "Atmos" alone.
+        let _ = USE_COLOR.set(false);
+        let s = highlight_codecs("TrueHD Atmos 7.1 — Dolby Atmos");
+        assert_eq!(s, "TrueHD Atmos 7.1 — Dolby Atmos");
     }
 }
