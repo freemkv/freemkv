@@ -202,18 +202,40 @@ Labels are preserved in all output formats — MKV track names and M2TS metadata
 ## Flags
 
 ```
--t, --title N       Select title (1-based, repeatable). Default: all.
--k, --keydb PATH    KEYDB.cfg path
--v, --verbose       Show AACS/drive debug info
--q, --quiet         Suppress output
-    --raw           Skip decryption (raw encrypted output)
--s, --share         Submit drive profile (with info disc://)
--m, --mask          Mask serial numbers (with --share)
+-t, --title N        Select title (1-based, repeatable). Default: all.
+-k, --keydb PATH     KEYDB.cfg path
+    --language CODE  UI language: en, es, fr, de, it, pt, nl. Default: en.
+    --lang CODE      Alias for --language.
+-v, --verbose        Show AACS/drive debug info
+-q, --quiet          Suppress output
+    --raw            Skip decryption (raw encrypted output)
+    --multipass      Write/update mapfile for multipass recovery
+-s, --share          Submit drive profile (with info disc://)
+-m, --mask           Mask serial numbers (with --share)
+```
+
+### Environment
+
+```
+NO_COLOR             Disable ANSI colors in styled output, regardless of TTY.
+                     (https://no-color.org — set NO_COLOR=1 to opt out.)
 ```
 
 ## Multi-language
 
-freemkv is fully localized. All output — errors, status, labels — adapts to your locale. Ships with English, Spanish, French, German, Italian, Portuguese, and Dutch. Contributions for additional languages welcome.
+freemkv is fully localized. All output — errors, status, prose labels, help text — adapts to your selected language. Ships with English, Spanish, French, German, Italian, Portuguese, and Dutch.
+
+**Selecting a language** — pass `--language CODE` (or `--lang CODE`) as the very first argument, before the subcommand or URLs:
+
+```bash
+freemkv --language es disc-info       # Spanish
+freemkv --language fr disc:// mkv://Dune.mkv   # French
+freemkv --lang de info iso://disc.iso          # German
+```
+
+Supported codes: `en` (English), `es` (Spanish), `fr` (French), `de` (German), `it` (Italian), `pt` (Portuguese), `nl` (Dutch). Default is `en`.
+
+Contributions for additional languages welcome — locale files live in [`locales/`](locales/) as JSON, one file per language. Add a new file with the same key set and freemkv will pick it up.
 
 ## Building from Source
 
