@@ -14,14 +14,14 @@ jobs:
         with:
           components: clippy, rustfmt
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --locked -- -D warnings
 
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.86.0
-      - run: cargo test --tests
+      - run: cargo test --locked --tests
 
   check-windows:
     runs-on: windows-latest
