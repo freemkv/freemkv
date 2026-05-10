@@ -46,7 +46,7 @@ fn main() {
         "info" => cmd::info::run(&args[2..]),
         "verify" => cmd::verify::run(&args[2..]),
         "update-keys" => cmd::update_keys::run(&args[2..]),
-        "version" | "--version" | "-V" => println!("{}", env!("CARGO_PKG_VERSION")),
+        "version" | "--version" | "-V" => println!("freemkv {}", env!("CARGO_PKG_VERSION")),
         "help" | "--help" | "-h" => usage(),
 
         // Everything else: freemkv <source> <dest>

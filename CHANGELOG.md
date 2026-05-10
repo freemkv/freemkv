@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.18.2 (2026-05-09)
+
+### Bug fixes (CLI display)
+
+- **"Lost" reported NonTried bytes as data loss** (`pipe.rs::print_disc_progress`,
+  post-rip summary). The lost-seconds calculation summed
+  `bytes_unreadable + bytes_pending`, so a clean rip in progress with
+  the entire disc still NonTried reported the full disc duration as
+  "lost". NonTried bytes are still recoverable on a `--resume` run and
+  shouldn't count as loss. Fix: extract a shared `lost_secs(...)` helper
+  that takes only `bytes_unreadable` and use it from both the live
+  progress line and the post-rip summary. Three regression tests in
+  `pipe::tests` cover the boundaries.
+
+- **`--version` output format** — was bare `0.18.1`; now `freemkv 0.18.1`,
+  matching `cargo --version` / `rustc --version` convention. CLI
+  test `version_shows_version` updated to require the prefix.
+
+### Picks up
+
+- libfreemkv 0.18.2 (nav-file scramble fix, sweep progress non-regression).
+
 ## 0.18.1 (2026-05-09)
 
 ### Sync release — picks up libfreemkv 0.18.1
