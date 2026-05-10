@@ -3,6 +3,9 @@
 //
 // CLI is dumb — all logic in libfreemkv::verify. This file only formats output.
 
+use crate::strings;
+use crate::style;
+
 pub(crate) fn run(args: &[String]) {
     let url = args.first().map(|s| s.as_str()).unwrap_or("disc://");
     let parsed = libfreemkv::parse_url(url);
@@ -12,45 +15,45 @@ pub(crate) fn run(args: &[String]) {
         libfreemkv::StreamUrl::Disc { device: None } => match libfreemkv::find_drive() {
             Some(d) => std::path::PathBuf::from(d.device_path()),
             None => {
-                eprintln!("No drive found");
+                eprintln!("{}", strings::get("error.no_drive"));
                 std::process::exit(1);
             }
         },
         _ => {
-            eprintln!("verify only works with disc:// URLs");
+            eprintln!("{}", strings::get("verify.disc_only"));
             std::process::exit(1);
         }
     };
 
     println!(
         "{}\n",
-        crate::style::dim(&format!("freemkv {}", env!("CARGO_PKG_VERSION")))
+        style::dim(&format!("freemkv {}", env!("CARGO_PKG_VERSION")))
     );
 
     // Open and scan
-    eprint!("Opening drive...");
+    eprint!("{}", strings::get("verify.opening_drive"));
     let mut drive = match libfreemkv::Drive::open(&device) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("FAILED\n{}", e);
+            eprintln!("{}\n{}", style::warn(&strings::get("rip.failed")), e);
             std::process::exit(1);
         }
     };
     let _ = drive.wait_ready();
     let _ = drive.init();
-    eprintln!("OK");
+    eprintln!("{}", style::ok(&strings::get("rip.ok")));
 
-    eprint!("Scanning...");
+    eprint!("{}", strings::get("disc.scanning"));
     let scan_opts = libfreemkv::ScanOptions::default();
     let disc = match libfreemkv::Disc::scan(&mut drive, &scan_opts) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("FAILED\n{}", e);
+            eprintln!("{}\n{}", style::warn(&strings::get("rip.failed")), e);
             std::process::exit(1);
         }
     };
     if disc.titles.is_empty() {
-        eprintln!("No titles found");
+        eprintln!("{}", strings::get("disc.no_titles"));
         std::process::exit(1);
     }
     let title = &disc.titles[0];
@@ -58,14 +61,21 @@ pub(crate) fn run(args: &[String]) {
     let total_sectors: u64 = title.extents.iter().map(|e| e.sector_count as u64).sum();
     let total_gb = total_sectors as f64 * 2048.0 / 1_073_741_824.0;
     eprintln!(
-        "{} ({:.1} GB, {} sectors)",
-        disc_name, total_gb, total_sectors
+        "{}",
+        strings::fmt(
+            "verify.disc_summary",
+            &[
+                ("name", &style::hl(disc_name)),
+                ("size", &format!("{:.1}", total_gb)),
+                ("sectors", &total_sectors.to_string()),
+            ]
+        )
     );
 
     let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
     let _ = drive.probe_disc();
 
-    eprintln!("\nVerifying...");
+    eprintln!("\n{}", strings::get("verify.verifying"));
     let start = std::time::Instant::now();
     let last_print = std::sync::Mutex::new(std::time::Instant::now());
 
@@ -99,32 +109,39 @@ pub(crate) fn run(args: &[String]) {
     eprintln!(); // newline after progress
 
     // Results
+    let count_line = |label: String, count: u64| {
+        format!(
+            "  {:<12} {:>12}  ({:.4}%)",
+            format!("{}:", label),
+            count,
+            count as f64 / result.total_sectors as f64 * 100.0
+        )
+    };
     println!();
-    println!("Results:");
     println!(
-        "  Good:        {:>12}  ({:.4}%)",
-        result.good,
-        result.good as f64 / result.total_sectors as f64 * 100.0
+        "{}",
+        style::hl(&format!("{}:", strings::get("verify.results_header")))
+    );
+    println!(
+        "{}",
+        count_line(strings::get("verify.count_good"), result.good)
     );
     if result.slow > 0 {
         println!(
-            "  Slow:        {:>12}  ({:.4}%)",
-            result.slow,
-            result.slow as f64 / result.total_sectors as f64 * 100.0
+            "{}",
+            count_line(strings::get("verify.count_slow"), result.slow)
         );
     }
     if result.recovered > 0 {
         println!(
-            "  Recovered:   {:>12}  ({:.4}%)",
-            result.recovered,
-            result.recovered as f64 / result.total_sectors as f64 * 100.0
+            "{}",
+            count_line(strings::get("verify.count_recovered"), result.recovered)
         );
     }
     if result.bad > 0 {
         println!(
-            "  Bad:         {:>12}  ({:.4}%)",
-            result.bad,
-            result.bad as f64 / result.total_sectors as f64 * 100.0
+            "{}",
+            count_line(strings::get("verify.count_bad"), result.bad)
         );
     }
 
@@ -132,9 +149,11 @@ pub(crate) fn run(args: &[String]) {
         println!();
         for range in &result.ranges {
             let status_str = match range.status {
-                libfreemkv::verify::SectorStatus::Slow => "SLOW",
-                libfreemkv::verify::SectorStatus::Recovered => "RECOVERED",
-                libfreemkv::verify::SectorStatus::Bad => "BAD",
+                libfreemkv::verify::SectorStatus::Slow => strings::get("verify.status_slow"),
+                libfreemkv::verify::SectorStatus::Recovered => {
+                    strings::get("verify.status_recovered")
+                }
+                libfreemkv::verify::SectorStatus::Bad => strings::get("verify.status_bad"),
                 _ => continue,
             };
             let gb = range.byte_offset as f64 / 1_073_741_824.0;
@@ -148,18 +167,38 @@ pub(crate) fn run(args: &[String]) {
                 Some((ch, secs)) => {
                     let m = secs as u32 / 60;
                     let s = secs as u32 % 60;
-                    format!(" — Chapter {}, {:02}:{:02}", ch, m, s)
+                    format!(
+                        " — {}",
+                        strings::fmt(
+                            "verify.chapter_label",
+                            &[
+                                ("ch", &ch.to_string()),
+                                ("m", &format!("{:02}", m)),
+                                ("s", &format!("{:02}", s)),
+                            ]
+                        )
+                    )
                 }
                 None => String::new(),
             };
+            // Color the status word per severity: bad → warn (yellow),
+            // slow/recovered → hl (teal). Same affordance as the
+            // damage marker on the rip progress line.
+            let status_styled = match range.status {
+                libfreemkv::verify::SectorStatus::Bad => style::warn(&status_str),
+                _ => style::hl(&status_str),
+            };
+            let sectors_word = strings::get("verify.sectors_word");
             println!(
-                "  {} sectors {}-{} ({:.1} GB{}): {} sectors",
-                status_str,
+                "  {} {} {}-{} ({:.1} GB{}): {} {}",
+                status_styled,
+                sectors_word,
                 range.start_lba,
                 range.start_lba + range.count,
                 gb,
                 ch_str,
-                range.count
+                range.count,
+                sectors_word,
             );
         }
     }
@@ -168,24 +207,37 @@ pub(crate) fn run(args: &[String]) {
     let m = elapsed as u32 / 60;
     let s = elapsed as u32 % 60;
     println!();
+    let verdict_line = strings::fmt(
+        "verify.verdict_format",
+        &[
+            ("pct", &format!("{:.4}", result.readable_pct())),
+            ("m", &m.to_string()),
+            ("s", &format!("{:02}", s)),
+        ],
+    );
     println!(
-        "Verdict: {:.4}% readable in {}:{:02}",
-        result.readable_pct(),
-        m,
-        s
+        "{} {}",
+        style::hl(&format!("{}:", strings::get("verify.verdict_header"))),
+        verdict_line,
     );
 
     if result.is_perfect() {
-        println!("         Disc is perfect.");
+        println!("         {}", style::ok(&strings::get("verify.perfect")));
     } else if result.bad > 0 {
+        let cluster_count = result
+            .ranges
+            .iter()
+            .filter(|r| r.status == libfreemkv::verify::SectorStatus::Bad)
+            .count();
         println!(
-            "         {} unrecoverable sectors in {} cluster(s).",
-            result.bad,
-            result
-                .ranges
-                .iter()
-                .filter(|r| r.status == libfreemkv::verify::SectorStatus::Bad)
-                .count()
+            "         {}",
+            style::warn(&strings::fmt(
+                "verify.bad_clusters",
+                &[
+                    ("count", &result.bad.to_string()),
+                    ("clusters", &cluster_count.to_string()),
+                ]
+            ))
         );
     }
 

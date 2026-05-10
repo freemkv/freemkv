@@ -173,7 +173,10 @@ pub(crate) fn run(args: &[String]) {
     let capture = match libfreemkv::capture_drive_data(&mut session) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Capture failed: {}", e);
+            eprintln!(
+                "{}",
+                strings::fmt("drive.capture_failed", &[("error", &e.to_string())])
+            );
             std::process::exit(1);
         }
     };
