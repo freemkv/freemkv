@@ -22,6 +22,52 @@ jobs:
           fi
           echo "Version match: $CARGO_VER"
 
+      - name: Verify Cargo.lock libfreemkv matches tag and is from crates.io
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          python3 - "$TAG_VER" <<'PY'
+          import sys, re
+          tag = sys.argv[1]
+          try:
+              with open("Cargo.lock") as f:
+                  text = f.read()
+          except FileNotFoundError:
+              print("::error::Cargo.lock not found")
+              sys.exit(1)
+          if not text.strip():
+              print("::error::Cargo.lock is empty or truncated")
+              sys.exit(1)
+          # Split into [[package]] blocks; defend against multiple libfreemkv entries.
+          blocks = re.split(r'(?m)^\[\[package\]\]\s*$', text)
+          matches = []
+          for b in blocks:
+              name_m = re.search(r'(?m)^name\s*=\s*"libfreemkv"\s*$', b)
+              if not name_m:
+                  continue
+              ver_m = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', b)
+              src_m = re.search(r'(?m)^source\s*=\s*"([^"]+)"\s*$', b)
+              matches.append((ver_m.group(1) if ver_m else None,
+                              src_m.group(1) if src_m else None))
+          if not matches:
+              print("::error::Cargo.lock has no libfreemkv entry")
+              sys.exit(1)
+          if len(matches) > 1:
+              print(f"::error::Cargo.lock has {len(matches)} libfreemkv entries: {matches}")
+              sys.exit(1)
+          lock_ver, lock_src = matches[0]
+          if lock_ver != tag:
+              print(f"::error::Cargo.lock libfreemkv = {lock_ver} but tag is {tag}. "
+                    f"Cause: cargo update --workspace was used instead of the rm+generate-lockfile recipe. "
+                    f"Fix: rm Cargo.lock && cargo +1.86 generate-lockfile (with .cargo/config.toml temporarily disabled).")
+              sys.exit(1)
+          if not lock_src or not lock_src.startswith("registry+https://github.com/rust-lang/crates.io"):
+              print(f"::error::Cargo.lock libfreemkv must come from crates.io registry, not local path. "
+                    f"Run rm Cargo.lock && cargo generate-lockfile with [patch.crates-io] disabled. "
+                    f"(saw source={lock_src!r})")
+              sys.exit(1)
+          print(f"Cargo.lock libfreemkv = {lock_ver} from {lock_src}")
+          PY
+
   build:
     needs: verify
     strategy:
