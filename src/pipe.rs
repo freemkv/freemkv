@@ -1106,11 +1106,13 @@ fn print_disc_progress(
     } else {
         strings::get("rip.damage_none")
     };
+    let bar = crate::style::bar(24, pct / 100.0);
     eprint!(
-        "\r  {:.1}/{:.1} GB ({:.1}%)  {}  ETA {}    {}    ",
+        "\r  {} {} {:.1}/{:.1} GB  {}  ETA {}  {}    ",
+        bar,
+        crate::style::hl(&format!("{:>5.1}%", pct)),
         gb_done,
         gb_total,
-        pct,
         fmt_speed(inst_speed_mbps),
         eta,
         damage,
@@ -1136,19 +1138,22 @@ fn print_progress(done: u64, total: u64, resumed_from: u64, start: &std::time::I
         } else {
             "?:??".into()
         };
+        let bar = crate::style::bar(24, pct / 100.0);
+        let pct_styled = crate::style::hl(&format!("{:>5.1}%", pct));
         if mb_total >= 1024.0 {
             eprint!(
-                "\r  {:.1} GB / {:.1} GB  ({:.1}%)  {:.1} MB/s  ETA {}    ",
+                "\r  {} {} {:.1}/{:.1} GB  {:.1} MB/s  ETA {}    ",
+                bar,
+                pct_styled,
                 mb_done / 1024.0,
                 mb_total / 1024.0,
-                pct,
                 avg,
                 eta
             );
         } else {
             eprint!(
-                "\r  {:.0} MB / {:.0} MB  ({:.1}%)  {:.1} MB/s  ETA {}    ",
-                mb_done, mb_total, pct, avg, eta
+                "\r  {} {} {:.0}/{:.0} MB  {:.1} MB/s  ETA {}    ",
+                bar, pct_styled, mb_done, mb_total, avg, eta
             );
         }
     } else {

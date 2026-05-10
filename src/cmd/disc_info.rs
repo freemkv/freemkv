@@ -5,6 +5,7 @@
 
 use crate::output::{Level::Normal, Output};
 use crate::strings;
+use crate::style;
 use libfreemkv::{
     AudioStream, Codec, ColorSpace, Disc, DiscFormat, Drive, HdrFormat, LabelPurpose,
     LabelQualifier, ScanOptions, Stream, SubtitleStream, VideoStream,
@@ -45,7 +46,10 @@ pub(crate) fn run(args: &[String]) {
 
     let out = Output::new(verbose, quiet);
 
-    out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
+    out.raw(
+        Normal,
+        &style::dim(&format!("freemkv {}", env!("CARGO_PKG_VERSION"))),
+    );
     out.blank(Normal);
     out.print(Normal, "disc.scanning");
     out.blank(Normal);
@@ -77,14 +81,17 @@ pub(crate) fn run(args: &[String]) {
 
     // Disc title
     if let Some(ref title) = disc.meta_title {
-        out.raw(Normal, &format!("{}: {}", strings::get("disc.disc"), title));
+        out.raw(
+            Normal,
+            &format!("{}: {}", strings::get("disc.disc"), style::hl(title)),
+        );
     } else if !disc.volume_id.is_empty() {
         out.raw(
             Normal,
             &format!(
                 "{}: {}",
                 strings::get("disc.disc"),
-                format_volume_id(&disc.volume_id)
+                style::hl(&format_volume_id(&disc.volume_id))
             ),
         );
     }
