@@ -905,14 +905,9 @@ fn disc_to_iso(
                     .first()
                     .map(|t| disc.bytes_bad_in_title(&mapfile_path, t))
                     .unwrap_or(0);
-                let total_bad = r.bytes_unreadable + r.bytes_pending;
                 let disc_dur = disc.titles.first().map(|t| t.duration_secs).unwrap_or(0.0);
                 let disc_size = disc.capacity_bytes;
-                let lost_secs = if total_bad > 0 && disc_size > 0 && disc_dur > 0.0 {
-                    total_bad as f64 / disc_size as f64 * disc_dur
-                } else {
-                    0.0
-                };
+                let lost_secs = lost_secs(r.bytes_unreadable, disc_size, Some(disc_dur));
                 let main_lost_secs = if main_title_bad > 0 && disc_size > 0 && disc_dur > 0.0 {
                     let main_size = disc
                         .titles
@@ -1031,6 +1026,22 @@ fn fmt_eta(secs: f64) -> String {
     }
 }
 
+/// Convert "confirmed unrecoverable bytes" into wall-clock seconds, scaled
+/// by disc duration. NonTried (`bytes_pending`) bytes are deliberately *not*
+/// considered loss — they're recoverable on a `--resume` run. The 0.18.1
+/// CLI conflated the two and reported the entire disc as lost from the
+/// start of every clean rip; this helper exists so both the live progress
+/// line and the post-rip summary share the same definition.
+fn lost_secs(bytes_unreadable: u64, bytes_disc: u64, disc_duration_secs: Option<f64>) -> f64 {
+    if bytes_unreadable == 0 || bytes_disc == 0 {
+        return 0.0;
+    }
+    disc_duration_secs
+        .filter(|&d| d > 0.0)
+        .map(|dur| bytes_unreadable as f64 / bytes_disc as f64 * dur)
+        .unwrap_or(0.0)
+}
+
 fn fmt_damage_time(secs: f64) -> String {
     if secs >= 3600.0 {
         format!("{:.1}h", secs / 3600.0)
@@ -1068,15 +1079,7 @@ fn print_disc_progress(
     } else {
         "?:??".into()
     };
-    let bytes_worst_case = p.bytes_unreadable_total + p.bytes_pending_total;
-    let disc_damage_secs = if bytes_worst_case > 0 {
-        p.disc_duration_secs
-            .filter(|&d| d > 0.0)
-            .map(|dur| bytes_worst_case as f64 / bytes_disc as f64 * dur)
-            .unwrap_or(0.0)
-    } else {
-        0.0
-    };
+    let disc_damage_secs = lost_secs(p.bytes_unreadable_total, bytes_disc, p.disc_duration_secs);
     let title_damage_secs = if p.bytes_bad_in_main_title > 0 {
         p.main_title_duration_secs
             .zip(p.main_title_size_bytes)
@@ -1086,7 +1089,7 @@ fn print_disc_progress(
         None
     };
 
-    let damage = if bytes_worst_case > 0 {
+    let damage = if p.bytes_unreadable_total > 0 {
         // Always show BOTH numbers: total disc damage + main-title damage.
         // They may be equal (whole-disc damage that's all in the main
         // movie) — show both anyway so the user can see they matched.
@@ -1232,5 +1235,42 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
         libfreemkv::LabelPurpose::Score => Some("stream.purpose.score"),
         libfreemkv::LabelPurpose::Ime => Some("stream.purpose.ime"),
         libfreemkv::LabelPurpose::Normal => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for Anomaly A (0.18.1): NonTried (`bytes_pending`) bytes
+    /// must NOT count as data loss. A clean rip in progress with the entire
+    /// disc still pending should report 0 lost seconds.
+    #[test]
+    fn lost_secs_excludes_pending_bytes() {
+        // 60 GB disc, 2 hours main feature, none unreadable yet — clean rip
+        // mid-flight. Should report ZERO loss (NonTried sectors are still
+        // recoverable). 0.18.1 reported `(pending+unreadable)/disc * dur`
+        // which gave the full 2-hour duration as "lost".
+        let disc = 60u64 * 1_000_000_000;
+        assert_eq!(lost_secs(0, disc, Some(7200.0)), 0.0);
+    }
+
+    /// Confirmed unrecoverable bytes scale linearly with disc fraction.
+    #[test]
+    fn lost_secs_scales_with_unreadable_fraction() {
+        let disc = 100u64 * 1_000_000_000; // 100 GB
+        let dur = 6000.0; // 100 minutes
+        // 1 GB unreadable on a 100 GB disc with 100-minute main = 1 minute lost
+        let secs = lost_secs(1_000_000_000, disc, Some(dur));
+        assert!((secs - 60.0).abs() < 0.01, "expected ~60 secs, got {secs}");
+    }
+
+    /// Edge cases: zero inputs and missing duration shouldn't NaN or panic.
+    #[test]
+    fn lost_secs_handles_edge_cases() {
+        assert_eq!(lost_secs(0, 100, Some(60.0)), 0.0);
+        assert_eq!(lost_secs(50, 0, Some(60.0)), 0.0);
+        assert_eq!(lost_secs(50, 100, None), 0.0);
+        assert_eq!(lost_secs(50, 100, Some(0.0)), 0.0);
     }
 }

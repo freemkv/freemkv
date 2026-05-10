@@ -33,12 +33,25 @@ fn help_shows_usage() {
     assert!(out.status.success());
 }
 
+/// `--version` output follows the conventional `<binary> <version>`
+/// format used by `cargo --version`, `rustc --version`, etc. 0.18.1
+/// printed only the version number, which TESTPLAN's Phase 1.7 flagged
+/// as inconsistent with that convention.
 #[test]
 fn version_shows_version() {
     let out = freemkv().arg("--version").output().expect("failed to run");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.trim().chars().next().unwrap().is_ascii_digit());
+    let trimmed = stdout.trim();
+    assert!(
+        trimmed.starts_with("freemkv "),
+        "expected version output to start with 'freemkv ', got {trimmed:?}"
+    );
+    let version_part = trimmed.strip_prefix("freemkv ").unwrap();
+    assert!(
+        version_part.chars().next().unwrap().is_ascii_digit(),
+        "expected version part to start with a digit, got {version_part:?}"
+    );
 }
 
 // ── Error handling ──────────────────────────────────────────────────────────
