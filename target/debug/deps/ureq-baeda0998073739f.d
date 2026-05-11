@@ -1,0 +1,23 @@
+~/freemkv/target/debug/deps/ureq-baeda0998073739f.d: ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/lib.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/agent.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/body.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/chunked/mod.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/chunked/decoder.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/error.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/header.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/middleware.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/pool.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/proxy.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/request.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/resolve.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/response.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/stream.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/unit.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/rtls.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/testserver.rs
+
+~/freemkv/target/debug/deps/libureq-baeda0998073739f.rmeta: ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/lib.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/agent.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/body.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/chunked/mod.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/chunked/decoder.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/error.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/header.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/middleware.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/pool.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/proxy.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/request.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/resolve.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/response.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/stream.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/unit.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/rtls.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/testserver.rs
+
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/lib.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/agent.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/body.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/chunked/mod.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/chunked/decoder.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/error.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/header.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/middleware.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/pool.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/proxy.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/request.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/resolve.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/response.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/stream.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/unit.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/rtls.rs:
+~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ureq-2.12.1/src/testserver.rs:
+
+# env-dep:CARGO_PKG_VERSION=2.12.1

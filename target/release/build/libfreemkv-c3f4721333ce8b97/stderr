@@ -1,0 +1,2 @@
+clang: warning: -framework IOKit: 'linker' input unused [-Wunused-command-line-argument]
+clang: warning: -framework CoreFoundation: 'linker' input unused [-Wunused-command-line-argument]

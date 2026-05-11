@@ -1,0 +1,5 @@
+cargo:rustc-link-lib=framework=IOKit
+cargo:rustc-link-lib=framework=CoreFoundation
+cargo:rustc-link-search=native=~/freemkv/target/release/build/libfreemkv-c3f4721333ce8b97/out
+cargo:rustc-link-lib=static=macos_scsi
+cargo:rerun-if-changed=src/scsi/macos_shim.c
