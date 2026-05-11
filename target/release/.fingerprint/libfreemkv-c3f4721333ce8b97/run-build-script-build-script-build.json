@@ -1,1 +1,0 @@
-{"rustc":17940977064402226622,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[11170540402153485405,"build_script_build",false,11217856130884354355]],"local":[{"RerunIfChanged":{"output":"release/build/libfreemkv-c3f4721333ce8b97/output","paths":["src/scsi/macos_shim.c"]}}],"rustflags":[],"config":0,"compile_kind":0}
