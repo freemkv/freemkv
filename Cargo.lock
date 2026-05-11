@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "0.18.10"
+version = "0.18.12"
 dependencies = [
  "isolang",
  "libc",
@@ -409,9 +409,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libfreemkv"
-version = "0.18.10"
+version = "0.18.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "251d9831fe3f4860fd81595759fa872fd76709962757f4216ba3ffa7f22b9d9c"
+checksum = "3a23d8c322d599917e7b4c470feeeade616729531dadf34fc4b7105f7a5bdc35"
 dependencies = [
  "aes",
  "base64",
