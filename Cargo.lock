@@ -1196,3 +1196,7 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
+
+[[patch.unused]]
+name = "libfreemkv"
+version = "0.18.15"
