@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Verify Cargo.toml version matches tag
         run: |
-          CARGO_VER="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
+          CARGO_VER="v$(grep '^version' autorip/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
           if [ "$CARGO_VER" != "${{ github.ref_name }}" ]; then
             echo "::error::Cargo.toml says $CARGO_VER but tag is ${{ github.ref_name }}"
             exit 1
