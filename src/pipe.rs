@@ -6,11 +6,6 @@
 //!
 //! Batch (multiple titles) is just a for loop calling pipe() per title.
 
-// libfreemkv 0.19 split PesStream into FrameSource/FrameSink. The CLI
-// still uses the unified PesStream trait; migration to the split traits
-// is tracked separately. Until then, suppress deprecation warnings.
-#![allow(deprecated)]
-
 use crate::output::{Level::Normal, Output};
 use crate::strings;
 use libfreemkv::pes::Stream as PesStream;

@@ -121,7 +121,6 @@ fn info_cmd(args: &[String]) {
         | libfreemkv::StreamUrl::Iso { .. } => {
             match libfreemkv::input(url, &libfreemkv::InputOptions::default()) {
                 Ok(stream) => {
-                    #[allow(deprecated)]
                     let meta = stream.info();
                     println!("File: {}", parsed.path_str());
                     if meta.duration_secs > 0.0 {
