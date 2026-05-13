@@ -1,1 +1,4 @@
 .aider*
+target/
+.claude/
+.cargo/
