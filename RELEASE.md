@@ -1,8 +1,20 @@
 # freemkv Release Process
 
-**Complete checklist for releasing v0.18.25 (current) to production.**
+**Complete instruction set for releasing v0.X.Y to production.**
 
-Replace `0.18.24` → `0.18.25` throughout with your target version. Follow this order exactly. Skipping steps or changing the sequence will cause CI failures or version mismatches.
+Replace `0.X.Z` → `0.X.Y` throughout with your target version. **FOLLOW THIS ORDER EXACTLY. DO NOT THINK. DO NOT DEVIATE. DO NOT OPTIMIZE. These are mandatory instructions, not suggestions.**
+
+**FAILURE MODES FROM DEVIATION:**
+- v0.17.2: Tagged before bumping Cargo.toml → CI verify failed
+- v0.18.7: Used `cargo update --workspace` instead of manual Cargo.lock regeneration → libfreemkv 0.18.6 still baked in release  
+- Any time: Skipping pre-commit → Rust 1.94 accepts lints that 1.86 rejects
+
+**RULES:**
+1. DO NOT skip steps
+2. DO NOT reorder phases
+3. DO NOT optimize commands
+4. DO NOT think ahead — execute each step, confirm success, then proceed
+5. STOP immediately if any step fails — report the error exactly as shown
 
 ---
 
@@ -39,7 +51,7 @@ freemkv-private/scripts/precommit.sh --no-tests   # fmt+clippy only (faster)
 
 1. Make code changes to desired crates
 2. Run local verification (see above)
-3. **Do not commit yet** if clippy fails — fix locally first
+3. **STOP IF FAILS** — do not proceed if clippy fails, fix locally first
 
 ---
 
@@ -63,8 +75,10 @@ git push origin main
 ### Step 2: Tag and Push (Triggers crates.io Publish)
 ```bash
 cd /Users/mjackson/Developer/freemkv/libfreemkv
-git tag -a v0.18.25 -m "v0.18.25" && git push origin v0.18.25
+git tag -a v0.X.Y -m "v0.X.Y" && git push origin v0.X.Y
 ```
+
+**STOP IF TAG PUSH FAILS** — do not proceed. Fix the issue, then retry.
 
 **Wait for crates.io publish (~2-3 minutes)** before proceeding:
 ```bash
@@ -86,34 +100,40 @@ Edit `Cargo.toml` to match libfreemkv version:
 ```bash
 cd /Users/mjackson/Developer/freemkv/<crate-name>
 nano Cargo.toml  # or use your editor
-# Change line: version = "0.18.24" → version = "0.18.25"
+# Change line: version = "0.X.Z" → version = "0.X.Y"
 
 # Update dependency versions (if applicable, e.g., autorip depends on libfreemkv)
-cargo update -p libfreemkv --precise 0.18.25
+cargo update -p libfreemkv --precise 0.X.Y
 ```
+
+**STOP IF CARGO UPDATE FAILS** — crates.io may not have published yet. Wait longer.
 
 #### Step 2: Commit Version Bump + Cargo.lock
 
 **Verify version matches expected format:**
 ```bash
-grep '^version' autorip/Cargo.toml
-# Should output: version = "0.18.25" (for autorip)
+grep '^version' <crate-name>/Cargo.toml
+# Should output: version = "0.X.Y" (for this crate)
 # The CI verifies this matches the git tag exactly
 ```
 
 ```bash
-git add Cargo.toml Cargo.lock && git commit -m "v0.18.25: bump version"
+git add Cargo.toml Cargo.lock && git commit -m "v0.X.Y: bump version"
 git push origin main
 ```
+
+**STOP IF GIT PUSH FAILS** — resolve merge conflicts or other issues before proceeding.
 
 **CRITICAL:** Never tag before committing the Cargo.toml bump. The CI verify job compares `autorip/Cargo.toml` version to git tag and fails on mismatch (bug: v0.17.2).
 
 #### Step 3: Tag (Triggers CI)
 ```bash
-git tag -a v0.18.25 -m "v0.18.25" && git push origin v0.18.25 --force
+git tag -a v0.X.Y -m "v0.X.Y" && git push origin v0.X.Y --force
 ```
 
-Repeat for each crate in order. Each tag triggers its own GitHub Actions workflow.
+**STOP IF TAG PUSH FAILS** — do not proceed. Fix the issue, then retry.
+
+Repeat for each crate in order (bdemu → freemkv → autorip). Each tag triggers its own GitHub Actions workflow.
 
 ---
 
@@ -123,14 +143,18 @@ Repeat for each crate in order. Each tag triggers its own GitHub Actions workflo
 ```bash
 # Confirm version is set correctly in all crates
 grep '^version' libfreemkv/Cargo.toml autorip/Cargo.toml freemkv/Cargo.toml bdemu/Cargo.toml
-# All should show the same version number (e.g., 0.18.25)
+# All should show the same version number (e.g., 0.X.Y)
 ```
+
+**STOP IF VERSIONS DO NOT MATCH** — do not proceed until all crates have identical versions.
 
 ### Monitor autorip CI (Most Critical)
 ```bash
 # Check GitHub Actions: https://github.com/freemkv/autorip/actions
-sleep 180 && curl -s "https://api.github.com/repos/freemkv/autorip/actions/runs?tag=v0.18.25&per_page=1" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d['workflow_runs'][0]; print(f\"Status: {r['status']} -> {r.get('conclusion')}\")"
+sleep 180 && curl -s "https://api.github.com/repos/freemkv/autorip/actions/runs?tag=v0.X.Y&per_page=1" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d['workflow_runs'][0]; print(f\"Status: {r['status']} -> {r.get('conclusion')}\")"
 ```
+
+**STOP IF CI FAILS** — do not proceed to deployment. Go to Phase 5 for failure recovery.
 
 **Expected sequence:** `verify → ci → build (all targets) → docker → GHCR deploy`
 
@@ -163,13 +187,15 @@ cd /Users/mjackson/Developer/freemkv/autorip
 cargo +1.86 build --release --target x86_64-unknown-linux-musl
 
 # Deploy to rip1 (adjust version as needed)
-scp target/x86_64-unknown-linux-musl/release/autorip rip@rip1.docker.internal.pq.io:/tmp/autorip-0.18.25
+scp target/x86_64-unknown-linux-musl/release/autorip rip@rip1.docker.internal.pq.io:/tmp/autorip-0.X.Y
 ssh rip@rip1.docker.internal.pq.io << 'DEPLOY'
-sudo docker cp /tmp/autorip-0.18.25 autorip:/app/autorip
+sudo docker cp /tmp/autorip-0.X.Y autorip:/app/autorip
 sudo docker restart autorip
 sleep 5 && curl http://rip1.docker.internal.pq.io/api/version
 DEPLOY
 ```
+
+**STOP IF DEPLOY FAILS** — do not proceed. Check logs, verify container is running, then retry.
 
 ### Enable Debug Logging (for troubleshooting)
 ```bash
@@ -189,21 +215,27 @@ Run `cargo +1.86 clippy --locked` first to catch issues before pushing. Common f
 - `cfg!(feature = "debug")` errors → remove feature check, use only env var
 - Missing Cargo.lock commit → ensure both Cargo.toml and Cargo.lock are committed together
 
+**STOP IF CLIPPY FAILS** — do not tag or push until clippy passes with zero warnings.
+
 ### If Version Mismatch (CI verify fails)
 The CI job compares Cargo.toml version to git tag. If they don't match:
-1. Check `autorip/Cargo.toml` version matches expected (e.g., "0.18.25")
+1. Check `<crate-name>/Cargo.toml` version matches expected (e.g., "0.X.Y")
 2. Delete old tag, recreate with correct commit SHA:
    ```bash
-   git tag -d v0.18.25 && git tag -a v0.18.25 <bump_commit_sha>
-   git push origin v0.18.25 --force
+   git tag -d v0.X.Y && git tag -a v0.X.Y <bump_commit_sha>
+   git push origin v0.X.Y --force
    ```
+
+**STOP IF TAG RECREATE FAILS** — verify the commit SHA exists, then retry.
 
 ### If CI Build Fails
 1. Check workflow logs at https://github.com/freemkv/autorip/actions
 2. Fix the issue locally on `main` (do NOT amend the tagged commit)
 3. Commit new fix to main: `git push origin main`
-4. Delete old tag, recreate with new SHA: `git tag -d v0.18.25 && git tag -a v0.18.25 <new_sha>`
-5. Force push tag: `git push origin v0.18.25 --force`
+4. Delete old tag, recreate with new SHA: `git tag -d v0.X.Y && git tag -a v0.X.Y <new_sha>`
+5. Force push tag: `git push origin v0.X.Y --force`
+
+**STOP IF CI FAILS REPEATEDLY** — after 2 failures, investigate root cause before retrying.
 
 ### If crates.io Publish Stalls
 Wait longer (up to 10 minutes). Verify via API:
@@ -211,7 +243,7 @@ Wait longer (up to 10 minutes). Verify via API:
 curl https://crates.io/api/v1/crates/libfreemkv | grep version
 ```
 
-If still failing after 15 min, investigate index sync issues.
+If still failing after 15 min, **STOP** — investigate index sync issues. Do not proceed with downstream releases until libfreemkv is published.
 
 ---
 
@@ -225,36 +257,40 @@ cargo +1.86 test --tests
 freemkv-private/scripts/precommit.sh
 ```
 
+**STOP IF PRE-COMMIT FAILS** — do not proceed until all checks pass.
+
 ### Version Bump Pattern (all crates)
 
 **Manual edit preferred for clarity:**
 ```bash
 cd /path/to/crate
-nano Cargo.toml  # Change version = "0.18.24" → "0.18.25"
-git add Cargo.toml && git commit -m "v0.18.25: bump version" && git push origin main
+nano Cargo.toml  # Change version = "0.X.Z" → "0.X.Y"
+git add Cargo.toml && git commit -m "v0.X.Y: bump version" && git push origin main
 ```
 
 ### Tag Creation (NEVER before bump)
 ```bash
 cd /path/to/crate
-git tag -a v0.18.25 -m "v0.18.25" && git push origin v0.18.25 --force
+git tag -a v0.X.Y -m "v0.X.Y" && git push origin v0.X.Y --force
 ```
+
+**STOP IF TAG PUSH FAILS** — verify commit exists, then retry.
 
 ---
 
-## Hard Rules
+## Hard Rules (STOP IMMEDIATELY IF VIOLATED)
 
 1. **Never add `Co-Authored-By: Claude`** to commit messages. One contributor: MattJackson.
 
-2. **Don't tag before bumping Cargo.toml.** CI verify job catches mismatch (v0.17.2 bug).
+2. **Don't tag before bumping Cargo.toml.** CI verify job catches mismatch (v0.17.2 bug). **STOP if you tagged first — delete and recreate the tag.**
 
-3. **Don't skip precommit.** CI's Rust 1.86 catches what Mac default (1.9x) silently accepts.
+3. **Don't skip precommit.** CI's Rust 1.86 catches what Mac default (1.9x) silently accepts. **STOP if clippy fails locally — fix before pushing.**
 
-4. **Don't deploy without `privileged: true`.** Drive enumeration returns 0; UI shows "No drives detected."
+4. **Don't deploy without `privileged: true`.** Drive enumeration returns 0; UI shows "No drives detected." **STOP deployment if drive_count=0 in logs.**
 
 5. **abort_on_lost_secs=0 means "require perfect rip"**, not "never abort". Default is 0 (perfect-required); set e.g. 30 to tolerate up to 30s of main-movie loss before aborting after retries exhausted.
 
-6. **Pause watchtower before pushing autorip** if a rip is in progress. See `freemkv-private/memory/feedback_release_kills_rip_2026_04_26.md`.
+6. **Pause watchtower before pushing autorip** if a rip is in progress. See `freemkv-private/memory/feedback_release_kills_rip_2026_04_26.md`. **STOP and wait for current rip to complete.**
 
 ---
 
@@ -273,3 +309,15 @@ git tag -a v0.18.25 -m "v0.18.25" && git push origin v0.18.25 --force
 - Release automation: `freemkv-private/scripts/release.sh`
 - Test plan: `freemkv-private/docs/TEST_PLAN.md`
 - Watchtower pause guidance: `freemkv-private/memory/feedback_release_kills_rip_2026_04_26.md`
+
+## Critical Warnings (READ BEFORE STARTING)
+
+**DO NOT DEVIATE FROM THIS DOCUMENT.** Each step is mandatory. Skipping or reordering causes failures:
+
+| Bug Version | Deviation | Result |
+|-------------|-----------|--------|
+| v0.17.2 | Tagged before bumping Cargo.toml | CI verify job failed, release blocked |
+| v0.18.7 | Used `cargo update --workspace` | libfreemkv 0.18.6 baked in release image |
+| Any time | Skipped Rust 1.86 requirement | Mac default (1.94) accepts lints that CI rejects |
+
+**IF ANY STEP FAILS:** STOP immediately. Report the exact error. Do not proceed until resolved.
