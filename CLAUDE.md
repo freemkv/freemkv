@@ -24,103 +24,7 @@ The toolchain composes:
 Production wrapper (`autorip`) orchestrates this on disc insert via a
 docker container; manual control via the `freemkv` CLI.
 
-## End-to-End Build & Release Process
-
-**Complete checklist for releasing v0.18.X to production:**
-
-```bash
-# === PHASE 1: Changes & Local Verification ===
-cd /Users/mjackson/Developer/freemkv
-
-# Make code changes, then verify locally BEFORE any git operations
-cargo +1.86 clippy --locked -- -D warnings  # Must pass with zero errors/warnings
-cargo +1.86 test --locked --tests           # Run all tests
-cargo +1.86 build --release                 # Build release binary
-
-# === PHASE 2: Bump libfreemkv First (if applicable) ===
-cd /Users/mjackson/Developer/freemkv/libfreemkv
-sed -i '' 's/version = "0.18.X"/version = "0.18.Y"/' Cargo.toml
-git add Cargo.toml && git commit -m "v0.18.Y: bump version"
-git push origin main
-
-# Tag and push libfreemkv FIRST (CI publishes to crates.io)
-git tag -a v0.18.Y -m "v0.18.Y" && git push origin v0.18.Y
-
-# Wait for crates.io publish (~2-3 minutes)
-# Verify: curl https://crates.io/api/v1/crates/libfreemkv | grep version
-
-# === PHASE 3: Bump autorip ===
-cd /Users/mjackson/Developer/freemkv/autorip
-sed -i '' 's/version = "0.18.X"/version = "0.18.Y"/' Cargo.toml
-cargo update -p libfreemkv --precise 0.18.Y  # Update Cargo.lock to new version
-git add Cargo.toml Cargo.lock && git commit -m "v0.18.Y: bump version + libfreemkv"
-git push origin main
-
-# === PHASE 4: Tag autorip (triggers CI) ===
-git tag -a v0.18.Y -m "v0.18.Y" && git push origin v0.18.Y --force
-
-# === PHASE 5: Monitor CI ===
-# Check GitHub Actions: https://github.com/freemkv/autorip/actions
-# Expected sequence: verify → build (all targets) → docker → GHCR deploy
-
-# Wait for CI to complete (~3-5 minutes total)
-sleep 180 && curl -s "https://api.github.com/repos/freemkv/autorip/actions/runs?tag=v0.18.Y&per_page=1" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d['workflow_runs'][0]; print(f\"Status: {r['status']} -> {r.get('conclusion')}\")"
-
-# === PHASE 6: Deploy to rip1 (if CI passed) ===
-scp target/release/autorip rip@rip1.docker.internal.pq.io:/tmp/autorip-0.18.Y
-ssh rip@rip1.docker.internal.pq.io << 'DEPLOY'
-sudo docker cp /tmp/autorip-0.18.Y autorip:/app/autorip
-sudo docker restart autorip
-sleep 5 && curl http://rip1.docker.internal.pq.io/api/version
-DEPLOY
-
-# === Common Failure Modes & Fixes ===
-# 1. Clippy fails: Run `cargo +1.86 clippy --locked` locally first, fix all warnings
-#    - Watch for `cfg!(feature = "debug")` errors → remove feature check, use only env var
-# 2. Version mismatch (libfreemkv not published): Wait longer for crates.io publish
-#    - Check: https://crates.io/api/v1/crates/libfreemkv
-# 3. Cargo.lock not updated: Run `cargo update -p libfreemkv --precise X.Y.Z` before committing
-
-
-# 4. Build release binary for all targets CI will use
-cargo +1.86 build --release --target x86_64-unknown-linux-musl
-cargo +1.86 build --release --target aarch64-unknown-linux-musl
-
-# 5. Commit version bump + Cargo.lock
-git add Cargo.toml Cargo.lock && git commit -m "vX.Y.Z: bump version"
-git push origin main
-
-# 6. ONLY THEN create tag (pointing to the commit with bumped version)
-git tag -a vX.Y.Z -m "vX.Y.Z" <commit_sha>
-git push origin vX.Y.Z
-
-# CI will verify Cargo.toml matches tag, then build all targets
-```
-
-**Common failure modes:**
-- `cargo clippy --locked` fails: Missing Cargo.lock commit or unexpected cfg values (e.g., `cfg!(feature = "debug")`)
-- Version mismatch: Tag doesn't match Cargo.toml version (CI verify job catches this)
-- Clippy warnings treated as errors: Always run `-D warnings` locally before pushing
-
-**If CI fails:**
-1. Check workflow logs at https://github.com/freemkv/autorip/actions
-2. Fix the issue locally
-3. Commit to main (NOT amend the tagged commit)
-4. Delete old tag, recreate with new SHA: `git tag -d vX.Y.Z && git tag -a vX.Y.Z <new_sha>`
-5. Force push tag: `git push origin vX.Y.Z --force`
-# Build locally (takes ~15s)
-cd /Users/mjackson/Developer/freemkv/autorip && cargo +1.86 build --release
-
-# Deploy to rip1
-scp target/release/autorip rip@rip1.docker.internal.pq.io:/tmp/autorip-debug
-ssh rip@rip1.docker.internal.pq.io 'sudo docker cp /tmp/autorip-debug autorip:/app/autorip && sudo docker restart autorip'
-
-# Enable debug logging via API
-curl -X POST http://rip1.docker.internal.pq.io/api/debug -H "Content-Type: application/json" -d '{"enabled":true}'
-
-# Monitor logs during rip
-ssh rip@rip1.docker.internal.pq.io 'docker logs autorip --tail=500 -f'
-```
+**Release process:** See [RELEASE.md](RELEASE.md) for complete step-by-step instructions.
 
 v0.18.24 released with mux reader verification logging — confirms ISO file vs drive source during mux phase. Debug logs show `target: "mux"` messages for reader type (FileSectorSource vs Drive), ISO sector count on open, and stall detection (>5s waits in fill_extents).
 
@@ -249,35 +153,7 @@ cd freemkv && CC=x86_64-linux-musl-gcc \
 ```
 
 Don't push if precommit fails. Don't `--no-verify`. CI uses Rust 1.86;
-the Mac default (e.g. 1.94) silently accepts lints 1.86 rejects.
-
-## Release process — TAG ORDER MATTERS
-
-Critical: **bump `Cargo.toml` BEFORE creating the tag.** The verify CI
-job compares Cargo.toml version to git tag and fails on mismatch.
-
-For autorip:
-```bash
-# 1. Bump Cargo.toml + commit + push
-cd autorip
-# edit Cargo.toml: version = "X.Y.Z"
-git -C /Users/mjackson/Developer/freemkv/autorip add Cargo.toml
-git -C /Users/mjackson/Developer/freemkv/autorip commit -m "vX.Y.Z: bump version"
-git -C /Users/mjackson/Developer/freemkv/autorip push
-
-# 2. Tag THE COMMIT WITH THE BUMP (use that specific SHA)
-git -C /Users/mjackson/Developer/freemkv/autorip tag -a vX.Y.Z -m "vX.Y.Z" <bump_commit_sha>
-git -C /Users/mjackson/Developer/freemkv/autorip push origin vX.Y.Z
-```
-
-CI runs **verify → ci → build → docker** and pushes the image to GHCR.
-Watchtower on .13 polls every 30s and auto-deploys.
-
-For libfreemkv: same pattern; CI auto-publishes to crates.io on tag.
-
-For freemkv CLI: same pattern; CI builds binaries for 5 platforms
-(though x86_64-darwin currently fails on a pre-existing macOS C shim
-link issue — aarch64-darwin works, so Apple Silicon is fine).
+the Mac default (e.g., 1.94) silently accepts lints 1.86 rejects.
 
 ## Container requirements
 
