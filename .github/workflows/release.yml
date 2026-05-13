@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: true
       - name: Verify Cargo.toml version matches tag
         run: |
           CARGO_VER="v$(grep '^version' autorip/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
