@@ -12,7 +12,7 @@ name = "freemkv"
 path = "src/main.rs"
 
 [dependencies]
-libfreemkv = "0.22"
+libfreemkv = "0.23"
 isolang = "2"
 tracing-subscriber = "0.3"
 ureq = { version = "2", features = ["json"] }
