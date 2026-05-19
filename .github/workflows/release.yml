@@ -66,7 +66,13 @@ jobs:
 
       - name: Build (native)
         if: matrix.target != 'aarch64-unknown-linux-musl'
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          # Ubuntu's gcc defaults to -D_FORTIFY_SOURCE=2 which makes
+          # mimalloc-sys (transitive C dep) emit calls to glibc-only
+          # __memcpy_chk / __memset_chk that aren't in musl. Disable
+          # fortify for the C portion of the build.
+          export CFLAGS="-U_FORTIFY_SOURCE"
+          cargo build --release --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.target == 'aarch64-unknown-linux-musl'
