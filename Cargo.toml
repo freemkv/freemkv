@@ -25,10 +25,3 @@ libc = "0.2"
 # benchmark relative to autorip (which already uses mimalloc).
 # Matching allocators across binaries makes perf numbers comparable.
 mimalloc = "0.1"
-
-# Local development override: build freemkv against the sibling
-# libfreemkv repo so iteration loops pick up local changes immediately
-# without a crates.io round-trip. Must be removed (along with bumping
-# the `libfreemkv = "0.NN"` constraint) before `cargo publish`.
-[patch.crates-io]
-libfreemkv = { path = "../libfreemkv" }
