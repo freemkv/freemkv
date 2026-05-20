@@ -41,17 +41,19 @@ sudo mv freemkv /usr/local/bin/
 
 [All downloads](https://github.com/freemkv/freemkv/releases)
 
-### 2. Set up decryption keys (one time)
+### 2. Set up decryption keys (UHD discs only)
 
 **DVD:** No setup needed. CSS decryption works out of the box.
 
-**Blu-ray / 4K UHD:** You need a KEYDB.cfg — a community-maintained AACS key database. freemkv cannot ship keys due to legal restrictions (same as every other BD ripping tool).
+**Blu-ray (AACS 1.0):** No setup needed. Built-in keys cover the full MKB range.
+
+**4K UHD (AACS 2.0 / 2.1):** UHD discs use per-disc volume unique keys, so freemkv reads them from an optional `keydb.cfg`. Fetch the latest one and save it to `~/.config/freemkv/keydb.cfg`, or:
 
 ```bash
-freemkv update-keys --url <your-keydb-url>
+freemkv update-keys --url <keydb-url>
 ```
 
-Saved to `~/.config/freemkv/keydb.cfg` and used automatically from then on.
+Used automatically once present.
 
 ### 3. Rip
 

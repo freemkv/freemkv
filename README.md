@@ -6,6 +6,8 @@
 
 Open source 4K UHD / Blu-ray / DVD backup tool. Two arguments — source and destination. Stream URLs let you rip, remux, and transfer between any combination of disc, file, and network.
 
+Built-in keys cover DVDs and Blu-rays (AACS 1.0) — no setup. For UHD (AACS 2.0 / 2.1) discs, an optional `keydb.cfg` supplies disc-specific volume unique keys.
+
 ## Quick Start
 
 ### 1. Install
@@ -26,17 +28,23 @@ sudo mv freemkv /usr/local/bin/
 # Windows — download .zip from https://github.com/freemkv/freemkv/releases/latest
 ```
 
-### 2. Set up decryption keys (one time)
+### 2. Set up decryption keys (UHD discs only)
 
 **DVD:** No setup needed. CSS decryption works out of the box.
 
-**Blu-ray / 4K UHD:** You need a KEYDB.cfg file containing AACS decryption keys. This is a community-maintained key database — freemkv cannot ship keys due to legal restrictions.
+**Blu-ray (AACS 1.0):** No setup needed. Built-in keys cover the full MKB range.
+
+**4K UHD (AACS 2.0 / 2.1):** UHD discs use per-disc volume unique keys (VUKs), so freemkv reads them from an optional `keydb.cfg`. Fetch the latest one from a community source and save it to `~/.config/freemkv/keydb.cfg`, or point `update-keys` at a URL:
 
 ```bash
-freemkv update-keys --url <your-keydb-url>
+freemkv update-keys --url <keydb-url>
 ```
 
-The KEYDB is saved to `~/.config/freemkv/keydb.cfg` and used automatically from then on.
+Once present, it's used automatically.
+
+#### Operator-supplied keys
+
+If you have additional device keys, processing keys, or VUKs you derived yourself, drop them in `~/.config/freemkv/local_keys.cfg`. Same format as `keydb.cfg`. The file is additive — its entries are merged on top of the built-in keys and any main `keydb.cfg`.
 
 ### 3. Rip
 
@@ -203,7 +211,7 @@ Labels are preserved in all output formats — MKV track names and M2TS metadata
 
 ```
 -t, --title N       Select title (1-based, repeatable). Default: all.
--k, --keydb PATH    KEYDB.cfg path
+-k, --keydb PATH    KEYDB.cfg path (optional; only required for UHD / AACS 2.0+ discs)
 -v, --verbose       Show AACS/drive debug info
 -q, --quiet         Suppress output
     --raw           Skip decryption (raw encrypted output)
