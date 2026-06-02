@@ -109,17 +109,17 @@ Rip on a low-power machine with a disc drive, remux on a high-power server:
   [Ripper]  ──────────────────────►  [Transcoder]
   disc drive                          fast CPU
   freemkv disc://                     freemkv network://
-    network://10.0.0.1:9000            0.0.0.0:9000 mkv://Dune.mkv
+    network://192.0.2.10:9000            0.0.0.0:9000 mkv://Movie.mkv
 ```
 
 **On the transcoder** (start first — it listens):
 ```bash
-freemkv network://0.0.0.0:9000 mkv://Dune.mkv
+freemkv network://0.0.0.0:9000 mkv://Movie.mkv
 ```
 
 **On the ripper** (connects and streams):
 ```bash
-freemkv disc:// network://10.0.0.1:9000
+freemkv disc:// network://192.0.2.10:9000
 ```
 
 The metadata header flows first — labels, languages, duration, stream layout. The transcoder has everything it needs without touching the disc.
@@ -128,7 +128,7 @@ The metadata header flows first — labels, languages, duration, stream layout. 
 
 ```bash
 freemkv disc:// stdio:// | ffmpeg -i pipe:0 -c copy output.mkv
-cat raw.m2ts | freemkv stdio:// mkv://Dune.mkv
+cat raw.m2ts | freemkv stdio:// mkv://Movie.mkv
 ```
 
 ### Benchmark read speed
@@ -141,8 +141,8 @@ freemkv disc:// null://
 
 ```bash
 freemkv info disc://                                # Disc info
-freemkv info m2ts://Dune.m2ts                       # File metadata
-freemkv info mkv://Dune.mkv                         # MKV track info
+freemkv info m2ts://Movie.m2ts                       # File metadata
+freemkv info mkv://Movie.mkv                         # MKV track info
 ```
 
 ### Disc info
@@ -150,7 +150,7 @@ freemkv info mkv://Dune.mkv                         # MKV track info
 ```
 $ freemkv info disc://
 
-Disc: Dune
+Disc: Sample Film
 Format: 4K UHD (2L, 90.7 GB)
 AACS: Encrypted
 

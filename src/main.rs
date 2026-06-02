@@ -5,10 +5,10 @@
 //        freemkv info <url> [flags]
 //
 // Examples:
-//   freemkv disc:// mkv://Dune.mkv
-//   freemkv disc:///dev/sg4 m2ts://Dune.m2ts
-//   freemkv m2ts://Dune.m2ts mkv://Dune.mkv
-//   freemkv disc:// network://10.0.0.1:9000
+//   freemkv disc:// mkv://Movie.mkv
+//   freemkv disc:///dev/sg4 m2ts://Movie.m2ts
+//   freemkv m2ts://Movie.m2ts mkv://Movie.mkv
+//   freemkv disc:// network://192.0.2.10:9000
 //   freemkv info disc://
 
 mod disc_info;
@@ -406,12 +406,12 @@ fn usage() {
     println!("  null://                  Discard (benchmarking)");
     println!();
     println!("  All URLs require a scheme:// prefix.");
-    println!("  File paths follow the scheme: mkv://./Dune.mkv, m2ts:///tmp/Dune.m2ts");
+    println!("  File paths follow the scheme: mkv://./Movie.mkv, m2ts:///tmp/Movie.m2ts");
     println!();
     println!("Examples:");
-    println!("  freemkv disc:// mkv://Dune.mkv                     Rip disc to MKV");
-    println!("  freemkv disc:// m2ts://Dune.m2ts                   Rip disc to m2ts");
-    println!("  freemkv disc:///dev/sg4 mkv://Dune.mkv             Rip specific drive");
+    println!("  freemkv disc:// mkv://Movie.mkv                     Rip disc to MKV");
+    println!("  freemkv disc:// m2ts://Movie.m2ts                   Rip disc to m2ts");
+    println!("  freemkv disc:///dev/sg4 mkv://Movie.mkv             Rip specific drive");
     println!("  freemkv disc:// mkv://Movie.mkv                    Rip all titles");
     println!("  freemkv disc:// mkv://Movie.mkv -t 1               Rip main feature only");
     println!("  freemkv disc:// mkv://Movie.mkv -t 1 -t 3          Rip titles 1 and 3");
@@ -429,7 +429,7 @@ fn usage() {
     );
     println!("  freemkv iso://Disc.iso mkv://Movie.mkv             ISO to MKV");
     println!("  freemkv m2ts://Movie.m2ts mkv://Movie.mkv          Remux m2ts to MKV");
-    println!("  freemkv disc:// network://10.0.0.1:9000           Stream to network");
+    println!("  freemkv disc:// network://192.0.2.10:9000           Stream to network");
     println!("  freemkv network://0.0.0.0:9000 mkv://Movie.mkv    Receive from network");
     println!("  freemkv disc:// stdio://                           Pipe to stdout");
     println!("  freemkv disc:// null://                            Benchmark read speed");
