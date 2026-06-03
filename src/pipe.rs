@@ -233,6 +233,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                 keydb_path: keydb_path.clone(),
                 title_index: *title_idx,
                 raw,
+                ..Default::default()
             };
             if let Err(e) = pipe(source, dest_url, &opts, &out) {
                 out.raw(Normal, &fmt_err(&e));
@@ -275,6 +276,7 @@ fn pipe_disc(
     let scan_opts = match keydb_path {
         Some(p) => libfreemkv::ScanOptions {
             keydb_path: Some(p.into()),
+            ..Default::default()
         },
         None => libfreemkv::ScanOptions::default(),
     };
@@ -557,6 +559,7 @@ fn disc_to_iso(
     let scan_opts = match keydb_path {
         Some(p) => libfreemkv::ScanOptions {
             keydb_path: Some(p.into()),
+            ..Default::default()
         },
         None => libfreemkv::ScanOptions::default(),
     };
@@ -670,6 +673,7 @@ fn disc_to_iso(
         multipass,
         halt: None,
         progress: Some(&progress),
+        ..Default::default()
     };
     match disc.copy(&mut drive, &iso_path, &copy_opts) {
         Ok(r) => {
@@ -772,6 +776,7 @@ fn scan_titles(source: &str, keydb_path: &Option<String>) -> Option<Vec<libfreem
     let scan_opts = match keydb_path {
         Some(p) => libfreemkv::ScanOptions {
             keydb_path: Some(p.into()),
+            ..Default::default()
         },
         None => libfreemkv::ScanOptions::default(),
     };
