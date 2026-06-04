@@ -264,6 +264,22 @@ fn keyless_scan_opts() -> libfreemkv::ScanOptions {
     libfreemkv::ScanOptions::default()
 }
 
+/// ScanOptions for a **live-drive** scan: keyless, plus the AACS host
+/// credentials for the authenticated handshake (sourced from the local keydb).
+/// A locked drive needs the cert to read its Volume ID; an unlocked / LibreDrive
+/// drive takes the OEM path and ignores them. ISO scans use [`keyless_scan_opts`].
+fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOptions {
+    let path = keydb_path
+        .clone()
+        .map(std::path::PathBuf::from)
+        .or_else(|| libfreemkv::keydb::default_path().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("keydb.cfg"));
+    let host_certs = freemkv_keysources::KeydbSource::new(path).host_certs();
+    let credentials =
+        (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs });
+    libfreemkv::ScanOptions { credentials }
+}
+
 /// Resolve an ISO's AACS unit keys once: keyless scan → local keydb →
 /// `decrypt_with`. libfreemkv does no lookup, so the CLI resolves here and the
 /// keys ride into each title's stream. Empty for an unencrypted ISO or when no
@@ -337,8 +353,8 @@ fn pipe_disc(
     let _ = drive.probe_disc();
     drive.lock_tray();
 
-    let mut disc =
-        libfreemkv::Disc::scan(&mut drive, &keyless_scan_opts()).map_err(|e| format!("{}", e))?;
+    let mut disc = libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keydb_path))
+        .map_err(|e| format!("{}", e))?;
     apply_local_key(&mut disc, keydb_path);
 
     if title_idx >= disc.titles.len() {
@@ -615,7 +631,7 @@ fn disc_to_iso(
     let _ = drive.init();
     let _ = drive.probe_disc();
 
-    let mut disc = match libfreemkv::Disc::scan(&mut drive, &keyless_scan_opts()) {
+    let mut disc = match libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keydb_path)) {
         Ok(d) => d,
         Err(e) => {
             out.raw(
@@ -826,20 +842,19 @@ fn disc_to_iso(
 
 /// Scan any source for its title list. Returns None if source has no titles
 /// (e.g. a single M2TS file, network stream).
-fn scan_titles(source: &str, _keydb_path: &Option<String>) -> Option<Vec<libfreemkv::DiscTitle>> {
+fn scan_titles(source: &str, keydb_path: &Option<String>) -> Option<Vec<libfreemkv::DiscTitle>> {
     let parsed = libfreemkv::parse_url(source);
-    // Listing titles needs only the disc structure (navigation is in the clear);
-    // no key resolution required, so scan keyless.
-    let scan_opts = keyless_scan_opts();
 
     match parsed {
         libfreemkv::StreamUrl::Iso { ref path } => {
+            // Listing needs only clear UDF navigation — no handshake, no creds.
             let mut reader = libfreemkv::FileSectorSource::open(path).ok()?;
             let capacity =
                 <libfreemkv::FileSectorSource as libfreemkv::SectorSource>::capacity_sectors(
                     &reader,
                 );
-            let disc = libfreemkv::Disc::scan_image(&mut reader, capacity, &scan_opts).ok()?;
+            let disc =
+                libfreemkv::Disc::scan_image(&mut reader, capacity, &keyless_scan_opts()).ok()?;
             Some(disc.titles)
         }
         libfreemkv::StreamUrl::Disc { ref device } => {
@@ -850,7 +865,8 @@ fn scan_titles(source: &str, _keydb_path: &Option<String>) -> Option<Vec<libfree
             let _ = drive.wait_ready();
             let _ = drive.init();
             let _ = drive.probe_disc();
-            let disc = libfreemkv::Disc::scan(&mut drive, &scan_opts).ok()?;
+            // Live drive may be locked → supply handshake credentials.
+            let disc = libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keydb_path)).ok()?;
             Some(disc.titles)
         }
         _ => None,
