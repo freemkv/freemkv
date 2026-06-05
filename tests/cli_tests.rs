@@ -103,6 +103,38 @@ fn null_input_errors() {
     );
 }
 
+// ── --raw + mux rejection ───────────────────────────────────────────────────
+
+#[test]
+fn raw_into_mkv_is_rejected() {
+    // --raw passes encrypted bytes through; muxing ciphertext is nonsense.
+    // The CLI must reject this before doing any work — no disc/ISO needed.
+    let out = freemkv()
+        .args(["disc:///dev/sg99", "mkv://out.mkv", "--raw"])
+        .output()
+        .expect("failed to run");
+    assert!(!out.status.success());
+    let combined = combined_output(&out);
+    assert!(
+        combined.contains("--raw cannot be used for muxing"),
+        "expected raw-mux rejection, got: {combined}"
+    );
+}
+
+#[test]
+fn raw_into_m2ts_is_rejected() {
+    let out = freemkv()
+        .args(["disc:///dev/sg99", "m2ts://out.m2ts", "--raw"])
+        .output()
+        .expect("failed to run");
+    assert!(!out.status.success());
+    let combined = combined_output(&out);
+    assert!(
+        combined.contains("--raw cannot be used for muxing"),
+        "expected raw-mux rejection, got: {combined}"
+    );
+}
+
 // ── Quiet mode ──────────────────────────────────────────────────────────────
 
 #[test]

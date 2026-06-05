@@ -51,8 +51,8 @@ extern "C" fn handle_sigint(_sig: libc::c_int) {
 ///
 /// libfreemkv errors render as `E<code>: <data>`. The no-key mux abort
 /// (`E7022`, [`libfreemkv::Error::NoDiscKey`]) gets a dedicated message that
-/// names the disc by hash and points at `--raw`; everything else falls through
-/// to the generic wrapper.
+/// names the disc by hash; everything else falls through to the generic
+/// wrapper.
 fn fmt_err(e: &dyn std::fmt::Display) -> String {
     let s = e.to_string();
     if let Some(rest) = s.strip_prefix("E7022:") {
@@ -103,6 +103,19 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
 
     let parsed_source = libfreemkv::parse_url(source);
     let parsed_dest = libfreemkv::parse_url(dest);
+
+    // `--raw` passes encrypted bytes through unchanged. That is valid for a raw
+    // ISO copy (iso:// output) but nonsense for a mux: you cannot mux ciphertext.
+    // Reject it up front before building any jobs/pipeline.
+    if raw
+        && matches!(
+            parsed_dest,
+            libfreemkv::StreamUrl::Mkv { .. } | libfreemkv::StreamUrl::M2ts { .. }
+        )
+    {
+        out.raw(Normal, &strings::get("error.raw_mux_invalid"));
+        return false;
+    }
 
     // Disc → ISO or Disc → null: use Disc::copy() (not a stream)
     if matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. })
