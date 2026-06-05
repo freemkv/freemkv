@@ -320,35 +320,49 @@ fn resolve_iso_unit_keys(source: &str, keydb_path: &Option<String>) -> Vec<(u32,
     else {
         return Vec::new();
     };
-    apply_local_key(&mut disc, keydb_path);
+    // Sample encrypted units from the largest title so key resolution can
+    // validate a keydb key against real ciphertext (and reject a wrong one).
+    let samples = disc
+        .titles
+        .iter()
+        .max_by_key(|t| t.size_bytes)
+        .cloned()
+        .map(|t| freemkv_keysources::read_sample_units(&mut reader, &t, SAMPLE_UNITS))
+        .unwrap_or_default();
+    apply_local_key(&mut disc, keydb_path, samples);
     match disc.decrypt_keys() {
         libfreemkv::DecryptKeys::Aacs { unit_keys, .. } => unit_keys,
         _ => Vec::new(),
     }
 }
 
+/// How many encrypted aligned units to sample for key validation.
+const SAMPLE_UNITS: usize = 4;
+
 /// Resolve an AACS key for a keyless-scanned `disc` from the local keydb and
 /// apply it via `Disc::decrypt_with`. No-op for an unencrypted disc (no AACS
-/// inputs). The CLI is keydb-only; candidates are tried in order and the first
-/// that derives unit keys wins. `--keydb <path>` overrides the default location.
-fn apply_local_key(disc: &mut libfreemkv::Disc, keydb_path: &Option<String>) {
-    use freemkv_keysources::KeySource;
-    let Some(inputs) = disc.inputs() else {
+/// inputs). The CLI is keydb-only; the keydb hands its candidates out UK-first
+/// and the shared loop keeps the first whose key actually decrypts a `samples`
+/// unit (a wrong candidate is rejected and the next tried). `--keydb <path>`
+/// overrides the default location.
+fn apply_local_key(
+    disc: &mut libfreemkv::Disc,
+    keydb_path: &Option<String>,
+    samples: Vec<Vec<u8>>,
+) {
+    let Some(mut inputs) = disc.inputs() else {
         return; // not AACS-encrypted (or no inputs captured)
     };
+    inputs.samples = samples;
     let path = keydb_path
         .clone()
         .map(std::path::PathBuf::from)
         .or_else(|| libfreemkv::keydb::default_path().ok())
         .unwrap_or_else(|| std::path::PathBuf::from("keydb.cfg"));
-    let source = freemkv_keysources::KeydbSource::new(path);
-    if let Ok(candidates) = source.resolve(&inputs) {
-        for key in candidates {
-            if disc.decrypt_with(key).is_ok() {
-                break;
-            }
-        }
-    }
+    let sources: Vec<Box<dyn freemkv_keysources::KeySource>> =
+        vec![Box::new(freemkv_keysources::KeydbSource::new(path))];
+    let mut sources = freemkv_keysources::MultiSource::new(sources);
+    freemkv_keysources::resolve_and_apply(&mut sources, &inputs, disc);
 }
 
 fn pipe_disc(
@@ -377,7 +391,16 @@ fn pipe_disc(
 
     let mut disc = libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keydb_path))
         .map_err(|e| format!("{}", e))?;
-    apply_local_key(&mut disc, keydb_path);
+    // Sample encrypted units from the largest title to validate the keydb key
+    // against real ciphertext before muxing.
+    let samples = disc
+        .titles
+        .iter()
+        .max_by_key(|t| t.size_bytes)
+        .cloned()
+        .map(|t| freemkv_keysources::read_sample_units(&mut drive, &t, SAMPLE_UNITS))
+        .unwrap_or_default();
+    apply_local_key(&mut disc, keydb_path, samples);
 
     if title_idx >= disc.titles.len() {
         return Err(format!(
@@ -664,8 +687,16 @@ fn disc_to_iso(
         }
     };
     // Resolve + apply the AACS key so the keys persist in the mapfile during
-    // disc→ISO copy (the mux step reads them back to decrypt).
-    apply_local_key(&mut disc, keydb_path);
+    // disc→ISO copy (the mux step reads them back to decrypt). Sample encrypted
+    // units first so the keydb key is validated against real ciphertext.
+    let samples = disc
+        .titles
+        .iter()
+        .max_by_key(|t| t.size_bytes)
+        .cloned()
+        .map(|t| freemkv_keysources::read_sample_units(&mut drive, &t, SAMPLE_UNITS))
+        .unwrap_or_default();
+    apply_local_key(&mut disc, keydb_path, samples);
 
     let disc_name = sanitize_name(disc.meta_title.as_deref().unwrap_or(&disc.volume_id));
     let (iso_path, is_null) = match &parsed_dest {
