@@ -8,3 +8,7 @@ scratch/
 
 # internal agent context — never publish
 CLAUDE.md
+
+# stray local build/debug artifacts
+/rust_out
+/stdin
