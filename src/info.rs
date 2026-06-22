@@ -505,9 +505,43 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
             &[("path", &zip_path.display().to_string())]
         )
     );
+
+    // Build-injected, issues-only PAT scoped to freemkv/bdemu. Set
+    // FREEMKV_GH_TOKEN at build time (release CI / local) so the secret lives
+    // in the binary, NOT the source — GitHub's secret scanner revokes any token
+    // committed to a repo (that's what killed the old base64'd one). When no
+    // token is compiled in, we fall straight through to the manual flow below.
+    let token = option_env!("FREEMKV_GH_TOKEN").unwrap_or("").trim();
+    if !token.is_empty() {
+        println!();
+        eprint!("Submit this profile to help expand drive support? [Y/n] ");
+        let _ = std::io::stdout().flush();
+        let mut input = String::new();
+        let _ = std::io::stdin().read_line(&mut input);
+        let ans = input.trim();
+        if ans.is_empty() || ans.eq_ignore_ascii_case("y") {
+            match submit_issue(token, title, body) {
+                Some(url) => {
+                    println!();
+                    println!("Submitted — thank you!");
+                    println!("  {url}");
+                    return;
+                }
+                None => {
+                    println!();
+                    println!("Automated submission failed; you can still file it by hand:");
+                    // fall through to the manual instructions
+                }
+            }
+        } else {
+            println!("Not submitted. You can still file it by hand if you like:");
+            // fall through to the manual instructions
+        }
+    }
+
     println!();
     println!("{}", strings::get("drive.submit_manual"));
-    println!("  https://github.com/freemkv/freemkv/issues/new");
+    println!("  https://github.com/freemkv/bdemu/issues/new");
     println!();
     println!(
         "{}",
@@ -518,6 +552,70 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
     println!("────────────────────────────────────────");
     print!("{}", body);
     println!("────────────────────────────────────────");
+}
+
+/// POST a drive-profile issue to `freemkv/bdemu` via the GitHub Issues API.
+///
+/// Returns the issue's `html_url` on success, `None` on any failure (the caller
+/// falls back to the manual print path). Uses `curl` to avoid pulling an HTTP
+/// stack into the CLI, matching the original 0.1-era implementation.
+fn submit_issue(token: &str, title: &str, body: &str) -> Option<String> {
+    const REPO: &str = "freemkv/bdemu";
+    let payload = format!(
+        r#"{{"title":"{}","body":"{}","labels":["drive-profile"]}}"#,
+        json_escape(title),
+        json_escape(body)
+    );
+
+    let output = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            &format!("https://api.github.com/repos/{REPO}/issues"),
+            "-H",
+            &format!("Authorization: token {token}"),
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            "User-Agent: freemkv-info",
+            "-d",
+            &payload,
+        ])
+        .output()
+        .ok()?;
+
+    let response = String::from_utf8_lossy(&output.stdout);
+    // Pull out "html_url":"…/issues/N" (skip the repo/user html_url fields).
+    for (idx, _) in response.match_indices("\"html_url\":\"") {
+        let rest = &response[idx + "\"html_url\":\"".len()..];
+        if let Some(end) = rest.find('"') {
+            let url = &rest[..end];
+            if url.contains("/issues/") {
+                return Some(url.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Minimal JSON string escaper for the issue payload (quotes, backslashes,
+/// newlines, and control chars). The body carries base64 + backticks, so a
+/// naive replace isn't enough.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 16);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn zip_directory(dir: &std::path::Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
