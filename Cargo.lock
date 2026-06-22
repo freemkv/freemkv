@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "freemkv-keysources",
  "isolang",
@@ -287,9 +287,9 @@ dependencies = [
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b749595fdb6d2b0bfa5f3e6dc69d0c0dec8bf26789df2bcbbf5ff11e4fb8f4c8"
+checksum = "edb1c526e45c1cefdc515f4be84003b19d470a160d3918b8142ab788b6ba5b6b"
 dependencies = [
  "base64",
  "libfreemkv",
@@ -477,9 +477,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libfreemkv"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "312cd37fc2c828c623705129be4f0fd6fe317decfb2c6a097ad865bd16a332ea"
+checksum = "ee753e4ad4af746feffa1344dd835bd30519b8f092491dce93a3a5c74eab59bf"
 dependencies = [
  "aes",
  "base64",
@@ -671,9 +671,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.45"
+version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
 dependencies = [
  "proc-macro2",
 ]
@@ -761,9 +761,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.40"
+version = "0.23.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
+checksum = "6b92b125634d9b795e7beca796cc790df15a7fb38323bf3196fda83292d06b1f"
 dependencies = [
  "log",
  "once_cell",

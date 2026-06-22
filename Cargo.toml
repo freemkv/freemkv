@@ -1,6 +1,6 @@
 [package]
 name = "freemkv"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 edition = "2024"
 rust-version = "1.86"
 license = "AGPL-3.0-only"
@@ -16,8 +16,8 @@ name = "freemkv"
 path = "src/main.rs"
 
 [dependencies]
-libfreemkv = "1.0.0-rc.1"
-freemkv-keysources = "1.0.0-rc.1"
+libfreemkv = "1.0.0-rc.2"
+freemkv-keysources = "1.0.0-rc.2"
 isolang = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
