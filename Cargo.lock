@@ -274,6 +274,7 @@ name = "freemkv"
 version = "1.0.0-rc.2"
 dependencies = [
  "freemkv-keysources",
+ "freemkv-unlock-ld",
  "isolang",
  "libc",
  "libfreemkv",
@@ -288,14 +289,23 @@ dependencies = [
 [[package]]
 name = "freemkv-keysources"
 version = "1.0.0-rc.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edb1c526e45c1cefdc515f4be84003b19d470a160d3918b8142ab788b6ba5b6b"
 dependencies = [
  "base64",
  "libfreemkv",
  "serde_json",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "freemkv-unlock-ld"
+version = "1.0.0-rc.2"
+dependencies = [
+ "base64",
+ "libfreemkv",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -478,8 +488,6 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libfreemkv"
 version = "1.0.0-rc.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee753e4ad4af746feffa1344dd835bd30519b8f092491dce93a3a5c74eab59bf"
 dependencies = [
  "aes",
  "base64",

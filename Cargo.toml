@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 libfreemkv = "1.0.0-rc.2"
+freemkv-unlock-ld = "1.0.0-rc.2"
 freemkv-keysources = "1.0.0-rc.2"
 isolang = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
