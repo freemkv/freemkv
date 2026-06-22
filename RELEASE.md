@@ -18,6 +18,58 @@ Replace `X.Y.Z` throughout with your target version. **FOLLOW THIS ORDER EXACTLY
 
 ---
 
+## Dependency & publish model (current — READ FIRST)
+
+As of **1.0.0-rc.3** the workspace is **7 repos** with three different publish
+targets. Get this wrong and the release breaks in non-obvious ways.
+
+| Repo | Publish target | How |
+|---|---|---|
+| `libfreemkv` | **crates.io** | **CI auto-publishes** on tag (`cargo publish`, repo has `CARGO_REGISTRY_TOKEN`) |
+| `freemkv-keysources` | **crates.io** | **MANUAL** — its CI only makes a GitHub release. Run `cargo publish` locally (uses your local crates.io credentials) |
+| `freemkv-unlock` | **git tag only** (NEVER crates.io) | Public repo; workspace holding the unlocker plugins (`ld/` = LibreDrive). Consumers git-dep it |
+| `freemkv` / `autorip` / `bdemu` | binaries (autorip → GHCR image on tag) | not on crates.io |
+
+**Committed dependency form** (all consumers):
+- `libfreemkv = "X.Y.Z"` and `freemkv-keysources = "X.Y.Z"` — **bare crates.io versions**
+- `freemkv-unlock-ld = { git = "https://github.com/freemkv/freemkv-unlock", tag = "vX.Y.Z" }` — **git dep**
+- **NEVER** commit `{ version = "...", path = "..." }` — autorip's release CI rejects any `Cargo.lock` whose libfreemkv source is a local path.
+
+**Local dev** resolves the unpublished crates via a **gitignored `.cargo/config.toml`**
+(NOT committed) in each consumer:
+```toml
+[patch.crates-io]
+libfreemkv = { path = "../libfreemkv" }
+freemkv-keysources = { path = "../freemkv-keysources" }
+[patch."https://github.com/freemkv/freemkv-unlock"]
+freemkv-unlock-ld = { path = "../freemkv-unlock/ld" }
+```
+
+### Publish ORDER (dependency-driven — do not reorder)
+1. **`freemkv-unlock`** — bump `ld/Cargo.toml`, push, `git tag vX.Y.Z` + push tag. (Consumers pin this tag, so it must exist first.)
+2. **`libfreemkv`** — bump, push main, tag, push tag → **CI publishes to crates.io**. Wait for it.
+3. **`freemkv-keysources`** — bump, push, tag, then **`cargo publish` MANUALLY** (CI won't). Needs libfreemkv on crates.io first.
+4. **`freemkv` / `autorip` / `bdemu`** — for each: **regenerate `Cargo.lock` with the local patch DISABLED** so it references crates.io + the unlock git-tag, then commit `Cargo.toml` + `Cargo.lock`, push, tag. autorip's tag builds the GHCR image.
+
+**Regenerate a release `Cargo.lock`** (the v0.18.7 trap — a local-path lock ships the wrong dep):
+```bash
+mv .cargo/config.toml /tmp/cfg.bak     # disable the local patch (move OUT of the repo, not to a .bak inside it)
+rm -f Cargo.lock && cargo generate-lockfile
+# verify: libfreemkv/keysources source = registry+...crates.io, unlock-ld source = git+...freemkv-unlock?tag=
+mv /tmp/cfg.bak .cargo/config.toml
+```
+
+### rc.3 gotchas (learnings — don't relearn these)
+- **keysources is NOT auto-published.** Tag success ≠ on crates.io. Its CI run is ~1 min (lint + GH release only); libfreemkv's is ~5 min (build matrix + publish). `cargo publish` keysources by hand.
+- **crates.io index LAGS the publish** by minutes. The **Release run / `cargo publish` success is authoritative**, not the index/web API. If downstream `generate-lockfile` says "candidate versions didn't match," the publish may still be propagating — wait, or confirm it actually ran.
+- **Check ALL consumers of unlock-ld when rewiring** — `bdemu` consumes it (`freemkv_unlock_ld::profile::load_bundled()` for drive emulation), not just freemkv/autorip. Easy to miss.
+- **`cargo publish` refuses on a dirty working dir** — never leave a temp `.bak` *inside* the repo; move the config to `/tmp`.
+- **zsh:** `status` is a read-only variable — don't use it as a loop var in release scripts.
+- **Tag must match committed `Cargo.toml` version** (v0.17.2). Commit the bump BEFORE tagging.
+- **`freemkv-unlock` / delete-to-comply:** libfreemkv ships only the `Unlocker` trait + registry (firmware-clean). Each binary registers a plugin with ONE `register_unlocker(...)` line. No firmware/profiles/blobs anywhere outside `freemkv-unlock`.
+
+---
+
 ## Prerequisites
 
 ### Toolchain
