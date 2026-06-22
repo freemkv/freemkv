@@ -6,7 +6,7 @@
 use crate::output::{Level::Normal, Output};
 use crate::strings;
 use libfreemkv::Drive;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 
 pub fn run(args: &[String]) {
@@ -512,14 +512,22 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
     // committed to a repo (that's what killed the old base64'd one). When no
     // token is compiled in, we fall straight through to the manual flow below.
     let token = option_env!("FREEMKV_GH_TOKEN").unwrap_or("").trim();
-    if !token.is_empty() {
+    // Only offer auto-submit on an INTERACTIVE terminal. A non-interactive stdin
+    // (closed/redirected/piped — a CI runner, cron, or `... --share </dev/null`)
+    // cannot give informed consent, and EOF there must NOT be read as "yes": the
+    // posted profile carries the drive serial (unless --mask), so a default-yes
+    // on EOF would upload identifying hardware data without the user agreeing.
+    // In that case fall straight through to the manual flow below.
+    if !token.is_empty() && std::io::stdin().is_terminal() {
         println!();
         eprint!("Submit this profile to help expand drive support? [Y/n] ");
         let _ = std::io::stdout().flush();
         let mut input = String::new();
-        let _ = std::io::stdin().read_line(&mut input);
+        let n = std::io::stdin().read_line(&mut input).unwrap_or(0);
         let ans = input.trim();
-        if ans.is_empty() || ans.eq_ignore_ascii_case("y") {
+        // A bare Enter (n>0, empty after trim) is the [Y] default; EOF (n==0,
+        // e.g. ^D or a stdin that closed despite is_terminal) is NOT consent.
+        if n > 0 && (ans.is_empty() || ans.eq_ignore_ascii_case("y")) {
             match submit_issue(token, title, body) {
                 Some(url) => {
                     println!();
@@ -833,9 +841,31 @@ fn toml_basic_unescape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_decode, base64_encode, format_date, hex_dump, sanitize_component,
+        base64_decode, base64_encode, format_date, hex_dump, json_escape, sanitize_component,
         toml_basic_unescape, toml_escape,
     };
+
+    #[test]
+    fn json_escape_handles_quotes_backslashes_control_chars() {
+        // The auto-post issue body is base64 + backticks + newlines, so the
+        // POST payload must be valid JSON. A naive replace would break on
+        // backslashes and control chars.
+        assert_eq!(json_escape("plain"), "plain");
+        assert_eq!(json_escape("a\"b"), "a\\\"b");
+        assert_eq!(json_escape("a\\b"), "a\\\\b");
+        assert_eq!(json_escape("line1\nline2"), "line1\\nline2");
+        assert_eq!(json_escape("a\tb\r"), "a\\tb\\r");
+        // A bare control char (e.g. 0x01) must become a \u escape, not a raw byte.
+        assert_eq!(json_escape("\u{0001}"), "\\u0001");
+        // Backticks are NOT special in JSON — must pass through untouched (the
+        // body is full of them from the firmware hex dumps).
+        assert_eq!(json_escape("`code`"), "`code`");
+        // Combined: the result must round-trip as a valid JSON string body.
+        let escaped = json_escape("he said \"hi\"\npath: C:\\x");
+        let doc = format!("{{\"v\":\"{escaped}\"}}");
+        let parsed: serde_json::Value = serde_json::from_str(&doc).expect("valid JSON");
+        assert_eq!(parsed["v"], "he said \"hi\"\npath: C:\\x");
+    }
 
     #[test]
     fn sanitize_component_blocks_path_traversal() {
