@@ -4,6 +4,38 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.0.0-rc.4] — UNRELEASED
+
+Cleaner terminal output, an error-message overhaul, and reliability fixes
+on the disc-info and pipe paths.
+
+### Changed
+
+- **Two-channel logging: clean terminal, file-only diagnostics.** The
+  terminal now carries only curated progress, status, and the final
+  result block — no `tracing` DEBUG/TRACE ever reaches it. A diagnostic
+  log file is written only when you ask for it (`--log-level N`,
+  `--log-file PATH`, or `RUST_LOG`); with none set, no subscriber is
+  installed and nothing is logged. The default log path is `./log.txt`,
+  written with timestamps on and ANSI colour off so it pastes cleanly
+  into a bug report.
+- **Fatal-error block.** On a fatal error the CLI prints one readable
+  block — the operation, the plain-English cause, and how to enable a
+  diagnostic log — instead of a raw error code.
+- **Error-message overhaul.** 47 previously unmapped error codes now
+  render a clear message, jargon-heavy strings were rewritten in plain
+  language, and the `verify` subcommand is fully localized.
+
+### Fixed
+
+- A disc → ISO rip that recovered zero readable bytes now fails instead
+  of writing an empty image.
+- A CLI pipe that hits an early EOF no longer exits `0` with a
+  structurally invalid MKV.
+- `disc-info` no longer drops the real scan/drive-open error: the
+  underlying cause is routed through the localized error renderer rather
+  than being masked by a generic failure.
+
 ## [1.0.0-rc.2]
 
 Second release candidate for 1.0. Adds keyless DVD/CSS ripping and correct DVD
