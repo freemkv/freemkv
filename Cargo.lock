@@ -289,8 +289,7 @@ dependencies = [
 [[package]]
 name = "freemkv-keysources"
 version = "1.0.0-rc.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7e5fef9f35c55c116b3b3f8caac1c6c7bd9e7609a3a1eff8f2aa9e4d14d0102"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.0.0-rc.3.1#6f164ca355a7e1b83548bf98a18cda322011fe35"
 dependencies = [
  "base64",
  "libfreemkv",
@@ -491,8 +490,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libfreemkv"
 version = "1.0.0-rc.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c3bcc24e46c58f9aa24788b4b50382878cd737a033e520c9bf70b8e70dd6538"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.0.0-rc.3.1#633a22c6bdceb8dccd6199c51b27796dba28bc70"
 dependencies = [
  "aes",
  "base64",
