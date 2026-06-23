@@ -2344,15 +2344,12 @@ mod tests {
             &out,
         );
         assert_eq!(s.len(), 1);
-        assert!(
-            !s[0].needs_samples(),
-            "keydb-only first source is the keydb"
-        );
+        assert_eq!(s[0].label(), "keydb", "keydb-only first source is the keydb");
 
         // neither flag → still [Keydb] (default keydb location).
         let s = build_key_sources(&KeyConfig::default(), &out);
         assert_eq!(s.len(), 1);
-        assert!(!s[0].needs_samples(), "no flags → keydb only");
+        assert_eq!(s[0].label(), "keydb", "no flags → keydb only");
 
         // --key-url only → [Online] (no keydb consulted).
         let s = build_key_sources(
@@ -2364,8 +2361,9 @@ mod tests {
             &out,
         );
         assert_eq!(s.len(), 1);
-        assert!(
-            s[0].needs_samples(),
+        assert_eq!(
+            s[0].label(),
+            "online",
             "url-only first source is the online one"
         );
 
@@ -2379,8 +2377,8 @@ mod tests {
             &out,
         );
         assert_eq!(s.len(), 2);
-        assert!(!s[0].needs_samples(), "local keydb is tried first");
-        assert!(s[1].needs_samples(), "online service is the fallback");
+        assert_eq!(s[0].label(), "keydb", "local keydb is tried first");
+        assert_eq!(s[1].label(), "online", "online service is the fallback");
     }
 
     /// SSRF guard: a `--key-url` that resolves to an internal / metadata host is
@@ -2426,7 +2424,7 @@ mod tests {
             &out,
         );
         assert_eq!(s.len(), 1, "rejected url dropped; keydb remains");
-        assert!(!s[0].needs_samples(), "the surviving source is the keydb");
+        assert_eq!(s[0].label(), "keydb", "the surviving source is the keydb");
     }
 
     #[test]
