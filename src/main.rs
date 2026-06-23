@@ -458,12 +458,12 @@ fn verify_cmd(args: &[String]) {
         libfreemkv::StreamUrl::Disc { device: None } => match libfreemkv::find_drive() {
             Some(d) => std::path::PathBuf::from(d.device_path()),
             None => {
-                eprintln!("No drive found");
+                eprintln!("{}", strings::get("error.no_drive"));
                 std::process::exit(1);
             }
         },
         _ => {
-            eprintln!("verify only works with disc:// URLs");
+            eprintln!("{}", strings::get("verify.only_disc"));
             std::process::exit(1);
         }
     };
@@ -471,11 +471,11 @@ fn verify_cmd(args: &[String]) {
     println!("freemkv {}\n", env!("CARGO_PKG_VERSION"));
 
     // Open and scan
-    eprint!("Opening drive...");
+    eprint!("{}", strings::get("verify.opening"));
     let mut drive = match libfreemkv::Drive::open(&device) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("FAILED");
+            eprintln!("{}", strings::get("verify.failed"));
             fatal("error.op_verify", &pipe::fmt_err(&e));
         }
     };
@@ -485,16 +485,19 @@ fn verify_cmd(args: &[String]) {
     // report WARN and the error so a later scan failure isn't mysterious.
     let _ = drive.wait_ready();
     match drive.init() {
-        Ok(_) => eprintln!("OK"),
-        Err(e) => eprintln!("WARN ({})", e),
+        Ok(_) => eprintln!("{}", strings::get("verify.ok")),
+        Err(e) => eprintln!(
+            "{}",
+            strings::fmt("verify.warn", &[("error", &pipe::fmt_err(&e))])
+        ),
     }
 
-    eprint!("Scanning...");
+    eprint!("{}", strings::get("verify.scanning"));
     let scan_opts = libfreemkv::ScanOptions::default();
     let disc = match libfreemkv::Disc::scan(&mut drive, &scan_opts) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("FAILED");
+            eprintln!("{}", strings::get("verify.failed"));
             fatal("error.op_verify", &pipe::fmt_err(&e));
         }
     };
@@ -506,14 +509,21 @@ fn verify_cmd(args: &[String]) {
     let total_sectors: u64 = title.extents.iter().map(|e| e.sector_count as u64).sum();
     let total_gb = total_sectors as f64 * 2048.0 / 1_073_741_824.0;
     eprintln!(
-        "{} ({:.1} GB, {} sectors)",
-        disc_name, total_gb, total_sectors
+        "{}",
+        strings::fmt(
+            "verify.disc_summary",
+            &[
+                ("name", disc_name),
+                ("size", &format!("{total_gb:.1}")),
+                ("sectors", &total_sectors.to_string()),
+            ]
+        )
     );
 
     let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
     let _ = drive.probe_disc();
 
-    eprintln!("\nVerifying...");
+    eprintln!("\n{}", strings::get("verify.verifying"));
     let start = std::time::Instant::now();
     let last_print = std::sync::Mutex::new(std::time::Instant::now());
 
@@ -536,8 +546,16 @@ fn verify_cmd(args: &[String]) {
                     0.0
                 };
                 eprint!(
-                    "\r  {}% · {:.1} MB/s · {} / {} sectors",
-                    pct, speed, p.work_done, p.work_total
+                    "\r  {}",
+                    strings::fmt(
+                        "verify.progress",
+                        &[
+                            ("pct", &pct.to_string()),
+                            ("speed", &format!("{speed:.1}")),
+                            ("done", &p.work_done.to_string()),
+                            ("total", &p.work_total.to_string()),
+                        ]
+                    )
                 );
                 *lp = std::time::Instant::now();
             }
@@ -550,42 +568,35 @@ fn verify_cmd(args: &[String]) {
     // would otherwise print `NaN%` on every row (mirrors the library's own
     // `VerifyResult::readable_pct` zero-guard).
     let pct = |n: u64| pct_of(n, result.total_sectors);
+    // One results row: a localized label, right-aligned count, and percentage.
+    // The label word varies in width across languages; the count keeps its own
+    // right-aligned column so the numbers still line up within a run.
+    let row = |label_key: &str, n: u64| {
+        let label = strings::get(label_key);
+        println!("  {:<11} {:>12}  ({:.4}%)", format!("{label}:"), n, pct(n));
+    };
     println!();
-    println!("Results:");
-    println!(
-        "  Good:        {:>12}  ({:.4}%)",
-        result.good,
-        pct(result.good)
-    );
+    println!("{}", strings::get("verify.results"));
+    row("verify.good", result.good);
     if result.slow > 0 {
-        println!(
-            "  Slow:        {:>12}  ({:.4}%)",
-            result.slow,
-            pct(result.slow)
-        );
+        row("verify.slow", result.slow);
     }
     if result.recovered > 0 {
-        println!(
-            "  Recovered:   {:>12}  ({:.4}%)",
-            result.recovered,
-            pct(result.recovered)
-        );
+        row("verify.recovered", result.recovered);
     }
     if result.bad > 0 {
-        println!(
-            "  Bad:         {:>12}  ({:.4}%)",
-            result.bad,
-            pct(result.bad)
-        );
+        row("verify.bad", result.bad);
     }
 
     if !result.ranges.is_empty() {
         println!();
         for range in &result.ranges {
             let status_str = match range.status {
-                libfreemkv::verify::SectorStatus::Slow => "SLOW",
-                libfreemkv::verify::SectorStatus::Recovered => "RECOVERED",
-                libfreemkv::verify::SectorStatus::Bad => "BAD",
+                libfreemkv::verify::SectorStatus::Slow => strings::get("verify.status_slow"),
+                libfreemkv::verify::SectorStatus::Recovered => {
+                    strings::get("verify.status_recovered")
+                }
+                libfreemkv::verify::SectorStatus::Bad => strings::get("verify.status_bad"),
                 _ => continue,
             };
             let gb = range.byte_offset as f64 / 1_073_741_824.0;
@@ -599,7 +610,17 @@ fn verify_cmd(args: &[String]) {
                 Some((ch, secs)) => {
                     let m = secs as u32 / 60;
                     let s = secs as u32 % 60;
-                    format!(" — Chapter {}, {:02}:{:02}", ch, m, s)
+                    format!(
+                        " — {}",
+                        strings::fmt(
+                            "verify.chapter",
+                            &[
+                                ("num", &ch.to_string()),
+                                ("min", &m.to_string()),
+                                ("sec", &format!("{s:02}")),
+                            ]
+                        )
+                    )
                 }
                 None => String::new(),
             };
@@ -608,8 +629,18 @@ fn verify_cmd(args: &[String]) {
             // and contradict the trailing "0 sectors").
             let last_lba = inclusive_last_lba(range.start_lba, range.count);
             println!(
-                "  {} sectors {}-{} ({:.1} GB{}): {} sectors",
-                status_str, range.start_lba, last_lba, gb, ch_str, range.count
+                "  {}",
+                strings::fmt(
+                    "verify.range",
+                    &[
+                        ("status", &status_str),
+                        ("start", &range.start_lba.to_string()),
+                        ("end", &last_lba.to_string()),
+                        ("size", &format!("{gb:.1}")),
+                        ("chapter", &ch_str),
+                        ("count", &range.count.to_string()),
+                    ]
+                )
             );
         }
     }
@@ -619,23 +650,34 @@ fn verify_cmd(args: &[String]) {
     let s = elapsed as u32 % 60;
     println!();
     println!(
-        "Verdict: {:.4}% readable in {}:{:02}",
-        result.readable_pct(),
-        m,
-        s
+        "{}",
+        strings::fmt(
+            "verify.verdict",
+            &[
+                ("pct", &format!("{:.4}", result.readable_pct())),
+                ("min", &m.to_string()),
+                ("sec", &format!("{s:02}")),
+            ]
+        )
     );
 
     if result.is_perfect() {
-        println!("         Disc is perfect.");
+        println!("         {}", strings::get("verify.perfect"));
     } else if result.bad > 0 {
+        let clusters = result
+            .ranges
+            .iter()
+            .filter(|r| r.status == libfreemkv::verify::SectorStatus::Bad)
+            .count();
         println!(
-            "         {} unrecoverable sectors in {} cluster(s).",
-            result.bad,
-            result
-                .ranges
-                .iter()
-                .filter(|r| r.status == libfreemkv::verify::SectorStatus::Bad)
-                .count()
+            "         {}",
+            strings::fmt(
+                "verify.unrecoverable",
+                &[
+                    ("count", &result.bad.to_string()),
+                    ("clusters", &clusters.to_string()),
+                ]
+            )
         );
     }
 

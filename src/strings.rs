@@ -352,4 +352,150 @@ mod tests {
     fn locale_nl_loads() {
         verify_locale("nl", LOCALE_NL);
     }
+
+    /// Regression guard: EVERY error code that libfreemkv can produce must have
+    /// an `error.E<code>` string in en.json. Without a string, the CLI's
+    /// `fmt_err` falls back to the generic wrapper and the user sees a raw
+    /// `E<code>: <internal data>`. We construct one instance of every `Error`
+    /// variant, collect its `.code()`, and assert the locale key exists.
+    ///
+    /// `Error` is `#[non_exhaustive]`, so this list must be kept in sync by hand
+    /// when a new variant is added — that is the point: a new code with no
+    /// string trips this test instead of shipping a bare code to users. The
+    /// companion `all_error_code_constants_are_unique` test in libfreemkv pins
+    /// the constant set; this one pins locale coverage of it.
+    #[test]
+    fn every_error_code_has_an_en_string() {
+        use libfreemkv::Error;
+        let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
+
+        let p = || "p".to_string();
+        let variants: Vec<Error> = vec![
+            Error::DeviceNotFound { path: p() },
+            Error::DevicePermission { path: p() },
+            Error::DeviceNotReady { path: p() },
+            Error::DeviceResetFailed { path: p() },
+            Error::ScsiInterfaceUnavailable { path: p() },
+            Error::DeviceLocked { path: p(), kr: 0 },
+            Error::IoKitPluginFailed { path: p(), kr: 0 },
+            Error::UnsupportedDrive {
+                vendor_id: p(),
+                product_id: p(),
+                product_revision: p(),
+            },
+            Error::ProfileParse,
+            Error::UnsupportedPlatform { target: p() },
+            Error::PlatformNotImplemented { platform: p() },
+            Error::UnlockFailed,
+            Error::SignatureMismatch {
+                expected: [0; 4],
+                got: [0; 4],
+            },
+            Error::ScsiError {
+                opcode: 0,
+                status: 0,
+                sense: None,
+            },
+            Error::InvalidCdbLength { len: 0, max: 0 },
+            Error::IoError {
+                source: std::io::Error::from_raw_os_error(13),
+            },
+            Error::DiscRead {
+                sector: 0,
+                status: None,
+                sense: None,
+            },
+            Error::Halted,
+            Error::MplsParse,
+            Error::ClpiParse,
+            Error::UdfNotFound { path: p() },
+            Error::UdfBufferTooSmall,
+            Error::DiscTitleRange { index: 0, count: 0 },
+            Error::IfoParse,
+            Error::MkvInvalid,
+            Error::NoStreams,
+            Error::MapfileInvalid { kind: "hex" },
+            Error::AacsNoKeys,
+            Error::AacsCertShort,
+            Error::AacsAgidAlloc,
+            Error::AacsCertRejected,
+            Error::AacsCertRead,
+            Error::AacsCertVerify,
+            Error::AacsKeyRead,
+            Error::AacsKeyRejected,
+            Error::AacsKeyVerify,
+            Error::AacsVidRead,
+            Error::AacsVidMac,
+            Error::AacsDataKey,
+            Error::DecryptFailed,
+            Error::CssAuthFailed,
+            Error::AacsHostCertRejected,
+            Error::AacsRawReadUnsupported,
+            Error::AacsVidUnavailable,
+            Error::AacsMkUnavailable,
+            Error::AacsVukNotInKeydb,
+            Error::DriveProfileMissing,
+            Error::VidCdbUnavailable,
+            Error::NoDiscKey { disc_hash: p() },
+            Error::CssKeyMissing,
+            Error::AacsNoHostCert { path: p() },
+            Error::KeydbConnect { host: p() },
+            Error::KeydbHttp { status: 0 },
+            Error::KeydbInvalid,
+            Error::KeydbWrite { path: p() },
+            Error::KeydbParse,
+            Error::KeydbLoad { path: p() },
+            Error::KeydbUnsupportedScheme { scheme: p() },
+            Error::KeydbTooManyRedirects,
+            Error::StreamReadOnly,
+            Error::StreamWriteOnly,
+            Error::StreamUrlInvalid { url: p() },
+            Error::StreamUrlMissingPath { scheme: p() },
+            Error::StreamUrlMissingPort { addr: p() },
+            Error::NetworkAddrBlocked { addr: p() },
+            Error::MuxEmpty,
+            Error::PesFrameTooLarge { size: 0 },
+            Error::PesInvalidMagic,
+            Error::PesTrackTooLarge { track: 0 },
+            Error::IsoTooLarge { path: p() },
+            Error::NoMetadata,
+            Error::DiscUrlNotDirect,
+            Error::HevcParamParse,
+            Error::MuxTrackRange {
+                track: 0,
+                tracks: 0,
+            },
+            Error::Fmp4Unimplemented,
+            Error::DemuxThreadPanicked,
+            Error::PipelineJoinTimeout,
+            Error::PipelineConsumerPanicked,
+            Error::SweepConsumerGone,
+            Error::PipelineConsumerGone,
+            Error::DiscCapacityOverflow,
+            Error::ExtentNotUnitAligned,
+            Error::M2tsPacketMalformed,
+            Error::DiscCapacityMalformed,
+        ];
+
+        // E9012 (Fmp4Unimplemented) and E9021 (M2tsPacketMalformed) are internal
+        // invariants the CLI never surfaces to a user, but we still want a string
+        // so the generic wrapper never echoes a raw code. Every variant above is
+        // checked uniformly — no exceptions.
+        let mut missing = Vec::new();
+        for e in &variants {
+            let key = format!("error.E{}", e.code());
+            let got = lookup(&en, &key);
+            if got == key {
+                missing.push(key);
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "en.json is missing {} error code string(s): {:?}",
+            missing.len(),
+            missing
+        );
+    }
 }

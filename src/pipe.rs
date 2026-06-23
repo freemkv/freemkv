@@ -89,6 +89,13 @@ fn fmt_err_str(s: &str) -> String {
             if code_part == "E7022" {
                 return strings::fmt(&key, &[("hash", data), ("detail", data)]);
             }
+            // E6000 (DiscRead) Display is `E6000: <sector> 0x..hex..` — the
+            // status/sense hex tail is diagnostic noise that must not reach the
+            // user. Pass ONLY the leading sector number as {detail}.
+            if code_part == "E6000" {
+                let sector = data.split_whitespace().next().unwrap_or(data);
+                return strings::fmt(&key, &[("detail", sector)]);
+            }
             return strings::fmt(&key, &[("detail", data)]);
         }
     }
@@ -1842,17 +1849,19 @@ mod tests {
     fn fmt_err_renders_codes_to_english() {
         // E6009 NoStreams — the Theme A zero-output error.
         let s = fmt_err_str("E6009");
-        assert_eq!(s, "No streams found");
+        assert_eq!(s, "No streams found.");
         assert!(!s.contains("E6009"), "raw code leaked: {s}");
 
-        // E7023 CssKeyMissing — the Theme B CSS gate error (new locale entry).
+        // E7023 CssKeyMissing — the Theme B CSS gate error. The user-facing
+        // copy is dejargoned: "copy-protected", not "CSS title key".
         let s = fmt_err_str("E7023");
-        assert!(s.to_lowercase().contains("css"), "got: {s}");
+        assert!(s.to_lowercase().contains("copy-protected"), "got: {s}");
         assert!(!s.contains("E7023"), "raw code leaked: {s}");
 
-        // E9023 MuxEmpty — the Theme A m2ts zero-frame error (new locale entry).
+        // E9023 MuxEmpty — the Theme A m2ts zero-frame error. Dejargoned to
+        // "empty file" / "video or audio", not the internal "mux" term.
         let s = fmt_err_str("E9023");
-        assert!(s.to_lowercase().contains("mux"), "got: {s}");
+        assert!(s.to_lowercase().contains("empty file"), "got: {s}");
         assert!(!s.contains("E9023"), "raw code leaked: {s}");
 
         // E5000 with data → {detail} substituted, raw code gone.
@@ -1861,12 +1870,30 @@ mod tests {
         assert!(!s.contains("E5000"), "raw code leaked: {s}");
 
         // E7013 Decryption failed.
-        assert_eq!(fmt_err_str("E7013"), "Decryption failed");
+        assert_eq!(fmt_err_str("E7013"), "Decryption failed.");
 
         // E7022 names the disc by hash.
         let s = fmt_err_str("E7022: deadbeef");
         assert!(s.contains("deadbeef"), "hash not substituted: {s}");
         assert!(!s.contains("E7022"), "raw code leaked: {s}");
+    }
+
+    /// E6000 (DiscRead) Display is `E6000: <sector> 0x..status../0x..sense..`.
+    /// The status/sense hex tail is diagnostic noise that must NOT reach the
+    /// user — only the sector number is substituted into the localized message.
+    #[test]
+    fn fmt_err_e6000_strips_status_sense_hex_tail() {
+        // Full DiscRead Display: sector + status + sense triple.
+        let s = fmt_err_str("E6000: 7476928 0x02/0x03/0x11/0x00");
+        assert!(s.contains("7476928"), "sector number lost: {s}");
+        assert!(!s.contains("0x"), "raw hex tail leaked to user: {s}");
+        assert!(!s.contains("E6000"), "raw code leaked: {s}");
+        // Sense-only form (no status byte) also strips the tail.
+        let s = fmt_err_str("E6000: 100 0x03/0x11/0x00");
+        assert!(s.contains("100") && !s.contains("0x"), "got: {s}");
+        // Bare sector (no tail at all) renders cleanly.
+        let s = fmt_err_str("E6000: 42");
+        assert!(s.contains("42") && !s.contains("0x"), "got: {s}");
     }
 
     /// A code with NO locale entry falls back to the generic wrapper (which
