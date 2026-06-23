@@ -1013,6 +1013,17 @@ fn mux_produced_output(num_streams: usize, bytes_written: u64) -> bool {
     num_streams > 0 && bytes_written >= MIN_MUX_PAYLOAD_BYTES
 }
 
+/// Whether a completed disc→ISO sweep actually recovered any readable data,
+/// the guard `disc_to_iso` runs before declaring success — the sweep-path
+/// analogue of `mux_produced_output`. `Disc::copy` returns `Ok` even when every
+/// ECC block was unreadable and zero-filled (whole disc unreadable): the ISO on
+/// disk is all zeroes and unusable. Returns `false` (→ caller prints `rip.no_data`
+/// and exits non-zero) when nothing readable came off the disc; `true` only when
+/// at least one byte was recovered.
+fn disc_copy_recovered_data(bytes_good: u64) -> bool {
+    bytes_good > 0
+}
+
 /// The header-resolution gate both pipe paths run after their
 /// `while !input.headers_ready()` loop. That loop breaks on EOF (`Ok(None)`)
 /// without re-checking, so a disc with damaged video sectors or a very short
@@ -1328,6 +1339,23 @@ fn disc_to_iso(
                 eprint!("\r\x1b[K");
             }
             out.raw(Normal, &strings::get("rip.interrupted"));
+            false
+        }
+        Ok(r) if !disc_copy_recovered_data(r.bytes_good) => {
+            // The copy ran to completion but recovered ZERO readable bytes —
+            // every ECC block was zero-filled and marked NonTrimmed (whole disc
+            // unreadable). The ISO on disk is all zeroes and unusable. Don't
+            // print "Complete" or return success: a scripted caller checking $?
+            // must see a non-zero exit, mirroring the NoStreams guard on the
+            // mux paths in this file.
+            if !out.is_quiet() {
+                eprint!("\r\x1b[K");
+            }
+            let mb_bad = r.bytes_unreadable as f64 / 1_048_576.0;
+            out.raw(
+                Normal,
+                &strings::fmt("rip.no_data", &[("unreadable", &format!("{mb_bad:.1}"))]),
+            );
             false
         }
         Ok(r) => {
@@ -1764,8 +1792,9 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 mod tests {
     use super::{
         KeyConfig, build_jobs, build_key_sources, copy_should_continue, disc_aacs_key_missing,
-        disc_css_key_missing, fmt_err_str, headers_resolved, is_keyserver_url, is_url_token,
-        mux_produced_output, mux_was_interrupted, parse_error_code, parse_flags, title_in_range,
+        disc_copy_recovered_data, disc_css_key_missing, fmt_err_str, headers_resolved,
+        is_keyserver_url, is_url_token, mux_produced_output, mux_was_interrupted, parse_error_code,
+        parse_flags, title_in_range,
     };
     use crate::output::Output;
 
@@ -1861,6 +1890,20 @@ mod tests {
         // Zero bytes written → never produced (the natural-drain-on-first-None
         // empty-output silent failure).
         assert!(!mux_produced_output(3, 0));
+    }
+
+    /// The disc→ISO sweep-success guard. `Disc::copy` returns `Ok` even when the
+    /// whole disc was unreadable (`bytes_good == 0`, every ECC block zero-filled
+    /// and marked NonTrimmed) — the ISO is all zeroes and unusable. The guard
+    /// must report that as NOT recovered (→ caller prints `rip.no_data`, exits
+    /// non-zero), never as a "Complete" success.
+    #[test]
+    fn disc_copy_recovered_data_gates_zero_recovery() {
+        // Whole disc unreadable → no data recovered → not a success.
+        assert!(!disc_copy_recovered_data(0));
+        // Any recovered bytes → success.
+        assert!(disc_copy_recovered_data(1));
+        assert!(disc_copy_recovered_data(50_000_000_000));
     }
 
     /// The header-resolution gate both pipe paths run after their

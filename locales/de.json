@@ -117,6 +117,7 @@
     "output": "Ausgabe:  {path}",
     "continuing_oem": "{error} (Fortsetzung mit OEM-Geschwindigkeit)",
     "interrupted": "Unterbrochen",
+    "no_data": "Keine Daten wiederhergestellt — die gesamte Disc war unlesbar ({unreadable} MB). Ausgabe unbrauchbar.",
     "drive": "Laufwerk: {device}",
     "disc_label": "Disc: {name} ({size} GB)",
     "disc_titles": "Disc: {name} ({count} Titel)",

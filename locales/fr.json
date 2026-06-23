@@ -117,6 +117,7 @@
     "output": "Sortie :  {path}",
     "continuing_oem": "{error} (poursuite a vitesse OEM)",
     "interrupted": "Interrompu",
+    "no_data": "Aucune donnée récupérée — tout le disque était illisible ({unreadable} Mo). Sortie inutilisable.",
     "drive": "Lecteur : {device}",
     "disc_label": "Disque : {name} ({size} Go)",
     "disc_titles": "Disque : {name} ({count} titres)",

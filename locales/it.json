@@ -117,6 +117,7 @@
     "output": "Output:   {path}",
     "continuing_oem": "{error} (proseguo a velocita' OEM)",
     "interrupted": "Interrotto",
+    "no_data": "Nessun dato recuperato — l'intero disco era illeggibile ({unreadable} MB). Output non utilizzabile.",
     "drive": "Lettore: {device}",
     "disc_label": "Disco: {name} ({size} GB)",
     "disc_titles": "Disco: {name} ({count} titoli)",

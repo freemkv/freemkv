@@ -117,6 +117,7 @@
     "output": "Output:   {path}",
     "continuing_oem": "{error} (continuing at OEM speed)",
     "interrupted": "Interrupted",
+    "no_data": "No data recovered — the entire disc was unreadable ({unreadable} MB). Output not usable.",
     "drive": "Drive: {device}",
     "disc_label": "Disc: {name} ({size} GB)",
     "disc_titles": "Disc: {name} ({count} titles)",
