@@ -75,7 +75,7 @@ pub fn run(args: &[String]) {
 
     let mut drive = match device_path {
         Some(ref p) => Drive::open(std::path::Path::new(p)).unwrap_or_else(|e| {
-            eprintln!("{}", e);
+            eprintln!("{}", crate::pipe::fmt_err(&e));
             std::process::exit(1);
         }),
         None => libfreemkv::find_drive().unwrap_or_else(|| {
@@ -646,6 +646,32 @@ mod tests {
         assert!(
             rendered.starts_with("Scan failed:") && rendered.len() > "Scan failed:".len() + 1,
             "expected the cause appended after the prefix, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn open_failure_renders_through_fmt_err_no_raw_code_leaks() {
+        // Regression: the `disc-info --device` open-failure handler did
+        // `eprintln!("{}", e)`, printing libfreemkv's raw `E####: <data>`
+        // Display and bypassing the i18n renderer. It must route the error
+        // through `pipe::fmt_err`, which localizes the code (E1001 explains the
+        // disk-group / privilege fix) and never leaks a raw `E####`.
+        let rendered = crate::pipe::fmt_err(&libfreemkv::Error::DevicePermission {
+            path: "/dev/sg0".to_string(),
+        });
+        assert!(
+            !rendered.contains("E1001"),
+            "raw error code must not leak, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("/dev/sg0"),
+            "expected the device path in the localized message, got:\n{rendered}"
+        );
+        // The localized E1001 text names the actionable fix (disk group / privileges).
+        assert!(
+            rendered.to_lowercase().contains("disk group")
+                || rendered.to_lowercase().contains("privile"),
+            "expected the actionable remediation text, got:\n{rendered}"
         );
     }
 
