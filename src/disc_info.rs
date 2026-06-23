@@ -95,7 +95,10 @@ pub fn run(args: &[String]) {
         Err(e) => {
             eprintln!(
                 "{}",
-                strings::fmt("error.scan_failed", &[("error", &e.to_string())])
+                strings::fmt(
+                    "error.scan_failed",
+                    &[("detail", &crate::pipe::fmt_err(&e))]
+                )
             );
             std::process::exit(1);
         }
@@ -612,6 +615,37 @@ mod tests {
         assert!(
             joined.contains("English"),
             "expected the audio/subtitle language, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn scan_failed_substitutes_detail_and_drops_no_placeholder() {
+        // Regression: the scan-failure handler keyed the format arg "error" while
+        // the `error.scan_failed` locale string uses `{detail}` — so the real
+        // cause was dropped and the user saw the literal `{detail}`. The handler
+        // must key the arg "detail" (and route the cause through `fmt_err`).
+        let rendered = strings::fmt(
+            "error.scan_failed",
+            &[(
+                "detail",
+                &crate::pipe::fmt_err(&libfreemkv::Error::DeviceNotReady {
+                    path: "/dev/sr0".to_string(),
+                }),
+            )],
+        );
+        assert!(
+            !rendered.contains("{detail}"),
+            "placeholder must be substituted, got:\n{rendered}"
+        );
+        // The substituted cause text is present (no raw E#### code leaks because
+        // it routed through `fmt_err`).
+        assert!(
+            !rendered.contains("E1002"),
+            "raw error code must not leak, got:\n{rendered}"
+        );
+        assert!(
+            rendered.starts_with("Scan failed:") && rendered.len() > "Scan failed:".len() + 1,
+            "expected the cause appended after the prefix, got:\n{rendered}"
         );
     }
 
