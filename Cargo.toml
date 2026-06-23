@@ -1,6 +1,6 @@
 [package]
 name = "freemkv"
-version = "1.0.0-rc.3.1"
+version = "1.0.0-rc.4"
 edition = "2024"
 rust-version = "1.86"
 license = "AGPL-3.0-only"
@@ -16,9 +16,9 @@ name = "freemkv"
 path = "src/main.rs"
 
 [dependencies]
-libfreemkv = "1.0.0-rc.3"
+libfreemkv = "1.0.0-rc.4"
 freemkv-unlock-ld = { git = "https://github.com/freemkv/freemkv-unlock", tag = "v1.0.0-rc.3" }
-freemkv-keysources = "1.0.0-rc.3"
+freemkv-keysources = "1.0.0-rc.4"
 isolang = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
@@ -54,5 +54,5 @@ codegen-units = 1
 # patch with a path patch via the gitignored .cargo/config.toml (a config-level
 # [patch.crates-io] wins over this manifest one for the same crate).
 [patch.crates-io]
-libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.0.0-rc.3.1" }
-freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.0.0-rc.3.1" }
+libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.0.0-rc.4" }
+freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.0.0-rc.4" }
