@@ -753,10 +753,10 @@ fn usage() {
     println!("                      With --keydb the keydb is tried first (local-");
     println!("                      first); alone it is the only key source.");
     println!("      --key-auth TOKEN Bearer token sent to the key service (optional).");
-    println!("      --log-level N   1=warnings 2=info 3=debug 4=trace (default 1).");
-    println!("                      Use 3 for bug reports. Logs go to STDERR so");
-    println!("                      stdout stays pipe-clean.");
-    println!("      --log-file PATH Also write logs to PATH (for bug reports).");
+    println!("      --log-level N   1=warn 2=info 3=debug 4=trace. Off by default —");
+    println!("                      the terminal stays clean. Set it to write a");
+    println!("                      diagnostic log to ./log.txt (use 3 for bug reports).");
+    println!("      --log-file PATH Write the diagnostic log to PATH instead of ./log.txt.");
     println!("  -q, --quiet         Suppress output");
     println!("      --raw           Skip decryption (raw encrypted output)");
     println!("      --multipass    Write/update mapfile for multipass recovery");
