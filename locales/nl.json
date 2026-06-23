@@ -192,6 +192,7 @@
     "E7003": "AACS-handshake mislukt",
     "E7013": "Decodering mislukt",
     "E7022": "geen sleutel gevonden voor schijf {hash} — kan niet decoderen (sleutel niet in keydb).",
+    "E7023": "DVD CSS-titelsleutel niet gevonden — de schijf is versleuteld maar er kon geen sleutel voor deze titel worden hersteld. Ontsleutelen niet mogelijk (uitvoer zou onbruikbaar zijn).",
     "E8000": "Kan geen verbinding maken met KEYDB-server: {detail}",
     "E8001": "KEYDB-download mislukt (HTTP {detail})",
     "E8002": "KEYDB is leeg of ongeldig",
@@ -204,8 +205,10 @@
     "E9003": "URL mist pad: {detail}",
     "E9004": "URL mist poort: {detail}",
     "E9007": "ISO-image te groot: {detail}",
+    "E9023": "Mux heeft geen frames geproduceerd — de uitvoer zou een leeg bestand met alleen een header zijn. Er is niets gedecodeerd (niet-ontsleutelbare invoer of geen leesbare gegevens).",
     "title_out_of_range": "Titel {num} buiten bereik ({count})",
     "cannot_create_dir": "Kan map {path} niet aanmaken: {error}",
-    "cannot_write": "Kan {path} niet schrijven: {error}"
+    "cannot_write": "Kan {path} niet schrijven: {error}",
+    "keyserver_url_rejected": "Fout: sleutelservice-URL geweigerd ({error}) — online sleutelbron uitgeschakeld voor deze rip."
   }
 }

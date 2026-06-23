@@ -577,6 +577,7 @@ mod tests {
             css: None,
             encrypted: true,
             aacs_error: None,
+            css_error: None,
             content_format: ContentFormat::BdTs,
         }
     }

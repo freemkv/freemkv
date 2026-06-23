@@ -192,6 +192,7 @@
     "E7003": "Echec de la negociation AACS",
     "E7013": "Echec du dechiffrement",
     "E7022": "aucune cle trouvee pour le disque {hash} — dechiffrement impossible (cle absente du keydb).",
+    "E7023": "Clé de titre CSS du DVD introuvable — le disque est chiffré mais aucune clé n'a pu être récupérée pour ce titre. Déchiffrement impossible (la sortie serait inutilisable).",
     "E8000": "Impossible de se connecter au serveur KEYDB : {detail}",
     "E8001": "Echec du telechargement KEYDB (HTTP {detail})",
     "E8002": "KEYDB vide ou invalide",
@@ -204,8 +205,10 @@
     "E9003": "Chemin manquant dans l'URL : {detail}",
     "E9004": "Port manquant dans l'URL : {detail}",
     "E9007": "Image ISO trop volumineuse : {detail}",
+    "E9023": "Le mux n'a produit aucune image — la sortie serait un fichier vide, contenant uniquement l'en-tête. Rien n'a été décodé (entrée non déchiffrable ou aucune donnée lisible).",
     "title_out_of_range": "Titre {num} hors limites ({count})",
     "cannot_create_dir": "Impossible de créer le répertoire {path} : {error}",
-    "cannot_write": "Impossible d'écrire {path} : {error}"
+    "cannot_write": "Impossible d'écrire {path} : {error}",
+    "keyserver_url_rejected": "Erreur : URL du service de clés rejetée ({error}) — source de clés en ligne désactivée pour ce rip."
   }
 }

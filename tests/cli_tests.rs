@@ -91,9 +91,16 @@ fn bad_scheme_errors() {
         .expect("failed to run");
     assert!(!out.status.success());
     let combined = combined_output(&out);
+    // `fmt_err` now renders E9002 (StreamUrlInvalid) to its English locale
+    // string — NO raw `E9002` may reach the user (the "english errors" rule).
+    // The message names the offending URL.
     assert!(
-        combined.contains("E9002"),
-        "expected E9002, got: {combined}"
+        combined.contains("Invalid stream URL") && combined.contains("foo://bar"),
+        "expected the English E9002 message, got: {combined}"
+    );
+    assert!(
+        !combined.contains("E9002"),
+        "raw error code must not leak to the user, got: {combined}"
     );
 }
 
@@ -123,9 +130,15 @@ fn null_input_errors() {
         .expect("failed to run");
     assert!(!out.status.success());
     let combined = combined_output(&out);
+    // `fmt_err` now renders E9001 (StreamWriteOnly) to its English locale
+    // string — NO raw `E9001` may reach the user (the "english errors" rule).
     assert!(
-        combined.contains("E9001"),
-        "expected E9001, got: {combined}"
+        combined.contains("Stream is write-only"),
+        "expected the English E9001 message, got: {combined}"
+    );
+    assert!(
+        !combined.contains("E9001"),
+        "raw error code must not leak to the user, got: {combined}"
     );
 }
 

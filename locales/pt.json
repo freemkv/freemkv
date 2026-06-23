@@ -192,6 +192,7 @@
     "E7003": "Handshake AACS falhou",
     "E7013": "Descriptografia falhou",
     "E7022": "nenhuma chave encontrada para o disco {hash} — nao e possivel descriptografar (chave nao esta no keydb).",
+    "E7023": "Chave de título CSS do DVD não encontrada — o disco está cifrado mas não foi possível recuperar nenhuma chave para este título. Não é possível descriptografar (a saída seria lixo).",
     "E8000": "Nao foi possivel conectar ao servidor KEYDB: {detail}",
     "E8001": "Download do KEYDB falhou (HTTP {detail})",
     "E8002": "KEYDB vazio ou invalido",
@@ -204,8 +205,10 @@
     "E9003": "URL sem caminho: {detail}",
     "E9004": "URL sem porta: {detail}",
     "E9007": "Imagem ISO muito grande: {detail}",
+    "E9023": "O mux não produziu quadros — a saída seria um arquivo vazio, apenas com cabeçalho. Nada foi decodificado (entrada não descriptografável ou sem dados legíveis).",
     "title_out_of_range": "Título {num} fora do intervalo ({count})",
     "cannot_create_dir": "Não foi possível criar o diretório {path}: {error}",
-    "cannot_write": "Não foi possível gravar {path}: {error}"
+    "cannot_write": "Não foi possível gravar {path}: {error}",
+    "keyserver_url_rejected": "Erro: URL do serviço de chaves rejeitado ({error}) — fonte de chaves online desativada para esta cópia."
   }
 }

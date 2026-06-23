@@ -192,6 +192,7 @@
     "E7003": "Autenticación AACS falló",
     "E7013": "Descifrado falló",
     "E7022": "no se encontro clave para el disco {hash} — no se puede descifrar (clave no esta en keydb).",
+    "E7023": "No se encontró la clave de título CSS del DVD: el disco está cifrado pero no se pudo recuperar ninguna clave para este título. No se puede descifrar (la salida sería basura).",
     "E8000": "No se puede conectar al servidor KEYDB: {detail}",
     "E8001": "Descarga de KEYDB falló (HTTP {detail})",
     "E8002": "KEYDB está vacío o es inválido",
@@ -204,8 +205,10 @@
     "E9003": "URL sin ruta: {detail}",
     "E9004": "URL sin puerto: {detail}",
     "E9007": "Imagen ISO demasiado grande: {detail}",
+    "E9023": "El mux no produjo fotogramas: la salida sería un archivo vacío, solo con cabecera. No se decodificó nada (entrada no descifrable o sin datos legibles).",
     "title_out_of_range": "Título {num} fuera de rango ({count})",
     "cannot_create_dir": "No se puede crear el directorio {path}: {error}",
-    "cannot_write": "No se puede escribir {path}: {error}"
+    "cannot_write": "No se puede escribir {path}: {error}",
+    "keyserver_url_rejected": "Error: URL del servicio de claves rechazada ({error}) — fuente de claves en línea desactivada para esta copia."
   }
 }

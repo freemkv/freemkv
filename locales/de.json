@@ -192,6 +192,7 @@
     "E7003": "AACS-Handshake fehlgeschlagen",
     "E7013": "Entschluesselung fehlgeschlagen",
     "E7022": "kein Schluessel fuer Disc {hash} gefunden — Entschluesselung nicht moeglich (Schluessel nicht in keydb).",
+    "E7023": "DVD-CSS-Titelschlüssel nicht gefunden – die Disc ist verschlüsselt, aber für diesen Titel konnte kein Schlüssel ermittelt werden. Entschlüsselung nicht möglich (Ausgabe wäre unbrauchbar).",
     "E8000": "Verbindung zum KEYDB-Server nicht moeglich: {detail}",
     "E8001": "KEYDB-Download fehlgeschlagen (HTTP {detail})",
     "E8002": "KEYDB ist leer oder ungueltig",
@@ -204,8 +205,10 @@
     "E9003": "URL ohne Pfad: {detail}",
     "E9004": "URL ohne Port: {detail}",
     "E9007": "ISO-Abbild zu gross: {detail}",
+    "E9023": "Mux hat keine Frames erzeugt – die Ausgabe wäre eine leere Datei nur mit Kopfdaten. Es wurde nichts dekodiert (nicht entschlüsselbare Eingabe oder keine lesbaren Daten).",
     "title_out_of_range": "Titel {num} außerhalb des Bereichs ({count})",
     "cannot_create_dir": "Verzeichnis {path} kann nicht erstellt werden: {error}",
-    "cannot_write": "{path} kann nicht geschrieben werden: {error}"
+    "cannot_write": "{path} kann nicht geschrieben werden: {error}",
+    "keyserver_url_rejected": "Fehler: Schlüsseldienst-URL abgelehnt ({error}) — Online-Schlüsselquelle für diesen Rip deaktiviert."
   }
 }

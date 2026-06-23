@@ -192,6 +192,7 @@
     "E7003": "AACS handshake failed",
     "E7013": "Decryption failed",
     "E7022": "no key found for disc {hash} — cannot decrypt (key not in keydb).",
+    "E7023": "DVD CSS title key not found — the disc is scrambled but no key could be recovered for this title. Cannot decrypt (output would be garbage).",
     "E8000": "Cannot connect to KEYDB server: {detail}",
     "E8001": "KEYDB download failed (HTTP {detail})",
     "E8002": "KEYDB is empty or invalid",
@@ -204,8 +205,10 @@
     "E9003": "URL missing path: {detail}",
     "E9004": "URL missing port: {detail}",
     "E9007": "ISO image too large: {detail}",
+    "E9023": "Mux produced no frames — the output would be an empty, header-only file. Nothing was decoded (undecryptable input, or no readable data).",
     "title_out_of_range": "Title {num} out of range ({count})",
     "cannot_create_dir": "Cannot create directory {path}: {error}",
-    "cannot_write": "Cannot write {path}: {error}"
+    "cannot_write": "Cannot write {path}: {error}",
+    "keyserver_url_rejected": "Error: key-service URL rejected ({error}) — online key source disabled for this rip."
   }
 }
