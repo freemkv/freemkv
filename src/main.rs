@@ -26,29 +26,45 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 static LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuard> =
     std::sync::OnceLock::new();
 
-/// Initialise tracing. Always installs a subscriber, so `--log-level` and
-/// `--log-file` actually drive log output. Logs go to STDERR (stdout stays
-/// clean for `mkv://` / `m2ts://` piping); with `--log-file` a non-blocking
-/// file layer is added too.
+/// Default diagnostic log path when `--log-level` is given without an explicit
+/// `--log-file`. Written in the working directory, matching the fatal-error
+/// hint ("re-run with --log-level 3 (writes ./log.txt)").
+const DEFAULT_LOG_FILE: &str = "log.txt";
+
+/// Initialise tracing.
 ///
-/// Filter precedence: `RUST_LOG` wins if set; otherwise `--log-level N` maps
-/// 1→warn, 2→info, 3→debug, 4→trace for the `freemkv` and `libfreemkv`
-/// targets (everything else stays at error). Default level is 1.
+/// Two-channel design: the **terminal** (Channel 1) is always clean — curated
+/// progress, status, and the final result block only. **Zero `tracing`
+/// DEBUG/TRACE (or any tracing level) ever reaches the terminal.** Tracing is a
+/// diagnostic stream that only exists when the user explicitly asks for it, and
+/// it goes to a **file** (Channel 2), never stdout/stderr.
+///
+/// A file log is written only when one of these is set:
+///   * `--log-level N` — N maps 1→warn, 2→info, 3→debug, 4→trace for the
+///     `freemkv` / `libfreemkv` targets (everything else stays at error).
+///   * `--log-file PATH` — write to PATH (default level 3/debug if `--log-level`
+///     is absent, so a lone `--log-file` still captures useful detail).
+///   * `RUST_LOG` — power-user override of the filter; still file-only.
+///
+/// With none of these set, no subscriber is installed at all: the library's
+/// `tracing` events are dropped and the terminal stays pristine. The file
+/// destination defaults to `./log.txt`; ANSI is off and timestamps are on so
+/// the log is clean and copy-pasteable for a bug report.
 fn init_logging(args: &[String]) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{EnvFilter, fmt};
 
-    // `--log-level N` (1=warn, 2=info, 3=debug, 4=trace). Default 1. The
+    // Parse the two logging flags. `--log-level N` (1=warn..4=trace); the
     // per-subcommand parsers read the same flag to widen stdout detail at >=2.
-    let mut level_num = 1u8;
+    let mut level_num: Option<u8> = None;
     let mut log_file: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--log-level" => {
                 if let Some(n) = it.next().and_then(|s| s.parse::<u8>().ok()) {
-                    level_num = n.clamp(1, 4);
+                    level_num = Some(n.clamp(1, 4));
                 }
             }
             "--log-file" => {
@@ -60,10 +76,22 @@ fn init_logging(args: &[String]) {
         }
     }
 
-    let env_filter = if std::env::var("RUST_LOG").is_ok() {
+    let rust_log = std::env::var("RUST_LOG").is_ok();
+
+    // No `--log-level`, no `--log-file`, no `RUST_LOG`: the user didn't ask for
+    // a diagnostic log. Install NOTHING — the terminal stays clean and the
+    // library's tracing events are silently dropped. This is the common path.
+    if level_num.is_none() && log_file.is_none() && !rust_log {
+        return;
+    }
+
+    // A diagnostic log was requested. Build the filter: RUST_LOG wins; else map
+    // the numeric level (defaulting to debug when only `--log-file` was given,
+    // since the user clearly wants detail).
+    let env_filter = if rust_log {
         EnvFilter::from_default_env()
     } else {
-        let level = match level_num {
+        let level = match level_num.unwrap_or(3) {
             1 => "warn",
             2 => "info",
             3 => "debug",
@@ -72,32 +100,29 @@ fn init_logging(args: &[String]) {
         EnvFilter::new(format!("error,freemkv={level},libfreemkv={level}"))
     };
 
-    // STDERR layer — always. Keep stdout clean for stream piping.
-    let stderr_layer = fmt::layer().with_writer(std::io::stderr);
-
-    let registry = tracing_subscriber::registry()
+    // File-only sink. NEVER stdout/stderr — the terminal is Channel 1 and must
+    // stay free of tracing. Default to ./log.txt; ANSI off, timestamps on.
+    let path = log_file.unwrap_or_else(|| DEFAULT_LOG_FILE.to_string());
+    let p = std::path::Path::new(&path);
+    let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
+    let file_appender = match (dir, p.file_name()) {
+        (Some(dir), Some(name)) => tracing_appender::rolling::never(dir, name),
+        (None, Some(name)) => tracing_appender::rolling::never(".", name),
+        _ => {
+            // An invalid `--log-file` path is a fatal misconfiguration of the
+            // diagnostic channel — report it cleanly on the terminal (this is a
+            // CLI diagnostic, not a tracing event) and continue without a file.
+            eprintln!("--log-file: invalid path '{path}' — no diagnostic log written");
+            return;
+        }
+    };
+    let (nb, guard) = tracing_appender::non_blocking(file_appender);
+    let _ = LOG_GUARD.set(guard);
+    let file_layer = fmt::layer().with_ansi(false).with_writer(nb);
+    tracing_subscriber::registry()
         .with(env_filter)
-        .with(stderr_layer);
-
-    if let Some(path) = log_file {
-        let p = std::path::Path::new(&path);
-        let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
-        let file_appender = match (dir, p.file_name()) {
-            (Some(dir), Some(name)) => tracing_appender::rolling::never(dir, name),
-            (None, Some(name)) => tracing_appender::rolling::never(".", name),
-            _ => {
-                eprintln!("--log-file: invalid path '{path}'");
-                registry.init();
-                return;
-            }
-        };
-        let (nb, guard) = tracing_appender::non_blocking(file_appender);
-        let _ = LOG_GUARD.set(guard);
-        let file_layer = fmt::layer().with_ansi(false).with_writer(nb);
-        registry.with(file_layer).init();
-    } else {
-        registry.init();
-    }
+        .with(file_layer)
+        .init();
 }
 
 fn main() {
@@ -166,6 +191,10 @@ fn main() {
 
             if urls.len() == 2 {
                 if !pipe::run(&urls[0], &urls[1], &args[1..]) {
+                    // `pipe::run` has already printed the curated cause/result
+                    // on the terminal; exit non-zero so a scripted `$?` sees the
+                    // failure. (The pretty fatal block for cause-bearing errors
+                    // is emitted inside the rip path where the cause is known.)
                     std::process::exit(1);
                 }
             } else if urls.len() == 1 {
@@ -192,6 +221,46 @@ fn main() {
 /// True if `s` looks like a stream URL (`scheme://...`).
 fn is_url(s: &str) -> bool {
     s.contains("://")
+}
+
+/// Print the curated fatal-error block and exit non-zero.
+///
+/// This is the single terminal-facing error path (Channel 1). It prints a
+/// clean, localized block — never a raw error code, never a tracing event:
+/// ```text
+/// ✗ <operation> failed: <clean cause>.
+///   For a diagnostic log, re-run with --log-level 3 (writes ./log.txt).
+/// ```
+/// `op_key` is a locale key for the operation name (`error.op_rip`, etc.);
+/// `cause` is the already-localized, human-readable cause (typically from
+/// [`pipe::fmt_err`], which renders `E<code>` → a plain-English message with
+/// its own remediation). The diagnostic-log hint tells the user how to capture
+/// a file log for a bug report — without ever spilling tracing onto the
+/// terminal by default.
+///
+/// The block goes to STDERR so stdout stays pipe-clean for `mkv://`/`m2ts://`
+/// streaming; the leading mark is ANSI-free when stderr is redirected.
+fn fatal(op_key: &str, cause: &str) -> ! {
+    let op = strings::get(op_key);
+    eprintln!();
+    eprintln!(
+        "{} {}.",
+        fail_mark(),
+        strings::fmt("error.fatal_header", &[("op", &op), ("cause", cause)])
+    );
+    eprintln!("  {}", strings::get("error.fatal_diagnostic_hint"));
+    std::process::exit(1);
+}
+
+/// The leading mark for the fatal-error block: a red `✗` on a real terminal, a
+/// plain `x` when stderr is redirected to a file/pipe (so a pasted bug-report
+/// log has no stray ANSI/Unicode noise).
+fn fail_mark() -> &'static str {
+    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        "\x1b[31m✗\x1b[0m"
+    } else {
+        "x"
+    }
 }
 
 /// Split positional stream URLs out of an argument list, accounting for
@@ -285,10 +354,7 @@ fn info_cmd(args: &[String]) {
             let full = args[1..].iter().any(|a| a == "--full" || a == "-f");
             let mut reader = match libfreemkv::FileSectorSource::open(path) {
                 Ok(r) => r,
-                Err(e) => {
-                    eprintln!("{}", pipe::fmt_err(&e));
-                    std::process::exit(1);
-                }
+                Err(e) => fatal("error.op_info", &pipe::fmt_err(&e)),
             };
             let capacity =
                 <libfreemkv::FileSectorSource as libfreemkv::SectorSource>::capacity_sectors(
@@ -300,10 +366,7 @@ fn info_cmd(args: &[String]) {
                 &libfreemkv::ScanOptions::default(),
             ) {
                 Ok(d) => d,
-                Err(e) => {
-                    eprintln!("{}", pipe::fmt_err(&e));
-                    std::process::exit(1);
-                }
+                Err(e) => fatal("error.op_info", &pipe::fmt_err(&e)),
             };
             println!("freemkv {}", env!("CARGO_PKG_VERSION"));
             println!();
@@ -369,10 +432,7 @@ fn info_cmd(args: &[String]) {
                         }
                     }
                 }
-                Err(e) => {
-                    eprintln!("{}", pipe::fmt_err(&e));
-                    std::process::exit(1);
-                }
+                Err(e) => fatal("error.op_info", &pipe::fmt_err(&e)),
             }
         }
         libfreemkv::StreamUrl::Unknown { .. } => {
@@ -415,8 +475,8 @@ fn verify_cmd(args: &[String]) {
     let mut drive = match libfreemkv::Drive::open(&device) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("FAILED\n{}", e);
-            std::process::exit(1);
+            eprintln!("FAILED");
+            fatal("error.op_verify", &pipe::fmt_err(&e));
         }
     };
     // init()/probe_disc() are best-effort: many drives lack the firmware
@@ -434,13 +494,12 @@ fn verify_cmd(args: &[String]) {
     let disc = match libfreemkv::Disc::scan(&mut drive, &scan_opts) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("FAILED\n{}", e);
-            std::process::exit(1);
+            eprintln!("FAILED");
+            fatal("error.op_verify", &pipe::fmt_err(&e));
         }
     };
     if disc.titles.is_empty() {
-        eprintln!("No titles found");
-        std::process::exit(1);
+        fatal("error.op_verify", &strings::get("error.no_titles"));
     }
     let title = &disc.titles[0];
     let disc_name = disc.meta_title.as_deref().unwrap_or(&disc.volume_id);
@@ -703,10 +762,7 @@ fn update_keys(args: &[String]) {
                 )
             );
         }
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        }
+        Err(e) => fatal("error.op_update_keys", &pipe::fmt_err(&e)),
     }
 }
 
