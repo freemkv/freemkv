@@ -195,6 +195,7 @@
     "op_verify": "Verify",
     "op_update_keys": "Key update",
     "no_drive": "No BD drive found. Use --device /dev/sgN",
+    "open_failed": "Could not open drive {device}: {error}",
     "no_titles": "No titles found on the disc — it may be blank, unsupported, or not yet readable.",
     "scan_failed": "Scan failed: {detail}",
     "raw_mux_invalid": "Error: --raw cannot be used for muxing (mkv/m2ts) — encrypted data cannot be muxed. Use --raw only with an iso:// output (raw disc copy).",

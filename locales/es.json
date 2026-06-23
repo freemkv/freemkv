@@ -195,6 +195,7 @@
     "op_verify": "Verificación",
     "op_update_keys": "Actualización de claves",
     "no_drive": "No se encontró unidad BD. Use --device /dev/sgN",
+    "open_failed": "No se pudo abrir la unidad {device}: {error}",
     "no_titles": "No se encontraron títulos en el disco — puede estar en blanco, no ser compatible o aún no ser legible.",
     "scan_failed": "Escaneo falló: {detail}",
     "raw_mux_invalid": "Error: --raw no se puede usar para multiplexar (mkv/m2ts) — los datos cifrados no se pueden multiplexar. Use --raw solo con una salida iso:// (copia en bruto del disco).",

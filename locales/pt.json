@@ -195,6 +195,7 @@
     "op_verify": "Verificação",
     "op_update_keys": "Atualização de chaves",
     "no_drive": "Nenhum drive BD encontrado. Use --device /dev/sgN",
+    "open_failed": "Não foi possível abrir o drive {device}: {error}",
     "no_titles": "Nenhum título encontrado no disco — ele pode estar vazio, não ser suportado ou ainda não ser legível.",
     "scan_failed": "Escaneamento falhou: {detail}",
     "raw_mux_invalid": "Erro: --raw nao pode ser usado para muxar (mkv/m2ts) — dados criptografados nao podem ser muxados. Use --raw apenas com uma saida iso:// (copia bruta do disco).",

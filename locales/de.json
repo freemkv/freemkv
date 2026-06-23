@@ -195,6 +195,7 @@
     "op_verify": "Überprüfung",
     "op_update_keys": "Schlüssel-Update",
     "no_drive": "Kein BD-Laufwerk gefunden. Verwenden Sie --device /dev/sgN",
+    "open_failed": "Laufwerk {device} konnte nicht geöffnet werden: {error}",
     "no_titles": "Keine Titel auf der Disc gefunden — sie ist möglicherweise leer, nicht unterstützt oder noch nicht lesbar.",
     "scan_failed": "Scan fehlgeschlagen: {detail}",
     "raw_mux_invalid": "Fehler: --raw kann nicht zum Muxen (mkv/m2ts) verwendet werden — verschluesselte Daten koennen nicht gemuxt werden. Verwenden Sie --raw nur mit einer iso://-Ausgabe (Rohkopie der Disc).",

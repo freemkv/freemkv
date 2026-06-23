@@ -195,6 +195,7 @@
     "op_verify": "Verificatie",
     "op_update_keys": "Sleutelupdate",
     "no_drive": "Geen BD-drive gevonden. Gebruik --device /dev/sgN",
+    "open_failed": "Kan station {device} niet openen: {error}",
     "no_titles": "Geen titels op de schijf gevonden — deze is mogelijk leeg, niet ondersteund of nog niet leesbaar.",
     "scan_failed": "Scannen mislukt: {detail}",
     "raw_mux_invalid": "Fout: --raw kan niet worden gebruikt voor muxen (mkv/m2ts) — versleutelde data kan niet worden gemuxt. Gebruik --raw alleen met een iso://-uitvoer (ruwe schijfkopie).",

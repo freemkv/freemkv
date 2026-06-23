@@ -324,6 +324,46 @@ mod tests {
     }
 
     #[test]
+    fn open_failed_key_exists_and_fills_placeholders() {
+        // Regression: `error.open_failed` was referenced by the drive-info /
+        // CLI device-open path but never defined in any locale. A missing key
+        // makes `lookup` return the dotted path verbatim, so `fmt` had no
+        // `{device}`/`{error}` to substitute and the user saw the bare string
+        // "error.open_failed". Guard that the key exists with both placeholders.
+        let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
+        let val = lookup(&en, "error.open_failed");
+        assert_ne!(
+            val, "error.open_failed",
+            "error.open_failed missing from en.json (lookup returned the key verbatim)"
+        );
+        let ph = placeholders(&val);
+        assert!(
+            ph.contains(&"{device}".to_string()) && ph.contains(&"{error}".to_string()),
+            "error.open_failed must contain {{device}} and {{error}} placeholders, got: '{}'",
+            val
+        );
+
+        // And the full fmt() path produces a clean message with the values
+        // substituted and no leftover placeholders or bare key.
+        let out = fmt(
+            "error.open_failed",
+            &[("device", "/dev/sg0"), ("error", "permission denied")],
+        );
+        assert!(
+            out.contains("/dev/sg0"),
+            "device not substituted: '{}'",
+            out
+        );
+        assert!(
+            out.contains("permission denied"),
+            "error not substituted: '{}'",
+            out
+        );
+        assert!(!out.contains("{device}") && !out.contains("{error}"));
+        assert_ne!(out, "error.open_failed");
+    }
+
+    #[test]
     fn locale_es_loads() {
         verify_locale("es", LOCALE_ES);
     }

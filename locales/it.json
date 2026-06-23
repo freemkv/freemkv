@@ -195,6 +195,7 @@
     "op_verify": "Verifica",
     "op_update_keys": "Aggiornamento chiavi",
     "no_drive": "Nessun lettore BD trovato. Usa --device /dev/sgN",
+    "open_failed": "Impossibile aprire il lettore {device}: {error}",
     "no_titles": "Nessun titolo trovato sul disco — potrebbe essere vuoto, non supportato o non ancora leggibile.",
     "scan_failed": "Scansione fallita: {detail}",
     "raw_mux_invalid": "Errore: --raw non puo essere usato per il muxing (mkv/m2ts) — i dati cifrati non possono essere muxati. Usa --raw solo con un output iso:// (copia grezza del disco).",
