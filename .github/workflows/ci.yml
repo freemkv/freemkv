@@ -13,6 +13,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.86.0
         with:
           components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
 
@@ -21,6 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: Swatinem/rust-cache@v2
       - run: cargo test --tests
 
   check-windows:
@@ -28,4 +30,5 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: Swatinem/rust-cache@v2
       - run: cargo check
