@@ -66,7 +66,7 @@ jobs:
             asset: freemkv-aarch64-macos
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            asset: freemkv-x86_64-windows.exe
+            asset: freemkv-x86_64-windows.zip
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -126,10 +126,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/freemkv.exe" -DestinationPath "freemkv-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/freemkv.exe" -DestinationPath "freemkv-${{ matrix.target }}.zip"
-          # Plain, runnable binary asset.
-          Copy-Item "target/${{ matrix.target }}/release/freemkv.exe" "${{ matrix.asset }}"
+          # Windows ships as a .zip ONLY (no bare .exe). Versioned + unversioned,
+          # mirroring the Unix tarball convention; ${{ matrix.asset }} is the
+          # unversioned .zip the download page links.
+          Compress-Archive -Path "target/${{ matrix.target }}/release/freemkv.exe" -DestinationPath "freemkv-${{ github.ref_name }}-x86_64-windows.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/freemkv.exe" -DestinationPath "${{ matrix.asset }}"
           $h = Get-FileHash -Algorithm SHA256 "${{ matrix.asset }}"
           "$($h.Hash.ToLower())  ${{ matrix.asset }}" | Out-File -Encoding ascii "${{ matrix.asset }}.sha256"
 
