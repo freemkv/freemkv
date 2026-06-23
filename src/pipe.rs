@@ -62,12 +62,57 @@ extern "C" fn handle_sigint(_sig: libc::c_int) {
 /// (`E7022`, [`libfreemkv::Error::NoDiscKey`]) gets a dedicated message that
 /// names the disc by hash; everything else falls through to the generic
 /// wrapper.
-fn fmt_err(e: &dyn std::fmt::Display) -> String {
+pub fn fmt_err(e: &dyn std::fmt::Display) -> String {
     let s = e.to_string();
-    if let Some(rest) = s.strip_prefix("E7022:") {
-        return strings::fmt("error.E7022", &[("hash", rest.trim())]);
+    fmt_err_str(&s)
+}
+
+/// Render a libfreemkv `E<code>[: <data>]` Display string (or any string) into
+/// the user's language. The library emits errors as `E<code>` or
+/// `E<code>: <data>` (see libfreemkv `error.rs` Display) with NO English; the
+/// CLI owns all i18n. This parses the code, looks up `error.E<code>` in the
+/// locale table, and renders it — for ANY code that has a locale entry — so no
+/// raw `E####` ever reaches a user.
+///
+/// The data after the colon is passed as `{detail}` for the generic case, and
+/// E7022 additionally exposes its disc hash as `{hash}` (its locale string
+/// names the disc). A code with NO locale entry falls back to `error.generic`,
+/// which still echoes the raw `E<code>: <data>` inside a localized wrapper —
+/// the last-resort path, not the common one.
+fn fmt_err_str(s: &str) -> String {
+    if let Some((code_part, data)) = parse_error_code(s) {
+        let key = format!("error.{code_part}");
+        // `strings::get` returns the dotted path verbatim on a miss, so a
+        // present locale entry is one whose lookup does NOT equal its own key.
+        if strings::get(&key) != key {
+            // E7022 names the disc by hash; keep its dedicated placeholder.
+            if code_part == "E7022" {
+                return strings::fmt(&key, &[("hash", data), ("detail", data)]);
+            }
+            return strings::fmt(&key, &[("detail", data)]);
+        }
     }
-    strings::fmt("error.generic", &[("detail", &s)])
+    strings::fmt("error.generic", &[("detail", s)])
+}
+
+/// Parse a libfreemkv Display string of the form `E<code>` or
+/// `E<code>: <data>` into `("E<code>", "<data>")` (data empty when absent).
+/// Returns `None` for any string that isn't an `E<digits>` code (so arbitrary
+/// CLI error strings fall through to the generic wrapper unchanged).
+fn parse_error_code(s: &str) -> Option<(&str, &str)> {
+    let rest = s.strip_prefix('E')?;
+    // The code is the leading run of digits after 'E'.
+    let digits_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if digits_end == 0 {
+        return None; // "E" not followed by a digit — not a code.
+    }
+    let code = &s[..digits_end + 1]; // include the leading 'E'
+    let after = &s[digits_end + 1..];
+    // Data follows a ": " separator; absent for the bare `E<code>` form.
+    let data = after.strip_prefix(':').map(|d| d.trim()).unwrap_or("");
+    Some((code, data))
 }
 
 // ── CLI entry point ─────────────────────────────────────────────────────────
@@ -80,7 +125,33 @@ struct ParsedFlags {
     raw: bool,
     multipass: bool,
     keydb_path: Option<String>,
+    key_url: Option<String>,
+    key_auth: Option<String>,
     title_nums: Vec<usize>,
+}
+
+/// Where the CLI looks up AACS keys for a disc, assembled from the key flags.
+///
+/// libfreemkv does no lookup — the CLI resolves a [`libfreemkv::Key`] from these
+/// sources and hands it to `Disc::decrypt_with`. The sources are ordered
+/// **local-first**: a present keydb is consulted before the network, so an
+/// offline hit never makes a key-service round-trip. See [`build_key_sources`].
+#[derive(Default, Debug, Clone)]
+pub struct KeyConfig {
+    /// `-k`/`--keydb PATH` — local `keydb.cfg` (else the standard location).
+    keydb_path: Option<String>,
+    /// `--key-url URL` — remote key-service base URL (enables the online source).
+    key_url: Option<String>,
+    /// `--key-auth TOKEN` — bearer token sent to the key service (optional).
+    key_auth: Option<String>,
+}
+
+impl KeyConfig {
+    /// The keydb path as an `Option<String>`, for the drive-handshake host-cert
+    /// lookup (which always comes from a keydb, independent of the online source).
+    fn keydb_path(&self) -> &Option<String> {
+        &self.keydb_path
+    }
 }
 
 /// Parse rip flags, returning a clear error string on any misuse:
@@ -148,6 +219,47 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                     }
                 }
             }
+            // `--key-url URL` enables the online key service. The URL must not be
+            // a positional stream URL token (`scheme://...` other than http(s)) —
+            // but a key-service URL IS `https://…`, which `is_url_token` matches
+            // on "://". So accept it on its own merit: require an http(s) scheme
+            // here, and reject a missing value (next token is a flag, or absent).
+            "--key-url" => {
+                let flag = &args[i];
+                match args.get(i + 1) {
+                    Some(u) if is_keyserver_url(u) => {
+                        i += 1;
+                        f.key_url = Some(u.clone());
+                    }
+                    _ => {
+                        return Err(strings::fmt(
+                            "error.flag_needs_value",
+                            &[
+                                ("flag", flag),
+                                ("example", "--key-url https://keys.example/keys"),
+                            ],
+                        ));
+                    }
+                }
+            }
+            // `--key-auth TOKEN` — bearer token for the key service. A token is an
+            // opaque string, not a URL; reject only a missing value (a following
+            // stream-URL token means the token was omitted).
+            "--key-auth" => {
+                let flag = &args[i];
+                match args.get(i + 1) {
+                    Some(t) if !is_url_token(t) => {
+                        i += 1;
+                        f.key_auth = Some(t.clone());
+                    }
+                    _ => {
+                        return Err(strings::fmt(
+                            "error.flag_needs_value",
+                            &[("flag", flag), ("example", "--key-auth TOKEN")],
+                        ));
+                    }
+                }
+            }
             // An unrecognized dash-prefixed token is a typo (`--titel`,
             // `--qiet`), not something to silently ignore — the default would
             // be used and the rip would exit 0 having done the wrong thing.
@@ -188,8 +300,16 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         raw,
         multipass,
         keydb_path,
+        key_url,
+        key_auth,
         title_nums,
     } = flags;
+
+    let keys = KeyConfig {
+        keydb_path,
+        key_url,
+        key_auth,
+    };
 
     let out = Output::new(verbose, quiet);
 
@@ -232,7 +352,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
             libfreemkv::StreamUrl::Iso { .. } | libfreemkv::StreamUrl::Null
         )
     {
-        return disc_to_iso(source, dest, &keydb_path, raw, multipass, &out);
+        return disc_to_iso(source, dest, &keys, raw, multipass, &out);
     }
 
     // Everything else: figure out titles, pipe each one
@@ -252,7 +372,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     let titles = if is_disc {
         None
     } else {
-        scan_titles(source, &keydb_path)
+        scan_titles(source, &keys)
     };
     let is_dir_dest = dest.ends_with('/') || std::path::Path::new(parsed_dest.path_str()).is_dir();
 
@@ -299,7 +419,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     let iso_unit_keys = if is_disc {
         Vec::new()
     } else {
-        resolve_iso_unit_keys(source, &keydb_path)
+        resolve_iso_unit_keys(source, &keys, &out)
     };
 
     for (title_idx, dest_url) in &jobs {
@@ -343,7 +463,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                 source,
                 dest_url,
                 title_idx.unwrap_or(0),
-                &keydb_path,
+                &keys,
                 raw,
                 multipass,
                 &out,
@@ -494,11 +614,7 @@ fn keyless_scan_opts() -> libfreemkv::ScanOptions {
 /// A locked drive needs the cert to read its Volume ID; an unlocked / LibreDrive
 /// drive takes the OEM path and ignores them. ISO scans use [`keyless_scan_opts`].
 fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOptions {
-    let path = keydb_path
-        .clone()
-        .map(std::path::PathBuf::from)
-        .or_else(|| libfreemkv::keydb::default_path().ok())
-        .unwrap_or_else(|| std::path::PathBuf::from("keydb.cfg"));
+    let path = resolved_keydb_path(keydb_path);
     let host_certs = freemkv_keysources::KeydbSource::new(path).host_certs();
     let credentials =
         (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs });
@@ -512,7 +628,7 @@ fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOptions {
 /// `decrypt_with`. libfreemkv does no lookup, so the CLI resolves here and the
 /// keys ride into each title's stream. Empty for an unencrypted ISO or when no
 /// key resolves.
-fn resolve_iso_unit_keys(source: &str, keydb_path: &Option<String>) -> Vec<(u32, [u8; 16])> {
+fn resolve_iso_unit_keys(source: &str, keys: &KeyConfig, out: &Output) -> Vec<(u32, [u8; 16])> {
     let path = match libfreemkv::parse_url(source) {
         libfreemkv::StreamUrl::Iso { path } => path,
         _ => return Vec::new(),
@@ -535,7 +651,7 @@ fn resolve_iso_unit_keys(source: &str, keydb_path: &Option<String>) -> Vec<(u32,
         .cloned()
         .map(|t| freemkv_keysources::read_sample_units(&mut reader, &t, SAMPLE_UNITS))
         .unwrap_or_default();
-    apply_local_key(&mut disc, keydb_path, samples);
+    apply_keys(&mut disc, keys, samples, out);
     match disc.decrypt_keys() {
         libfreemkv::DecryptKeys::Aacs { unit_keys, .. } => unit_keys,
         _ => Vec::new(),
@@ -545,37 +661,109 @@ fn resolve_iso_unit_keys(source: &str, keydb_path: &Option<String>) -> Vec<(u32,
 /// How many encrypted aligned units to sample for key validation.
 const SAMPLE_UNITS: usize = 4;
 
-/// Resolve an AACS key for a keyless-scanned `disc` from the local keydb and
-/// apply it via `Disc::decrypt_with`. No-op for an unencrypted disc (no AACS
-/// inputs). The CLI is keydb-only; the keydb hands its candidates out UK-first
-/// and the shared loop keeps the first whose key actually decrypts a `samples`
-/// unit (a wrong candidate is rejected and the next tried). `--keydb <path>`
-/// overrides the default location.
-fn apply_local_key(
-    disc: &mut libfreemkv::Disc,
-    keydb_path: &Option<String>,
-    samples: Vec<Vec<u8>>,
-) {
+/// The keydb path to use: `--keydb <path>` if given; else the first
+/// per-OS search location that exists (Windows `%APPDATA%\freemkv\keydb.cfg`
+/// then the legacy `.config` dotfolder; Linux/macOS `~/.config/freemkv/keydb.cfg`),
+/// else the canonical default location for that OS, else a bare `keydb.cfg`
+/// in the cwd. The search/default policy lives in `freemkv-keysources`.
+fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::PathBuf {
+    keydb_path
+        .clone()
+        .map(std::path::PathBuf::from)
+        .or_else(freemkv_keysources::existing_keydb_path)
+        .or_else(freemkv_keysources::default_keydb_path)
+        .unwrap_or_else(|| std::path::PathBuf::from("keydb.cfg"))
+}
+
+/// Build the ordered `KeySource` list from the key flags, **local-first**:
+///
+/// - `--key-url` only → `[OnlineSource]` (no keydb consulted).
+/// - `--keydb` only / neither → `[KeydbSource]` (the standard CLI behaviour;
+///   "neither" still uses the default keydb location).
+/// - both → `[KeydbSource, OnlineSource]` — a local keydb hit wins and never
+///   makes a network round-trip; the service is the fallback.
+///
+/// `--key-url` is SSRF-validated (via the shared
+/// [`freemkv_keysources::validate_keyserver_url`]) before the online source is
+/// added; a rejected URL prints a warning and the online source is dropped (the
+/// keydb, if any, still applies) rather than POSTing key material to an
+/// internal/metadata host.
+fn build_key_sources(
+    keys: &KeyConfig,
+    out: &Output,
+) -> Vec<Box<dyn freemkv_keysources::KeySource>> {
+    let mut sources: Vec<Box<dyn freemkv_keysources::KeySource>> = Vec::new();
+
+    // Local keydb is added whenever the user didn't ask for online-only. (An
+    // explicit --keydb, or no key flags at all, both want the keydb.)
+    let online_only = keys.key_url.is_some() && keys.keydb_path.is_none();
+    if !online_only {
+        sources.push(Box::new(freemkv_keysources::KeydbSource::new(
+            resolved_keydb_path(&keys.keydb_path),
+        )));
+    }
+
+    if let Some(url) = &keys.key_url {
+        match freemkv_keysources::validate_keyserver_url(url) {
+            Ok(()) => sources.push(Box::new(freemkv_keysources::OnlineSource::new(
+                url.clone(),
+                keys.key_auth.clone().unwrap_or_default(),
+            ))),
+            Err(e) => {
+                out.raw(
+                    Normal,
+                    &strings::fmt("error.keyserver_url_rejected", &[("error", &e)]),
+                );
+            }
+        }
+    }
+    sources
+}
+
+/// Resolve an AACS key for a keyless-scanned `disc` from the configured sources
+/// and apply it via `Disc::decrypt_with`. No-op for an unencrypted disc (no AACS
+/// inputs). Each source hands its candidates out best-first and the shared loop
+/// keeps the first whose key actually decrypts a `samples` unit (a wrong
+/// candidate is rejected and the next tried). Sources are local-first — see
+/// [`build_key_sources`].
+fn apply_keys(disc: &mut libfreemkv::Disc, keys: &KeyConfig, samples: Vec<Vec<u8>>, out: &Output) {
     let Some(mut inputs) = disc.inputs() else {
         return; // not AACS-encrypted (or no inputs captured)
     };
     inputs.samples = samples;
-    let path = keydb_path
-        .clone()
-        .map(std::path::PathBuf::from)
-        .or_else(|| libfreemkv::keydb::default_path().ok())
-        .unwrap_or_else(|| std::path::PathBuf::from("keydb.cfg"));
-    let sources: Vec<Box<dyn freemkv_keysources::KeySource>> =
-        vec![Box::new(freemkv_keysources::KeydbSource::new(path))];
+    let sources = build_key_sources(keys, out);
     let mut sources = freemkv_keysources::MultiSource::new(sources);
     freemkv_keysources::resolve_and_apply(&mut sources, &inputs, disc);
+}
+
+/// Live-disc analogue of libfreemkv's `mux::resolve::aacs_key_missing`.
+/// Returns `true` when decryption is requested (`!raw`), the disc is
+/// AACS-encrypted (`has_aacs`), and key resolution yielded no usable key
+/// (`DecryptKeys::None`). In that case `pipe_disc` fails fast with
+/// `Error::NoDiscKey` rather than streaming ciphertext that muxes to garbage.
+/// `--raw` and non-AACS discs (incl. CSS DVDs, which resolve to `Css{..}`)
+/// always return `false`.
+fn disc_aacs_key_missing(raw: bool, has_aacs: bool, keys: &libfreemkv::DecryptKeys) -> bool {
+    !raw && has_aacs && matches!(keys, libfreemkv::DecryptKeys::None)
+}
+
+/// Live-disc analogue of libfreemkv's `mux::resolve::css_key_missing`.
+/// Returns `true` when decryption is requested (`!raw`), the disc is
+/// CSS-encrypted (`has_css`), and per-title key resolution yielded no usable
+/// key (`DecryptKeys::None` — e.g. a multi-VTS DVD whose chosen title's VTS
+/// could not be re-cracked). In that case `pipe_disc` fails fast with
+/// `Error::CssKeyMissing` rather than streaming scrambled MPEG that muxes to
+/// garbage. `--raw` and non-CSS discs (AACS resolves to `Aacs{..}`,
+/// unencrypted has no `disc.css`) always return `false`.
+fn disc_css_key_missing(raw: bool, has_css: bool, keys: &libfreemkv::DecryptKeys) -> bool {
+    !raw && has_css && matches!(keys, libfreemkv::DecryptKeys::None)
 }
 
 fn pipe_disc(
     source: &str,
     dest: &str,
     title_idx: usize,
-    keydb_path: &Option<String>,
+    keys: &KeyConfig,
     raw: bool,
     _multipass: bool,
     out: &Output,
@@ -604,9 +792,9 @@ fn pipe_disc(
     // and lets the stream drop, so the common interrupt case unlocks the tray.
     drive.lock_tray();
 
-    let mut disc = libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keydb_path))
+    let mut disc = libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keys.keydb_path()))
         .map_err(|e| format!("{}", e))?;
-    // Sample encrypted units from the largest title to validate the keydb key
+    // Sample encrypted units from the largest title to validate the resolved key
     // against real ciphertext before muxing.
     let samples = disc
         .titles
@@ -615,7 +803,7 @@ fn pipe_disc(
         .cloned()
         .map(|t| freemkv_keysources::read_sample_units(&mut drive, &t, SAMPLE_UNITS))
         .unwrap_or_default();
-    apply_local_key(&mut disc, keydb_path, samples);
+    apply_keys(&mut disc, keys, samples, out);
 
     if title_idx >= disc.titles.len() {
         return Err(strings::fmt(
@@ -627,9 +815,62 @@ fn pipe_disc(
         ));
     }
 
+    // CSS scrambled-but-uncracked gate (Fix 6): the scan saw scrambled sectors
+    // but recovered no title key (`disc.css` is None yet `disc.css_error` is
+    // set). The disc IS encrypted; muxing would pass scrambled MPEG through as
+    // plaintext (garbage at exit 0). Fail loudly. `--raw` skips decryption.
+    if !raw && disc.css_error.is_some() {
+        return Err(libfreemkv::Error::CssKeyMissing.to_string());
+    }
+
     let title = disc.titles[title_idx].clone();
-    let keys = disc.decrypt_keys();
     let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
+
+    // Per-title key resolution (Theme B fix, mirrors the ISO path in
+    // libfreemkv mux/resolve.rs:321-331). The disc-wide `decrypt_keys()`
+    // carries the single key the scan cracked — but on a multi-VTS CSS DVD
+    // a non-main-VTS `-t N` lives in a different VTS with a DIFFERENT
+    // per-VTS title key, so the disc-wide key descrambles it to GARBAGE at
+    // exit 0. `decrypt_keys_for_title` re-cracks from the chosen title's
+    // own extents when it doesn't overlap the cracked span, and returns
+    // `DecryptKeys::None` (never the wrong key) when that re-crack misses.
+    //
+    // The re-crack reads sectors off the live `drive` (a `SectorSource`),
+    // which is still owned here — it is only moved into `DiscStream` below.
+    // For AACS / single-VTS / unencrypted discs `decrypt_keys_for_title`
+    // short-circuits to `decrypt_keys()`, so this is a no-op on those paths.
+    let keys = disc.decrypt_keys_for_title(title_idx, &mut drive, batch);
+
+    // CSS no-key gate (parallel to the AACS gate below; mirrors the ISO
+    // path's `css_key_missing` at mux/resolve.rs:329). On a CSS DVD whose
+    // chosen title's VTS could not be re-cracked, `keys` is
+    // `DecryptKeys::None`; muxing that would pass scrambled MPEG through as
+    // plaintext (garbage at exit 0). Fail loudly with `Error::CssKeyMissing`
+    // instead. `--raw` skips decryption so it is never gated; non-CSS discs
+    // (AACS resolves to `Aacs{..}`, unencrypted has no `disc.css`) don't fire.
+    if disc_css_key_missing(raw, disc.css.is_some(), &keys) {
+        return Err(libfreemkv::Error::CssKeyMissing.to_string());
+    }
+
+    // No-key guard (mirrors the ISO-path gate in libfreemkv mux/resolve.rs):
+    // if decryption is wanted (not --raw) and the disc is AACS-encrypted but key
+    // resolution yielded no usable key, FAIL here. Without this the live disc://
+    // path passes `DecryptKeys::None` into `DiscStream`, which then passes
+    // ciphertext through unchanged — the demuxer sees no TS syncs, emits nothing,
+    // and we write an empty/garbage MKV and exit 0 with no message. Return the
+    // `Error::NoDiscKey` Display (`E7022[: <hash>]`) so the caller's `fmt_err`
+    // renders "no KEYDB.cfg found / no key for disc" and the exit code is nonzero.
+    // CSS DVDs resolve to `DecryptKeys::Css{..}` (never `None`), so this is
+    // AACS-only via `disc.aacs`.
+    if disc_aacs_key_missing(raw, disc.aacs.is_some(), &keys) {
+        let disc_hash = disc
+            .aacs
+            .as_ref()
+            .map(|a| a.disc_hash.trim_start_matches("0x").to_string())
+            .unwrap_or_default();
+        return Err(libfreemkv::Error::NoDiscKey { disc_hash }.to_string());
+    }
+
     let format = disc.content_format;
 
     let mut input = libfreemkv::DiscStream::new(Box::new(drive), title, keys, batch, format);
@@ -716,10 +957,41 @@ fn pipe_disc(
         return Err(interrupted_error(out));
     }
 
+    // Zero-output guard (Theme A): a natural drain that wrote no streams / no
+    // frame bytes must NOT be finalized and reported "Complete" — that is the
+    // empty/garbage-output silent failure (undecryptable input → demuxer emits
+    // nothing). Surface `Error::NoStreams` (as the ISO path does at libfreemkv
+    // mux/resolve.rs:305) so the exit code is nonzero and the user sees a
+    // localized message instead of a header-only "success".
+    if !mux_produced_output(info.streams.len(), output.bytes_written()) {
+        return Err(libfreemkv::Error::NoStreams.to_string());
+    }
+
     output.finish().map_err(|e| format!("{}", e))?;
 
     print_completion_summary(out, output.bytes_written(), start);
     Ok(())
+}
+
+/// Minimum plausible PES-frame payload for a non-empty mux. `CountingStream`
+/// counts only the bytes of `PesFrame.data` actually handed to the sink, so a
+/// successful mux of even one tiny audio frame clears this. A value of 0 means
+/// the frame loop drained on the first `Ok(None)` having written nothing —
+/// the symptom of undecryptable/empty input (no TS syncs → demuxer emits
+/// nothing). We require strictly more than zero rather than a header threshold
+/// because `bytes_written()` is frame-payload bytes (not container bytes), so
+/// even a 1-byte payload is real media and any container header is not counted.
+const MIN_MUX_PAYLOAD_BYTES: u64 = 1;
+
+/// Whether a completed mux actually produced output, the guard both pipe paths
+/// run before declaring success (Theme A). A "natural drain" (`Ok(None)` on the
+/// first read) followed by `output.finish()` + a "Complete" summary must NOT be
+/// reported as success when the title carried no streams OR not a single frame
+/// payload byte reached the sink — that is the zero-output / undecryptable-input
+/// silent failure. Returns `false` (→ caller errors, nonzero exit) in those
+/// cases; `true` only when there is at least one stream and ≥1 payload byte.
+fn mux_produced_output(num_streams: usize, bytes_written: u64) -> bool {
+    num_streams > 0 && bytes_written >= MIN_MUX_PAYLOAD_BYTES
 }
 
 /// Print the interrupt notice and return the error string both pipe paths use
@@ -827,6 +1099,16 @@ fn pipe(
         return Err(interrupted_error(out));
     }
 
+    // Zero-output guard (Theme A): a natural drain that wrote no streams / no
+    // frame bytes must NOT be finalized and reported "Complete" — that is the
+    // empty/garbage-output silent failure (undecryptable input → demuxer emits
+    // nothing). Surface `Error::NoStreams` (as the ISO path does at libfreemkv
+    // mux/resolve.rs:305) so the exit code is nonzero and the user sees a
+    // localized message instead of a header-only "success".
+    if !mux_produced_output(info.streams.len(), output.bytes_written()) {
+        return Err(libfreemkv::Error::NoStreams.to_string());
+    }
+
     output.finish().map_err(|e| format!("{}", e))?;
 
     print_completion_summary(out, output.bytes_written(), start);
@@ -841,7 +1123,7 @@ fn pipe(
 fn disc_to_iso(
     source: &str,
     dest: &str,
-    keydb_path: &Option<String>,
+    keys: &KeyConfig,
     raw: bool,
     multipass: bool,
     out: &Output,
@@ -879,7 +1161,7 @@ fn disc_to_iso(
     // the scan below re-derives what it needs, so its result stays discarded.
     let _ = drive.probe_disc();
 
-    let mut disc = match libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keydb_path)) {
+    let mut disc = match libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keys.keydb_path())) {
         Ok(d) => d,
         Err(e) => {
             out.raw(
@@ -891,7 +1173,7 @@ fn disc_to_iso(
     };
     // Resolve + apply the AACS key so the keys persist in the mapfile during
     // disc→ISO copy (the mux step reads them back to decrypt). Sample encrypted
-    // units first so the keydb key is validated against real ciphertext.
+    // units first so the resolved key is validated against real ciphertext.
     let samples = disc
         .titles
         .iter()
@@ -899,7 +1181,7 @@ fn disc_to_iso(
         .cloned()
         .map(|t| freemkv_keysources::read_sample_units(&mut drive, &t, SAMPLE_UNITS))
         .unwrap_or_default();
-    apply_local_key(&mut disc, keydb_path, samples);
+    apply_keys(&mut disc, keys, samples, out);
 
     let disc_name = sanitize_name(disc.meta_title.as_deref().unwrap_or(&disc.volume_id));
     let (iso_path, is_null) = match &parsed_dest {
@@ -1080,7 +1362,7 @@ fn disc_to_iso(
 
 /// Scan any source for its title list. Returns None if source has no titles
 /// (e.g. a single M2TS file, network stream).
-fn scan_titles(source: &str, keydb_path: &Option<String>) -> Option<Vec<libfreemkv::DiscTitle>> {
+fn scan_titles(source: &str, keys: &KeyConfig) -> Option<Vec<libfreemkv::DiscTitle>> {
     let parsed = libfreemkv::parse_url(source);
 
     match parsed {
@@ -1106,7 +1388,8 @@ fn scan_titles(source: &str, keydb_path: &Option<String>) -> Option<Vec<libfreem
             // the scan below re-derives what it needs, so its result stays dropped.
             let _ = drive.probe_disc();
             // Live drive may be locked → supply handshake credentials.
-            let disc = libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keydb_path)).ok()?;
+            let disc =
+                libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keys.keydb_path())).ok()?;
             Some(disc.titles)
         }
         _ => None,
@@ -1376,6 +1659,16 @@ fn is_url_token(s: &str) -> bool {
     s.contains("://")
 }
 
+/// Whether a token is a plausible key-service URL value for `--key-url` — i.e.
+/// an `http(s)://` URL. This is the gate that lets `--key-url https://…` accept
+/// its value (which `is_url_token` would otherwise treat as a positional stream
+/// URL) while still rejecting a missing value (a following flag, or a stream
+/// URL with a non-http scheme like `disc://`). The full SSRF/host validation is
+/// `freemkv_keysources::validate_keyserver_url`, applied at source-build time.
+fn is_keyserver_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
 /// The `Disc::copy` progress callback returns `true` to continue, `false` to
 /// halt. Halt the moment SIGINT was seen so the first Ctrl-C stops the copy
 /// cleanly (letting the tray unlock on drop) instead of being ignored.
@@ -1426,10 +1719,214 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_jobs, copy_should_continue, is_url_token, mux_was_interrupted, parse_flags,
-        title_in_range,
+        KeyConfig, build_jobs, build_key_sources, copy_should_continue, disc_aacs_key_missing,
+        disc_css_key_missing, fmt_err_str, is_keyserver_url, is_url_token, mux_produced_output,
+        mux_was_interrupted, parse_error_code, parse_flags, title_in_range,
     };
     use crate::output::Output;
+
+    /// The silent-failure gate (Fix 1): an AACS disc whose key resolution
+    /// yielded `DecryptKeys::None` must be flagged so `pipe_disc` returns
+    /// `Error::NoDiscKey` (E7022 + nonzero exit) instead of streaming
+    /// ciphertext into an empty/garbage MKV at exit 0.
+    #[test]
+    fn aacs_disc_with_no_key_is_flagged() {
+        assert!(
+            disc_aacs_key_missing(false, true, &libfreemkv::DecryptKeys::None),
+            "AACS disc + no key (not --raw) must trip the no-key gate"
+        );
+    }
+
+    /// `--raw` deliberately skips decryption — no key needed, never gated.
+    #[test]
+    fn raw_disc_is_never_gated() {
+        assert!(
+            !disc_aacs_key_missing(true, true, &libfreemkv::DecryptKeys::None),
+            "--raw must bypass the no-key gate even with no key"
+        );
+    }
+
+    /// A non-AACS disc (unencrypted, or a CSS DVD) legitimately has no AACS
+    /// key — it must not be gated.
+    #[test]
+    fn non_aacs_disc_is_never_gated() {
+        assert!(
+            !disc_aacs_key_missing(false, false, &libfreemkv::DecryptKeys::None),
+            "a disc with no AACS state must not be gated"
+        );
+    }
+
+    // ── CSS per-title no-key gate (Theme B fix #5) ──────────────────────────
+
+    /// A CSS DVD whose chosen title's per-VTS key could not be re-cracked
+    /// (`decrypt_keys_for_title` → None) must trip the gate so `pipe_disc`
+    /// returns `Error::CssKeyMissing` instead of streaming scrambled MPEG
+    /// (garbage at exit 0).
+    #[test]
+    fn css_disc_with_no_title_key_is_flagged() {
+        assert!(
+            disc_css_key_missing(false, true, &libfreemkv::DecryptKeys::None),
+            "CSS disc + no per-title key (not --raw) must trip the gate"
+        );
+    }
+
+    /// A CSS disc WITH a resolved title key proceeds.
+    #[test]
+    fn css_disc_with_key_is_not_flagged() {
+        let css = libfreemkv::DecryptKeys::Css {
+            title_key: [0u8; 5],
+        };
+        assert!(
+            !disc_css_key_missing(false, true, &css),
+            "a resolved CSS title key must not be gated"
+        );
+    }
+
+    /// `--raw` skips decryption — the CSS gate never fires.
+    #[test]
+    fn css_raw_disc_is_never_gated() {
+        assert!(
+            !disc_css_key_missing(true, true, &libfreemkv::DecryptKeys::None),
+            "--raw must bypass the CSS no-key gate"
+        );
+    }
+
+    /// A non-CSS disc (AACS or unencrypted) never trips the CSS gate.
+    #[test]
+    fn non_css_disc_is_never_gated() {
+        assert!(
+            !disc_css_key_missing(false, false, &libfreemkv::DecryptKeys::None),
+            "a disc with no CSS state must not be CSS-gated"
+        );
+    }
+
+    // ── zero-output guard (Theme A fix #1/#2) ───────────────────────────────
+
+    /// The success guard both pipe paths run before `output.finish()` +
+    /// "Complete": a drain that wrote no streams OR no frame bytes must be
+    /// reported as NOT produced (→ caller errors with NoStreams, nonzero
+    /// exit), never finalized as an empty/garbage "success".
+    #[test]
+    fn mux_produced_output_requires_streams_and_bytes() {
+        // Real output: at least one stream AND ≥1 payload byte.
+        assert!(mux_produced_output(2, 1));
+        assert!(mux_produced_output(1, 5_000_000));
+        // Zero streams → never produced (even if some bytes somehow counted).
+        assert!(!mux_produced_output(0, 0));
+        assert!(!mux_produced_output(0, 1000));
+        // Zero bytes written → never produced (the natural-drain-on-first-None
+        // empty-output silent failure).
+        assert!(!mux_produced_output(3, 0));
+    }
+
+    // ── fmt_err generalization (english errors for ALL codes) ───────────────
+
+    /// `parse_error_code` splits the libfreemkv `E<code>[: <data>]` Display
+    /// form into the code token and its trailing data.
+    #[test]
+    fn parse_error_code_splits_code_and_data() {
+        assert_eq!(parse_error_code("E6009"), Some(("E6009", "")));
+        assert_eq!(parse_error_code("E7022: abcdef"), Some(("E7022", "abcdef")));
+        assert_eq!(parse_error_code("E5000: 13"), Some(("E5000", "13")));
+        // Not an E-code: returns None (falls through to the generic wrapper).
+        assert_eq!(parse_error_code("No drive found"), None);
+        assert_eq!(parse_error_code("Error: boom"), None);
+        assert_eq!(parse_error_code("E"), None);
+        assert_eq!(parse_error_code("Eabc"), None);
+    }
+
+    /// A representative sample of codes must render to their ENGLISH locale
+    /// strings — NO raw `E####` may reach the user. This is the core of the
+    /// "english errors for all codes" requirement.
+    #[test]
+    fn fmt_err_renders_codes_to_english() {
+        // E6009 NoStreams — the Theme A zero-output error.
+        let s = fmt_err_str("E6009");
+        assert_eq!(s, "No streams found");
+        assert!(!s.contains("E6009"), "raw code leaked: {s}");
+
+        // E7023 CssKeyMissing — the Theme B CSS gate error (new locale entry).
+        let s = fmt_err_str("E7023");
+        assert!(s.to_lowercase().contains("css"), "got: {s}");
+        assert!(!s.contains("E7023"), "raw code leaked: {s}");
+
+        // E9023 MuxEmpty — the Theme A m2ts zero-frame error (new locale entry).
+        let s = fmt_err_str("E9023");
+        assert!(s.to_lowercase().contains("mux"), "got: {s}");
+        assert!(!s.contains("E9023"), "raw code leaked: {s}");
+
+        // E5000 with data → {detail} substituted, raw code gone.
+        let s = fmt_err_str("E5000: 13");
+        assert!(s.contains("13"), "detail not substituted: {s}");
+        assert!(!s.contains("E5000"), "raw code leaked: {s}");
+
+        // E7013 Decryption failed.
+        assert_eq!(fmt_err_str("E7013"), "Decryption failed");
+
+        // E7022 names the disc by hash.
+        let s = fmt_err_str("E7022: deadbeef");
+        assert!(s.contains("deadbeef"), "hash not substituted: {s}");
+        assert!(!s.contains("E7022"), "raw code leaked: {s}");
+    }
+
+    /// A code with NO locale entry falls back to the generic wrapper (which
+    /// still localizes the surround) rather than printing a bare code — but it
+    /// is the last resort, not the common path.
+    #[test]
+    fn fmt_err_unknown_code_uses_generic_wrapper() {
+        // E1234 has no locale entry; the generic wrapper echoes the raw form
+        // inside "Error: {detail}".
+        let s = fmt_err_str("E1234: whatever");
+        assert!(s.starts_with("Error:"), "got: {s}");
+        assert!(
+            s.contains("E1234"),
+            "generic wrapper keeps the raw detail: {s}"
+        );
+    }
+
+    /// A non-code error string (e.g. a CLI-side message) passes through the
+    /// generic wrapper unchanged.
+    #[test]
+    fn fmt_err_non_code_string_uses_generic() {
+        let s = fmt_err_str("No BD drive found");
+        assert_eq!(s, "Error: No BD drive found");
+    }
+
+    // ── negative path: no-keydb AACS disc → E7022 surfaced in English ───────
+
+    /// End-to-end negative-path coverage: an AACS disc with no usable key (no
+    /// keydb / disc hash not in keydb) trips `disc_aacs_key_missing`, which
+    /// makes `pipe_disc` return `Error::NoDiscKey`'s Display (`E7022[: hash]`).
+    /// That string must render to the ENGLISH E7022 message via `fmt_err` (so
+    /// the user never sees a raw `E7022`) AND `run()` propagates the Err to a
+    /// nonzero exit. Here we assert the gate + the message; the exit-code wiring
+    /// is exercised by `run()` returning `false` on any `pipe_disc` Err.
+    #[test]
+    fn no_keydb_aacs_disc_surfaces_e7022_in_english() {
+        // The gate fires for an AACS disc with no key (not --raw).
+        assert!(disc_aacs_key_missing(
+            false,
+            true,
+            &libfreemkv::DecryptKeys::None
+        ));
+        // The error pipe_disc returns, rendered for the user.
+        let disp = libfreemkv::Error::NoDiscKey {
+            disc_hash: "deadbeefcafe".to_string(),
+        }
+        .to_string();
+        assert!(
+            disp.starts_with("E7022"),
+            "library Display is E7022: {disp}"
+        );
+        let rendered = fmt_err_str(&disp);
+        // English, names the disc by hash, no raw code leaked.
+        assert!(rendered.contains("deadbeefcafe"), "hash named: {rendered}");
+        assert!(!rendered.contains("E7022"), "raw code leaked: {rendered}");
+        assert!(
+            rendered.to_lowercase().contains("key"),
+            "english key message: {rendered}"
+        );
+    }
 
     #[test]
     fn copy_halts_on_first_interrupt() {
@@ -1662,6 +2159,152 @@ mod tests {
     fn keydb_value_accepted() {
         let f = parse_flags(&v(&["-k", "/etc/keydb.cfg"])).unwrap();
         assert_eq!(f.keydb_path.as_deref(), Some("/etc/keydb.cfg"));
+    }
+
+    // ── Online key-source flags ────────────────────────────────────────────
+
+    #[test]
+    fn is_keyserver_url_accepts_http_only() {
+        assert!(is_keyserver_url("http://keys.example/keys"));
+        assert!(is_keyserver_url("https://keys.example/keys"));
+        // A stream URL with a non-http scheme is NOT a key-service URL value.
+        assert!(!is_keyserver_url("disc://"));
+        assert!(!is_keyserver_url("mkv://out.mkv"));
+        assert!(!is_keyserver_url("ftp://x/keys"));
+        assert!(!is_keyserver_url("--quiet"));
+    }
+
+    #[test]
+    fn key_url_and_auth_parse() {
+        let f = parse_flags(&v(&[
+            "--key-url",
+            "https://keys.example/keys",
+            "--key-auth",
+            "tok123",
+        ]))
+        .unwrap();
+        assert_eq!(f.key_url.as_deref(), Some("https://keys.example/keys"));
+        assert_eq!(f.key_auth.as_deref(), Some("tok123"));
+    }
+
+    #[test]
+    fn key_url_missing_or_non_http_value_rejected() {
+        // No value at all.
+        assert!(parse_flags(&v(&["--key-url"])).is_err());
+        // A following stream URL with a non-http scheme is NOT the value —
+        // value is missing (must not eat the positional `disc://`).
+        assert!(parse_flags(&v(&["--key-url", "disc://"])).is_err());
+        // A following flag means the value is missing.
+        assert!(parse_flags(&v(&["--key-url", "--quiet"])).is_err());
+    }
+
+    #[test]
+    fn key_auth_missing_value_rejected() {
+        assert!(parse_flags(&v(&["--key-auth"])).is_err());
+        // A following stream URL means the token was omitted.
+        assert!(parse_flags(&v(&["--key-auth", "disc://"])).is_err());
+    }
+
+    /// Source assembly per the agreed design. `OnlineSource::needs_samples()` is
+    /// `true` and `KeydbSource::needs_samples()` is `false`, so the first source's
+    /// `needs_samples` distinguishes online-first from keydb-first ordering.
+    #[test]
+    fn build_key_sources_orders_local_first() {
+        let out = Output::new(false, true);
+
+        // keydb only → [Keydb]. (Default location is fine; we only inspect order.)
+        let s = build_key_sources(
+            &KeyConfig {
+                keydb_path: Some("keydb.cfg".into()),
+                key_url: None,
+                key_auth: None,
+            },
+            &out,
+        );
+        assert_eq!(s.len(), 1);
+        assert!(
+            !s[0].needs_samples(),
+            "keydb-only first source is the keydb"
+        );
+
+        // neither flag → still [Keydb] (default keydb location).
+        let s = build_key_sources(&KeyConfig::default(), &out);
+        assert_eq!(s.len(), 1);
+        assert!(!s[0].needs_samples(), "no flags → keydb only");
+
+        // --key-url only → [Online] (no keydb consulted).
+        let s = build_key_sources(
+            &KeyConfig {
+                keydb_path: None,
+                key_url: Some("https://8.8.8.8/keys".into()),
+                key_auth: None,
+            },
+            &out,
+        );
+        assert_eq!(s.len(), 1);
+        assert!(
+            s[0].needs_samples(),
+            "url-only first source is the online one"
+        );
+
+        // both → [Keydb, Online] — LOCAL-FIRST.
+        let s = build_key_sources(
+            &KeyConfig {
+                keydb_path: Some("keydb.cfg".into()),
+                key_url: Some("https://8.8.8.8/keys".into()),
+                key_auth: Some("tok".into()),
+            },
+            &out,
+        );
+        assert_eq!(s.len(), 2);
+        assert!(!s[0].needs_samples(), "local keydb is tried first");
+        assert!(s[1].needs_samples(), "online service is the fallback");
+    }
+
+    /// SSRF guard: a `--key-url` that resolves to an internal / metadata host is
+    /// dropped (not added as a source) — `build_key_sources` does not POST key
+    /// material there. With keydb present, the keydb remains; url-only yields no
+    /// sources at all.
+    #[test]
+    fn build_key_sources_drops_ssrf_rejected_url() {
+        let out = Output::new(false, true);
+
+        // url-only, metadata endpoint → rejected → zero sources.
+        let s = build_key_sources(
+            &KeyConfig {
+                keydb_path: None,
+                key_url: Some("http://169.254.169.254/latest/meta-data".into()),
+                key_auth: None,
+            },
+            &out,
+        );
+        assert!(
+            s.is_empty(),
+            "SSRF-rejected url-only must add no online source"
+        );
+
+        // url-only, loopback → rejected → zero sources.
+        let s = build_key_sources(
+            &KeyConfig {
+                keydb_path: None,
+                key_url: Some("https://127.0.0.1:8443/keys".into()),
+                key_auth: None,
+            },
+            &out,
+        );
+        assert!(s.is_empty(), "loopback url must be rejected");
+
+        // keydb + rejected url → only the keydb survives.
+        let s = build_key_sources(
+            &KeyConfig {
+                keydb_path: Some("keydb.cfg".into()),
+                key_url: Some(format!("http://{}.{}.{}.{}/keys", 10, 0, 0, 5)),
+                key_auth: None,
+            },
+            &out,
+        );
+        assert_eq!(s.len(), 1, "rejected url dropped; keydb remains");
+        assert!(!s[0].needs_samples(), "the surviving source is the keydb");
     }
 
     #[test]

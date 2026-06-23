@@ -210,18 +210,30 @@ fn collect_urls(args: &[String]) -> Vec<String> {
         "--title",
         "-k",
         "--keydb",
+        "--key-url",
+        "--key-auth",
         "--log-file",
         "--log-level",
     ];
 
+    // `--key-url`'s value is itself an `http(s)://` URL — so unlike `-t`/`-k`
+    // (whose value is never a stream URL), its value MUST be consumed even though
+    // it matches `is_url`. Otherwise the reclassify-as-positional fallback below
+    // would treat the key-service URL as a third stream URL and break the
+    // 2-URL rip dispatch. Track whether the flag we're skipping for is key-url.
     let mut urls = Vec::new();
     let mut skip_next = false;
+    let mut skip_is_key_url = false;
     for arg in args {
         if skip_next {
             skip_next = false;
-            // The greedy flag's "value" is actually a positional URL —
-            // reclassify it as a URL instead of consuming it.
-            if is_url(arg) {
+            let consume_key_url = skip_is_key_url;
+            skip_is_key_url = false;
+            // `--key-url`'s value is always consumed (it's the key-service URL,
+            // not a positional stream URL). For the other value-flags, a value
+            // that looks like a stream URL is actually a misplaced positional —
+            // reclassify it so `-k disc:// mkv://out` still rips.
+            if !consume_key_url && is_url(arg) {
                 urls.push(arg.clone());
             }
             continue;
@@ -229,6 +241,7 @@ fn collect_urls(args: &[String]) -> Vec<String> {
         if arg.starts_with('-') {
             if VALUE_FLAGS.contains(&arg.as_str()) {
                 skip_next = true;
+                skip_is_key_url = arg == "--key-url";
             }
         } else {
             urls.push(arg.clone());
@@ -273,7 +286,7 @@ fn info_cmd(args: &[String]) {
             let mut reader = match libfreemkv::FileSectorSource::open(path) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    eprintln!("{}", pipe::fmt_err(&e));
                     std::process::exit(1);
                 }
             };
@@ -288,7 +301,7 @@ fn info_cmd(args: &[String]) {
             ) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    eprintln!("{}", pipe::fmt_err(&e));
                     std::process::exit(1);
                 }
             };
@@ -357,7 +370,7 @@ fn info_cmd(args: &[String]) {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    eprintln!("{}", pipe::fmt_err(&e));
                     std::process::exit(1);
                 }
             }
@@ -634,7 +647,11 @@ fn usage() {
     println!();
     println!("Flags:");
     println!("  -t, --title N       Select title (1-based, repeatable). Default: all.");
-    println!("  -k, --keydb PATH    KEYDB.cfg path");
+    println!("  -k, --keydb PATH    KEYDB.cfg path (local key source)");
+    println!("      --key-url URL   Online key-service base URL (http/https).");
+    println!("                      With --keydb the keydb is tried first (local-");
+    println!("                      first); alone it is the only key source.");
+    println!("      --key-auth TOKEN Bearer token sent to the key service (optional).");
     println!("      --log-level N   1=warnings 2=info 3=debug 4=trace (default 1).");
     println!("                      Use 3 for bug reports. Logs go to STDERR so");
     println!("                      stdout stays pipe-clean.");
@@ -769,6 +786,43 @@ mod tests {
         assert_eq!(
             collect_urls(&v(&["--multipass", "disc://", "iso://d.iso", "--raw"])),
             v(&["disc://", "iso://d.iso"])
+        );
+    }
+
+    #[test]
+    fn key_url_value_is_not_a_positional() {
+        // `--key-url`'s value is an https:// URL — it must be consumed as the
+        // flag value, NOT reclassified as a third positional stream URL (which
+        // would break the 2-URL rip dispatch). Only the two stream URLs remain.
+        assert_eq!(
+            collect_urls(&v(&[
+                "disc://",
+                "mkv://out.mkv",
+                "--key-url",
+                "https://keys.example/keys",
+            ])),
+            v(&["disc://", "mkv://out.mkv"])
+        );
+        // With a bearer token too.
+        assert_eq!(
+            collect_urls(&v(&[
+                "--key-url",
+                "https://keys.example/keys",
+                "--key-auth",
+                "tok",
+                "disc://",
+                "mkv://out.mkv",
+            ])),
+            v(&["disc://", "mkv://out.mkv"])
+        );
+    }
+
+    #[test]
+    fn key_auth_token_value_consumed() {
+        // `--key-auth`'s opaque token must be consumed, not kept as a positional.
+        assert_eq!(
+            collect_urls(&v(&["--key-auth", "tok", "disc://", "mkv://out.mkv"])),
+            v(&["disc://", "mkv://out.mkv"])
         );
     }
 }
