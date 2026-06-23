@@ -898,6 +898,18 @@ fn pipe_disc(
         }
     }
 
+    // The header loop breaks on EOF (`Ok(None)`) without re-checking
+    // `headers_ready()`. If we drained the input before the video codec
+    // parser emitted its codec_private (hvcC/avcC) — a damaged or very
+    // short title — `codec_private()` returns `None` for the video track
+    // and the muxer writes a track header with no CODEC_PRIVATE element.
+    // The downstream zero-output guard does NOT catch this (one stray audio
+    // PES byte clears it), so we would finalize a structurally-invalid MKV
+    // and exit 0. Refuse here, mirroring autorip's run_mux gate.
+    if !headers_resolved(input.headers_ready()) {
+        return Err(libfreemkv::Error::MkvInvalid.to_string());
+    }
+
     let info = input.info().clone();
     print_stream_info(out, &info);
 
@@ -1001,6 +1013,19 @@ fn mux_produced_output(num_streams: usize, bytes_written: u64) -> bool {
     num_streams > 0 && bytes_written >= MIN_MUX_PAYLOAD_BYTES
 }
 
+/// The header-resolution gate both pipe paths run after their
+/// `while !input.headers_ready()` loop. That loop breaks on EOF (`Ok(None)`)
+/// without re-checking, so a disc with damaged video sectors or a very short
+/// title can drain before the video codec parser emits its codec_private
+/// (hvcC/avcC). Muxing then writes a track header with no CODEC_PRIVATE
+/// element — a structurally-invalid MKV that the zero-output guard does NOT
+/// catch (one stray audio PES byte clears it). Returns `false` (→ caller
+/// errors with `MkvInvalid`, nonzero exit) when headers never resolved;
+/// `true` only when `headers_ready()` actually became true.
+fn headers_resolved(headers_ready: bool) -> bool {
+    headers_ready
+}
+
 /// Print the interrupt notice and return the error string both pipe paths use
 /// when a SIGINT lands mid-mux. The message names the output as incomplete so
 /// the user knows not to trust it.
@@ -1039,6 +1064,18 @@ fn pipe(
             Ok(None) => break,
             Err(e) => return Err(format!("{}", e)),
         }
+    }
+
+    // The header loop breaks on EOF (`Ok(None)`) without re-checking
+    // `headers_ready()`. If the input drained before the video codec parser
+    // emitted its codec_private (hvcC/avcC), `codec_private()` yields `None`
+    // for the video track and the muxer writes a track header with no
+    // CODEC_PRIVATE element — a structurally-invalid MKV. The zero-output
+    // guard below does NOT catch this (one stray audio PES byte clears it),
+    // so without this check we would finalize the broken file and exit 0.
+    // Refuse here, mirroring autorip's run_mux gate.
+    if !headers_resolved(input.headers_ready()) {
+        return Err(libfreemkv::Error::MkvInvalid.to_string());
     }
 
     // Get info after header scanning (stdio/network populate info during read)
@@ -1727,8 +1764,8 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 mod tests {
     use super::{
         KeyConfig, build_jobs, build_key_sources, copy_should_continue, disc_aacs_key_missing,
-        disc_css_key_missing, fmt_err_str, is_keyserver_url, is_url_token, mux_produced_output,
-        mux_was_interrupted, parse_error_code, parse_flags, title_in_range,
+        disc_css_key_missing, fmt_err_str, headers_resolved, is_keyserver_url, is_url_token,
+        mux_produced_output, mux_was_interrupted, parse_error_code, parse_flags, title_in_range,
     };
     use crate::output::Output;
 
@@ -1824,6 +1861,21 @@ mod tests {
         // Zero bytes written → never produced (the natural-drain-on-first-None
         // empty-output silent failure).
         assert!(!mux_produced_output(3, 0));
+    }
+
+    /// The header-resolution gate both pipe paths run after their
+    /// `while !input.headers_ready()` loop. EOF can break that loop before the
+    /// video codec_private (hvcC/avcC) resolves; proceeding would mux a track
+    /// header with no CODEC_PRIVATE and still exit 0 (the zero-output guard
+    /// passes once any audio byte is written). `headers_resolved(false)` must
+    /// be `false` so the caller errors with `MkvInvalid` instead of finalizing
+    /// a structurally-invalid MKV.
+    #[test]
+    fn headers_resolved_rejects_unready_headers() {
+        // Headers never became ready (EOF before video codec_private) → abort.
+        assert!(!headers_resolved(false));
+        // Headers resolved normally → proceed to mux.
+        assert!(headers_resolved(true));
     }
 
     // ── fmt_err generalization (english errors for ALL codes) ───────────────
