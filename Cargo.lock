@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.0.0-rc.4.2"
+version = "1.0.0-rc.4.3"
 dependencies = [
  "freemkv-keysources",
  "freemkv-unlock-ld",
@@ -288,8 +288,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.0.0-rc.4.2"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.0.0-rc.4.2#c247f02894b82e6aac3653ad7c9b3c294b943a4b"
+version = "1.0.0-rc.4.3"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.0.0-rc.4.3#cced7818d2292ccdfa0ff48e7ffbe0eade8e978d"
 dependencies = [
  "base64",
  "libfreemkv",
@@ -300,8 +300,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock-ld"
-version = "1.0.0-rc.3"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.0.0-rc.3#607782ab64a3b2348bcbac069cee1d5ffcc3924b"
+version = "1.0.0-rc.4.3"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.0.0-rc.4.3#ef3a6fe42d8a5184061609040b10f0c2d814b52d"
 dependencies = [
  "base64",
  "libfreemkv",
@@ -489,8 +489,8 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libfreemkv"
-version = "1.0.0-rc.4.2"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.0.0-rc.4.2#845e20e508d7d23508ddafc453b27b732d81244a"
+version = "1.0.0-rc.4.3"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.0.0-rc.4.3#3c3e0b43418fe96816c822968a1697ce7ac179a1"
 dependencies = [
  "aes",
  "base64",
