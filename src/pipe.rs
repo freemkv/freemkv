@@ -2344,7 +2344,11 @@ mod tests {
             &out,
         );
         assert_eq!(s.len(), 1);
-        assert_eq!(s[0].label(), "keydb", "keydb-only first source is the keydb");
+        assert_eq!(
+            s[0].label(),
+            "keydb",
+            "keydb-only first source is the keydb"
+        );
 
         // neither flag → still [Keydb] (default keydb location).
         let s = build_key_sources(&KeyConfig::default(), &out);
