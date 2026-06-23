@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 libfreemkv = "1.0.0-rc.4.2"
-freemkv-unlock-ld = { git = "https://github.com/freemkv/freemkv-unlock", tag = "v1.0.0-rc.3" }
+freemkv-unlock-ld = { git = "https://github.com/freemkv/freemkv-unlock", tag = "v1.0.0-rc.4.3" }
 freemkv-keysources = "1.0.0-rc.4.2"
 isolang = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
