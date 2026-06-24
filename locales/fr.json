@@ -200,6 +200,7 @@
     "scan_failed": "Echec de l'analyse : {detail}",
     "raw_mux_invalid": "Erreur : --raw ne peut pas etre utilise pour le multiplexage (mkv/m2ts) — les donnees chiffrees ne peuvent pas etre multiplexees. Utilisez --raw uniquement avec une sortie iso:// (copie brute du disque).",
     "dest_needs_scheme": "Erreur : '{dest}' n'a pas de schema d'URL. Utilisez un prefixe scheme:// (par ex. mkv://{dest} pour un seul fichier), ou indiquez un dossier existant pour plusieurs titres.",
+    "source_needs_scheme": "Erreur : '{source}' n'a pas de schema d'URL. Utilisez un prefixe scheme:// (par ex. iso://{source} pour un fichier ISO, ou disc:// pour un lecteur physique).",
     "invalid_title": "Erreur : titre invalide '{value}' — les titres commencent a 1, ce doit etre un nombre >= 1.",
     "flag_needs_value": "Erreur : {flag} requiert une valeur (par ex. {example}).",
     "unknown_flag": "Erreur : option inconnue '{flag}'. Utilisez 'freemkv help' pour la liste des options.",

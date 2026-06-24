@@ -200,6 +200,7 @@
     "scan_failed": "Scan failed: {detail}",
     "raw_mux_invalid": "Error: --raw cannot be used for muxing (mkv/m2ts) — encrypted data cannot be muxed. Use --raw only with an iso:// output (raw disc copy).",
     "dest_needs_scheme": "Error: '{dest}' has no URL scheme. Use a scheme:// prefix (e.g. mkv://{dest} for a single file), or pass an existing directory for multiple titles.",
+    "source_needs_scheme": "Error: '{source}' has no URL scheme. Use a scheme:// prefix (e.g. iso://{source} for an ISO file, or disc:// for a physical drive).",
     "invalid_title": "Error: invalid title '{value}' — titles are 1-based, must be a number >= 1.",
     "flag_needs_value": "Error: {flag} requires a value (e.g. {example}).",
     "unknown_flag": "Error: unknown flag '{flag}'. Try 'freemkv help' for a list of options.",

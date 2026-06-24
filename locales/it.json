@@ -200,6 +200,7 @@
     "scan_failed": "Scansione fallita: {detail}",
     "raw_mux_invalid": "Errore: --raw non puo essere usato per il muxing (mkv/m2ts) — i dati cifrati non possono essere muxati. Usa --raw solo con un output iso:// (copia grezza del disco).",
     "dest_needs_scheme": "Errore: '{dest}' non ha uno schema URL. Usa un prefisso scheme:// (es. mkv://{dest} per un singolo file), oppure indica una cartella esistente per piu titoli.",
+    "source_needs_scheme": "Errore: '{source}' non ha uno schema URL. Usa un prefisso scheme:// (es. iso://{source} per un file ISO, o disc:// per un'unita fisica).",
     "invalid_title": "Errore: titolo non valido '{value}' — i titoli partono da 1, deve essere un numero >= 1.",
     "flag_needs_value": "Errore: {flag} richiede un valore (es. {example}).",
     "unknown_flag": "Errore: opzione sconosciuta '{flag}'. Usa 'freemkv help' per l'elenco delle opzioni.",

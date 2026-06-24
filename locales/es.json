@@ -200,6 +200,7 @@
     "scan_failed": "Escaneo falló: {detail}",
     "raw_mux_invalid": "Error: --raw no se puede usar para multiplexar (mkv/m2ts) — los datos cifrados no se pueden multiplexar. Use --raw solo con una salida iso:// (copia en bruto del disco).",
     "dest_needs_scheme": "Error: '{dest}' no tiene esquema de URL. Use un prefijo scheme:// (p. ej. mkv://{dest} para un solo archivo), o indique un directorio existente para varios titulos.",
+    "source_needs_scheme": "Error: '{source}' no tiene esquema de URL. Use un prefijo scheme:// (p. ej. iso://{source} para un archivo ISO, o disc:// para una unidad fisica).",
     "invalid_title": "Error: titulo invalido '{value}' — los titulos empiezan en 1, debe ser un numero >= 1.",
     "flag_needs_value": "Error: {flag} requiere un valor (p. ej. {example}).",
     "unknown_flag": "Error: opcion desconocida '{flag}'. Use 'freemkv help' para ver las opciones.",

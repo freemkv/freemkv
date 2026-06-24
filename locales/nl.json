@@ -200,6 +200,7 @@
     "scan_failed": "Scannen mislukt: {detail}",
     "raw_mux_invalid": "Fout: --raw kan niet worden gebruikt voor muxen (mkv/m2ts) — versleutelde data kan niet worden gemuxt. Gebruik --raw alleen met een iso://-uitvoer (ruwe schijfkopie).",
     "dest_needs_scheme": "Fout: '{dest}' heeft geen URL-schema. Gebruik een scheme://-prefix (bijv. mkv://{dest} voor een enkel bestand), of geef een bestaande map op voor meerdere titels.",
+    "source_needs_scheme": "Fout: '{source}' heeft geen URL-schema. Gebruik een scheme://-prefix (bijv. iso://{source} voor een ISO-bestand, of disc:// voor een fysiek station).",
     "invalid_title": "Fout: ongeldige titel '{value}' — titels beginnen bij 1, moet een getal >= 1 zijn.",
     "flag_needs_value": "Fout: {flag} vereist een waarde (bijv. {example}).",
     "unknown_flag": "Fout: onbekende optie '{flag}'. Gebruik 'freemkv help' voor een lijst met opties.",

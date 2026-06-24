@@ -200,6 +200,7 @@
     "scan_failed": "Scan fehlgeschlagen: {detail}",
     "raw_mux_invalid": "Fehler: --raw kann nicht zum Muxen (mkv/m2ts) verwendet werden — verschluesselte Daten koennen nicht gemuxt werden. Verwenden Sie --raw nur mit einer iso://-Ausgabe (Rohkopie der Disc).",
     "dest_needs_scheme": "Fehler: '{dest}' hat kein URL-Schema. Verwenden Sie ein scheme://-Praefix (z. B. mkv://{dest} fuer eine einzelne Datei) oder geben Sie ein vorhandenes Verzeichnis fuer mehrere Titel an.",
+    "source_needs_scheme": "Fehler: '{source}' hat kein URL-Schema. Verwenden Sie ein scheme://-Praefix (z. B. iso://{source} fuer eine ISO-Datei oder disc:// fuer ein physisches Laufwerk).",
     "invalid_title": "Fehler: ungueltiger Titel '{value}' — Titel sind 1-basiert und muessen eine Zahl >= 1 sein.",
     "flag_needs_value": "Fehler: {flag} benoetigt einen Wert (z. B. {example}).",
     "unknown_flag": "Fehler: unbekannte Option '{flag}'. Mit 'freemkv help' werden alle Optionen angezeigt.",

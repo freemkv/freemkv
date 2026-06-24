@@ -341,6 +341,19 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         return false;
     }
 
+    // A schemeless source (e.g. `movie.iso` or `/path/disc.iso`) parses as
+    // Unknown. Without this guard it bypasses scan_titles (the `_ => None`
+    // arm) and reaches libfreemkv::input(), which returns the generic
+    // StreamUrlInvalid error. Mirror the dest guard so the user gets an
+    // actionable message instead.
+    if matches!(parsed_source, libfreemkv::StreamUrl::Unknown { .. }) {
+        out.raw(
+            Normal,
+            &strings::fmt("error.source_needs_scheme", &[("source", source)]),
+        );
+        return false;
+    }
+
     // `--raw` passes encrypted bytes through unchanged. That is valid for a raw
     // ISO copy (iso:// output) but nonsense for a mux: you cannot mux ciphertext.
     // Reject it up front before building any jobs/pipeline.
