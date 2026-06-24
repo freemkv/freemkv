@@ -687,7 +687,7 @@ fn resolve_iso_unit_keys(source: &str, keys: &KeyConfig, out: &Output) -> Vec<(u
         .iter()
         .max_by_key(|t| t.size_bytes)
         .cloned()
-        .map(|t| freemkv_keysources::read_sample_units(&mut reader, &t, SAMPLE_UNITS))
+        .map(|t| libfreemkv::read_encrypted_units(&mut reader, &t, SAMPLE_UNITS))
         .unwrap_or_default();
     apply_keys(&mut disc, keys, samples, out);
     match disc.decrypt_keys() {
@@ -771,7 +771,7 @@ fn apply_keys(disc: &mut libfreemkv::Disc, keys: &KeyConfig, samples: Vec<Vec<u8
     inputs.samples = samples;
     let sources = build_key_sources(keys, out);
     let mut sources = freemkv_keysources::MultiSource::new(sources);
-    freemkv_keysources::resolve_and_apply(&mut sources, &inputs, disc);
+    libfreemkv::resolve_and_apply(&mut sources, &inputs, disc);
 }
 
 /// Live-disc analogue of libfreemkv's `mux::resolve::aacs_key_missing`.
@@ -839,7 +839,7 @@ fn pipe_disc(
         .iter()
         .max_by_key(|t| t.size_bytes)
         .cloned()
-        .map(|t| freemkv_keysources::read_sample_units(&mut drive, &t, SAMPLE_UNITS))
+        .map(|t| libfreemkv::read_encrypted_units(&mut drive, &t, SAMPLE_UNITS))
         .unwrap_or_default();
     apply_keys(&mut disc, keys, samples, out);
 
@@ -1266,7 +1266,7 @@ fn disc_to_iso(
         .iter()
         .max_by_key(|t| t.size_bytes)
         .cloned()
-        .map(|t| freemkv_keysources::read_sample_units(&mut drive, &t, SAMPLE_UNITS))
+        .map(|t| libfreemkv::read_encrypted_units(&mut drive, &t, SAMPLE_UNITS))
         .unwrap_or_default();
     apply_keys(&mut disc, keys, samples, out);
 
