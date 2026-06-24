@@ -176,11 +176,27 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
     while i < args.len() {
         match args[i].as_str() {
             // `--log-level N` sets the tracing level (main::init_logging); here
-            // it widens prose detail at level >= 2. Swallow its numeric value.
+            // it widens prose detail at level >= 2. VAL-1: reject a non-numeric
+            // or out-of-range value with a clean localized error rather than
+            // silently ignoring it and leaving the user without a log file.
             "--log-level" => {
-                if let Some(n) = args.get(i + 1).and_then(|s| s.parse::<u8>().ok()) {
-                    f.verbose = n >= 2;
-                    i += 1;
+                match args.get(i + 1) {
+                    Some(s) if !is_url_token(s) => {
+                        i += 1;
+                        match s.parse::<u8>() {
+                            Ok(n) if n >= 1 => f.verbose = n >= 2,
+                            _ => {
+                                return Err(strings::fmt(
+                                    "error.invalid_log_level",
+                                    &[("value", s)],
+                                ));
+                            }
+                        }
+                    }
+                    // No value or a URL follows: logging init already handles
+                    // the bare --log-level case with its own plain-English
+                    // diagnostic; nothing to do here.
+                    _ => {}
                 }
             }
             // `--log-file PATH` is consumed by logging init; swallow its value
@@ -233,12 +249,25 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
             // but a key-service URL IS `https://…`, which `is_url_token` matches
             // on "://". So accept it on its own merit: require an http(s) scheme
             // here, and reject a missing value (next token is a flag, or absent).
+            // VAL-2: a non-http(s) URL (e.g. ftp://) gets its own clear error
+            // rather than the confusing "requires a value" message, since the
+            // user DID provide a value — it just has the wrong scheme.
             "--key-url" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
                     Some(u) if is_keyserver_url(u) => {
                         i += 1;
                         f.key_url = Some(u.clone());
+                    }
+                    Some(u) if u.contains("://") && !is_keyserver_url(u) => {
+                        // Has a scheme but it is NOT an http(s) key-service URL
+                        // (e.g. `ftp://…`, or a stream scheme like `disc://`).
+                        // The user DID supply a value — it just has the wrong
+                        // scheme — so give the clear bad-scheme error instead of
+                        // the misleading "requires a value". (`is_url_token` is
+                        // exactly `contains("://")`, so the old guard was `A && !A`
+                        // — dead code; key on the keyserver-scheme check instead.)
+                        return Err(strings::fmt("error.key_url_bad_scheme", &[("value", u)]));
                     }
                     _ => {
                         return Err(strings::fmt(
@@ -2321,6 +2350,104 @@ mod tests {
         assert!(parse_flags(&v(&["--key-url", "disc://"])).is_err());
         // A following flag means the value is missing.
         assert!(parse_flags(&v(&["--key-url", "--quiet"])).is_err());
+    }
+
+    // ── VAL-2 regression: --key-url scheme validation ──────────────────────
+    //
+    // Bug: the guard was `!is_url_token(u)` (i.e. `!u.contains("://")`) so the
+    // bad-scheme branch's `u.contains("://") && !is_keyserver_url(u)` was
+    // `A && !A` — dead code that could never fire. `ftp://x` and `disc://` both
+    // fell through to "requires a value" even though the user DID supply a value.
+    // Fix: guard the accept arm on `is_keyserver_url(u)` so the bad-scheme arm
+    // is reachable for any `://` URL that is NOT http(s).
+
+    /// VAL-2: `--key-url ftp://x` — a non-http(s) scheme — must produce the
+    /// bad-scheme error, NOT "requires a value" (the value was present).
+    #[test]
+    fn val2_key_url_ftp_scheme_gives_bad_scheme_error() {
+        let err = parse_flags(&v(&["--key-url", "ftp://x"])).unwrap_err();
+        // Must contain the bad-scheme message substring, not the generic
+        // "requires a value" substring.
+        assert!(
+            err.contains("http://") || err.contains("https://"),
+            "expected bad-scheme error (mentioning http(s)://), got: {err}"
+        );
+        assert!(
+            !err.contains("requires a value"),
+            "must NOT produce flag_needs_value when a value was present: {err}"
+        );
+        // The bad URL itself must appear in the message so the user can see
+        // what was rejected.
+        assert!(
+            err.contains("ftp://x"),
+            "rejected URL missing from error: {err}"
+        );
+    }
+
+    /// VAL-2: `--key-url disc://` — a stream scheme used as a key-url — must
+    /// also produce the bad-scheme error. `disc://` contains `://` but is not
+    /// http(s), so it goes through the bad-scheme arm, not the missing-value arm.
+    #[test]
+    fn val2_key_url_disc_scheme_gives_bad_scheme_error() {
+        let err = parse_flags(&v(&["--key-url", "disc://"])).unwrap_err();
+        assert!(
+            err.contains("http://") || err.contains("https://"),
+            "expected bad-scheme error (mentioning http(s)://), got: {err}"
+        );
+        assert!(
+            !err.contains("requires a value"),
+            "must NOT produce flag_needs_value when a value (with wrong scheme) was present: {err}"
+        );
+        assert!(
+            err.contains("disc://"),
+            "rejected URL missing from error: {err}"
+        );
+    }
+
+    /// VAL-2 (positive path): `--key-url https://keys.example/keys` must be
+    /// accepted and stored verbatim.
+    #[test]
+    fn val2_key_url_https_accepted() {
+        let f = parse_flags(&v(&["--key-url", "https://keys.example/keys"])).unwrap();
+        assert_eq!(
+            f.key_url.as_deref(),
+            Some("https://keys.example/keys"),
+            "https key-url must be accepted and stored verbatim"
+        );
+    }
+
+    /// VAL-2 (positive path): `--key-url http://keys.example/keys` (plain http)
+    /// must also be accepted.
+    #[test]
+    fn val2_key_url_http_accepted() {
+        let f = parse_flags(&v(&["--key-url", "http://keys.example/keys"])).unwrap();
+        assert_eq!(
+            f.key_url.as_deref(),
+            Some("http://keys.example/keys"),
+            "http key-url must be accepted and stored verbatim"
+        );
+    }
+
+    /// VAL-2 (missing value): bare `--key-url` with no following token must
+    /// produce the flag_needs_value error (not the bad-scheme error).
+    #[test]
+    fn val2_key_url_no_value_gives_needs_value_error() {
+        let err = parse_flags(&v(&["--key-url"])).unwrap_err();
+        assert!(
+            err.contains("requires a value"),
+            "bare --key-url must produce flag_needs_value, got: {err}"
+        );
+    }
+
+    /// VAL-2 (missing value via flag): `--key-url --quiet` — the value is a
+    /// flag, not a URL, so it is missing. Must produce flag_needs_value.
+    #[test]
+    fn val2_key_url_followed_by_flag_gives_needs_value_error() {
+        let err = parse_flags(&v(&["--key-url", "--quiet"])).unwrap_err();
+        assert!(
+            err.contains("requires a value"),
+            "--key-url followed by a flag must produce flag_needs_value, got: {err}"
+        );
     }
 
     #[test]
