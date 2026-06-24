@@ -140,9 +140,11 @@ struct ParsedFlags {
 /// Where the CLI looks up AACS keys for a disc, assembled from the key flags.
 ///
 /// libfreemkv does no lookup — the CLI resolves a [`libfreemkv::Key`] from these
-/// sources and hands it to `Disc::decrypt_with`. The sources are ordered
-/// **local-first**: a present keydb is consulted before the network, so an
-/// offline hit never makes a key-service round-trip. See [`build_key_sources`].
+/// sources and hands it to `Disc::decrypt_with`. When both `--keydb` and
+/// `--key-url` are given, the keydb is consulted first (local-first), so an
+/// offline hit never makes a key-service round-trip. Passing `--key-url` alone
+/// bypasses the keydb entirely. See [`build_key_sources`] for the full
+/// source-list policy.
 #[derive(Default, Debug, Clone)]
 pub struct KeyConfig {
     /// `-k`/`--keydb PATH` — local `keydb.cfg` (else the standard location).
@@ -833,8 +835,9 @@ fn pipe_disc(
     let title = disc.titles[title_idx].clone();
     let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
 
-    // Per-title key resolution (Theme B fix, mirrors the ISO path in
-    // libfreemkv mux/resolve.rs:321-331). The disc-wide `decrypt_keys()`
+    // Per-title key resolution (Theme B fix, mirrors the ISO path's
+    // per-title key block in libfreemkv mux/resolve.rs). The disc-wide
+    // `decrypt_keys()`
     // carries the single key the scan cracked — but on a multi-VTS CSS DVD
     // a non-main-VTS `-t N` lives in a different VTS with a DIFFERENT
     // per-VTS title key, so the disc-wide key descrambles it to GARBAGE at
@@ -849,7 +852,7 @@ fn pipe_disc(
     let keys = disc.decrypt_keys_for_title(title_idx, &mut drive, batch);
 
     // CSS no-key gate (parallel to the AACS gate below; mirrors the ISO
-    // path's `css_key_missing` at mux/resolve.rs:329). On a CSS DVD whose
+    // path's `css_key_missing` gate in libfreemkv mux/resolve.rs). On a CSS DVD whose
     // chosen title's VTS could not be re-cracked, `keys` is
     // `DecryptKeys::None`; muxing that would pass scrambled MPEG through as
     // plaintext (garbage at exit 0). Fail loudly with `Error::CssKeyMissing`
@@ -979,9 +982,9 @@ fn pipe_disc(
     // Zero-output guard (Theme A): a natural drain that wrote no streams / no
     // frame bytes must NOT be finalized and reported "Complete" — that is the
     // empty/garbage-output silent failure (undecryptable input → demuxer emits
-    // nothing). Surface `Error::NoStreams` (as the ISO path does at libfreemkv
-    // mux/resolve.rs:305) so the exit code is nonzero and the user sees a
-    // localized message instead of a header-only "success".
+    // nothing). Surface `Error::NoStreams` (as the ISO path does via the
+    // NoStreams gate in libfreemkv mux/resolve.rs) so the exit code is nonzero
+    // and the user sees a localized message instead of a header-only "success".
     if !mux_produced_output(info.streams.len(), output.bytes_written()) {
         return Err(libfreemkv::Error::NoStreams.to_string());
     }
@@ -1157,9 +1160,9 @@ fn pipe(
     // Zero-output guard (Theme A): a natural drain that wrote no streams / no
     // frame bytes must NOT be finalized and reported "Complete" — that is the
     // empty/garbage-output silent failure (undecryptable input → demuxer emits
-    // nothing). Surface `Error::NoStreams` (as the ISO path does at libfreemkv
-    // mux/resolve.rs:305) so the exit code is nonzero and the user sees a
-    // localized message instead of a header-only "success".
+    // nothing). Surface `Error::NoStreams` (as the ISO path does via the
+    // NoStreams gate in libfreemkv mux/resolve.rs) so the exit code is nonzero
+    // and the user sees a localized message instead of a header-only "success".
     if !mux_produced_output(info.streams.len(), output.bytes_written()) {
         return Err(libfreemkv::Error::NoStreams.to_string());
     }
