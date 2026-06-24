@@ -4,6 +4,30 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.0.0-rc.5.1]
+
+### Added
+
+- **`--log-level` validation.** Out-of-range or non-integer values now
+  print a clear error and exit non-zero instead of silently falling back
+  to a default.
+- **`--key-url` scheme validation.** The key URL is validated at startup;
+  an unsupported scheme (anything other than `http://` / `https://`)
+  prints a specific error rather than failing later at download time.
+- **`--language` validation.** An unrecognized language tag is rejected
+  with a descriptive error listing accepted values.
+- **Full UI localization across 7 locales.** The help/usage screen and all
+  user-facing strings (progress labels, result blocks, error messages) are
+  now fully localized for all supported locales, not just the runtime
+  error path.
+
+### Changed
+
+- **"CSS authentication failed" message clarified.** When the CSS bus-auth
+  handshake succeeds but the disc cannot be decrypted, the error message
+  now distinguishes between an auth-level failure and an unrecoverable
+  title-key failure, making the root cause actionable.
+
 ## [1.0.0-rc.4] — UNRELEASED
 
 Cleaner terminal output, an error-message overhaul, and reliability fixes

@@ -55,7 +55,12 @@ pub fn init() {
         // Community language — loaded from disk
         v
     } else {
-        // Fallback
+        // Fallback to English. Notify the user when they explicitly requested a
+        // locale that isn't available (VAL-3). Plain English is intentional here:
+        // we cannot use strings::get/fmt because STRINGS isn't set yet.
+        if code != "en" {
+            eprintln!("freemkv: locale '{code}' not found, using English");
+        }
         serde_json::from_str(LOCALE_EN).expect("invalid en.json")
     };
     let _ = STRINGS.set(json);
