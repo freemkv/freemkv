@@ -63,8 +63,20 @@ fn init_logging(args: &[String]) {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--log-level" => {
-                if let Some(n) = it.next().and_then(|s| s.parse::<u8>().ok()) {
-                    level_num = Some(n.clamp(1, 4));
+                // VAL-1 / VAL-4: validate the value rather than silently
+                // swallowing bad input or silently clamping 0 → 1.
+                // Strings aren't loaded yet here, so plain English is fine.
+                match it.next() {
+                    Some(s) => match s.parse::<u8>() {
+                        Ok(0) => eprintln!("--log-level: value 0 is out of range (1–4), ignored"),
+                        Ok(n) => level_num = Some(n.clamp(1, 4)),
+                        Err(_) => {
+                            eprintln!("--log-level: expected a number 1–4, got '{s}', ignored")
+                        }
+                    },
+                    None => eprintln!(
+                        "--log-level: requires a value (1=warn, 2=info, 3=debug, 4=trace)"
+                    ),
                 }
             }
             "--log-file" => {
@@ -208,10 +220,7 @@ fn main() {
                 info_args.extend(args[1..].iter().filter(|a| **a != urls[0]).cloned());
                 info_cmd(&info_args);
             } else {
-                eprintln!("Usage: freemkv <source> <dest> [flags]");
-                eprintln!("       freemkv info <url>");
-                eprintln!();
-                eprintln!("Try 'freemkv help' for more.");
+                eprintln!("{}", strings::get("error.usage_hint"));
                 std::process::exit(1);
             }
         }
@@ -321,7 +330,7 @@ fn collect_urls(args: &[String]) -> Vec<String> {
 
 fn info_cmd(args: &[String]) {
     if args.is_empty() {
-        eprintln!("Usage: freemkv info <url>");
+        eprintln!("{}", strings::get("error.info_usage"));
         std::process::exit(1);
     }
 
@@ -437,13 +446,16 @@ fn info_cmd(args: &[String]) {
         }
         libfreemkv::StreamUrl::Unknown { .. } => {
             eprintln!(
-                "'{}' is not a valid URL — use scheme://path (e.g. disc://, mkv://movie.mkv)",
-                url
+                "{}",
+                strings::fmt("error.info_unknown_url", &[("url", url)])
             );
             std::process::exit(1);
         }
         _ => {
-            eprintln!("Cannot get info for {}", url);
+            eprintln!(
+                "{}",
+                strings::fmt("error.info_unsupported_url", &[("url", url)])
+            );
             std::process::exit(1);
         }
     }
@@ -704,64 +716,58 @@ fn inclusive_last_lba(start_lba: u32, count: u32) -> u32 {
 fn usage() {
     println!("freemkv {}", env!("CARGO_PKG_VERSION"));
     println!();
-    println!("Usage: freemkv <source> <dest> [flags]");
-    println!("       freemkv info <url> [flags]");
-    println!("       freemkv verify [disc://]");
+    println!("{}", strings::get("usage.synopsis_1"));
+    println!("{}", strings::get("usage.synopsis_2"));
+    println!("{}", strings::get("usage.synopsis_3"));
     println!();
-    println!("Stream URLs:");
-    println!("  disc://                  Optical drive (auto-detect)");
-    println!("  disc:///dev/sg4          Optical drive (Linux)");
-    println!("  disc://D:                Optical drive (Windows)");
-    println!("  mkv://path.mkv           Matroska file");
-    println!("  m2ts://path.m2ts         BD transport stream file");
-    println!("  network://host:port      TCP stream");
-    println!("  stdio://                 Stdin/stdout pipe");
-    println!("  iso://image.iso          Blu-ray ISO image");
-    println!("  null://                  Discard (benchmarking)");
+    println!("{}", strings::get("usage.urls_header"));
+    println!("{}", strings::get("usage.url.disc_auto"));
+    println!("{}", strings::get("usage.url.disc_linux"));
+    println!("{}", strings::get("usage.url.disc_windows"));
+    println!("{}", strings::get("usage.url.mkv"));
+    println!("{}", strings::get("usage.url.m2ts"));
+    println!("{}", strings::get("usage.url.network"));
+    println!("{}", strings::get("usage.url.stdio"));
+    println!("{}", strings::get("usage.url.iso"));
+    println!("{}", strings::get("usage.url.null"));
     println!();
-    println!("  All URLs require a scheme:// prefix.");
-    println!("  File paths follow the scheme: mkv://./Movie.mkv, m2ts://./Movie.m2ts");
+    println!("{}", strings::get("usage.url.scheme_note"));
+    println!("{}", strings::get("usage.url.path_note"));
     println!();
-    println!("Examples:");
-    println!("  freemkv disc:// mkv://Movie.mkv                     Rip disc to MKV");
-    println!("  freemkv disc:// m2ts://Movie.m2ts                   Rip disc to m2ts");
-    println!("  freemkv disc:///dev/sg4 mkv://Movie.mkv             Rip specific drive");
-    println!("  freemkv disc:// mkv://Movie.mkv -t 1               Rip main feature only");
-    println!("  freemkv disc:// mkv://Movie.mkv -t 1 -t 3          Rip titles 1 and 3");
-    println!(
-        "  freemkv disc:// iso://Disc.iso                     Full disc to ISO (auto-resumes)"
-    );
-    println!(
-        "  freemkv disc:// iso://Disc.iso --raw               Full disc, no decryption (auto-resumes)"
-    );
-    println!(
-        "  freemkv disc:// iso://Disc.iso --multipass        Sweep with mapfile for multipass recovery"
-    );
-    println!("  freemkv disc:// iso://Disc.iso --multipass        Re-run to patch bad sectors");
-    println!("  freemkv iso://Disc.iso mkv://Movie.mkv             ISO to MKV");
-    println!("  freemkv m2ts://Movie.m2ts mkv://Movie.mkv          Remux m2ts to MKV");
-    println!("  freemkv disc:// network://192.0.2.10:9000           Stream to network");
-    println!("  freemkv network://0.0.0.0:9000 mkv://Movie.mkv    Receive from network");
-    println!("  freemkv disc:// stdio://                           Pipe to stdout");
-    println!("  freemkv disc:// null://                            Benchmark read speed");
-    println!("  freemkv info disc://                               Show disc info");
+    println!("{}", strings::get("usage.examples_header"));
+    println!("{}", strings::get("usage.ex.rip_mkv"));
+    println!("{}", strings::get("usage.ex.rip_m2ts"));
+    println!("{}", strings::get("usage.ex.rip_drive"));
+    println!("{}", strings::get("usage.ex.rip_title"));
+    println!("{}", strings::get("usage.ex.rip_titles"));
+    println!("{}", strings::get("usage.ex.rip_iso"));
+    println!("{}", strings::get("usage.ex.rip_iso_raw"));
+    println!("{}", strings::get("usage.ex.rip_iso_mp"));
+    println!("{}", strings::get("usage.ex.rip_iso_patch"));
+    println!("{}", strings::get("usage.ex.iso_to_mkv"));
+    println!("{}", strings::get("usage.ex.remux"));
+    println!("{}", strings::get("usage.ex.network"));
+    println!("{}", strings::get("usage.ex.network_recv"));
+    println!("{}", strings::get("usage.ex.stdio"));
+    println!("{}", strings::get("usage.ex.benchmark"));
+    println!("{}", strings::get("usage.ex.info"));
     println!();
-    println!("Flags:");
-    println!("  -t, --title N       Select title (1-based, repeatable). Default: all.");
-    println!("  -k, --keydb PATH    KEYDB.cfg path (local key source)");
-    println!("      --key-url URL   Online key-service base URL (http/https).");
-    println!("                      With --keydb the keydb is tried first (local-");
-    println!("                      first); alone it is the only key source.");
-    println!("      --key-auth TOKEN Bearer token sent to the key service (optional).");
-    println!("      --log-level N   1=warn 2=info 3=debug 4=trace. Off by default —");
-    println!("                      the terminal stays clean. Set it to write a");
-    println!("                      diagnostic log to ./log.txt (use 3 for bug reports).");
-    println!("      --log-file PATH Write the diagnostic log to PATH instead of ./log.txt.");
-    println!("  -q, --quiet         Suppress output");
-    println!("      --raw           Skip decryption (raw encrypted output)");
-    println!("      --multipass    Write/update mapfile for multipass recovery");
-    println!("  -s, --share         Submit drive profile (with info disc://)");
-    println!("  -m, --mask          Mask serial numbers (with --share)");
+    println!("{}", strings::get("usage.flags_header"));
+    println!("{}", strings::get("usage.flag.title"));
+    println!("{}", strings::get("usage.flag.keydb"));
+    println!("{}", strings::get("usage.flag.key_url_1"));
+    println!("{}", strings::get("usage.flag.key_url_2"));
+    println!("{}", strings::get("usage.flag.key_url_3"));
+    println!("{}", strings::get("usage.flag.key_auth"));
+    println!("{}", strings::get("usage.flag.log_level_1"));
+    println!("{}", strings::get("usage.flag.log_level_2"));
+    println!("{}", strings::get("usage.flag.log_level_3"));
+    println!("{}", strings::get("usage.flag.log_file"));
+    println!("{}", strings::get("usage.flag.quiet"));
+    println!("{}", strings::get("usage.flag.raw"));
+    println!("{}", strings::get("usage.flag.multipass"));
+    println!("{}", strings::get("usage.flag.share"));
+    println!("{}", strings::get("usage.flag.mask"));
 }
 
 fn update_keys(args: &[String]) {
