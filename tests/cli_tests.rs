@@ -91,15 +91,16 @@ fn bad_scheme_errors() {
         .expect("failed to run");
     assert!(!out.status.success());
     let combined = combined_output(&out);
-    // `fmt_err` now renders E9002 (StreamUrlInvalid) to its English locale
-    // string — NO raw `E9002` may reach the user (the "english errors" rule).
-    // The message names the offending URL.
+    // An unrecognized SOURCE scheme (`foo://`) is now caught up front by
+    // `preflight_validate` (fail loud and early) with a clear English message
+    // that names the offending URL and guides toward a real scheme. No raw error
+    // code may reach the user.
     assert!(
-        combined.contains("Invalid stream URL") && combined.contains("foo://bar"),
-        "expected the English E9002 message, got: {combined}"
+        combined.contains("not a usable source URL") && combined.contains("foo://bar"),
+        "expected the source-scheme guidance message, got: {combined}"
     );
     assert!(
-        !combined.contains("E9002"),
+        !combined.contains("E9002") && !combined.contains("E90"),
         "raw error code must not leak to the user, got: {combined}"
     );
 }
@@ -146,8 +147,9 @@ fn null_input_errors() {
 
 #[test]
 fn raw_into_mkv_is_rejected() {
-    // --raw passes encrypted bytes through; muxing ciphertext is nonsense.
-    // The CLI must reject this before doing any work — no disc/ISO needed.
+    // --raw is iso://-output-only (it writes a raw, still-encrypted disc image).
+    // A non-ISO mux destination + --raw is rejected up front before any work —
+    // no disc/ISO needed. The message names the flag and points at iso://.
     let out = freemkv()
         .args(["disc:///dev/sg99", "mkv://out.mkv", "--raw"])
         .output()
@@ -155,8 +157,8 @@ fn raw_into_mkv_is_rejected() {
     assert!(!out.status.success());
     let combined = combined_output(&out);
     assert!(
-        combined.contains("--raw cannot be used for muxing"),
-        "expected raw-mux rejection, got: {combined}"
+        combined.contains("--raw") && combined.contains("iso://"),
+        "expected raw-iso-only rejection naming the flag + iso://, got: {combined}"
     );
 }
 
@@ -169,8 +171,25 @@ fn raw_into_m2ts_is_rejected() {
     assert!(!out.status.success());
     let combined = combined_output(&out);
     assert!(
-        combined.contains("--raw cannot be used for muxing"),
-        "expected raw-mux rejection, got: {combined}"
+        combined.contains("--raw") && combined.contains("iso://"),
+        "expected raw-iso-only rejection naming the flag + iso://, got: {combined}"
+    );
+}
+
+#[test]
+fn multipass_into_mkv_is_rejected() {
+    // --multipass is iso://-output-only too (multi-pass recovery writes a disc
+    // image with a mapfile). A non-ISO destination + --multipass is a hard,
+    // early error — replacing the old silent warn-and-ignore.
+    let out = freemkv()
+        .args(["disc:///dev/sg99", "mkv://out.mkv", "--multipass"])
+        .output()
+        .expect("failed to run");
+    assert!(!out.status.success());
+    let combined = combined_output(&out);
+    assert!(
+        combined.contains("--multipass") && combined.contains("iso://"),
+        "expected multipass-iso-only rejection, got: {combined}"
     );
 }
 
