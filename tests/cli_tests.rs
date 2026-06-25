@@ -199,6 +199,79 @@ fn multipass_into_mkv_is_rejected() {
     );
 }
 
+// ── WS3: dropped `-k` short flag (rc.6 — `--keydb` long form only) ──────────
+
+#[test]
+fn dropped_short_k_flag_is_rejected_end_to_end() {
+    // `-k` was removed; through the real CLI dispatch it must surface the
+    // unknown-flag error (naming `-k`) and exit non-zero — never silently
+    // consume `keydb.cfg` as a keydb path and proceed against the default.
+    let out = freemkv()
+        .args(["disc:///dev/sg99", "mkv://out.mkv", "-k", "keydb.cfg"])
+        .output()
+        .expect("failed to run");
+    assert!(!out.status.success());
+    let combined = combined_output(&out);
+    assert!(
+        combined.contains("unknown flag") && combined.contains("-k"),
+        "expected unknown-flag error naming -k, got: {combined}"
+    );
+    // No raw error code leaks (the message is a CLI validation string).
+    assert!(
+        !combined.contains("E70"),
+        "no raw code expected: {combined}"
+    );
+}
+
+// ── WS3: dir:// routing pre-flight (byte-stream source rejected) ────────────
+
+#[test]
+fn dir_dest_byte_stream_source_rejected_end_to_end() {
+    // A byte-stream source (mkv://) into a dir:// target has no UDF file tree —
+    // the CLI must reject it up front with the localized guidance, exit non-zero,
+    // and never create the target folder.
+    let target = std::env::temp_dir().join(format!("freemkv_ws3_dir_{}", std::process::id()));
+    let dest = format!("dir://{}/", target.display());
+    let out = freemkv()
+        .args(["mkv://in.mkv", &dest])
+        .output()
+        .expect("failed to run");
+    let target_made = target.exists();
+    let _ = std::fs::remove_dir_all(&target);
+    assert!(!out.status.success());
+    let combined = combined_output(&out);
+    assert!(
+        combined.contains("dir://") && combined.contains("mkv://in.mkv"),
+        "expected dir:// source guidance naming the bad source, got: {combined}"
+    );
+    assert!(
+        !target_made,
+        "a rejected dir:// source must not create the target folder"
+    );
+}
+
+#[test]
+fn dir_dest_existing_file_rejected_end_to_end() {
+    // A dir:// target that is an existing regular FILE must be rejected (you
+    // can't extract a tree into a file). Use the auto-detect `disc://` source so
+    // the (cheap, side-effect-free) dest-file check is reached: an explicit
+    // `disc:///dev/sgN` would trip the earlier device-reachability gate first.
+    let f = std::env::temp_dir().join(format!("freemkv_ws3_isfile_{}", std::process::id()));
+    std::fs::write(&f, b"i am a file").unwrap();
+    let dest = format!("dir://{}", f.display());
+    let out = freemkv()
+        .args(["disc://", &dest])
+        .output()
+        .expect("failed to run");
+    let _ = std::fs::remove_file(&f);
+    assert!(!out.status.success());
+    let combined = combined_output(&out);
+    assert!(
+        combined.to_lowercase().contains("file") || combined.to_lowercase().contains("folder"),
+        "expected file/folder mismatch guidance, got: {combined}"
+    );
+}
+
 // ── Quiet mode ──────────────────────────────────────────────────────────────
 
 #[test]
