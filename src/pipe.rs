@@ -2118,6 +2118,54 @@ fn fmt_damage_time(secs: f64) -> String {
     }
 }
 
+/// Render the disc-level damage string ("lost" / "no loss") for the live
+/// progress line.
+///
+/// "Lost" means READ FAILED only: `bytes_unreadable_total` (gave up) plus
+/// `bytes_retryable_total` (failed, awaiting retry — NonTrimmed/NonScraped).
+/// It deliberately does NOT include `bytes_pending_total`, which also folds
+/// in not-yet-attempted (NonTried) sectors — counting those would make a
+/// healthy in-progress rip report most of its remaining runtime as "lost".
+/// The title-level path (`bytes_bad_in_main_title`) is already failed-only.
+fn fmt_disc_damage(p: &libfreemkv::progress::PassProgress) -> String {
+    let bytes_disc = p.bytes_total_disc;
+    if bytes_disc == 0 {
+        return strings::get("rip.damage_none");
+    }
+    let bytes_failed = p
+        .bytes_unreadable_total
+        .saturating_add(p.bytes_retryable_total);
+    let disc_damage_secs = if bytes_failed > 0 {
+        p.disc_duration_secs
+            .filter(|&d| d > 0.0)
+            .map(|dur| bytes_failed as f64 / bytes_disc as f64 * dur)
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let title_damage_secs = if p.bytes_bad_in_main_title > 0 {
+        p.main_title_duration_secs
+            .zip(p.main_title_size_bytes)
+            .filter(|&(dur, sz)| dur > 0.0 && sz > 0)
+            .map(|(dur, sz)| p.bytes_bad_in_main_title as f64 / sz as f64 * dur)
+    } else {
+        None
+    };
+
+    if bytes_failed > 0 {
+        let disc_str = fmt_damage_time(disc_damage_secs);
+        match title_damage_secs {
+            Some(ms) if ms > 0.0 && ms < disc_damage_secs * 0.99 => strings::fmt(
+                "rip.damage_lost",
+                &[("time", &disc_str), ("movie_time", &fmt_damage_time(ms))],
+            ),
+            Some(_) | None => strings::fmt("rip.damage_lost_movie", &[("time", &disc_str)]),
+        }
+    } else {
+        strings::get("rip.damage_none")
+    }
+}
+
 fn print_disc_progress(p: &libfreemkv::progress::PassProgress, inst_speed_mbps: f64) {
     let bytes_disc = p.bytes_total_disc;
     if bytes_disc == 0 {
@@ -2149,38 +2197,7 @@ fn print_disc_progress(p: &libfreemkv::progress::PassProgress, inst_speed_mbps: 
     } else {
         "?:??".into()
     };
-    let bytes_worst_case = p
-        .bytes_unreadable_total
-        .saturating_add(p.bytes_pending_total);
-    let disc_damage_secs = if bytes_worst_case > 0 {
-        p.disc_duration_secs
-            .filter(|&d| d > 0.0)
-            .map(|dur| bytes_worst_case as f64 / bytes_disc as f64 * dur)
-            .unwrap_or(0.0)
-    } else {
-        0.0
-    };
-    let title_damage_secs = if p.bytes_bad_in_main_title > 0 {
-        p.main_title_duration_secs
-            .zip(p.main_title_size_bytes)
-            .filter(|&(dur, sz)| dur > 0.0 && sz > 0)
-            .map(|(dur, sz)| p.bytes_bad_in_main_title as f64 / sz as f64 * dur)
-    } else {
-        None
-    };
-
-    let damage = if bytes_worst_case > 0 {
-        let disc_str = fmt_damage_time(disc_damage_secs);
-        match title_damage_secs {
-            Some(ms) if ms > 0.0 && ms < disc_damage_secs * 0.99 => strings::fmt(
-                "rip.damage_lost",
-                &[("time", &disc_str), ("movie_time", &fmt_damage_time(ms))],
-            ),
-            Some(_) | None => strings::fmt("rip.damage_lost_movie", &[("time", &disc_str)]),
-        }
-    } else {
-        strings::get("rip.damage_none")
-    };
+    let damage = fmt_disc_damage(p);
     eprint!(
         "\r  {:.1}/{:.1} GB ({:.1}%)  {}  ETA {}    {}    ",
         gb_done,
@@ -2400,12 +2417,13 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 mod tests {
     use super::{
         KeyConfig, build_jobs, build_key_sources, copy_should_continue, dest_is_iso,
-        disc_copy_recovered_data, fmt_err, fmt_err_str, headers_resolved, is_keyserver_url,
-        is_scheme_only_sink, is_url_token, mux_produced_output, mux_was_interrupted,
-        parse_error_code, parse_flags, preflight_validate, render_error, resolved_keydb_path,
-        sanitize_name, title_in_range, validate_file_dest, validate_iso_input,
+        disc_copy_recovered_data, fmt_disc_damage, fmt_err, fmt_err_str, headers_resolved,
+        is_keyserver_url, is_scheme_only_sink, is_url_token, mux_produced_output,
+        mux_was_interrupted, parse_error_code, parse_flags, preflight_validate, render_error,
+        resolved_keydb_path, sanitize_name, title_in_range, validate_file_dest, validate_iso_input,
     };
     use crate::output::Output;
+    use crate::strings;
     use libfreemkv::parse_url;
 
     // The decrypt no-key verdict matrix (AACS / CSS / css_error / --raw /
@@ -2647,6 +2665,7 @@ mod tests {
             bytes_good_total: 0,
             bytes_unreadable_total: 0,
             bytes_pending_total: 0,
+            bytes_retryable_total: 0,
             bytes_total_disc: 0,
             disc_duration_secs: None,
             bytes_bad_in_main_title: 0,
@@ -2656,6 +2675,78 @@ mod tests {
         let pct = p.work_pct();
         assert!(pct.is_finite(), "work_total==0 must not yield NaN%");
         assert_eq!(pct, 100.0);
+    }
+
+    /// A healthy in-progress rip (zero read errors, large unread remainder)
+    /// must render the clean "no loss" damage string, NOT a "lost" string.
+    /// Regression: `print_disc_progress` used to fold `bytes_pending_total`
+    /// (which includes not-yet-read NonTried sectors) into the "lost" total,
+    /// so an 8%-done rip displayed ~92% of runtime as "lost (in movie)".
+    #[test]
+    fn disc_damage_unread_is_not_lost() {
+        let p = libfreemkv::progress::PassProgress {
+            kind: libfreemkv::progress::PassKind::Sweep,
+            work_done: 800,
+            work_total: 10_000,
+            bytes_good_total: 800,
+            bytes_unreadable_total: 0,
+            // 92% of the disc not yet read — large pending, but ZERO failed.
+            bytes_pending_total: 9_200,
+            bytes_retryable_total: 0,
+            bytes_total_disc: 10_000,
+            disc_duration_secs: Some(7200.0),
+            bytes_bad_in_main_title: 0,
+            main_title_duration_secs: Some(7200.0),
+            main_title_size_bytes: Some(10_000),
+        };
+        let damage = fmt_disc_damage(&p);
+        assert_eq!(
+            damage,
+            strings::get("rip.damage_none"),
+            "unread sectors must not count as lost; got {damage:?}"
+        );
+        assert!(
+            !damage.contains("lost"),
+            "healthy rip must not render a 'lost' string; got {damage:?}"
+        );
+    }
+
+    /// Sectors that actually FAILED to read (unreadable, or retryable =
+    /// NonTrimmed/NonScraped awaiting retry) DO count as lost.
+    #[test]
+    fn disc_damage_failed_reads_are_lost() {
+        // Retryable (failed-awaiting-retry) alone triggers "lost".
+        let p_retryable = libfreemkv::progress::PassProgress {
+            kind: libfreemkv::progress::PassKind::Sweep,
+            work_done: 5_000,
+            work_total: 10_000,
+            bytes_good_total: 4_900,
+            bytes_unreadable_total: 0,
+            bytes_pending_total: 5_100,
+            bytes_retryable_total: 100,
+            bytes_total_disc: 10_000,
+            disc_duration_secs: Some(7200.0),
+            bytes_bad_in_main_title: 0,
+            main_title_duration_secs: Some(7200.0),
+            main_title_size_bytes: Some(10_000),
+        };
+        let damage = fmt_disc_damage(&p_retryable);
+        assert!(
+            damage.contains("lost"),
+            "failed-awaiting-retry must render a 'lost' string; got {damage:?}"
+        );
+        assert_ne!(damage, strings::get("rip.damage_none"));
+
+        // Unreadable (gave up) alone also triggers "lost".
+        let p_unreadable = libfreemkv::progress::PassProgress {
+            bytes_unreadable_total: 100,
+            bytes_retryable_total: 0,
+            ..p_retryable
+        };
+        assert!(
+            fmt_disc_damage(&p_unreadable).contains("lost"),
+            "unreadable bytes must render a 'lost' string"
+        );
     }
 
     fn v(args: &[&str]) -> Vec<String> {
