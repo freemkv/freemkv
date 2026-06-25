@@ -357,29 +357,15 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     let parsed_source = libfreemkv::parse_url(source);
     let parsed_dest = libfreemkv::parse_url(dest);
 
-    // A schemeless dest (e.g. `out.mkv` or `/path/out.mkv`) parses as Unknown.
-    // Don't try to use its "scheme" ("unknown") as a file extension / URL scheme
-    // (→ `name_t1.unknown`, `unknown://...`) or pass it raw into `output()`
-    // (→ cryptic StreamUrlInvalid). Tell the user to add a scheme. Mirrors how
-    // `info_cmd` guides on a bad URL.
-    if matches!(parsed_dest, libfreemkv::StreamUrl::Unknown { .. }) {
-        out.raw(
-            Normal,
-            &strings::fmt("error.dest_needs_scheme", &[("dest", dest)]),
-        );
-        return false;
-    }
-
-    // `--raw` passes encrypted bytes through unchanged. That is valid for a raw
-    // ISO copy (iso:// output) but nonsense for a mux: you cannot mux ciphertext.
-    // Reject it up front before building any jobs/pipeline.
-    if raw
-        && matches!(
-            parsed_dest,
-            libfreemkv::StreamUrl::Mkv { .. } | libfreemkv::StreamUrl::M2ts { .. }
-        )
+    // Fail loud and EARLY: validate the whole invocation (URL schemes, ISO-only
+    // flags, source reachability, dest writability) BEFORE any drive open, scan,
+    // or file creation. On any error this prints one clear message and returns
+    // false (→ nonzero exit), so no partial output is ever produced. Each
+    // individual check is small and unit-tested; this is the single entry point
+    // that orders them.
+    if let Err(msg) = preflight_validate(source, dest, &parsed_source, &parsed_dest, raw, multipass)
     {
-        out.raw(Normal, &strings::get("error.raw_mux_invalid"));
+        out.raw(Normal, &msg);
         return false;
     }
 
@@ -397,13 +383,11 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // For disc with explicit -t, skip scan_titles (pipe_disc does its own scan)
     let is_disc = matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. });
 
-    // --multipass only governs the disc→ISO sweep (mapfile-driven recovery),
-    // which returned above. A direct disc→MKV/M2TS mux is single-pass; honoring
-    // multipass would require an ISO intermediate. Warn rather than silently
-    // ignore the flag, and point at the supported path.
-    if is_disc && multipass {
-        out.raw(Normal, &strings::get("rip.multipass_ignored"));
-    }
+    // `--multipass` (and `--raw`) on a non-iso:// destination is rejected up
+    // front by `preflight_validate` (iso://-only flags). The old silent
+    // warn-and-ignore here is gone: reaching this point with `multipass` set
+    // means the destination IS iso:// (handled by the disc_to_iso branch above)
+    // or it's a non-disc source where multipass never applied. No action needed.
     // For a disc source we skip the upfront `scan_titles` (pipe_disc does its
     // own scan per title); we still need to honor MULTIPLE `-t` flags, so build
     // jobs straight from `title_nums` rather than collapsing to a single title.
@@ -527,6 +511,239 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     ok
 }
 
+// ── Pre-flight invocation validation (fail loud and EARLY) ──────────────────
+
+/// Whether a parsed destination URL targets an `iso://` image. `--raw` and
+/// `--multipass` only apply to a raw disc-image output (they write/recover a
+/// sector image with a mapfile); every other destination is a decode+mux and
+/// must reject those flags. Centralized so the flag gate and any future caller
+/// agree on the predicate.
+fn dest_is_iso(parsed_dest: &libfreemkv::StreamUrl) -> bool {
+    matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. })
+}
+
+/// Whether a destination is a scheme-only sink with no filesystem path —
+/// `null://` (discard) or `stdio://` (stdout). Such a sink consumes every
+/// selected title through the SAME URL: it can't be given per-title file names,
+/// so the multi-title job builder must not route it through `dir_jobs` (which
+/// would synthesize an invalid `null://stem_t1.null` path).
+fn is_scheme_only_sink(parsed_dest: &libfreemkv::StreamUrl) -> bool {
+    matches!(
+        parsed_dest,
+        libfreemkv::StreamUrl::Null | libfreemkv::StreamUrl::Stdio
+    )
+}
+
+/// Validate the whole rip invocation BEFORE any drive open, scan, or file
+/// creation. Returns `Err(message)` — a single, already-localized, ready-to-
+/// print string — on the first problem, so the caller prints it and exits
+/// non-zero with no partial output. `Ok(())` means every checked precondition
+/// holds and the rip may proceed.
+///
+/// Checks, in order (cheapest / most-fundamental first):
+/// 1. Source and destination both carry a URL scheme (`scheme://…`).
+/// 2. `--raw` / `--multipass` are used only with an `iso://` destination.
+/// 3. Source is reachable: a `disc://` device path that is given must exist; an
+///    `iso://` input must exist, be a file (not a dir), and be non-empty.
+/// 4. Destination is writable: for a single-file `mkv://`/`m2ts://`/`iso://`
+///    output the parent directory must exist and be writable, and the path must
+///    not already be a directory.
+///
+/// Deep validation (a real UDF/ISO filesystem probe, a live drive handshake) is
+/// left to the scan step, which surfaces its own typed errors; this is the
+/// cheap, side-effect-free gate that catches the common mistakes instantly.
+fn preflight_validate(
+    source: &str,
+    dest: &str,
+    parsed_source: &libfreemkv::StreamUrl,
+    parsed_dest: &libfreemkv::StreamUrl,
+    raw: bool,
+    multipass: bool,
+) -> Result<(), String> {
+    // 1a. Destination must have a recognized scheme. A schemeless dest
+    // (`out.mkv`, `/path/out.mkv`) parses as Unknown — guide the user to add a
+    // scheme rather than later failing with a cryptic StreamUrlInvalid or
+    // writing `name_t1.unknown`.
+    if matches!(parsed_dest, libfreemkv::StreamUrl::Unknown { .. }) {
+        return Err(strings::fmt("error.dest_needs_scheme", &[("dest", dest)]));
+    }
+    // 1b. Source must have a recognized scheme too. A bare path as source would
+    // otherwise fall through to a no-titles / cryptic error far downstream.
+    if matches!(parsed_source, libfreemkv::StreamUrl::Unknown { .. }) {
+        return Err(strings::fmt(
+            "error.source_needs_scheme",
+            &[("source", source)],
+        ));
+    }
+
+    // 2. `--raw` and `--multipass` are iso://-output-only (deliberate design).
+    // A non-ISO destination + either flag is a hard, early error with guidance —
+    // never a silent ignore. Check raw first, then multipass, so the message
+    // names the actual offending flag.
+    if !dest_is_iso(parsed_dest) {
+        if raw {
+            return Err(strings::fmt("error.raw_iso_only", &[("dest", dest)]));
+        }
+        if multipass {
+            return Err(strings::fmt("error.multipass_iso_only", &[("dest", dest)]));
+        }
+    }
+
+    // 3. Source reachability.
+    match parsed_source {
+        libfreemkv::StreamUrl::Disc { device: Some(p) } => {
+            // An explicitly named device must exist. (Auto-detect — device None —
+            // is left to `find_drive`, which has its own "no drive" message.)
+            if !p.exists() {
+                return Err(strings::fmt(
+                    "error.device_not_found",
+                    &[("path", &p.display().to_string())],
+                ));
+            }
+        }
+        libfreemkv::StreamUrl::Iso { path } => {
+            validate_iso_input(path)?;
+        }
+        _ => {}
+    }
+
+    // 4. Destination writability for a single-file output. Directory dests and
+    // scheme-only sinks (null://, stdio://, network://) are not pre-checked here:
+    // a directory dest is created on demand by `dir_jobs` (which reports its own
+    // error), and the sinks have no filesystem path to validate.
+    match parsed_dest {
+        libfreemkv::StreamUrl::Mkv { path }
+        | libfreemkv::StreamUrl::M2ts { path }
+        | libfreemkv::StreamUrl::Iso { path } => {
+            // A trailing-slash dest (one-file-per-title directory) is validated by
+            // dir_jobs, not here.
+            if !dest.ends_with('/') {
+                validate_file_dest(path)?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// Validate an `iso://` input path: must exist, be a regular file (not a
+/// directory), and be non-empty. A deeper "is it a real disc image?" probe is
+/// the scan's job; this catches the instant mistakes (typo'd path, a directory,
+/// a 0-byte stub) before any scan work.
+fn validate_iso_input(path: &std::path::Path) -> Result<(), String> {
+    let md = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(strings::fmt(
+                "error.iso_not_found",
+                &[("path", &path.display().to_string())],
+            ));
+        }
+        Err(e) => {
+            return Err(strings::fmt(
+                "error.iso_not_readable",
+                &[
+                    ("path", &path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
+        }
+    };
+    if md.is_dir() {
+        return Err(strings::fmt(
+            "error.iso_is_dir",
+            &[("path", &path.display().to_string())],
+        ));
+    }
+    if md.len() == 0 {
+        return Err(strings::fmt(
+            "error.iso_empty",
+            &[("path", &path.display().to_string())],
+        ));
+    }
+    // Readability: opening for read is cheap and catches permission errors that
+    // `metadata` (which only needs directory-traverse) would miss.
+    if let Err(e) = std::fs::File::open(path) {
+        return Err(strings::fmt(
+            "error.iso_not_readable",
+            &[
+                ("path", &path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a single-file destination path: the parent directory must exist,
+/// the path must not already be a directory, and the location must be writable.
+/// Catches "parent dir doesn't exist" and "no write permission" up front instead
+/// of after a scan + mux has already run.
+fn validate_file_dest(path: &std::path::Path) -> Result<(), String> {
+    // An existing directory at the file path can't receive a single-file write.
+    if path.is_dir() {
+        return Err(strings::fmt(
+            "error.dest_is_dir_as_file",
+            &[("path", &path.display().to_string())],
+        ));
+    }
+    // The parent directory must exist. `parent()` is None for a bare filename
+    // (e.g. `out.mkv`) → parent is the current dir, which exists; treat empty
+    // parent as "." so a cwd-relative filename is allowed.
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    if !parent.exists() {
+        return Err(strings::fmt(
+            "error.dest_parent_missing",
+            &[("path", &parent.display().to_string())],
+        ));
+    }
+    // Writability probe: try to create (then remove) the target. This is the
+    // honest test — directory write/exec permission, a read-only filesystem, an
+    // existing read-only file all surface here. We only probe when the target
+    // does not already exist (so we never truncate a real prior output during a
+    // dry validation); if it exists, we check it's writable via its metadata.
+    if path.exists() {
+        match std::fs::OpenOptions::new().append(true).open(path) {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(strings::fmt(
+                    "error.dest_not_writable",
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ));
+            }
+        }
+    } else {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(_) => {
+                // Remove the just-created probe file so the real mux creates it
+                // fresh (with its size hint / fallocate). Best-effort cleanup.
+                let _ = std::fs::remove_file(path);
+            }
+            Err(e) => {
+                return Err(strings::fmt(
+                    "error.dest_not_writable",
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build the `(title_index, dest_url)` job list.
 ///
 /// - Scanned source (ISO, etc.) with a title list: select the requested titles
@@ -582,6 +799,23 @@ fn build_jobs(
         )
     };
 
+    // A scheme-only sink (null://, stdio://) has NO filesystem path, so it can
+    // never receive per-title file naming. Multiple selected titles all route to
+    // the SAME sink URL (each title decoded then discarded / streamed in turn).
+    // Without this, the multi-title branches below call `dir_jobs`, which derives
+    // an invalid `null://disc_t1.null` (a path on a scheme that must be empty) —
+    // `parse_url` then rejects it (Unknown) and `output()` errors, so `null://`
+    // wrongly failed on any multi-title source. `sink_jobs` maps each selected
+    // index to the bare sink URL instead.
+    let sink_jobs = |indices: &[usize]| -> Option<Vec<(Option<usize>, String)>> {
+        Some(
+            indices
+                .iter()
+                .map(|&idx| (Some(idx), dest.to_string()))
+                .collect(),
+        )
+    };
+
     match titles {
         Some(t) if !t.is_empty() => {
             // Scanned source — select which titles.
@@ -590,7 +824,10 @@ fn build_jobs(
             } else {
                 title_nums.iter().map(|n| n.saturating_sub(1)).collect()
             };
-            if indices.len() == 1 && !is_dir_dest {
+            if is_scheme_only_sink(parsed_dest) {
+                // null:// / stdio:// — every title to the single sink, no naming.
+                sink_jobs(&indices)
+            } else if indices.len() == 1 && !is_dir_dest {
                 Some(vec![(Some(indices[0]), dest.to_string())])
             } else {
                 let disc_name = t
@@ -608,10 +845,12 @@ fn build_jobs(
         }
         _ if is_disc && title_nums.len() > 1 => {
             // Disc source, multiple titles requested. pipe_disc scans per title;
-            // one job per requested title, written to a directory. Use a generic
-            // "disc" stem (the real disc name isn't known until each per-title
-            // scan inside pipe_disc).
-            //
+            // one job per requested title.
+            let indices: Vec<usize> = title_nums.iter().map(|n| n.saturating_sub(1)).collect();
+            if is_scheme_only_sink(parsed_dest) {
+                // null:// / stdio:// — every requested title to the single sink.
+                return sink_jobs(&indices);
+            }
             // A single-file dest can't hold multiple titles: `dir_jobs` would
             // `create_dir_all` it, silently turning `movie.mkv` into a directory.
             // Mirror the scanned-source guard above and reject up front. (The
@@ -624,7 +863,6 @@ fn build_jobs(
                 );
                 return None;
             }
-            let indices: Vec<usize> = title_nums.iter().map(|n| n.saturating_sub(1)).collect();
             dir_jobs(&indices, "disc")
         }
         _ => {
@@ -774,29 +1012,6 @@ fn apply_keys(disc: &mut libfreemkv::Disc, keys: &KeyConfig, samples: Vec<Vec<u8
     libfreemkv::resolve_and_apply(&mut sources, &inputs, disc);
 }
 
-/// Live-disc analogue of libfreemkv's `mux::resolve::aacs_key_missing`.
-/// Returns `true` when decryption is requested (`!raw`), the disc is
-/// AACS-encrypted (`has_aacs`), and key resolution yielded no usable key
-/// (`DecryptKeys::None`). In that case `pipe_disc` fails fast with
-/// `Error::NoDiscKey` rather than streaming ciphertext that muxes to garbage.
-/// `--raw` and non-AACS discs (incl. CSS DVDs, which resolve to `Css{..}`)
-/// always return `false`.
-fn disc_aacs_key_missing(raw: bool, has_aacs: bool, keys: &libfreemkv::DecryptKeys) -> bool {
-    !raw && has_aacs && matches!(keys, libfreemkv::DecryptKeys::None)
-}
-
-/// Live-disc analogue of libfreemkv's `mux::resolve::css_key_missing`.
-/// Returns `true` when decryption is requested (`!raw`), the disc is
-/// CSS-encrypted (`has_css`), and per-title key resolution yielded no usable
-/// key (`DecryptKeys::None` — e.g. a multi-VTS DVD whose chosen title's VTS
-/// could not be re-cracked). In that case `pipe_disc` fails fast with
-/// `Error::CssKeyMissing` rather than streaming scrambled MPEG that muxes to
-/// garbage. `--raw` and non-CSS discs (AACS resolves to `Aacs{..}`,
-/// unencrypted has no `disc.css`) always return `false`.
-fn disc_css_key_missing(raw: bool, has_css: bool, keys: &libfreemkv::DecryptKeys) -> bool {
-    !raw && has_css && matches!(keys, libfreemkv::DecryptKeys::None)
-}
-
 fn pipe_disc(
     source: &str,
     dest: &str,
@@ -853,13 +1068,13 @@ fn pipe_disc(
         ));
     }
 
-    // CSS scrambled-but-uncracked gate (Fix 6): the scan saw scrambled sectors
-    // but recovered no title key (`disc.css` is None yet `disc.css_error` is
-    // set). The disc IS encrypted; muxing would pass scrambled MPEG through as
-    // plaintext (garbage at exit 0). Fail loudly. `--raw` skips decryption.
-    if !raw && disc.css_error.is_some() {
-        return Err(libfreemkv::Error::CssKeyMissing.to_string());
-    }
+    // Pre-flight decrypt gate (disc-wide): catches a scrambled-but-uncracked
+    // CSS disc (`css_error` set, `css` None — the content IS encrypted) and an
+    // AACS disc with no resolved key, BEFORE building the stream. The per-title
+    // (multi-VTS CSS) check runs again below once the chosen title's key is
+    // resolved. `--raw` and unencrypted discs pass. Single verdict source as the
+    // ISO mux path (`Disc::ensure_decryptable`).
+    disc.ensure_decryptable(raw).map_err(|e| e.to_string())?;
 
     let title = disc.titles[title_idx].clone();
     let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
@@ -880,35 +1095,17 @@ fn pipe_disc(
     // short-circuits to `decrypt_keys()`, so this is a no-op on those paths.
     let keys = disc.decrypt_keys_for_title(title_idx, &mut drive, batch);
 
-    // CSS no-key gate (parallel to the AACS gate below; mirrors the ISO
-    // path's `css_key_missing` gate in libfreemkv mux/resolve.rs). On a CSS DVD whose
-    // chosen title's VTS could not be re-cracked, `keys` is
-    // `DecryptKeys::None`; muxing that would pass scrambled MPEG through as
-    // plaintext (garbage at exit 0). Fail loudly with `Error::CssKeyMissing`
-    // instead. `--raw` skips decryption so it is never gated; non-CSS discs
-    // (AACS resolves to `Aacs{..}`, unencrypted has no `disc.css`) don't fire.
-    if disc_css_key_missing(raw, disc.css.is_some(), &keys) {
-        return Err(libfreemkv::Error::CssKeyMissing.to_string());
-    }
-
-    // No-key guard (mirrors the ISO-path gate in libfreemkv mux/resolve.rs):
-    // if decryption is wanted (not --raw) and the disc is AACS-encrypted but key
-    // resolution yielded no usable key, FAIL here. Without this the live disc://
-    // path passes `DecryptKeys::None` into `DiscStream`, which then passes
-    // ciphertext through unchanged — the demuxer sees no TS syncs, emits nothing,
-    // and we write an empty/garbage MKV and exit 0 with no message. Return the
-    // `Error::NoDiscKey` Display (`E7022[: <hash>]`) so the caller's `fmt_err`
-    // renders "no KEYDB.cfg found / no key for disc" and the exit code is nonzero.
-    // CSS DVDs resolve to `DecryptKeys::Css{..}` (never `None`), so this is
-    // AACS-only via `disc.aacs`.
-    if disc_aacs_key_missing(raw, disc.aacs.is_some(), &keys) {
-        let disc_hash = disc
-            .aacs
-            .as_ref()
-            .map(|a| a.disc_hash.trim_start_matches("0x").to_string())
-            .unwrap_or_default();
-        return Err(libfreemkv::Error::NoDiscKey { disc_hash }.to_string());
-    }
+    // Per-title decrypt gate (mirrors the ISO mux path): on a multi-VTS CSS DVD
+    // whose chosen title's VTS could not be re-cracked, `keys` is
+    // `DecryptKeys::None` even though the disc-wide gate above passed; on an
+    // AACS disc with no key it is also None. Either way, streaming that into
+    // `DiscStream` passes ciphertext through unchanged → the demuxer sees no TS
+    // syncs, emits nothing, and we'd write an empty/garbage MKV at exit 0. Fail
+    // loudly with the same verdict source (`Disc::ensure_decryptable_keys`):
+    // CssKeyMissing for CSS, NoDiscKey (named by hash) for AACS. `--raw` and
+    // unencrypted discs pass.
+    disc.ensure_decryptable_keys(raw, &keys)
+        .map_err(|e| e.to_string())?;
 
     let format = disc.content_format;
 
@@ -1269,6 +1466,18 @@ fn disc_to_iso(
         .map(|t| libfreemkv::read_encrypted_units(&mut drive, &t, SAMPLE_UNITS))
         .unwrap_or_default();
     apply_keys(&mut disc, keys, samples, out);
+
+    // Pre-flight decrypt gate: a decrypting disc→ISO copy (not --raw) of an
+    // encrypted disc with no usable key would write ciphertext to the ISO and
+    // exit 0. Refuse here — right after scan + key resolution, BEFORE locking
+    // the tray, sizing the ISO, or reading a single sector — so the failure is
+    // pre-flight with no partial ISO. (`Disc::copy` enforces the same gate
+    // internally; this surfaces it earlier with the localized message.) --raw
+    // and unencrypted discs pass.
+    if let Err(e) = disc.ensure_decryptable(raw) {
+        out.raw(Normal, &fmt_err(&e));
+        return false;
+    }
 
     let disc_name = sanitize_name(disc.meta_title.as_deref().unwrap_or(&disc.volume_id));
     let (iso_path, is_null) = match &parsed_dest {
@@ -1823,87 +2032,23 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyConfig, build_jobs, build_key_sources, copy_should_continue, disc_aacs_key_missing,
-        disc_copy_recovered_data, disc_css_key_missing, fmt_err_str, headers_resolved,
-        is_keyserver_url, is_url_token, mux_produced_output, mux_was_interrupted, parse_error_code,
-        parse_flags, title_in_range,
+        KeyConfig, build_jobs, build_key_sources, copy_should_continue, dest_is_iso,
+        disc_copy_recovered_data, fmt_err_str, headers_resolved, is_keyserver_url,
+        is_scheme_only_sink, is_url_token, mux_produced_output, mux_was_interrupted,
+        parse_error_code, parse_flags, preflight_validate, title_in_range, validate_file_dest,
+        validate_iso_input,
     };
     use crate::output::Output;
+    use libfreemkv::parse_url;
 
-    /// The silent-failure gate (Fix 1): an AACS disc whose key resolution
-    /// yielded `DecryptKeys::None` must be flagged so `pipe_disc` returns
-    /// `Error::NoDiscKey` (E7022 + nonzero exit) instead of streaming
-    /// ciphertext into an empty/garbage MKV at exit 0.
-    #[test]
-    fn aacs_disc_with_no_key_is_flagged() {
-        assert!(
-            disc_aacs_key_missing(false, true, &libfreemkv::DecryptKeys::None),
-            "AACS disc + no key (not --raw) must trip the no-key gate"
-        );
-    }
-
-    /// `--raw` deliberately skips decryption — no key needed, never gated.
-    #[test]
-    fn raw_disc_is_never_gated() {
-        assert!(
-            !disc_aacs_key_missing(true, true, &libfreemkv::DecryptKeys::None),
-            "--raw must bypass the no-key gate even with no key"
-        );
-    }
-
-    /// A non-AACS disc (unencrypted, or a CSS DVD) legitimately has no AACS
-    /// key — it must not be gated.
-    #[test]
-    fn non_aacs_disc_is_never_gated() {
-        assert!(
-            !disc_aacs_key_missing(false, false, &libfreemkv::DecryptKeys::None),
-            "a disc with no AACS state must not be gated"
-        );
-    }
-
-    // ── CSS per-title no-key gate (Theme B fix #5) ──────────────────────────
-
-    /// A CSS DVD whose chosen title's per-VTS key could not be re-cracked
-    /// (`decrypt_keys_for_title` → None) must trip the gate so `pipe_disc`
-    /// returns `Error::CssKeyMissing` instead of streaming scrambled MPEG
-    /// (garbage at exit 0).
-    #[test]
-    fn css_disc_with_no_title_key_is_flagged() {
-        assert!(
-            disc_css_key_missing(false, true, &libfreemkv::DecryptKeys::None),
-            "CSS disc + no per-title key (not --raw) must trip the gate"
-        );
-    }
-
-    /// A CSS disc WITH a resolved title key proceeds.
-    #[test]
-    fn css_disc_with_key_is_not_flagged() {
-        let css = libfreemkv::DecryptKeys::Css {
-            title_key: [0u8; 5],
-        };
-        assert!(
-            !disc_css_key_missing(false, true, &css),
-            "a resolved CSS title key must not be gated"
-        );
-    }
-
-    /// `--raw` skips decryption — the CSS gate never fires.
-    #[test]
-    fn css_raw_disc_is_never_gated() {
-        assert!(
-            !disc_css_key_missing(true, true, &libfreemkv::DecryptKeys::None),
-            "--raw must bypass the CSS no-key gate"
-        );
-    }
-
-    /// A non-CSS disc (AACS or unencrypted) never trips the CSS gate.
-    #[test]
-    fn non_css_disc_is_never_gated() {
-        assert!(
-            !disc_css_key_missing(false, false, &libfreemkv::DecryptKeys::None),
-            "a disc with no CSS state must not be CSS-gated"
-        );
-    }
+    // The decrypt no-key verdict matrix (AACS / CSS / css_error / --raw /
+    // unencrypted) now lives in `libfreemkv::Disc::ensure_decryptable[_keys]`,
+    // which both CLI entry points (`pipe_disc`, `disc_to_iso`) and the ISO mux
+    // (`libfreemkv::input`) delegate to. It is exhaustively tested at that single
+    // source of truth in `libfreemkv::disc::tests`, so the CLI no longer carries
+    // its own copies of the matrix. The CLI-specific concern — that the resulting
+    // `Error::NoDiscKey` renders to an English message with no raw code leak — is
+    // covered by `no_keydb_aacs_disc_surfaces_e7022_in_english` below.
 
     // ── zero-output guard (Theme A fix #1/#2) ───────────────────────────────
 
@@ -2048,21 +2193,15 @@ mod tests {
 
     // ── negative path: no-keydb AACS disc → E7022 surfaced in English ───────
 
-    /// End-to-end negative-path coverage: an AACS disc with no usable key (no
-    /// keydb / disc hash not in keydb) trips `disc_aacs_key_missing`, which
-    /// makes `pipe_disc` return `Error::NoDiscKey`'s Display (`E7022[: hash]`).
-    /// That string must render to the ENGLISH E7022 message via `fmt_err` (so
-    /// the user never sees a raw `E7022`) AND `run()` propagates the Err to a
-    /// nonzero exit. Here we assert the gate + the message; the exit-code wiring
-    /// is exercised by `run()` returning `false` on any `pipe_disc` Err.
+    /// End-to-end negative-path coverage: when the decrypt gate
+    /// (`Disc::ensure_decryptable`, tested in libfreemkv) fires for a no-keydb
+    /// AACS disc, `pipe_disc`/`disc_to_iso` surface `Error::NoDiscKey`'s Display
+    /// (`E7022[: hash]`). This test pins the CLI-side rendering: that string must
+    /// render to the ENGLISH E7022 message via `fmt_err` (so the user never sees
+    /// a raw `E7022`) and name the disc by hash. The exit-code wiring is
+    /// exercised by `run()` returning `false` on any `pipe_disc` Err.
     #[test]
     fn no_keydb_aacs_disc_surfaces_e7022_in_english() {
-        // The gate fires for an AACS disc with no key (not --raw).
-        assert!(disc_aacs_key_missing(
-            false,
-            true,
-            &libfreemkv::DecryptKeys::None
-        ));
         // The error pipe_disc returns, rendered for the user.
         let disp = libfreemkv::Error::NoDiscKey {
             disc_hash: "deadbeefcafe".to_string(),
@@ -2610,5 +2749,376 @@ mod tests {
             libfreemkv::parse_url("mkv://out.mkv"),
             libfreemkv::StreamUrl::Mkv { .. }
         ));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Adversarial input battery — "tests galore to try and break it".
+    //
+    // Every bad-input class + combinations, each asserting fail-LOUD-EARLY:
+    // `preflight_validate` returns Err (a printable message) — never panics,
+    // never silently succeeds. The CLI maps that Err to a printed message +
+    // `run()` returning false → nonzero exit + no output.
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// Run `preflight_validate` on a (source, dest, raw, multipass) tuple,
+    /// parsing the URLs the same way `run()` does. Returns the Result so tests
+    /// can assert Ok / Err without repeating the parse boilerplate.
+    fn preflight(source: &str, dest: &str, raw: bool, multipass: bool) -> Result<(), String> {
+        let ps = parse_url(source);
+        let pd = parse_url(dest);
+        preflight_validate(source, dest, &ps, &pd, raw, multipass)
+    }
+
+    /// A unique temp path under the system temp dir (no tempfile dep). Caller
+    /// is responsible for cleanup; non-existent by construction.
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("freemkv_test_{}_{}_{}", tag, std::process::id(), n))
+    }
+
+    // ── schemes ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn preflight_rejects_schemeless_dest() {
+        let e = preflight("iso://in.iso", "out.mkv", false, false).unwrap_err();
+        assert!(
+            e.contains("scheme"),
+            "must guide on missing dest scheme: {e}"
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_schemeless_source() {
+        // A real readable ISO dest is irrelevant — the schemeless SOURCE must be
+        // caught first. Use a sink dest so dest validation can't mask it.
+        let e = preflight("in.iso", "null://", false, false).unwrap_err();
+        assert!(
+            e.to_lowercase().contains("scheme"),
+            "must guide on missing source scheme: {e}"
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_unknown_dest_scheme() {
+        // `gopher://x` parses to Unknown (no recognized scheme) → rejected.
+        let e = preflight("null://", "gopher://x", false, false).unwrap_err();
+        assert!(!e.is_empty());
+    }
+
+    // ── --raw / --multipass are iso://-only ─────────────────────────────────
+
+    #[test]
+    fn raw_rejected_on_mkv_dest() {
+        let e = preflight("disc://", "mkv://out.mkv", true, false).unwrap_err();
+        assert!(e.contains("--raw"), "names the offending flag: {e}");
+        assert!(e.contains("iso://"), "points at the supported output: {e}");
+    }
+
+    #[test]
+    fn raw_rejected_on_m2ts_and_null_and_stdio() {
+        for dest in ["m2ts://o.m2ts", "null://", "stdio://"] {
+            let e = preflight("disc://", dest, true, false)
+                .expect_err(&format!("--raw on {dest} must error"));
+            assert!(e.contains("--raw"), "{dest}: {e}");
+        }
+    }
+
+    #[test]
+    fn multipass_rejected_on_mkv_dest() {
+        let e = preflight("disc://", "mkv://out.mkv", false, true).unwrap_err();
+        assert!(e.contains("--multipass"), "names the flag: {e}");
+        assert!(e.contains("iso://"), "points at iso://: {e}");
+    }
+
+    #[test]
+    fn multipass_rejected_on_null_and_stdio_and_network() {
+        for dest in ["null://", "stdio://", "network://host:9000"] {
+            let e = preflight("disc://", dest, false, true)
+                .expect_err(&format!("--multipass on {dest} must error"));
+            assert!(e.contains("--multipass"), "{dest}: {e}");
+        }
+    }
+
+    #[test]
+    fn disc_to_mkv_raw_combination_errors() {
+        // disc→mkv --raw: the explicit combination called out in the brief.
+        assert!(preflight("disc://", "mkv://o.mkv", true, false).is_err());
+    }
+
+    #[test]
+    fn disc_to_mkv_multipass_combination_errors() {
+        assert!(preflight("disc://", "mkv://o.mkv", false, true).is_err());
+    }
+
+    #[test]
+    fn disc_to_null_raw_and_multipass_error() {
+        // disc→null --raw and disc→null --multipass: both error (iso://-only).
+        assert!(preflight("disc://", "null://", true, false).is_err());
+        assert!(preflight("disc://", "null://", false, true).is_err());
+    }
+
+    #[test]
+    fn raw_and_multipass_accepted_on_iso_dest() {
+        // The legit case: iso:// destination accepts both flags. (Source is the
+        // live drive, not pre-checked for existence here — device None.)
+        assert!(preflight("disc://", "iso://disc.iso", true, false).is_ok());
+        assert!(preflight("disc://", "iso://disc.iso", false, true).is_ok());
+        assert!(preflight("disc://", "iso://disc.iso", true, true).is_ok());
+    }
+
+    #[test]
+    fn no_flags_accepted_on_non_iso_dest() {
+        // Without the iso-only flags, a mux/sink dest is fine at preflight.
+        assert!(preflight("disc://", "mkv://o.mkv", false, false).is_ok());
+        assert!(preflight("disc://", "null://", false, false).is_ok());
+    }
+
+    // ── drive / device source ────────────────────────────────────────────────
+
+    #[test]
+    fn missing_device_path_errors_early() {
+        // An explicit device path that doesn't exist must be caught before any
+        // open. Use a sink dest so only the source check can fire.
+        let e = preflight("disc:///dev/does-not-exist-xyz", "null://", false, false).unwrap_err();
+        assert!(
+            e.to_lowercase().contains("device") || e.contains("does-not-exist"),
+            "must name the missing device: {e}"
+        );
+    }
+
+    #[test]
+    fn auto_detect_device_not_prechecked() {
+        // `disc://` with no device path is auto-detect — left to find_drive, so
+        // preflight must NOT error on it for source reachability.
+        assert!(preflight("disc://", "null://", false, false).is_ok());
+    }
+
+    // ── ISO input ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn iso_input_missing_errors() {
+        let p = temp_path("nope.iso");
+        let e = validate_iso_input(&p).unwrap_err();
+        assert!(e.to_lowercase().contains("not found"), "{e}");
+    }
+
+    #[test]
+    fn iso_input_directory_errors() {
+        let dir = temp_path("isodir");
+        std::fs::create_dir(&dir).unwrap();
+        let e = validate_iso_input(&dir).unwrap_err();
+        let _ = std::fs::remove_dir(&dir);
+        assert!(e.to_lowercase().contains("directory"), "{e}");
+    }
+
+    #[test]
+    fn iso_input_empty_errors() {
+        let f = temp_path("empty.iso");
+        std::fs::write(&f, b"").unwrap();
+        let e = validate_iso_input(&f).unwrap_err();
+        let _ = std::fs::remove_file(&f);
+        assert!(e.to_lowercase().contains("empty"), "{e}");
+    }
+
+    #[test]
+    fn iso_input_nonempty_file_passes_cheap_check() {
+        // A non-empty readable file passes the CHEAP preflight (deep image
+        // validity is the scan's job, not preflight's).
+        let f = temp_path("ok.iso");
+        std::fs::write(&f, vec![0u8; 4096]).unwrap();
+        let r = validate_iso_input(&f);
+        let _ = std::fs::remove_file(&f);
+        assert!(r.is_ok(), "non-empty file must pass cheap iso check: {r:?}");
+    }
+
+    #[test]
+    fn iso_source_missing_errors_through_preflight() {
+        // Full path: an iso:// source pointing at a missing file errors in
+        // preflight (not just the unit helper).
+        let p = temp_path("missing.iso");
+        let src = format!("iso://{}", p.display());
+        let e = preflight(&src, "null://", false, false).unwrap_err();
+        assert!(e.to_lowercase().contains("not found"), "{e}");
+    }
+
+    // ── output destination ───────────────────────────────────────────────────
+
+    #[test]
+    fn dest_parent_missing_errors() {
+        // mkv:// whose parent directory does not exist must error before work.
+        let missing_dir = temp_path("no_such_dir");
+        let dest = missing_dir.join("movie.mkv");
+        let e = validate_file_dest(&dest).unwrap_err();
+        assert!(
+            e.to_lowercase().contains("director") || e.to_lowercase().contains("exist"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn dest_is_existing_directory_errors() {
+        // A path that is an existing DIRECTORY can't receive a single-file write.
+        let dir = temp_path("existing_dir");
+        std::fs::create_dir(&dir).unwrap();
+        let e = validate_file_dest(&dir).unwrap_err();
+        let _ = std::fs::remove_dir(&dir);
+        assert!(e.to_lowercase().contains("director"), "{e}");
+    }
+
+    #[test]
+    fn dest_writable_parent_passes_and_leaves_no_probe_file() {
+        // A writable parent + non-existent target passes, and the writability
+        // probe must NOT leave its temp file behind.
+        let f = temp_path("writable.mkv");
+        let r = validate_file_dest(&f);
+        assert!(r.is_ok(), "writable dest must pass: {r:?}");
+        assert!(
+            !f.exists(),
+            "the writability probe must clean up its temp file"
+        );
+    }
+
+    #[test]
+    fn dest_writable_check_does_not_truncate_existing_file() {
+        // If the target already exists, the probe must NOT truncate it (we open
+        // append, not create-new). Pre-seed content and assert it survives.
+        let f = temp_path("preexisting.mkv");
+        std::fs::write(&f, b"keepme").unwrap();
+        let r = validate_file_dest(&f);
+        let survived = std::fs::read(&f).unwrap_or_default();
+        let _ = std::fs::remove_file(&f);
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(survived, b"keepme", "existing output must not be truncated");
+    }
+
+    #[test]
+    fn full_preflight_dest_parent_missing_errors() {
+        let missing = temp_path("nodir");
+        let dest = format!("mkv://{}", missing.join("m.mkv").display());
+        let e = preflight("null://", &dest, false, false).unwrap_err();
+        assert!(!e.is_empty());
+    }
+
+    // ── predicates ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn dest_is_iso_predicate() {
+        assert!(dest_is_iso(&parse_url("iso://x.iso")));
+        assert!(!dest_is_iso(&parse_url("mkv://x.mkv")));
+        assert!(!dest_is_iso(&parse_url("null://")));
+    }
+
+    #[test]
+    fn scheme_only_sink_predicate() {
+        assert!(is_scheme_only_sink(&parse_url("null://")));
+        assert!(is_scheme_only_sink(&parse_url("stdio://")));
+        assert!(!is_scheme_only_sink(&parse_url("mkv://x.mkv")));
+        assert!(!is_scheme_only_sink(&parse_url("iso://x.iso")));
+    }
+
+    // ── null:// multi-title routing fix ──────────────────────────────────────
+
+    /// Regression: `null://` on a MULTI-title scanned source must route every
+    /// selected title to the bare `null://` sink — NEVER synthesize an invalid
+    /// `null://stem_t1.null` (which `parse_url` rejects → output() error, the
+    /// old bug). Each emitted job's dest URL must be exactly `null://`, and every
+    /// such URL must re-parse to `StreamUrl::Null` (proving it's a valid sink).
+    #[test]
+    fn null_dest_multi_title_routes_all_to_sink() {
+        let titles = Some(vec![
+            libfreemkv::DiscTitle::empty(),
+            libfreemkv::DiscTitle::empty(),
+            libfreemkv::DiscTitle::empty(),
+        ]);
+        let out = Output::new(false, true);
+        let parsed = parse_url("null://");
+        let jobs = build_jobs(&titles, false, &[], false, "null://", &parsed, &out)
+            .expect("null:// multi-title must build jobs, not fail");
+        assert_eq!(jobs.len(), 3, "one job per title");
+        for (idx, url) in &jobs {
+            assert!(idx.is_some(), "each job names its title index");
+            assert_eq!(url, "null://", "every title routes to the bare sink");
+            assert!(
+                matches!(parse_url(url), libfreemkv::StreamUrl::Null),
+                "the sink URL must re-parse to Null (not Unknown): {url}"
+            );
+        }
+    }
+
+    /// `stdio://` (the other scheme-only sink) gets the same multi-title routing.
+    #[test]
+    fn stdio_dest_multi_title_routes_all_to_sink() {
+        let titles = Some(vec![
+            libfreemkv::DiscTitle::empty(),
+            libfreemkv::DiscTitle::empty(),
+        ]);
+        let out = Output::new(false, true);
+        let parsed = parse_url("stdio://");
+        let jobs = build_jobs(&titles, false, &[], false, "stdio://", &parsed, &out)
+            .expect("stdio:// multi-title must build jobs");
+        assert_eq!(jobs.len(), 2);
+        for (_idx, url) in &jobs {
+            assert_eq!(url, "stdio://");
+        }
+    }
+
+    /// A real file dest (mkv://) on a multi-title source still routes through
+    /// per-title naming (the sink special-case must NOT swallow file dests).
+    #[test]
+    fn file_dest_multi_title_still_named_per_title() {
+        let mut t0 = libfreemkv::DiscTitle::empty();
+        t0.playlist = "Movie".into();
+        let titles = Some(vec![t0, libfreemkv::DiscTitle::empty()]);
+        let out = Output::new(false, true);
+        // Directory dest (trailing slash) → one named file per title.
+        let dir = temp_path("mkvout");
+        let dest = format!("{}/", dir.display());
+        let parsed = parse_url(&format!("mkv://{}/", dir.display()));
+        let jobs = build_jobs(&titles, false, &[], true, &dest, &parsed, &out);
+        let _ = std::fs::remove_dir_all(&dir);
+        let jobs = jobs.expect("dir dest builds per-title jobs");
+        assert_eq!(jobs.len(), 2);
+        for (_idx, url) in &jobs {
+            assert!(url.contains("_t"), "per-title file naming preserved: {url}");
+        }
+    }
+
+    /// `preflight_validate` must NEVER panic, on any combination of adversarial
+    /// scheme strings × flag states. The only acceptable outcomes are Ok or Err
+    /// — a panic here would crash the CLI on malformed input.
+    #[test]
+    fn preflight_never_panics_on_adversarial_combinations() {
+        let urls = [
+            "",
+            "://",
+            "disc://",
+            "disc:///dev/null",
+            "iso://",
+            "iso://\0",
+            "mkv://",
+            "m2ts://x",
+            "null://",
+            "null://trailing",
+            "stdio://",
+            "network://",
+            "network://host:9000",
+            "gopher://x",
+            "out.mkv",
+            "/abs/path",
+            "iso://日本語.iso",
+            &"iso://".to_string().repeat(1000),
+        ];
+        for &s in &urls {
+            for &d in &urls {
+                for raw in [false, true] {
+                    for mp in [false, true] {
+                        // Must return (Ok or Err), never panic.
+                        let _ = preflight(s, d, raw, mp);
+                    }
+                }
+            }
+        }
     }
 }
