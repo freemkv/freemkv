@@ -13,6 +13,7 @@
 
 mod disc_info;
 mod info;
+mod messaging;
 mod output;
 mod pipe;
 mod strings;
@@ -251,11 +252,19 @@ fn is_url(s: &str) -> bool {
 /// streaming; the leading mark is ANSI-free when stderr is redirected.
 fn fatal(op_key: &str, cause: &str) -> ! {
     let op = strings::get(op_key);
+    // WS2: the `Error:` level word is rendered from `error.level_error` (a
+    // translatable key, the one home for the three level words) so the fatal
+    // block reads `✗ Error: <op> failed: <cause>.` with the code-forward cause
+    // produced by `pipe::fmt_err`.
+    let level = strings::get(messaging::Level::Error.locale_key());
     eprintln!();
     eprintln!(
         "{} {}.",
         fail_mark(),
-        strings::fmt("error.fatal_header", &[("op", &op), ("cause", cause)])
+        strings::fmt(
+            "error.fatal_header",
+            &[("level", &level), ("op", &op), ("cause", cause)]
+        )
     );
     eprintln!("  {}", strings::get("error.fatal_diagnostic_hint"));
     std::process::exit(1);

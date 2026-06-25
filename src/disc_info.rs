@@ -621,11 +621,12 @@ mod tests {
             !rendered.contains("{detail}"),
             "placeholder must be substituted, got:\n{rendered}"
         );
-        // The substituted cause text is present (no raw E#### code leaks because
-        // it routed through `fmt_err`).
+        // WS2: the cause routes through `fmt_err`, which now PREFIXES the
+        // language-neutral `E<code>` token (code-forward) ahead of the
+        // localized message — the code is shown, not stripped.
         assert!(
-            !rendered.contains("E1002"),
-            "raw error code must not leak, got:\n{rendered}"
+            rendered.contains("E1002"),
+            "expected the code-forward E1002 token, got:\n{rendered}"
         );
         assert!(
             rendered.starts_with("Scan failed:") && rendered.len() > "Scan failed:".len() + 1,
@@ -634,18 +635,19 @@ mod tests {
     }
 
     #[test]
-    fn open_failure_renders_through_fmt_err_no_raw_code_leaks() {
+    fn open_failure_renders_through_fmt_err_shows_code() {
         // Regression: the `disc-info --device` open-failure handler did
         // `eprintln!("{}", e)`, printing libfreemkv's raw `E####: <data>`
         // Display and bypassing the i18n renderer. It must route the error
-        // through `pipe::fmt_err`, which localizes the code (E1001 explains the
-        // disk-group / privilege fix) and never leaks a raw `E####`.
+        // through `pipe::fmt_err`, which localizes the message (E1001 explains
+        // the disk-group / privilege fix). WS2: the `E<code>` token is now
+        // shown as a code-forward prefix ahead of the localized message.
         let rendered = crate::pipe::fmt_err(&libfreemkv::Error::DevicePermission {
             path: "/dev/sg0".to_string(),
         });
         assert!(
-            !rendered.contains("E1001"),
-            "raw error code must not leak, got:\n{rendered}"
+            rendered.starts_with("E1001 "),
+            "expected the code-forward E1001 prefix, got:\n{rendered}"
         );
         assert!(
             rendered.contains("/dev/sg0"),

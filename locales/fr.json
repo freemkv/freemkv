@@ -193,8 +193,11 @@
     "unrecoverable": "{count} secteurs irrécupérables dans {clusters} groupe(s)."
   },
   "error": {
-    "generic": "Erreur : {detail}",
-    "fatal_header": "{op} a échoué : {cause}",
+    "generic": "{code} {detail}",
+    "fatal_header": "{level} : {op} a échoué : {cause}",
+    "level_error": "Erreur",
+    "level_warn": "Avertissement",
+    "level_info": "Info",
     "fatal_diagnostic_hint": "Pour un journal de diagnostic, relancez avec --log-level 3 (écrit ./log.txt).",
     "op_rip": "Extraction",
     "op_info": "Infos disque",
