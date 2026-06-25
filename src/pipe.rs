@@ -713,6 +713,11 @@ fn preflight_validate(
         libfreemkv::StreamUrl::Dir { path } => {
             validate_dir_dest(path, dest, force)?;
         }
+        // `demux://` writes per-track ES files into a directory (created on
+        // demand). Same creatable/writable/non-empty gate as `dir://`.
+        libfreemkv::StreamUrl::Demux { dir } => {
+            validate_dir_dest(dir, dest, force)?;
+        }
         _ => {}
     }
 
@@ -946,17 +951,50 @@ fn build_jobs(
         )
     };
 
+    // `demux://` is a directory-target sink that fans each title's tracks out to
+    // ES files INSIDE the directory (the sink does its own per-track naming).
+    // A single title writes straight into `demux://<dir>/`; multiple titles each
+    // get their own `demux://<dir>/t<NN>/` subdirectory so their files don't
+    // collide. (Unlike `dir_jobs`, we never append a `.demux` filename — the
+    // path stays a directory.)
+    let demux_jobs = |indices: &[usize], base_dir: &str| -> Vec<(Option<usize>, String)> {
+        if indices.len() == 1 {
+            return vec![(Some(indices[0]), dest.to_string())];
+        }
+        let trimmed = base_dir.trim_end_matches('/');
+        indices
+            .iter()
+            .map(|&idx| (Some(idx), format!("{trimmed}/t{:02}/", idx + 1)))
+            .collect()
+    };
+    let demux_dir = parsed_dest.path_str().to_string();
+
     match titles {
         Some(t) if !t.is_empty() => {
             // Scanned source — select which titles.
             let indices: Vec<usize> = if title_nums.is_empty() {
-                (0..t.len()).collect()
+                // ALL-TITLES rip (no `-t`): drop the empty nav/menu PGC stubs
+                // (0-duration, 0-content titles) BEFORE they ever reach the
+                // muxer. They are not real titles — muxing one emits no frames
+                // and surfaces a scary `Error: E6008 Invalid MKV file` line for
+                // something the user never asked to rip. The main feature
+                // (title 0) is ALWAYS kept even if it scanned as empty, so an
+                // all-empty/degenerate disc still produces one job (whose real
+                // failure then surfaces) rather than silently doing nothing.
+                // An explicit `-t N` is unaffected (see the else branch): a user
+                // asking for a specific empty title still gets a clean error.
+                (0..t.len())
+                    .filter(|&idx| idx == 0 || is_muxable_title(&t[idx]))
+                    .collect()
             } else {
                 title_nums.iter().map(|n| n.saturating_sub(1)).collect()
             };
             if is_scheme_only_sink(parsed_dest) {
                 // null:// / stdio:// — every title to the single sink, no naming.
                 sink_jobs(&indices)
+            } else if matches!(parsed_dest, libfreemkv::StreamUrl::Demux { .. }) {
+                // demux:// — directory sink with its own per-track naming.
+                Some(demux_jobs(&indices, &demux_dir))
             } else if indices.len() == 1 && !is_dir_dest {
                 Some(vec![(Some(indices[0]), dest.to_string())])
             } else {
@@ -980,6 +1018,10 @@ fn build_jobs(
             if is_scheme_only_sink(parsed_dest) {
                 // null:// / stdio:// — every requested title to the single sink.
                 return sink_jobs(&indices);
+            }
+            if matches!(parsed_dest, libfreemkv::StreamUrl::Demux { .. }) {
+                // demux:// — directory sink with its own per-track naming.
+                return Some(demux_jobs(&indices, &demux_dir));
             }
             // A single-file dest can't hold multiple titles: `dir_jobs` would
             // `create_dir_all` it, silently turning `movie.mkv` into a directory.
