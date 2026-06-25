@@ -13,6 +13,7 @@
 
 mod disc_info;
 mod info;
+mod keydb_fetch;
 mod messaging;
 mod output;
 mod pipe;
@@ -915,7 +916,13 @@ fn update_keys(args: &[String]) {
             std::process::exit(1);
         }
     };
-    match libfreemkv::keydb::update(url) {
+    // Fetch the keydb bytes via ureq (HTTP **and** HTTPS), then hand them to
+    // libfreemkv to verify + atomically save. libfreemkv's own raw-TCP
+    // downloader is plaintext-HTTP only; routing the fetch through the CLI's
+    // existing `ureq` dependency adds TLS with zero new deps and reuses the
+    // library's parse/save path unchanged.
+    let result = keydb_fetch::fetch(url).and_then(|bytes| libfreemkv::keydb::save(&bytes));
+    match result {
         Ok(result) => {
             println!(
                 "{}",
