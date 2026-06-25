@@ -41,7 +41,7 @@
     "supported": "Supporte",
     "unknown": "Inconnu",
     "share_hint": "Lancez 'freemkv drive-info --share' pour aider a elargir la prise en charge des lecteurs.",
-    "share_usage": "Utilisation : freemkv drive-info [--share] [--mask] [--device /dev/sgN]",
+    "share_usage": "Utilisation : freemkv drive-info [--share] [--mask]",
     "share_desc": "Capturer et soumettre le profil du lecteur pour elargir la prise en charge",
     "mask_desc": "Masquer les numeros de serie (lettres → A, chiffres → 0)",
     "device_desc": "Specifier le chemin du peripherique",
@@ -79,7 +79,7 @@
     "subtitle": "Sous-titre",
     "dolby_vision_el": "Dolby Vision EL",
     "forced": "force",
-    "usage": "Utilisation : freemkv disc-info [--device /dev/sgN] [--full] [--basic] [--quiet]",
+    "usage": "Utilisation : freemkv disc-info [--full] [--basic] [--quiet]",
     "format_unknown": "Inconnu"
   },
   "stream": {
@@ -146,6 +146,12 @@
     "damage_none": "0s",
     "multipass_ignored": "Remarque : --multipass est ignoré pour disc->MKV/M2TS (mux en une passe). Utilisez une sortie iso:// pour la récupération multipasse."
   },
+  "dir": {
+    "extracting": "Extracting decrypted file tree to {path}",
+    "file_lossy": "  {file}: {lost} MB lost",
+    "complete": "Extracted {files} files ({size} MB) — tree is complete",
+    "lossy": "Extracted {files} files but {lost} MB were unreadable/undecryptable. Recover with disc->iso --multipass, then iso->dir."
+  },
   "remux": {
     "input": "Entree",
     "output_label": "Sortie",
@@ -194,7 +200,7 @@
     "op_info": "Infos disque",
     "op_verify": "Vérification",
     "op_update_keys": "Mise à jour des clés",
-    "no_drive": "Aucun lecteur BD trouve. Utilisez --device /dev/sgN",
+    "no_drive": "Aucun lecteur BD trouve. Utilisez disc:///dev/sgN",
     "open_failed": "Impossible d'ouvrir le lecteur {device} : {error}",
     "no_titles": "Aucun titre trouvé sur le disque — il peut être vierge, non pris en charge ou pas encore lisible.",
     "scan_failed": "Echec de l'analyse : {detail}",
@@ -310,7 +316,12 @@
     "dest_parent_missing": "Error: output directory does not exist: '{path}'. Create it first, or choose an existing directory.",
     "dest_not_writable": "Error: output destination is not writable: '{path}' ({error}).",
     "dest_is_dir_as_file": "Error: output '{path}' is an existing directory, but a single file was expected. Choose a file path or end the destination with '/' for one-file-per-title.",
-    "device_not_found": "Error: drive device not found: '{path}'."
+    "device_not_found": "Error: drive device not found: '{path}'.",
+    "dir_source_unsupported": "Error: dir:// extraction needs a disc filesystem source (disc:// or iso://). '{source}' has no file tree. Rip a disc or ISO to a folder; for a single stream use mkv:// instead.",
+    "dir_dest_invalid": "Error: '{dest}' is not a valid dir:// path. Use dir://<folder>/ to extract the decrypted file tree into a folder.",
+    "dir_dest_is_file": "Error: dir:// target '{path}' is an existing file, not a folder. Choose a folder path for the extracted tree.",
+    "dir_dest_not_writable": "Error: cannot create or write the dir:// target '{path}': {error}.",
+    "dir_dest_not_empty": "Error: dir:// target '{path}' is not empty. Pass --force to extract into it anyway, or choose an empty folder."
   },
   "usage": {
     "synopsis_1": "Utilisation : freemkv <source> <dest> [options]",
@@ -347,7 +358,8 @@
       "network_recv": "  freemkv network://0.0.0.0:9000 mkv://Film.mkv   Recevoir depuis le réseau",
       "stdio": "  freemkv disc:// stdio://                          Rediriger vers stdout",
       "benchmark": "  freemkv disc:// null://                           Mesurer la vitesse de lecture",
-      "info": "  freemkv info disc://                              Afficher les infos du disque"
+      "info": "  freemkv info disc://                              Afficher les infos du disque",
+      "rip_dir": "  freemkv iso://Disc.iso dir://Movie/           Extract decrypted file tree into a folder"
     },
     "flags_header": "Options :",
     "flag": {
@@ -365,7 +377,8 @@
       "raw": "      --raw           Ignorer le déchiffrement (sortie chiffrée brute)",
       "multipass": "      --multipass    Écrire/mettre à jour le mapfile pour la récupération multipasse",
       "share": "  -s, --share         Soumettre le profil du lecteur (avec info disc://)",
-      "mask": "  -m, --mask          Masquer les numéros de série (avec --share)"
+      "mask": "  -m, --mask          Masquer les numéros de série (avec --share)",
+      "force": "      --force        Extract into a non-empty dir:// target (overwrite)"
     }
   }
 }

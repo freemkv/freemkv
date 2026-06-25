@@ -339,17 +339,14 @@ fn info_cmd(args: &[String]) {
 
     match &parsed {
         libfreemkv::StreamUrl::Disc { device } => {
-            let mut disc_args = Vec::new();
-            if let Some(d) = device {
-                disc_args.push("-d".to_string());
-                disc_args.push(d.to_string_lossy().to_string());
-            }
-            disc_args.extend_from_slice(&args[1..]);
+            // The device comes from the source URL (`disc:///dev/sgN`), not a flag.
+            let dev = device.as_ref().map(|d| d.to_string_lossy().to_string());
+            let flags = &args[1..];
             // --share routes to drive-info module (capture + GitHub submit)
-            if disc_args.iter().any(|a| a == "--share" || a == "-s") {
-                info::run(&disc_args);
+            if flags.iter().any(|a| a == "--share" || a == "-s") {
+                info::run(dev.as_deref(), flags);
             } else {
-                disc_info::run(&disc_args);
+                disc_info::run(dev.as_deref(), flags);
             }
         }
         libfreemkv::StreamUrl::Iso { path } => {

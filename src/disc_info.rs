@@ -10,8 +10,7 @@ use libfreemkv::{
     LabelQualifier, ScanOptions, Stream, SubtitleStream, VideoStream,
 };
 
-pub fn run(args: &[String]) {
-    let mut device_path: Option<String> = None;
+pub fn run(device: Option<&str>, args: &[String]) {
     let mut quiet = false;
     let mut verbose = false;
     let mut full = false;
@@ -20,22 +19,6 @@ pub fn run(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--device" | "-d" => {
-                i += 1;
-                match args.get(i) {
-                    Some(v) => device_path = Some(v.clone()),
-                    None => {
-                        eprintln!(
-                            "{}",
-                            strings::fmt(
-                                "error.flag_needs_value",
-                                &[("flag", "--device"), ("example", "--device /dev/sg0")]
-                            )
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
             "--quiet" | "-q" => quiet = true,
             // `--log-level N` sets the tracing level (in main::init_logging);
             // here it also widens stdout detail at level >= 2. Accept + skip
@@ -73,8 +56,8 @@ pub fn run(args: &[String]) {
     out.print(Normal, "disc.scanning");
     out.blank(Normal);
 
-    let mut drive = match device_path {
-        Some(ref p) => Drive::open(std::path::Path::new(p)).unwrap_or_else(|e| {
+    let mut drive = match device {
+        Some(p) => Drive::open(std::path::Path::new(p)).unwrap_or_else(|e| {
             eprintln!("{}", crate::pipe::fmt_err(&e));
             std::process::exit(1);
         }),

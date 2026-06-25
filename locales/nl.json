@@ -41,7 +41,7 @@
     "supported": "Ondersteund",
     "unknown": "Onbekend",
     "share_hint": "Voer 'freemkv drive-info --share' uit om drive-ondersteuning uit te breiden.",
-    "share_usage": "Gebruik: freemkv drive-info [--share] [--mask] [--device /dev/sgN]",
+    "share_usage": "Gebruik: freemkv drive-info [--share] [--mask]",
     "share_desc": "Leg drive-profiel vast en stuur het in om drive-ondersteuning uit te breiden",
     "mask_desc": "Serienummers maskeren (letters → A, cijfers → 0)",
     "device_desc": "Apparaatpad opgeven",
@@ -79,7 +79,7 @@
     "subtitle": "Ondertitel",
     "dolby_vision_el": "Dolby Vision EL",
     "forced": "geforceerd",
-    "usage": "Gebruik: freemkv disc-info [--device /dev/sgN] [--full] [--basic] [--quiet]",
+    "usage": "Gebruik: freemkv disc-info [--full] [--basic] [--quiet]",
     "format_unknown": "Onbekend"
   },
   "stream": {
@@ -146,6 +146,12 @@
     "damage_none": "0s",
     "multipass_ignored": "Let op: --multipass wordt genegeerd voor disc->MKV/M2TS (mux in één doorgang). Gebruik een iso://-uitvoer voor multipass-herstel."
   },
+  "dir": {
+    "extracting": "Extracting decrypted file tree to {path}",
+    "file_lossy": "  {file}: {lost} MB lost",
+    "complete": "Extracted {files} files ({size} MB) — tree is complete",
+    "lossy": "Extracted {files} files but {lost} MB were unreadable/undecryptable. Recover with disc->iso --multipass, then iso->dir."
+  },
   "remux": {
     "input": "Invoer",
     "output_label": "Uitvoer",
@@ -194,7 +200,7 @@
     "op_info": "Schijfinfo",
     "op_verify": "Verificatie",
     "op_update_keys": "Sleutelupdate",
-    "no_drive": "Geen BD-drive gevonden. Gebruik --device /dev/sgN",
+    "no_drive": "Geen BD-drive gevonden. Gebruik disc:///dev/sgN",
     "open_failed": "Kan station {device} niet openen: {error}",
     "no_titles": "Geen titels op de schijf gevonden — deze is mogelijk leeg, niet ondersteund of nog niet leesbaar.",
     "scan_failed": "Scannen mislukt: {detail}",
@@ -310,7 +316,12 @@
     "dest_parent_missing": "Error: output directory does not exist: '{path}'. Create it first, or choose an existing directory.",
     "dest_not_writable": "Error: output destination is not writable: '{path}' ({error}).",
     "dest_is_dir_as_file": "Error: output '{path}' is an existing directory, but a single file was expected. Choose a file path or end the destination with '/' for one-file-per-title.",
-    "device_not_found": "Error: drive device not found: '{path}'."
+    "device_not_found": "Error: drive device not found: '{path}'.",
+    "dir_source_unsupported": "Error: dir:// extraction needs a disc filesystem source (disc:// or iso://). '{source}' has no file tree. Rip a disc or ISO to a folder; for a single stream use mkv:// instead.",
+    "dir_dest_invalid": "Error: '{dest}' is not a valid dir:// path. Use dir://<folder>/ to extract the decrypted file tree into a folder.",
+    "dir_dest_is_file": "Error: dir:// target '{path}' is an existing file, not a folder. Choose a folder path for the extracted tree.",
+    "dir_dest_not_writable": "Error: cannot create or write the dir:// target '{path}': {error}.",
+    "dir_dest_not_empty": "Error: dir:// target '{path}' is not empty. Pass --force to extract into it anyway, or choose an empty folder."
   },
   "usage": {
     "synopsis_1": "Gebruik: freemkv <bron> <doel> [opties]",
@@ -347,7 +358,8 @@
       "network_recv": "  freemkv network://0.0.0.0:9000 mkv://Film.mkv   Van netwerk ontvangen",
       "stdio": "  freemkv disc:// stdio://                           Naar stdout doorsturen",
       "benchmark": "  freemkv disc:// null://                            Leessnelheid meten",
-      "info": "  freemkv info disc://                               Disc-info weergeven"
+      "info": "  freemkv info disc://                               Disc-info weergeven",
+      "rip_dir": "  freemkv iso://Disc.iso dir://Movie/           Extract decrypted file tree into a folder"
     },
     "flags_header": "Opties:",
     "flag": {
@@ -365,7 +377,8 @@
       "raw": "      --raw           Decodering overslaan (ruwe versleutelde uitvoer)",
       "multipass": "      --multipass    Mapfile schrijven/bijwerken voor multipass-herstel",
       "share": "  -s, --share         Stationsprofiel indienen (met info disc://)",
-      "mask": "  -m, --mask          Serienummers maskeren (met --share)"
+      "mask": "  -m, --mask          Serienummers maskeren (met --share)",
+      "force": "      --force        Extract into a non-empty dir:// target (overwrite)"
     }
   }
 }
