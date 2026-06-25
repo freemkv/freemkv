@@ -193,8 +193,11 @@
     "unrecoverable": "{count} nicht wiederherstellbare Sektoren in {clusters} Cluster(n)."
   },
   "error": {
-    "generic": "Fehler: {detail}",
-    "fatal_header": "{op} fehlgeschlagen: {cause}",
+    "generic": "{code} {detail}",
+    "fatal_header": "{level}: {op} fehlgeschlagen: {cause}",
+    "level_error": "Fehler",
+    "level_warn": "Warnung",
+    "level_info": "Info",
     "fatal_diagnostic_hint": "Für ein Diagnoseprotokoll erneut mit --log-level 3 ausführen (schreibt ./log.txt).",
     "op_rip": "Auslesen",
     "op_info": "Disc-Info",

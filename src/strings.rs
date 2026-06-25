@@ -196,6 +196,13 @@ fn lookup(strings: &Value, path: &str) -> String {
 mod tests {
     use super::*;
 
+    // Shared WS2 test fixtures: `all_error_variants()` (the canonical
+    // Error-variant enumeration) and `placeholders()` (the placeholder
+    // extractor). Included rather than imported because `freemkv` is a binary
+    // crate with no lib target — `tests/messaging_contract.rs` includes the
+    // SAME file, so the two enumerations can never drift.
+    include!("test_support.rs");
+
     /// Collect all dotted key paths from a JSON value (e.g. "app.usage", "error.E1000").
     fn collect_keys(value: &Value, prefix: &str, out: &mut Vec<String>) {
         if let Some(obj) = value.as_object() {
@@ -255,36 +262,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// Extract `{word}` placeholders from a format string, matching exactly how
-    /// `fmt` substitutes them: a balanced single `{...}` with no nested braces.
-    /// Escaped/doubled braces (`{{`, `}}`) are skipped so a literal `{{val}}`
-    /// does not register a malformed `{{val}` placeholder.
-    fn placeholders(s: &str) -> Vec<String> {
-        let bytes = s.as_bytes();
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'{' {
-                // Doubled `{{` is an escape, not a placeholder — skip both.
-                if bytes.get(i + 1) == Some(&b'{') {
-                    i += 2;
-                    continue;
-                }
-                if let Some(rel_end) = s[i + 1..].find('}') {
-                    let inner = &s[i + 1..i + 1 + rel_end];
-                    // A real placeholder has no nested brace inside it.
-                    if !inner.contains('{') {
-                        out.push(format!("{{{}}}", inner));
-                    }
-                    i += 1 + rel_end + 1;
-                    continue;
-                }
-            }
-            i += 1;
-        }
-        out
     }
 
     #[test]
@@ -411,121 +388,15 @@ mod tests {
     /// the constant set; this one pins locale coverage of it.
     #[test]
     fn every_error_code_has_an_en_string() {
-        use libfreemkv::Error;
         let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
 
-        let p = || "p".to_string();
-        let variants: Vec<Error> = vec![
-            Error::DeviceNotFound { path: p() },
-            Error::DevicePermission { path: p() },
-            Error::DeviceNotReady { path: p() },
-            Error::DeviceResetFailed { path: p() },
-            Error::ScsiInterfaceUnavailable { path: p() },
-            Error::DeviceLocked { path: p(), kr: 0 },
-            Error::IoKitPluginFailed { path: p(), kr: 0 },
-            Error::UnsupportedDrive {
-                vendor_id: p(),
-                product_id: p(),
-                product_revision: p(),
-            },
-            Error::ProfileParse,
-            Error::UnsupportedPlatform { target: p() },
-            Error::PlatformNotImplemented { platform: p() },
-            Error::UnlockFailed,
-            Error::SignatureMismatch {
-                expected: [0; 4],
-                got: [0; 4],
-            },
-            Error::ScsiError {
-                opcode: 0,
-                status: 0,
-                sense: None,
-            },
-            Error::InvalidCdbLength { len: 0, max: 0 },
-            Error::IoError {
-                source: std::io::Error::from_raw_os_error(13),
-            },
-            Error::DiscRead {
-                sector: 0,
-                status: None,
-                sense: None,
-            },
-            Error::Halted,
-            Error::MplsParse,
-            Error::ClpiParse,
-            Error::UdfNotFound { path: p() },
-            Error::UdfBufferTooSmall,
-            Error::DiscTitleRange { index: 0, count: 0 },
-            Error::IfoParse,
-            Error::MkvInvalid,
-            Error::NoStreams,
-            Error::MapfileInvalid { kind: "hex" },
-            Error::AacsNoKeys,
-            Error::AacsCertShort,
-            Error::AacsAgidAlloc,
-            Error::AacsCertRejected,
-            Error::AacsCertRead,
-            Error::AacsCertVerify,
-            Error::AacsKeyRead,
-            Error::AacsKeyRejected,
-            Error::AacsKeyVerify,
-            Error::AacsVidRead,
-            Error::AacsVidMac,
-            Error::AacsDataKey,
-            Error::DecryptFailed,
-            Error::CssAuthFailed,
-            Error::AacsHostCertRejected,
-            Error::AacsRawReadUnsupported,
-            Error::AacsVidUnavailable,
-            Error::AacsMkUnavailable,
-            Error::AacsVukNotInKeydb,
-            Error::DriveProfileMissing,
-            Error::VidCdbUnavailable,
-            Error::NoDiscKey { disc_hash: p() },
-            Error::CssKeyMissing,
-            Error::AacsNoHostCert { path: p() },
-            Error::KeydbConnect { host: p() },
-            Error::KeydbHttp { status: 0 },
-            Error::KeydbInvalid,
-            Error::KeydbWrite { path: p() },
-            Error::KeydbParse,
-            Error::KeydbLoad { path: p() },
-            Error::KeydbUnsupportedScheme { scheme: p() },
-            Error::KeydbTooManyRedirects,
-            Error::StreamReadOnly,
-            Error::StreamWriteOnly,
-            Error::StreamUrlInvalid { url: p() },
-            Error::StreamUrlMissingPath { scheme: p() },
-            Error::StreamUrlMissingPort { addr: p() },
-            Error::NetworkAddrBlocked { addr: p() },
-            Error::MuxEmpty,
-            Error::PesFrameTooLarge { size: 0 },
-            Error::PesInvalidMagic,
-            Error::PesTrackTooLarge { track: 0 },
-            Error::IsoTooLarge { path: p() },
-            Error::NoMetadata,
-            Error::DiscUrlNotDirect,
-            Error::HevcParamParse,
-            Error::MuxTrackRange {
-                track: 0,
-                tracks: 0,
-            },
-            Error::Fmp4Unimplemented,
-            Error::DemuxThreadPanicked,
-            Error::PipelineJoinTimeout,
-            Error::PipelineConsumerPanicked,
-            Error::SweepConsumerGone,
-            Error::PipelineConsumerGone,
-            Error::DiscCapacityOverflow,
-            Error::ExtentNotUnitAligned,
-            Error::M2tsPacketMalformed,
-            Error::DiscCapacityMalformed,
-        ];
+        // The canonical variant list lives in the shared `test_support.rs`
+        // fixture (included above), so this and `tests/messaging_contract.rs`
+        // enumerate the identical set and cannot drift.
+        let variants = all_error_variants();
 
-        // E9012 (Fmp4Unimplemented) and E9021 (M2tsPacketMalformed) are internal
-        // invariants the CLI never surfaces to a user, but we still want a string
-        // so the generic wrapper never echoes a raw code. Every variant above is
-        // checked uniformly — no exceptions.
+        // Every variant must have an `error.E<code>` string so the generic
+        // wrapper never echoes a raw code. Checked uniformly — no exceptions.
         let mut missing = Vec::new();
         for e in &variants {
             let key = format!("error.E{}", e.code());

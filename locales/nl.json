@@ -193,8 +193,11 @@
     "unrecoverable": "{count} onherstelbare sectoren in {clusters} cluster(s)."
   },
   "error": {
-    "generic": "Fout: {detail}",
-    "fatal_header": "{op} mislukt: {cause}",
+    "generic": "{code} {detail}",
+    "fatal_header": "{level}: {op} mislukt: {cause}",
+    "level_error": "Fout",
+    "level_warn": "Waarschuwing",
+    "level_info": "Info",
     "fatal_diagnostic_hint": "Voer voor een diagnoselogboek opnieuw uit met --log-level 3 (schrijft ./log.txt).",
     "op_rip": "Rippen",
     "op_info": "Schijfinfo",

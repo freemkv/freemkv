@@ -85,21 +85,47 @@ fn fmt_err_str(s: &str) -> String {
         // `strings::get` returns the dotted path verbatim on a miss, so a
         // present locale entry is one whose lookup does NOT equal its own key.
         if strings::get(&key) != key {
-            // E7022 names the disc by hash; keep its dedicated placeholder.
-            if code_part == "E7022" {
-                return strings::fmt(&key, &[("hash", data), ("detail", data)]);
-            }
-            // E6000 (DiscRead) Display is `E6000: <sector> 0x..hex..` — the
-            // status/sense hex tail is diagnostic noise that must not reach the
-            // user. Pass ONLY the leading sector number as {detail}.
-            if code_part == "E6000" {
+            // WS2: the localized message is prefixed with its language-neutral
+            // `E<code>` token — the code is SHOWN, not stripped. The `Error:`
+            // level word is added once at the render site (`render_error` /
+            // `main::fatal`), never here, so the fragment can also be embedded
+            // as `{cause}`/`{detail}` inside a localized wrapper without
+            // doubling the level prefix.
+            let localized = if code_part == "E7022" {
+                // E7022 names the disc by hash; keep its dedicated placeholder.
+                strings::fmt(&key, &[("hash", data), ("detail", data)])
+            } else if code_part == "E6000" {
+                // E6000 (DiscRead) Display is `E6000: <sector> 0x..hex..` — the
+                // status/sense hex tail is diagnostic noise that must not reach
+                // the user. Pass ONLY the leading sector number as {detail}.
                 let sector = data.split_whitespace().next().unwrap_or(data);
-                return strings::fmt(&key, &[("detail", sector)]);
-            }
-            return strings::fmt(&key, &[("detail", data)]);
+                strings::fmt(&key, &[("detail", sector)])
+            } else {
+                strings::fmt(&key, &[("detail", data)])
+            };
+            return format!("{code_part} {localized}");
         }
+        // A code with NO locale entry still SHOWS its code via the generic
+        // wrapper (`{code} {detail}`), so a missing string never swallows the
+        // code. The contract test makes this unreachable for any real variant.
+        return strings::fmt("error.generic", &[("code", code_part), ("detail", data)]);
     }
-    strings::fmt("error.generic", &[("detail", s)])
+    // A non-code string (a CLI-side message): no code to show. The generic
+    // wrapper is `{code} {detail}`; with an empty code that leaves a leading
+    // space, so trim it — the render site adds the level word, and a stray
+    // leading space would show as `Error:  msg`.
+    strings::fmt("error.generic", &[("code", ""), ("detail", s)])
+        .trim_start()
+        .to_string()
+}
+
+/// Render an error for a user-facing terminal line, with the `Error:` level
+/// word prefixed exactly once (WS2 §2.1). Inline render sites print this; the
+/// `fatal()` block instead embeds the prefix-free `fmt_err` fragment as
+/// `{cause}` inside `error.fatal_header` and adds the level word itself.
+pub fn render_error(e: &dyn std::fmt::Display) -> String {
+    let level = strings::get(crate::messaging::Level::Error.locale_key());
+    format!("{}: {}", level, fmt_err(e))
 }
 
 /// Parse a libfreemkv Display string of the form `E<code>` or
@@ -510,7 +536,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                 multipass,
                 &out,
             ) {
-                out.raw(Normal, &fmt_err(&e));
+                out.raw(Normal, &render_error(&e));
                 ok = false;
             }
         } else {
@@ -521,7 +547,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                 raw,
             };
             if let Err(e) = pipe(source, dest_url, &opts, &out) {
-                out.raw(Normal, &fmt_err(&e));
+                out.raw(Normal, &render_error(&e));
                 ok = false;
             }
         }
@@ -1500,7 +1526,7 @@ fn disc_to_iso(
         Some(ref d) => match libfreemkv::Drive::open(d) {
             Ok(d) => d,
             Err(e) => {
-                out.raw(Normal, &fmt_err(&e));
+                out.raw(Normal, &render_error(&e));
                 return false;
             }
         },
@@ -1552,7 +1578,7 @@ fn disc_to_iso(
     // internally; this surfaces it earlier with the localized message.) --raw
     // and unencrypted discs pass.
     if let Err(e) = disc.ensure_decryptable(raw) {
-        out.raw(Normal, &fmt_err(&e));
+        out.raw(Normal, &render_error(&e));
         return false;
     }
 
@@ -1739,7 +1765,7 @@ fn disc_to_iso(
             true
         }
         Err(e) => {
-            out.raw(Normal, &fmt_err(&e));
+            out.raw(Normal, &render_error(&e));
             false
         }
     };
@@ -1778,7 +1804,7 @@ fn dir_to_extract(
                 Some(p) => match libfreemkv::Drive::open(p) {
                     Ok(d) => d,
                     Err(e) => {
-                        out.raw(Normal, &fmt_err(&e));
+                        out.raw(Normal, &render_error(&e));
                         return false;
                     }
                 },
@@ -1818,7 +1844,7 @@ fn dir_to_extract(
                 .unwrap_or_default();
             apply_keys(&mut disc, keys, samples, out);
             if let Err(e) = disc.ensure_decryptable(false) {
-                out.raw(Normal, &fmt_err(&e));
+                out.raw(Normal, &render_error(&e));
                 return false;
             }
             drive.lock_tray();
@@ -1861,7 +1887,7 @@ fn dir_to_extract(
                 .unwrap_or_default();
             apply_keys(&mut disc, keys, samples, out);
             if let Err(e) = disc.ensure_decryptable(false) {
-                out.raw(Normal, &fmt_err(&e));
+                out.raw(Normal, &render_error(&e));
                 return false;
             }
             run_extract(&disc, &mut reader, &dest_path, force, out)
@@ -1981,7 +2007,7 @@ fn run_extract(
             }
         }
         Err(e) => {
-            out.raw(Normal, &fmt_err(&e));
+            out.raw(Normal, &render_error(&e));
             false
         }
     }
@@ -2351,8 +2377,8 @@ mod tests {
         KeyConfig, build_jobs, build_key_sources, copy_should_continue, dest_is_iso,
         disc_copy_recovered_data, fmt_err_str, headers_resolved, is_keyserver_url,
         is_scheme_only_sink, is_url_token, mux_produced_output, mux_was_interrupted,
-        parse_error_code, parse_flags, preflight_validate, title_in_range, validate_file_dest,
-        validate_iso_input,
+        parse_error_code, parse_flags, preflight_validate, render_error, title_in_range,
+        validate_file_dest, validate_iso_input,
     };
     use crate::output::Output;
     use libfreemkv::parse_url;
@@ -2431,39 +2457,50 @@ mod tests {
     }
 
     /// A representative sample of codes must render to their ENGLISH locale
-    /// strings — NO raw `E####` may reach the user. This is the core of the
-    /// "english errors for all codes" requirement.
+    /// strings, prefixed with the language-neutral `E<code>` token (WS2: the
+    /// code is SHOWN, not stripped). `fmt_err_str` returns the prefix-free-of-
+    /// level `E<code> <message>` fragment; the `Error:` level word is added by
+    /// the render site (`render_error`).
     #[test]
     fn fmt_err_renders_codes_to_english() {
-        // E6009 NoStreams — the Theme A zero-output error.
+        // E6009 NoStreams — the Theme A zero-output error. Code now prefixed.
         let s = fmt_err_str("E6009");
-        assert_eq!(s, "No streams found.");
-        assert!(!s.contains("E6009"), "raw code leaked: {s}");
+        assert_eq!(s, "E6009 No streams found.");
 
         // E7023 CssKeyMissing — the Theme B CSS gate error. The user-facing
         // copy is dejargoned: "copy-protected", not "CSS title key".
         let s = fmt_err_str("E7023");
+        assert!(s.starts_with("E7023 "), "code not prefixed: {s}");
         assert!(s.to_lowercase().contains("copy-protected"), "got: {s}");
-        assert!(!s.contains("E7023"), "raw code leaked: {s}");
 
         // E9023 MuxEmpty — the Theme A m2ts zero-frame error. Dejargoned to
         // "empty file" / "video or audio", not the internal "mux" term.
         let s = fmt_err_str("E9023");
+        assert!(s.starts_with("E9023 "), "code not prefixed: {s}");
         assert!(s.to_lowercase().contains("empty file"), "got: {s}");
-        assert!(!s.contains("E9023"), "raw code leaked: {s}");
 
-        // E5000 with data → {detail} substituted, raw code gone.
+        // E5000 with data → {detail} substituted, code prefixed.
         let s = fmt_err_str("E5000: 13");
+        assert!(s.starts_with("E5000 "), "code not prefixed: {s}");
         assert!(s.contains("13"), "detail not substituted: {s}");
-        assert!(!s.contains("E5000"), "raw code leaked: {s}");
 
-        // E7013 Decryption failed.
-        assert_eq!(fmt_err_str("E7013"), "Decryption failed.");
+        // E7013 Decryption failed — code now prefixed.
+        assert_eq!(fmt_err_str("E7013"), "E7013 Decryption failed.");
 
-        // E7022 names the disc by hash.
+        // E7022 names the disc by hash, code prefixed.
         let s = fmt_err_str("E7022: deadbeef");
+        assert!(s.starts_with("E7022 "), "code not prefixed: {s}");
         assert!(s.contains("deadbeef"), "hash not substituted: {s}");
-        assert!(!s.contains("E7022"), "raw code leaked: {s}");
+    }
+
+    /// The full render-site output: `render_error` prefixes the `Error:` level
+    /// word exactly once onto the `E<code> <message>` fragment (WS2 §2.1).
+    #[test]
+    fn render_error_prefixes_level_once() {
+        let rendered = render_error(&"E6009");
+        assert_eq!(rendered, "Error: E6009 No streams found.");
+        // The level word appears exactly once (no nested doubling).
+        assert_eq!(rendered.matches("Error:").count(), 1);
     }
 
     /// E6000 (DiscRead) Display is `E6000: <sector> 0x..status../0x..sense..`.
@@ -2471,11 +2508,12 @@ mod tests {
     /// user — only the sector number is substituted into the localized message.
     #[test]
     fn fmt_err_e6000_strips_status_sense_hex_tail() {
-        // Full DiscRead Display: sector + status + sense triple.
+        // Full DiscRead Display: sector + status + sense triple. The code is
+        // now shown as a prefix; the status/sense hex tail is still stripped.
         let s = fmt_err_str("E6000: 7476928 0x02/0x03/0x11/0x00");
+        assert!(s.starts_with("E6000 "), "code not prefixed: {s}");
         assert!(s.contains("7476928"), "sector number lost: {s}");
         assert!(!s.contains("0x"), "raw hex tail leaked to user: {s}");
-        assert!(!s.contains("E6000"), "raw code leaked: {s}");
         // Sense-only form (no status byte) also strips the tail.
         let s = fmt_err_str("E6000: 100 0x03/0x11/0x00");
         assert!(s.contains("100") && !s.contains("0x"), "got: {s}");
@@ -2484,27 +2522,33 @@ mod tests {
         assert!(s.contains("42") && !s.contains("0x"), "got: {s}");
     }
 
-    /// A code with NO locale entry falls back to the generic wrapper (which
-    /// still localizes the surround) rather than printing a bare code — but it
-    /// is the last resort, not the common path.
+    /// A code with NO locale entry falls back to the generic wrapper, which
+    /// (WS2) still SHOWS the code via `{code} {detail}` rather than swallowing
+    /// it — the last resort, not the common path. The `Error:` level word is
+    /// added by the render site, not by `fmt_err_str`.
     #[test]
     fn fmt_err_unknown_code_uses_generic_wrapper() {
-        // E1234 has no locale entry; the generic wrapper echoes the raw form
-        // inside "Error: {detail}".
+        // E1234 has no locale entry; the generic wrapper keeps the code.
         let s = fmt_err_str("E1234: whatever");
-        assert!(s.starts_with("Error:"), "got: {s}");
-        assert!(
-            s.contains("E1234"),
-            "generic wrapper keeps the raw detail: {s}"
-        );
+        assert_eq!(s, "E1234 whatever");
+        // Through the render site the code is still shown with the level word.
+        assert_eq!(render_error(&"E1234: whatever"), "Error: E1234 whatever");
     }
 
     /// A non-code error string (e.g. a CLI-side message) passes through the
-    /// generic wrapper unchanged.
+    /// generic wrapper with an empty code, so `fmt_err_str` yields the bare
+    /// string and the render site prefixes the level word.
     #[test]
     fn fmt_err_non_code_string_uses_generic() {
+        // Empty code → leading space trimmed away by the render contract; the
+        // fragment carries just the message.
         let s = fmt_err_str("No BD drive found");
-        assert_eq!(s, "Error: No BD drive found");
+        assert!(s.contains("No BD drive found"), "got: {s}");
+        assert!(!s.contains('E'), "no spurious code token: {s}");
+        assert_eq!(
+            render_error(&"No BD drive found"),
+            "Error: No BD drive found"
+        );
     }
 
     // ── negative path: no-keydb AACS disc → E7022 surfaced in English ───────
@@ -2528,9 +2572,12 @@ mod tests {
             "library Display is E7022: {disp}"
         );
         let rendered = fmt_err_str(&disp);
-        // English, names the disc by hash, no raw code leaked.
+        // English, names the disc by hash, code SHOWN (WS2: code-forward).
         assert!(rendered.contains("deadbeefcafe"), "hash named: {rendered}");
-        assert!(!rendered.contains("E7022"), "raw code leaked: {rendered}");
+        assert!(
+            rendered.starts_with("E7022 "),
+            "code not prefixed: {rendered}"
+        );
         assert!(
             rendered.to_lowercase().contains("key"),
             "english key message: {rendered}"

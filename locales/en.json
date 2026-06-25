@@ -193,8 +193,11 @@
     "unrecoverable": "{count} unrecoverable sectors in {clusters} cluster(s)."
   },
   "error": {
-    "generic": "Error: {detail}",
-    "fatal_header": "{op} failed: {cause}",
+    "generic": "{code} {detail}",
+    "fatal_header": "{level}: {op} failed: {cause}",
+    "level_error": "Error",
+    "level_warn": "Warning",
+    "level_info": "Info",
     "fatal_diagnostic_hint": "For a diagnostic log, re-run with --log-level 3 (writes ./log.txt).",
     "op_rip": "Rip",
     "op_info": "Disc info",

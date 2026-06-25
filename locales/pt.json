@@ -193,8 +193,11 @@
     "unrecoverable": "{count} setores irrecuperáveis em {clusters} cluster(s)."
   },
   "error": {
-    "generic": "Erro: {detail}",
-    "fatal_header": "{op} falhou: {cause}",
+    "generic": "{code} {detail}",
+    "fatal_header": "{level}: {op} falhou: {cause}",
+    "level_error": "Erro",
+    "level_warn": "Aviso",
+    "level_info": "Informação",
     "fatal_diagnostic_hint": "Para um registro de diagnóstico, execute novamente com --log-level 3 (grava ./log.txt).",
     "op_rip": "Extração",
     "op_info": "Info do disco",
