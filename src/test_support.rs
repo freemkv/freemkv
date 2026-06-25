@@ -123,6 +123,18 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::ExtentNotUnitAligned,
         Error::M2tsPacketMalformed,
         Error::DiscCapacityMalformed,
+        // dir:// extraction errors that surface to the user as raw E-codes
+        // (the three preflight-caught dir codes — E9019/E9024/E9025 — are
+        // intercepted by CLI validation strings and never reach `fmt_err`,
+        // so they are intentionally NOT enumerated here). These four are
+        // produced inside `Disc::extract_tree` and DO reach the user.
+        Error::DirNotEmpty,
+        Error::DirInsufficientSpace {
+            required: 0,
+            available: 0,
+        },
+        Error::DirNameCollision { host: p() },
+        Error::DirWriteFailed { errno: Some(28) },
     ]
 }
 
