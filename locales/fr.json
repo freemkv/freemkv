@@ -386,6 +386,57 @@
       "share": "  -s, --share         Soumettre le profil du lecteur (avec info disc://)",
       "mask": "  -m, --mask          Masquer les numéros de série (avec --share)",
       "force": "      --force        Extract into a non-empty dir:// target (overwrite)"
+    },
+    "synopsis_4": "       freemkv <command> [args]",
+    "subcommands_header": "Subcommands:",
+    "subcmd": {
+      "info": "  info <url>               Inspect a disc, image, or file (titles, streams, sizes)",
+      "verify": "  verify [disc://]         Scan disc health (good/slow/recovered/bad sectors)",
+      "remux": "  remux <in> <out>         Convert m2ts/ISO to MKV (the <source> <dest> form)",
+      "update_keys": "  update-keys --url URL    Download and install the AACS keydb",
+      "version": "  version                  Show version (also --version, -V)",
+      "help": "  help [command]           Show this help, or help for one command"
+    },
+    "subcommands_note": "  Run 'freemkv <command> --help' (or 'freemkv help <command>') for command-specific help."
+  },
+  "help": {
+    "unknown_command": "Unknown command '{cmd}'. Try 'freemkv help' for a list of commands.",
+    "info": {
+      "usage": "Usage: freemkv info <url> [flags]",
+      "desc": "Inspect a disc, image, or file: lists titles, durations, sizes, and per-stream detail. Needs no decryption key, even on AACS discs. A lone URL with no destination is the same as 'freemkv info <url>'.",
+      "examples_header": "Examples:",
+      "ex_disc": "  freemkv info disc://             Inspect the optical drive",
+      "ex_iso": "  freemkv info iso://Disc.iso      Inspect an ISO image",
+      "flags_header": "Flags:",
+      "flag_full": "  -f, --full       List every title (default: the first five, with a '+N more' footer).",
+      "flag_basic": "  -b, --basic      Title rows only — omit per-stream (video/audio/subtitle) detail.",
+      "flag_verbose": "  -v, --verbose    Add technical detail (AACS/MKB version, per-stream PIDs, audio sample rates).",
+      "flag_share": "  -s, --share      Capture the drive profile and offer to submit it to the drive-compatibility database (disc:// only). --mask redacts serials first."
+    },
+    "verify": {
+      "usage": "Usage: freemkv verify [disc://]",
+      "desc": "Scan the main title and report good / slow / recovered / bad sectors, with chapter and timestamp per damaged region. Writes nothing. Exits 1 if any sector is unrecoverable, so it works as a pass/fail gate. Defaults to disc:// when no URL is given.",
+      "examples_header": "Examples:",
+      "ex_verify": "  freemkv verify                  Verify the disc in the auto-detected drive",
+      "ex_verify_dev": "  freemkv verify disc:///dev/sg4  Verify a specific drive"
+    },
+    "remux": {
+      "usage": "Usage: freemkv remux <source> <destination> [flags]",
+      "desc": "Remux is the <source> <destination> form: pass two URLs and freemkv converts one to the other with no drive needed. The classic case is m2ts -> MKV, but any file source (m2ts://, iso://) to a mux destination (mkv://, m2ts://) works.",
+      "examples_header": "Examples:",
+      "ex_m2ts": "  freemkv m2ts://Movie.m2ts mkv://Movie.mkv     Remux a BD transport stream to MKV",
+      "ex_iso": "  freemkv iso://Disc.iso mkv://Movie.mkv        Mux an ISO image to MKV",
+      "flags_header": "Flags:",
+      "flag_title": "  -t, --title N    Select title (1-based, repeatable). Default: all titles in the source.",
+      "note": "  No subcommand word is required: just give a source URL and a destination URL."
+    },
+    "update_keys": {
+      "usage": "Usage: freemkv update-keys --url <url>",
+      "desc": "Download, verify, and install an AACS keydb (.txt / .zip / .gz). Only Blu-ray and UHD (AACS) discs need a keydb; DVDs (CSS) need none. --url is required.",
+      "examples_header": "Examples:",
+      "ex": "  freemkv update-keys --url http://example.org/keydb_eng.zip",
+      "flags_header": "Flags:",
+      "flag_url": "  -u, --url URL    Source URL for the keydb archive (required)."
     }
   }
 }

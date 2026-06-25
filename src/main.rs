@@ -192,11 +192,47 @@ fn main() {
     }
 
     match args[1].as_str() {
+        // `freemkv <cmd> --help` / `freemkv <cmd> -h` print command-specific help.
+        // Handled before the per-command dispatch so the flag never reaches the
+        // command's own argument parser.
+        "info" if wants_help(&args[2..]) => help_info(),
+        "verify" if wants_help(&args[2..]) => help_verify(),
+        "update-keys" if wants_help(&args[2..]) => help_update_keys(),
+        "remux" if wants_help(&args[2..]) => help_remux(),
+
         "info" => info_cmd(&args[2..]),
         "verify" => verify_cmd(&args[2..]),
         "update-keys" => update_keys(&args[2..]),
+        // `remux` is a synonym for the two-URL <source> <dest> form. A bare
+        // `freemkv remux` (no URLs) prints remux help rather than erroring.
+        "remux" => {
+            let urls = collect_urls(&args[2..]);
+            if urls.len() == 2 {
+                if !pipe::run(&urls[0], &urls[1], &args[2..]) {
+                    std::process::exit(1);
+                }
+            } else {
+                help_remux();
+            }
+        }
         "version" | "--version" | "-V" => println!("{}", env!("CARGO_PKG_VERSION")),
-        "help" | "--help" | "-h" => usage(),
+        // `freemkv help`, `freemkv --help`, `freemkv -h`: top-level usage.
+        // `freemkv help <command>`: command-specific help.
+        "help" | "--help" | "-h" => match args.get(2).map(|s| s.as_str()) {
+            Some("info") => help_info(),
+            Some("verify") => help_verify(),
+            Some("update-keys") => help_update_keys(),
+            Some("remux") => help_remux(),
+            Some("version") | Some("help") | None => usage(),
+            Some(other) => {
+                eprintln!(
+                    "{}",
+                    strings::fmt("help.unknown_command", &[("cmd", other)])
+                );
+                usage();
+                std::process::exit(2);
+            }
+        },
 
         // Everything else: freemkv <source> <dest>
         _ => {
@@ -725,6 +761,17 @@ fn usage() {
     println!("{}", strings::get("usage.synopsis_1"));
     println!("{}", strings::get("usage.synopsis_2"));
     println!("{}", strings::get("usage.synopsis_3"));
+    println!("{}", strings::get("usage.synopsis_4"));
+    println!();
+    println!("{}", strings::get("usage.subcommands_header"));
+    println!("{}", strings::get("usage.subcmd.info"));
+    println!("{}", strings::get("usage.subcmd.verify"));
+    println!("{}", strings::get("usage.subcmd.remux"));
+    println!("{}", strings::get("usage.subcmd.update_keys"));
+    println!("{}", strings::get("usage.subcmd.version"));
+    println!("{}", strings::get("usage.subcmd.help"));
+    println!();
+    println!("{}", strings::get("usage.subcommands_note"));
     println!();
     println!("{}", strings::get("usage.urls_header"));
     println!("{}", strings::get("usage.url.disc_auto"));
@@ -774,6 +821,78 @@ fn usage() {
     println!("{}", strings::get("usage.flag.multipass"));
     println!("{}", strings::get("usage.flag.share"));
     println!("{}", strings::get("usage.flag.mask"));
+}
+
+/// True if a command's argument list requests its help (`--help` / `-h`).
+/// Used to route `freemkv <cmd> --help` to the per-command help text before the
+/// command's own parser runs.
+fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--help" || a == "-h")
+}
+
+/// `freemkv info --help` / `freemkv help info`.
+fn help_info() {
+    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("{}", strings::get("help.info.usage"));
+    println!();
+    println!("{}", strings::get("help.info.desc"));
+    println!();
+    println!("{}", strings::get("help.info.examples_header"));
+    println!("{}", strings::get("help.info.ex_disc"));
+    println!("{}", strings::get("help.info.ex_iso"));
+    println!();
+    println!("{}", strings::get("help.info.flags_header"));
+    println!("{}", strings::get("help.info.flag_full"));
+    println!("{}", strings::get("help.info.flag_basic"));
+    println!("{}", strings::get("help.info.flag_verbose"));
+    println!("{}", strings::get("help.info.flag_share"));
+}
+
+/// `freemkv verify --help` / `freemkv help verify`.
+fn help_verify() {
+    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("{}", strings::get("help.verify.usage"));
+    println!();
+    println!("{}", strings::get("help.verify.desc"));
+    println!();
+    println!("{}", strings::get("help.verify.examples_header"));
+    println!("{}", strings::get("help.verify.ex_verify"));
+    println!("{}", strings::get("help.verify.ex_verify_dev"));
+}
+
+/// `freemkv remux --help` / `freemkv help remux`.
+fn help_remux() {
+    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("{}", strings::get("help.remux.usage"));
+    println!();
+    println!("{}", strings::get("help.remux.desc"));
+    println!();
+    println!("{}", strings::get("help.remux.examples_header"));
+    println!("{}", strings::get("help.remux.ex_m2ts"));
+    println!("{}", strings::get("help.remux.ex_iso"));
+    println!();
+    println!("{}", strings::get("help.remux.flags_header"));
+    println!("{}", strings::get("help.remux.flag_title"));
+    println!();
+    println!("{}", strings::get("help.remux.note"));
+}
+
+/// `freemkv update-keys --help` / `freemkv help update-keys`.
+fn help_update_keys() {
+    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("{}", strings::get("help.update_keys.usage"));
+    println!();
+    println!("{}", strings::get("help.update_keys.desc"));
+    println!();
+    println!("{}", strings::get("help.update_keys.examples_header"));
+    println!("{}", strings::get("help.update_keys.ex"));
+    println!();
+    println!("{}", strings::get("help.update_keys.flags_header"));
+    println!("{}", strings::get("help.update_keys.flag_url"));
 }
 
 fn update_keys(args: &[String]) {
