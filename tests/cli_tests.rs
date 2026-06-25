@@ -131,15 +131,21 @@ fn null_input_errors() {
         .expect("failed to run");
     assert!(!out.status.success());
     let combined = combined_output(&out);
-    // `fmt_err` now renders E9001 (StreamWriteOnly) to its English locale
-    // string — NO raw `E9001` may reach the user (the "english errors" rule).
+    // `fmt_err` renders E9001 (StreamWriteOnly) to its English locale string.
+    // WS2: the line is now code-forward — the `E9001` token is SHOWN as a
+    // prefix ahead of the localized message (`Error: E9001 Stream is
+    // write-only.`), not stripped.
     assert!(
         combined.contains("Stream is write-only"),
         "expected the English E9001 message, got: {combined}"
     );
     assert!(
-        !combined.contains("E9001"),
-        "raw error code must not leak to the user, got: {combined}"
+        combined.contains("E9001"),
+        "expected the code-forward E9001 token, got: {combined}"
+    );
+    assert!(
+        combined.contains("Error: E9001"),
+        "expected the WS2 level+code render, got: {combined}"
     );
 }
 
