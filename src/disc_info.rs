@@ -20,6 +20,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
     while i < args.len() {
         match args[i].as_str() {
             "--quiet" | "-q" => quiet = true,
+            "--verbose" | "-v" => verbose = true,
             // `--log-level N` sets the tracing level (in main::init_logging);
             // here it also widens stdout detail at level >= 2. Accept + skip
             // its value so it isn't treated as a positional / unknown option.
