@@ -490,7 +490,19 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         resolve_iso_unit_keys(source, &keys, &out)
     };
 
+    // When the rip covers MORE THAN ONE title and the user did NOT name a
+    // specific title (`-t N`), an incidental extra title that turns out to be
+    // copy-protected-but-uncrackable (a 0.5 s menu stub, an FBI-warning loop,
+    // any tiny CSS-locked nav title) must NOT abort the whole rip. We skip it
+    // with a warning and keep muxing the rest. See `is_title_failure_fatal`.
+    let multi_title = jobs.len() > 1;
+    let explicit_selection = !title_nums.is_empty();
+
     for (title_idx, dest_url) in &jobs {
+        // The MAIN FEATURE is title index 0 (the disc's primary title — first in
+        // every title list throughout the codebase). A failure there is always a
+        // hard error, even in an all-titles rip: the user wants the movie.
+        let is_feature = title_idx.unwrap_or(0) == 0;
         // Print title info if we have it
         if let (Some(idx), Some(t)) = (title_idx, &titles) {
             if !title_in_range(*idx, t.len()) {
@@ -525,9 +537,9 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
             );
         }
 
-        if is_disc {
+        let result = if is_disc {
             // Disc source: use open_drive() directly — one session, no double init.
-            if let Err(e) = pipe_disc(
+            pipe_disc(
                 source,
                 dest_url,
                 title_idx.unwrap_or(0),
@@ -535,10 +547,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                 raw,
                 multipass,
                 &out,
-            ) {
-                out.raw(Normal, &render_error(&e));
-                ok = false;
-            }
+            )
         } else {
             // Non-disc (ISO): hand in the caller-resolved unit keys.
             let opts = libfreemkv::InputOptions {
@@ -546,9 +555,27 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                 title_index: *title_idx,
                 raw,
             };
-            if let Err(e) = pipe(source, dest_url, &opts, &out) {
+            pipe(source, dest_url, &opts, &out)
+        };
+
+        if let Err(e) = result {
+            if is_title_failure_fatal(&e, multi_title, explicit_selection, is_feature) {
+                // The title the user actually wants (a `-t N` selection, or the
+                // main feature) failed, or the failure is not a recoverable
+                // per-title copy-protection skip — a genuine hard error. Print
+                // it (E7023 / NoDiscKey / IO …) and fail the command.
                 out.raw(Normal, &render_error(&e));
                 ok = false;
+            } else {
+                // An incidental extra title in an all-titles rip is copy-
+                // protected and uncrackable. Skip it with a clear warning and
+                // keep muxing the rest; the command can still exit 0 if the
+                // feature / requested titles succeed. NO FALSE ERRORS.
+                let num = title_idx.map(|i| i + 1).unwrap_or(0);
+                out.raw(
+                    Normal,
+                    &strings::fmt("rip.title_skipped", &[("num", &num.to_string())]),
+                );
             }
         }
         out.blank(Normal);
@@ -1196,7 +1223,10 @@ fn pipe_disc(
     // which is still owned here — it is only moved into `DiscStream` below.
     // For AACS / single-VTS / unencrypted discs `decrypt_keys_for_title`
     // short-circuits to `decrypt_keys()`, so this is a no-op on those paths.
-    let keys = disc.decrypt_keys_for_title(title_idx, &mut drive, batch);
+    // `_checked` also tells us whether the chosen title proved GENUINELY CLEAR
+    // (an unencrypted stub in its own VTS on an otherwise-CSS disc): that title
+    // needs no key, and the gate below must not false-error it with E7023.
+    let (keys, title_is_clear) = disc.decrypt_keys_for_title_checked(title_idx, &mut drive, batch);
 
     // Per-title decrypt gate (mirrors the ISO mux path): on a multi-VTS CSS DVD
     // whose chosen title's VTS could not be re-cracked, `keys` is
@@ -1207,7 +1237,7 @@ fn pipe_disc(
     // loudly with the same verdict source (`Disc::ensure_decryptable_keys`):
     // CssKeyMissing for CSS, NoDiscKey (named by hash) for AACS. `--raw` and
     // unencrypted discs pass.
-    disc.ensure_decryptable_keys(raw, &keys)
+    disc.ensure_title_decryptable(raw, &keys, title_is_clear)
         .map_err(|e| e.to_string())?;
 
     let format = disc.content_format;
@@ -1376,6 +1406,47 @@ fn interrupted_error(out: &Output) -> String {
     out.blank(Normal);
     out.raw(Normal, &strings::get("error.interrupted_incomplete"));
     strings::get("rip.interrupted")
+}
+
+/// Decide whether a per-title mux failure should abort the WHOLE rip (fatal) or
+/// be skipped with a warning so the remaining titles still mux.
+///
+/// Core principle: **NO FALSE ERRORS, and a failure in one extra title must not
+/// kill the whole rip.** When `freemkv iso://X mkv://dir/` muxes ALL titles, one
+/// incidental copy-protected-but-uncrackable stub (a 0.5 s menu loop, an
+/// FBI-warning title) used to abort the entire mux with `E7023` and make users
+/// think freemkv was broken. It must instead skip that title and finish the rest.
+///
+/// A failure is FATAL (hard error, non-zero exit) when ANY of:
+/// - the error is NOT a skippable per-title copy-protection failure (only
+///   `E7023` / [`libfreemkv::Error::CssKeyMissing`] is skippable — every other
+///   error, e.g. IO, NoDiscKey/E7022 AACS, MkvInvalid, is a real problem);
+/// - the user explicitly selected titles with `-t N` (`explicit_selection`) —
+///   the title they asked for failing is exactly what they need to know about;
+/// - this title IS the main feature (`is_feature`, title index 0) — the movie
+///   itself failing is never "incidental";
+/// - the rip targets a single title (`!multi_title`) — there is no "other title"
+///   to carry on with, so the lone failure is the result.
+///
+/// It is SKIPPABLE (warn + continue, command may still exit 0) ONLY when an
+/// all-titles rip (`multi_title && !explicit_selection`) hits a non-feature
+/// title whose failure is a `E7023` copy-protection skip.
+fn is_title_failure_fatal(
+    err: &str,
+    multi_title: bool,
+    explicit_selection: bool,
+    is_feature: bool,
+) -> bool {
+    // Only an E7023 (CssKeyMissing) per-title copy-protection failure is ever a
+    // candidate for skipping; anything else is always fatal. The error string is
+    // libfreemkv's `E<code>[: <data>]` Display form (see `parse_error_code`).
+    let is_css_skip = parse_error_code(err).is_some_and(|(code, _)| code == "E7023");
+    if !is_css_skip {
+        return true;
+    }
+    // A copy-protection failure on the feature, an explicitly-requested title, or
+    // in a single-title rip is the title the user actually wants — hard error.
+    is_feature || explicit_selection || !multi_title
 }
 
 /// One title: open input, open output, stream PES frames.
@@ -2418,9 +2489,10 @@ mod tests {
     use super::{
         KeyConfig, build_jobs, build_key_sources, copy_should_continue, dest_is_iso,
         disc_copy_recovered_data, fmt_disc_damage, fmt_err, fmt_err_str, headers_resolved,
-        is_keyserver_url, is_scheme_only_sink, is_url_token, mux_produced_output,
-        mux_was_interrupted, parse_error_code, parse_flags, preflight_validate, render_error,
-        resolved_keydb_path, sanitize_name, title_in_range, validate_file_dest, validate_iso_input,
+        is_keyserver_url, is_scheme_only_sink, is_title_failure_fatal, is_url_token,
+        mux_produced_output, mux_was_interrupted, parse_error_code, parse_flags,
+        preflight_validate, render_error, resolved_keydb_path, sanitize_name, title_in_range,
+        validate_file_dest, validate_iso_input,
     };
     use crate::output::Output;
     use crate::strings;
@@ -2452,6 +2524,80 @@ mod tests {
         // Zero bytes written → never produced (the natural-drain-on-first-None
         // empty-output silent failure).
         assert!(!mux_produced_output(3, 0));
+    }
+
+    // ── is_title_failure_fatal: skip an incidental copy-protected extra ───────
+
+    /// The E7023 Display string libfreemkv emits for a `CssKeyMissing` per-title
+    /// failure (a bare-code error, no trailing data).
+    const E7023: &str = "E7023";
+
+    /// (a) Multi-title all-titles rip, a NON-feature title hits E7023: SKIP, not
+    /// fatal. The remaining titles still mux and the command can exit 0. This is
+    /// the core "one extra protected stub must not kill the whole rip" fix.
+    #[test]
+    fn title_failure_e7023_non_feature_all_titles_is_skippable() {
+        // multi_title=true, explicit_selection=false, is_feature=false.
+        assert!(
+            !is_title_failure_fatal(E7023, true, false, false),
+            "an incidental copy-protected extra title must be skipped, not fatal"
+        );
+    }
+
+    /// (c) `-t N` on a ScrambledUncracked title — the title the user explicitly
+    /// asked for — DOES hard-error, even though it's not the feature.
+    #[test]
+    fn title_failure_e7023_explicit_selection_is_fatal() {
+        // explicit_selection=true → fatal regardless of multi_title / is_feature.
+        assert!(is_title_failure_fatal(E7023, true, true, false));
+        assert!(is_title_failure_fatal(E7023, false, true, false));
+    }
+
+    /// The MAIN FEATURE failing with E7023 is always a hard error — even in an
+    /// all-titles rip with no explicit selection. The user wants the movie.
+    #[test]
+    fn title_failure_e7023_feature_is_fatal() {
+        assert!(is_title_failure_fatal(E7023, true, false, true));
+    }
+
+    /// A single-title rip (only one job) that hits E7023 is fatal: there is no
+    /// "other title" to carry on with, so the lone failure is the result.
+    #[test]
+    fn title_failure_e7023_single_title_is_fatal() {
+        // multi_title=false, not the feature, no explicit selection.
+        assert!(is_title_failure_fatal(E7023, false, false, false));
+    }
+
+    /// A NON-E7023 error (IO, AACS NoDiscKey/E7022, MkvInvalid, …) is ALWAYS
+    /// fatal — only a copy-protection skip (E7023) is ever skippable. A real
+    /// problem must never be silently swallowed as "skip the title".
+    #[test]
+    fn title_failure_non_e7023_is_always_fatal() {
+        // Even in the otherwise-skippable shape (multi/non-explicit/non-feature).
+        assert!(is_title_failure_fatal(
+            "E7022: abcd1234",
+            true,
+            false,
+            false
+        ));
+        assert!(is_title_failure_fatal("E6000: 12345", true, false, false));
+        assert!(is_title_failure_fatal("E8001", true, false, false));
+        // A non-code CLI string is also fatal (not a CSS skip).
+        assert!(is_title_failure_fatal("some io error", true, false, false));
+    }
+
+    /// The skip warning the loop prints (`rip.title_skipped`) exists in en.json
+    /// and carries the `{num}` placeholder — so a skipped title surfaces a clear,
+    /// localized, non-error message rather than a raw E7023.
+    #[test]
+    fn rip_title_skipped_string_present_and_localized() {
+        let s = strings::fmt("rip.title_skipped", &[("num", "3")]);
+        assert_ne!(s, "rip.title_skipped", "missing locale entry");
+        assert!(s.contains('3'), "num placeholder not substituted: {s}");
+        assert!(
+            !s.contains("E7023") && !s.to_lowercase().contains("error"),
+            "skip notice must not look like a hard error: {s}"
+        );
     }
 
     /// The disc→ISO sweep-success guard. `Disc::copy` returns `Ok` even when the

@@ -144,7 +144,8 @@
     "nothing_to_patch": "Nothing to patch — all sectors are good",
     "patch_start": "Patching: {good} GB good, {unreadable} MB unreadable, {pending} MB pending",
     "patch_done": "Patch done: recovered {recovered} MB, {unreadable} MB unreadable, {pending} MB pending ({time}s, {speed} MB/s)",
-    "multipass_ignored": "Note: --multipass is ignored for disc->MKV/M2TS (single-pass mux). Use an iso:// output for multipass recovery."
+    "multipass_ignored": "Note: --multipass is ignored for disc->MKV/M2TS (single-pass mux). Use an iso:// output for multipass recovery.",
+    "title_skipped": "Skipping title {num}: copy-protected, no key recoverable."
   },
   "dir": {
     "extracting": "Extracting decrypted file tree to {path}",
