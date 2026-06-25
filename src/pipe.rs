@@ -131,6 +131,8 @@ struct ParsedFlags {
     quiet: bool,
     raw: bool,
     multipass: bool,
+    /// `--force`: overwrite into a non-empty `dir://` target.
+    force: bool,
     keydb_path: Option<String>,
     key_url: Option<String>,
     key_auth: Option<String>,
@@ -147,7 +149,7 @@ struct ParsedFlags {
 /// source-list policy.
 #[derive(Default, Debug, Clone)]
 pub struct KeyConfig {
-    /// `-k`/`--keydb PATH` — local `keydb.cfg` (else the standard location).
+    /// `--keydb PATH` — local `keydb.cfg` (else the standard location).
     keydb_path: Option<String>,
     /// `--key-url URL` — remote key-service base URL (enables the online source).
     key_url: Option<String>,
@@ -166,7 +168,7 @@ impl KeyConfig {
 /// Parse rip flags, returning a clear error string on any misuse:
 /// - `-t`/`--title` with a missing, non-numeric, or `0` value (titles are
 ///   1-based; never silently fall through to "all titles").
-/// - `-k`/`--keydb` with a missing value (never silently use the default).
+/// - `--keydb` with a missing value (never silently use the default).
 ///
 /// A value-flag will not consume a following positional URL token
 /// (`scheme://...`) as its value — that means the value is missing.
@@ -209,6 +211,7 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
             "-q" | "--quiet" => f.quiet = true,
             "--raw" => f.raw = true,
             "--multipass" => f.multipass = true,
+            "--force" => f.force = true,
             "-t" | "--title" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
@@ -229,7 +232,7 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                     }
                 }
             }
-            "-k" | "--keydb" => {
+            "--keydb" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
                     Some(p) if !is_url_token(p) => {
@@ -239,7 +242,7 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                     _ => {
                         return Err(strings::fmt(
                             "error.flag_needs_value",
-                            &[("flag", flag), ("example", "-k keydb.cfg")],
+                            &[("flag", flag), ("example", "--keydb keydb.cfg")],
                         ));
                     }
                 }
@@ -337,6 +340,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         quiet,
         raw,
         multipass,
+        force,
         keydb_path,
         key_url,
         key_auth,
@@ -363,8 +367,15 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // false (→ nonzero exit), so no partial output is ever produced. Each
     // individual check is small and unit-tested; this is the single entry point
     // that orders them.
-    if let Err(msg) = preflight_validate(source, dest, &parsed_source, &parsed_dest, raw, multipass)
-    {
+    if let Err(msg) = preflight_validate(
+        source,
+        dest,
+        &parsed_source,
+        &parsed_dest,
+        raw,
+        multipass,
+        force,
+    ) {
         out.raw(Normal, &msg);
         return false;
     }
@@ -377,6 +388,15 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         )
     {
         return disc_to_iso(source, dest, &keys, raw, multipass, &out);
+    }
+
+    // Disc / ISO → dir://: decrypted file-tree extraction (Disc::extract_tree,
+    // not a stream). Placed BEFORE the generic mux path: a `dir://` dest with a
+    // disc-source input never flows through the PES/mux highway. Byte-stream
+    // sources, `--raw`, and `--multipass` are already rejected by
+    // `preflight_validate` above, so reaching here means the source is a disc.
+    if matches!(parsed_dest, libfreemkv::StreamUrl::Dir { .. }) {
+        return dir_to_extract(source, dest, &keys, &parsed_source, force, &out);
     }
 
     // Everything else: figure out titles, pipe each one
@@ -559,6 +579,7 @@ fn preflight_validate(
     parsed_dest: &libfreemkv::StreamUrl,
     raw: bool,
     multipass: bool,
+    force: bool,
 ) -> Result<(), String> {
     // 1a. Destination must have a recognized scheme. A schemeless dest
     // (`out.mkv`, `/path/out.mkv`) parses as Unknown — guide the user to add a
@@ -587,6 +608,18 @@ fn preflight_validate(
         if multipass {
             return Err(strings::fmt("error.multipass_iso_only", &[("dest", dest)]));
         }
+    }
+
+    // 2b. `dir://` (decrypted file-tree extraction) gates. A `dir://` output
+    // needs a filesystem source (disc:// or iso://) — a byte-stream source
+    // (mkv://, m2ts://, network://, stdio://) has no UDF tree, so reject it up
+    // front. (`--raw` / `--multipass` are already rejected by step 2, since
+    // `dir://` is not `iso://`.) Writability/non-empty are checked in step 4.
+    if matches!(parsed_dest, libfreemkv::StreamUrl::Dir { .. }) && !parsed_source.is_disc_source() {
+        return Err(strings::fmt(
+            "error.dir_source_unsupported",
+            &[("source", source)],
+        ));
     }
 
     // 3. Source reachability.
@@ -621,9 +654,53 @@ fn preflight_validate(
                 validate_file_dest(path)?;
             }
         }
+        // `dir://` target: must be creatable + writable, and (unless --force)
+        // empty. The producer re-checks these, but surfacing them here gives a
+        // clean localized message with zero side effects.
+        libfreemkv::StreamUrl::Dir { path } => {
+            validate_dir_dest(path, dest, force)?;
+        }
         _ => {}
     }
 
+    Ok(())
+}
+
+/// Validate a `dir://` destination: the path must be creatable and writable
+/// (it is created if absent), must not be an existing regular file, and —
+/// unless `force` — must be empty.
+fn validate_dir_dest(path: &std::path::Path, dest: &str, force: bool) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err(strings::fmt("error.dir_dest_invalid", &[("dest", dest)]));
+    }
+    if path.is_file() {
+        return Err(strings::fmt(
+            "error.dir_dest_is_file",
+            &[("path", &path.display().to_string())],
+        ));
+    }
+    // Create it (idempotent if it already exists). A failure here is the
+    // honest writability test (missing parent, read-only fs, permission).
+    if let Err(e) = std::fs::create_dir_all(path) {
+        return Err(strings::fmt(
+            "error.dir_dest_not_writable",
+            &[
+                ("path", &path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        ));
+    }
+    if !force {
+        let non_empty = std::fs::read_dir(path)
+            .map(|mut it| it.next().is_some())
+            .unwrap_or(false);
+        if non_empty {
+            return Err(strings::fmt(
+                "error.dir_dest_not_empty",
+                &[("path", &path.display().to_string())],
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1671,6 +1748,245 @@ fn disc_to_iso(
     success
 }
 
+// ── dir:// decrypted file-tree extraction ───────────────────────────────────
+
+/// Extract a disc's decrypted file tree to a host directory (`dir://`). Routed
+/// here (before the generic mux path) for a `dir://` dest with a disc-source
+/// input (`disc://` or `iso://`). 1-shot, decrypt-only — recovery for damaged
+/// media is the `disc→iso --multipass` then `iso→dir` workflow. Returns true on
+/// success (a fully-clean tree); a lossy extraction prints the per-file summary
+/// and returns false (→ non-zero exit) so a script can re-run via the ISO path.
+fn dir_to_extract(
+    source: &str,
+    dest: &str,
+    keys: &KeyConfig,
+    parsed_source: &libfreemkv::StreamUrl,
+    force: bool,
+    out: &Output,
+) -> bool {
+    let dest_path = match libfreemkv::parse_url(dest) {
+        libfreemkv::StreamUrl::Dir { path } => path,
+        _ => return false,
+    };
+
+    // Open the right reader + scan, resolving keys, then extract. The two
+    // source kinds differ only in how the `SectorSource` + scanned `Disc` are
+    // obtained; the extraction is identical once keys are resolved.
+    match parsed_source {
+        libfreemkv::StreamUrl::Disc { device } => {
+            let mut drive = match device {
+                Some(p) => match libfreemkv::Drive::open(p) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        out.raw(Normal, &fmt_err(&e));
+                        return false;
+                    }
+                },
+                None => match libfreemkv::find_drive() {
+                    Some(d) => d,
+                    None => {
+                        out.raw(Normal, &strings::get("error.no_drive"));
+                        return false;
+                    }
+                },
+            };
+            out.raw(
+                Normal,
+                &strings::fmt("rip.drive", &[("device", drive.device_path())]),
+            );
+            debug_drive_step("wait_ready", drive.wait_ready());
+            debug_drive_step("init", drive.init());
+            let _ = drive.probe_disc();
+
+            let mut disc =
+                match libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keys.keydb_path())) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        out.raw(
+                            Normal,
+                            &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
+                        );
+                        return false;
+                    }
+                };
+            let samples = disc
+                .titles
+                .iter()
+                .max_by_key(|t| t.size_bytes)
+                .cloned()
+                .map(|t| libfreemkv::read_encrypted_units(&mut drive, &t, SAMPLE_UNITS))
+                .unwrap_or_default();
+            apply_keys(&mut disc, keys, samples, out);
+            if let Err(e) = disc.ensure_decryptable(false) {
+                out.raw(Normal, &fmt_err(&e));
+                return false;
+            }
+            drive.lock_tray();
+            let ok = run_extract(&disc, &mut drive, &dest_path, force, out);
+            drive.unlock_tray();
+            ok
+        }
+        libfreemkv::StreamUrl::Iso { path } => {
+            let mut reader = match libfreemkv::FileSectorSource::open(path) {
+                Ok(r) => r,
+                Err(e) => {
+                    out.raw(
+                        Normal,
+                        &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
+                    );
+                    return false;
+                }
+            };
+            let capacity =
+                <libfreemkv::FileSectorSource as libfreemkv::SectorSource>::capacity_sectors(
+                    &reader,
+                );
+            let mut disc =
+                match libfreemkv::Disc::scan_image(&mut reader, capacity, &keyless_scan_opts()) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        out.raw(
+                            Normal,
+                            &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
+                        );
+                        return false;
+                    }
+                };
+            let samples = disc
+                .titles
+                .iter()
+                .max_by_key(|t| t.size_bytes)
+                .cloned()
+                .map(|t| libfreemkv::read_encrypted_units(&mut reader, &t, SAMPLE_UNITS))
+                .unwrap_or_default();
+            apply_keys(&mut disc, keys, samples, out);
+            if let Err(e) = disc.ensure_decryptable(false) {
+                out.raw(Normal, &fmt_err(&e));
+                return false;
+            }
+            run_extract(&disc, &mut reader, &dest_path, force, out)
+        }
+        _ => {
+            // Unreachable: preflight rejects non-disc sources for dir://.
+            out.raw(
+                Normal,
+                &strings::fmt("error.dir_source_unsupported", &[("source", source)]),
+            );
+            false
+        }
+    }
+}
+
+/// Run `Disc::extract_tree` and render the result. Shared by the disc:// and
+/// iso:// `dir://` paths.
+fn run_extract(
+    disc: &libfreemkv::Disc,
+    reader: &mut dyn libfreemkv::SectorSource,
+    dest_path: &std::path::Path,
+    force: bool,
+    out: &Output,
+) -> bool {
+    out.raw(
+        Normal,
+        &strings::fmt(
+            "dir.extracting",
+            &[("path", &dest_path.display().to_string())],
+        ),
+    );
+    out.blank(Normal);
+
+    // Bridge the CLI's SIGINT flag into a libfreemkv Halt the producer polls
+    // at file / batch boundaries. A watcher thread flips the halt when SIGINT
+    // arrives mid-extraction so a long extract stops promptly (the producer
+    // leaves the in-flight file as `.partial`, never a half-written file that
+    // looks complete). The watcher exits when extraction finishes (via `done`).
+    let halt = libfreemkv::Halt::new();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        halt.cancel();
+    }
+    let watcher = {
+        let halt = halt.clone();
+        let done = done.clone();
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    halt.cancel();
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        })
+    };
+    let opts = libfreemkv::ExtractOptions {
+        force,
+        progress: None,
+        halt: Some(halt.clone()),
+    };
+
+    let outcome = disc.extract_tree(reader, dest_path, &opts);
+    done.store(true, Ordering::SeqCst);
+    let _ = watcher.join();
+
+    match outcome {
+        Ok(res) => {
+            // Per-file loss lines (only the lossy ones, to keep output terse).
+            for f in &res.files {
+                let lost = f.bytes_unreadable + f.bytes_undecryptable;
+                if lost > 0 {
+                    out.raw(
+                        Normal,
+                        &strings::fmt(
+                            "dir.file_lossy",
+                            &[
+                                ("file", &f.path.display().to_string()),
+                                ("lost", &format!("{:.2}", lost as f64 / 1_048_576.0)),
+                            ],
+                        ),
+                    );
+                }
+            }
+            if res.halted {
+                out.raw(Normal, &strings::get("rip.interrupted"));
+                return false;
+            }
+            let good_mb = res.bytes_good as f64 / 1_048_576.0;
+            if res.complete {
+                out.raw(
+                    Normal,
+                    &strings::fmt(
+                        "dir.complete",
+                        &[
+                            ("files", &res.files.len().to_string()),
+                            ("size", &format!("{good_mb:.1}")),
+                        ],
+                    ),
+                );
+                true
+            } else {
+                let lost_mb = res.bytes_lost() as f64 / 1_048_576.0;
+                out.raw(
+                    Normal,
+                    &strings::fmt(
+                        "dir.lossy",
+                        &[
+                            ("files", &res.files.len().to_string()),
+                            ("lost", &format!("{lost_mb:.2}")),
+                        ],
+                    ),
+                );
+                // A lossy extraction returns failure (non-zero exit) so scripts
+                // can detect "extracted but holed" and re-run via iso multipass.
+                false
+            }
+        }
+        Err(e) => {
+            out.raw(Normal, &fmt_err(&e));
+            false
+        }
+    }
+}
+
 // ── Title scanning ──────────────────────────────────────────────────────────
 
 /// Scan any source for its title list. Returns None if source has no titles
@@ -1967,7 +2283,7 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
 }
 
 /// Whether a token is a positional stream URL (`scheme://...`) rather than a
-/// flag value. A value-flag (`-t`, `-k`) must not swallow one of these.
+/// flag value. A value-flag (`-t`, `--keydb`) must not swallow one of these.
 fn is_url_token(s: &str) -> bool {
     s.contains("://")
 }
@@ -2443,14 +2759,14 @@ mod tests {
 
     #[test]
     fn keydb_missing_value_rejected() {
-        // `-k` with no value must not silently fall back to the default keydb.
-        assert!(parse_flags(&v(&["-k"])).is_err());
-        assert!(parse_flags(&v(&["-k", "disc://"])).is_err());
+        // `--keydb` with no value must not silently fall back to the default keydb.
+        assert!(parse_flags(&v(&["--keydb"])).is_err());
+        assert!(parse_flags(&v(&["--keydb", "disc://"])).is_err());
     }
 
     #[test]
     fn keydb_value_accepted() {
-        let f = parse_flags(&v(&["-k", "/etc/keydb.cfg"])).unwrap();
+        let f = parse_flags(&v(&["--keydb", "/etc/keydb.cfg"])).unwrap();
         assert_eq!(f.keydb_path.as_deref(), Some("/etc/keydb.cfg"));
     }
 
@@ -2722,6 +3038,15 @@ mod tests {
         let f = parse_flags(&v(&["--raw", "--multipass", "--log-level", "2", "-q"])).unwrap();
         assert!(f.raw && f.multipass && f.verbose && f.quiet);
         assert!(f.title_nums.is_empty());
+        assert!(!f.force, "force defaults off");
+    }
+
+    #[test]
+    fn force_flag_parses() {
+        // `--force` opts into overwriting a non-empty dir:// target.
+        let f = parse_flags(&v(&["--force"])).unwrap();
+        assert!(f.force);
+        assert!(!parse_flags(&v(&[])).unwrap().force);
     }
 
     #[test]
@@ -2764,9 +3089,21 @@ mod tests {
     /// parsing the URLs the same way `run()` does. Returns the Result so tests
     /// can assert Ok / Err without repeating the parse boilerplate.
     fn preflight(source: &str, dest: &str, raw: bool, multipass: bool) -> Result<(), String> {
+        preflight_f(source, dest, raw, multipass, false)
+    }
+
+    /// `preflight` with an explicit `--force` value (for `dir://` non-empty
+    /// target tests).
+    fn preflight_f(
+        source: &str,
+        dest: &str,
+        raw: bool,
+        multipass: bool,
+        force: bool,
+    ) -> Result<(), String> {
         let ps = parse_url(source);
         let pd = parse_url(dest);
-        preflight_validate(source, dest, &ps, &pd, raw, multipass)
+        preflight_validate(source, dest, &ps, &pd, raw, multipass, force)
     }
 
     /// A unique temp path under the system temp dir (no tempfile dep). Caller
@@ -2857,6 +3194,89 @@ mod tests {
         // disc→null --raw and disc→null --multipass: both error (iso://-only).
         assert!(preflight("disc://", "null://", true, false).is_err());
         assert!(preflight("disc://", "null://", false, true).is_err());
+    }
+
+    // ── dir:// (decrypted file-tree extraction) gates ───────────────────────
+
+    /// `--raw` into a `dir://` dest is rejected (dir:// is not iso://, so the
+    /// system-wide raw/iso-only gate fires). An encrypted file tree is useless.
+    #[test]
+    fn dir_dest_rejects_raw() {
+        let out = temp_path("dir_raw");
+        let dest = format!("dir://{}/", out.display());
+        let e = preflight("disc://", &dest, true, false).expect_err("dir:// + --raw must error");
+        assert!(e.contains("--raw"), "names the offending flag: {e}");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// `--multipass` into a `dir://` dest is rejected (dir:// is 1-shot;
+    /// recovery is the iso:// multipass path's job).
+    #[test]
+    fn dir_dest_rejects_multipass() {
+        let out = temp_path("dir_mp");
+        let dest = format!("dir://{}/", out.display());
+        let e =
+            preflight("disc://", &dest, false, true).expect_err("dir:// + --multipass must error");
+        assert!(e.contains("--multipass"), "names the flag: {e}");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// A byte-stream source (no filesystem) into `dir://` is rejected up front
+    /// — only disc:// / iso:// supply a UDF tree.
+    #[test]
+    fn dir_dest_rejects_byte_stream_source() {
+        for src in [
+            "mkv://in.mkv",
+            "m2ts://in.m2ts",
+            "network://host:9000",
+            "stdio://",
+        ] {
+            let out = temp_path("dir_src");
+            let dest = format!("dir://{}/", out.display());
+            let e = preflight(src, &dest, false, false)
+                .expect_err(&format!("{src} → dir:// should error"));
+            assert!(
+                e.to_lowercase().contains("dir://") || e.contains("file tree"),
+                "{src}: {e}"
+            );
+            let _ = std::fs::remove_dir_all(&out);
+        }
+    }
+
+    /// disc:// and iso:// SOURCES into dir:// pass the source gate (an iso://
+    /// input still needs a readable file, supplied here).
+    #[test]
+    fn dir_dest_accepts_disc_and_iso_sources() {
+        let out = temp_path("dir_ok");
+        let dest = format!("dir://{}/", out.display());
+        // disc:// (auto-detect device): source gate passes; dir target created.
+        assert!(preflight("disc://", &dest, false, false).is_ok());
+        let _ = std::fs::remove_dir_all(&out);
+
+        // iso:// source needs a real, non-empty file.
+        let iso = temp_path("dir_ok_iso");
+        std::fs::write(&iso, b"not empty").unwrap();
+        let out2 = temp_path("dir_ok2");
+        let dest2 = format!("dir://{}/", out2.display());
+        let src = format!("iso://{}", iso.display());
+        assert!(preflight(&src, &dest2, false, false).is_ok());
+        let _ = std::fs::remove_file(&iso);
+        let _ = std::fs::remove_dir_all(&out2);
+    }
+
+    /// A non-empty `dir://` target is refused without `--force`, accepted with.
+    #[test]
+    fn dir_dest_non_empty_requires_force() {
+        let out = temp_path("dir_nonempty");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("x.txt"), b"x").unwrap();
+        let dest = format!("dir://{}/", out.display());
+        let e =
+            preflight_f("disc://", &dest, false, false, false).expect_err("non-empty must error");
+        assert!(e.to_lowercase().contains("empty"), "{e}");
+        // --force overrides.
+        assert!(preflight_f("disc://", &dest, false, false, true).is_ok());
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]

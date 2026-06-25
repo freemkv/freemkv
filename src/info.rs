@@ -9,8 +9,7 @@ use libfreemkv::Drive;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 
-pub fn run(args: &[String]) {
-    let mut device_path: Option<String> = None;
+pub fn run(device: Option<&str>, args: &[String]) {
     let mut share = false;
     let mut mask = false;
     let mut quiet = false;
@@ -19,22 +18,6 @@ pub fn run(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--device" | "-d" => {
-                i += 1;
-                match args.get(i) {
-                    Some(v) => device_path = Some(v.clone()),
-                    None => {
-                        eprintln!(
-                            "{}",
-                            strings::fmt(
-                                "error.flag_needs_value",
-                                &[("flag", "--device"), ("example", "--device /dev/sg0")]
-                            )
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
             "--share" | "-s" => share = true,
             "--mask" | "-m" => mask = true,
             "--quiet" | "-q" => quiet = true,
@@ -50,7 +33,6 @@ pub fn run(args: &[String]) {
                 println!();
                 println!("  --share    {}", strings::get("drive.share_desc"));
                 println!("  --mask     {}", strings::get("drive.mask_desc"));
-                println!("  --device   {}", strings::get("drive.device_desc"));
                 println!("  --quiet    {}", strings::get("app.opt_quiet"));
                 println!("  --verbose  {}", strings::get("app.opt_verbose"));
                 return;
@@ -66,8 +48,8 @@ pub fn run(args: &[String]) {
         i += 1;
     }
 
-    let mut session = match device_path {
-        Some(ref p) => Drive::open(Path::new(p)).unwrap_or_else(|e| {
+    let mut session = match device {
+        Some(p) => Drive::open(Path::new(p)).unwrap_or_else(|e| {
             eprintln!(
                 "{}",
                 strings::fmt(
