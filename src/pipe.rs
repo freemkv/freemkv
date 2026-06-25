@@ -2400,10 +2400,10 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 mod tests {
     use super::{
         KeyConfig, build_jobs, build_key_sources, copy_should_continue, dest_is_iso,
-        disc_copy_recovered_data, fmt_err_str, headers_resolved, is_keyserver_url,
+        disc_copy_recovered_data, fmt_err, fmt_err_str, headers_resolved, is_keyserver_url,
         is_scheme_only_sink, is_url_token, mux_produced_output, mux_was_interrupted,
-        parse_error_code, parse_flags, preflight_validate, render_error, title_in_range,
-        validate_file_dest, validate_iso_input,
+        parse_error_code, parse_flags, preflight_validate, render_error, resolved_keydb_path,
+        sanitize_name, title_in_range, validate_file_dest, validate_iso_input,
     };
     use crate::output::Output;
     use libfreemkv::parse_url;
@@ -3642,5 +3642,311 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — dropped `-k` short flag (rc.6: `--keydb` long form ONLY).
+    //
+    // The `-k` short flag was removed from `parse_flags`. It must now be
+    // treated as an UNKNOWN flag (hard error), NOT silently consume its value
+    // as a keydb path — otherwise a user who learned `-k` in an earlier rc would
+    // get a confusing "unexpected positional" downstream, or worse, the value
+    // would be eaten and the rip would proceed against the default keydb.
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// `-k <path>` is no longer a recognized flag: it must be rejected as an
+    /// unknown flag (so the user is told to use `--keydb`), never quietly
+    /// accepted. The long `--keydb` form (tested elsewhere) is the only spelling.
+    #[test]
+    fn dropped_short_k_flag_is_unknown() {
+        // `-k keydb.cfg` — the dropped short form — must error.
+        let err = parse_flags(&v(&["-k", "keydb.cfg"])).unwrap_err();
+        assert!(
+            err.contains("-k"),
+            "unknown-flag error must name `-k`: {err}"
+        );
+        // It must NOT have been parsed as a keydb path (the parse failed, so no
+        // ParsedFlags exists — but assert the long form still works to prove we
+        // didn't break `--keydb` while dropping `-k`).
+        let f = parse_flags(&v(&["--keydb", "keydb.cfg"])).unwrap();
+        assert_eq!(f.keydb_path.as_deref(), Some("keydb.cfg"));
+        // Bare `-k` (no value) is likewise unknown, not "needs a value".
+        let err = parse_flags(&v(&["-k"])).unwrap_err();
+        assert!(
+            err.contains("-k") && !err.contains("requires a value"),
+            "bare `-k` must be unknown-flag, not flag_needs_value: {err}"
+        );
+    }
+
+    /// The dropped `--device` / `-d` flags: the device now comes from the source
+    /// URL (`disc:///dev/sgN`). `parse_flags` must reject `--device`/`-d` as
+    /// unknown — they are not silently swallowed (which would let a stray device
+    /// path leak through as a positional).
+    #[test]
+    fn dropped_device_flags_are_unknown() {
+        for bad in [
+            v(&["--device", "/dev/sg0"]),
+            v(&["-d", "/dev/sg0"]),
+            v(&["--device"]),
+            v(&["-d"]),
+        ] {
+            match parse_flags(&bad) {
+                Ok(f) => panic!("{bad:?} must be rejected, got {f:?}"),
+                Err(err) => assert!(!err.is_empty(), "{bad:?}: unknown-flag error must be set"),
+            }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — device comes from the source URL (`disc:///dev/sgN`).
+    //
+    // `main::info_cmd` / `pipe_disc` / `dir_to_extract` all read the device out
+    // of the parsed `disc://` URL — there is no `--device` flag anymore. Pin the
+    // exact `parse_url` shape those routes depend on, so a parser change that
+    // breaks device-from-URL is caught here in the CLI's own tests.
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn device_comes_from_disc_url() {
+        // Explicit device path → carried in the URL.
+        match parse_url("disc:///dev/sg3") {
+            libfreemkv::StreamUrl::Disc { device: Some(p) } => {
+                assert_eq!(p.to_string_lossy(), "/dev/sg3");
+            }
+            other => panic!("disc:///dev/sg3 must parse to Disc{{device:Some}}, got {other:?}"),
+        }
+        // Bare `disc://` → auto-detect (device None); the routes fall back to
+        // `find_drive()` rather than a flag.
+        match parse_url("disc://") {
+            libfreemkv::StreamUrl::Disc { device: None } => {}
+            other => panic!("disc:// must parse to Disc{{device:None}}, got {other:?}"),
+        }
+        // A Windows device path survives the URL too (the route is OS-agnostic;
+        // the path string is opaque to the parser).
+        match parse_url("disc://D:") {
+            libfreemkv::StreamUrl::Disc { device: Some(p) } => {
+                assert_eq!(p.to_string_lossy(), "D:");
+            }
+            other => panic!("disc://D: must parse to Disc{{device:Some}}, got {other:?}"),
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — path handling (Windows-relevant). `sanitize_name` seeds per-title
+    // output filenames under a directory dest; it must never emit a path
+    // separator, a host-illegal character, or an empty stem — on ANY platform,
+    // since a rip authored on Linux may be muxed on Windows. These run on every
+    // platform (the function is platform-agnostic by design).
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn sanitize_name_strips_path_separators_and_illegal_chars() {
+        // Forward AND back slashes must not survive — a `Movie/Part2` stem would
+        // otherwise synthesize `dir/Movie/Part2_t1.mkv`, escaping the dest dir.
+        // The separator is STRIPPED (not converted), so the space-only gaps are
+        // what become underscores.
+        let s = sanitize_name("Movie/Part 2");
+        assert!(!s.contains('/'), "path separator survived: {s}");
+        assert_eq!(s, "MoviePart_2", "got {s}");
+        let s = sanitize_name(r"A\B");
+        assert!(!s.contains('\\'), "backslash survived: {s}");
+        assert_eq!(s, "AB", "backslash stripped, not converted: {s}");
+        // Windows-illegal punctuation (`: * ? " < > |`) is dropped, not kept.
+        let s = sanitize_name(r#"a:b*c?d"e<f>g|h"#);
+        for bad in [':', '*', '?', '"', '<', '>', '|', '\\', '/'] {
+            assert!(!s.contains(bad), "illegal char {bad:?} survived in {s}");
+        }
+        assert_eq!(s, "abcdefgh", "got {s}");
+    }
+
+    #[test]
+    fn sanitize_name_spaces_to_underscores_and_trims() {
+        assert_eq!(sanitize_name("  The  Movie  "), "The__Movie");
+        // Hyphen and underscore are preserved (legal everywhere).
+        assert_eq!(sanitize_name("Director-Cut_2"), "Director-Cut_2");
+    }
+
+    #[test]
+    fn sanitize_name_empty_or_all_illegal_falls_back_to_disc() {
+        // An empty or fully-stripped stem must fall back to "disc" so the
+        // per-title filename is never `_t1.mkv` (leading underscore, no stem).
+        assert_eq!(sanitize_name(""), "disc");
+        assert_eq!(sanitize_name("///"), "disc");
+        assert_eq!(sanitize_name(":*?"), "disc");
+        assert_eq!(sanitize_name("   "), "disc");
+        // A name that is ALL non-ascii is stripped to empty → "disc".
+        assert_eq!(sanitize_name("日本語"), "disc");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — keydb path resolution (Windows-relevant). `resolved_keydb_path`
+    // honors an explicit `--keydb` override verbatim, and falls back to the
+    // exe-local / default location otherwise. It must NEVER panic and ALWAYS
+    // return a usable path (the bare `keydb.cfg` last resort guarantees Some).
+    // The exe-relative search policy itself is owned + tested by
+    // `freemkv-keysources::paths`; this pins the CLI's wrapper behavior.
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn resolved_keydb_path_honors_explicit_override() {
+        // An explicit `--keydb PATH` is used verbatim, never the search policy.
+        let p = resolved_keydb_path(&Some("/custom/keydb.cfg".to_string()));
+        assert_eq!(p, std::path::PathBuf::from("/custom/keydb.cfg"));
+        // A Windows-style override path is passed through unchanged too.
+        let p = resolved_keydb_path(&Some(r"C:\keys\keydb.cfg".to_string()));
+        assert_eq!(p, std::path::PathBuf::from(r"C:\keys\keydb.cfg"));
+    }
+
+    #[test]
+    fn resolved_keydb_path_falls_back_without_panicking() {
+        // No override → the exe-local/default policy (or the bare `keydb.cfg`
+        // last resort). Either way a non-empty path is returned, never a panic.
+        let p = resolved_keydb_path(&None);
+        assert!(
+            p.file_name().is_some_and(|n| n == "keydb.cfg"),
+            "fallback must end in keydb.cfg: {}",
+            p.display()
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — dir:// preflight messaging render. The dir:// validation strings
+    // carry placeholders; pin that the RENDERED message substitutes them (no
+    // leftover `{path}` / `{source}` braces) and surfaces actionable guidance.
+    // The gating (which inputs error) is covered by the dir:// gate tests above;
+    // this covers the user-facing TEXT.
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn dir_source_unsupported_message_substitutes_and_guides() {
+        // A byte-stream source into dir:// renders the localized guidance with
+        // the offending source URL substituted and no leftover placeholder.
+        let out = temp_path("dir_msg_src");
+        let dest = format!("dir://{}/", out.display());
+        let err = preflight("mkv://in.mkv", &dest, false, false).unwrap_err();
+        let _ = std::fs::remove_dir_all(&out);
+        assert!(
+            err.contains("mkv://in.mkv"),
+            "source not substituted: {err}"
+        );
+        assert!(!err.contains("{source}"), "leftover placeholder: {err}");
+        // Guides toward a usable source (disc:// or iso://).
+        assert!(
+            err.contains("disc://") || err.contains("iso://"),
+            "must guide to a filesystem source: {err}"
+        );
+    }
+
+    #[test]
+    fn dir_dest_is_file_message_substitutes_path() {
+        // A dir:// target that is a regular file renders the path-substituted
+        // file/folder mismatch message with no leftover `{path}`.
+        let f = temp_path("dir_msg_file");
+        std::fs::write(&f, b"x").unwrap();
+        let dest = format!("dir://{}", f.display());
+        let err = preflight("disc://", &dest, false, false).unwrap_err();
+        let _ = std::fs::remove_file(&f);
+        assert!(
+            err.contains(&f.display().to_string()),
+            "path not substituted: {err}"
+        );
+        assert!(!err.contains("{path}"), "leftover placeholder: {err}");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — the new (WS2) messaging render shape. `main::fatal` builds the fatal
+    // block from `error.fatal_header` (`{level}: {op} failed: {cause}`) and the
+    // `error.fatal_diagnostic_hint`. `fmt_err` produces the code-forward
+    // `{cause}` fragment. Pin the assembled shape end-to-end so a locale or
+    // template change that drops the code, the level word, or a placeholder is
+    // caught.
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn fatal_header_assembles_level_op_and_code_forward_cause() {
+        // The cause fragment for a real library error, code-forward (E-prefixed).
+        let cause = fmt_err(&"E6009");
+        assert!(
+            cause.starts_with("E6009 "),
+            "cause not code-forward: {cause}"
+        );
+
+        // The render site assembles `{level}: {op} failed: {cause}`. Reproduce
+        // the exact substitution `main::fatal` performs (it isn't callable — it
+        // exits the process — so we pin the template + parts it feeds).
+        let level = crate::strings::get(crate::messaging::Level::Error.locale_key());
+        let op = crate::strings::get("error.op_rip");
+        let header = crate::strings::fmt(
+            "error.fatal_header",
+            &[("level", &level), ("op", &op), ("cause", &cause)],
+        );
+        // All three parts present, in order, with no leftover placeholders.
+        assert!(
+            header.starts_with(&format!("{level}:")),
+            "level first: {header}"
+        );
+        assert!(header.contains(&op), "op missing: {header}");
+        assert!(header.contains(&cause), "cause missing: {header}");
+        assert!(
+            !header.contains("{level}") && !header.contains("{op}") && !header.contains("{cause}"),
+            "leftover placeholder in fatal header: {header}"
+        );
+        // The diagnostic-log hint exists and names the --log-level escape hatch.
+        let hint = crate::strings::get("error.fatal_diagnostic_hint");
+        assert_ne!(hint, "error.fatal_diagnostic_hint", "hint key missing");
+        assert!(
+            hint.contains("--log-level"),
+            "hint must point at the log flag: {hint}"
+        );
+    }
+
+    /// Each operation name key the fatal block can use (`op_rip`, `op_info`,
+    /// `op_verify`, `op_update_keys`) must resolve to a real localized word, not
+    /// the bare dotted key — otherwise the fatal header reads
+    /// `Error: error.op_rip failed: ...`.
+    #[test]
+    fn fatal_operation_keys_all_resolve() {
+        for key in [
+            "error.op_rip",
+            "error.op_info",
+            "error.op_verify",
+            "error.op_update_keys",
+        ] {
+            assert_ne!(
+                crate::strings::get(key),
+                key,
+                "fatal op key {key} unresolved (would print the raw key)"
+            );
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — Windows-only compile-gated coverage. `cfg(windows)` does NOT run in
+    // the Mac precommit, but it MUST compile-gate cleanly so CI (which builds on
+    // Windows) validates it. These pin the OS-specific path/keydb shapes the
+    // CLI relies on under Windows.
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_keydb_override_keeps_drive_letter_path() {
+        // A Windows override path (drive letter + backslashes) must survive
+        // verbatim through the CLI wrapper, unmangled.
+        let p = resolved_keydb_path(&Some(r"C:\Users\me\AppData\keydb.cfg".to_string()));
+        assert_eq!(
+            p,
+            std::path::PathBuf::from(r"C:\Users\me\AppData\keydb.cfg")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sanitize_name_drops_reserved_punctuation() {
+        // On Windows the `:` (drive separator) and `\` MUST never reach a
+        // synthesized filename. (The function is platform-agnostic, but pin it
+        // explicitly under the Windows build so a regression is caught on CI's
+        // Windows job even if a future change made it cfg-specific.)
+        let s = sanitize_name(r"C:\Movie");
+        assert!(!s.contains(':') && !s.contains('\\'), "got {s}");
     }
 }
