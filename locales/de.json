@@ -144,7 +144,8 @@
     "damage_lost_movie": "{time} lost (in movie)",
     "damage_lost_simple": "{time} lost",
     "damage_none": "0s",
-    "multipass_ignored": "Hinweis: --multipass wird bei disc->MKV/M2TS ignoriert (Einzeldurchlauf-Mux). Verwende eine iso://-Ausgabe für Mehrpass-Wiederherstellung."
+    "multipass_ignored": "Hinweis: --multipass wird bei disc->MKV/M2TS ignoriert (Einzeldurchlauf-Mux). Verwende eine iso://-Ausgabe für Mehrpass-Wiederherstellung.",
+    "title_skipped": "Titel {num} wird übersprungen: kopiergeschützt, kein Schlüssel wiederherstellbar."
   },
   "dir": {
     "extracting": "Extracting decrypted file tree to {path}",
