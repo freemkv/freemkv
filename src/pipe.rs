@@ -1944,6 +1944,31 @@ fn run_extract(
             }
         })
     };
+
+    // Signal `done` and join the watcher from a Drop guard so the watcher is
+    // ALWAYS released — including the unwind path. `extract_tree` is not
+    // panic-free (a slice/arithmetic bug could panic); without the guard a
+    // panic would skip the `done.store`/`join` below and leave the watcher
+    // spinning its 200 ms poll until process exit. The guard's Drop runs on
+    // both normal return and unwind, so the thread is signalled and reaped
+    // either way.
+    struct WatcherGuard {
+        done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for WatcherGuard {
+        fn drop(&mut self) {
+            self.done.store(true, Ordering::SeqCst);
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+    let _watcher_guard = WatcherGuard {
+        done: done.clone(),
+        handle: Some(watcher),
+    };
+
     let opts = libfreemkv::ExtractOptions {
         force,
         progress: None,
@@ -1951,8 +1976,8 @@ fn run_extract(
     };
 
     let outcome = disc.extract_tree(reader, dest_path, &opts);
-    done.store(true, Ordering::SeqCst);
-    let _ = watcher.join();
+    // `_watcher_guard`'s Drop (at end of scope, or on unwind) signals `done`
+    // and joins the watcher; no explicit store/join needed here.
 
     match outcome {
         Ok(res) => {
@@ -3324,6 +3349,36 @@ mod tests {
         // --force overrides.
         assert!(preflight_f("disc://", &dest, false, false, true).is_ok());
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// disc:// → dir:// where the dir:// target is an EXISTING REGULAR FILE is
+    /// rejected, and `--force` does NOT override it (force only opts into a
+    /// non-empty *directory*; it cannot turn a file into a folder). This pins
+    /// the `validate_dir_dest` file-branch on the disc-source path, which the
+    /// other dir:// gating tests (raw/multipass/byte-stream/non-empty) leave
+    /// uncovered.
+    #[test]
+    fn dir_dest_existing_file_rejected_even_with_force() {
+        let f = temp_path("dir_isfile");
+        std::fs::write(&f, b"i am a file, not a folder").unwrap();
+        let dest = format!("dir://{}", f.display());
+
+        // Without --force.
+        let e = preflight("disc://", &dest, false, false)
+            .expect_err("dir:// target that is a file must error");
+        assert!(
+            e.to_lowercase().contains("file") || e.to_lowercase().contains("folder"),
+            "must explain the file/folder mismatch: {e}"
+        );
+
+        // --force must NOT rescue it — a regular file is still not a folder.
+        let e2 = preflight_f("disc://", &dest, false, false, true)
+            .expect_err("dir:// target that is a file must error even with --force");
+        assert!(
+            e2.to_lowercase().contains("file") || e2.to_lowercase().contains("folder"),
+            "--force must not turn a file into a dir:// target: {e2}"
+        );
+        let _ = std::fs::remove_file(&f);
     }
 
     #[test]
