@@ -145,7 +145,8 @@
     "damage_lost_simple": "{time} lost",
     "damage_none": "0s",
     "multipass_ignored": "Remarque : --multipass est ignoré pour disc->MKV/M2TS (mux en une passe). Utilisez une sortie iso:// pour la récupération multipasse.",
-    "title_skipped": "Titre {num} ignoré : protégé contre la copie, aucune clé récupérable."
+    "title_skipped": "Titre {num} ignoré : protégé contre la copie, aucune clé récupérable.",
+    "title_skipped_empty": "Titre {num} ignoré : vide (aucune vidéo) — probablement un menu ou un segment de navigation."
   },
   "dir": {
     "extracting": "Extracting decrypted file tree to {path}",
