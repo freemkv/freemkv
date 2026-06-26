@@ -254,6 +254,7 @@
     "title_out_of_range": "Titel {num} buiten bereik ({count})",
     "cannot_create_dir": "Kan map {path} niet aanmaken: {error}",
     "cannot_write": "Kan {path} niet schrijven: {error}",
+    "capture_failed": "Kan de profielgegevens van de drive niet lezen ({error}). Sluit de drive opnieuw aan en probeer het opnieuw.",
     "keyserver_url_rejected": "Fout: sleutelservice-URL geweigerd ({error}) — online sleutelbron uitgeschakeld voor deze rip.",
     "E1004": "Kon de opdrachtinterface van het station niet bereiken. Sluit het station opnieuw aan en probeer het opnieuw.",
     "E1005": "Het station is in gebruik door een ander programma. Sluit alles wat de disc gebruikt en probeer het opnieuw.",

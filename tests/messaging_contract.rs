@@ -154,6 +154,134 @@ fn every_variant_has_code_message_locales_placeholders_and_level() {
     }
 }
 
+// ── Message-quality pins (rc6 error-message quality pillar) ─────────────────
+//
+// The contract test above guarantees every code HAS a string; these pin the
+// QUALITY of the high-traffic real-failure messages so an edit can't silently
+// regress them below the rubric (WHAT / WHY / WHAT-next). Each asserts the
+// English message both names the failure in plain language AND carries an
+// actionable next step — and never leaks a bare `E####` token.
+
+/// The English message for a code, via the same lookup the CLI uses.
+fn en_msg(code: u16) -> String {
+    let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
+    lookup(&en, &format!("error.E{code}"))
+}
+
+#[test]
+fn no_drive_message_is_actionable() {
+    let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
+    let m = lookup(&en, "error.no_drive");
+    // Plain language (no internal "BD" jargon), and an actionable path syntax.
+    assert!(
+        m.contains("optical drive") || m.to_lowercase().contains("drive"),
+        "no_drive must name the failure plainly: {m}"
+    );
+    assert!(
+        m.contains("disc://"),
+        "no_drive must show how to name a drive explicitly: {m}"
+    );
+}
+
+#[test]
+fn drive_not_found_message_is_actionable() {
+    let m = en_msg(1000);
+    assert!(
+        m.to_lowercase().contains("not found") && m.contains("{detail}"),
+        "E1000 must name what wasn't found and where: {m}"
+    );
+    assert!(
+        m.to_lowercase().contains("auto-detect") || m.to_lowercase().contains("check"),
+        "E1000 must offer a next step: {m}"
+    );
+}
+
+#[test]
+fn drive_not_ready_message_is_actionable() {
+    let m = en_msg(1002);
+    assert!(m.to_lowercase().contains("not ready"), "E1002 what: {m}");
+    assert!(
+        m.to_lowercase().contains("insert") && m.to_lowercase().contains("try again"),
+        "E1002 must tell the user to insert a disc and retry: {m}"
+    );
+}
+
+#[test]
+fn aacs_no_keys_message_points_at_update_keys() {
+    // The known-good remediation pattern: an AACS-needs-keys failure must guide
+    // the user to fetch a key database, not just state the fact.
+    let m = en_msg(7000);
+    assert!(m.contains("AACS"), "E7000 must name AACS: {m}");
+    assert!(
+        m.contains("update-keys"),
+        "E7000 must point at `freemkv update-keys`: {m}"
+    );
+}
+
+#[test]
+fn decrypt_failed_message_is_actionable() {
+    let m = en_msg(7013);
+    assert!(
+        m.to_lowercase().contains("decryption failed"),
+        "E7013 what: {m}"
+    );
+    assert!(
+        m.contains("update-keys"),
+        "E7013 must offer a remediation (refresh keys): {m}"
+    );
+}
+
+#[test]
+fn no_streams_message_explains_and_diagnoses() {
+    let m = en_msg(6009);
+    assert!(
+        m.to_lowercase().contains("no audio or video") || m.to_lowercase().contains("no streams"),
+        "E6009 what: {m}"
+    );
+    assert!(
+        m.to_lowercase().contains("damaged") || m.to_lowercase().contains("unsupported"),
+        "E6009 must offer a likely cause: {m}"
+    );
+}
+
+#[test]
+fn improved_messages_carry_no_bare_code() {
+    // None of the curated messages may themselves embed a raw `E####` token —
+    // the code is prefixed once by the render site, never baked into the prose.
+    for code in [1000u16, 1002, 6009, 7000, 7013] {
+        let m = en_msg(code);
+        assert!(
+            !m.contains(&format!("E{code}")),
+            "E{code} message must not embed its own raw code: {m}"
+        );
+    }
+}
+
+#[test]
+fn capture_failed_key_exists_in_all_locales() {
+    // The drive-profile capture failure is now localized (was bare English).
+    let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
+    let en_msg = lookup(&en, "error.capture_failed");
+    assert_ne!(
+        en_msg, "error.capture_failed",
+        "en.json missing capture_failed"
+    );
+    assert!(
+        en_msg.contains("{error}"),
+        "capture_failed must keep {{error}}"
+    );
+    let en_ph: std::collections::BTreeSet<String> = placeholders(&en_msg).into_iter().collect();
+    for (lc, loc) in other_locales() {
+        let m = lookup(&loc, "error.capture_failed");
+        assert_ne!(
+            m, "error.capture_failed",
+            "{lc}.json missing capture_failed"
+        );
+        let ph: std::collections::BTreeSet<String> = placeholders(&m).into_iter().collect();
+        assert_eq!(ph, en_ph, "{lc}.json capture_failed placeholders differ");
+    }
+}
+
 // ── §3.2 — assertion 6: no orphan locale keys ───────────────────────────────
 
 #[test]

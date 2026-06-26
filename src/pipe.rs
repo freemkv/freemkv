@@ -569,10 +569,11 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
             } else {
                 // An incidental extra title in an all-titles rip is a stub:
                 // either copy-protected-but-uncrackable (E7023) or empty / no
-                // muxable frames (E6008, an empty nav/menu PGC that slipped past
-                // `is_muxable_title`). Skip it with a clear, non-error notice and
-                // keep muxing the rest; the command can still exit 0 if the
-                // feature / requested titles succeed. NO FALSE ERRORS.
+                // muxable frames (E6008, an empty nav/menu PGC that emits no
+                // frames). `is_title_failure_fatal` classified it non-fatal, so
+                // skip it with a clear, non-error notice and keep muxing the
+                // rest; the command can still exit 0 if the feature / requested
+                // titles succeed. NO FALSE ERRORS.
                 let num = title_idx.map(|i| i + 1).unwrap_or(0);
                 let key = match parse_error_code(&e) {
                     Some(("E6008", _)) => "rip.title_skipped_empty",
@@ -1469,10 +1470,11 @@ fn interrupted_error(out: &Output) -> String {
 ///
 /// It is SKIPPABLE (warn + continue, command may still exit 0) ONLY when an
 /// all-titles rip (`multi_title && !explicit_selection`) hits a non-feature
-/// title whose failure is one of the skippable stub codes. This is the
-/// defensive backstop to [`is_muxable_title`]: most empty stubs are filtered out
-/// of the job set before muxing, but a title that scans as non-empty yet still
-/// muxes to nothing (E6008) is caught here instead of printing a scary error.
+/// title whose failure is one of the skippable stub codes. This runtime
+/// classification is the operative mechanism for empty nav/menu PGC stubs:
+/// rather than pre-filtering the job set, a title that scans as non-empty yet
+/// still muxes to nothing (E6008) is caught here at rip time and skipped with a
+/// clear notice (`rip.title_skipped_empty`) instead of printing a scary error.
 fn is_title_failure_fatal(
     err: &str,
     multi_title: bool,
@@ -1491,21 +1493,6 @@ fn is_title_failure_fatal(
     // A stub failure on the feature, an explicitly-requested title, or in a
     // single-title rip is the title the user actually wants — hard error.
     is_feature || explicit_selection || !multi_title
-}
-
-/// Whether a scanned title is worth handing to the muxer in an ALL-TITLES rip.
-///
-/// DVD-Video discs carry empty nav/menu PGC "titles" — 0-duration, 0-content
-/// stubs that exist only as program-chain entries. Muxing one emits no frames
-/// and surfaces a scary `Error: E6008 Invalid MKV file` for something the user
-/// never asked to rip. Such a title is NOT muxable: it has no runtime AND no
-/// bytes. A title with EITHER a non-zero duration OR non-zero content is real
-/// and kept (a damaged real title may scan short but still hold data; a title
-/// with runtime but an unknown byte count is still real). Used only to prune the
-/// all-titles set — an explicit `-t N` bypasses this so a user asking for a
-/// specific empty title still gets a clean per-title error.
-fn is_muxable_title(title: &libfreemkv::DiscTitle) -> bool {
-    title.duration_secs > 0.0 || title.size_bytes > 0
 }
 
 /// One title: open input, open output, stream PES frames.
@@ -2529,11 +2516,7 @@ fn sanitize_name(name: &str) -> String {
         )
         .trim()
         .replace(' ', "_");
-    if s.is_empty() {
-        "disc".to_string()
-    } else {
-        s
-    }
+    if s.is_empty() { "disc".to_string() } else { s }
 }
 
 /// Map `LabelPurpose` to its locale string key. `Normal` → no tag.
@@ -2550,12 +2533,12 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_jobs, build_key_sources, copy_should_continue, dest_is_iso, disc_copy_recovered_data,
-        fmt_disc_damage, fmt_err, fmt_err_str, headers_resolved, is_keyserver_url,
-        is_scheme_only_sink, is_title_failure_fatal, is_url_token, mux_produced_output,
-        mux_was_interrupted, parse_error_code, parse_flags, preflight_validate, render_error,
-        resolved_keydb_path, sanitize_name, title_in_range, validate_file_dest, validate_iso_input,
-        KeyConfig,
+        KeyConfig, build_jobs, build_key_sources, copy_should_continue, dest_is_iso,
+        disc_copy_recovered_data, fmt_disc_damage, fmt_err, fmt_err_str, headers_resolved,
+        is_keyserver_url, is_scheme_only_sink, is_title_failure_fatal, is_url_token,
+        mux_produced_output, mux_was_interrupted, parse_error_code, parse_flags,
+        preflight_validate, render_error, resolved_keydb_path, sanitize_name, title_in_range,
+        validate_file_dest, validate_iso_input,
     };
     use crate::output::Output;
     use crate::strings;
@@ -2715,9 +2698,14 @@ mod tests {
     /// the render site (`render_error`).
     #[test]
     fn fmt_err_renders_codes_to_english() {
-        // E6009 NoStreams — the Theme A zero-output error. Code now prefixed.
+        // E6009 NoStreams — the Theme A zero-output error. Code now prefixed,
+        // message dejargoned to the user-facing "no audio or video streams".
         let s = fmt_err_str("E6009");
-        assert_eq!(s, "E6009 No streams found.");
+        assert!(s.starts_with("E6009 "), "code not prefixed: {s}");
+        assert!(
+            s.to_lowercase().contains("no audio or video streams"),
+            "got: {s}"
+        );
 
         // E7023 CssKeyMissing — the Theme B CSS gate error. The user-facing
         // copy is dejargoned: "copy-protected", not "CSS title key".
@@ -2737,7 +2725,9 @@ mod tests {
         assert!(s.contains("13"), "detail not substituted: {s}");
 
         // E7013 Decryption failed — code now prefixed.
-        assert_eq!(fmt_err_str("E7013"), "E7013 Decryption failed.");
+        let s = fmt_err_str("E7013");
+        assert!(s.starts_with("E7013 "), "code not prefixed: {s}");
+        assert!(s.to_lowercase().contains("decryption failed"), "got: {s}");
 
         // E7022 names the disc by hash, code prefixed.
         let s = fmt_err_str("E7022: deadbeef");
@@ -2750,7 +2740,7 @@ mod tests {
     #[test]
     fn render_error_prefixes_level_once() {
         let rendered = render_error(&"E6009");
-        assert_eq!(rendered, "Error: E6009 No streams found.");
+        assert!(rendered.starts_with("Error: E6009 "), "got: {rendered}");
         // The level word appears exactly once (no nested doubling).
         assert_eq!(rendered.matches("Error:").count(), 1);
     }
