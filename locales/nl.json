@@ -145,7 +145,8 @@
     "damage_lost_simple": "{time} lost",
     "damage_none": "0s",
     "multipass_ignored": "Let op: --multipass wordt genegeerd voor disc->MKV/M2TS (mux in één doorgang). Gebruik een iso://-uitvoer voor multipass-herstel.",
-    "title_skipped": "Titel {num} overgeslagen: kopieerbeveiligd, geen sleutel herstelbaar."
+    "title_skipped": "Titel {num} overgeslagen: kopieerbeveiligd, geen sleutel herstelbaar.",
+    "title_skipped_empty": "Titel {num} overgeslagen: leeg (geen video) — waarschijnlijk een menu-/navigatiestub."
   },
   "dir": {
     "extracting": "Extracting decrypted file tree to {path}",
