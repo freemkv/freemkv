@@ -285,6 +285,7 @@
     "E7020": "Ce lecteur n'est pas reconnu, les étapes nécessaires pour lire l'identifiant de ce disque ne sont donc pas disponibles. Lancez 'freemkv drive-info --share' pour aider à l'ajouter.",
     "E7021": "Ce lecteur ne fournit aucun moyen de lire l'identifiant de ce disque.",
     "E7024": "Aucune source de clés ne fournit de certificat hôte pour la liaison sécurisée du lecteur.",
+    "E7025": "Ce disque utilise le chiffrement de bus AACS, mais aucune clé de bus n'a pu être obtenue lors de la liaison sécurisée du lecteur, de sorte que ses données ne peuvent pas être déchiffrées (la sortie serait illisible).",
     "E8006": "L'URL de la base de clés utilise un type d'adresse non pris en charge ({detail}).",
     "E8007": "Le téléchargement de la base de clés a été redirigé trop de fois. Vérifiez l'URL et réessayez.",
     "E9005": "Erreur interne lors de la construction de la sortie. Veuillez le signaler.",

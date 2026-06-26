@@ -87,6 +87,7 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::NoDiscKey { disc_hash: p() },
         Error::CssKeyMissing,
         Error::AacsNoHostCert { path: p() },
+        Error::AacsBusKeyUnavailable,
         Error::KeydbConnect { host: p() },
         Error::KeydbHttp { status: 0 },
         Error::KeydbInvalid,

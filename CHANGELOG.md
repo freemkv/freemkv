@@ -4,6 +4,16 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.1.0-beta.1] — UNRELEASED
+
+Inherits libfreemkv 1.1.0-beta.1, including the **DVD movie-not-menu** fix —
+DVD rips now begin at the feature instead of several minutes of the disc menu.
+
+### Added
+
+- New error code **E7025** ("AACS bus key unavailable"), with messages in all
+  seven UI languages and full Error-Codes-page coverage.
+
 ## [1.0.0-rc.5.1]
 
 ### Added

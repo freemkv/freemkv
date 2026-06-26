@@ -146,10 +146,12 @@ fn every_variant_has_code_message_locales_placeholders_and_level() {
         // 5. An assigned Level in the closed vocabulary; Error for every
         //    libfreemkv code.
         let level = level_for(code);
-        assert!(
-            matches!(level, Level::Warn | Level::Info | Level::Error),
-            "{key}: level not in the closed vocabulary"
-        );
+        // Exhaustive match over the closed vocabulary: a runtime `matches!` here
+        // is a tautology (every arm is covered), so guard at compile time
+        // instead — a future `Level` variant forces this test to be updated.
+        match level {
+            Level::Warn | Level::Info | Level::Error => {}
+        }
         assert_eq!(level, Level::Error, "{key}: every libfreemkv code is Error");
     }
 }
@@ -172,6 +174,10 @@ fn en_msg(code: u16) -> String {
 fn no_drive_message_is_actionable() {
     let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
     let m = lookup(&en, "error.no_drive");
+    // A missing key returns the dotted sentinel ("error.no_drive"), which
+    // happens to contain "drive" — assert presence first so a dropped key
+    // reports the true cause, not a vaguer content failure downstream.
+    assert_ne!(m, "error.no_drive", "en.json missing error.no_drive");
     // Plain language (no internal "BD" jargon), and an actionable path syntax.
     assert!(
         m.contains("optical drive") || m.to_lowercase().contains("drive"),
