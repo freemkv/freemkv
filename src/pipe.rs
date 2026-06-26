@@ -567,15 +567,18 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                 out.raw(Normal, &render_error(&e));
                 ok = false;
             } else {
-                // An incidental extra title in an all-titles rip is copy-
-                // protected and uncrackable. Skip it with a clear warning and
+                // An incidental extra title in an all-titles rip is a stub:
+                // either copy-protected-but-uncrackable (E7023) or empty / no
+                // muxable frames (E6008, an empty nav/menu PGC that slipped past
+                // `is_muxable_title`). Skip it with a clear, non-error notice and
                 // keep muxing the rest; the command can still exit 0 if the
                 // feature / requested titles succeed. NO FALSE ERRORS.
                 let num = title_idx.map(|i| i + 1).unwrap_or(0);
-                out.raw(
-                    Normal,
-                    &strings::fmt("rip.title_skipped", &[("num", &num.to_string())]),
-                );
+                let key = match parse_error_code(&e) {
+                    Some(("E6008", _)) => "rip.title_skipped_empty",
+                    _ => "rip.title_skipped",
+                };
+                out.raw(Normal, &strings::fmt(key, &[("num", &num.to_string())]));
             }
         }
         out.blank(Normal);
@@ -1452,9 +1455,11 @@ fn interrupted_error(out: &Output) -> String {
 /// think freemkv was broken. It must instead skip that title and finish the rest.
 ///
 /// A failure is FATAL (hard error, non-zero exit) when ANY of:
-/// - the error is NOT a skippable per-title copy-protection failure (only
-///   `E7023` / [`libfreemkv::Error::CssKeyMissing`] is skippable — every other
-///   error, e.g. IO, NoDiscKey/E7022 AACS, MkvInvalid, is a real problem);
+/// - the error is NOT a skippable per-title stub failure. Two codes are
+///   skippable: `E7023` / [`libfreemkv::Error::CssKeyMissing`] (copy-protected,
+///   no key recoverable) and `E6008` / [`libfreemkv::Error::MkvInvalid`] (the
+///   title produced no muxable frames — an empty nav/menu PGC stub). Every other
+///   error (IO, NoDiscKey/E7022 AACS, …) is a real problem and stays fatal;
 /// - the user explicitly selected titles with `-t N` (`explicit_selection`) —
 ///   the title they asked for failing is exactly what they need to know about;
 /// - this title IS the main feature (`is_feature`, title index 0) — the movie
@@ -1464,23 +1469,43 @@ fn interrupted_error(out: &Output) -> String {
 ///
 /// It is SKIPPABLE (warn + continue, command may still exit 0) ONLY when an
 /// all-titles rip (`multi_title && !explicit_selection`) hits a non-feature
-/// title whose failure is a `E7023` copy-protection skip.
+/// title whose failure is one of the skippable stub codes. This is the
+/// defensive backstop to [`is_muxable_title`]: most empty stubs are filtered out
+/// of the job set before muxing, but a title that scans as non-empty yet still
+/// muxes to nothing (E6008) is caught here instead of printing a scary error.
 fn is_title_failure_fatal(
     err: &str,
     multi_title: bool,
     explicit_selection: bool,
     is_feature: bool,
 ) -> bool {
-    // Only an E7023 (CssKeyMissing) per-title copy-protection failure is ever a
-    // candidate for skipping; anything else is always fatal. The error string is
-    // libfreemkv's `E<code>[: <data>]` Display form (see `parse_error_code`).
-    let is_css_skip = parse_error_code(err).is_some_and(|(code, _)| code == "E7023");
-    if !is_css_skip {
+    // Only a per-title STUB failure is ever a candidate for skipping:
+    // E7023 (CssKeyMissing — copy-protected) or E6008 (MkvInvalid — empty/no
+    // frames). Anything else is always fatal. The error string is libfreemkv's
+    // `E<code>[: <data>]` Display form (see `parse_error_code`).
+    let is_skippable_code =
+        parse_error_code(err).is_some_and(|(code, _)| matches!(code, "E7023" | "E6008"));
+    if !is_skippable_code {
         return true;
     }
-    // A copy-protection failure on the feature, an explicitly-requested title, or
-    // in a single-title rip is the title the user actually wants — hard error.
+    // A stub failure on the feature, an explicitly-requested title, or in a
+    // single-title rip is the title the user actually wants — hard error.
     is_feature || explicit_selection || !multi_title
+}
+
+/// Whether a scanned title is worth handing to the muxer in an ALL-TITLES rip.
+///
+/// DVD-Video discs carry empty nav/menu PGC "titles" — 0-duration, 0-content
+/// stubs that exist only as program-chain entries. Muxing one emits no frames
+/// and surfaces a scary `Error: E6008 Invalid MKV file` for something the user
+/// never asked to rip. Such a title is NOT muxable: it has no runtime AND no
+/// bytes. A title with EITHER a non-zero duration OR non-zero content is real
+/// and kept (a damaged real title may scan short but still hold data; a title
+/// with runtime but an unknown byte count is still real). Used only to prune the
+/// all-titles set — an explicit `-t N` bypasses this so a user asking for a
+/// specific empty title still gets a clean per-title error.
+fn is_muxable_title(title: &libfreemkv::DiscTitle) -> bool {
+    title.duration_secs > 0.0 || title.size_bytes > 0
 }
 
 /// One title: open input, open output, stream PES frames.
@@ -2504,7 +2529,11 @@ fn sanitize_name(name: &str) -> String {
         )
         .trim()
         .replace(' ', "_");
-    if s.is_empty() { "disc".to_string() } else { s }
+    if s.is_empty() {
+        "disc".to_string()
+    } else {
+        s
+    }
 }
 
 /// Map `LabelPurpose` to its locale string key. `Normal` → no tag.
@@ -2521,12 +2550,12 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyConfig, build_jobs, build_key_sources, copy_should_continue, dest_is_iso,
-        disc_copy_recovered_data, fmt_disc_damage, fmt_err, fmt_err_str, headers_resolved,
-        is_keyserver_url, is_scheme_only_sink, is_title_failure_fatal, is_url_token,
-        mux_produced_output, mux_was_interrupted, parse_error_code, parse_flags,
-        preflight_validate, render_error, resolved_keydb_path, sanitize_name, title_in_range,
-        validate_file_dest, validate_iso_input,
+        build_jobs, build_key_sources, copy_should_continue, dest_is_iso, disc_copy_recovered_data,
+        fmt_disc_damage, fmt_err, fmt_err_str, headers_resolved, is_keyserver_url,
+        is_scheme_only_sink, is_title_failure_fatal, is_url_token, mux_produced_output,
+        mux_was_interrupted, parse_error_code, parse_flags, preflight_validate, render_error,
+        resolved_keydb_path, sanitize_name, title_in_range, validate_file_dest, validate_iso_input,
+        KeyConfig,
     };
     use crate::output::Output;
     use crate::strings;
