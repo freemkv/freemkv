@@ -172,7 +172,13 @@ pub fn run(device: Option<&str>, args: &[String]) {
     let capture = match libfreemkv::capture_drive_data(&mut session) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Capture failed: {}", e);
+            eprintln!(
+                "{}",
+                strings::fmt(
+                    "error.capture_failed",
+                    &[("error", &crate::pipe::fmt_err(&e))]
+                )
+            );
             std::process::exit(1);
         }
     };
@@ -321,7 +327,16 @@ pub fn run(device: Option<&str>, args: &[String]) {
     }
     let toml_path = profile_dir.join("drive.toml");
     if let Err(e) = std::fs::write(&toml_path, &toml) {
-        eprintln!("Cannot write {}: {}", toml_path.display(), e);
+        eprintln!(
+            "{}",
+            strings::fmt(
+                "error.cannot_write",
+                &[
+                    ("path", &toml_path.display().to_string()),
+                    ("error", &e.to_string())
+                ]
+            )
+        );
         std::process::exit(1);
     }
 

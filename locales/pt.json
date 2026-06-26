@@ -254,6 +254,7 @@
     "title_out_of_range": "Título {num} fora do intervalo ({count})",
     "cannot_create_dir": "Não foi possível criar o diretório {path}: {error}",
     "cannot_write": "Não foi possível gravar {path}: {error}",
+    "capture_failed": "Não foi possível ler os dados de perfil do drive ({error}). Reconecte o drive e tente novamente.",
     "keyserver_url_rejected": "Erro: URL do serviço de chaves rejeitado ({error}) — fonte de chaves online desativada para esta cópia.",
     "E1004": "Não foi possível acessar a interface de comandos da unidade. Reconecte a unidade e tente novamente.",
     "E1005": "A unidade está em uso por outro programa. Feche qualquer outra coisa que use o disco e tente novamente.",

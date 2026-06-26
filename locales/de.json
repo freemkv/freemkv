@@ -254,6 +254,7 @@
     "title_out_of_range": "Titel {num} außerhalb des Bereichs ({count})",
     "cannot_create_dir": "Verzeichnis {path} kann nicht erstellt werden: {error}",
     "cannot_write": "{path} kann nicht geschrieben werden: {error}",
+    "capture_failed": "Die Profildaten des Laufwerks konnten nicht gelesen werden ({error}). Laufwerk neu verbinden und erneut versuchen.",
     "keyserver_url_rejected": "Fehler: Schlüsseldienst-URL abgelehnt ({error}) — Online-Schlüsselquelle für diesen Rip deaktiviert.",
     "E1004": "Die Befehlsschnittstelle des Laufwerks war nicht erreichbar. Verbinden Sie das Laufwerk neu und versuchen Sie es erneut.",
     "E1005": "Das Laufwerk wird von einem anderen Programm verwendet. Schließen Sie alles andere, was die Disc nutzt, und versuchen Sie es erneut.",
