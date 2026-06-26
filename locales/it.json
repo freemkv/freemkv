@@ -254,6 +254,7 @@
     "title_out_of_range": "Titolo {num} fuori intervallo ({count})",
     "cannot_create_dir": "Impossibile creare la directory {path}: {error}",
     "cannot_write": "Impossibile scrivere {path}: {error}",
+    "capture_failed": "Impossibile leggere i dati di profilo dell'unità ({error}). Riconnetti l'unità e riprova.",
     "keyserver_url_rejected": "Errore: URL del servizio chiavi rifiutato ({error}) — sorgente chiavi online disattivata per questo rip.",
     "E1004": "Impossibile raggiungere l'interfaccia comandi dell'unità. Ricollega l'unità e riprova.",
     "E1005": "L'unità è in uso da un altro programma. Chiudi qualsiasi altra cosa che usa il disco e riprova.",

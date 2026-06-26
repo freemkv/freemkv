@@ -254,6 +254,7 @@
     "title_out_of_range": "Titre {num} hors limites ({count})",
     "cannot_create_dir": "Impossible de créer le répertoire {path} : {error}",
     "cannot_write": "Impossible d'écrire {path} : {error}",
+    "capture_failed": "Impossible de lire les données de profil du lecteur ({error}). Reconnectez le lecteur et réessayez.",
     "keyserver_url_rejected": "Erreur : URL du service de clés rejetée ({error}) — source de clés en ligne désactivée pour ce rip.",
     "E1004": "L'interface de commande du lecteur est injoignable. Reconnectez le lecteur et réessayez.",
     "E1005": "Le lecteur est utilisé par un autre programme. Fermez tout ce qui utilise le disque et réessayez.",

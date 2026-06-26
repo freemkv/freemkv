@@ -519,6 +519,7 @@ mod tests {
             display_aspect: None,
             secondary: false,
             label: String::new(),
+            measured_cicp: None,
         });
         let audio = Stream::Audio(AudioStream {
             pid: 0x1100,
