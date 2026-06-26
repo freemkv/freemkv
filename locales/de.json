@@ -285,6 +285,7 @@
     "E7020": "Dieses Laufwerk wird nicht erkannt, daher sind die zum Lesen der Disc-Kennung nötigen Schritte nicht verfügbar. Führen Sie 'freemkv drive-info --share' aus, um es hinzuzufügen.",
     "E7021": "Dieses Laufwerk bietet keine Möglichkeit, die Kennung dieser Disc zu lesen.",
     "E7024": "Von keiner Schlüsselquelle ist ein Host-Zertifikat für den sicheren Handshake des Laufwerks verfügbar.",
+    "E7025": "Diese Disc verwendet AACS-Busverschlüsselung, aber aus dem sicheren Handshake des Laufwerks konnte kein Busschlüssel gewonnen werden, sodass ihre Daten nicht entschlüsselt werden können (die Ausgabe wäre unlesbar).",
     "E8006": "Die URL der Schlüsseldatenbank verwendet einen nicht unterstützten Adresstyp ({detail}).",
     "E8007": "Der Download der Schlüsseldatenbank wurde zu oft umgeleitet. Prüfen Sie die URL und versuchen Sie es erneut.",
     "E9005": "Interner Fehler beim Erstellen der Ausgabe. Bitte melden Sie dies.",

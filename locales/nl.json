@@ -285,6 +285,7 @@
     "E7020": "Dit station wordt niet herkend, dus de stappen die nodig zijn om de disc-identificatie te lezen zijn niet beschikbaar. Voer 'freemkv drive-info --share' uit om te helpen het toe te voegen.",
     "E7021": "Dit station biedt geen manier om de identificatie van deze disc te lezen.",
     "E7024": "Geen enkele sleutelbron biedt een hostcertificaat voor de beveiligde handshake van het station.",
+    "E7025": "Deze schijf gebruikt AACS-busversleuteling, maar uit de beveiligde handshake van het station kon geen bussleutel worden verkregen, waardoor de gegevens niet kunnen worden ontsleuteld (de uitvoer zou onleesbaar zijn).",
     "E8006": "De URL van de sleuteldatabase gebruikt een niet-ondersteund adrestype ({detail}).",
     "E8007": "De download van de sleuteldatabase werd te vaak omgeleid. Controleer de URL en probeer het opnieuw.",
     "E9005": "Interne fout bij het opbouwen van de uitvoer. Meld dit alstublieft.",

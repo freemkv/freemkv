@@ -266,9 +266,12 @@ fn dir_dest_existing_file_rejected_end_to_end() {
     let _ = std::fs::remove_file(&f);
     assert!(!out.status.success());
     let combined = combined_output(&out);
+    // Match a substring unique to the dir_dest_is_file message (en.json) rather
+    // than the broad "file"/"folder" check, so a wrong-reason failure (e.g. a
+    // reordered check or a different error string) can't silently pass.
     assert!(
-        combined.to_lowercase().contains("file") || combined.to_lowercase().contains("folder"),
-        "expected file/folder mismatch guidance, got: {combined}"
+        combined.contains("not a folder"),
+        "expected dir:// dest-is-file guidance, got: {combined}"
     );
 }
 

@@ -285,6 +285,7 @@
     "E7020": "Esta unidad no se reconoce, por lo que los pasos necesarios para leer el identificador de este disco no están disponibles. Ejecute 'freemkv drive-info --share' para ayudar a añadirla.",
     "E7021": "Esta unidad no proporciona una forma de leer el identificador de este disco.",
     "E7024": "Ninguna fuente de claves ofrece un certificado de host para el protocolo de enlace seguro de la unidad.",
+    "E7025": "Este disco usa cifrado de bus AACS, pero no se pudo obtener ninguna clave de bus del protocolo de enlace seguro de la unidad, por lo que sus datos no se pueden descifrar (la salida sería ilegible).",
     "E8006": "La URL de la base de datos de claves usa un tipo de dirección no compatible ({detail}).",
     "E8007": "La descarga de la base de datos de claves se redirigió demasiadas veces. Compruebe la URL e inténtelo de nuevo.",
     "E9005": "Error interno al construir la salida. Por favor, informe de esto.",

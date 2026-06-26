@@ -285,6 +285,7 @@
     "E7020": "Esta unidade não é reconhecida, portanto os passos necessários para ler o identificador deste disco não estão disponíveis. Execute 'freemkv drive-info --share' para ajudar a adicioná-la.",
     "E7021": "Esta unidade não fornece uma forma de ler o identificador deste disco.",
     "E7024": "Nenhuma fonte de chaves fornece um certificado de host para o handshake seguro da unidade.",
+    "E7025": "Este disco usa criptografia de barramento AACS, mas nenhuma chave de barramento pôde ser obtida no handshake seguro da unidade, portanto seus dados não podem ser descriptografados (a saída seria ilegível).",
     "E8006": "A URL do banco de dados de chaves usa um tipo de endereço não suportado ({detail}).",
     "E8007": "O download do banco de dados de chaves foi redirecionado vezes demais. Verifique a URL e tente novamente.",
     "E9005": "Erro interno ao construir a saída. Por favor, relate isso.",

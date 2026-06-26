@@ -285,6 +285,7 @@
     "E7020": "Questa unità non è riconosciuta, quindi i passaggi necessari per leggere l'identificatore di questo disco non sono disponibili. Esegui 'freemkv drive-info --share' per aiutare ad aggiungerla.",
     "E7021": "Questa unità non fornisce un modo per leggere l'identificatore di questo disco.",
     "E7024": "Nessuna sorgente di chiavi fornisce un certificato host per l'handshake sicuro dell'unità.",
+    "E7025": "Questo disco utilizza la cifratura del bus AACS, ma dall'handshake sicuro dell'unità non è stato possibile ottenere alcuna chiave di bus, quindi i suoi dati non possono essere decifrati (l'output sarebbe illeggibile).",
     "E8006": "L'URL del database delle chiavi usa un tipo di indirizzo non supportato ({detail}).",
     "E8007": "Il download del database delle chiavi è stato reindirizzato troppe volte. Controlla l'URL e riprova.",
     "E9005": "Errore interno durante la creazione dell'output. Si prega di segnalarlo.",
