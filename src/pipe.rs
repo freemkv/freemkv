@@ -964,7 +964,10 @@ fn build_jobs(
         let trimmed = base_dir.trim_end_matches('/');
         indices
             .iter()
-            .map(|&idx| (Some(idx), format!("{trimmed}/t{:02}/", idx + 1)))
+            // Re-prefix the `demux://` scheme: `base_dir` came from
+            // `path_str()` (scheme stripped), so a bare `out/t02/` would be
+            // rejected by `parse_url` as Unknown and `output()` would error.
+            .map(|&idx| (Some(idx), format!("demux://{trimmed}/t{:02}/", idx + 1)))
             .collect()
     };
     let demux_dir = parsed_dest.path_str().to_string();
@@ -973,19 +976,8 @@ fn build_jobs(
         Some(t) if !t.is_empty() => {
             // Scanned source — select which titles.
             let indices: Vec<usize> = if title_nums.is_empty() {
-                // ALL-TITLES rip (no `-t`): drop the empty nav/menu PGC stubs
-                // (0-duration, 0-content titles) BEFORE they ever reach the
-                // muxer. They are not real titles — muxing one emits no frames
-                // and surfaces a scary `Error: E6008 Invalid MKV file` line for
-                // something the user never asked to rip. The main feature
-                // (title 0) is ALWAYS kept even if it scanned as empty, so an
-                // all-empty/degenerate disc still produces one job (whose real
-                // failure then surfaces) rather than silently doing nothing.
-                // An explicit `-t N` is unaffected (see the else branch): a user
-                // asking for a specific empty title still gets a clean error.
-                (0..t.len())
-                    .filter(|&idx| idx == 0 || is_muxable_title(&t[idx]))
-                    .collect()
+                // ALL-TITLES rip (no `-t`): one job per scanned title.
+                (0..t.len()).collect()
             } else {
                 title_nums.iter().map(|n| n.saturating_sub(1)).collect()
             };
@@ -3862,6 +3854,33 @@ mod tests {
         assert_eq!(jobs.len(), 2);
         for (_idx, url) in &jobs {
             assert_eq!(url, "stdio://");
+        }
+    }
+
+    /// `demux://` multi-title routing: each title gets its own
+    /// `demux://<dir>/t<NN>/` subdir, and (regression) every job URL must carry
+    /// the `demux://` scheme so it re-parses to `Demux` — NOT bare `out/tNN/`,
+    /// which `parse_url` rejects as Unknown and `output()` then errors on.
+    #[test]
+    fn demux_dest_multi_title_urls_carry_scheme() {
+        let titles = Some(vec![
+            libfreemkv::DiscTitle::empty(),
+            libfreemkv::DiscTitle::empty(),
+        ]);
+        let out = Output::new(false, true);
+        let parsed = parse_url("demux://out/");
+        let jobs = build_jobs(&titles, false, &[], false, "demux://out/", &parsed, &out)
+            .expect("demux:// multi-title must build jobs");
+        assert_eq!(jobs.len(), 2, "one job per title");
+        // t01 / t02 subdirs, each a valid Demux URL (scheme present).
+        assert_eq!(jobs[0].1, "demux://out/t01/");
+        assert_eq!(jobs[1].1, "demux://out/t02/");
+        for (idx, url) in &jobs {
+            assert!(idx.is_some(), "each job names its title index");
+            assert!(
+                matches!(parse_url(url), libfreemkv::StreamUrl::Demux { .. }),
+                "the job URL must re-parse to Demux (not Unknown): {url}"
+            );
         }
     }
 
