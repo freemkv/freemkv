@@ -1176,8 +1176,79 @@ fn apply_keys(disc: &mut libfreemkv::Disc, keys: &KeyConfig, samples: Vec<Vec<u8
     };
     inputs.samples = samples;
     let sources = build_key_sources(keys, out);
-    let mut sources = freemkv_keysources::MultiSource::new(sources);
-    libfreemkv::resolve_and_apply(&mut sources, &inputs, disc);
+    // The `_traced` variant resolves AND hands back the structured per-source
+    // walk; each source's `get_uk` is tried in order and the first whose Unit
+    // Keys validate against the samples is committed.
+    let (_resolved, trace) =
+        libfreemkv::keysource::resolve_and_apply_traced(&sources, &inputs, disc);
+    // Render the structured walk to STDERR (never stdout — that may carry the
+    // piped disc stream), suppressed only when quiet. English lives here in the
+    // app layer; the library trace is typed enums only.
+    if !out.is_quiet() {
+        for line in render_resolution_trace(&trace) {
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// Render a [`libfreemkv::aacs::ResolutionTrace`] into human-readable
+/// `who > node > … > OUTCOME` lines — one per unlocker and per key source
+/// consulted. The library trace is English-free typed enums; ALL English
+/// mapping lives here in the app layer. Mirrors autorip's renderer (the two
+/// apps are separate crates, so the mapping is duplicated, not shared).
+fn render_resolution_trace(trace: &libfreemkv::aacs::ResolutionTrace) -> Vec<String> {
+    use libfreemkv::aacs::trace::{KeyNode, KeyOutcome as KO, UnlockOutcome};
+
+    let mkb = |m: Option<u32>| match m {
+        Some(n) => format!(" (MKBv{n})"),
+        None => String::new(),
+    };
+    let mut lines = Vec::new();
+
+    for step in &trace.unlock {
+        // `who` is the unlocker's own name() — printed verbatim (no enum to map).
+        let outcome = match step.outcome {
+            UnlockOutcome::Unlocked => "UNLOCKED".to_string(),
+            UnlockOutcome::FirmwareNotUnlockable => "firmware not unlockable".to_string(),
+            UnlockOutcome::NoUsableHostCert { mkb: m } => format!("no usable host cert{}", mkb(m)),
+            UnlockOutcome::CertRevoked { mkb: m } => format!("host cert revoked{}", mkb(m)),
+            UnlockOutcome::HandshakeRejected => "handshake rejected".to_string(),
+            UnlockOutcome::VidUnavailable => "Volume ID unavailable".to_string(),
+        };
+        lines.push(format!("unlock: {} > {outcome}", step.who));
+    }
+
+    for step in &trace.keys {
+        // `who` is the source's own label() — printed verbatim (no enum to map).
+        let nodes: Vec<&str> = step
+            .path
+            .iter()
+            .map(|n| match n {
+                KeyNode::MatchedDisc => "matched disc",
+                KeyNode::NoEntry => "no entry",
+                KeyNode::FoundUnitKeys => "found unit keys",
+                KeyNode::FoundVuk => "found VUK",
+                KeyNode::FoundMediaKey => "found media key",
+                KeyNode::NeedVid => "need VID",
+                KeyNode::VidFromUnlock => "VID from drive",
+                KeyNode::VidFromKeydb => "VID from keydb",
+                KeyNode::NoVid => "no VID",
+                KeyNode::DerivedVuk => "derived VUK",
+                KeyNode::DerivedUnitKeys => "derived unit keys",
+            })
+            .collect();
+        let outcome = match step.outcome {
+            KO::Resolved => "RESOLVED",
+            KO::MissingVid => "MISSING VID",
+            KO::NoKey => "NO KEY",
+        };
+        let mut parts = vec![step.who.clone()];
+        parts.extend(nodes.into_iter().map(str::to_string));
+        parts.push(outcome.to_string());
+        lines.push(format!("key: {}", parts.join(" > ")));
+    }
+
+    lines
 }
 
 fn pipe_disc(
@@ -3274,9 +3345,8 @@ mod tests {
         assert!(parse_flags(&v(&["--key-auth", "disc://"])).is_err());
     }
 
-    /// Source assembly per the agreed design. `OnlineSource::needs_samples()` is
-    /// `true` and `KeydbSource::needs_samples()` is `false`, so the first source's
-    /// `needs_samples` distinguishes online-first from keydb-first ordering.
+    /// Source assembly per the agreed design — local-first ordering, pinned via
+    /// each source's stable `label()` (`"keydb"` before `"online"`).
     #[test]
     fn build_key_sources_orders_local_first() {
         let out = Output::new(false, true);
