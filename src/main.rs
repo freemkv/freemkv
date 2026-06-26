@@ -562,7 +562,7 @@ fn verify_cmd(args: &[String]) {
     let title = &disc.titles[0];
     let disc_name = disc.meta_title.as_deref().unwrap_or(&disc.volume_id);
     let total_sectors: u64 = title.extents.iter().map(|e| e.sector_count as u64).sum();
-    let total_gb = total_sectors as f64 * 2048.0 / 1_073_741_824.0;
+    let total_gb = total_sectors as f64 * libfreemkv::consts::SECTOR_BYTES as f64 / 1_073_741_824.0;
     eprintln!(
         "{}",
         strings::fmt(
