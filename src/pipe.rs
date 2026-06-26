@@ -1780,7 +1780,7 @@ fn disc_to_iso(
         _ => unreachable!(),
     };
 
-    let total_bytes = disc.capacity_sectors as u64 * 2048;
+    let total_bytes = disc.capacity_sectors as u64 * libfreemkv::consts::SECTOR_BYTES_U64;
     out.raw(
         Normal,
         &strings::fmt(
