@@ -1110,7 +1110,7 @@ const SAMPLE_UNITS: usize = 4;
 /// then the legacy `.config` dotfolder; Linux/macOS `~/.config/freemkv/keydb.cfg`),
 /// else the canonical default location for that OS, else a bare `keydb.cfg`
 /// in the cwd. The search/default policy lives in `freemkv-keysources`.
-fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::PathBuf {
+pub(crate) fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::PathBuf {
     keydb_path
         .clone()
         .map(std::path::PathBuf::from)

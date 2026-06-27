@@ -896,6 +896,24 @@ fn help_update_keys() {
     println!("{}", strings::get("help.update_keys.flag_url"));
 }
 
+/// Resolve where `update-keys` saves the downloaded keydb: `--keydb <path>`
+/// wins, else the standard location (first existing search path, else the
+/// default). Factored out so the "`--keydb` is honored" behaviour is unit
+/// testable without a network fetch — the prior bug was this flag being ignored
+/// and the keydb always landing at the default location.
+fn update_keys_dest(args: &[String]) -> std::path::PathBuf {
+    let mut keydb: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--keydb" {
+            i += 1;
+            keydb = args.get(i).cloned();
+        }
+        i += 1;
+    }
+    pipe::resolved_keydb_path(&keydb)
+}
+
 fn update_keys(args: &[String]) {
     let mut url: Option<&str> = None;
     let mut i = 0;
@@ -916,12 +934,14 @@ fn update_keys(args: &[String]) {
             std::process::exit(1);
         }
     };
-    // Fetch the keydb bytes via ureq (HTTP **and** HTTPS), then hand them to
-    // libfreemkv to verify + atomically save. libfreemkv's own raw-TCP
-    // downloader is plaintext-HTTP only; routing the fetch through the CLI's
-    // existing `ureq` dependency adds TLS with zero new deps and reuses the
-    // library's parse/save path unchanged.
-    let result = keydb_fetch::fetch(url).and_then(|bytes| libfreemkv::keydb::save(&bytes));
+    // The download lands at the `--keydb` path when given, else the standard
+    // location.
+    let dest = update_keys_dest(args);
+    // Fetch the keydb bytes via ureq (HTTP **and** HTTPS) and hand them to the
+    // keydb source to verify + atomically save to `dest`. The CLI supplies its
+    // own SSRF-guarded `ureq` transport (`keydb_fetch::fetch`); the keydb
+    // source stays transport-agnostic on the update path.
+    let result = freemkv_keysources::KeydbSource::new(dest).update(keydb_fetch::fetch, url);
     match result {
         Ok(result) => {
             println!(
@@ -948,7 +968,42 @@ fn update_keys(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_urls, inclusive_last_lba, pct_of};
+    use super::{collect_urls, inclusive_last_lba, pct_of, update_keys_dest};
+
+    /// Regression: `update-keys --keydb <path>` must save the download to that
+    /// path. The flag used to be ignored (the keydb always went to the default
+    /// location); `update_keys_dest` now honors it.
+    #[test]
+    fn update_keys_honors_keydb_flag() {
+        let args: Vec<String> = [
+            "--url",
+            "http://x/k.zip",
+            "--keydb",
+            "/custom/path/keydb.cfg",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            update_keys_dest(&args),
+            std::path::PathBuf::from("/custom/path/keydb.cfg"),
+            "--keydb must be the download destination"
+        );
+    }
+
+    /// Without `--keydb`, the destination resolves through the standard
+    /// search/default policy — never the bogus override above.
+    #[test]
+    fn update_keys_without_keydb_flag_uses_standard_location() {
+        let args: Vec<String> = ["--url", "http://x/k.zip"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_ne!(
+            update_keys_dest(&args),
+            std::path::PathBuf::from("/custom/path/keydb.cfg")
+        );
+    }
 
     #[test]
     fn pct_of_guards_zero_total() {

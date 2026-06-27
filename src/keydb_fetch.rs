@@ -1,16 +1,15 @@
 //! TLS-capable keydb fetch for `freemkv update-keys`.
 //!
-//! libfreemkv's own keydb downloader (`libfreemkv::keydb::http_get`) is
-//! deliberately dependency-light: raw `TcpStream`, plaintext HTTP only, no
-//! TLS. That keeps the library lean, but it rejects an `https://` keydb URL
-//! with `KeydbUnsupportedScheme`.
+//! Keydb save/update lives in `freemkv-keysources` (`KeydbSource::save` /
+//! `KeydbSource::update`), and the verify + atomic-write path is
+//! transport-agnostic: it takes the fetched bytes (or an injected fetch
+//! closure) and never speaks HTTP itself.
 //!
 //! The CLI already depends on `ureq` (for the online key service), so the
-//! `update-keys` command routes its FETCH through `ureq` here — handling BOTH
-//! `http://` and `https://` — and then hands the raw bytes to
-//! `libfreemkv::keydb::save`, which reuses the library's existing
-//! parse/verify/atomic-save path. No new dependency, and libfreemkv's own
-//! `http_get` stays untouched for the daily-refresh thread.
+//! `update-keys` command supplies THIS module's `fetch` as the transport —
+//! handling BOTH `http://` and `https://` — and `KeydbSource::update` then
+//! verifies + atomically saves the raw bytes to the resolved keydb path. No new
+//! dependency.
 //!
 //! The fetch is hardened the same way as the online key service
 //! (`freemkv-keysources::online`): resolve + SSRF-guard the host immediately
@@ -40,7 +39,7 @@ const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 /// Fetch keydb bytes from `url` over HTTP or HTTPS via `ureq`, with the same
 /// SSRF / redirect / timeout hardening as the online key service. The returned
 /// bytes are the raw response body (plain text, `.zip`, or `.gz`) — hand them
-/// to `libfreemkv::keydb::save` for verify + atomic save.
+/// to `freemkv_keysources::KeydbSource::save` for verify + atomic save.
 pub fn fetch(url: &str) -> Result<Vec<u8>> {
     // An SSRF rejection (or a malformed/unsupported URL) surfaces as a connect
     // failure — the request never leaves the host. The user sees the localized
