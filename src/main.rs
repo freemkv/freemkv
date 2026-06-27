@@ -216,7 +216,7 @@ fn main() {
                 help_remux();
             }
         }
-        "version" | "--version" | "-V" => println!("{}", env!("CARGO_PKG_VERSION")),
+        "version" | "--version" | "-V" => println!("{}", libfreemkv::VERSION_LABEL),
         // `freemkv help`, `freemkv --help`, `freemkv -h`: top-level usage.
         // `freemkv help <command>`: command-specific help.
         "help" | "--help" | "-h" => match args.get(2).map(|s| s.as_str()) {
@@ -420,7 +420,7 @@ fn info_cmd(args: &[String]) {
                 Ok(d) => d,
                 Err(e) => fatal("error.op_info", &pipe::fmt_err(&e)),
             };
-            println!("freemkv {}", env!("CARGO_PKG_VERSION"));
+            println!("freemkv {}", libfreemkv::VERSION_LABEL);
             println!();
             disc_info::print_disc_titles(&disc, full);
         }
@@ -523,7 +523,7 @@ fn verify_cmd(args: &[String]) {
         }
     };
 
-    println!("freemkv {}\n", env!("CARGO_PKG_VERSION"));
+    println!("freemkv {}\n", libfreemkv::VERSION_LABEL);
 
     // Open and scan
     eprint!("{}", strings::get("verify.opening"));
@@ -757,7 +757,7 @@ fn inclusive_last_lba(start_lba: u32, count: u32) -> u32 {
 }
 
 fn usage() {
-    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
+    println!("freemkv {}", libfreemkv::VERSION_LABEL);
     println!();
     println!("{}", strings::get("usage.synopsis_1"));
     println!("{}", strings::get("usage.synopsis_2"));
@@ -833,7 +833,7 @@ fn wants_help(args: &[String]) -> bool {
 
 /// `freemkv info --help` / `freemkv help info`.
 fn help_info() {
-    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
+    println!("freemkv {}", libfreemkv::VERSION_LABEL);
     println!();
     println!("{}", strings::get("help.info.usage"));
     println!();
@@ -852,7 +852,7 @@ fn help_info() {
 
 /// `freemkv verify --help` / `freemkv help verify`.
 fn help_verify() {
-    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
+    println!("freemkv {}", libfreemkv::VERSION_LABEL);
     println!();
     println!("{}", strings::get("help.verify.usage"));
     println!();
@@ -865,7 +865,7 @@ fn help_verify() {
 
 /// `freemkv remux --help` / `freemkv help remux`.
 fn help_remux() {
-    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
+    println!("freemkv {}", libfreemkv::VERSION_LABEL);
     println!();
     println!("{}", strings::get("help.remux.usage"));
     println!();
@@ -883,7 +883,7 @@ fn help_remux() {
 
 /// `freemkv update-keys --help` / `freemkv help update-keys`.
 fn help_update_keys() {
-    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
+    println!("freemkv {}", libfreemkv::VERSION_LABEL);
     println!();
     println!("{}", strings::get("help.update_keys.usage"));
     println!();
