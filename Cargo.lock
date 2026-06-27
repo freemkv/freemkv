@@ -291,10 +291,12 @@ name = "freemkv-keysources"
 version = "1.0.0-rc.5.3"
 dependencies = [
  "base64",
+ "flate2",
  "libfreemkv",
  "serde_json",
  "tracing",
  "ureq",
+ "zip",
 ]
 
 [[package]]
@@ -494,7 +496,6 @@ dependencies = [
  "cbc",
  "cmac",
  "crossbeam-channel",
- "flate2",
  "libc",
  "memchr",
  "num-bigint",

@@ -14,6 +14,11 @@ DVD rips now begin at the feature instead of several minutes of the disc menu.
 - New error code **E7025** ("AACS bus key unavailable"), with messages in all
   seven UI languages and full Error-Codes-page coverage.
 
+### Fixed
+
+- `update-keys --keydb <path>` now downloads to that path (previously ignored,
+  always wrote the default location).
+
 ## [1.0.0-rc.5.1]
 
 ### Added
