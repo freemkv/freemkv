@@ -6,8 +6,10 @@ project follows semantic versioning.
 
 ## [1.1.0-beta.1] — UNRELEASED
 
-Inherits libfreemkv 1.1.0-beta.1, including the **DVD movie-not-menu** fix —
-DVD rips now begin at the feature instead of several minutes of the disc menu.
+Inherits libfreemkv 1.1.0-beta.1, including the **post-read decrypt-verify
+gate** (encrypted units are verified during the rip; an undecryptable unit is
+treated like a bad read) and the **DVD movie-not-menu** fix — DVD rips now begin
+at the feature instead of several minutes of the disc menu.
 
 ### Added
 

@@ -1160,10 +1160,10 @@ fn build_iso_key_fetch(source: &str, keys: &KeyConfig) -> Option<libfreemkv::sec
     let make_sources: std::sync::Arc<
         dyn Fn() -> Vec<Box<dyn libfreemkv::keysource::KeySource>> + Send + Sync,
     > = std::sync::Arc::new(move || {
-        vec![
-            Box::new(freemkv_keysources::OnlineSource::new(url.clone(), auth.clone()))
-                as Box<dyn libfreemkv::keysource::KeySource>,
-        ]
+        vec![Box::new(freemkv_keysources::OnlineSource::new(
+            url.clone(),
+            auth.clone(),
+        )) as Box<dyn libfreemkv::keysource::KeySource>]
     });
     Some(libfreemkv::keysource::key_fetch(inputs, make_sources))
 }
