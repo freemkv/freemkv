@@ -490,6 +490,16 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         resolve_iso_unit_keys(source, &keys, &out)
     };
 
+    // Fresh-key-on-failure factory for the ISO mux: when an online key service
+    // is configured, a unit no upfront key decrypts is re-tried by forwarding
+    // that ciphertext to the service. `None` (no `--key-url`) keeps the prior
+    // behaviour. Built once; cheap `Arc` clone per title below.
+    let iso_key_fetch = if is_disc {
+        None
+    } else {
+        build_iso_key_fetch(source, &keys)
+    };
+
     // When the rip covers MORE THAN ONE title and the user did NOT name a
     // specific title (`-t N`), an incidental extra title that turns out to be
     // copy-protected-but-uncrackable (a 0.5 s menu stub, an FBI-warning loop,
@@ -554,6 +564,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                 unit_keys: iso_unit_keys.clone(),
                 title_index: *title_idx,
                 raw,
+                key_fetch: iso_key_fetch.clone(),
             };
             pipe(source, dest_url, &opts, &out)
         };
@@ -1100,6 +1111,61 @@ fn resolve_iso_unit_keys(source: &str, keys: &KeyConfig, out: &Output) -> Vec<(u
         libfreemkv::DecryptKeys::Aacs { unit_keys, .. } => unit_keys,
         _ => Vec::new(),
     }
+}
+
+/// Build the fresh-key-on-failure closure for an ISO mux, or `None`.
+///
+/// When an online key service is configured (`--key-url`), this returns a shared
+/// [`libfreemkv::sector::KeyFetch`] (built by [`libfreemkv::keysource::key_fetch`])
+/// that the iso:// mux installs into the decrypt decorator. If a unit no held key
+/// decrypts, the decorator hands that ciphertext to the closure, which forwards it
+/// (as content samples) to the key service via [`freemkv_keysources::OnlineSource`]
+/// and returns any unit keys the service derives — mirroring the DVD model (held
+/// key first, ask the key source for the failing data). `None` when no key URL is
+/// set, the URL is SSRF-rejected, or the source isn't an AACS ISO. The library
+/// still makes no network call — this closure is the application's seam to the
+/// key service. The fetch logic lives in the lib; the CLI supplies only the disc
+/// inputs and the source builder.
+fn build_iso_key_fetch(source: &str, keys: &KeyConfig) -> Option<libfreemkv::sector::KeyFetch> {
+    let url = keys.key_url.clone()?;
+    // Reuse the SSRF guard the upfront source list uses; a rejected URL means no
+    // fetch (rather than POSTing key material to an internal/metadata host).
+    if freemkv_keysources::validate_keyserver_url(&url).is_err() {
+        return None;
+    }
+    let auth = keys.key_auth.clone().unwrap_or_default();
+    let path = match libfreemkv::parse_url(source) {
+        libfreemkv::StreamUrl::Iso { path } => path,
+        _ => return None,
+    };
+    // Capture the disc's inf + MKB ONCE; a non-AACS ISO yields an error → None.
+    let (inf, mkb) = libfreemkv::Disc::read_aacs_inputs(std::path::Path::new(&path)).ok()?;
+    if inf.is_empty() {
+        return None;
+    }
+    // Disc inputs the lib's `key_fetch` reuses per call (it swaps in the failing
+    // `samples`). An ISO has no live-drive VID (all-zero) — VID-optional.
+    let inputs = libfreemkv::DiscInputs {
+        disc_hash: String::new(),
+        volume_id: [0u8; 16],
+        mkb,
+        unit_key_ro: inf,
+        samples: Vec::new(),
+        volume_label: None,
+    };
+    // Zero duplicated fetch logic: the lib's `key_fetch` owns the
+    // build-inputs-with-samples → ask-sources → return-keys flow. The CLI only
+    // supplies the disc inputs and a way to (re)build its key source (the
+    // `--key-url` OnlineSource).
+    let make_sources: std::sync::Arc<
+        dyn Fn() -> Vec<Box<dyn libfreemkv::keysource::KeySource>> + Send + Sync,
+    > = std::sync::Arc::new(move || {
+        vec![
+            Box::new(freemkv_keysources::OnlineSource::new(url.clone(), auth.clone()))
+                as Box<dyn libfreemkv::keysource::KeySource>,
+        ]
+    });
+    Some(libfreemkv::keysource::key_fetch(inputs, make_sources))
 }
 
 /// How many encrypted aligned units to sample for key validation.
