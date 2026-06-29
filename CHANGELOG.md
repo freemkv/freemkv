@@ -4,9 +4,9 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
-## [1.1.0-beta.1] — UNRELEASED
+## [1.1.0]
 
-Inherits libfreemkv 1.1.0-beta.1, including the **post-read decrypt-verify
+Inherits libfreemkv 1.1.0, including the **post-read decrypt-verify
 gate** (encrypted units are verified during the rip; an undecryptable unit is
 treated like a bad read) and the **DVD movie-not-menu** fix — DVD rips now begin
 at the feature instead of several minutes of the disc menu.
