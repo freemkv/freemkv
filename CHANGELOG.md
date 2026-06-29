@@ -4,7 +4,7 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
-## [1.2.0] — 2026-06-28
+## [1.2.0] — 2026-06-29
 
 Inherits libfreemkv 1.2.0, including **mux loss concealment** — when a unit
 genuinely can't be decrypted, the mux conceals it (rather than emitting
