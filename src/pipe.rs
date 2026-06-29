@@ -1139,15 +1139,18 @@ fn build_iso_key_fetch(source: &str, keys: &KeyConfig) -> Option<libfreemkv::sec
         _ => return None,
     };
     // Capture the disc's inf + MKB ONCE; a non-AACS ISO yields an error → None.
-    let (inf, mkb) = libfreemkv::Disc::read_aacs_inputs(std::path::Path::new(&path)).ok()?;
+    let (inf, mkb, version) =
+        libfreemkv::Disc::read_aacs_inputs(std::path::Path::new(&path)).ok()?;
     if inf.is_empty() {
         return None;
     }
     // Disc inputs the lib's `key_fetch` reuses per call (it swaps in the failing
-    // `samples`). An ISO has no live-drive VID (all-zero) — VID-optional.
+    // `samples`). An ISO has no live-drive VID (all-zero) — VID-optional. The
+    // version drives the Unit_Key_RO.inf stride for a VUK-from-server reply.
     let inputs = libfreemkv::DiscInputs {
         disc_hash: String::new(),
         volume_id: [0u8; 16],
+        version,
         mkb,
         unit_key_ro: inf,
         samples: Vec::new(),
