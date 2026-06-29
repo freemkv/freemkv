@@ -4,6 +4,21 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.2.0] — 2026-06-28
+
+Inherits libfreemkv 1.2.0, including **mux loss concealment** — when a unit
+genuinely can't be decrypted, the mux conceals it (rather than emitting
+ciphertext or a broken frame) and drops forward to the next keyframe, so a
+remux of a disc with an unrecoverable gap still produces a decode-clean MKV;
+the loss is logged, not silent.
+
+### Fixed
+
+- **Read-time key fetch uses the disc's own AACS version.** `update-keys` /
+  remux key resolution now carries the disc's AACS version into `DiscInputs`, so
+  an on-demand key fetch parses `Unit_Key_RO.inf` at the disc's matching stride
+  (AACS-1.0 48-byte vs AACS-2.x 64-byte) instead of assuming one layout.
+
 ## [1.1.0]
 
 Inherits libfreemkv 1.1.0, including the **post-read decrypt-verify
