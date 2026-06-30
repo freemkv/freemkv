@@ -12,9 +12,10 @@ release.sh --dry-run X.Y.Z  # preview every command first
 ```
 
 (The release script lives in the maintainer tooling repo.) The script orchestrates the whole cascade in ONE dependency-ordered, idempotent
-run (bump → push → tag libs → re-pin binary git deps → regen locks → tag
-binaries → publish keysources in parallel → print CI URLs). The manual phases
-below are the fallback / mental model — **prefer the script.**
+run (tag freemkv-unlock → libfreemkv → keysources → confirm tags → re-pin binary
+git deps → regen locks → tag binaries → print CI URLs). Every crate is
+git-tag-only; nothing touches crates.io. The manual phases below are the
+fallback / mental model — **prefer the script.**
 
 **FAILURE MODES FROM DEVIATION:**
 - v0.17.2: Tagged before bumping Cargo.toml → CI verify failed
@@ -23,76 +24,75 @@ below are the fallback / mental model — **prefer the script.**
 
 ---
 
-## The fast-release model (chore/fast-release — READ FIRST)
+## The git-tag-only model (off crates.io — READ FIRST)
 
-A release used to take **~10-20 min** because it SERIALIZED through crates.io:
-libfreemkv tag → CI publish → index propagation → keysources publish →
-propagation → binaries regen `Cargo.lock` (gated by a CI check that libfreemkv
-be LIVE on crates.io) → binary build matrices. Each binary waited on a
-crates.io publish it didn't actually need.
+**Nothing publishes to crates.io anymore.** `freemkv-unlock` is git-tag-only by
+policy (never crates.io); `libfreemkv` git-deps it, so libfreemkv can only be
+consumed by git tag too; `freemkv-keysources` deps libfreemkv, so it followed.
+Every freemkv crate — libs and binaries alike — is consumed end to end by **git
+tag**. (External consumers can no longer `cargo add libfreemkv`; they git-dep it.)
 
-**The fix: the binaries no longer touch crates.io.** Each binary
-(`freemkv`/`autorip`/`bdemu`/`freemkv-tools`) carries a committed
-`[patch.crates-io]` in its `Cargo.toml` that redirects libfreemkv +
-freemkv-keysources to a **git tag**:
+**The dependency graph — note the inversion.** `freemkv-unlock` is the BASE:
+libfreemkv depends on IT (it defines the `Unlocker` trait libfreemkv
+dispatches), not the reverse.
 
-```toml
-# in freemkv/autorip/bdemu/freemkv-tools Cargo.toml
-[patch.crates-io]
-libfreemkv         = { git = "https://github.com/freemkv/libfreemkv",         tag = "vX.Y.Z" }
-freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "vX.Y.Z" }   # not in bdemu/freemkv-tools
+```
+freemkv-unlock  ◄── libfreemkv ◄── freemkv-keysources
+       ▲                ▲                  ▲
+       └── bdemu        └── freemkv / autorip (+ keysources)
 ```
 
-This patch applies to BOTH the direct deps AND the transitive refs that
-`freemkv-unlock-ld` / `freemkv-keysources` make to libfreemkv, **unifying every
-libfreemkv reference to a single git-tag source** (no duplicate crate, no
-trait-identity mismatch). So a binary release builds the instant its tag exists
-— **no crates.io wait.** Target: **~3-5 min** (critical path = the slowest
-single binary build matrix).
+Each binary (`freemkv`/`autorip`) carries a committed `[patch.crates-io]` that
+redirects libfreemkv + freemkv-keysources to a **git tag**:
 
-crates.io publish STILL happens for **external consumers**, but as INDEPENDENT,
-parallel work nothing downstream blocks on:
-- `libfreemkv` → its own CI publishes on tag (`cargo publish --no-verify`).
-- `freemkv-keysources` → `release.sh` runs `cargo publish --no-verify` locally,
-  in parallel with the binary builds.
+```toml
+# in freemkv / autorip Cargo.toml  (keysources too; bdemu only libfreemkv)
+[patch.crates-io]
+libfreemkv         = { git = "https://github.com/freemkv/libfreemkv",         tag = "vX.Y.Z" }
+freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "vX.Y.Z" }
+```
+
+The patch unifies BOTH the direct dep AND the transitive ref keysources makes to
+libfreemkv onto one git-tag source (no duplicate crate, no trait-identity
+mismatch). A binary release builds the instant the lib tags exist.
 
 | Repo | Publish target | How |
 |---|---|---|
-| `libfreemkv` | **crates.io** + git tag | CI auto-publishes on tag (`--no-verify`); binaries git-tag-pin it |
-| `freemkv-keysources` | **crates.io** + git tag | `release.sh` publishes locally (`--no-verify`), in parallel; binaries git-tag-pin it |
-| `freemkv-unlock` | **git tag only** (NEVER crates.io) | Workspace of unlocker plugins (`ld/` = LibreDrive). Consumers git-pin it |
-| `freemkv` / `autorip` / `bdemu` / `freemkv-tools` | binaries (autorip → GHCR on tag) | not on crates.io; git-tag-pin the libs |
+| `freemkv-unlock` | **git tag only** (NEVER crates.io) | Single crate. The BASE — tagged FIRST. libfreemkv + bdemu git-pin it |
+| `libfreemkv` | **git tag only** | Off crates.io (git-deps freemkv-unlock). Consumers git-tag-pin it |
+| `freemkv-keysources` | **git tag only** | Off crates.io (deps libfreemkv). git-tag-pins libfreemkv; consumers git-tag-pin it |
+| `freemkv` / `autorip` / `bdemu` | binaries (autorip → GHCR on tag) | not on crates.io; git-tag-pin the libs |
 
-**Committed dependency form** (binaries):
-- `libfreemkv = "X.Y.Z"` / `freemkv-keysources = "X.Y.Z"` — bare crates.io
-  version reqs (kept so the transitive refs match), **redirected to git tags by
-  the committed `[patch.crates-io]`** at the bottom of the manifest.
-- `freemkv-unlock-ld = { git = ..., tag = "vX.Y.Z" }` (bdemu uses `rev = ...`).
-- **NEVER** commit `{ path = ... }` — CI rejects any `Cargo.lock` whose
+**Committed dependency forms:**
+- binaries + keysources: `libfreemkv = "X.Y.Z"` / `freemkv-keysources = "X.Y.Z"`
+  — bare version reqs **redirected to git tags by the committed
+  `[patch.crates-io]`** at the bottom of the manifest. **NEVER** commit a
+  libfreemkv/keysources `{ path = ... }` — CI rejects any `Cargo.lock` whose
   libfreemkv source isn't the expected git tag.
+- libfreemkv + bdemu dep `freemkv-unlock` by a committed
+  `{ path = "../freemkv-unlock" }` (it has no crates.io name to
+  `[patch.crates-io]`). The release SWAPS path → `{ git, tag }` in the **tagged
+  commit** (so the tag is CI-resolvable), then restores the path dep on the
+  branch tip. **The branch keeps the path dep; the git-tag form lives only in
+  the tag.** (bdemu adds `features = ["emulation"]` — preserved across the swap.)
 
-**Committed dependency form** (`freemkv-keysources`, a published lib): plain
-`libfreemkv = "X.Y.Z"` (crates.io) — keysources publishes to crates.io, so it
-CANNOT have a git dep.
-
-**Local dev** overrides the manifest's git-tag patch with a **gitignored
+**Local dev** overrides the manifests' git-tag patches with a **gitignored
 `.cargo/config.toml`** (config-level `[patch.crates-io]` wins over the manifest
-one for the same crate) pointing at local sibling paths:
+one) pointing at local sibling paths:
 ```toml
 [patch.crates-io]
 libfreemkv = { path = "../libfreemkv" }
 freemkv-keysources = { path = "../freemkv-keysources" }
 [patch."https://github.com/freemkv/freemkv-unlock"]
-freemkv-unlock-ld = { path = "../freemkv-unlock/ld" }
+freemkv-unlock = { path = "../freemkv-unlock" }
 ```
 
 ### Order (the script does this — do not reorder if doing it by hand)
-1. **`freemkv-unlock`** — if changed: bump `ld/Cargo.toml`, push, tag `vX.Y.Z`, push tag. Consumers pin this, so it must exist first.
-2. **`libfreemkv`** — bump, push main, tag, push tag. (Kicks its crates.io publish CI — **do NOT wait for it.**)
-3. **`freemkv-keysources`** — bump (its `libfreemkv` crates.io req + own version), push, tag. (Tag only here; its crates.io publish is deferred to step 6.)
-4. **Confirm the lib TAGS are on the GitHub remote** (`git ls-remote --tags`). Near-instant — this is the ONLY cross-repo barrier, and it is NOT a crates.io wait.
-5. **`freemkv` / `autorip` / `bdemu` / `freemkv-tools`** — for each: re-pin the `[patch.crates-io]` git tags (+ base version reqs) to `vX.Y.Z`, regen `Cargo.lock` with the dev `.cargo/config.toml` DISABLED (so the lock references the git tag, not a local path), commit `Cargo.toml` + `Cargo.lock`, push, tag. Each tag kicks an independent CI build immediately. autorip's tag → GHCR image.
-6. **`freemkv-keysources` crates.io publish** — `cargo publish --no-verify`, in PARALLEL with the binary builds now running (needs libfreemkv on crates.io; off the binary critical path).
+1. **`freemkv-unlock`** — bump root `Cargo.toml`, `cargo build --all-features`, push, tag `vX.Y.Z`, push tag. The BASE; everything pins it, so it must exist first.
+2. **`libfreemkv`** — bump; in the tagged commit, swap `freemkv-unlock` path → `{ git, tag = "vX.Y.Z" }`; push main, tag, push tag; restore the path dep on the branch tip. **Off crates.io — nothing to wait on.**
+3. **`freemkv-keysources`** — re-pin its committed `libfreemkv` git tag + bump versions, push, tag. **Off crates.io.**
+4. **Confirm the three lib TAGS are on the GitHub remote** (`git ls-remote --tags`). Near-instant — the only cross-repo barrier.
+5. **`freemkv` / `autorip` / `bdemu`** — for each: re-pin the `[patch.crates-io]` git tags (+ base version reqs) to `vX.Y.Z`, regen `Cargo.lock` with the dev `.cargo/config.toml` DISABLED (so the lock references the git tag, not a local path), commit `Cargo.toml` + `Cargo.lock`, push, tag. bdemu ALSO swaps its `freemkv-unlock` path → git tag in its tagged commit (then restores). Each tag kicks an independent CI build; autorip's → GHCR image.
 
 **Regenerate a release `Cargo.lock`** (the v0.18.7 trap):
 ```bash
@@ -103,32 +103,30 @@ mv /tmp/cfg.bak .cargo/config.toml
 ```
 
 ### Gotchas (learnings — don't relearn these)
-- **The lib TAGS, not the crates.io publish, gate the binaries.** A binary's `Cargo.lock` regen fetches the git tag — so the tag must be PUSHED before the regen. The script confirms this; by hand, push the lib tags first.
-- **Exactly ONE libfreemkv in each binary's `Cargo.lock`.** Two entries (a git-tag one + a crates.io one) means the `[patch.crates-io]` git redirect didn't unify the transitive ref → a `trait ... is not satisfied` build error. CI checks the count.
-- **keysources still needs libfreemkv on crates.io to PUBLISH** (cargo publish resolves deps from the registry). That's why its publish is step 6, after libfreemkv's crates.io publish lands — but nothing downstream waits on it.
-- **`cargo publish --no-verify`** — CI already compiled the exact commit; the default re-verify is a redundant cold build. The script and libfreemkv CI both use `--no-verify`.
-- **Check ALL consumers of unlock-ld when rewiring** — `bdemu` consumes it (`freemkv_unlock_ld::profile::load_bundled()`), not just freemkv/autorip.
-- **`cargo publish` refuses on a dirty working dir** — the script stashes the dev `.cargo/config.toml` to `/tmp` during publish; by hand, never leave a `.bak` inside the repo.
+- **freemkv-unlock is the BASE — tag it FIRST.** libfreemkv git-deps it; its tag must exist before libfreemkv's tagged commit swaps the path dep → that git tag, and before any binary's lock regen fetches it (transitively via libfreemkv, directly for bdemu).
+- **The lib TAGS gate the binaries.** A binary's `Cargo.lock` regen fetches the git tags — so all three lib tags must be PUSHED before the regen. The script confirms this; by hand, push the lib tags first.
+- **Exactly ONE libfreemkv in each binary's `Cargo.lock`.** Two entries (e.g. a git-tag one + a stale registry one) means the `[patch.crates-io]` git redirect didn't unify the transitive ref → a `trait ... is not satisfied` build error. CI checks the count.
+- **The branch keeps the `freemkv-unlock` PATH dep; the git-tag form lives only in the tag** (libfreemkv + bdemu). The release commits the git form, tags it, then commits a restore. Don't "fix" the branch back to git — local cross-repo dev needs the path.
+- **Check ALL consumers of `freemkv-unlock` when rewiring** — `bdemu` consumes its public catalog API (`freemkv_unlock::ld::profiles()`) + the `emulation` feature, not just libfreemkv.
 - **zsh:** `status` is a read-only variable — don't use it as a loop var.
 - **Tag must match committed `Cargo.toml` version** (v0.17.2). Commit the bump BEFORE tagging.
 
-### Before / after timing
+### Timing
 
-| | Old (serial via crates.io) | New (fast-release) |
-|---|---|---|
-| Critical path | lib tag → CI publish → **index propagation** → keysources publish → **propagation** → binaries regen lock → binary matrices | lib tags pushed → confirm tags on remote (seconds) → binary matrices |
-| crates.io on binary path? | **yes** (publish + multi-min index lag, ×2) | **no** |
-| Tests | serial gate before build | parallel tripwire (build doesn't `needs: test`) |
-| `cargo publish` | full re-verify cold build | `--no-verify` |
-| Build matrix | 5 targets (1 a no-op) | 4 targets |
-| **Wall-clock** | **~10-20 min** | **~3-5 min** (≈ the slowest single binary build matrix; crates.io publishes happen in parallel, off-path) |
+| | git-tag-only model |
+|---|---|
+| Critical path | tag freemkv-unlock → libfreemkv → keysources → confirm 3 tags on remote (seconds) → binary build matrices |
+| crates.io on any path? | **no** (every crate is git-tag-only) |
+| Tests | parallel tripwire (build doesn't `needs: test`) |
+| Build matrix | 3 binary targets (freemkv / autorip / bdemu) |
+| **Wall-clock** | **~3-5 min** (≈ the slowest single binary build matrix) |
 
 ### Local dev — fast builds across the shared dep graph
 
 A true `[workspace]` over the separate repos would fight the per-repo release
 model (each repo ships its own `Cargo.toml`/`Cargo.lock`), so we DON'T add a
 root workspace. Instead each binary's gitignored `.cargo/config.toml` path-patches
-libfreemkv/keysources/unlock-ld to the local sibling checkouts, so `cargo build`
+libfreemkv/keysources/freemkv-unlock to the local sibling checkouts, so `cargo build`
 in any binary repo compiles against the working tree (not the pinned tags) and
 shares one `target/`-relative dep build per repo. To compile the whole graph
 once locally, an **optional gitignored root `Cargo.toml`** can declare a virtual
@@ -177,47 +175,57 @@ cargo +1.86 clippy -p freemkv-autorip --locked -- -D warnings   # one crate
 ## Manual fallback (only if `release.sh` is unavailable)
 
 > Prefer `release.sh X.Y.Z`. The steps below are the by-hand equivalent.
-> Under the fast-release model the binaries git-tag-pin the libs, so libfreemkv
-> does **not** need to be on crates.io before the binaries build — only its
-> **git tag** must exist. Push lib tags, then build the binaries; the crates.io
-> publishes happen in parallel.
+> Every crate is git-tag-only — NOTHING publishes to crates.io. Tag the libs in
+> dependency order (freemkv-unlock → libfreemkv → keysources), confirm the tags
+> on the remote, then build the binaries.
 
-## Phase 1: libfreemkv (tag first)
+## Phase 0: freemkv-unlock (the BASE — tag first)
 
-libfreemkv's TAG must exist before downstream crates regen their lockfiles
-(their git patch fetches it). Its crates.io publish runs in its own CI — do NOT
-wait for it.
+freemkv-unlock is the base of the graph (libfreemkv git-deps it, bdemu deps it),
+so its TAG must exist before anything downstream resolves.
+```bash
+cd ~/freemkv/freemkv-unlock
+# bump root Cargo.toml version → 0.X.Y, then:
+cargo +1.86 build --all-features                  # proof (covers bdemu's emulation feature)
+git add Cargo.toml && git commit -m "v0.X.Y: bump version"
+git push origin main
+git tag -a v0.X.Y -m "v0.X.Y" && git push origin v0.X.Y
+```
 
-### Step 1: Bump Version
+## Phase 1: libfreemkv (off crates.io; swap freemkv-unlock path→git in the tag)
 
-Edit `Cargo.toml` to change the `version` field to the new target version:
+libfreemkv's TAG must exist before the binaries regen their lockfiles (their git
+patch fetches it). It does **not** go to crates.io. Its committed
+`freemkv-unlock = { path = ... }` must become `{ git, tag }` in the TAGGED
+commit, then revert to path on the branch tip.
 ```bash
 cd ~/freemkv/libfreemkv
-# Manual edit preferred for clarity:
-nano Cargo.toml  # or use your editor
-# Change line: version = "OLD" → version = "0.X.Y"
-
-git add Cargo.toml && git commit -m "v0.X.Y: bump version"
+# bump Cargo.toml version → 0.X.Y
+# swap the dep:  freemkv-unlock = { git = "https://github.com/freemkv/freemkv-unlock", tag = "v0.X.Y" }
+git add Cargo.toml && git commit -m "v0.X.Y: bump version (freemkv-unlock git-pinned for the tag)"
+git push origin main
+git tag -a v0.X.Y -m "v0.X.Y" && git push origin v0.X.Y
+# restore the path dep for ongoing local dev:
+# swap back:  freemkv-unlock = { path = "../freemkv-unlock" }
+git add Cargo.toml && git commit -m "restore freemkv-unlock path dep for local dev (post-v0.X.Y)"
 git push origin main
 ```
 
-### Step 2: Tag and Push (kicks crates.io publish CI; do NOT wait)
+## Phase 2: freemkv-keysources (off crates.io; git-tag-pin libfreemkv)
 ```bash
-cd ~/freemkv/libfreemkv
+cd ~/freemkv/freemkv-keysources
+# re-pin its committed [patch.crates-io] libfreemkv tag → v0.X.Y, bump version
+git add Cargo.toml && git commit -m "v0.X.Y: bump version"
+git push origin main
 git tag -a v0.X.Y -m "v0.X.Y" && git push origin v0.X.Y
-# Same for freemkv-keysources (bump its libfreemkv crates.io req + version first).
 ```
 
-**STOP IF TAG PUSH FAILS** — do not proceed. Fix the issue, then retry.
-
-**Do NOT wait for the crates.io publish here.** The binaries git-tag-pin
-libfreemkv/keysources, so they only need the TAGS to exist on the remote — which
-they now do. (keysources's crates.io publish, in Phase 3, is the only thing that
-needs libfreemkv ON crates.io, and it runs in parallel with the binary builds.)
+**STOP IF ANY TAG PUSH FAILS** — do not proceed. Fix the issue, then retry.
+**No crates.io step** — the binaries only need the three lib TAGS on the remote.
 
 ---
 
-## Phase 2: Binary Crates (bdemu, freemkv, autorip, freemkv-tools)
+## Phase 3: Binary Crates (bdemu, freemkv, autorip)
 
 All crates ship the same version number.
 
@@ -234,6 +242,8 @@ cd ~/freemkv/<crate-name>
 #   - [patch.crates-io] libfreemkv tag = "v0.X.Y"  (and keysources, where present)
 #   - libfreemkv = "0.X.Y"  (base req — must be satisfiable by the patched tag;
 #                            for a pre-release this must be the EXACT version)
+# bdemu ONLY: also swap freemkv-unlock { path } → { git, tag = "v0.X.Y", features = ["emulation"] }
+#             for the tagged commit, then restore the path dep after tagging.
 ```
 
 #### Step 1b: Regenerate Cargo.lock against the git tags
@@ -276,18 +286,7 @@ git tag -a v0.X.Y -m "v0.X.Y" && git push origin v0.X.Y
 Repeat for each binary crate. Each tag triggers its own GitHub Actions workflow
 **right away** — they build in parallel; none waits on crates.io.
 
----
-
-## Phase 3 (parallel): keysources crates.io publish
-
-For external consumers only — the binaries don't wait on this. Needs libfreemkv
-ON crates.io first (its publish CI from Phase 1):
-```bash
-cd ~/freemkv/freemkv-keysources
-mv .cargo/config.toml /tmp/cfg.bak               # clean tree for publish
-cargo +1.86 publish --no-verify                  # CI already compiled this commit
-mv /tmp/cfg.bak .cargo/config.toml
-```
+(There is no crates.io publish phase — every freemkv crate is git-tag-only.)
 
 ---
 
@@ -395,13 +394,17 @@ The CI job compares Cargo.toml version to git tag. If they don't match:
 
 **STOP IF CI FAILS REPEATEDLY** — after 2 failures, investigate root cause before retrying.
 
-### If crates.io Publish Stalls
-Wait longer (up to 10 minutes). Verify via API:
+### If a binary's lockfile regen fails (lib tag not resolvable)
+Confirm the three lib tags are on their remotes (freemkv-unlock, libfreemkv,
+keysources) before regenerating any binary lock:
 ```bash
-curl https://crates.io/api/v1/crates/libfreemkv | grep version
+for r in freemkv-unlock libfreemkv freemkv-keysources; do
+  git -C ~/freemkv/$r ls-remote --tags origin v0.X.Y | grep -q v0.X.Y \
+    && echo "$r ✓" || echo "$r ✗ tag missing — push it first"
+done
 ```
-
-If still failing after 15 min, **STOP** — investigate index sync issues. Do not proceed with downstream releases until libfreemkv is published.
+A missing tag, or a base version req that the patched tag can't satisfy, makes
+`generate-lockfile` fail closed. Push the tag / fix the req, then retry.
 
 ---
 
