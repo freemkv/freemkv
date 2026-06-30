@@ -3010,6 +3010,7 @@ mod tests {
             bytes_bad_in_main_title: 0,
             main_title_duration_secs: None,
             main_title_size_bytes: None,
+            located: Default::default(),
         };
         let pct = p.work_pct();
         assert!(pct.is_finite(), "work_total==0 must not yield NaN%");
@@ -3037,6 +3038,7 @@ mod tests {
             bytes_bad_in_main_title: 0,
             main_title_duration_secs: Some(7200.0),
             main_title_size_bytes: Some(10_000),
+            located: Default::default(),
         };
         let damage = fmt_disc_damage(&p);
         assert_eq!(
@@ -3068,6 +3070,7 @@ mod tests {
             bytes_bad_in_main_title: 0,
             main_title_duration_secs: Some(7200.0),
             main_title_size_bytes: Some(10_000),
+            located: Default::default(),
         };
         let damage = fmt_disc_damage(&p_retryable);
         assert!(
