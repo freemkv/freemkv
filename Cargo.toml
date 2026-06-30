@@ -17,7 +17,6 @@ path = "src/main.rs"
 
 [dependencies]
 libfreemkv = "1.2"
-freemkv-unlock-ld = { git = "https://github.com/freemkv/freemkv-unlock", tag = "v1.1.0" }
 freemkv-keysources = "1.2"
 freemkv-i18n = "1.2"
 isolang = "2"
@@ -45,10 +44,9 @@ codegen-units = 1
 # independent parallel job; this binary no longer depends on it.
 #
 # This [patch.crates-io] is committed (CI-visible) and applies to BOTH the
-# direct deps above AND the transitive references that freemkv-unlock-ld and
-# freemkv-keysources make to libfreemkv via crates.io — unifying every
-# libfreemkv ref to the single git-tag source (no duplicate crate, no
-# trait-identity mismatch).
+# direct deps above AND the transitive reference that freemkv-keysources makes
+# to libfreemkv via crates.io — unifying every libfreemkv ref to the single
+# git-tag source (no duplicate crate, no trait-identity mismatch).
 #
 # The release script rewrites these tags to the new version before
 # regenerating Cargo.lock. Local dev overrides this

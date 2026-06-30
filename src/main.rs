@@ -143,13 +143,6 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     init_logging(&args);
 
-    // Plug in the LibreDrive firmware unlocker. libfreemkv ships only the
-    // pluggable `Unlocker` seam; this one line registers the firmware-unlock
-    // implementation so matching drives are unlocked at drive-prep. Remove it
-    // (and the freemkv-unlock-ld dep) and the CLI still builds — drives fall
-    // back to the host-cert AACS handshake.
-    libfreemkv::register_unlocker(Box::new(freemkv_unlock_ld::LibreDrive::new()));
-
     // Parse --language before anything else.
     //
     // Apply the same is-URL guard `collect_urls` uses: a value-flag must not

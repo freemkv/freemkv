@@ -275,7 +275,6 @@ version = "1.2.0"
 dependencies = [
  "freemkv-i18n",
  "freemkv-keysources",
- "freemkv-unlock-ld",
  "isolang",
  "libc",
  "libfreemkv",
@@ -308,13 +307,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "freemkv-unlock-ld"
-version = "1.1.0"
+name = "freemkv-unlock"
+version = "1.2.0"
 dependencies = [
+ "aes",
  "base64",
- "libfreemkv",
+ "num-bigint",
+ "num-traits",
+ "rand",
  "serde",
  "serde_json",
+ "sha1",
+ "sha2",
  "tracing",
 ]
 
@@ -504,6 +508,7 @@ dependencies = [
  "cbc",
  "cmac",
  "crossbeam-channel",
+ "freemkv-unlock",
  "libc",
  "memchr",
  "num-bigint",
