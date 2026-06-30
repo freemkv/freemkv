@@ -19,6 +19,7 @@ path = "src/main.rs"
 libfreemkv = "1.2"
 freemkv-unlock-ld = { git = "https://github.com/freemkv/freemkv-unlock", tag = "v1.1.0" }
 freemkv-keysources = "1.2"
+freemkv-i18n = "1.2"
 isolang = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
@@ -56,3 +57,4 @@ codegen-units = 1
 [patch.crates-io]
 libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.2.0" }
 freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.2.0" }
+freemkv-i18n = { git = "https://github.com/freemkv/freemkv-i18n", tag = "v1.2.0" }
