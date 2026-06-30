@@ -37,16 +37,15 @@ mimalloc = "0.1"
 lto = "thin"
 codegen-units = 1
 
-# Resolve libfreemkv + freemkv-keysources from their GIT TAGS instead of
-# crates.io, so a release build starts the instant those tags exist — it no
-# longer waits on the crates.io publish + index propagation (the old serial
-# chain). crates.io publish still happens (for external consumers) but as an
-# independent parallel job; this binary no longer depends on it.
+# Resolve libfreemkv + freemkv-keysources from their GIT TAGS. Both are OFF
+# crates.io now (publish = false — libfreemkv git-deps the firmware crate, and
+# keysources deps libfreemkv), so this [patch.crates-io] git-tag redirect is the
+# ONLY resolution path; there is no crates.io publish for these crates at all.
 #
 # This [patch.crates-io] is committed (CI-visible) and applies to BOTH the
 # direct deps above AND the transitive reference that freemkv-keysources makes
-# to libfreemkv via crates.io — unifying every libfreemkv ref to the single
-# git-tag source (no duplicate crate, no trait-identity mismatch).
+# to libfreemkv — unifying every libfreemkv ref to the single git-tag source
+# (no duplicate crate, no trait-identity mismatch).
 #
 # The release script rewrites these tags to the new version before
 # regenerating Cargo.lock. Local dev overrides this
