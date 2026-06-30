@@ -41,25 +41,32 @@ fn level_for(_code: u16) -> Level {
     Level::Error
 }
 
-// ── Locale loading (canonical JSON, read straight from the source tree) ─────
+// ── Locale loading (canonical JSON, from the bundled freemkv-i18n crate) ────
+//
+// The locale files now live in the shared `freemkv-i18n` crate, compiled in
+// via its build.rs. Reading them through `bundled_locale_json` keeps this
+// contract test working wherever the dependency is resolved from (local path
+// patch or the pinned git tag) — a sibling-directory `../freemkv-i18n` path
+// would only exist in a local checkout, not in CI's registry cache.
 
-const LOCALE_EN: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/locales/en.json"));
-const LOCALE_ES: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/locales/es.json"));
-const LOCALE_FR: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/locales/fr.json"));
-const LOCALE_DE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/locales/de.json"));
-const LOCALE_IT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/locales/it.json"));
-const LOCALE_PT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/locales/pt.json"));
-const LOCALE_NL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/locales/nl.json"));
+fn bundled(code: &str) -> &'static str {
+    freemkv_i18n::bundled_locale_json(code)
+        .unwrap_or_else(|| panic!("{code} not bundled in freemkv-i18n"))
+}
+
+fn locale_en() -> &'static str {
+    bundled("en")
+}
 
 /// The six community locales (en is held separately as the canonical source).
 fn other_locales() -> Vec<(&'static str, Value)> {
     [
-        ("es", LOCALE_ES),
-        ("fr", LOCALE_FR),
-        ("de", LOCALE_DE),
-        ("it", LOCALE_IT),
-        ("pt", LOCALE_PT),
-        ("nl", LOCALE_NL),
+        ("es", bundled("es")),
+        ("fr", bundled("fr")),
+        ("de", bundled("de")),
+        ("it", bundled("it")),
+        ("pt", bundled("pt")),
+        ("nl", bundled("nl")),
     ]
     .into_iter()
     .map(|(code, data)| {
@@ -107,7 +114,7 @@ fn error_code_keys(loc: &Value) -> std::collections::BTreeSet<String> {
 
 #[test]
 fn every_variant_has_code_message_locales_placeholders_and_level() {
-    let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
+    let en: Value = serde_json::from_str(locale_en()).expect("en.json invalid");
     let others = other_locales();
 
     for e in all_error_variants() {
@@ -166,13 +173,13 @@ fn every_variant_has_code_message_locales_placeholders_and_level() {
 
 /// The English message for a code, via the same lookup the CLI uses.
 fn en_msg(code: u16) -> String {
-    let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
+    let en: Value = serde_json::from_str(locale_en()).expect("en.json invalid");
     lookup(&en, &format!("error.E{code}"))
 }
 
 #[test]
 fn no_drive_message_is_actionable() {
-    let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
+    let en: Value = serde_json::from_str(locale_en()).expect("en.json invalid");
     let m = lookup(&en, "error.no_drive");
     // A missing key returns the dotted sentinel ("error.no_drive"), which
     // happens to contain "drive" — assert presence first so a dropped key
@@ -266,7 +273,7 @@ fn improved_messages_carry_no_bare_code() {
 #[test]
 fn capture_failed_key_exists_in_all_locales() {
     // The drive-profile capture failure is now localized (was bare English).
-    let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
+    let en: Value = serde_json::from_str(locale_en()).expect("en.json invalid");
     let en_msg = lookup(&en, "error.capture_failed");
     assert_ne!(
         en_msg, "error.capture_failed",
@@ -292,7 +299,7 @@ fn capture_failed_key_exists_in_all_locales() {
 
 #[test]
 fn no_orphan_error_code_keys_in_en() {
-    let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
+    let en: Value = serde_json::from_str(locale_en()).expect("en.json invalid");
 
     // The set of codes a current build can emit.
     let live: std::collections::BTreeSet<String> = all_error_variants()
@@ -316,7 +323,7 @@ fn no_orphan_error_code_keys_in_en() {
 
 #[test]
 fn error_code_keys_have_locale_parity() {
-    let en: Value = serde_json::from_str(LOCALE_EN).expect("en.json invalid");
+    let en: Value = serde_json::from_str(locale_en()).expect("en.json invalid");
     let en_keys = error_code_keys(&en);
 
     for (lc, loc) in other_locales() {
