@@ -190,33 +190,20 @@ fn main() {
         // Handled before the per-command dispatch so the flag never reaches the
         // command's own argument parser.
         "info" if wants_help(&args[2..]) => help_info(),
-        "verify" if wants_help(&args[2..]) => help_verify(),
         "update-keys" if wants_help(&args[2..]) => help_update_keys(),
-        "remux" if wants_help(&args[2..]) => help_remux(),
 
         "info" => info_cmd(&args[2..]),
-        "verify" => verify_cmd(&args[2..]),
         "update-keys" => update_keys(&args[2..]),
-        // `remux` is a synonym for the two-URL <source> <dest> form. A bare
-        // `freemkv remux` (no URLs) prints remux help rather than erroring.
-        "remux" => {
-            let urls = collect_urls(&args[2..]);
-            if urls.len() == 2 {
-                if !pipe::run(&urls[0], &urls[1], &args[2..]) {
-                    std::process::exit(1);
-                }
-            } else {
-                help_remux();
-            }
-        }
+        // NOTE: there is deliberately NO `remux` (or any conversion) verb. The
+        // operation IS the URL pair: `freemkv <source-url> <dest-url> [opts]`.
+        // e.g. `freemkv iso://Disc.iso -t 1 mkv://Movie.mkv`. Source→dest is the
+        // whole grammar; a conversion "command" would be redundant.
         "version" | "--version" | "-V" => println!("{}", libfreemkv::VERSION_LABEL),
         // `freemkv help`, `freemkv --help`, `freemkv -h`: top-level usage.
         // `freemkv help <command>`: command-specific help.
         "help" | "--help" | "-h" => match args.get(2).map(|s| s.as_str()) {
             Some("info") => help_info(),
-            Some("verify") => help_verify(),
             Some("update-keys") => help_update_keys(),
-            Some("remux") => help_remux(),
             Some("version") | Some("help") | None => usage(),
             Some(other) => {
                 eprintln!(
@@ -497,270 +484,15 @@ fn info_cmd(args: &[String]) {
     }
 }
 
-fn verify_cmd(args: &[String]) {
-    let url = args.first().map(|s| s.as_str()).unwrap_or("disc://");
-    let parsed = libfreemkv::parse_url(url);
-
-    let device = match &parsed {
-        libfreemkv::StreamUrl::Disc { device: Some(p) } => p.clone(),
-        libfreemkv::StreamUrl::Disc { device: None } => match libfreemkv::find_drive() {
-            Some(d) => std::path::PathBuf::from(d.device_path()),
-            None => {
-                eprintln!("{}", strings::get("error.no_drive"));
-                std::process::exit(1);
-            }
-        },
-        _ => {
-            eprintln!("{}", strings::get("verify.only_disc"));
-            std::process::exit(1);
-        }
-    };
-
-    println!("freemkv {}\n", libfreemkv::VERSION_LABEL);
-
-    // Open and scan
-    eprint!("{}", strings::get("verify.opening"));
-    let mut drive = match libfreemkv::Drive::open(&device) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("{}", strings::get("verify.failed"));
-            fatal("error.op_verify", &pipe::fmt_err(&e));
-        }
-    };
-    // init()/probe_disc() are best-effort: many drives lack the firmware
-    // support they probe for and `Disc::scan` below is the authoritative gate.
-    // But don't print an unconditional "OK" that masks a genuine failure —
-    // report WARN and the error so a later scan failure isn't mysterious.
-    let _ = drive.wait_ready();
-    match drive.init() {
-        Ok(_) => eprintln!("{}", strings::get("verify.ok")),
-        Err(e) => eprintln!(
-            "{}",
-            strings::fmt("verify.warn", &[("error", &pipe::fmt_err(&e))])
-        ),
-    }
-
-    eprint!("{}", strings::get("verify.scanning"));
-    let scan_opts = libfreemkv::ScanOptions::default();
-    let disc = match libfreemkv::Disc::scan(&mut drive, &scan_opts) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("{}", strings::get("verify.failed"));
-            fatal("error.op_verify", &pipe::fmt_err(&e));
-        }
-    };
-    if disc.titles.is_empty() {
-        fatal("error.op_verify", &strings::get("error.no_titles"));
-    }
-    let title = &disc.titles[0];
-    let disc_name = disc.meta_title.as_deref().unwrap_or(&disc.volume_id);
-    let total_sectors: u64 = title.extents.iter().map(|e| e.sector_count as u64).sum();
-    let total_gb = total_sectors as f64 * libfreemkv::consts::SECTOR_BYTES as f64 / 1_073_741_824.0;
-    eprintln!(
-        "{}",
-        strings::fmt(
-            "verify.disc_summary",
-            &[
-                ("name", disc_name),
-                ("size", &format!("{total_gb:.1}")),
-                ("sectors", &total_sectors.to_string()),
-            ]
-        )
-    );
-
-    let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
-    let _ = drive.probe_disc();
-
-    eprintln!("\n{}", strings::get("verify.verifying"));
-    let start = std::time::Instant::now();
-    let last_print = std::sync::Mutex::new(std::time::Instant::now());
-
-    let result = libfreemkv::verify::verify_title(
-        &mut drive,
-        title,
-        batch,
-        Some(&|p: &libfreemkv::progress::PassProgress| {
-            let mut lp = last_print.lock().unwrap();
-            if lp.elapsed().as_secs_f64() >= 1.0 || p.work_done == p.work_total {
-                let pct = if p.work_total > 0 {
-                    p.work_done * 100 / p.work_total
-                } else {
-                    0
-                };
-                let elapsed = start.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 {
-                    p.bytes_good_total as f64 / (1024.0 * 1024.0) / elapsed
-                } else {
-                    0.0
-                };
-                eprint!(
-                    "\r  {}",
-                    strings::fmt(
-                        "verify.progress",
-                        &[
-                            ("pct", &pct.to_string()),
-                            ("speed", &format!("{speed:.1}")),
-                            ("done", &p.work_done.to_string()),
-                            ("total", &p.work_total.to_string()),
-                        ]
-                    )
-                );
-                *lp = std::time::Instant::now();
-            }
-            true // continue
-        }),
-    );
-    eprintln!(); // newline after progress
-
-    // Results. Guard the divisor: a title whose extents sum to zero sectors
-    // would otherwise print `NaN%` on every row (mirrors the library's own
-    // `VerifyResult::readable_pct` zero-guard).
-    let pct = |n: u64| pct_of(n, result.total_sectors);
-    // One results row: a localized label, right-aligned count, and percentage.
-    // The label word varies in width across languages; the count keeps its own
-    // right-aligned column so the numbers still line up within a run.
-    let row = |label_key: &str, n: u64| {
-        let label = strings::get(label_key);
-        println!("  {:<11} {:>12}  ({:.4}%)", format!("{label}:"), n, pct(n));
-    };
-    println!();
-    println!("{}", strings::get("verify.results"));
-    row("verify.good", result.good);
-    if result.slow > 0 {
-        row("verify.slow", result.slow);
-    }
-    if result.recovered > 0 {
-        row("verify.recovered", result.recovered);
-    }
-    if result.bad > 0 {
-        row("verify.bad", result.bad);
-    }
-
-    if !result.ranges.is_empty() {
-        println!();
-        for range in &result.ranges {
-            let status_str = match range.status {
-                libfreemkv::verify::SectorStatus::Slow => strings::get("verify.status_slow"),
-                libfreemkv::verify::SectorStatus::Recovered => {
-                    strings::get("verify.status_recovered")
-                }
-                libfreemkv::verify::SectorStatus::Bad => strings::get("verify.status_bad"),
-                _ => continue,
-            };
-            let gb = range.byte_offset as f64 / 1_073_741_824.0;
-            let chapter_info = libfreemkv::verify::VerifyResult::chapter_at_offset(
-                &title.chapters,
-                range.byte_offset,
-                title.duration_secs,
-                title.size_bytes,
-            );
-            let ch_str = match chapter_info {
-                Some((ch, secs)) => {
-                    let m = secs as u32 / 60;
-                    let s = secs as u32 % 60;
-                    format!(
-                        " — {}",
-                        strings::fmt(
-                            "verify.chapter",
-                            &[
-                                ("num", &ch.to_string()),
-                                ("min", &m.to_string()),
-                                ("sec", &format!("{s:02}")),
-                            ]
-                        )
-                    )
-                }
-                None => String::new(),
-            };
-            // `count` is a half-open span; the displayed range is inclusive, so
-            // the last LBA is start + count - 1. Guard count==0 (would underflow
-            // and contradict the trailing "0 sectors").
-            let last_lba = inclusive_last_lba(range.start_lba, range.count);
-            println!(
-                "  {}",
-                strings::fmt(
-                    "verify.range",
-                    &[
-                        ("status", &status_str),
-                        ("start", &range.start_lba.to_string()),
-                        ("end", &last_lba.to_string()),
-                        ("size", &format!("{gb:.1}")),
-                        ("chapter", &ch_str),
-                        ("count", &range.count.to_string()),
-                    ]
-                )
-            );
-        }
-    }
-
-    let elapsed = result.elapsed_secs;
-    let m = elapsed as u32 / 60;
-    let s = elapsed as u32 % 60;
-    println!();
-    println!(
-        "{}",
-        strings::fmt(
-            "verify.verdict",
-            &[
-                ("pct", &format!("{:.4}", result.readable_pct())),
-                ("min", &m.to_string()),
-                ("sec", &format!("{s:02}")),
-            ]
-        )
-    );
-
-    if result.is_perfect() {
-        println!("         {}", strings::get("verify.perfect"));
-    } else if result.bad > 0 {
-        let clusters = result
-            .ranges
-            .iter()
-            .filter(|r| r.status == libfreemkv::verify::SectorStatus::Bad)
-            .count();
-        println!(
-            "         {}",
-            strings::fmt(
-                "verify.unrecoverable",
-                &[
-                    ("count", &result.bad.to_string()),
-                    ("clusters", &clusters.to_string()),
-                ]
-            )
-        );
-    }
-
-    std::process::exit(if result.bad > 0 { 1 } else { 0 });
-}
-
-/// `n` as a percentage of `total`, guarding the zero divisor (which would yield
-/// `NaN%`). Returns 0.0 when `total == 0`.
-fn pct_of(n: u64, total: u64) -> f64 {
-    if total > 0 {
-        n as f64 / total as f64 * 100.0
-    } else {
-        0.0
-    }
-}
-
-/// Inclusive last LBA of a half-open `[start, start+count)` range, for display.
-/// Guards `count == 0` so the printed span matches the trailing sector count
-/// instead of underflowing / overshooting by one.
-fn inclusive_last_lba(start_lba: u32, count: u32) -> u32 {
-    start_lba.saturating_add(count.saturating_sub(1))
-}
-
 fn usage() {
     println!("freemkv {}", libfreemkv::VERSION_LABEL);
     println!();
     println!("{}", strings::get("usage.synopsis_1"));
     println!("{}", strings::get("usage.synopsis_2"));
-    println!("{}", strings::get("usage.synopsis_3"));
     println!("{}", strings::get("usage.synopsis_4"));
     println!();
     println!("{}", strings::get("usage.subcommands_header"));
     println!("{}", strings::get("usage.subcmd.info"));
-    println!("{}", strings::get("usage.subcmd.verify"));
-    println!("{}", strings::get("usage.subcmd.remux"));
     println!("{}", strings::get("usage.subcmd.update_keys"));
     println!("{}", strings::get("usage.subcmd.version"));
     println!("{}", strings::get("usage.subcmd.help"));
@@ -792,7 +524,6 @@ fn usage() {
     println!("{}", strings::get("usage.ex.rip_iso_mp"));
     println!("{}", strings::get("usage.ex.rip_iso_patch"));
     println!("{}", strings::get("usage.ex.iso_to_mkv"));
-    println!("{}", strings::get("usage.ex.remux"));
     println!("{}", strings::get("usage.ex.network"));
     println!("{}", strings::get("usage.ex.network_recv"));
     println!("{}", strings::get("usage.ex.stdio"));
@@ -841,37 +572,6 @@ fn help_info() {
     println!("{}", strings::get("help.info.flag_basic"));
     println!("{}", strings::get("help.info.flag_verbose"));
     println!("{}", strings::get("help.info.flag_share"));
-}
-
-/// `freemkv verify --help` / `freemkv help verify`.
-fn help_verify() {
-    println!("freemkv {}", libfreemkv::VERSION_LABEL);
-    println!();
-    println!("{}", strings::get("help.verify.usage"));
-    println!();
-    println!("{}", strings::get("help.verify.desc"));
-    println!();
-    println!("{}", strings::get("help.verify.examples_header"));
-    println!("{}", strings::get("help.verify.ex_verify"));
-    println!("{}", strings::get("help.verify.ex_verify_dev"));
-}
-
-/// `freemkv remux --help` / `freemkv help remux`.
-fn help_remux() {
-    println!("freemkv {}", libfreemkv::VERSION_LABEL);
-    println!();
-    println!("{}", strings::get("help.remux.usage"));
-    println!();
-    println!("{}", strings::get("help.remux.desc"));
-    println!();
-    println!("{}", strings::get("help.remux.examples_header"));
-    println!("{}", strings::get("help.remux.ex_m2ts"));
-    println!("{}", strings::get("help.remux.ex_iso"));
-    println!();
-    println!("{}", strings::get("help.remux.flags_header"));
-    println!("{}", strings::get("help.remux.flag_title"));
-    println!();
-    println!("{}", strings::get("help.remux.note"));
 }
 
 /// `freemkv update-keys --help` / `freemkv help update-keys`.
@@ -961,7 +661,7 @@ fn update_keys(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_urls, inclusive_last_lba, pct_of, update_keys_dest};
+    use super::{collect_urls, update_keys_dest};
 
     /// Regression: `update-keys --keydb <path>` must save the download to that
     /// path. The flag used to be ignored (the keydb always went to the default
@@ -996,33 +696,6 @@ mod tests {
             update_keys_dest(&args),
             std::path::PathBuf::from("/custom/path/keydb.cfg")
         );
-    }
-
-    #[test]
-    fn pct_of_guards_zero_total() {
-        // The verify NaN% bug: a zero-sector title divided by total_sectors==0.
-        assert_eq!(pct_of(0, 0), 0.0);
-        assert_eq!(pct_of(5, 0), 0.0);
-        // Normal cases still compute.
-        assert_eq!(pct_of(50, 100), 50.0);
-        assert_eq!(pct_of(1, 4), 25.0);
-        assert!(pct_of(0, 0).is_finite(), "must not be NaN");
-    }
-
-    #[test]
-    fn inclusive_last_lba_matches_count() {
-        // Single bad sector at LBA 100 → "100-100", not the contradictory
-        // "100-101" the half-open `start + count` produced.
-        assert_eq!(inclusive_last_lba(100, 1), 100);
-        assert_eq!(inclusive_last_lba(100, 5), 104);
-        // count==0 must not underflow.
-        assert_eq!(inclusive_last_lba(100, 0), 100);
-        assert_eq!(inclusive_last_lba(0, 0), 0);
-        // A range that reaches the top of the address space must not overflow
-        // the `start + (count-1)` add (saturating_add caps at u32::MAX).
-        assert_eq!(inclusive_last_lba(u32::MAX, 1), u32::MAX);
-        assert_eq!(inclusive_last_lba(u32::MAX - 1, 5), u32::MAX);
-        assert_eq!(inclusive_last_lba(u32::MAX, 1000), u32::MAX);
     }
 
     fn v(args: &[&str]) -> Vec<String> {
