@@ -130,11 +130,12 @@ pub fn run(device: Option<&str>, args: &[String]) {
         }
     }
 
-    // Unlocker matrix — which registered unlockers apply to THIS drive+disc, so
-    // the user can see (and question) a missing one (e.g. "LibreDrive: no" on a
-    // supported drive = the drive isn't recognised). Registry-driven: names come
-    // from libfreemkv's unlocker registry, never hardcoded. Kept byte-identical
-    // to autorip's rendering for consistency across the two apps.
+    // Unlocker matrix — which registered unlockers actually RAN this rip (did
+    // work, not merely "matched the disc kind"), so the user can see (and
+    // question) a missing one (e.g. "LibreDrive: no" on a supported drive = the
+    // firmware unlock didn't take). Registry-driven: names come from libfreemkv's
+    // unlocker registry, never hardcoded. Kept byte-identical to autorip's
+    // rendering for consistency across the two apps.
     {
         let matrix = disc
             .unlocker_matrix(&drive)
@@ -142,7 +143,10 @@ pub fn run(device: Option<&str>, args: &[String]) {
             .map(|(name, ok)| format!("{name}: {}", if ok { "yes" } else { "no" }))
             .collect::<Vec<_>>()
             .join(", ");
-        out.raw(Normal, &format!("Unlockers — {matrix}"));
+        out.raw(
+            Normal,
+            &format!("Unlockers (yes = ran this rip) — {matrix}"),
+        );
     }
 
     // Verbose: AACS details
