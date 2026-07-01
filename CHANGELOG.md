@@ -4,13 +4,21 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
-## [1.2.0] — 2026-06-29
+## [1.2.0] — 2026-07-01
 
 Inherits libfreemkv 1.2.0, including **mux loss concealment** — when a unit
 genuinely can't be decrypted, the mux conceals it (rather than emitting
 ciphertext or a broken frame) and drops forward to the next keyframe, so a
 remux of a disc with an unrecoverable gap still produces a decode-clean MKV;
 the loss is logged, not silent.
+
+### Added
+
+- **`disc-info` reports the unlocker matrix.** The `disc-info` command now shows
+  which unlockers actually ran for the disc — LibreDrive firmware unlock, AACS,
+  CSS — alongside the disc's other metadata, matching the operator-visible report
+  autorip logs after each scan. Driven by `Disc::unlocker_matrix()` in libfreemkv
+  1.2.0.
 
 ### Fixed
 
