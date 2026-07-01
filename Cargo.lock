@@ -289,6 +289,7 @@ dependencies = [
 [[package]]
 name = "freemkv-i18n"
 version = "1.2.0"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.2.0#1d5b157831ecde27b13cb7d5be8ee775ef3cff59"
 dependencies = [
  "serde_json",
 ]
@@ -296,6 +297,7 @@ dependencies = [
 [[package]]
 name = "freemkv-keysources"
 version = "1.2.0"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.2.0#2cc7c30fa3368e30a47813e143ce2bc69672bc58"
 dependencies = [
  "base64",
  "flate2",
@@ -309,6 +311,7 @@ dependencies = [
 [[package]]
 name = "freemkv-unlock"
 version = "1.2.0"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.2.0#892e58634076fcb09ec56bc0b919bf3dc1d4e4fe"
 dependencies = [
  "aes",
  "base64",
@@ -502,6 +505,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libfreemkv"
 version = "1.2.0"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.2.0#3a4307def66ecb677eb0b9c074e9fd04185259e9"
 dependencies = [
  "aes",
  "base64",
@@ -798,9 +802,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.14.1"
+version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
+checksum = "764899a24af3980067ee14bc143654f297b22eaebfe3c7b6b211920a5a59b046"
 dependencies = [
  "zeroize",
 ]
