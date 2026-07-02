@@ -143,10 +143,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
             .map(|(name, ok)| format!("{name}: {}", if ok { "yes" } else { "no" }))
             .collect::<Vec<_>>()
             .join(", ");
-        out.raw(
-            Normal,
-            &format!("Unlockers — {matrix}"),
-        );
+        out.raw(Normal, &format!("Unlockers — {matrix}"));
     }
 
     // Verbose: AACS details
