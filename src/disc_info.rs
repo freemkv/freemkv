@@ -145,7 +145,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
             .join(", ");
         out.raw(
             Normal,
-            &format!("Unlockers (yes = ran this rip) — {matrix}"),
+            &format!("Unlockers — {matrix}"),
         );
     }
 
