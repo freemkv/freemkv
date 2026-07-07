@@ -1260,12 +1260,12 @@ fn apply_keys(disc: &mut libfreemkv::Disc, keys: &KeyConfig, samples: Vec<Vec<u8
     }
 }
 
-/// Render a [`libfreemkv::aacs::ResolutionTrace`] into human-readable
+/// Render a [`libfreemkv::aacs::trace::ResolutionTrace`] into human-readable
 /// `who > node > … > OUTCOME` lines — one per unlocker and per key source
 /// consulted. The library trace is English-free typed enums; ALL English
 /// mapping lives here in the app layer. Mirrors autorip's renderer (the two
 /// apps are separate crates, so the mapping is duplicated, not shared).
-fn render_resolution_trace(trace: &libfreemkv::aacs::ResolutionTrace) -> Vec<String> {
+fn render_resolution_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> Vec<String> {
     use libfreemkv::aacs::trace::{KeyNode, KeyOutcome as KO, UnlockOutcome};
 
     let mkb = |m: Option<u32>| match m {
