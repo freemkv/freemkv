@@ -437,11 +437,10 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // For a disc source we skip the upfront `scan_titles` (pipe_disc does its
     // own scan per title); we still need to honor MULTIPLE `-t` flags, so build
     // jobs straight from `title_nums` rather than collapsing to a single title.
-    let titles = if is_disc {
-        None
-    } else {
-        scan_titles(source, &keys)
-    };
+    // Scan the ISO structure ONCE (keyless) and share it: titles here, unit keys
+    // below (`resolve_iso_unit_keys`). A disc source scans per-title in `pipe_disc`.
+    let iso_disc = if is_disc { None } else { scan_iso(source) };
+    let titles = iso_disc.as_ref().map(|d| d.titles.clone());
     let is_dir_dest = dest.ends_with('/') || std::path::Path::new(parsed_dest.path_str()).is_dir();
 
     // Resolve the per-title indices we will rip. For a scanned source this comes
@@ -484,10 +483,9 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // For an ISO source, resolve the AACS unit keys ONCE (keyless scan → local
     // keydb → decrypt_with) and hand them to each title's stream — libfreemkv
     // does no lookup. A disc source resolves per-title inside `pipe_disc`.
-    let iso_unit_keys = if is_disc {
-        Vec::new()
-    } else {
-        resolve_iso_unit_keys(source, &keys, &out)
+    let iso_unit_keys = match iso_disc {
+        Some(disc) => resolve_iso_unit_keys(source, disc, &keys, &out),
+        None => Vec::new(),
     };
 
     // Fresh-key-on-failure factory for the ISO mux: when an online key service
@@ -752,17 +750,10 @@ fn validate_dir_dest(path: &std::path::Path, dest: &str, force: bool) -> Result<
             &[("path", &path.display().to_string())],
         ));
     }
-    // Create it (idempotent if it already exists). A failure here is the
-    // honest writability test (missing parent, read-only fs, permission).
-    if let Err(e) = std::fs::create_dir_all(path) {
-        return Err(strings::fmt(
-            "error.dir_dest_not_writable",
-            &[
-                ("path", &path.display().to_string()),
-                ("error", &e.to_string()),
-            ],
-        ));
-    }
+    // Side-effect-free preflight: do NOT create the directory here. The write
+    // path (`dir_jobs`) does `create_dir_all` and fails fast with a clear message
+    // if it can't, so creating it here only risks leaving a stray empty dir when a
+    // later step fails. A missing dir reads as empty below (created at write time).
     if !force {
         let non_empty = std::fs::read_dir(path)
             .map(|mut it| it.next().is_some())
@@ -1079,22 +1070,36 @@ fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOptions {
     }
 }
 
-/// Resolve an ISO's AACS unit keys once: keyless scan → local keydb →
-/// `decrypt_with`. libfreemkv does no lookup, so the CLI resolves here and the
-/// keys ride into each title's stream. Empty for an unencrypted ISO or when no
-/// key resolves.
-fn resolve_iso_unit_keys(source: &str, keys: &KeyConfig, out: &Output) -> Vec<(u32, [u8; 16])> {
+/// Scan an `iso://` source's structure ONCE (keyless). The resulting `Disc` is
+/// shared by title enumeration and unit-key resolution so the ISO is not
+/// re-parsed per step. `None` for a non-iso source or an unreadable image.
+fn scan_iso(source: &str) -> Option<libfreemkv::Disc> {
+    let path = match libfreemkv::parse_url(source) {
+        libfreemkv::StreamUrl::Iso { path } => path,
+        _ => return None,
+    };
+    let mut reader = libfreemkv::FileSectorSource::open(&path).ok()?;
+    let capacity =
+        <libfreemkv::FileSectorSource as libfreemkv::SectorSource>::capacity_sectors(&reader);
+    libfreemkv::Disc::scan_image(&mut reader, capacity, &keyless_scan_opts()).ok()
+}
+
+/// Resolve an ISO's AACS unit keys from an already-scanned `Disc`: sample its
+/// largest title, then local keydb, then decrypt_with. Empty for an unencrypted
+/// ISO or when no key resolves.
+fn resolve_iso_unit_keys(
+    source: &str,
+    mut disc: libfreemkv::Disc,
+    keys: &KeyConfig,
+    out: &Output,
+) -> Vec<(u32, [u8; 16])> {
     let path = match libfreemkv::parse_url(source) {
         libfreemkv::StreamUrl::Iso { path } => path,
         _ => return Vec::new(),
     };
+    // The ISO was already scanned once by the caller (`scan_iso`); we only open a
+    // cheap reader here to sample ciphertext — no second structure scan.
     let Ok(mut reader) = libfreemkv::FileSectorSource::open(&path) else {
-        return Vec::new();
-    };
-    let capacity =
-        <libfreemkv::FileSectorSource as libfreemkv::SectorSource>::capacity_sectors(&reader);
-    let Ok(mut disc) = libfreemkv::Disc::scan_image(&mut reader, capacity, &keyless_scan_opts())
-    else {
         return Vec::new();
     };
     // Sample encrypted units from the largest title so key resolution can
@@ -2240,7 +2245,7 @@ fn run_extract(
         Ok(res) => {
             // Per-file loss lines (only the lossy ones, to keep output terse).
             for f in &res.files {
-                let lost = f.bytes_unreadable + f.bytes_undecryptable;
+                let lost = f.bytes_unreadable;
                 if lost > 0 {
                     out.raw(
                         Normal,
@@ -2292,44 +2297,6 @@ fn run_extract(
             out.raw(Normal, &render_error(&e));
             false
         }
-    }
-}
-
-// ── Title scanning ──────────────────────────────────────────────────────────
-
-/// Scan any source for its title list. Returns None if source has no titles
-/// (e.g. a single M2TS file, network stream).
-fn scan_titles(source: &str, keys: &KeyConfig) -> Option<Vec<libfreemkv::DiscTitle>> {
-    let parsed = libfreemkv::parse_url(source);
-
-    match parsed {
-        libfreemkv::StreamUrl::Iso { ref path } => {
-            // Listing needs only clear UDF navigation — no handshake, no creds.
-            let mut reader = libfreemkv::FileSectorSource::open(path).ok()?;
-            let capacity =
-                <libfreemkv::FileSectorSource as libfreemkv::SectorSource>::capacity_sectors(
-                    &reader,
-                );
-            let disc =
-                libfreemkv::Disc::scan_image(&mut reader, capacity, &keyless_scan_opts()).ok()?;
-            Some(disc.titles)
-        }
-        libfreemkv::StreamUrl::Disc { ref device } => {
-            let mut drive = match device {
-                Some(d) => libfreemkv::Drive::open(d).ok()?,
-                None => libfreemkv::find_drive()?,
-            };
-            debug_drive_step("wait_ready", drive.wait_ready());
-            debug_drive_step("init", drive.init());
-            // probe_disc is advisory: routinely fails (no disc, already probed);
-            // the scan below re-derives what it needs, so its result stays dropped.
-            let _ = drive.probe_disc();
-            // Live drive may be locked → supply handshake credentials.
-            let disc =
-                libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keys.keydb_path())).ok()?;
-            Some(disc.titles)
-        }
-        _ => None,
     }
 }
 

@@ -10,6 +10,14 @@ use libfreemkv::{
     LabelQualifier, ScanOptions, Stream, SubtitleStream, VideoStream,
 };
 
+/// Strip control/escape characters from untrusted on-disc metadata (title,
+/// volume label, playlist name, stream labels) before printing it to the
+/// terminal, so a crafted or corrupt disc cannot inject terminal escape
+/// sequences (color/cursor/OSC) via those fields.
+fn sanitize(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
 pub fn run(device: Option<&str>, args: &[String]) {
     let mut quiet = false;
     let mut verbose = false;
@@ -90,7 +98,10 @@ pub fn run(device: Option<&str>, args: &[String]) {
 
     // Disc title
     if let Some(ref title) = disc.meta_title {
-        out.raw(Normal, &format!("{}: {}", strings::get("disc.disc"), title));
+        out.raw(
+            Normal,
+            &format!("{}: {}", strings::get("disc.disc"), sanitize(title)),
+        );
     } else if !disc.volume_id.is_empty() {
         out.raw(
             Normal,
@@ -266,7 +277,7 @@ fn title_lines(disc: &Disc, full: bool, verbose: bool, basic: bool) -> Vec<Strin
         lines.push(format!(
             "  {:2}. {:14}  {:2}h {:02}m  {:>5.1} GB  {} {}",
             idx + 1,
-            title.playlist,
+            sanitize(&title.playlist),
             hours,
             mins,
             gb,
@@ -403,7 +414,7 @@ fn format_video(v: &VideoStream, verbose: bool) -> String {
     if v.secondary && v.hdr == HdrFormat::DolbyVision {
         parts.push(strings::get("disc.dolby_vision_el"));
     } else if v.secondary && !v.label.is_empty() {
-        parts.push(v.label.clone());
+        parts.push(sanitize(&v.label));
     }
     if verbose {
         parts.push(format!("[PID 0x{:04X}]", v.pid));
@@ -429,7 +440,7 @@ fn format_audio(a: &AudioStream, verbose: bool) -> String {
         tags.push(strings::get("stream.secondary"));
     }
     if !a.label.is_empty() {
-        tags.push(a.label.clone());
+        tags.push(sanitize(&a.label));
     }
     if !tags.is_empty() {
         s.push_str(&format!(" ({})", tags.join(", ")));
