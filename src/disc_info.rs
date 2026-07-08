@@ -107,7 +107,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
     let unknown = strings::get("disc.format_unknown");
     let format = match disc.format {
         DiscFormat::Uhd => "4K UHD",
+        DiscFormat::Fmts => "4K UHD (AACS 2.1 FMTS)",
         DiscFormat::BluRay => "Blu-ray",
+        DiscFormat::HdDvd => "HD-DVD",
         DiscFormat::Dvd => "DVD",
         DiscFormat::Unknown => &unknown,
     };
