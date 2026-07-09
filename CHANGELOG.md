@@ -4,6 +4,28 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.3.0] — 2026-07-08
+
+Inherits libfreemkv 1.3.0 — AACS 2.1 (FMTS) and HD-DVD as first-class formats,
+HD-DVD VC-1 muxing, and display-order timestamps for program-stream video.
+
+### Added
+
+- **`disc-info` labels the AACS generation and HD-DVD / FMTS formats.** The
+  encryption line now reads `AACS 1.0` / `AACS 2.0` / `AACS 2.1` (the 2.1 from
+  the FMTS format) instead of a bare "encrypted", and HD-DVD / 4K UHD FMTS discs
+  are named as their own formats.
+- **`disc-info -v` resolves keys and shows the crypto detail.** Verbose now runs
+  a local-keydb key resolution (host-cert handshake scan + ciphertext sampling),
+  so the Keys line reflects a real unit-key set — with the Volume ID, the Volume
+  Unique Key, and each CPS unit key printed. The verbose block leads with the
+  drive / device / region, then the MKB generation, hash, VID, and keys.
+
+### Changed
+
+- **`disc-info -v` shows a PID for every stream**, subtitles included (previously
+  video and audio only), and adds the disc region.
+
 ## [1.2.0] — 2026-07-01
 
 Inherits libfreemkv 1.2.0, including **mux loss concealment** — when a unit
