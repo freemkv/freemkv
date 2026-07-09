@@ -1059,7 +1059,7 @@ fn keyless_scan_opts() -> libfreemkv::ScanOptions {
 /// credentials for the authenticated handshake (sourced from the local keydb).
 /// A locked drive needs the cert to read its Volume ID; an unlocked / LibreDrive
 /// drive takes the OEM path and ignores them. ISO scans use [`keyless_scan_opts`].
-fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOptions {
+pub(crate) fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOptions {
     let path = resolved_keydb_path(keydb_path);
     let host_certs = freemkv_keysources::KeydbSource::new(path).host_certs();
     let credentials =
@@ -1068,6 +1068,34 @@ fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOptions {
         credentials,
         ..Default::default()
     }
+}
+
+/// Resolve a **live drive's** AACS unit keys in place for `disc-info -v`: sample
+/// ciphertext from the largest title and run the local-keydb key source against
+/// it (no online source — `disc-info` never phones a key service). Populates
+/// `disc.aacs.unit_keys` / `vuk` so the verbose crypto block can show a REAL
+/// resolution instead of the keyless 0. No-op for an unencrypted / non-AACS disc
+/// (`inputs()` returns `None`). The drive must still be open and have been
+/// scanned with [`drive_scan_opts`] so the handshake captured the VID + inf.
+pub(crate) fn resolve_info_keys(
+    drive: &mut libfreemkv::Drive,
+    disc: &mut libfreemkv::Disc,
+    keydb_path: &Option<String>,
+    out: &Output,
+) {
+    let samples = disc
+        .titles
+        .iter()
+        .max_by_key(|t| t.size_bytes)
+        .cloned()
+        .map(|t| libfreemkv::read_encrypted_units(drive, &t, SAMPLE_UNITS))
+        .unwrap_or_default();
+    let keys = KeyConfig {
+        keydb_path: keydb_path.clone(),
+        key_url: None,
+        key_auth: None,
+    };
+    apply_keys(disc, &keys, samples, out);
 }
 
 /// Scan an `iso://` source's structure ONCE (keyless). The resulting `Disc` is
