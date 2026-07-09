@@ -5,6 +5,7 @@
 
 use crate::output::{Level::Normal, Output};
 use crate::strings;
+use libfreemkv::disc::{BdRegion, DiscRegion};
 use libfreemkv::{
     AudioStream, Codec, ColorSpace, Disc, DiscFormat, Drive, HdrFormat, LabelPurpose,
     LabelQualifier, ScanOptions, Stream, SubtitleStream, VideoStream,
@@ -23,12 +24,21 @@ pub fn run(device: Option<&str>, args: &[String]) {
     let mut verbose = false;
     let mut full = false;
     let mut basic = false;
+    let mut keydb: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--quiet" | "-q" => quiet = true,
             "--verbose" | "-v" => verbose = true,
+            // `--keydb PATH` — used ONLY on `-v` to resolve keys (host-cert
+            // handshake + local keydb lookup) so the crypto block shows a real
+            // unit-key set. Accept + capture its value on every path so it is
+            // not mistaken for a positional / unknown option.
+            "--keydb" => {
+                i += 1;
+                keydb = args.get(i).cloned();
+            }
             // `--log-level N` sets the tracing level (in main::init_logging);
             // here it also widens stdout detail at level >= 2. Accept + skip
             // its value so it isn't treated as a positional / unknown option.
@@ -82,7 +92,16 @@ pub fn run(device: Option<&str>, args: &[String]) {
     let _ = drive.init();
     let _ = drive.probe_disc();
 
-    let disc = match Disc::scan(&mut drive, &ScanOptions::default()) {
+    // Normal `info` is a fast keyless scan. `-v` scans with the AACS host
+    // credentials (from the local keydb) so the handshake captures the Volume
+    // ID + Unit_Key_RO.inf a live-drive key resolution needs; without them a
+    // locked drive yields no VID and no resolvable keys.
+    let scan_opts = if verbose {
+        crate::pipe::drive_scan_opts(&keydb)
+    } else {
+        ScanOptions::default()
+    };
+    let mut disc = match Disc::scan(&mut drive, &scan_opts) {
         Ok(d) => d,
         Err(e) => {
             eprintln!(
@@ -139,7 +158,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
         if disc.css.is_some() {
             out.print(Normal, "disc.css_encrypted");
         } else {
-            out.print(Normal, "disc.aacs_encrypted");
+            out.raw(Normal, &format!("{} encrypted", aacs_generation(&disc)));
         }
     }
 
@@ -159,27 +178,15 @@ pub fn run(device: Option<&str>, args: &[String]) {
         out.raw(Normal, &format!("Unlockers — {matrix}"));
     }
 
-    // Verbose: AACS details
+    // Verbose: hardware/disc facts first, then a blank line, then the AACS
+    // crypto block. Key resolution runs ONLY here (`-v`): sample ciphertext from
+    // the live drive and resolve against the local keydb so the crypto block
+    // shows a real unit-key set rather than the keyless 0.
     if verbose {
-        if let Some(ref aacs) = disc.aacs {
-            out.raw(
-                Normal,
-                &format!(
-                    "AACS {}.0, MKB v{}",
-                    aacs.version,
-                    aacs.mkb_version.unwrap_or(0)
-                ),
-            );
-            out.raw(Normal, &format!("Disc hash: {}", aacs.disc_hash));
-            out.raw(
-                Normal,
-                &format!(
-                    "Keys: {} ({} unit keys)",
-                    aacs.key_source.name(),
-                    aacs.unit_keys.len()
-                ),
-            );
+        if disc.aacs.is_some() {
+            crate::pipe::resolve_info_keys(&mut drive, &mut disc, &keydb, &out);
         }
+
         out.raw(
             Normal,
             &format!(
@@ -190,6 +197,48 @@ pub fn run(device: Option<&str>, args: &[String]) {
             ),
         );
         out.raw(Normal, &format!("Device: {}", drive.device_path()));
+        out.raw(Normal, &format!("Region: {}", region_name(&disc.region)));
+
+        if let Some(ref aacs) = disc.aacs {
+            out.blank(Normal);
+            // Generation label lives on the normal-level encryption line now; the
+            // crypto block leads with the MKB generation number.
+            out.raw(
+                Normal,
+                &format!(
+                    "MKB v{}{}",
+                    aacs.mkb_version.unwrap_or(0),
+                    if aacs.bus_encryption {
+                        " (bus encryption)"
+                    } else {
+                        ""
+                    }
+                ),
+            );
+            out.raw(Normal, &format!("Disc hash: {}", aacs.disc_hash));
+            // Volume ID (from the SCSI AACS handshake). Absent on an ISO scan
+            // (no handshake) — the 16 bytes stay zero there, so only show it
+            // when the disc actually yielded one.
+            if aacs.volume_id.iter().any(|&b| b != 0) {
+                out.raw(Normal, &format!("VID: 0x{}", hex_bytes(&aacs.volume_id)));
+            }
+            // Keys group: source + count, then the Volume Unique Key (when a VUK
+            // path resolved it) and each CPS unit key on its own indented line.
+            out.raw(
+                Normal,
+                &format!(
+                    "Keys: {} ({} unit keys)",
+                    aacs.key_source.name(),
+                    aacs.unit_keys.len()
+                ),
+            );
+            if let Some(vuk) = aacs.vuk {
+                out.raw(Normal, &format!("  VUK:   0x{}", hex_bytes(&vuk)));
+            }
+            for (cps, key) in &aacs.unit_keys {
+                out.raw(Normal, &format!("  CPS {cps}: 0x{}", hex_bytes(key)));
+            }
+        }
     }
 
     // Release the drive fd before printing titles
@@ -355,7 +404,7 @@ fn title_lines(disc: &Disc, full: bool, verbose: bool, basic: bool) -> Vec<Strin
             lines.push(String::new());
             let label = strings::get("disc.subtitle");
             for (si, s) in subs.iter().enumerate() {
-                let line = format_subtitle(s);
+                let line = format_subtitle(s, verbose);
                 if si == 0 {
                     lines.push(format!("{}{}", label_prefix(&label, indent), line));
                 } else {
@@ -448,7 +497,7 @@ fn format_audio(a: &AudioStream, verbose: bool) -> String {
     s
 }
 
-fn format_subtitle(s: &SubtitleStream) -> String {
+fn format_subtitle(s: &SubtitleStream, verbose: bool) -> String {
     let lang = lang_name(&s.language);
     let mut tags: Vec<String> = Vec::new();
     if s.forced {
@@ -457,11 +506,71 @@ fn format_subtitle(s: &SubtitleStream) -> String {
     if let Some(key) = qualifier_key(s.qualifier) {
         tags.push(strings::get(key));
     }
-    if tags.is_empty() {
+    let mut line = if tags.is_empty() {
         lang.to_string()
     } else {
         format!("{} ({})", lang, tags.join(", "))
+    };
+    if verbose {
+        line.push_str(&format!(" [PID 0x{:04X}]", s.pid));
     }
+    line
+}
+
+/// AACS generation label ("AACS 1.0" / "AACS 2.0" / "AACS 2.1"). The 2.1
+/// discriminator is the FMTS content-protection format (`DiscFormat::Fmts`); UHD
+/// is 2.0; every other AACS carrier (BD / HD-DVD) is 1.0. Falls back to the
+/// `aacs.version` minor when the format isn't a known AACS carrier.
+fn aacs_generation(disc: &Disc) -> String {
+    match disc.format {
+        DiscFormat::Fmts => "AACS 2.1".to_string(),
+        DiscFormat::Uhd => "AACS 2.0".to_string(),
+        _ => format!(
+            "AACS {}.0",
+            disc.aacs.as_ref().map(|a| a.version).unwrap_or(1)
+        ),
+    }
+}
+
+/// Human-readable region: "Region-free", the Blu-ray region letters (e.g.
+/// "A/B/C"), or the DVD region numbers (e.g. "1, 2").
+fn region_name(region: &DiscRegion) -> String {
+    match region {
+        DiscRegion::Free => "Region-free".to_string(),
+        DiscRegion::BluRay(rs) => {
+            if rs.is_empty() {
+                "Region-free".to_string()
+            } else {
+                rs.iter()
+                    .map(|r| match r {
+                        BdRegion::A => "A",
+                        BdRegion::B => "B",
+                        BdRegion::C => "C",
+                    })
+                    .collect::<Vec<_>>()
+                    .join("/")
+            }
+        }
+        DiscRegion::Dvd(rs) => {
+            if rs.is_empty() {
+                "Region-free".to_string()
+            } else {
+                rs.iter()
+                    .map(|r| r.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        }
+    }
+}
+
+/// Lower-case hex of a byte slice, no separators (for VID / hash-style fields).
+fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes.iter().fold(String::new(), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
 }
 
 /// Map `LabelPurpose` to its locale string key. `Normal` returns None — no tag.
