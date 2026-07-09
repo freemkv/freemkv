@@ -127,7 +127,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
             &format!(
                 "{}: {}",
                 strings::get("disc.disc"),
-                format_volume_id(&disc.volume_id)
+                sanitize(&format_volume_id(&disc.volume_id))
             ),
         );
     }
