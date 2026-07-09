@@ -615,7 +615,10 @@ fn lang_name(code: &str) -> String {
     isolang::Language::from_639_3(code)
         .or_else(|| isolang::Language::from_639_1(code))
         .map(|l| l.to_name().to_string())
-        .unwrap_or_else(|| code.to_string())
+        // An unrecognized code falls back to the raw on-disc bytes; sanitize it,
+        // as these come from an untrusted MPLS/IFO language field and could carry
+        // terminal-escape sequences (same defense as the other printed fields).
+        .unwrap_or_else(|| sanitize(code))
 }
 
 fn format_volume_id(vol_id: &str) -> String {
