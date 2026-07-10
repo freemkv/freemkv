@@ -2543,13 +2543,7 @@ fn print_completion_summary(out: &Output, done: u64, start: std::time::Instant) 
     );
 }
 
-/// Strip control/escape characters from untrusted on-disc strings (stream
-/// labels, language codes) before printing them to the terminal, so a crafted
-/// or corrupt disc cannot inject terminal escape sequences. Mirrors the
-/// `disc-info` renderer's `sanitize`.
-fn sanitize(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).collect()
-}
+use crate::disc_info::sanitize;
 
 fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
     out.raw(
