@@ -4,6 +4,10 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.3.2] — 2026-07-10
+
+Version sync with the workspace; inherits libfreemkv 1.3.2.
+
 ## [1.3.1] — 2026-07-10
 
 Inherits libfreemkv 1.3.1 — authoritative HD-DVD title composition (durations,
