@@ -158,16 +158,12 @@ pub fn run(device: Option<&str>, args: &[String]) {
         if disc.css.is_some() {
             out.print(Normal, "disc.css_encrypted");
         } else {
-            // Localized "{gen} encrypted" — the generation label (AACS 2.1 etc.)
-            // is a non-translated proper noun; the rest goes through the string
-            // table like the CSS branch (keeps i18n coverage on this line).
-            out.raw(
-                Normal,
-                &strings::fmt(
-                    "disc.aacs_encrypted_gen",
-                    &[("gen", &aacs_generation(&disc))],
-                ),
-            );
+            // "AACS 2.1 encrypted" — the generation label is the informative part
+            // (a non-translated proper noun). The word "encrypted" is app-layer
+            // English here rather than the i18n table, deliberately: localizing it
+            // would require adding a string to freemkv-i18n (a versioned crate we
+            // keep frozen), and a stale i18n pin would then print the raw key.
+            out.raw(Normal, &format!("{} encrypted", aacs_generation(&disc)));
         }
     }
 
@@ -723,22 +719,6 @@ mod tests {
             css_error: None,
             content_format: ContentFormat::BdTs,
         }
-    }
-
-    #[test]
-    fn aacs_encrypted_gen_key_resolves_and_localizes() {
-        // The AACS-encrypted status line goes through the i18n string table
-        // (regression: it had been hardcoded English). The key must resolve — not
-        // print the raw "disc.aacs_encrypted_gen" — and substitute {gen}.
-        let line = strings::fmt("disc.aacs_encrypted_gen", &[("gen", "AACS 2.1")]);
-        assert!(
-            !line.contains("aacs_encrypted_gen") && !line.contains("{gen}"),
-            "key resolved and placeholder substituted, got: {line}"
-        );
-        assert!(
-            line.contains("AACS 2.1"),
-            "generation label present, got: {line}"
-        );
     }
 
     #[test]
