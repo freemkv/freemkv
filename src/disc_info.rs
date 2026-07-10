@@ -15,7 +15,7 @@ use libfreemkv::{
 /// volume label, playlist name, stream labels) before printing it to the
 /// terminal, so a crafted or corrupt disc cannot inject terminal escape
 /// sequences (color/cursor/OSC) via those fields.
-fn sanitize(s: &str) -> String {
+pub(crate) fn sanitize(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
 }
 
