@@ -1,5 +1,5 @@
 // freemkv — Open source 4K UHD / Blu-ray / DVD backup tool
-// AGPL-3.0 — freemkv project
+// MIT — freemkv project
 //
 // Usage: freemkv <source> <dest> [flags]
 //        freemkv info <url> [flags]

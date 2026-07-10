@@ -1,4 +1,4 @@
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Latest Release](https://img.shields.io/github/v/release/freemkv/freemkv?label=latest&color=brightgreen)](https://github.com/freemkv/freemkv/releases/latest)
 
 # freemkv
@@ -272,4 +272,4 @@ Run `freemkv info disc:// --share` to submit your drive's profile and help expan
 
 ## License
 
-AGPL-3.0-only. Built on [libfreemkv](https://github.com/freemkv/libfreemkv).
+MIT. Built on [libfreemkv](https://github.com/freemkv/libfreemkv).

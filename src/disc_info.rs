@@ -1,5 +1,5 @@
 // freemkv disc-info — Show disc titles, streams, and sizes
-// AGPL-3.0 — freemkv project
+// MIT — freemkv project
 //
 // CLI is dumb — all logic in libfreemkv. This file only formats output.
 
