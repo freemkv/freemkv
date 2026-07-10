@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "freemkv-i18n",
  "freemkv-keysources",
@@ -288,16 +288,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.3.0"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.3.0#3efaece24aa0f216cdbb854d05432b17b9574c09"
+version = "1.3.1"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.3.1#dbd9b6a8c46db59f7e4f06f4c1a3b7725340a7ee"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.3.0"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.3.0#cce2d5fe77107de8609d8d4c4f8e5d506268aeb8"
+version = "1.3.1"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.3.1#46fecaeef1e13b7a9c2b421abc827718fcdf2390"
 dependencies = [
  "base64",
  "flate2",
@@ -310,8 +310,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.3.0"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.3.0#4120d3815106c0a9bbe26dc8caeca147d17df212"
+version = "1.3.1"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.3.1#b7f34c46bc128d4564ff13edcd9ff1b2ccde878d"
 dependencies = [
  "aes",
  "base64",
@@ -504,8 +504,8 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libfreemkv"
-version = "1.3.0"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.3.0#e2f595d558baab620e54a7fc510682d084acbb84"
+version = "1.3.1"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.3.1#9e8f196b205b9106eae0ff65237c82cb8d7af224"
 dependencies = [
  "aes",
  "base64",
@@ -520,6 +520,7 @@ dependencies = [
  "num-traits",
  "rand",
  "rayon",
+ "roxmltree",
  "serde",
  "serde_json",
  "sha1",
@@ -784,6 +785,12 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rustls"
