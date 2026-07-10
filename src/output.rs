@@ -1,5 +1,5 @@
 // freemkv — Output writer with verbosity filtering
-// AGPL-3.0 — freemkv project
+// MIT — freemkv project
 //
 // All CLI output goes through this. One filter point for quiet/normal/verbose.
 // No `if verbose` scattered through code — tag each line with its level.

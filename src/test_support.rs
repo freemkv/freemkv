@@ -1,5 +1,5 @@
 // freemkv — shared test fixtures (WS2)
-// AGPL-3.0 — freemkv project
+// MIT — freemkv project
 //
 // Single source of truth for the enumerated `Error`-variant list and the
 // placeholder extractor, shared between `strings.rs`'s

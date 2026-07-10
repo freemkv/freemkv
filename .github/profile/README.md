@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://img.shields.io/github/v/release/freemkv/freemkv?label=latest&color=brightgreen" alt="Latest release">
   <img src="https://img.shields.io/crates/v/libfreemkv" alt="crates.io">
-  <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Linux | macOS | Windows">
 </p>
 
@@ -95,7 +95,7 @@ Open `localhost:8080`. Configure KEYDB URL and TMDB key in Settings. Insert disc
 
 ## Why freemkv
 
-- **Open source** — pure Rust, AGPL-3.0, library on [crates.io](https://crates.io/crates/libfreemkv)
+- **Open source** — pure Rust, MIT, library on [crates.io](https://crates.io/crates/libfreemkv)
 - **It sees more** — BD-J parsers extract stream labels other tools miss
 - **It's fast** — firmware upload removes riplock, adaptive batch sizing, 17+ MB/s
 - **It decrypts** — AACS 1.0 + 2.0, CSS — all transparent and automatic
@@ -157,5 +157,5 @@ Captures your drive's hardware profile and submits it as a GitHub issue. No disc
   <a href="https://github.com/freemkv/libfreemkv">Library</a> ·
   <a href="https://github.com/freemkv/autorip">Autorip</a> ·
   <a href="https://github.com/freemkv/bdemu">Emulator</a> ·
-  <a href="https://www.gnu.org/licenses/agpl-3.0.txt">AGPL-3.0</a>
+  <a href="https://opensource.org/licenses/MIT">MIT</a>
 </p>
