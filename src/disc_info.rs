@@ -170,23 +170,16 @@ pub fn run(device: Option<&str>, args: &[String]) {
             gb
         ),
     );
-    if disc.encrypted {
-        // CSS — either resolved (css state) or a CSS disc whose key crack failed
-        // (css is None but a css_error was recorded). Both are CSS, NOT AACS.
-        if disc.css.is_some() || disc.css_error.is_some() {
-            out.print(Normal, "disc.css_encrypted");
-        } else if disc.aacs.is_some() || is_aacs_format(&disc) {
-            // "AACS 2.1 encrypted" — the generation label is the informative part
-            // (a non-translated proper noun). The word "encrypted" is app-layer
-            // English here rather than the i18n table, deliberately: localizing it
-            // would require adding a string to freemkv-i18n (a versioned crate we
-            // keep frozen), and a stale i18n pin would then print the raw key.
-            out.raw(Normal, &format!("{} encrypted", aacs_generation(&disc)));
-        } else {
-            // Encrypted but neither CSS nor a known AACS carrier resolved — don't
-            // fabricate a scheme; use the generic localized line.
-            out.print(Normal, "disc.aacs_encrypted");
-        }
+    match encryption_label(&disc) {
+        Some(EncLabel::Css) => out.print(Normal, "disc.css_encrypted"),
+        // "AACS 2.1 encrypted" — the generation label is the informative part (a
+        // non-translated proper noun). The word "encrypted" is app-layer English
+        // here rather than the i18n table, deliberately: localizing it would
+        // require adding a string to freemkv-i18n (a versioned crate we keep
+        // frozen), and a stale i18n pin would then print the raw key.
+        Some(EncLabel::Aacs(label)) => out.raw(Normal, &format!("{label} encrypted")),
+        Some(EncLabel::GenericAacs) => out.print(Normal, "disc.aacs_encrypted"),
+        None => {}
     }
 
     // Unlocker matrix — which registered unlockers actually RAN this rip (did
@@ -573,6 +566,34 @@ fn is_aacs_format(disc: &Disc) -> bool {
     )
 }
 
+/// The encryption-status line to render for a disc.
+#[derive(Debug, PartialEq, Eq)]
+enum EncLabel {
+    /// CSS (DVD) — resolved or a CSS disc whose key crack failed.
+    Css,
+    /// AACS with a generation label (BD / UHD / FMTS).
+    Aacs(String),
+    /// Encrypted, but neither CSS nor a known AACS carrier resolved.
+    GenericAacs,
+}
+
+/// Decide which encryption line to show. `None` for an unencrypted disc. CSS
+/// wins whenever any CSS signal is present (resolved state OR a recorded
+/// css_error from a failed crack) — a failed-CSS DVD must never be mislabeled as
+/// AACS; the AACS generation is used only for a real AACS carrier / state.
+fn encryption_label(disc: &Disc) -> Option<EncLabel> {
+    if !disc.encrypted {
+        return None;
+    }
+    if disc.css.is_some() || disc.css_error.is_some() {
+        Some(EncLabel::Css)
+    } else if disc.aacs.is_some() || is_aacs_format(disc) {
+        Some(EncLabel::Aacs(aacs_generation(disc)))
+    } else {
+        Some(EncLabel::GenericAacs)
+    }
+}
+
 /// Human-readable region: "Region-free", the Blu-ray region letters (e.g.
 /// "A/B/C"), or the DVD region numbers (e.g. "1, 2").
 fn region_name(region: &DiscRegion) -> String {
@@ -751,6 +772,46 @@ mod tests {
             css_error: None,
             content_format: ContentFormat::BdTs,
         }
+    }
+
+    #[test]
+    fn encryption_label_never_mislabels_a_failed_css_dvd_as_aacs() {
+        let mut disc = synthetic_disc();
+        // A CSS DVD whose title-key crack failed: encrypted, no css state, a
+        // css_error recorded, format DVD, no aacs. Must render CSS, NOT AACS.
+        disc.format = DiscFormat::Dvd;
+        disc.encrypted = true;
+        disc.css = None;
+        disc.aacs = None;
+        disc.css_error = Some(libfreemkv::Error::MkvInvalid); // any css-path error
+        assert_eq!(encryption_label(&disc), Some(EncLabel::Css));
+
+        // A resolved CSS DVD → CSS.
+        disc.css_error = None;
+        // (css stays None in the fixture; a resolved DVD would set css=Some, but
+        // the css_error path above is the regression case. Verify the AACS paths.)
+
+        // A UHD carrier → AACS 2.0.
+        let mut uhd = synthetic_disc();
+        uhd.format = DiscFormat::Uhd;
+        uhd.encrypted = true;
+        uhd.css = None;
+        uhd.css_error = None;
+        assert_eq!(
+            encryption_label(&uhd),
+            Some(EncLabel::Aacs("AACS 2.0".to_string()))
+        );
+
+        // An FMTS carrier → AACS 2.1.
+        uhd.format = DiscFormat::Fmts;
+        assert_eq!(
+            encryption_label(&uhd),
+            Some(EncLabel::Aacs("AACS 2.1".to_string()))
+        );
+
+        // Unencrypted → no line.
+        uhd.encrypted = false;
+        assert_eq!(encryption_label(&uhd), None);
     }
 
     #[test]
