@@ -16,7 +16,23 @@ use libfreemkv::{
 /// terminal, so a crafted or corrupt disc cannot inject terminal escape
 /// sequences (color/cursor/OSC) via those fields.
 pub(crate) fn sanitize(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).collect()
+    s.chars().filter(|&c| !is_unsafe_display_char(c)).collect()
+}
+
+/// Terminal-spoofing characters to strip from untrusted on-disc strings:
+/// C0/C1 controls (incl. ESC) AND the Unicode format (Cf) characters that
+/// `char::is_control()` does NOT catch — bidirectional overrides/isolates
+/// (U+202A-202E, U+2066-2069), zero-width spaces/joiners (U+200B-200F,
+/// U+2060-2064), and the BOM (U+FEFF) — which can reorder or hide how the rest
+/// of a line renders in a terminal.
+fn is_unsafe_display_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}')
 }
 
 pub fn run(device: Option<&str>, args: &[String]) {
@@ -155,15 +171,21 @@ pub fn run(device: Option<&str>, args: &[String]) {
         ),
     );
     if disc.encrypted {
-        if disc.css.is_some() {
+        // CSS — either resolved (css state) or a CSS disc whose key crack failed
+        // (css is None but a css_error was recorded). Both are CSS, NOT AACS.
+        if disc.css.is_some() || disc.css_error.is_some() {
             out.print(Normal, "disc.css_encrypted");
-        } else {
+        } else if disc.aacs.is_some() || is_aacs_format(&disc) {
             // "AACS 2.1 encrypted" — the generation label is the informative part
             // (a non-translated proper noun). The word "encrypted" is app-layer
             // English here rather than the i18n table, deliberately: localizing it
             // would require adding a string to freemkv-i18n (a versioned crate we
             // keep frozen), and a stale i18n pin would then print the raw key.
             out.raw(Normal, &format!("{} encrypted", aacs_generation(&disc)));
+        } else {
+            // Encrypted but neither CSS nor a known AACS carrier resolved — don't
+            // fabricate a scheme; use the generic localized line.
+            out.print(Normal, "disc.aacs_encrypted");
         }
     }
 
@@ -541,6 +563,16 @@ fn aacs_generation(disc: &Disc) -> String {
     }
 }
 
+/// Whether the disc format is a known AACS carrier (BD / UHD / FMTS). A DVD or
+/// unclassified disc is NOT — so an encrypted-but-unresolved DVD (e.g. a failed
+/// CSS crack) is never mislabeled with an AACS generation.
+fn is_aacs_format(disc: &Disc) -> bool {
+    matches!(
+        disc.format,
+        DiscFormat::BluRay | DiscFormat::Uhd | DiscFormat::Fmts
+    )
+}
+
 /// Human-readable region: "Region-free", the Blu-ray region letters (e.g.
 /// "A/B/C"), or the DVD region numbers (e.g. "1, 2").
 fn region_name(region: &DiscRegion) -> String {
@@ -735,6 +767,11 @@ mod tests {
         assert_eq!(clean, "Ti[2Jtle]0;pwn\\", "printable text preserved");
         // The lang_name fallback for an unrecognized code sanitizes too.
         assert!(!lang_name("\x1b[31mzz").contains('\x1b'));
+        // Unicode format (Cf) chars — bidi override, zero-width, BOM — are
+        // stripped too (char::is_control does NOT catch these).
+        let bidi = "abc\u{202E}gnp\u{200B}\u{FEFF}xyz";
+        let cleaned = sanitize(bidi);
+        assert_eq!(cleaned, "abcgnpxyz", "bidi/zero-width/BOM stripped");
     }
 
     #[test]
