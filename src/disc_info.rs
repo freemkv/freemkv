@@ -713,6 +713,22 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_strips_terminal_escape_sequences() {
+        // Untrusted on-disc strings (title, volume label, stream label, language)
+        // must have control/escape bytes stripped before printing, so a crafted
+        // disc cannot inject terminal escapes (color/cursor/OSC).
+        let hostile = "Ti\x1b[2Jtle\x07\x1b]0;pwn\x1b\\";
+        let clean = sanitize(hostile);
+        assert!(
+            !clean.contains('\x1b') && !clean.contains('\x07'),
+            "control/escape chars stripped, got {clean:?}"
+        );
+        assert_eq!(clean, "Ti[2Jtle]0;pwn\\", "printable text preserved");
+        // The lang_name fallback for an unrecognized code sanitizes too.
+        assert!(!lang_name("\x1b[31mzz").contains('\x1b'));
+    }
+
+    #[test]
     fn title_lines_lists_encrypted_disc_without_key() {
         // The bug: `info iso://<encrypted>` returned E7022 and listed no titles
         // because it went through the key-gated `input()`. The keyless title
