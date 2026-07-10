@@ -1,5 +1,5 @@
 // freemkv drive-info — Show drive information and capture profiles
-// AGPL-3.0 — freemkv project
+// MIT — freemkv project
 //
 // CLI is dumb — all drive data from libfreemkv.
 

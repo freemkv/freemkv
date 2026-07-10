@@ -4,6 +4,16 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.3.1] — 2026-07-10
+
+Inherits libfreemkv 1.3.1 — authoritative HD-DVD title composition (durations,
+names, chapters from the Advanced-Content playlist).
+
+### Licensing
+
+- **Relicensed to the MIT License, from 1.3.1 onwards** (releases up to and
+  including 1.3.0 remain under AGPL-3.0).
+
 ## [1.3.0] — 2026-07-08
 
 Inherits libfreemkv 1.3.0 — AACS 2.1 (FMTS) and HD-DVD as first-class formats,

@@ -1,5 +1,5 @@
 // freemkv — WS2 messaging CONTRACT TEST
-// AGPL-3.0 — freemkv project
+// MIT — freemkv project
 //
 // Every live `libfreemkv::Error` variant must have: a non-zero code in a known
 // 1xxx-9xxx bucket, an `error.E<code>` message in en.json, the same key in all

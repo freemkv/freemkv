@@ -1,5 +1,5 @@
 // freemkv — i18n string loader
-// AGPL-3.0 — freemkv project
+// MIT — freemkv project
 //
 // The loader itself now lives in the shared `freemkv-i18n` crate so `autorip`
 // can reuse it. This module is a thin re-export so every existing

@@ -1,5 +1,5 @@
 // freemkv — messaging standard (Level + Code + Message)
-// AGPL-3.0 — freemkv project
+// MIT — freemkv project
 //
 // WS2: every user-visible error line renders as `Error: E<code> <message>`.
 // The three-level vocabulary is closed here: `Warn`/`Info` are the
