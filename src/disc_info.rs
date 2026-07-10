@@ -158,7 +158,16 @@ pub fn run(device: Option<&str>, args: &[String]) {
         if disc.css.is_some() {
             out.print(Normal, "disc.css_encrypted");
         } else {
-            out.raw(Normal, &format!("{} encrypted", aacs_generation(&disc)));
+            // Localized "{gen} encrypted" — the generation label (AACS 2.1 etc.)
+            // is a non-translated proper noun; the rest goes through the string
+            // table like the CSS branch (keeps i18n coverage on this line).
+            out.raw(
+                Normal,
+                &strings::fmt(
+                    "disc.aacs_encrypted_gen",
+                    &[("gen", &aacs_generation(&disc))],
+                ),
+            );
         }
     }
 
@@ -187,13 +196,17 @@ pub fn run(device: Option<&str>, args: &[String]) {
             crate::pipe::resolve_info_keys(&mut drive, &mut disc, &keydb, &out);
         }
 
+        // Sanitize the SCSI INQUIRY strings: vendor/product/revision come from
+        // the drive/bridge firmware (an untrusted source — a spoofed enclosure
+        // could return terminal escapes), so strip control bytes like every other
+        // externally-sourced field.
         out.raw(
             Normal,
             &format!(
                 "Drive: {} {} {}",
-                drive.drive_id.vendor_id.trim(),
-                drive.drive_id.product_id.trim(),
-                drive.drive_id.product_revision.trim()
+                sanitize(drive.drive_id.vendor_id.trim()),
+                sanitize(drive.drive_id.product_id.trim()),
+                sanitize(drive.drive_id.product_revision.trim())
             ),
         );
         out.raw(Normal, &format!("Device: {}", drive.device_path()));
@@ -710,6 +723,22 @@ mod tests {
             css_error: None,
             content_format: ContentFormat::BdTs,
         }
+    }
+
+    #[test]
+    fn aacs_encrypted_gen_key_resolves_and_localizes() {
+        // The AACS-encrypted status line goes through the i18n string table
+        // (regression: it had been hardcoded English). The key must resolve — not
+        // print the raw "disc.aacs_encrypted_gen" — and substitute {gen}.
+        let line = strings::fmt("disc.aacs_encrypted_gen", &[("gen", "AACS 2.1")]);
+        assert!(
+            !line.contains("aacs_encrypted_gen") && !line.contains("{gen}"),
+            "key resolved and placeholder substituted, got: {line}"
+        );
+        assert!(
+            line.contains("AACS 2.1"),
+            "generation label present, got: {line}"
+        );
     }
 
     #[test]

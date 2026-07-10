@@ -6,6 +6,7 @@
 //!
 //! Batch (multiple titles) is just a for loop calling pipe() per title.
 
+use crate::disc_info::sanitize;
 use crate::output::{Level::Normal, Output};
 use crate::strings;
 use libfreemkv::pes::Stream as PesStream;
@@ -2542,8 +2543,6 @@ fn print_completion_summary(out: &Output, done: u64, start: std::time::Instant) 
         ),
     );
 }
-
-use crate::disc_info::sanitize;
 
 fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
     out.raw(
