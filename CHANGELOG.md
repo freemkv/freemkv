@@ -4,6 +4,15 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.4.0] — 2026-07-13
+
+### Added
+
+- **Blu-ray 3D output.** Ripping a 3D disc — `freemkv disc:// mkv://out.mkv` or
+  `freemkv iso://<3d>.iso mkv://out.mkv` — now produces a single MVC video track
+  carrying both eyes (base + dependent view), via libfreemkv 1.4.0. Non-3D rips
+  are byte-for-byte unchanged.
+
 ## [1.3.2] — 2026-07-10
 
 Version sync with the workspace; inherits libfreemkv 1.3.2.
