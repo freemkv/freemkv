@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "freemkv-i18n",
  "freemkv-keysources",
@@ -288,16 +288,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.4.0"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.4.0#4ebf038d637e00b67432c30d27584f2c7741eb5e"
+version = "1.4.1"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.4.1#71fb9dd737f430b3ef84239adfe88224699ee77b"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.4.0"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.4.0#e1234558611702285f2ae9b6997f57085ec40676"
+version = "1.4.1"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.4.1#03765184c81b19be2d82c36b4434833f2ada8b0d"
 dependencies = [
  "base64",
  "flate2",
@@ -310,8 +310,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.4.0"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.4.0#d32d43c2e239cfe8146aabc2ac60c1e7b870b596"
+version = "1.4.1"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.4.1#fb7d74039fca1809208feb9ba347742056086387"
 dependencies = [
  "aes",
  "base64",
@@ -504,8 +504,8 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libfreemkv"
-version = "1.4.0"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.4.0#75b0e68b85445cc3ed7421036e7a657dd3cb00a1"
+version = "1.4.1"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.4.1#9d37043b3e3e4fecc2883095674072ab7df83297"
 dependencies = [
  "aes",
  "base64",
@@ -909,9 +909,9 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "simd-adler32"
-version = "0.3.9"
+version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
+checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "siphasher"
