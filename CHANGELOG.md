@@ -4,6 +4,16 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.4.1] — 2026-07-14
+
+### Fixed
+
+- Inherits **libfreemkv 1.4.1**: `freemkv iso://… mkv://…` (and disc rips) no
+  longer conceal decryptable video as loss over a single authored-bad TS packet.
+  A non-conforming packet is now left for the demuxer to handle instead of the
+  whole aligned unit being nulled. Also folds in the unified MVC (Blu-ray 3D)
+  track-signal handling.
+
 ## [1.4.0] — 2026-07-13
 
 ### Added
