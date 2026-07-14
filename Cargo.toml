@@ -1,6 +1,6 @@
 [package]
 name = "freemkv"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2024"
 rust-version = "1.86"
 license = "MIT"
@@ -52,6 +52,6 @@ codegen-units = 1
 # patch with a path patch via the gitignored .cargo/config.toml (a config-level
 # [patch.crates-io] wins over this manifest one for the same crate).
 [patch.crates-io]
-libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.4.0" }
-freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.4.0" }
-freemkv-i18n = { git = "https://github.com/freemkv/freemkv-i18n", tag = "v1.4.0" }
+libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.4.1" }
+freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.4.1" }
+freemkv-i18n = { git = "https://github.com/freemkv/freemkv-i18n", tag = "v1.4.1" }
