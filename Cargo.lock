@@ -84,9 +84,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.66"
+version = "1.2.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5d6cac793997bd970000024b2934968efe83b382de4fdcf4fcb46b6ee4ad996"
+checksum = "e17dd265a7d0f31ef544e1b20e03add05d3b45b491b633b10d67145d2acc1a38"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.3.2"
+version = "1.4.0"
 dependencies = [
  "freemkv-i18n",
  "freemkv-keysources",
@@ -288,16 +288,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.3.2"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.3.2#53b6c5ddf1d374fba42c3d745cf159732e33722d"
+version = "1.4.0"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.4.0#4ebf038d637e00b67432c30d27584f2c7741eb5e"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.3.2"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.3.2#b67d290f3e3acb676af4e11e52d455def4b5a5e2"
+version = "1.4.0"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.4.0#e1234558611702285f2ae9b6997f57085ec40676"
 dependencies = [
  "base64",
  "flate2",
@@ -310,8 +310,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.3.2"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.3.2#9fbbe15b29512a85ec9e3437604b9eade2805e89"
+version = "1.4.0"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.4.0#d32d43c2e239cfe8146aabc2ac60c1e7b870b596"
 dependencies = [
  "aes",
  "base64",
@@ -504,8 +504,8 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libfreemkv"
-version = "1.3.2"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.3.2#057c878831b442aaee48f20ebb1b87b1f5b9a6c6"
+version = "1.4.0"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.4.0#75b0e68b85445cc3ed7421036e7a657dd3cb00a1"
 dependencies = [
  "aes",
  "base64",
@@ -707,9 +707,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
  "libc",
  "rand_chacha",
@@ -794,9 +794,9 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rustls"
-version = "0.23.41"
+version = "0.23.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b92b125634d9b795e7beca796cc790df15a7fb38323bf3196fda83292d06b1f"
+checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
 dependencies = [
  "log",
  "once_cell",
@@ -1415,9 +1415,9 @@ dependencies = [
 
 [[package]]
 name = "zmij"
-version = "1.0.21"
+version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zopfli"
