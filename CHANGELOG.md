@@ -4,6 +4,15 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.4.2] — 2026-07-15
+
+### Changed
+
+- Inherits **libfreemkv 1.4.2**: the mux no longer nulls decryptable video or
+  storms the online key server on a bad-encoded region; decrypt and TS-structure
+  are separated into distinct primitives so a correct key that yields
+  imperfectly-encoded TS is passed to the demuxer rather than treated as loss.
+
 ## [1.4.1] — 2026-07-14
 
 ### Fixed
