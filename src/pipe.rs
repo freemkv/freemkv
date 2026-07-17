@@ -1089,7 +1089,7 @@ pub(crate) fn resolve_info_keys(
         .iter()
         .max_by_key(|t| t.size_bytes)
         .cloned()
-        .map(|t| libfreemkv::read_encrypted_units(drive, &t, SAMPLE_UNITS))
+        .map(|t| libfreemkv::read_encrypted_units(drive, &t, freemkv_keysources::MIN_SAMPLE_UNITS))
         .unwrap_or_default();
     let keys = KeyConfig {
         keydb_path: keydb_path.clone(),
@@ -1138,7 +1138,9 @@ fn resolve_iso_unit_keys(
         .iter()
         .max_by_key(|t| t.size_bytes)
         .cloned()
-        .map(|t| libfreemkv::read_encrypted_units(&mut reader, &t, SAMPLE_UNITS))
+        .map(|t| {
+            libfreemkv::read_encrypted_units(&mut reader, &t, freemkv_keysources::MIN_SAMPLE_UNITS)
+        })
         .unwrap_or_default();
     apply_keys(&mut disc, keys, samples, out);
     match disc.decrypt_keys() {
@@ -1204,9 +1206,6 @@ fn build_iso_key_fetch(source: &str, keys: &KeyConfig) -> Option<libfreemkv::sec
     });
     Some(libfreemkv::keysource::key_fetch(inputs, make_sources))
 }
-
-/// How many encrypted aligned units to sample for key validation.
-const SAMPLE_UNITS: usize = 4;
 
 /// The keydb path to use: `--keydb <path>` if given; else the first
 /// per-OS search location that exists (Windows `%APPDATA%\freemkv\keydb.cfg`
@@ -1396,7 +1395,9 @@ fn pipe_disc(
         .iter()
         .max_by_key(|t| t.size_bytes)
         .cloned()
-        .map(|t| libfreemkv::read_encrypted_units(&mut drive, &t, SAMPLE_UNITS))
+        .map(|t| {
+            libfreemkv::read_encrypted_units(&mut drive, &t, freemkv_keysources::MIN_SAMPLE_UNITS)
+        })
         .unwrap_or_default();
     apply_keys(&mut disc, keys, samples, out);
 
@@ -1857,7 +1858,9 @@ fn disc_to_iso(
         .iter()
         .max_by_key(|t| t.size_bytes)
         .cloned()
-        .map(|t| libfreemkv::read_encrypted_units(&mut drive, &t, SAMPLE_UNITS))
+        .map(|t| {
+            libfreemkv::read_encrypted_units(&mut drive, &t, freemkv_keysources::MIN_SAMPLE_UNITS)
+        })
         .unwrap_or_default();
     apply_keys(&mut disc, keys, samples, out);
 
@@ -2131,7 +2134,13 @@ fn dir_to_extract(
                 .iter()
                 .max_by_key(|t| t.size_bytes)
                 .cloned()
-                .map(|t| libfreemkv::read_encrypted_units(&mut drive, &t, SAMPLE_UNITS))
+                .map(|t| {
+                    libfreemkv::read_encrypted_units(
+                        &mut drive,
+                        &t,
+                        freemkv_keysources::MIN_SAMPLE_UNITS,
+                    )
+                })
                 .unwrap_or_default();
             apply_keys(&mut disc, keys, samples, out);
             if let Err(e) = disc.ensure_decryptable(false) {
@@ -2174,7 +2183,13 @@ fn dir_to_extract(
                 .iter()
                 .max_by_key(|t| t.size_bytes)
                 .cloned()
-                .map(|t| libfreemkv::read_encrypted_units(&mut reader, &t, SAMPLE_UNITS))
+                .map(|t| {
+                    libfreemkv::read_encrypted_units(
+                        &mut reader,
+                        &t,
+                        freemkv_keysources::MIN_SAMPLE_UNITS,
+                    )
+                })
                 .unwrap_or_default();
             apply_keys(&mut disc, keys, samples, out);
             if let Err(e) = disc.ensure_decryptable(false) {
