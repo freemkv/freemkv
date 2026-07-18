@@ -4,6 +4,30 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.4.5] — 2026-07-18
+
+### Changed
+
+- Inherits **libfreemkv 1.4.5**: FMTS (AACS 2.1) discs mux to a clean single-variant
+  stream — `freemkv iso://… mkv://…` reads only the local variant's units, never
+  handing the alternate device-group half to the demuxer. Also folds in key-`Debug`
+  redaction and the uppercase-`0X` hex parse fix. The CLI now renders `KeyOrigin`
+  display text itself (moved out of the library).
+
+## [1.4.4] — 2026-07-17
+
+### Changed
+
+- Inherits **libfreemkv 1.4.4**: online key requests are no longer silently dropped
+  on discs that yield few sample units.
+
+## [1.4.3] — 2026-07-17
+
+### Changed
+
+- Inherits **libfreemkv 1.4.3**: AACS 2.1 forensic-variant online lookups. The CLI
+  samples `MIN_SAMPLE_UNITS` units for the online key source.
+
 ## [1.4.2] — 2026-07-15
 
 ### Changed
