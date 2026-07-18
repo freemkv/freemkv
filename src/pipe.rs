@@ -1439,7 +1439,7 @@ fn pipe_disc(
     // `_checked` also tells us whether the chosen title proved GENUINELY CLEAR
     // (an unencrypted stub in its own VTS on an otherwise-CSS disc): that title
     // needs no key, and the gate below must not false-error it with E7023.
-    let (keys, title_is_clear) = disc.decrypt_keys_for_title_checked(title_idx, &mut drive, batch);
+    let (keys, title_is_clear) = disc.decrypt_keys_for_title(title_idx, &mut drive, batch);
 
     // Per-title decrypt gate (mirrors the ISO mux path): on a multi-VTS CSS DVD
     // whose chosen title's VTS could not be re-cracked, `keys` is
