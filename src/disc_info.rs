@@ -252,7 +252,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
                 Normal,
                 &format!(
                     "Keys: {} ({} unit keys)",
-                    aacs.key_source.name(),
+                    key_origin_label(aacs.key_source),
                     aacs.unit_keys.len()
                 ),
             );
@@ -633,6 +633,20 @@ fn hex_bytes(bytes: &[u8]) -> String {
         let _ = write!(acc, "{b:02x}");
         acc
     })
+}
+
+/// Human label for how AACS keys were resolved. The library holds no
+/// user-facing English (it exposes the typed `KeyOrigin` enum); this CLI-side
+/// map renders it for `disc-info`.
+fn key_origin_label(o: libfreemkv::KeyOrigin) -> &'static str {
+    match o {
+        libfreemkv::KeyOrigin::DeviceKey => "MKB + device key",
+        libfreemkv::KeyOrigin::ProcessingKey => "MKB + processing key",
+        libfreemkv::KeyOrigin::KeyDbDerived => "KEYDB (derived)",
+        libfreemkv::KeyOrigin::KeyDb => "KEYDB",
+        libfreemkv::KeyOrigin::KeyDbUnitKeys => "KEYDB (unit keys)",
+        libfreemkv::KeyOrigin::ExternalUk => "external UK",
+    }
 }
 
 /// Map `LabelPurpose` to its locale string key. `Normal` returns None — no tag.
