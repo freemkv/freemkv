@@ -1520,6 +1520,18 @@ fn pipe_disc(
         }
     };
     let mut output = libfreemkv::pes::CountingStream::new(raw_output);
+    // Metadata sinks (chapters:// / json://) already wrote their whole file from
+    // the scanned title in output()/create(); they consume no PES frames. Skip
+    // the demux entirely — reading the title just to feed a no-op write() is
+    // pure waste (and on a disc, needless drive wear), and the zero-payload
+    // guard below would otherwise false-fail on a frameless sink.
+    if matches!(
+        libfreemkv::parse_url(dest),
+        libfreemkv::StreamUrl::Chapters { .. } | libfreemkv::StreamUrl::Json { .. }
+    ) {
+        output.finish().map_err(|e| format!("{}", e))?;
+        return Ok(());
+    }
 
     out.blank(Normal);
 
@@ -1749,6 +1761,18 @@ fn pipe(
         }
     };
     let mut output = libfreemkv::pes::CountingStream::new(raw_output);
+    // Metadata sinks (chapters:// / json://) already wrote their whole file from
+    // the scanned title in output()/create(); they consume no PES frames. Skip
+    // the demux entirely — reading the title just to feed a no-op write() is
+    // pure waste (and on a disc, needless drive wear), and the zero-payload
+    // guard below would otherwise false-fail on a frameless sink.
+    if matches!(
+        libfreemkv::parse_url(dest),
+        libfreemkv::StreamUrl::Chapters { .. } | libfreemkv::StreamUrl::Json { .. }
+    ) {
+        output.finish().map_err(|e| format!("{}", e))?;
+        return Ok(());
+    }
 
     out.blank(Normal);
 
