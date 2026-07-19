@@ -4,6 +4,18 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.5.0] — UNRELEASED
+
+### Added
+
+- **Four extraction destinations** (inherits libfreemkv 1.5.0): `audio://` and
+  `sub://` write per-track files (audio-only / subtitle-only, native containers) to
+  a directory; `chapters://` writes a title's chapter markers (`.xml` / `.txt` /
+  `.vtt`, chosen by extension); `json://` writes one title's complete structure as
+  JSON. The two metadata sinks are scan-only — no demux — so they return in seconds.
+- All four schemes are documented in the CLI reference (`cli.md`), with the
+  `audio://` LPCM `.pcm` caveat noted.
+
 ## [1.4.5] — 2026-07-18
 
 ### Changed
