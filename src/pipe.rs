@@ -713,6 +713,7 @@ fn preflight_validate(
     // error), and the sinks have no filesystem path to validate.
     match parsed_dest {
         libfreemkv::StreamUrl::Mkv { path }
+        | libfreemkv::StreamUrl::Mp4 { path }
         | libfreemkv::StreamUrl::M2ts { path }
         | libfreemkv::StreamUrl::Iso { path } => {
             // A trailing-slash dest (one-file-per-title directory) is validated by
