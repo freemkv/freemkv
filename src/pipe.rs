@@ -727,9 +727,12 @@ fn preflight_validate(
         libfreemkv::StreamUrl::Dir { path } => {
             validate_dir_dest(path, dest, force)?;
         }
-        // `demux://` writes per-track ES files into a directory (created on
-        // demand). Same creatable/writable/non-empty gate as `dir://`.
-        libfreemkv::StreamUrl::Demux { dir } => {
+        // `demux://` / `audio://` / `sub://` write per-track ES files into a
+        // directory (created on demand). Same creatable/writable/non-empty gate
+        // as `dir://`.
+        libfreemkv::StreamUrl::Demux { dir }
+        | libfreemkv::StreamUrl::Audio { dir }
+        | libfreemkv::StreamUrl::Sub { dir } => {
             validate_dir_dest(dir, dest, force)?;
         }
         _ => {}
@@ -991,7 +994,12 @@ fn build_jobs(
             if is_scheme_only_sink(parsed_dest) {
                 // null:// / stdio:// — every title to the single sink, no naming.
                 sink_jobs(&indices)
-            } else if matches!(parsed_dest, libfreemkv::StreamUrl::Demux { .. }) {
+            } else if matches!(
+                parsed_dest,
+                libfreemkv::StreamUrl::Demux { .. }
+                    | libfreemkv::StreamUrl::Audio { .. }
+                    | libfreemkv::StreamUrl::Sub { .. }
+            ) {
                 // demux:// — directory sink with its own per-track naming.
                 Some(demux_jobs(&indices, &demux_dir))
             } else if indices.len() == 1 && !is_dir_dest {
@@ -1018,7 +1026,12 @@ fn build_jobs(
                 // null:// / stdio:// — every requested title to the single sink.
                 return sink_jobs(&indices);
             }
-            if matches!(parsed_dest, libfreemkv::StreamUrl::Demux { .. }) {
+            if matches!(
+                parsed_dest,
+                libfreemkv::StreamUrl::Demux { .. }
+                    | libfreemkv::StreamUrl::Audio { .. }
+                    | libfreemkv::StreamUrl::Sub { .. }
+            ) {
                 // demux:// — directory sink with its own per-track naming.
                 return Some(demux_jobs(&indices, &demux_dir));
             }
