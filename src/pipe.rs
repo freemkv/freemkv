@@ -1507,6 +1507,7 @@ fn pipe_disc(
 
     let info = input.info().clone();
     print_stream_info(out, &info);
+    print_mp4_skips(out, dest, &info);
 
     let mut title = info.clone();
     let disc_name = disc.meta_title.as_deref().unwrap_or(&disc.volume_id);
@@ -1748,6 +1749,7 @@ fn pipe(
     // Get info after header scanning (stdio/network populate info during read)
     let info = input.info().clone();
     print_stream_info(out, &info);
+    print_mp4_skips(out, dest, &info);
 
     // Build output title with codec_privates from input
     let mut title = info.clone();
@@ -2666,6 +2668,45 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
                 d as u64 / 3600,
                 (d as u64 % 3600) / 60,
                 d as u64 % 60
+            ),
+        );
+    }
+}
+
+/// For an `mp4://` destination, print the tracks that can't be carried in MP4
+/// (bitmap subs, TrueHD/DTS, secondary video) so a compatibility export is never
+/// a silent drop. No-op for every other scheme.
+fn print_mp4_skips(out: &Output, dest: &str, title: &libfreemkv::DiscTitle) {
+    if !matches!(
+        libfreemkv::parse_url(dest),
+        libfreemkv::StreamUrl::Mp4 { .. }
+    ) {
+        return;
+    }
+    let report = libfreemkv::mp4_fit_report(title);
+    if report.skipped.is_empty() {
+        return;
+    }
+    out.raw(
+        Normal,
+        &strings::fmt(
+            "mp4.excluded_header",
+            &[("count", &report.skipped.len().to_string())],
+        ),
+    );
+    for (idx, reason) in &report.skipped {
+        let reason_key = match reason {
+            libfreemkv::Mp4SkipReason::BitmapSubtitle => "mp4.reason.subtitle",
+            libfreemkv::Mp4SkipReason::UnmappableAudio => "mp4.reason.audio",
+            libfreemkv::Mp4SkipReason::SecondaryVideo => "mp4.reason.video",
+        };
+        out.raw(
+            Normal,
+            &format!(
+                "    - {} {}: {}",
+                strings::get("stream.track"),
+                idx + 1,
+                strings::get(reason_key)
             ),
         );
     }
