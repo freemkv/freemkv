@@ -112,11 +112,18 @@ pub fn run(device: Option<&str>, args: &[String]) {
     // credentials (from the local keydb) so the handshake captures the Volume
     // ID + Unit_Key_RO.inf a live-drive key resolution needs; without them a
     // locked drive yields no VID and no resolvable keys.
-    let scan_opts = if verbose {
+    let mut scan_opts = if verbose {
         crate::pipe::drive_scan_opts(&keydb)
     } else {
         ScanOptions::default()
     };
+    // Read the PGS streams to detect forced subtitles from their content, so the
+    // reported forced flags match what a rip's muxer produces. Gated to verbose:
+    // it needs the AACS keys to read encrypted UHD subtitle content, and it reads
+    // the clip (slow) — keyless `info` stays fast and uses vendor-label forced.
+    if verbose {
+        scan_opts.probe_forced_subtitles = true;
+    }
     let mut disc = match Disc::scan(&mut drive, &scan_opts) {
         Ok(d) => d,
         Err(e) => {
