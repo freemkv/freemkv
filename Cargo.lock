@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.4.5"
+version = "1.5.0"
 dependencies = [
  "freemkv-i18n",
  "freemkv-keysources",
@@ -288,14 +288,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.4.5"
+version = "1.5.0"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.5.0#88d2e687a45a84cc14e7782fb7b7a77e502f6371"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.4.5"
+version = "1.5.0"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.5.0#9449debc4f4d3bd063efdbb20491fcfa99fc2109"
 dependencies = [
  "base64",
  "flate2",
@@ -308,7 +310,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.4.5"
+version = "1.5.0"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.5.0#4a6f0dee19e1612567013a4b1763b321c4156102"
 dependencies = [
  "aes",
  "base64",
@@ -502,6 +505,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libfreemkv"
 version = "1.5.0"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.5.0#e194ef15857c46bd5c79e1f5a283659e158536b8"
 dependencies = [
  "aes",
  "base64",
@@ -685,18 +689,18 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.106"
+version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
 
 [[package]]
 name = "quote"
-version = "1.0.46"
+version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
+checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
