@@ -727,10 +727,11 @@ fn preflight_validate(
         libfreemkv::StreamUrl::Dir { path } => {
             validate_dir_dest(path, dest, force)?;
         }
-        // `demux://` / `audio://` / `sub://` write per-track ES files into a
-        // directory (created on demand). Same creatable/writable/non-empty gate
-        // as `dir://`.
+        // `demux://` / `video://` / `audio://` / `sub://` write per-track ES files
+        // into a directory (created on demand). Same creatable/writable/non-empty
+        // gate as `dir://`.
         libfreemkv::StreamUrl::Demux { dir }
+        | libfreemkv::StreamUrl::Video { dir }
         | libfreemkv::StreamUrl::Audio { dir }
         | libfreemkv::StreamUrl::Sub { dir } => {
             validate_dir_dest(dir, dest, force)?;
@@ -972,12 +973,15 @@ fn build_jobs(
             return vec![(Some(indices[0]), dest.to_string())];
         }
         let trimmed = base_dir.trim_end_matches('/');
+        // Re-prefix the ORIGINAL scheme (`demux`/`video`/`audio`/`sub`): `base_dir`
+        // came from `path_str()` (scheme stripped), so a bare `out/t02/` would be
+        // rejected by `parse_url` as Unknown. Hardcoding `demux://` here would drop
+        // the kind filter and dump every track for a multi-title `video/audio/sub`
+        // rip — so carry the sink's own scheme through.
+        let scheme = parsed_dest.scheme();
         indices
             .iter()
-            // Re-prefix the `demux://` scheme: `base_dir` came from
-            // `path_str()` (scheme stripped), so a bare `out/t02/` would be
-            // rejected by `parse_url` as Unknown and `output()` would error.
-            .map(|&idx| (Some(idx), format!("demux://{trimmed}/t{:02}/", idx + 1)))
+            .map(|&idx| (Some(idx), format!("{scheme}://{trimmed}/t{:02}/", idx + 1)))
             .collect()
     };
     let demux_dir = parsed_dest.path_str().to_string();
@@ -997,6 +1001,7 @@ fn build_jobs(
             } else if matches!(
                 parsed_dest,
                 libfreemkv::StreamUrl::Demux { .. }
+                    | libfreemkv::StreamUrl::Video { .. }
                     | libfreemkv::StreamUrl::Audio { .. }
                     | libfreemkv::StreamUrl::Sub { .. }
             ) {
@@ -1029,6 +1034,7 @@ fn build_jobs(
             if matches!(
                 parsed_dest,
                 libfreemkv::StreamUrl::Demux { .. }
+                    | libfreemkv::StreamUrl::Video { .. }
                     | libfreemkv::StreamUrl::Audio { .. }
                     | libfreemkv::StreamUrl::Sub { .. }
             ) {

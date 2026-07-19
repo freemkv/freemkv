@@ -8,13 +8,21 @@ project follows semantic versioning.
 
 ### Added
 
-- **Four extraction destinations** (inherits libfreemkv 1.5.0): `audio://` and
-  `sub://` write per-track files (audio-only / subtitle-only, native containers) to
-  a directory; `chapters://` writes a title's chapter markers (`.xml` / `.txt` /
-  `.vtt`, chosen by extension); `json://` writes one title's complete structure as
-  JSON. The two metadata sinks are scan-only — no demux — so they return in seconds.
-- All four schemes are documented in the CLI reference (`cli.md`), with the
+- **Five extraction destinations** (inherits libfreemkv 1.5.0): `video://`,
+  `audio://`, and `sub://` write per-track files (one track class each, native
+  form) to a directory; `chapters://` writes a title's chapter markers (`.xml` /
+  `.txt` / `.vtt`, chosen by extension); `json://` writes one title's complete
+  structure as JSON. The two metadata sinks are scan-only — no demux — so they
+  return in seconds.
+- All five schemes are documented in the CLI reference (`cli.md`), with the
   `audio://` LPCM `.pcm` caveat noted.
+
+### Fixed
+
+- **Multi-title `video://` / `audio://` / `sub://` keep their kind filter.** The
+  per-title job builder hardcoded a `demux://` prefix on the per-title
+  subdirectories, so a multi-title extraction of one track class would have fanned
+  out *every* track instead. It now carries the sink's own scheme through.
 
 ## [1.4.5] — 2026-07-18
 
