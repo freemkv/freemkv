@@ -8,10 +8,13 @@ project follows semantic versioning.
 
 ### Added
 
-- **`mp4://` destination** (inherits libfreemkv 1.5.0): decrypt a disc straight to
-  a play-everywhere MP4. Before muxing, the CLI prints exactly which tracks MP4
-  can't carry (TrueHD / DTS-HD MA audio, PGS / VobSub subtitles) so the
-  compatibility export is never a silent loss — `mkv://` keeps everything.
+- **`mp4://` as source *and* destination** (inherits libfreemkv 1.5.0). As a
+  destination, decrypt a disc straight to a play-everywhere MP4; before muxing,
+  the CLI prints exactly which tracks MP4 can't carry (TrueHD / DTS-HD MA audio,
+  PGS / VobSub subtitles) so the compatibility export is never a silent loss
+  (`mkv://` keeps everything). As a source, `mp4://` reads a progressive MP4 back
+  into the pipeline — `mp4:// mkv://` converts with no re-encode, and `mp4://`
+  flows to every other sink too.
 
 - **Five extraction destinations** (inherits libfreemkv 1.5.0): `video://`,
   `audio://`, and `sub://` write per-track files (one track class each, native
