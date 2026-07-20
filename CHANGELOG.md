@@ -8,6 +8,12 @@ project follows semantic versioning.
 
 ### Added
 
+- **`info` states the disc's encryption generation for ISO scans.** `freemkv info
+  iso://…` now prints the AACS generation line (`AACS 2.0 encrypted`, `AACS 2.1
+  encrypted`, `AACS 1.0 encrypted`, or `CSS encrypted`) above the title list, the
+  same line the drive (`disc://`) path shows — the generation is read at scan time
+  even though the ISO path is keyless. Rendered through one shared helper, so the
+  two paths can't drift.
 - **`mp4://` as source *and* destination** (inherits libfreemkv 1.5.0). As a
   destination, decrypt a disc straight to a play-everywhere MP4; before muxing,
   the CLI prints exactly which tracks MP4 can't carry (TrueHD / LPCM audio,

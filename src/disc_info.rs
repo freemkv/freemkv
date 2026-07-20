@@ -177,17 +177,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
             gb
         ),
     );
-    match encryption_label(&disc) {
-        Some(EncLabel::Css) => out.print(Normal, "disc.css_encrypted"),
-        // "AACS 2.1 encrypted" — the generation label is the informative part (a
-        // non-translated proper noun). The word "encrypted" is app-layer English
-        // here rather than the i18n table, deliberately: localizing it would
-        // require adding a string to freemkv-i18n (a versioned crate we keep
-        // frozen), and a stale i18n pin would then print the raw key.
-        Some(EncLabel::Aacs(label)) => out.raw(Normal, &format!("{label} encrypted")),
-        Some(EncLabel::GenericAacs) => out.print(Normal, "disc.aacs_encrypted"),
-        None => {}
-    }
+    emit_encryption_line(&out, &disc);
 
     // Unlocker matrix — which registered unlockers actually RAN this rip (did
     // work, not merely "matched the disc kind"), so the user can see (and
@@ -290,6 +280,13 @@ pub fn run(device: Option<&str>, args: &[String]) {
 /// `full` shows every title (otherwise the first 5, with a "+N more" footer).
 pub fn print_disc_titles(disc: &Disc, full: bool) {
     let out = Output::new(false, false);
+    // The iso:// path is keyless, but the disc format and MKB generation are
+    // read at scan time, so state the encryption generation here with the SAME
+    // renderer the drive path uses (`emit_encryption_line`) — no duplicated
+    // match. An unencrypted disc (clear DVD, clear HD DVD) prints no line.
+    if emit_encryption_line(&out, disc) {
+        out.blank(Normal);
+    }
     print_titles(&out, disc, full, false, false);
 }
 
@@ -569,7 +566,7 @@ fn aacs_generation(disc: &Disc) -> String {
 fn is_aacs_format(disc: &Disc) -> bool {
     matches!(
         disc.format,
-        DiscFormat::BluRay | DiscFormat::Uhd | DiscFormat::Fmts
+        DiscFormat::BluRay | DiscFormat::Uhd | DiscFormat::Fmts | DiscFormat::HdDvd
     )
 }
 
@@ -588,6 +585,27 @@ enum EncLabel {
 /// wins whenever any CSS signal is present (resolved state OR a recorded
 /// css_error from a failed crack) — a failed-CSS DVD must never be mislabeled as
 /// AACS; the AACS generation is used only for a real AACS carrier / state.
+/// Emit the one-line encryption/generation label ("AACS 2.0 encrypted",
+/// "CSS encrypted", …) for a scanned disc, returning whether a line was printed
+/// (so a caller can follow it with a blank). Shared by the drive (`disc://`) and
+/// keyless ISO (`iso://`) info paths so the generation line renders identically
+/// for both — one renderer, no duplicated match.
+///
+/// The generation label is the informative part (a non-translated proper noun).
+/// The word "encrypted" is app-layer English here rather than the i18n table,
+/// deliberately: localizing it would require adding a string to freemkv-i18n (a
+/// versioned crate we keep frozen), and a stale i18n pin would then print the
+/// raw key.
+fn emit_encryption_line(out: &Output, disc: &Disc) -> bool {
+    match encryption_label(disc) {
+        Some(EncLabel::Css) => out.print(Normal, "disc.css_encrypted"),
+        Some(EncLabel::Aacs(label)) => out.raw(Normal, &format!("{label} encrypted")),
+        Some(EncLabel::GenericAacs) => out.print(Normal, "disc.aacs_encrypted"),
+        None => return false,
+    }
+    true
+}
+
 fn encryption_label(disc: &Disc) -> Option<EncLabel> {
     if !disc.encrypted {
         return None;
