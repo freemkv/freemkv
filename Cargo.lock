@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "freemkv-i18n",
  "freemkv-keysources",
@@ -288,16 +288,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.5.0"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.5.0#88d2e687a45a84cc14e7782fb7b7a77e502f6371"
+version = "1.5.1"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.5.1#add1821ebbec058a06f47245a5bd996531d01cb3"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.5.0"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.5.0#9449debc4f4d3bd063efdbb20491fcfa99fc2109"
+version = "1.5.1"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.5.1#c09c247e514cde4d5ba15f9d2a41770fd419a2a8"
 dependencies = [
  "base64",
  "flate2",
@@ -310,8 +310,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.5.0"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.5.0#4a6f0dee19e1612567013a4b1763b321c4156102"
+version = "1.5.1"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.5.1#cc4c9e496d140d0c472bf26d9bba3ff39f4a6043"
 dependencies = [
  "aes",
  "base64",
@@ -498,14 +498,14 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "libc"
-version = "0.2.186"
+version = "0.2.187"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+checksum = "a7743783ea728ef5c31194c6590797eed286449b4a4e87d626d8a51f0a94e732"
 
 [[package]]
 name = "libfreemkv"
-version = "1.5.0"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.5.0#e194ef15857c46bd5c79e1f5a283659e158536b8"
+version = "1.5.1"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.5.1#909fe48628300057ec0ccb1ecc873f3a64e5bb14"
 dependencies = [
  "aes",
  "base64",
@@ -854,14 +854,14 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.0",
+ "syn 3.0.2",
 ]
 
 [[package]]
 name = "serde_json"
-version = "1.0.150"
+version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
  "itoa",
  "memchr",
@@ -956,9 +956,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.0"
+version = "3.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2fac314a64dc9a36e61a9eb4261a5e9bbfbc922b27e518af97bc32b926cf967"
+checksum = "a207d6d6a2b7fc470b80443726053f18a2481b7e1eee970597051596567987a3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -993,7 +993,7 @@ checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.0",
+ "syn 3.0.2",
 ]
 
 [[package]]
@@ -1329,18 +1329,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.54"
+version = "0.8.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7cbbc0a705a0fd05cc3676525980d2bf5a9bc4adac6d6475209a7887cf59d19"
+checksum = "b5a105cd7b140f6eeec8acff2ea38135d3cab283ada58540f629fe51e46696eb"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.54"
+version = "0.8.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2e817b7b52d0c7358d3246da9d69935ebb18116b2b102b4230dac079b4862f5"
+checksum = "0fe976fb70c78cd64cccfe3a6fc142244e8a77b70959b30faf9d0ac37ee228eb"
 dependencies = [
  "proc-macro2",
  "quote",
