@@ -1442,23 +1442,16 @@ fn pipe_disc(
     let title = disc.titles[title_idx].clone();
     let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
 
-    // Per-title key resolution (Theme B fix, mirrors the ISO path's
-    // per-title key block in libfreemkv mux/resolve.rs). The disc-wide
-    // `decrypt_keys()`
-    // carries the single key the scan cracked — but on a multi-VTS CSS DVD
-    // a non-main-VTS `-t N` lives in a different VTS with a DIFFERENT
-    // per-VTS title key, so the disc-wide key descrambles it to GARBAGE at
-    // exit 0. `decrypt_keys_for_title` re-cracks from the chosen title's
-    // own extents when it doesn't overlap the cracked span, and returns
-    // `DecryptKeys::None` (never the wrong key) when that re-crack misses.
-    //
-    // The re-crack reads sectors off the live `drive` (a `SectorSource`),
-    // which is still owned here — it is only moved into `DiscStream` below.
-    // For AACS / single-VTS / unencrypted discs `decrypt_keys_for_title`
-    // short-circuits to `decrypt_keys()`, so this is a no-op on those paths.
-    // `_checked` also tells us whether the chosen title proved GENUINELY CLEAR
-    // (an unencrypted stub in its own VTS on an otherwise-CSS disc): that title
-    // needs no key, and the gate below must not false-error it with E7023.
+    // Per-title key resolution (mirrors the ISO path's per-title key block in
+    // libfreemkv mux/resolve.rs). For a DVD, `decrypt_keys_for_title` cracks the
+    // chosen title's CSS key from that title's OWN extents (in playback order),
+    // NOT from disc-wide detection — so the correct per-VTS key is used and a
+    // detection miss can never gate the mux into raw passthrough. It reads sectors
+    // off the live `drive` (a `SectorSource`), still owned here (only moved into
+    // `DiscStream` below). AACS / non-DVD discs short-circuit to `decrypt_keys()`.
+    // The bool reports whether the title proved GENUINELY CLEAR (an unencrypted
+    // stub needing no key): the gate below must not false-error such a title,
+    // while a scrambled-but-uncrackable title (bool false, key `None`) hard-fails.
     let (keys, title_is_clear) = disc.decrypt_keys_for_title(title_idx, &mut drive, batch);
 
     // Per-title decrypt gate (mirrors the ISO mux path): on a multi-VTS CSS DVD
