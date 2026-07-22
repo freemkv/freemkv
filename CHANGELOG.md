@@ -4,6 +4,11 @@ All notable changes to the `freemkv` CLI are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
 project follows semantic versioning.
 
+## [1.5.2] — UNRELEASED
+
+Version sync with the workspace; inherits libfreemkv 1.5.2 (CSS DVD mux fix, and
+the `disc-info` unlocker rename CSS → DVD). No source change in the CLI.
+
 ## [1.5.0] — UNRELEASED
 
 ### Added
