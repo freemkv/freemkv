@@ -6,8 +6,9 @@ project follows semantic versioning.
 
 ## [1.5.2] — UNRELEASED
 
-Version sync with the workspace; inherits libfreemkv 1.5.2 (CSS DVD mux fix, and
-the `disc-info` unlocker rename CSS → DVD). No source change in the CLI.
+Inherits libfreemkv 1.5.2 (CSS DVD mux fix, faster DVD scan, unlocker rename
+CSS → DVD). The disc→MKV path now lets `DiscStream` resolve a DVD's per-VTS CSS
+key at read time (one shared crack site with the ISO mux); `--raw` skips it.
 
 ## [1.5.0] — UNRELEASED
 

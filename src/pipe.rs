@@ -1452,23 +1452,37 @@ fn pipe_disc(
     // The bool reports whether the title proved GENUINELY CLEAR (an unencrypted
     // stub needing no key): the gate below must not false-error such a title,
     // while a scrambled-but-uncrackable title (bool false, key `None`) hard-fails.
-    let (keys, title_is_clear) = disc.decrypt_keys_for_title(title_idx, &mut drive, batch);
+    // DVD CSS is resolved at exactly ONE site — the per-title crack inside
+    // `DiscStream::new` (which decrypts a crackable title, passes a genuinely
+    // clear one through, and hard-fails an uncrackable one with CssKeyMissing).
+    // So for a DVD we do NOT pre-crack here: pass `None` and let the constructor
+    // own it. Pre-cracking would scan the live drive a second time for every
+    // clear title (`decrypt_keys_for_title` → None → constructor re-cracks).
+    // `--raw` (any format) is deliberate ciphertext passthrough — also `None`,
+    // no crack, no gate.
+    let is_dvd = matches!(disc.format, libfreemkv::DiscFormat::Dvd);
+    let (keys, title_is_clear) = if raw || is_dvd {
+        (libfreemkv::DecryptKeys::None, false)
+    } else {
+        disc.decrypt_keys_for_title(title_idx, &mut drive, batch)
+    };
 
-    // Per-title decrypt gate (mirrors the ISO mux path): on a multi-VTS CSS DVD
-    // whose chosen title's VTS could not be re-cracked, `keys` is
-    // `DecryptKeys::None` even though the disc-wide gate above passed; on an
-    // AACS disc with no key it is also None. Either way, streaming that into
-    // `DiscStream` passes ciphertext through unchanged → the demuxer sees no TS
-    // syncs, emits nothing, and we'd write an empty/garbage MKV at exit 0. Fail
-    // loudly with the same verdict source (`Disc::ensure_decryptable_keys`):
-    // CssKeyMissing for CSS, NoDiscKey (named by hash) for AACS. `--raw` and
-    // unencrypted discs pass.
-    disc.ensure_title_decryptable(raw, &keys, title_is_clear)
-        .map_err(|e| e.to_string())?;
+    // Per-title decrypt gate for the AACS / non-DVD path: a None key here means
+    // no usable disc key, which would mux ciphertext as an empty/garbage MKV at
+    // exit 0 — fail loudly with NoDiscKey (named by hash). The DVD path is gated
+    // inside `DiscStream::new` instead (its CSS hard-fail), and `--raw` passes.
+    if !is_dvd {
+        disc.ensure_title_decryptable(raw, &keys, title_is_clear)
+            .map_err(|e| e.to_string())?;
+    }
 
     let format = disc.content_format;
 
-    let mut input = libfreemkv::DiscStream::new(Box::new(drive), title, keys, batch, format);
+    // `raw` here skips the CSS self-crack (ciphertext passthrough); `set_raw()`
+    // below additionally nulls the reader keys for the raw-AACS case.
+    let mut input =
+        libfreemkv::DiscStream::new(Box::new(drive), title, keys, batch, format, raw, None)
+            .map_err(|e| e.to_string())?;
 
     if raw {
         input.set_raw();
