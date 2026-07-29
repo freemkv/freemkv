@@ -404,27 +404,34 @@ fn session_credentials(keys: &KeyConfig) -> Option<libfreemkv::DriveCredentials>
     (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs })
 }
 
+/// Normalize the GUI's settings-derived [`KeyConfig`] into the engine's
+/// `KeyParams`, preserving the GUI's `shellexpand` of the configured keydb
+/// path and its EXPLICIT `online_only` toggle — both stay GUI-boundary
+/// concerns; the engine only sees the already-resolved result. An empty
+/// `keydb_path` / `keyserver_url` setting (the GUI's "not configured"
+/// sentinel) maps to `None`, dropping that source entirely — never a
+/// default-location fallback (that's the CLI's policy, not the GUI's).
+fn key_params(keys: &KeyConfig) -> freemkv_engine::KeyParams {
+    let keydb_path = (!keys.keydb_path.trim().is_empty())
+        .then(|| crate::settings::shellexpand(&keys.keydb_path));
+    let key_url = (!keys.keyserver_url.trim().is_empty()).then(|| keys.keyserver_url.clone());
+    freemkv_engine::KeyParams {
+        keydb_path,
+        key_url,
+        key_auth: Some(keys.keyserver_token.clone()),
+        online_only: keys.online_only,
+    }
+}
+
 /// The key-source factory used to resolve a disc's AACS keys (same sources the
 /// ISO path uses, built from the user's settings).
 fn key_factory(keys: &KeyConfig) -> libfreemkv::KeySourceFactory {
-    let k = keys.clone();
-    std::sync::Arc::new(move || {
-        key_sources(
-            &k.keydb_path,
-            &k.keyserver_url,
-            &k.keyserver_token,
-            k.online_only,
-        )
-    })
+    freemkv_engine::key_source_factory(&key_params(keys))
 }
 
 /// Which key source won, from a resolution trace (for the key strip).
 fn won_from_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> Option<String> {
-    trace
-        .keys
-        .iter()
-        .find(|s| s.outcome == libfreemkv::aacs::trace::KeyOutcome::Resolved)
-        .map(|s| s.who.clone())
+    freemkv_engine::won_source(trace)
 }
 
 /// Scan a live optical drive (`disc://<device>` or bare `disc://` autodetect)
@@ -538,32 +545,6 @@ impl fe::Sink for UiSink {
     }
 }
 
-/// Build the ordered key-source list from the user's settings, mirroring the
-/// CLI's local-first policy: the keydb unless the user asked for online-only,
-/// then the online service when a valid URL is configured.
-fn key_sources(
-    keydb_path: &str,
-    keyserver_url: &str,
-    keyserver_token: &str,
-    online_only: bool,
-) -> Vec<Box<dyn freemkv_keysources::KeySource>> {
-    let mut v: Vec<Box<dyn freemkv_keysources::KeySource>> = Vec::new();
-    if !online_only && !keydb_path.trim().is_empty() {
-        v.push(Box::new(freemkv_keysources::KeydbSource::new(
-            crate::settings::shellexpand(keydb_path),
-        )));
-    }
-    if !keyserver_url.trim().is_empty()
-        && freemkv_keysources::validate_keyserver_url(keyserver_url).is_ok()
-    {
-        v.push(Box::new(freemkv_keysources::OnlineSource::new(
-            keyserver_url.to_string(),
-            keyserver_token.to_string(),
-        )));
-    }
-    v
-}
-
 /// Resolve AACS keys onto a scanned disc. Without this the mux fails E7022 on
 /// every encrypted title — scanning alone does not consult any key source.
 /// Returns the label of the source that actually produced the key
@@ -573,25 +554,10 @@ pub fn resolve_disc_keys(
     reader: &mut dyn libfreemkv::SectorSource,
     keys: &KeyConfig,
 ) -> Option<String> {
-    let k = keys.clone();
-    let factory: libfreemkv::KeySourceFactory = std::sync::Arc::new(move || {
-        key_sources(
-            &k.keydb_path,
-            &k.keyserver_url,
-            &k.keyserver_token,
-            k.online_only,
-        )
-    });
-    let resolved = libfreemkv::resolve_keys_for(reader, disc, factory);
     // The trace is the ONLY authoritative record of which source won.
     // `Disc::aacs.key_source` is `ExternalUk` for every caller-supplied key —
     // and is also the scan-time placeholder — so it cannot answer this.
-    resolved
-        .trace
-        .keys
-        .iter()
-        .find(|step| step.outcome == libfreemkv::aacs::trace::KeyOutcome::Resolved)
-        .map(|step| step.who.clone())
+    freemkv_engine::resolve_disc_keys(disc, reader, &key_params(keys))
 }
 
 /// Describe the disc's key state honestly.
