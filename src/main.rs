@@ -63,6 +63,15 @@ fn main() {
 /// Launch the desktop shell for this platform.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn run_gui() {
+    // Apply the saved interface language BEFORE any UI string is looked up.
+    // `freemkv_i18n` locks the locale on first `get()` and refuses a later
+    // change (OnceLock), so this must run before the shell builds anything.
+    // "auto" (the default) leaves the crate to follow the system locale.
+    let code = ui::locale_code(&settings::Settings::load().language);
+    if code != "auto" {
+        strings::set_language(code);
+    }
+
     // Development harness (scan / rip / screenshot hooks). Debug builds only —
     // the shipped release binary has no environment switches.
     #[cfg(all(debug_assertions, target_os = "macos"))]

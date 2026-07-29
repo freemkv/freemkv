@@ -10,4 +10,7 @@
 pub mod engine;
 pub mod platform;
 pub mod settings;
+// The i18n string facade — the core (`ui`) localizes through it, so the lib
+// target needs it too (it is just a re-export of `freemkv_i18n`).
+pub mod strings;
 pub mod ui;

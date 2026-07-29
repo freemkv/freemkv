@@ -351,15 +351,19 @@ impl InfoRows {
         }
     }
 
-    pub const LABELS: [&'static str; 7] = [
-        "Source :",
-        "Source file :",
-        "Source size :",
-        "Read rate :",
-        "Output file :",
-        "Output size :",
-        "Free space :",
-    ];
+    /// Row labels for the Information panel, localized. A function (not a
+    /// const) so it reflects the active locale.
+    pub fn labels() -> [String; 7] {
+        [
+            crate::strings::get("gui.info.source"),
+            crate::strings::get("gui.info.source_file"),
+            crate::strings::get("gui.info.source_size"),
+            crate::strings::get("gui.info.read_rate"),
+            crate::strings::get("gui.info.output_file"),
+            crate::strings::get("gui.info.output_size"),
+            crate::strings::get("gui.info.free_space"),
+        ]
+    }
 
     pub fn as_array(&self) -> [&str; 7] {
         [
@@ -379,7 +383,7 @@ pub fn rate_text(speed_bps: u64, running: bool) -> String {
     if speed_bps > 0 {
         format!("{}/s", fmt_bytes(speed_bps))
     } else if running {
-        "not reported".to_string()
+        crate::strings::get("gui.info.not_reported")
     } else {
         "—".to_string()
     }
@@ -387,10 +391,17 @@ pub fn rate_text(speed_bps: u64, running: bool) -> String {
 
 /// Bar caption: percent, elapsed, and the engine's ETA when it has one.
 pub fn bar_caption(pct: f64, elapsed_secs: u64, eta_secs: Option<u64>) -> String {
-    let el = format!("Elapsed: {}", fmt_hms(elapsed_secs));
+    let el = crate::strings::fmt("gui.progress.elapsed", &[("hms", &fmt_hms(elapsed_secs))]);
+    let pct = format!("{pct:.0}");
     match eta_secs {
-        Some(e) => format!("{pct:.0}%   {el}   Remaining: {}", fmt_hms(e)),
-        None => format!("{pct:.0}%   {el}"),
+        Some(e) => crate::strings::fmt(
+            "gui.progress.caption_eta",
+            &[("pct", &pct), ("elapsed", &el), ("hms", &fmt_hms(e))],
+        ),
+        None => crate::strings::fmt(
+            "gui.progress.caption_no_eta",
+            &[("pct", &pct), ("elapsed", &el)],
+        ),
     }
 }
 
@@ -405,6 +416,88 @@ pub fn container_label(format: &str) -> &'static str {
     } else {
         "MKV"
     }
+}
+
+/// Localized display text for a canonical output-format string. The canonical
+/// string (returned by `output_formats`, stored in `App.format`, matched by
+/// `.contains(...)` in the engine) stays English so ripping keeps working; only
+/// what the picker SHOWS is translated. An unknown format returns as-is.
+pub fn format_label(canonical: &str) -> String {
+    let key = match canonical {
+        "Selected titles → MKV" => "gui.format.mkv",
+        "Selected titles → MP4" => "gui.format.mp4",
+        "Selected titles → M2TS" => "gui.format.m2ts",
+        "Selected titles → separate track files" => "gui.format.tracks",
+        "Whole disc → ISO image" => "gui.format.iso",
+        "Whole disc → decrypted folder" => "gui.format.folder",
+        "Chapters → file" => "gui.format.chapters",
+        "Title info → JSON" => "gui.format.json",
+        "Video index → .fvi" => "gui.format.fvi",
+        _ => return canonical.to_string(),
+    };
+    crate::strings::get(key)
+}
+
+/// Inverse of [`format_label`]: resolve a LOCALIZED popup label back to the
+/// canonical format string. The shell shows `format_label(canonical)`, so a
+/// non-English selection reads back as translated text — `format_by_title`
+/// only matches the English canonical list, so it would fail in every other
+/// locale. Match on the localized display instead.
+pub fn format_from_label(label: &str, disc_source: bool, mp4_ok: bool) -> Option<&'static str> {
+    // Canonical (English) fast path first — also covers callers that pass a
+    // canonical string directly — then fall back to the localized display.
+    format_by_title(label, disc_source, mp4_ok).or_else(|| {
+        output_formats(disc_source, mp4_ok)
+            .into_iter()
+            .flatten()
+            .find(|canon| format_label(canon) == label)
+    })
+}
+
+/// The interface languages the GUI offers, matched 1:1 to the locale files
+/// shipped by `freemkv-i18n` (`en de es fr it nl pt`). Each entry is
+/// `(endonym, code)`; the endonym is shown in the picker (language names are
+/// conventionally written in their own language, so they are not translated),
+/// the code is what `freemkv_i18n::set_language` expects. `"auto"` follows the
+/// system locale. Adding a locale file means adding one row here.
+pub const LOCALES: &[(&str, &str)] = &[
+    ("Auto", "auto"),
+    ("English", "en"),
+    ("Deutsch", "de"),
+    ("Español", "es"),
+    ("Français", "fr"),
+    ("Italiano", "it"),
+    ("Nederlands", "nl"),
+    ("Português", "pt"),
+];
+
+/// Endonyms for the language picker, in order.
+pub fn locale_names() -> Vec<&'static str> {
+    LOCALES.iter().map(|(name, _)| *name).collect()
+}
+
+/// Map a stored setting (endonym OR code, any case) to a locale code.
+/// Anything unrecognized — including "Auto"/"" — resolves to `"auto"`.
+pub fn locale_code(sel: &str) -> &'static str {
+    let s = sel.trim();
+    for (name, code) in LOCALES {
+        if s.eq_ignore_ascii_case(name) || s.eq_ignore_ascii_case(code) {
+            return code;
+        }
+    }
+    "auto"
+}
+
+/// Map a stored setting (code OR endonym) back to the picker endonym, so the
+/// popup re-selects the right row on reopen. Falls back to "Auto".
+pub fn locale_display(sel: &str) -> &'static str {
+    let s = sel.trim();
+    for (name, code) in LOCALES {
+        if s.eq_ignore_ascii_case(name) || s.eq_ignore_ascii_case(code) {
+            return name;
+        }
+    }
+    "Auto"
 }
 
 /// Overall progress across a multi-title run.
@@ -522,7 +615,7 @@ impl App {
         };
         app.say(
             LogKind::Result,
-            &format!("freemkv {} — ready", env!("CARGO_PKG_VERSION")),
+            &crate::strings::fmt("gui.log.ready", &[("version", env!("CARGO_PKG_VERSION"))]),
         );
         app
     }
@@ -562,9 +655,9 @@ impl App {
         if bad.is_empty() {
             return None;
         }
-        Some(format!(
-            "MP4 cannot store {} video. Choose MKV, which keeps everything.",
-            bad.join(" or ")
+        Some(crate::strings::fmt(
+            "gui.log.mp4_mismatch",
+            &[("codecs", &bad.join(" or "))],
         ))
     }
 
@@ -584,21 +677,24 @@ impl App {
                 self.tree = Tree::default();
                 self.source.clear();
                 self.page = Page::Empty;
-                self.say(LogKind::Result, "Source closed");
+                self.say(
+                    LogKind::Result,
+                    &crate::strings::get("gui.log.source_closed"),
+                );
                 vec![Effect::Redraw]
             }
             Cmd::Run => self.start_run(),
             Cmd::Cancel => {
                 if let Some(st) = &self.run {
                     st.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                    self.say(LogKind::Result, "Cancelling …");
+                    self.say(LogKind::Result, &crate::strings::get("gui.log.cancelling"));
                 }
                 vec![Effect::Redraw]
             }
             Cmd::Eject => {
                 self.say(
                     LogKind::Result,
-                    "Nothing to eject — the source is a file, not a drive.",
+                    &crate::strings::get("gui.log.nothing_eject"),
                 );
                 vec![Effect::Redraw]
             }
@@ -628,7 +724,10 @@ impl App {
             Cmd::CheckUpdates => {
                 // Actually check. A menu item that only *says* it is checking
                 // is worse than no menu item.
-                self.say(LogKind::Result, "Checking for updates …");
+                self.say(
+                    LogKind::Result,
+                    &crate::strings::get("gui.log.checking_updates"),
+                );
                 let msg = crate::settings::check_for_update(env!("CARGO_PKG_VERSION"));
                 self.say(LogKind::Result, &msg);
                 vec![Effect::Redraw]
@@ -657,13 +756,20 @@ impl App {
                 self.log.clear();
                 self.say(
                     LogKind::Result,
-                    &format!("freemkv {}", env!("CARGO_PKG_VERSION")),
+                    &crate::strings::fmt(
+                        "gui.log.opened_version",
+                        &[("version", env!("CARGO_PKG_VERSION"))],
+                    ),
                 );
                 self.say(
                     LogKind::Detail,
-                    &format!(
-                        "{} opened — {} title(s), keys: {}",
-                        sc.label, sc.title_count, sc.key_summary
+                    &crate::strings::fmt(
+                        "gui.log.opened",
+                        &[
+                            ("label", &sc.label),
+                            ("n", &sc.title_count.to_string()),
+                            ("keys", &sc.key_summary),
+                        ],
                     ),
                 );
                 self.video_codecs = sc.video_codecs.clone();
@@ -672,7 +778,10 @@ impl App {
                 self.page = Page::Titles;
                 self.selected_row = None;
                 if container {
-                    self.say(LogKind::Result, "Ready to convert");
+                    self.say(
+                        LogKind::Result,
+                        &crate::strings::get("gui.log.ready_convert"),
+                    );
                 } else {
                     match crate::engine::preflight_with_keys(
                         path,
@@ -680,10 +789,16 @@ impl App {
                         &[],
                         &KeyConfig::from_settings(&self.settings),
                     ) {
-                        Ok(v) if v.is_empty() => self.say(LogKind::Result, "Ready to rip"),
-                        Ok(v) => {
-                            self.say(LogKind::Notice, &format!("Cannot rip: {}", v.join(", ")))
+                        Ok(v) if v.is_empty() => {
+                            self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"))
                         }
+                        Ok(v) => self.say(
+                            LogKind::Notice,
+                            &crate::strings::fmt(
+                                "gui.log.cannot_rip",
+                                &[("reasons", &v.join(", "))],
+                            ),
+                        ),
                         Err(e) => self.say(LogKind::Notice, &e),
                     }
                 }
@@ -698,11 +813,17 @@ impl App {
 
     fn start_run(&mut self) -> Vec<Effect> {
         if self.source.is_empty() {
-            self.say(LogKind::Notice, "Open a source first.");
+            self.say(
+                LogKind::Notice,
+                &crate::strings::get("gui.log.open_source_first"),
+            );
             return vec![Effect::Redraw];
         }
         if self.output_dir.trim().is_empty() {
-            self.say(LogKind::Notice, "Choose an output folder first.");
+            self.say(
+                LogKind::Notice,
+                &crate::strings::get("gui.log.choose_folder_first"),
+            );
             return vec![Effect::Redraw];
         }
         let titles = self.tree.ticked_titles();
@@ -730,7 +851,7 @@ impl App {
         self.page = Page::Progress;
         self.say(
             LogKind::Result,
-            &format!("Starting rip → {}", self.output_dir),
+            &crate::strings::fmt("gui.log.starting_rip", &[("dir", &self.output_dir)]),
         );
         crate::engine::start_rip(
             RipRequest {
@@ -775,7 +896,7 @@ impl App {
             self.reported_bad = p.sectors_bad;
             self.say(
                 LogKind::Notice,
-                &format!("{} unreadable sector(s) so far", p.sectors_bad),
+                &crate::strings::fmt("gui.log.unreadable", &[("n", &p.sectors_bad.to_string())]),
             );
         }
         if st.finished.load(std::sync::atomic::Ordering::Relaxed) {
@@ -832,10 +953,13 @@ impl App {
                 None,
             ),
             show_overall_bar: self.run_titles > 1,
-            saving_current: format!("Saving to {} file", container_label(&self.format)),
-            saving_overall: format!(
-                "Saving all titles to {} files",
-                container_label(&self.format)
+            saving_current: crate::strings::fmt(
+                "gui.progress.saving_current",
+                &[("container", container_label(&self.format))],
+            ),
+            saving_overall: crate::strings::fmt(
+                "gui.progress.saving_overall",
+                &[("container", container_label(&self.format))],
             ),
             output_dir: self.output_dir.clone(),
             format: self.format.clone(),
@@ -847,16 +971,18 @@ impl App {
                 .selected_row
                 .and_then(|i| self.tree.arena.get(i))
                 .map(|n| n.info.clone())
-                .unwrap_or_else(|| "Open a disc image to see its titles.".into()),
+                .unwrap_or_else(|| crate::strings::get("gui.page.detail_default")),
             result_summary: self.result_summary.clone(),
+            // The summary text is engine-emitted English; classify on it, but
+            // show a localized heading.
             result_heading: if self.result_summary.starts_with("Cancelled") {
-                "Cancelled".into()
+                crate::strings::get("gui.result.cancelled")
             } else if self.result_summary.starts_with("Nothing")
                 || self.result_summary.contains("failed")
             {
-                "Nothing was written".into()
+                crate::strings::get("gui.result.nothing")
             } else {
-                "Finished".into()
+                crate::strings::get("gui.result.finished")
             },
             eject_visible: false,
         }
