@@ -36,6 +36,20 @@ follows semantic versioning.
   `-s eng`). Default (flag absent) is `all` — bit-for-bit the previous output.
   A language that matches no stream lists the disc's actual languages and fails
   the rip (a typo shouldn't silently ship the wrong file).
+- **True multipass disc recovery in the desktop app.** With Multi-pass selected
+  in Settings → Recovery, a disc rip recovers the disc to an intermediate image
+  through the engine's shared sweep/patch recovery loop (the same strategy
+  `autorip` uses — passes to convergence, abort after too many lost seconds),
+  then muxes your titles from the recovered image. "**Whole disc → ISO image**"
+  output writes that recovered image directly. Single-pass rips are unchanged.
+- **The desktop app speaks 29 languages.** The interface is localized into
+  every shipped locale (English, German, Spanish + Latin-American Spanish,
+  French, Italian, Dutch, Portuguese + Brazilian Portuguese, Polish, Russian,
+  Ukrainian, Czech, Slovak, Swedish, Danish, Norwegian, Finnish, Romanian,
+  Hungarian, Greek, Turkish, Catalan, Japanese, Korean, Simplified & Traditional
+  Chinese, Indonesian, Vietnamese), each natively reviewed. "Auto" follows the
+  macOS system language; a live in-app switch takes effect without a restart.
+  Regional variants resolve correctly (`pt-BR` ≠ `pt`, Simplified ≠ Traditional).
 
 ### Changed — BREAKING
 
@@ -53,6 +67,17 @@ follows semantic versioning.
   `libfreemkv::mux_stream`, brings drives up through `DiscSession`, scans ISOs
   through `scan_iso`, and resolves AACS keys through the library. No
   user-visible change; fewer places for the front-ends to drift.
+- Internal: **one implementation, two shells — no duplication.** Every piece of
+  orchestration the CLI and desktop app both need now lives once in
+  `freemkv-engine`: the optical-drive bring-up (`open_scan_resolve`), the mux
+  scaffolding (`mux_title` / `mux_title_session`, so the desktop app's live-drive
+  rip gets speed + ETA), decrypted-folder extraction (`extract_tree`), AACS
+  key-source ordering (`key_sources` / `won_source`), and — the big one — the
+  multipass recovery **strategy** (`plan_passes`, scope-aware convergence,
+  promotion, abort-on-lost, and the `multipass_rip` loop). `autorip`'s proven
+  recovery core was moved down verbatim, guarded by characterization tests that
+  prove its behaviour is byte-identical; its hardware-specific touch-points
+  (transport-crash retry, tray un-wedge) stay in the `autorip` shell.
 
 ### Fixed
 
