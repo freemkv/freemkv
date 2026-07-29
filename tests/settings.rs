@@ -56,7 +56,7 @@ fn get_set_round_trips_every_key() {
 #[test]
 fn bool_keys_round_trip() {
     let mut s = Settings::default();
-    for k in ["keep_iso", "capture_without_keys", "debug_log"] {
+    for k in ["keep_iso", "capture_without_keys", "auto_eject"] {
         s.set_bool(k, true);
         assert!(s.get_bool(k), "bool key {k} did not round-trip");
         s.set_bool(k, false);

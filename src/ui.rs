@@ -812,9 +812,9 @@ impl App {
     pub fn open(&mut self, path: &str) -> Vec<Effect> {
         let container = is_container(path);
         let disc = crate::engine::is_disc_source(path);
-        // "Log detail: Verbose" (or debug logging) reveals the resolved keys in
-        // the on-open detail block, mirroring the CLI's `info -v`.
-        let verbose = self.settings.log_level == "Verbose" || self.settings.debug_log;
+        // "Log detail: Verbose" (or Debug) reveals the resolved keys in the
+        // on-open detail block, mirroring the CLI's `info -v`.
+        let verbose = self.settings.log_level == "Verbose" || self.settings.log_level == "Debug";
         let scanned = if container {
             crate::engine::scan_stream(path)
         } else if disc {

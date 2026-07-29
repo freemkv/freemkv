@@ -113,14 +113,11 @@ fn init_gui_logging(s: &settings::Settings) {
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{EnvFilter, fmt};
 
-    let level = if s.debug_log {
-        "trace"
-    } else {
-        match s.log_level.as_str() {
-            "Verbose" => "debug",
-            // Quiet / Normal: no diagnostic file log.
-            _ => return,
-        }
+    let level = match s.log_level.as_str() {
+        "Debug" => "trace",
+        "Verbose" => "debug",
+        // Quiet / Normal: no diagnostic file log.
+        _ => return,
     };
 
     let dir = settings::support_dir();

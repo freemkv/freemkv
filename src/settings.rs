@@ -36,7 +36,6 @@ pub struct Settings {
     // Advanced
     pub language: String,
     pub decrypt_threads: String,
-    pub debug_log: bool,
     // Window
     pub win_w: f64,
     pub win_h: f64,
@@ -75,7 +74,6 @@ impl Default for Settings {
             log_level: "Normal".into(),
             language: "auto".into(),
             decrypt_threads: "0".into(),
-            debug_log: false,
             win_w: 1180.0,
             win_h: 760.0,
         }
@@ -134,7 +132,6 @@ impl Settings {
             "keep_iso" => self.keep_iso,
             "auto_eject" => self.auto_eject,
             "capture_without_keys" => self.capture_without_keys,
-            "debug_log" => self.debug_log,
             "raw" => self.raw,
             "force" => self.force,
             _ => false,
@@ -168,7 +165,6 @@ impl Settings {
             "keep_iso" => self.keep_iso = v,
             "auto_eject" => self.auto_eject = v,
             "capture_without_keys" => self.capture_without_keys = v,
-            "debug_log" => self.debug_log = v,
             "raw" => self.raw = v,
             "force" => self.force = v,
             _ => {}
@@ -218,7 +214,7 @@ impl Settings {
         );
         snap(
             &mut self.log_level,
-            &["Quiet", "Normal", "Verbose"],
+            &["Quiet", "Normal", "Verbose", "Debug"],
             &d.log_level,
         );
         // The output container must be one of the canonical format strings the
