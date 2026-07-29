@@ -1792,14 +1792,22 @@ fn pipe_disc(
     // instead of being pre-baked into ScanOptions. The advisory wait_ready/init
     // failures that `debug_drive_step` used to print to stderr are now logged via
     // the library's tracing (semantics — non-fatal — unchanged).
-    let keyspec = libfreemkv::KeySpec {
-        credentials: drive_credentials(keys.keydb_path()),
-        ..Default::default()
-    };
-    let mut session = libfreemkv::DiscSession::open(target, keyspec).map_err(|e| {
-        // Autodetect with no drive surfaces as an empty-path DeviceNotFound —
-        // keep the dedicated "no drive" message; any other open failure renders
-        // through the E-code Display.
+    // Drive bring-up (open + lock-tray + scan + resolve keys) is the SHARED
+    // optical core in `freemkv_engine::open_scan_resolve` — the desktop GUI
+    // calls the exact same function, so the two shells cannot diverge. The tray
+    // unlock is still guaranteed by `Drive::drop` (via the session/DiscStream)
+    // on every return path below. The CLI keeps its own presentation: the
+    // key-source factory (which logs each source attempt through `out`), the
+    // dedicated "no drive" message on an empty-path autodetect, and the
+    // resolution-trace render. Any error surfaces through the same PipeFail —
+    // only open produces an empty-path DeviceNotFound, so folding the three
+    // map_errs into one is behaviourally identical.
+    let (mut session, trace) = freemkv_engine::open_scan_resolve(
+        target,
+        drive_credentials(keys.keydb_path()),
+        key_source_factory(keys, out),
+    )
+    .map_err(|e| {
         PipeFail::fatal(match &e {
             libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
                 strings::get("error.no_drive")
@@ -1807,26 +1815,6 @@ fn pipe_disc(
             _ => format!("{}", e),
         })
     })?;
-    // Lock the tray so the disc cannot eject mid-rip. The unlock is guaranteed
-    // by `Drive::drop` (which calls `unlock_tray`): on every early-return path
-    // below the local `drive` is dropped, and after it is moved into
-    // `DiscStream` the boxed `Drive` is dropped when the stream is dropped on
-    // any return. The only path that bypasses Drop is a SECOND Ctrl-C
-    // (`_exit(130)`) — the first Ctrl-C now halts cleanly (loop check below)
-    // and lets the stream drop, so the common interrupt case unlocks the tray.
-    session.lock_tray();
-
-    session
-        .scan(libfreemkv::ScanOptions::default())
-        .map_err(|e| PipeFail::fatal(format!("{}", e)))?;
-    // Resolve + bank the disc's base AACS unit keys off the live drive (samples
-    // the largest title's ciphertext internally to validate the key), then
-    // render the structured walk. The library owns the sampling / ordered-apply /
-    // banking; the CLI just supplies the source factory and prints the trace.
-    let factory = key_source_factory(keys, out);
-    let trace = session
-        .resolve_keys(factory)
-        .map_err(|e| PipeFail::fatal(format!("{}", e)))?;
     emit_resolution_trace(out, &trace);
     // ── Pre-flight validation (borrows the scanned disc; no drive I/O) ──
     //
