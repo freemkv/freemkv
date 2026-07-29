@@ -1,0 +1,936 @@
+//! Platform-neutral UI model.
+//!
+//! Everything a shell needs to *decide* lives here; a shell only *draws*.
+//! No widget type, no `cfg`, no AppKit/Win32 — this file compiles and is
+//! tested on any platform, which is what stops a bug fixed on one shell from
+//! surviving on the other.
+//!
+//! The rule: if a change to this file would need mirroring in `mac.rs` or
+//! `win.rs`, the split is wrong.
+
+use crate::engine::Scanned;
+use std::cell::RefCell;
+
+// ── the title tree ────────────────────────────────────────────────────────
+
+/// A row in the title tree. Owned here so both shells render identical text.
+pub struct Node {
+    pub type_s: String,
+    pub desc: String,
+    /// Whether this row carries a checkbox — decided by the scan, not by
+    /// re-matching the display string here.
+    checkable: bool,
+    pub checked: RefCell<bool>,
+    pub children: Vec<usize>,
+    pub info: String,
+    /// Transport PID for audio/subtitle rows; `None` elsewhere.
+    pub pid: Option<u16>,
+    /// Canonical disc title index — NOT the tree position.
+    pub title_idx: usize,
+}
+
+impl Node {
+    /// Whether this row carries a checkbox.
+    ///
+    /// Taken from the scan, NOT re-derived from the display string: matching
+    /// on `type_s` meant the engine and the tree each decided separately what
+    /// is selectable, and a renamed row type would silently grow or lose a
+    /// checkbox.
+    pub fn checkable(&self) -> bool {
+        self.checkable
+    }
+}
+
+/// Tri-state for a title row: some streams on, none, or all.
+#[derive(PartialEq, Debug, Clone, Copy)]
+pub enum Check {
+    Off,
+    On,
+    Mixed,
+}
+
+/// The tree plus the selection state, with no widgets attached.
+#[derive(Default)]
+pub struct Tree {
+    pub arena: Vec<Node>,
+    pub roots: Vec<usize>,
+}
+
+impl Tree {
+    /// Build from an engine scan. An empty scan yields an empty tree — the
+    /// shell shows its empty page rather than inventing rows.
+    pub fn from_scan(sc: &Scanned) -> Self {
+        let mut arena: Vec<Node> = Vec::new();
+        let mut roots = Vec::new();
+        let mut last_title: Option<usize> = None;
+        for r in &sc.rows {
+            let idx = arena.len();
+            arena.push(Node {
+                type_s: r.type_s.clone(),
+                desc: r.desc.clone(),
+                checkable: r.checkable,
+                checked: RefCell::new(r.depth == 1 && r.title == 0),
+                children: vec![],
+                info: r.info.clone(),
+                pid: r.pid,
+                title_idx: r.title,
+            });
+            match r.depth {
+                0 => roots.push(idx),
+                1 => {
+                    if let Some(&root) = roots.first() {
+                        arena[root].children.push(idx);
+                    }
+                    last_title = Some(idx);
+                }
+                _ => {
+                    if let Some(t) = last_title {
+                        arena[t].children.push(idx);
+                        let on = *arena[t].checked.borrow();
+                        *arena[idx].checked.borrow_mut() = on;
+                    }
+                }
+            }
+        }
+        Tree { arena, roots }
+    }
+
+    /// Tick state for a row, folding children into a tri-state for titles.
+    pub fn check_state(&self, i: usize) -> Check {
+        let n = &self.arena[i];
+        if n.children.is_empty() {
+            return if *n.checked.borrow() {
+                Check::On
+            } else {
+                Check::Off
+            };
+        }
+        let sel: Vec<bool> = n
+            .children
+            .iter()
+            .filter(|&&c| self.arena[c].checkable())
+            .map(|&c| *self.arena[c].checked.borrow())
+            .collect();
+        let on = sel.iter().filter(|x| **x).count();
+        if on == 0 {
+            Check::Off
+        } else if on == sel.len() {
+            Check::On
+        } else {
+            Check::Mixed
+        }
+    }
+
+    /// Tick a row and cascade to its streams.
+    pub fn set_checked(&self, i: usize, on: bool) {
+        *self.arena[i].checked.borrow_mut() = on;
+        for &c in &self.arena[i].children {
+            *self.arena[c].checked.borrow_mut() = on;
+        }
+    }
+
+    pub fn set_all(&self, on: bool) {
+        for n in &self.arena {
+            if n.checkable() {
+                *n.checked.borrow_mut() = on;
+            }
+        }
+    }
+
+    pub fn invert(&self) {
+        for n in &self.arena {
+            if n.checkable() {
+                let cur = *n.checked.borrow();
+                *n.checked.borrow_mut() = !cur;
+            }
+        }
+    }
+
+    /// Canonical indices of ticked titles — what the engine's `Selection`
+    /// wants. Tree position is not the index once a disc is listed in full.
+    pub fn ticked_titles(&self) -> Vec<usize> {
+        self.arena
+            .iter()
+            .filter(|n| n.type_s == "Title" && *n.checked.borrow() && n.title_idx != usize::MAX)
+            .map(|n| n.title_idx)
+            .collect()
+    }
+
+    /// Number of title rows in the tree. Used by the cross-platform tests to
+    /// assert the tree matches the scan; the shells read `View` instead.
+    #[allow(dead_code)]
+    pub fn title_count(&self) -> usize {
+        self.arena.iter().filter(|n| n.type_s == "Title").count()
+    }
+
+    /// Ticked audio/subtitle PIDs, and whether the user deviated from
+    /// "everything" — an empty explicit list legitimately means "none".
+    pub fn ticked_streams(&self) -> (Vec<u16>, Vec<u16>, bool) {
+        let (mut a, mut s) = (Vec::new(), Vec::new());
+        let (mut total, mut on) = (0usize, 0usize);
+        for n in &self.arena {
+            let Some(pid) = n.pid else { continue };
+            total += 1;
+            if *n.checked.borrow() {
+                on += 1;
+                if n.type_s == "Audio" {
+                    a.push(pid);
+                } else {
+                    s.push(pid);
+                }
+            }
+        }
+        (a, s, total > 0 && on != total)
+    }
+}
+
+// ── formatting ────────────────────────────────────────────────────────────
+
+/// Human byte size, so a growing output rolls over instead of reading
+/// "6103.5 MB" all the way to a 6 GB file.
+pub fn fmt_bytes(b: u64) -> String {
+    const K: f64 = 1024.0;
+    let f = b as f64;
+    if f >= K * K * K {
+        format!("{:.2} GB", f / (K * K * K))
+    } else if f >= K * K {
+        format!("{:.1} MB", f / (K * K))
+    } else if f >= K {
+        format!("{:.0} KB", f / K)
+    } else {
+        format!("{b} B")
+    }
+}
+
+/// `h:mm:ss`.
+pub fn fmt_hms(secs: u64) -> String {
+    format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+}
+
+/// Free space on the volume holding `path`.
+pub fn free_space(path: &str) -> String {
+    crate::platform::free_space_bytes(path)
+        .map(fmt_bytes)
+        .unwrap_or_else(|| "—".into())
+}
+
+// ── which page is on screen ───────────────────────────────────────────────
+
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub enum Page {
+    Empty,
+    Titles,
+    Progress,
+    Result,
+}
+
+/// The output sinks offered for a given source kind. Whole-disc sinks make no
+/// sense for a container, so they are omitted rather than offered and failed.
+/// `mp4_ok` is false when the source's video cannot go in an MP4 at all (a
+/// DVD's MPEG-2, an HD DVD's VC-1). The option is then REMOVED rather than
+/// offered-and-refused: a choice that always fails is worse than no choice.
+/// Pass true when the codecs are unknown — never block on missing information.
+pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>> {
+    let mut titles = vec!["Selected titles → MKV"];
+    if mp4_ok {
+        titles.push("Selected titles → MP4");
+    }
+    titles.push("Selected titles → M2TS");
+    titles.push("Selected titles → separate track files");
+    let whole = vec!["Whole disc → ISO image", "Whole disc → decrypted folder"];
+    let meta = vec!["Chapters → file", "Title info → JSON", "Video index → .fvi"];
+    if disc_source {
+        vec![titles, whole, meta]
+    } else {
+        vec![titles, meta]
+    }
+}
+
+/// Video codecs MP4 can actually carry. Anything else (MPEG-2 from a DVD,
+/// VC-1 from an HD DVD) has no MP4 mapping, so the mux fails with E9048 after
+/// the user has already waited — say it up front instead.
+const MP4_VIDEO: &[&str] = &["H.264", "HEVC", "AV1"];
+
+/// Resolve a popup's visible text back to the canonical format string.
+///
+/// Shells hold display text; the core holds the authoritative list. Matching
+/// here means a shell never invents a format, and both shells resolve the same
+/// way instead of each parsing the string.
+pub fn format_by_title(title: &str, disc_source: bool, mp4_ok: bool) -> Option<&'static str> {
+    output_formats(disc_source, mp4_ok)
+        .into_iter()
+        .flatten()
+        .find(|f| *f == title)
+}
+
+/// Sources the file picker accepts, per docs/cli #stream-urls.
+pub const SOURCE_EXTS: &[&str] = &["iso", "ISO", "mkv", "m2ts", "mts", "mp4"];
+
+/// True for a container source (single title, no disc scan).
+pub fn is_container(path: &str) -> bool {
+    matches!(
+        std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "mkv" | "m2ts" | "mts" | "mp4"
+    )
+}
+
+/// Commands that must be unavailable while a rip is in flight. Cancel is
+/// deliberately absent — it must always be reachable.
+pub fn blocked_while_running(cmd: Cmd) -> bool {
+    !matches!(cmd, Cmd::Cancel | Cmd::About | Cmd::Docs | Cmd::Quit)
+}
+
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub enum Cmd {
+    /// The user picked an output format. Carries a `&'static str` borrowed
+    /// from [`output_formats`], so an unrecognized title cannot enter the
+    /// model — and `Cmd` stays `Copy`.
+    SetFormat(&'static str),
+    Open,
+    Close,
+    SetOutput,
+    Run,
+    Cancel,
+    Eject,
+    SelectAll,
+    SelectNone,
+    Invert,
+    ClearLog,
+    ToggleLog,
+    Settings,
+    About,
+    Docs,
+    CheckUpdates,
+    Quit,
+}
+
+// ── the Information block on the progress page ────────────────────────────
+
+/// Fully-formatted rows, so a shell only assigns strings to labels.
+pub struct InfoRows {
+    pub source: String,
+    pub source_file: String,
+    pub source_size: String,
+    pub read_rate: String,
+    pub output_file: String,
+    pub output_size: String,
+    pub free_space: String,
+}
+
+impl InfoRows {
+    /// `dest` is the output FILE, not the folder — the label says "Output
+    /// file" and showing a directory there is simply wrong.
+    pub fn starting(source: &str, dest: &str) -> Self {
+        InfoRows {
+            source: source.to_string(),
+            source_file: std::path::Path::new(source)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string(),
+            // Never leave the row blank — a blank Information field reads as
+            // a broken panel (reported). An unknown value is an em dash.
+            source_size: std::fs::metadata(source)
+                .map(|m| fmt_bytes(m.len()))
+                .unwrap_or_else(|_| "—".into()),
+            read_rate: "—".into(),
+            output_file: dest.to_string(),
+            output_size: "0 B".into(),
+            free_space: free_space(dest),
+        }
+    }
+
+    pub const LABELS: [&'static str; 7] = [
+        "Source :",
+        "Source file :",
+        "Source size :",
+        "Read rate :",
+        "Output file :",
+        "Output size :",
+        "Free space :",
+    ];
+
+    pub fn as_array(&self) -> [&str; 7] {
+        [
+            &self.source,
+            &self.source_file,
+            &self.source_size,
+            &self.read_rate,
+            &self.output_file,
+            &self.output_size,
+            &self.free_space,
+        ]
+    }
+}
+
+/// Read rate for display. `speed_bps` is engine-derived; never recompute it.
+pub fn rate_text(speed_bps: u64, running: bool) -> String {
+    if speed_bps > 0 {
+        format!("{}/s", fmt_bytes(speed_bps))
+    } else if running {
+        "not reported".to_string()
+    } else {
+        "—".to_string()
+    }
+}
+
+/// Bar caption: percent, elapsed, and the engine's ETA when it has one.
+pub fn bar_caption(pct: f64, elapsed_secs: u64, eta_secs: Option<u64>) -> String {
+    let el = format!("Elapsed: {}", fmt_hms(elapsed_secs));
+    match eta_secs {
+        Some(e) => format!("{pct:.0}%   {el}   Remaining: {}", fmt_hms(e)),
+        None => format!("{pct:.0}%   {el}"),
+    }
+}
+
+/// Overall progress across a multi-title run.
+pub fn overall_pct(titles_done: usize, total: usize, current_pct: f64) -> f64 {
+    let total = total.max(1) as f64;
+    ((titles_done as f64 + current_pct / 100.0) / total * 100.0).min(100.0)
+}
+
+// ══ the application core ══════════════════════════════════════════════════
+//
+// Model / Update / View. `App` owns every piece of state and every decision;
+// a shell does exactly three things:
+//
+//   1. render `App::view()`            — assign strings and flags to widgets
+//   2. call `App::dispatch(cmd)`       — on any click, menu pick or key
+//   3. perform the returned `Effect`s  — the platform-only actions
+//
+// Every button on every platform therefore runs the SAME code. Adding a shell
+// (Win32, GTK, a TUI) means implementing render + event → Cmd; it means
+// writing no behaviour, and fixing a bug here fixes it everywhere at once.
+
+use crate::engine::{KeyConfig, RipRequest, RunState};
+use crate::settings::Settings;
+use std::sync::Arc;
+
+/// A platform action the core cannot perform itself. The shell executes it and
+/// usually feeds the answer back in as a `Cmd`.
+#[derive(Debug, PartialEq)]
+pub enum Effect {
+    /// Show a file picker limited to `SOURCE_EXTS`; on choose → `Cmd::Open`.
+    PickSource,
+    /// Show a folder picker; on choose → set the output directory.
+    PickOutputDir,
+    /// Reveal a path in the platform file manager.
+    Reveal(String),
+    /// Open a URL in the default browser.
+    OpenUrl(String),
+    /// Present the settings window.
+    ShowSettings,
+    /// Present the about window.
+    ShowAbout,
+    /// Redraw: state changed.
+    Redraw,
+    /// Start the periodic tick that polls a running job.
+    StartTicking,
+    /// Stop it.
+    StopTicking,
+    Quit,
+}
+
+/// One line in the log, with its severity so a shell can colour it.
+#[derive(Clone, Debug)]
+pub struct LogLine {
+    pub text: String,
+    pub kind: LogKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum LogKind {
+    Notice,
+    Detail,
+    Result,
+}
+
+/// Everything the app knows. No widgets, no platform types.
+pub struct App {
+    pub tree: Tree,
+    pub settings: Settings,
+    pub page: Page,
+    pub log: Vec<LogLine>,
+    pub source: String,
+    pub output_dir: String,
+    pub format: String,
+    pub log_hidden: bool,
+    pub run: Option<Arc<RunState>>,
+    pub run_titles: usize,
+    pub run_started: Option<std::time::Instant>,
+    pub info: Option<InfoRows>,
+    pub result_summary: String,
+    pub selected_row: Option<usize>,
+    /// Video codec per title, from the scan — used to warn when the chosen
+    /// container cannot carry them.
+    video_codecs: Vec<String>,
+    /// Highest unreadable-sector count already announced, so the notice is
+    /// not repeated on every 100 ms tick.
+    reported_bad: u64,
+}
+
+impl App {
+    pub fn new() -> Self {
+        let settings = Settings::load();
+        let output_dir = settings.dest_dir.clone();
+        let format = if settings.container.is_empty() {
+            "Selected titles → MKV".to_string()
+        } else {
+            settings.container.clone()
+        };
+        let mut app = App {
+            tree: Tree::default(),
+            settings,
+            page: Page::Empty,
+            log: Vec::new(),
+            source: String::new(),
+            output_dir,
+            format,
+            log_hidden: false,
+            run: None,
+            run_titles: 0,
+            run_started: None,
+            info: None,
+            result_summary: String::new(),
+            selected_row: None,
+            video_codecs: Vec::new(),
+            reported_bad: 0,
+        };
+        app.say(
+            LogKind::Result,
+            &format!("freemkv {} — ready", env!("CARGO_PKG_VERSION")),
+        );
+        app
+    }
+
+    pub fn say(&mut self, kind: LogKind, text: &str) {
+        self.log.push(LogLine {
+            text: text.into(),
+            kind,
+        });
+    }
+
+    /// True when at least one title on this source could go in an MP4. With no
+    /// codec information (an unscanned or container source) this is true — the
+    /// UI must not hide an option on a guess.
+    pub fn mp4_possible(&self) -> bool {
+        let known: Vec<&String> = self.video_codecs.iter().filter(|c| !c.is_empty()).collect();
+        known.is_empty() || known.iter().any(|c| MP4_VIDEO.contains(&c.as_str()))
+    }
+
+    /// Why the current format cannot hold the ticked titles, if it cannot.
+    ///
+    /// Answered from the scan, before any rip: a container that will certainly
+    /// fail should say so while the user can still change it.
+    pub fn container_mismatch(&self) -> Option<String> {
+        if !self.format.contains("MP4") {
+            return None;
+        }
+        let ticked = self.tree.ticked_titles();
+        let mut bad: Vec<&str> = ticked
+            .iter()
+            .filter_map(|i| self.video_codecs.get(*i))
+            .map(|c| c.as_str())
+            .filter(|c| !c.is_empty() && !MP4_VIDEO.contains(c))
+            .collect();
+        bad.sort_unstable();
+        bad.dedup();
+        if bad.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "MP4 cannot store {} video. Choose MKV, which keeps everything.",
+            bad.join(" or ")
+        ))
+    }
+
+    pub fn running(&self) -> bool {
+        self.run.is_some()
+    }
+
+    /// The single entry point for every user action, on every platform.
+    pub fn dispatch(&mut self, cmd: Cmd) -> Vec<Effect> {
+        if self.running() && blocked_while_running(cmd) {
+            return vec![];
+        }
+        match cmd {
+            Cmd::Open => vec![Effect::PickSource],
+            Cmd::SetOutput => vec![Effect::PickOutputDir],
+            Cmd::Close => {
+                self.tree = Tree::default();
+                self.source.clear();
+                self.page = Page::Empty;
+                self.say(LogKind::Result, "Source closed");
+                vec![Effect::Redraw]
+            }
+            Cmd::Run => self.start_run(),
+            Cmd::Cancel => {
+                if let Some(st) = &self.run {
+                    st.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.say(LogKind::Result, "Cancelling …");
+                }
+                vec![Effect::Redraw]
+            }
+            Cmd::Eject => {
+                self.say(
+                    LogKind::Result,
+                    "Nothing to eject — the source is a file, not a drive.",
+                );
+                vec![Effect::Redraw]
+            }
+            Cmd::SelectAll => {
+                self.tree.set_all(true);
+                vec![Effect::Redraw]
+            }
+            Cmd::SelectNone => {
+                self.tree.set_all(false);
+                vec![Effect::Redraw]
+            }
+            Cmd::Invert => {
+                self.tree.invert();
+                vec![Effect::Redraw]
+            }
+            Cmd::ClearLog => {
+                self.log.clear();
+                vec![Effect::Redraw]
+            }
+            Cmd::ToggleLog => {
+                self.log_hidden = !self.log_hidden;
+                vec![Effect::Redraw]
+            }
+            Cmd::Settings => vec![Effect::ShowSettings],
+            Cmd::About => vec![Effect::ShowAbout],
+            Cmd::Docs => vec![Effect::OpenUrl("https://freemkv.org/docs".into())],
+            Cmd::CheckUpdates => {
+                // Actually check. A menu item that only *says* it is checking
+                // is worse than no menu item.
+                self.say(LogKind::Result, "Checking for updates …");
+                let msg = crate::settings::check_for_update(env!("CARGO_PKG_VERSION"));
+                self.say(LogKind::Result, &msg);
+                vec![Effect::Redraw]
+            }
+            Cmd::SetFormat(f) => {
+                self.format = f.to_string();
+                if let Some(m) = self.container_mismatch() {
+                    self.say(LogKind::Notice, &m);
+                }
+                vec![Effect::Redraw]
+            }
+            Cmd::Quit => vec![Effect::Quit],
+        }
+    }
+
+    /// Open a source: scan it, rebuild the tree, report honestly on failure.
+    pub fn open(&mut self, path: &str) -> Vec<Effect> {
+        let container = is_container(path);
+        let scanned = if container {
+            crate::engine::scan_stream(path)
+        } else {
+            crate::engine::scan_with_keys(path, &KeyConfig::from_settings(&self.settings))
+        };
+        match scanned {
+            Ok(sc) => {
+                self.log.clear();
+                self.say(
+                    LogKind::Result,
+                    &format!("freemkv {} — engine 1.6.0", env!("CARGO_PKG_VERSION")),
+                );
+                self.say(
+                    LogKind::Detail,
+                    &format!(
+                        "{} opened — {} title(s), keys: {}",
+                        sc.label, sc.title_count, sc.key_summary
+                    ),
+                );
+                self.video_codecs = sc.video_codecs.clone();
+                self.tree = Tree::from_scan(&sc);
+                self.source = path.to_string();
+                self.page = Page::Titles;
+                self.selected_row = None;
+                if container {
+                    self.say(LogKind::Result, "Ready to convert");
+                } else {
+                    match crate::engine::preflight_with_keys(
+                        path,
+                        "/tmp",
+                        &[],
+                        &KeyConfig::from_settings(&self.settings),
+                    ) {
+                        Ok(v) if v.is_empty() => self.say(LogKind::Result, "Ready to rip"),
+                        Ok(v) => {
+                            self.say(LogKind::Notice, &format!("Cannot rip: {}", v.join(", ")))
+                        }
+                        Err(e) => self.say(LogKind::Notice, &e),
+                    }
+                }
+            }
+            Err(e) => {
+                self.say(LogKind::Notice, &e);
+                self.page = Page::Empty;
+            }
+        }
+        vec![Effect::Redraw]
+    }
+
+    fn start_run(&mut self) -> Vec<Effect> {
+        if self.source.is_empty() {
+            self.say(LogKind::Notice, "Open a source first.");
+            return vec![Effect::Redraw];
+        }
+        if self.output_dir.trim().is_empty() {
+            self.say(LogKind::Notice, "Choose an output folder first.");
+            return vec![Effect::Redraw];
+        }
+        let titles = self.tree.ticked_titles();
+        let (audio_pids, sub_pids, explicit_streams) = self.tree.ticked_streams();
+        let state = Arc::new(RunState::default());
+        self.run = Some(state.clone());
+        self.reported_bad = 0;
+        self.run_titles = titles.len().max(1);
+        self.run_started = Some(std::time::Instant::now());
+        // Name the file the way the engine will, so the row matches reality.
+        let label = std::path::Path::new(&self.source)
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("output");
+        let ext = if self.format.contains("MP4") {
+            "mp4"
+        } else if self.format.contains("M2TS") {
+            "m2ts"
+        } else {
+            "mkv"
+        };
+        let first = titles.first().copied().unwrap_or(0) + 1;
+        let out_file = format!("{}/{}_t{}.{}", self.output_dir, label, first, ext);
+        self.info = Some(InfoRows::starting(&self.source, &out_file));
+        self.page = Page::Progress;
+        self.say(
+            LogKind::Result,
+            &format!("Starting rip → {}", self.output_dir),
+        );
+        crate::engine::start_rip(
+            RipRequest {
+                source: self.source.clone(),
+                dest_dir: self.output_dir.clone(),
+                titles,
+                format: self.format.clone(),
+                audio_pids,
+                sub_pids,
+                explicit_streams,
+                raw: self.settings.raw,
+                force: self.settings.force,
+                keys: KeyConfig::from_settings(&self.settings),
+            },
+            state,
+        );
+        vec![Effect::Redraw, Effect::StartTicking]
+    }
+
+    /// Poll a running job. Called on the shell's timer; returns the effects to
+    /// apply. All progress arithmetic is the engine's — never recomputed here.
+    pub fn tick(&mut self) -> Vec<Effect> {
+        let Some(st) = self.run.clone() else {
+            return vec![Effect::StopTicking];
+        };
+        let lines: Vec<String> = st
+            .lines
+            .lock()
+            .map(|mut v| v.drain(..).collect())
+            .unwrap_or_default();
+        for l in lines {
+            self.say(LogKind::Detail, &l);
+        }
+        let p = st.prog.lock().map(|g| *g).unwrap_or_default();
+        if let Some(info) = &mut self.info {
+            info.read_rate = rate_text(p.speed_bps, true);
+            info.output_size = fmt_bytes(p.bytes_done);
+        }
+        // Unreadable sectors are the whole reason this tool exists — say so
+        // once, when the count first rises, rather than burying it.
+        if p.sectors_bad > self.reported_bad {
+            self.reported_bad = p.sectors_bad;
+            self.say(
+                LogKind::Notice,
+                &format!("{} unreadable sector(s) so far", p.sectors_bad),
+            );
+        }
+        if st.finished.load(std::sync::atomic::Ordering::Relaxed) {
+            let sum = st.summary.lock().map(|s| s.clone()).unwrap_or_default();
+            self.say(LogKind::Result, &sum);
+            self.result_summary = sum;
+            self.run = None;
+            self.page = Page::Result;
+            return vec![Effect::Redraw, Effect::StopTicking];
+        }
+        vec![Effect::Redraw]
+    }
+
+    pub fn dismiss_result(&mut self) -> Vec<Effect> {
+        self.page = if self.tree.arena.is_empty() {
+            Page::Empty
+        } else {
+            Page::Titles
+        };
+        vec![Effect::Redraw]
+    }
+
+    /// Everything a shell needs to draw the current state.
+    pub fn view(&self) -> View {
+        let p = self
+            .run
+            .as_ref()
+            .and_then(|st| st.prog.lock().ok().map(|g| *g))
+            .unwrap_or_default();
+        let pct = if p.bytes_total > 0 {
+            p.bytes_done as f64 / p.bytes_total as f64 * 100.0
+        } else {
+            0.0
+        };
+        let elapsed = self.run_started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let titles_done = self
+            .run
+            .as_ref()
+            .map(|st| st.titles_done.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        View {
+            page: self.page,
+            title_rows: self.rows(),
+            info: self
+                .info
+                .as_ref()
+                .map(|i| i.as_array().map(|s| s.to_string())),
+            bar_current: pct,
+            bar_overall: overall_pct(titles_done, self.run_titles, pct),
+            caption_current: bar_caption(pct, elapsed, p.eta_secs),
+            caption_overall: bar_caption(
+                overall_pct(titles_done, self.run_titles, pct),
+                elapsed,
+                None,
+            ),
+            show_overall_bar: self.run_titles > 1,
+            output_dir: self.output_dir.clone(),
+            format: self.format.clone(),
+            formats: output_formats(!is_container(&self.source), self.mp4_possible()),
+            can_run: !self.running() && !self.source.is_empty(),
+            log: self.log.clone(),
+            log_hidden: self.log_hidden,
+            detail: self
+                .selected_row
+                .and_then(|i| self.tree.arena.get(i))
+                .map(|n| n.info.clone())
+                .unwrap_or_else(|| "Open a disc image to see its titles.".into()),
+            result_summary: self.result_summary.clone(),
+            result_heading: if self.result_summary.starts_with("Cancelled") {
+                "Cancelled".into()
+            } else if self.result_summary.starts_with("Nothing")
+                || self.result_summary.contains("failed")
+            {
+                "Nothing was written".into()
+            } else {
+                "Finished".into()
+            },
+            eject_visible: false,
+        }
+    }
+
+    fn rows(&self) -> Vec<Row> {
+        let mut out = Vec::new();
+        for (i, n) in self.tree.arena.iter().enumerate() {
+            let depth = if self.tree.roots.contains(&i) {
+                0
+            } else if n.type_s == "Title" {
+                1
+            } else {
+                2
+            };
+            out.push(Row {
+                index: i,
+                depth,
+                type_s: n.type_s.clone(),
+                desc: n.desc.clone(),
+                check: if n.checkable() {
+                    Some(self.tree.check_state(i))
+                } else {
+                    None
+                },
+            });
+        }
+        out
+    }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One rendered tree row — already decided, nothing left to compute.
+#[derive(Clone, Debug)]
+pub struct Row {
+    pub index: usize,
+    pub depth: u8,
+    pub type_s: String,
+    pub desc: String,
+    /// `None` means the row carries no checkbox at all.
+    pub check: Option<Check>,
+}
+
+/// A complete description of the screen. A shell assigns these to widgets and
+/// makes no decisions of its own.
+pub struct View {
+    pub page: Page,
+    pub title_rows: Vec<Row>,
+    pub info: Option<[String; 7]>,
+    pub bar_current: f64,
+    pub bar_overall: f64,
+    pub caption_current: String,
+    pub caption_overall: String,
+    pub show_overall_bar: bool,
+    pub output_dir: String,
+    pub format: String,
+    pub formats: Vec<Vec<&'static str>>,
+    pub can_run: bool,
+    pub log: Vec<LogLine>,
+    pub log_hidden: bool,
+    pub detail: String,
+    pub result_summary: String,
+    /// Heading for the result page — never "Finished" after a cancel.
+    pub result_heading: String,
+    pub eject_visible: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_roll_over_instead_of_staying_in_megabytes() {
+        assert_eq!(fmt_bytes(0), "0 B");
+        assert_eq!(fmt_bytes(2048), "2 KB");
+        assert_eq!(fmt_bytes(5 * 1024 * 1024), "5.0 MB");
+        // The bug this pins: a 6 GB output once read "6103.5 M".
+        assert_eq!(fmt_bytes(6 * 1024 * 1024 * 1024), "6.00 GB");
+        assert_eq!(fmt_bytes(64_424_509_440), "60.00 GB");
+    }
+
+    #[test]
+    fn an_empty_scan_yields_an_empty_tree() {
+        // No source means no rows — the shell shows its empty page rather
+        // than a placeholder disc.
+        let t = Tree::from_scan(&crate::engine::Scanned {
+            label: String::new(),
+            title_count: 0,
+            key_summary: String::new(),
+            video_codecs: vec![],
+            rows: vec![],
+        });
+        assert!(t.roots.is_empty());
+        assert!(t.arena.is_empty());
+    }
+}

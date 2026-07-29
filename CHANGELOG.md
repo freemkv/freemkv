@@ -1,283 +1,69 @@
 # Changelog
 
-All notable changes to the `freemkv` CLI are documented here. The format is
-based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the
-project follows semantic versioning.
+All notable changes to `freemkv` (the CLI and the desktop app — one binary,
+two shells over `freemkv-engine`) are documented here. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the project
+follows semantic versioning.
 
-## [1.5.2] — UNRELEASED
-
-Inherits libfreemkv 1.5.2 (CSS DVD mux fix, faster DVD scan, unlocker rename
-CSS → DVD). The disc→MKV path now lets `DiscStream` resolve a DVD's per-VTS CSS
-key at read time (one shared crack site with the ISO mux); `--raw` skips it.
-
-## [1.5.0] — UNRELEASED
+## [1.6.0] — UNRELEASED
 
 ### Added
 
-- **`info` states the disc's encryption generation for ISO scans.** `freemkv info
-  iso://…` now prints the AACS generation line (`AACS 2.0 encrypted`, `AACS 2.1
-  encrypted`, `AACS 1.0 encrypted`, or `CSS encrypted`) above the title list, the
-  same line the drive (`disc://`) path shows — the generation is read at scan time
-  even though the ISO path is keyless. Rendered through one shared helper, so the
-  two paths can't drift.
-- **`mp4://` as source *and* destination** (inherits libfreemkv 1.5.0). As a
-  destination, decrypt a disc straight to a play-everywhere MP4; before muxing,
-  the CLI prints exactly which tracks MP4 can't carry (TrueHD / LPCM audio,
-  PGS / VobSub subtitles) so the compatibility export is never a silent loss
-  (`mkv://` keeps everything). As a source, `mp4://` reads a progressive MP4 back
-  into the pipeline — `mp4:// mkv://` converts with no re-encode, and `mp4://`
-  flows to every other sink too.
+- **One `freemkv` binary, two shells.** The CLI and the desktop app are now the
+  same crate over the shared `freemkv-engine`. A CLI-style invocation (any
+  arguments, or a bare launch from a terminal) runs the command line — behaviour
+  identical to the previous `freemkv` CLI, byte for byte. A windowed launch (a
+  `.app` double-click, or `freemkv gui`) opens the desktop app.
+- **freemkv for Mac — a native desktop app.** Open a disc or a disc image, tick
+  the titles and tracks you want, press Rip. Runs the same `freemkv-engine` as
+  the CLI, so it inherits the same recovery, decryption, and mux behaviour.
+  - Ships as a `.dmg` per architecture (Apple Silicon and Intel).
+  - Reads every source the CLI does — `iso://`, `mkv://`, `m2ts://`, `mp4://` —
+    by file picker or Finder drag-and-drop.
+  - Per-title and per-track selection with tri-state rollup, an output-format
+    picker that follows the source kind, live progress with engine-derived
+    speed and ETA, and a copyable log.
+  - Key state is reported from the resolution trace, so the app names the
+    source that actually unlocked the disc (`keydb` or `online`) instead of
+    guessing from the disc's key-origin tag.
+  - The Windows app is in development. All decision-making lives in a
+    platform-neutral core, so the Windows shell renders the same model and
+    reuses the same tests.
+- **Audio / subtitle stream selection: `-a` / `-s`.** Choose which language
+  tracks land in the output instead of always keeping every audio and subtitle
+  stream. Each flag takes `all`, `none`, or a comma-separated language list —
+  names or ISO codes, mixed freely and case-insensitively (`-a English,spa`,
+  `-s eng`). Default (flag absent) is `all` — bit-for-bit the previous output.
+  A language that matches no stream lists the disc's actual languages and fails
+  the rip (a typo shouldn't silently ship the wrong file).
 
-- **Five extraction destinations** (inherits libfreemkv 1.5.0): `video://`,
-  `audio://`, and `sub://` write per-track files (one track class each, native
-  form) to a directory; `chapters://` writes a title's chapter markers (`.xml` /
-  `.txt` / `.vtt`, chosen by extension); `json://` writes one title's complete
-  structure as JSON. The two metadata sinks are scan-only — no demux — so they
-  return in seconds.
-- All five schemes are documented in the CLI reference (`cli.md`), with the
-  `audio://` LPCM `.pcm` caveat noted.
+### Changed — BREAKING
+
+- **`-t` now defaults to the MAIN TITLE only, not all titles.** With no `-t`
+  flag, obfuscated discs with 50+ near-equal-length playlists turned a 40 GB
+  disc into ~200 GB of near-duplicate MKVs. It now rips title 1 only.
+  **Migration:** add `-t all` to restore the old all-titles default. `-t N`
+  (repeatable, 1-based) is unchanged; `-t 0` is still invalid.
+
+### Changed
+
+- Internal: the CLI runs on **`freemkv-engine`** — the multi-title rip loop,
+  disc→ISO recovery (`copy` / `CopyOptions`, the sweep/patch strategy), and a
+  single shared `SpeedEstimator` for progress speed + ETA. It muxes through
+  `libfreemkv::mux_stream`, brings drives up through `DiscSession`, scans ISOs
+  through `scan_iso`, and resolves AACS keys through the library. No
+  user-visible change; fewer places for the front-ends to drift.
 
 ### Fixed
 
-- **Multi-title `video://` / `audio://` / `sub://` keep their kind filter.** The
-  per-title job builder hardcoded a `demux://` prefix on the per-title
-  subdirectories, so a multi-title extraction of one track class would have fanned
-  out *every* track instead. It now carries the sink's own scheme through.
-
-## [1.4.5] — 2026-07-18
-
-### Changed
-
-- Inherits **libfreemkv 1.4.5**: FMTS (AACS 2.1) discs mux to a clean single-variant
-  stream — `freemkv iso://… mkv://…` reads only the local variant's units, never
-  handing the alternate device-group half to the demuxer. Also folds in key-`Debug`
-  redaction and the uppercase-`0X` hex parse fix. The CLI now renders `KeyOrigin`
-  display text itself (moved out of the library).
-
-## [1.4.4] — 2026-07-17
-
-### Changed
-
-- Inherits **libfreemkv 1.4.4**: online key requests are no longer silently dropped
-  on discs that yield few sample units.
-
-## [1.4.3] — 2026-07-17
-
-### Changed
-
-- Inherits **libfreemkv 1.4.3**: AACS 2.1 forensic-variant online lookups. The CLI
-  samples `MIN_SAMPLE_UNITS` units for the online key source.
-
-## [1.4.2] — 2026-07-15
-
-### Changed
-
-- Inherits **libfreemkv 1.4.2**: the mux no longer nulls decryptable video or
-  storms the online key server on a bad-encoded region; decrypt and TS-structure
-  are separated into distinct primitives so a correct key that yields
-  imperfectly-encoded TS is passed to the demuxer rather than treated as loss.
-
-## [1.4.1] — 2026-07-14
-
-### Fixed
-
-- Inherits **libfreemkv 1.4.1**: `freemkv iso://… mkv://…` (and disc rips) no
-  longer conceal decryptable video as loss over a single authored-bad TS packet.
-  A non-conforming packet is now left for the demuxer to handle instead of the
-  whole aligned unit being nulled. Also folds in the unified MVC (Blu-ray 3D)
-  track-signal handling.
-
-## [1.4.0] — 2026-07-13
-
-### Added
-
-- **Blu-ray 3D output.** Ripping a 3D disc — `freemkv disc:// mkv://out.mkv` or
-  `freemkv iso://<3d>.iso mkv://out.mkv` — now produces a single MVC video track
-  carrying both eyes (base + dependent view), via libfreemkv 1.4.0. Non-3D rips
-  are byte-for-byte unchanged.
-
-## [1.3.2] — 2026-07-10
-
-Version sync with the workspace; inherits libfreemkv 1.3.2.
-
-## [1.3.1] — 2026-07-10
-
-Inherits libfreemkv 1.3.1 — authoritative HD-DVD title composition (durations,
-names, chapters from the Advanced-Content playlist).
-
-### Licensing
-
-- **Relicensed to the MIT License, from 1.3.1 onwards** (releases up to and
-  including 1.3.0 remain under AGPL-3.0).
-
-## [1.3.0] — 2026-07-08
-
-Inherits libfreemkv 1.3.0 — AACS 2.1 (FMTS) and HD-DVD as first-class formats,
-HD-DVD VC-1 muxing, and display-order timestamps for program-stream video.
-
-### Added
-
-- **`disc-info` labels the AACS generation and HD-DVD / FMTS formats.** The
-  encryption line now reads `AACS 1.0` / `AACS 2.0` / `AACS 2.1` (the 2.1 from
-  the FMTS format) instead of a bare "encrypted", and HD-DVD / 4K UHD FMTS discs
-  are named as their own formats.
-- **`disc-info -v` resolves keys and shows the crypto detail.** Verbose now runs
-  a local-keydb key resolution (host-cert handshake scan + ciphertext sampling),
-  so the Keys line reflects a real unit-key set — with the Volume ID, the Volume
-  Unique Key, and each CPS unit key printed. The verbose block leads with the
-  drive / device / region, then the MKB generation, hash, VID, and keys.
-
-### Changed
-
-- **`disc-info -v` shows a PID for every stream**, subtitles included (previously
-  video and audio only), and adds the disc region.
-
-## [1.2.0] — 2026-07-01
-
-Inherits libfreemkv 1.2.0, including **mux loss concealment** — when a unit
-genuinely can't be decrypted, the mux conceals it (rather than emitting
-ciphertext or a broken frame) and drops forward to the next keyframe, so a
-remux of a disc with an unrecoverable gap still produces a decode-clean MKV;
-the loss is logged, not silent.
-
-### Added
-
-- **`disc-info` reports the unlocker matrix.** The `disc-info` command now shows
-  which unlockers actually ran for the disc — LibreDrive firmware unlock, AACS,
-  CSS — alongside the disc's other metadata, matching the operator-visible report
-  autorip logs after each scan. Driven by `Disc::unlocker_matrix()` in libfreemkv
-  1.2.0.
-
-### Fixed
-
-- **Read-time key fetch uses the disc's own AACS version.** `update-keys` /
-  remux key resolution now carries the disc's AACS version into `DiscInputs`, so
-  an on-demand key fetch parses `Unit_Key_RO.inf` at the disc's matching stride
-  (AACS-1.0 48-byte vs AACS-2.x 64-byte) instead of assuming one layout.
-
-## [1.1.0]
-
-Inherits libfreemkv 1.1.0, including the **post-read decrypt-verify
-gate** (encrypted units are verified during the rip; an undecryptable unit is
-treated like a bad read) and the **DVD movie-not-menu** fix — DVD rips now begin
-at the feature instead of several minutes of the disc menu.
-
-### Added
-
-- New error code **E7025** ("AACS bus key unavailable"), with messages in all
-  seven UI languages and full Error-Codes-page coverage.
-
-### Fixed
-
-- `update-keys --keydb <path>` now downloads to that path (previously ignored,
-  always wrote the default location).
-
-## [1.0.0-rc.5.1]
-
-### Added
-
-- **`--log-level` validation.** Out-of-range or non-integer values now
-  print a clear error and exit non-zero instead of silently falling back
-  to a default.
-- **`--key-url` scheme validation.** The key URL is validated at startup;
-  an unsupported scheme (anything other than `http://` / `https://`)
-  prints a specific error rather than failing later at download time.
-- **`--language` validation.** An unrecognized language tag is rejected
-  with a descriptive error listing accepted values.
-- **Full UI localization across 7 locales.** The help/usage screen and all
-  user-facing strings (progress labels, result blocks, error messages) are
-  now fully localized for all supported locales, not just the runtime
-  error path.
-
-### Changed
-
-- **"CSS authentication failed" message clarified.** When the CSS bus-auth
-  handshake succeeds but the disc cannot be decrypted, the error message
-  now distinguishes between an auth-level failure and an unrecoverable
-  title-key failure, making the root cause actionable.
-
-## [1.0.0-rc.4] — UNRELEASED
-
-Cleaner terminal output, an error-message overhaul, and reliability fixes
-on the disc-info and pipe paths.
-
-### Changed
-
-- **Two-channel logging: clean terminal, file-only diagnostics.** The
-  terminal now carries only curated progress, status, and the final
-  result block — no `tracing` DEBUG/TRACE ever reaches it. A diagnostic
-  log file is written only when you ask for it (`--log-level N`,
-  `--log-file PATH`, or `RUST_LOG`); with none set, no subscriber is
-  installed and nothing is logged. The default log path is `./log.txt`,
-  written with timestamps on and ANSI colour off so it pastes cleanly
-  into a bug report.
-- **Fatal-error block.** On a fatal error the CLI prints one readable
-  block — the operation, the plain-English cause, and how to enable a
-  diagnostic log — instead of a raw error code.
-- **Error-message overhaul.** 47 previously unmapped error codes now
-  render a clear message, jargon-heavy strings were rewritten in plain
-  language, and the `verify` subcommand is fully localized.
-
-### Fixed
-
-- A disc → ISO rip that recovered zero readable bytes now fails instead
-  of writing an empty image.
-- A CLI pipe that hits an early EOF no longer exits `0` with a
-  structurally invalid MKV.
-- `disc-info` no longer drops the real scan/drive-open error: the
-  underlying cause is routed through the localized error renderer rather
-  than being masked by a generic failure.
-
-## [1.0.0-rc.2]
-
-Second release candidate for 1.0. Adds keyless DVD/CSS ripping and correct DVD
-video output, on top of release hardening.
-
-### Added
-
-- Keyless DVD/CSS ripping: a CSS-protected DVD decrypts with no key database, so
-  `disc://` to `mkv://` works out of the box on a DVD. Muxing a raw,
-  still-scrambled CSS ISO (`iso://`) works too — the title key is recovered from
-  the image directly, no pre-decryption step.
-- `--log-level N` sets log verbosity (1 = warnings/errors, up to 4 = trace) and
-  `--log-file PATH` adds a non-blocking file sink alongside stderr; `RUST_LOG`
-  overrides. Logs go to stderr so stdout stays pipe-clean for
-  `mkv://`/`m2ts://`.
-- Static-binary releases: each tagged release attaches a single static binary
-  per platform (Linux x86_64/aarch64, macOS Intel/Silicon, Windows) with a
-  `.sha256` checksum, alongside the source archives. See `INSTALL.md`.
-
-### Changed
-
-- Correct DVD video output via libfreemkv's MPEG-2 Program-Stream access-unit
-  reassembler (one coded picture per MKV block with reconstructed timestamps),
-  replacing the previous per-PES framing that produced corrupted DVD video.
-- MKV output records `freemkv <version>` in the Muxing/Writing application
-  fields.
-- Built on libfreemkv 1.0.0-rc.2: HEVC/H.264/VC-1 param-set keyframe
-  correctness, short-read rejection, `BlockDuration` timescale fix, and content-
-  key redaction in logs.
-
-## [1.0.0-rc.1]
-
-First release candidate for 1.0 — the first tagged 1.0 milestone of the CLI,
-establishing the stream-URL command surface (see "Pre-1.0 development").
-
-## Pre-1.0 development
-
-Versions 0.x were the development series leading up to 1.0. The highlights,
-condensed:
-
-- **Stream-URL CLI.** `freemkv <source> <dest>` over `disc://`, `iso://`,
-  `mkv://`, `m2ts://`, `network://`, `stdio://`, and `null://`, with `info` for
-  disc and file metadata and `update-keys` for fetching a keydb.
-- **Correct, safe output.** A resolved decryption key is verified against disc
-  content before muxing, so a stale or wrong key can't silently produce garbage;
-  `iso://` mux fails fast with a clear message when no usable key is available;
-  `info iso://` lists titles without requiring a key. A multi-title disc rip to
-  a single-file destination is rejected.
-- **Hardening.** Robust argument parsing (unknown flags error, flags before URLs
-  are not mistaken for the URL), TOML-safe `info`/`drive.toml` writing, and
-  `sigaction`-based SIGINT so a second Ctrl-C reliably exits.
-- **Build.** Release profile uses thin LTO and a single codegen unit. Tracks the
-  matching libfreemkv recovery and mux improvements throughout.
+- **Fail fast on a disc with no decryption key.** A multi-title rip (`-t all`)
+  against an AACS disc with no usable key used to print the "no key" error once
+  per title. It now stops after the first failure with one clear error.
+- **Ctrl-C is a full stop.** Interrupting a multi-title rip previously cancelled
+  only the title in progress and moved on. Ctrl-C now stops the whole rip
+  immediately; the mapfile/staging is preserved, so re-running resumes.
+
+### Known limitations
+
+- The desktop app is **not notarized**, so the first launch needs
+  right-click → Open.

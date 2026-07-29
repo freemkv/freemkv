@@ -5,9 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+# `freemkv` is one binary with two shells: the CLI (every OS) and the native
+# desktop GUI (macOS today, Windows next). So CI verifies BOTH halves:
+#   - the macOS jobs build/lint/test the whole crate incl. the AppKit shell —
+#     where the dead-state bugs live;
+#   - the Linux job builds/lints/tests the CLI, which is what Linux ships (the
+#     GUI is target-gated off, so a Linux build is pure CLI);
+#   - a lib-only check keeps the shared core (ui.rs/engine.rs) portable so the
+#     Windows shell inherits a clean base.
 jobs:
-  lint:
-    runs-on: ubuntu-latest
+  # ── macOS: the whole crate, GUI shell included ──────────────────────────────
+  lint-macos:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.86.0
@@ -15,20 +24,42 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
+      # --all-targets so the tests and the AppKit shell are linted too.
+      - run: cargo clippy --all-targets -- -D warnings
 
-  test:
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: Swatinem/rust-cache@v2
+      # The disc-backed tests skip themselves when FMKV_TEST_ISO is unset, so
+      # this runs the platform-neutral suite without needing media on the runner.
+      - run: cargo test --tests
+
+  # ── Linux: the CLI (what Linux ships) ───────────────────────────────────────
+  # The GUI is target-gated off, so this builds the pure CLI. If any GUI code or
+  # OS assumption leaked into the always-compiled path it would fail here on
+  # `-D warnings` (dead code) long before a Linux user hit it.
+  cli-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.86.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --tests
+      - run: cargo build --release
+
+  # The shared core must stay platform-neutral: this checks the LIBRARY on
+  # Linux, so if a `df` call or any OS assumption creeps into ui.rs/engine.rs it
+  # fails here long before the Windows shell exists to notice.
+  core-is-portable:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.86.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --tests
-
-  check-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.86.0
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check
+      - run: cargo check --lib

@@ -1,16 +1,20 @@
-// freemkv — Open source 4K UHD / Blu-ray / DVD backup tool
-// MIT — freemkv project
-//
-// Usage: freemkv <source> <dest> [flags]
-//        freemkv info <url> [flags]
-//
-// Examples:
-//   freemkv disc:// mkv://Movie.mkv
-//   freemkv disc:///dev/sg4 m2ts://Movie.m2ts
-//   freemkv m2ts://Movie.m2ts mkv://Movie.mkv
-//   freemkv disc:// network://192.0.2.10:9000
-//   freemkv info disc://
+//! freemkv — one binary, two shells over the shared `freemkv-engine`:
+//!
+//! * the **CLI** — the gold-standard `freemkv` command line, replicated 1:1
+//!   (`cli_entry` + `pipe`/`info`/`disc_info`/… copied verbatim), and
+//! * the native desktop **GUI** (`mac`, AppKit — macOS only) over the shared
+//!   `ui`/`engine`/`settings` core.
+//!
+//! The dispatcher routes a CLI-style invocation (any args, or a bare launch
+//! from a terminal) to the CLI shell — byte-for-byte identical to the old
+//! `freemkv` binary — and a windowed launch (a `.app` double-click, or an
+//! explicit `freemkv gui`) to the desktop shell.
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+// ── CLI shell (the gold-standard freemkv CLI, replicated verbatim) ──────────
+mod cli_entry;
 mod disc_info;
 mod info;
 mod keydb_fetch;
@@ -19,767 +23,283 @@ mod output;
 mod pipe;
 mod strings;
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+// ── GUI shell — DESKTOP TARGETS ONLY ────────────────────────────────────────
+// The shared GUI core (`ui`/`engine`/`settings`/`platform`) and the AppKit
+// shell exist only where there is a desktop shell to drive them. On Linux the
+// binary is pure CLI (like the historical `freemkv`), so none of this compiles
+// in — no dead code, no unused deps, and `clippy -D warnings` stays clean on a
+// Linux runner. (The lib target still exposes the core on every platform, so
+// CI's portable-core check keeps `ui.rs`/`engine.rs` honest.)
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod engine;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod platform;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod settings;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod ui;
 
-/// Worker guard for the optional non-blocking file log layer. Held for the
-/// life of the process so buffered records are flushed on exit; `None` when
-/// `--log-file` isn't given.
-static LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuard> =
-    std::sync::OnceLock::new();
-
-/// Default diagnostic log path when `--log-level` is given without an explicit
-/// `--log-file`. Written in the working directory, matching the fatal-error
-/// hint ("re-run with --log-level 3 (writes ./log.txt)").
-const DEFAULT_LOG_FILE: &str = "log.txt";
-
-/// Initialise tracing.
-///
-/// Two-channel design: the **terminal** (Channel 1) is always clean — curated
-/// progress, status, and the final result block only. **Zero `tracing`
-/// DEBUG/TRACE (or any tracing level) ever reaches the terminal.** Tracing is a
-/// diagnostic stream that only exists when the user explicitly asks for it, and
-/// it goes to a **file** (Channel 2), never stdout/stderr.
-///
-/// A file log is written only when one of these is set:
-///   * `--log-level N` — N maps 1→warn, 2→info, 3→debug, 4→trace for the
-///     `freemkv` / `libfreemkv` targets (everything else stays at error).
-///   * `--log-file PATH` — write to PATH (default level 3/debug if `--log-level`
-///     is absent, so a lone `--log-file` still captures useful detail).
-///   * `RUST_LOG` — power-user override of the filter; still file-only.
-///
-/// With none of these set, no subscriber is installed at all: the library's
-/// `tracing` events are dropped and the terminal stays pristine. The file
-/// destination defaults to `./log.txt`; ANSI is off and timestamps are on so
-/// the log is clean and copy-pasteable for a bug report.
-fn init_logging(args: &[String]) {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::{EnvFilter, fmt};
-
-    // Parse the two logging flags. `--log-level N` (1=warn..4=trace); the
-    // per-subcommand parsers read the same flag to widen stdout detail at >=2.
-    let mut level_num: Option<u8> = None;
-    let mut log_file: Option<String> = None;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--log-level" => {
-                // VAL-1 / VAL-4: validate the value rather than silently
-                // swallowing bad input or silently clamping 0 → 1.
-                // Strings aren't loaded yet here, so plain English is fine.
-                match it.next() {
-                    Some(s) => match s.parse::<u8>() {
-                        Ok(0) => eprintln!("--log-level: value 0 is out of range (1–4), ignored"),
-                        Ok(n) => level_num = Some(n.clamp(1, 4)),
-                        Err(_) => {
-                            eprintln!("--log-level: expected a number 1–4, got '{s}', ignored")
-                        }
-                    },
-                    None => eprintln!(
-                        "--log-level: requires a value (1=warn, 2=info, 3=debug, 4=trace)"
-                    ),
-                }
-            }
-            "--log-file" => {
-                if let Some(p) = it.next() {
-                    log_file = Some(p.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let rust_log = std::env::var("RUST_LOG").is_ok();
-
-    // No `--log-level`, no `--log-file`, no `RUST_LOG`: the user didn't ask for
-    // a diagnostic log. Install NOTHING — the terminal stays clean and the
-    // library's tracing events are silently dropped. This is the common path.
-    if level_num.is_none() && log_file.is_none() && !rust_log {
-        return;
-    }
-
-    // A diagnostic log was requested. Build the filter: RUST_LOG wins; else map
-    // the numeric level (defaulting to debug when only `--log-file` was given,
-    // since the user clearly wants detail).
-    let env_filter = if rust_log {
-        EnvFilter::from_default_env()
-    } else {
-        let level = match level_num.unwrap_or(3) {
-            1 => "warn",
-            2 => "info",
-            3 => "debug",
-            _ => "trace",
-        };
-        EnvFilter::new(format!("error,freemkv={level},libfreemkv={level}"))
-    };
-
-    // File-only sink. NEVER stdout/stderr — the terminal is Channel 1 and must
-    // stay free of tracing. Default to ./log.txt; ANSI off, timestamps on.
-    let path = log_file.unwrap_or_else(|| DEFAULT_LOG_FILE.to_string());
-    let p = std::path::Path::new(&path);
-    let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
-    let file_appender = match (dir, p.file_name()) {
-        (Some(dir), Some(name)) => tracing_appender::rolling::never(dir, name),
-        (None, Some(name)) => tracing_appender::rolling::never(".", name),
-        _ => {
-            // An invalid `--log-file` path is a fatal misconfiguration of the
-            // diagnostic channel — report it cleanly on the terminal (this is a
-            // CLI diagnostic, not a tracing event) and continue without a file.
-            eprintln!("--log-file: invalid path '{path}' — no diagnostic log written");
-            return;
-        }
-    };
-    let (nb, guard) = tracing_appender::non_blocking(file_appender);
-    let _ = LOG_GUARD.set(guard);
-    let file_layer = fmt::layer().with_ansi(false).with_writer(nb);
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(file_layer)
-        .init();
-}
+#[cfg(target_os = "macos")]
+mod mac;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    init_logging(&args);
 
-    // Parse --language before anything else.
-    //
-    // Apply the same is-URL guard `collect_urls` uses: a value-flag must not
-    // swallow a following positional stream URL. `freemkv --language disc://
-    // mkv://out.mkv` would otherwise eat `disc://` as the "language", leaving a
-    // single URL that silently degrades into an info/usage no-op. The same
-    // applies to a following flag token (e.g. `freemkv --language --verbose
-    // ...`): a leading `-` means the value is missing, not a language code. If
-    // the next token is a URL, a flag, or --language is the last token, the
-    // value is missing: warn and leave the token as positional. Strings aren't
-    // initialized yet, so this diagnostic is necessarily plain English.
-    let mut filtered = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--language" || args[i] == "--lang" {
-            match args.get(i + 1) {
-                Some(v) if !is_url(v) && !v.starts_with('-') => {
-                    strings::set_language(v);
-                    i += 2;
+    // A windowed launch opens the desktop shell; everything else is the CLI.
+    // On Linux there is no desktop shell, so this whole branch is compiled out
+    // and `freemkv` is always the CLI.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if wants_gui(&args) {
+        run_gui();
+        return;
+    }
+
+    // The gold-standard CLI. `cli_entry::run` owns exit codes (it calls
+    // `std::process::exit` on every terminal path, exactly as the old `main`
+    // did), so a normal return here is the success path.
+    cli_entry::run(args);
+}
+
+/// Launch the desktop shell for this platform.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn run_gui() {
+    // Development harness (scan / rip / screenshot hooks). Debug builds only —
+    // the shipped release binary has no environment switches.
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    if dev_harness() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    mac::run();
+    #[cfg(target_os = "windows")]
+    eprintln!("the Windows desktop shell is not built yet — run `freemkv <args>` for the CLI");
+}
+
+/// True when this invocation should open the desktop UI rather than the CLI:
+/// an explicit `freemkv gui`, or a bare launch from inside a macOS `.app`
+/// bundle (a Finder double-click passes no arguments). A bare launch from a
+/// terminal falls through to the CLI, so `freemkv` alone still prints usage and
+/// exits 2 — preserving the CLI contract byte-for-byte.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn wants_gui(args: &[String]) -> bool {
+    if args.get(1).map(String::as_str) == Some("gui") {
+        return true;
+    }
+    args.len() < 2 && launched_from_app_bundle()
+}
+
+#[cfg(target_os = "macos")]
+fn launched_from_app_bundle() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.contains(".app/Contents/MacOS/")))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn launched_from_app_bundle() -> bool {
+    // No bundle concept on Windows; the GUI is reached via `freemkv gui` (or a
+    // shortcut that passes it). A bare launch stays CLI.
+    false
+}
+
+/// Dev-only entry points. Returns true when it handled the invocation.
+/// macOS debug builds only — it drives the GUI core (`engine`/`settings`/`ui`),
+/// which only compiles on desktop targets.
+#[cfg(all(debug_assertions, target_os = "macos"))]
+fn dev_harness() -> bool {
+    // FMKV_FMTS=disc|file lists the output options offered for that source kind.
+    if let Ok(k) = std::env::var("FMKV_FMTS") {
+        println!("(checked in the UI; see popup_fmt_for) kind={k}");
+        return true;
+    }
+
+    if let Ok(p) = std::env::var("FMKV_STREAM") {
+        match engine::scan_stream(&p) {
+            Ok(sc) => {
+                println!("label={}  rows={}", sc.label, sc.rows.len());
+                for r in &sc.rows {
+                    println!(
+                        "{}{:<10} {}  pid={:?}",
+                        "  ".repeat(r.depth as usize),
+                        r.type_s,
+                        r.desc,
+                        r.pid
+                    );
                 }
-                _ => {
-                    eprintln!("{}: requires a language code (e.g. --language de)", args[i]);
-                    i += 1;
-                }
             }
-        } else {
-            filtered.push(args[i].clone());
-            i += 1;
+            Err(e) => println!("error: {e}"),
         }
-    }
-    let args = filtered;
-    strings::init();
-
-    if args.len() < 2 {
-        // Bare invocation with no subcommand/URL: print usage but exit non-zero
-        // so a scripted `freemkv; echo $?` (e.g. a misconfigured wrapper) sees a
-        // failure rather than a false success. Explicit `help`/`--help`/`-h`
-        // still exits 0 (handled below).
-        usage();
-        std::process::exit(2);
+        return true;
     }
 
-    match args[1].as_str() {
-        // `freemkv <cmd> --help` / `freemkv <cmd> -h` print command-specific help.
-        // Handled before the per-command dispatch so the flag never reaches the
-        // command's own argument parser.
-        "info" if wants_help(&args[2..]) => help_info(),
-        "update-keys" if wants_help(&args[2..]) => help_update_keys(),
-
-        "info" => info_cmd(&args[2..]),
-        "update-keys" => update_keys(&args[2..]),
-        // NOTE: there is deliberately NO `remux` (or any conversion) verb. The
-        // operation IS the URL pair: `freemkv <source-url> <dest-url> [opts]`.
-        // e.g. `freemkv iso://Disc.iso -t 1 mkv://Movie.mkv`. Source→dest is the
-        // whole grammar; a conversion "command" would be redundant.
-        "version" | "--version" | "-V" => println!("{}", libfreemkv::VERSION_LABEL),
-        // `freemkv help`, `freemkv --help`, `freemkv -h`: top-level usage.
-        // `freemkv help <command>`: command-specific help.
-        "help" | "--help" | "-h" => match args.get(2).map(|s| s.as_str()) {
-            Some("info") => help_info(),
-            Some("update-keys") => help_update_keys(),
-            Some("version") | Some("help") | None => usage(),
-            Some(other) => {
-                eprintln!(
-                    "{}",
-                    strings::fmt("help.unknown_command", &[("cmd", other)])
-                );
-                usage();
-                std::process::exit(2);
-            }
-        },
-
-        // Everything else: freemkv <source> <dest>
-        _ => {
-            let urls = collect_urls(&args[1..]);
-
-            if urls.len() == 2 {
-                if !pipe::run(&urls[0], &urls[1], &args[1..]) {
-                    // `pipe::run` has already printed the curated cause/result
-                    // on the terminal; exit non-zero so a scripted `$?` sees the
-                    // failure. (The pretty fatal block for cause-bearing errors
-                    // is emitted inside the rip path where the cause is known.)
-                    std::process::exit(1);
-                }
-            } else if urls.len() == 1 {
-                // Single URL with no dest — show info. `info_cmd` treats its
-                // `args[0]` as the URL, but a preceding flag (e.g. `freemkv
-                // --verbose disc://`) would otherwise sit at `args[0]` and be
-                // parsed as the URL. `collect_urls` already resolved the real
-                // URL token, so put it first and append the remaining (non-URL)
-                // flag tokens so downstream flags like `-d`/`--share` survive.
-                let mut info_args = vec![urls[0].clone()];
-                info_args.extend(args[1..].iter().filter(|a| **a != urls[0]).cloned());
-                info_cmd(&info_args);
-            } else {
-                eprintln!("{}", strings::get("error.usage_hint"));
-                std::process::exit(1);
-            }
-        }
-    }
-}
-
-/// True if `s` looks like a stream URL (`scheme://...`).
-fn is_url(s: &str) -> bool {
-    s.contains("://")
-}
-
-/// Print the curated fatal-error block and exit non-zero.
-///
-/// This is the single terminal-facing error path (Channel 1). It prints a
-/// clean, localized block — never a raw error code, never a tracing event:
-/// ```text
-/// ✗ <operation> failed: <clean cause>.
-///   For a diagnostic log, re-run with --log-level 3 (writes ./log.txt).
-/// ```
-/// `op_key` is a locale key for the operation name (`error.op_rip`, etc.);
-/// `cause` is the already-localized, human-readable cause (typically from
-/// [`pipe::fmt_err`], which renders `E<code>` → a plain-English message with
-/// its own remediation). The diagnostic-log hint tells the user how to capture
-/// a file log for a bug report — without ever spilling tracing onto the
-/// terminal by default.
-///
-/// The block goes to STDERR so stdout stays pipe-clean for `mkv://`/`m2ts://`
-/// streaming; the leading mark is ANSI-free when stderr is redirected.
-fn fatal(op_key: &str, cause: &str) -> ! {
-    let op = strings::get(op_key);
-    // WS2: the `Error:` level word is rendered from `error.level_error` (a
-    // translatable key, the one home for the three level words) so the fatal
-    // block reads `✗ Error: <op> failed: <cause>.` with the code-forward cause
-    // produced by `pipe::fmt_err`.
-    let level = strings::get(messaging::Level::Error.locale_key());
-    eprintln!();
-    eprintln!(
-        "{} {}.",
-        fail_mark(),
-        strings::fmt(
-            "error.fatal_header",
-            &[("level", &level), ("op", &op), ("cause", cause)]
-        )
-    );
-    eprintln!("  {}", strings::get("error.fatal_diagnostic_hint"));
-    std::process::exit(1);
-}
-
-/// The leading mark for the fatal-error block: a red `✗` on a real terminal, a
-/// plain `x` when stderr is redirected to a file/pipe (so a pasted bug-report
-/// log has no stray ANSI/Unicode noise).
-fn fail_mark() -> &'static str {
-    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-        "\x1b[31m✗\x1b[0m"
-    } else {
-        "x"
-    }
-}
-
-/// Split positional stream URLs out of an argument list, accounting for
-/// value-taking flags (`-t`, `-k`).
-///
-/// A value-flag normally consumes the following token as its value, but it must
-/// NOT swallow a positional stream URL (`scheme://...`): `freemkv -k disc://
-/// mkv://out.mkv` would otherwise let `-k` eat `disc://`, leaving a single URL
-/// that silently routes to `info` instead of ripping. So if a value-flag is
-/// followed by a URL token, the URL is kept as positional and the flag's value
-/// is treated as absent (pipe::run then reports the missing value).
-fn collect_urls(args: &[String]) -> Vec<String> {
-    // Flags that consume the next argument as a value.
-    const VALUE_FLAGS: &[&str] = &[
-        "-t",
-        "--title",
-        "-k",
-        "--keydb",
-        "--key-url",
-        "--key-auth",
-        "--log-file",
-        "--log-level",
-    ];
-
-    // `--key-url`'s value is itself an `http(s)://` URL — so unlike `-t`/`-k`
-    // (whose value is never a stream URL), its value MUST be consumed even though
-    // it matches `is_url`. Otherwise the reclassify-as-positional fallback below
-    // would treat the key-service URL as a third stream URL and break the
-    // 2-URL rip dispatch. Track whether the flag we're skipping for is key-url.
-    let mut urls = Vec::new();
-    let mut skip_next = false;
-    let mut skip_is_key_url = false;
-    for arg in args {
-        if skip_next {
-            skip_next = false;
-            let consume_key_url = skip_is_key_url;
-            skip_is_key_url = false;
-            // `--key-url`'s value is always consumed (it's the key-service URL,
-            // not a positional stream URL). For the other value-flags, a value
-            // that looks like a stream URL is actually a misplaced positional —
-            // reclassify it so `-k disc:// mkv://out` still rips.
-            if !consume_key_url && is_url(arg) {
-                urls.push(arg.clone());
-            }
-            continue;
-        }
-        if arg.starts_with('-') {
-            if VALUE_FLAGS.contains(&arg.as_str()) {
-                skip_next = true;
-                skip_is_key_url = arg == "--key-url";
-            }
-        } else {
-            urls.push(arg.clone());
-        }
-    }
-    urls
-}
-
-fn info_cmd(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("{}", strings::get("error.info_usage"));
-        std::process::exit(1);
-    }
-
-    let url = &args[0];
-    let parsed = libfreemkv::parse_url(url);
-
-    match &parsed {
-        libfreemkv::StreamUrl::Disc { device } => {
-            // The device comes from the source URL (`disc:///dev/sgN`), not a flag.
-            let dev = device.as_ref().map(|d| d.to_string_lossy().to_string());
-            let flags = &args[1..];
-            // --share routes to drive-info module (capture + GitHub submit)
-            if flags.iter().any(|a| a == "--share" || a == "-s") {
-                info::run(dev.as_deref(), flags);
-            } else {
-                disc_info::run(dev.as_deref(), flags);
-            }
-        }
-        libfreemkv::StreamUrl::Iso { path } => {
-            // Listing titles needs NO AACS key — only clear UDF navigation.
-            // Scan the ISO keylessly and reuse disc_info's full title list
-            // (duration, size, clip count, video/audio/subtitle streams).
-            // Going through the key-gated `input()` here would hit libfreemkv's
-            // no-key gate and surface E7022 for an encrypted disc, and would
-            // only ever open a single title. `-k`/`--keydb` is accepted but the
-            // listing never requires it. `--full` shows every title.
-            let full = args[1..].iter().any(|a| a == "--full" || a == "-f");
-            let mut reader = match libfreemkv::FileSectorSource::open(path) {
-                Ok(r) => r,
-                Err(e) => fatal("error.op_info", &pipe::fmt_err(&e)),
-            };
-            let capacity =
-                <libfreemkv::FileSectorSource as libfreemkv::SectorSource>::capacity_sectors(
-                    &reader,
-                );
-            let disc = match libfreemkv::Disc::scan_image(
-                &mut reader,
-                capacity,
-                &libfreemkv::ScanOptions::default(),
-            ) {
-                Ok(d) => d,
-                Err(e) => fatal("error.op_info", &pipe::fmt_err(&e)),
-            };
-            println!("freemkv {}", libfreemkv::VERSION_LABEL);
-            println!();
-            disc_info::print_disc_titles(&disc, full);
-        }
-        libfreemkv::StreamUrl::M2ts { .. } | libfreemkv::StreamUrl::Mkv { .. } => {
-            match libfreemkv::input(url, &libfreemkv::InputOptions::default()) {
-                Ok(stream) => {
-                    let meta = stream.info();
-                    println!("File: {}", parsed.path_str());
-                    if meta.duration_secs > 0.0 {
-                        let d = meta.duration_secs;
-                        println!(
-                            "Duration: {}:{:02}:{:02}",
-                            d as u64 / 3600,
-                            (d as u64 % 3600) / 60,
-                            d as u64 % 60
-                        );
-                    }
-                    println!("Streams: {}", meta.streams.len());
-                    for s in &meta.streams {
-                        match s {
-                            libfreemkv::Stream::Video(v) => {
-                                let label = if v.label.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" — {}", v.label)
-                                };
-                                println!("  {} {}{}", v.codec, v.resolution, label);
-                            }
-                            libfreemkv::Stream::Audio(a) => {
-                                let mut tags: Vec<String> = Vec::new();
-                                let purpose_key = match a.purpose {
-                                    libfreemkv::LabelPurpose::Commentary => {
-                                        Some("stream.purpose.commentary")
-                                    }
-                                    libfreemkv::LabelPurpose::Descriptive => {
-                                        Some("stream.purpose.descriptive")
-                                    }
-                                    libfreemkv::LabelPurpose::Score => Some("stream.purpose.score"),
-                                    libfreemkv::LabelPurpose::Ime => Some("stream.purpose.ime"),
-                                    libfreemkv::LabelPurpose::Normal => None,
-                                };
-                                if let Some(k) = purpose_key {
-                                    tags.push(strings::get(k));
-                                }
-                                if a.secondary {
-                                    tags.push(strings::get("stream.secondary"));
-                                }
-                                if !a.label.is_empty() {
-                                    tags.push(a.label.clone());
-                                }
-                                let label = if tags.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" — {}", tags.join(", "))
-                                };
-                                println!("  {} {} {}{}", a.codec, a.channels, a.language, label);
-                            }
-                            libfreemkv::Stream::Subtitle(s) => {
-                                println!("  {} {}", s.codec, s.language);
-                            }
-                        }
-                    }
-                }
-                Err(e) => fatal("error.op_info", &pipe::fmt_err(&e)),
-            }
-        }
-        libfreemkv::StreamUrl::Unknown { .. } => {
-            eprintln!(
-                "{}",
-                strings::fmt("error.info_unknown_url", &[("url", url)])
-            );
-            std::process::exit(1);
-        }
-        _ => {
-            eprintln!(
-                "{}",
-                strings::fmt("error.info_unsupported_url", &[("url", url)])
-            );
-            std::process::exit(1);
-        }
-    }
-}
-
-fn usage() {
-    println!("freemkv {}", libfreemkv::VERSION_LABEL);
-    println!();
-    println!("{}", strings::get("usage.synopsis_1"));
-    println!("{}", strings::get("usage.synopsis_2"));
-    println!("{}", strings::get("usage.synopsis_4"));
-    println!();
-    println!("{}", strings::get("usage.subcommands_header"));
-    println!("{}", strings::get("usage.subcmd.info"));
-    println!("{}", strings::get("usage.subcmd.update_keys"));
-    println!("{}", strings::get("usage.subcmd.version"));
-    println!("{}", strings::get("usage.subcmd.help"));
-    println!();
-    println!("{}", strings::get("usage.subcommands_note"));
-    println!();
-    println!("{}", strings::get("usage.urls_header"));
-    println!("{}", strings::get("usage.url.disc_auto"));
-    println!("{}", strings::get("usage.url.disc_linux"));
-    println!("{}", strings::get("usage.url.disc_windows"));
-    println!("{}", strings::get("usage.url.mkv"));
-    println!("{}", strings::get("usage.url.m2ts"));
-    println!("{}", strings::get("usage.url.network"));
-    println!("{}", strings::get("usage.url.stdio"));
-    println!("{}", strings::get("usage.url.iso"));
-    println!("{}", strings::get("usage.url.null"));
-    println!();
-    println!("{}", strings::get("usage.url.scheme_note"));
-    println!("{}", strings::get("usage.url.path_note"));
-    println!();
-    println!("{}", strings::get("usage.examples_header"));
-    println!("{}", strings::get("usage.ex.rip_mkv"));
-    println!("{}", strings::get("usage.ex.rip_m2ts"));
-    println!("{}", strings::get("usage.ex.rip_drive"));
-    println!("{}", strings::get("usage.ex.rip_title"));
-    println!("{}", strings::get("usage.ex.rip_titles"));
-    println!("{}", strings::get("usage.ex.rip_iso"));
-    println!("{}", strings::get("usage.ex.rip_iso_raw"));
-    println!("{}", strings::get("usage.ex.rip_iso_mp"));
-    println!("{}", strings::get("usage.ex.rip_iso_patch"));
-    println!("{}", strings::get("usage.ex.iso_to_mkv"));
-    println!("{}", strings::get("usage.ex.network"));
-    println!("{}", strings::get("usage.ex.network_recv"));
-    println!("{}", strings::get("usage.ex.stdio"));
-    println!("{}", strings::get("usage.ex.benchmark"));
-    println!("{}", strings::get("usage.ex.info"));
-    println!();
-    println!("{}", strings::get("usage.flags_header"));
-    println!("{}", strings::get("usage.flag.title"));
-    println!("{}", strings::get("usage.flag.keydb"));
-    println!("{}", strings::get("usage.flag.key_url_1"));
-    println!("{}", strings::get("usage.flag.key_url_2"));
-    println!("{}", strings::get("usage.flag.key_url_3"));
-    println!("{}", strings::get("usage.flag.key_auth"));
-    println!("{}", strings::get("usage.flag.log_level_1"));
-    println!("{}", strings::get("usage.flag.log_level_2"));
-    println!("{}", strings::get("usage.flag.log_level_3"));
-    println!("{}", strings::get("usage.flag.log_file"));
-    println!("{}", strings::get("usage.flag.quiet"));
-    println!("{}", strings::get("usage.flag.raw"));
-    println!("{}", strings::get("usage.flag.multipass"));
-    println!("{}", strings::get("usage.flag.share"));
-    println!("{}", strings::get("usage.flag.mask"));
-}
-
-/// True if a command's argument list requests its help (`--help` / `-h`).
-/// Used to route `freemkv <cmd> --help` to the per-command help text before the
-/// command's own parser runs.
-fn wants_help(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--help" || a == "-h")
-}
-
-/// `freemkv info --help` / `freemkv help info`.
-fn help_info() {
-    println!("freemkv {}", libfreemkv::VERSION_LABEL);
-    println!();
-    println!("{}", strings::get("help.info.usage"));
-    println!();
-    println!("{}", strings::get("help.info.desc"));
-    println!();
-    println!("{}", strings::get("help.info.examples_header"));
-    println!("{}", strings::get("help.info.ex_disc"));
-    println!("{}", strings::get("help.info.ex_iso"));
-    println!();
-    println!("{}", strings::get("help.info.flags_header"));
-    println!("{}", strings::get("help.info.flag_full"));
-    println!("{}", strings::get("help.info.flag_basic"));
-    println!("{}", strings::get("help.info.flag_verbose"));
-    println!("{}", strings::get("help.info.flag_share"));
-}
-
-/// `freemkv update-keys --help` / `freemkv help update-keys`.
-fn help_update_keys() {
-    println!("freemkv {}", libfreemkv::VERSION_LABEL);
-    println!();
-    println!("{}", strings::get("help.update_keys.usage"));
-    println!();
-    println!("{}", strings::get("help.update_keys.desc"));
-    println!();
-    println!("{}", strings::get("help.update_keys.examples_header"));
-    println!("{}", strings::get("help.update_keys.ex"));
-    println!();
-    println!("{}", strings::get("help.update_keys.flags_header"));
-    println!("{}", strings::get("help.update_keys.flag_url"));
-}
-
-/// Resolve where `update-keys` saves the downloaded keydb: `--keydb <path>`
-/// wins, else the standard location (first existing search path, else the
-/// default). Factored out so the "`--keydb` is honored" behaviour is unit
-/// testable without a network fetch — the prior bug was this flag being ignored
-/// and the keydb always landing at the default location.
-fn update_keys_dest(args: &[String]) -> std::path::PathBuf {
-    let mut keydb: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--keydb" {
-            i += 1;
-            keydb = args.get(i).cloned();
-        }
-        i += 1;
-    }
-    pipe::resolved_keydb_path(&keydb)
-}
-
-fn update_keys(args: &[String]) {
-    let mut url: Option<&str> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--url" | "-u" => {
-                i += 1;
-                url = args.get(i).map(|s| s.as_str());
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    let url = match url {
-        Some(u) => u,
-        None => {
-            eprintln!("{}", strings::get("keys.usage"));
-            std::process::exit(1);
-        }
-    };
-    // The download lands at the `--keydb` path when given, else the standard
-    // location.
-    let dest = update_keys_dest(args);
-    // Fetch the keydb bytes via ureq (HTTP **and** HTTPS) and hand them to the
-    // keydb source to verify + atomically save to `dest`. The CLI supplies its
-    // own SSRF-guarded `ureq` transport (`keydb_fetch::fetch`); the keydb
-    // source stays transport-agnostic on the update path.
-    let result = freemkv_keysources::KeydbSource::new(dest).update(keydb_fetch::fetch, url);
-    match result {
-        Ok(result) => {
+    // FMKV_TITLES_DUMP=<iso> — are same-looking titles actually distinct?
+    if let Ok(p) = std::env::var("FMKV_TITLES_DUMP") {
+        if let Ok((d, _r)) = libfreemkv::scan_iso(std::path::Path::new(&p), Default::default()) {
             println!(
-                "{}",
-                strings::fmt(
-                    "keys.updated",
-                    &[
-                        ("entries", &result.entries.to_string()),
-                        ("bytes", &result.bytes.to_string()),
-                    ]
-                )
+                "{:>3}  {:<14} {:>4}  {:>10}  {:>12}  {:>6}  first-extent",
+                "idx", "playlist", "plid", "duration", "size", "strms"
             );
-            println!(
-                "{}",
-                strings::fmt(
-                    "keys.saved",
-                    &[("path", &result.path.display().to_string())]
-                )
-            );
+            for (i, t) in d.titles.iter().enumerate() {
+                let e = t.extents.first().map(|e| e.start_lba).unwrap_or(0);
+                println!(
+                    "{:>3}  {:<14} {:>4}  {:>10.1}  {:>12}  {:>6}  {}",
+                    i,
+                    t.playlist,
+                    t.playlist_id,
+                    t.duration_secs,
+                    t.size_bytes,
+                    t.streams.len(),
+                    e
+                );
+            }
         }
-        Err(e) => fatal("error.op_update_keys", &pipe::fmt_err(&e)),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{collect_urls, update_keys_dest};
-
-    /// Regression: `update-keys --keydb <path>` must save the download to that
-    /// path. The flag used to be ignored (the keydb always went to the default
-    /// location); `update_keys_dest` now honors it.
-    #[test]
-    fn update_keys_honors_keydb_flag() {
-        let args: Vec<String> = [
-            "--url",
-            "http://x/k.zip",
-            "--keydb",
-            "/custom/path/keydb.cfg",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        assert_eq!(
-            update_keys_dest(&args),
-            std::path::PathBuf::from("/custom/path/keydb.cfg"),
-            "--keydb must be the download destination"
-        );
+        return true;
     }
 
-    /// Without `--keydb`, the destination resolves through the standard
-    /// search/default policy — never the bogus override above.
-    #[test]
-    fn update_keys_without_keydb_flag_uses_standard_location() {
-        let args: Vec<String> = ["--url", "http://x/k.zip"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_ne!(
-            update_keys_dest(&args),
-            std::path::PathBuf::from("/custom/path/keydb.cfg")
-        );
+    if let Ok(p) = std::env::var("FMKV_CAP") {
+        if let Ok((d, _r)) = libfreemkv::scan_iso(std::path::Path::new(&p), Default::default()) {
+            let sz = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            println!("file       = {sz} bytes");
+            println!(
+                "capacity   = {} bytes ({} sectors)",
+                d.capacity_bytes, d.capacity_sectors
+            );
+            println!("titles     = {}", d.titles.len());
+            let sum: u64 = d.titles.iter().map(|t| t.size_bytes).sum();
+            println!("titles sum = {sum} bytes");
+            if d.capacity_bytes > sz {
+                println!("=> IMAGE IS TRUNCATED by {} bytes", d.capacity_bytes - sz);
+            }
+            println!("\n idx  size        max-extent-end   beyond-EOF?");
+            for (i, t) in d.titles.iter().enumerate().take(30) {
+                let end = t
+                    .extents
+                    .iter()
+                    .map(|e| (e.start_lba as u64 + e.sector_count as u64) * 2048)
+                    .max()
+                    .unwrap_or(0);
+                println!(
+                    " {:>3}  {:>10}  {:>14}   {}",
+                    i,
+                    t.size_bytes,
+                    end,
+                    if end > sz { "YES" } else { "no" }
+                );
+            }
+        }
+        return true;
     }
 
-    fn v(args: &[&str]) -> Vec<String> {
-        args.iter().map(|s| s.to_string()).collect()
+    // FMKV_RIP="<iso> <destdir>" runs the real rip headlessly.
+    if let Ok(src) = std::env::var("FMKV_RIP") {
+        // Separate vars: paths contain spaces.
+        let dst = std::env::var("FMKV_OUT").unwrap_or_else(|_| "/tmp/riptest".into());
+        let st = std::sync::Arc::new(engine::RunState::default());
+        engine::start_rip(
+            engine::RipRequest {
+                source: src,
+                dest_dir: dst,
+                titles: std::env::var("FMKV_TITLES")
+                    .ok()
+                    .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+                    .unwrap_or_default(),
+                format: std::env::var("FMKV_FORMAT")
+                    .unwrap_or_else(|_| "Selected titles → MKV".into()),
+                audio_pids: std::env::var("FMKV_APIDS")
+                    .ok()
+                    .map(|v| {
+                        v.split(',')
+                            .filter(|x| !x.is_empty())
+                            .filter_map(|x| x.trim().parse().ok())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                sub_pids: std::env::var("FMKV_SPIDS")
+                    .ok()
+                    .map(|v| {
+                        v.split(',')
+                            .filter(|x| !x.is_empty())
+                            .filter_map(|x| x.trim().parse().ok())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                explicit_streams: std::env::var("FMKV_APIDS").is_ok(),
+                raw: std::env::var("FMKV_RAW").is_ok(),
+                force: true,
+                keys: engine::KeyConfig::from_settings(&settings::Settings::load()),
+            },
+            st.clone(),
+        );
+        while !st.finished.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            for l in st.lines.lock().unwrap().drain(..) {
+                println!("  {l}");
+            }
+            let p = *st.prog.lock().unwrap();
+            if p.bytes_total > 0 {
+                println!(
+                    "  {:.0}%  speed={:.1} MB/s  eta={}",
+                    p.bytes_done as f64 * 100.0 / p.bytes_total as f64,
+                    p.speed_bps as f64 / 1e6,
+                    p.eta_secs
+                        .map(|e| format!("{}s", e))
+                        .unwrap_or_else(|| "—".into())
+                );
+            }
+        }
+        for l in st.lines.lock().unwrap().drain(..) {
+            println!("  {l}");
+        }
+        println!("SUMMARY: {}", st.summary.lock().unwrap());
+        return true;
     }
 
-    #[test]
-    fn plain_two_urls() {
-        assert_eq!(
-            collect_urls(&v(&["disc://", "mkv://out.mkv"])),
-            v(&["disc://", "mkv://out.mkv"])
-        );
+    // FMKV_KEYDB="<url> <dest>" exercises the real download+install path.
+    if let Ok(a) = std::env::var("FMKV_KEYDB") {
+        let mut it = a.splitn(2, ' ');
+        let (u, d) = (it.next().unwrap_or(""), it.next().unwrap_or(""));
+        match settings::update_keydb(u, d) {
+            Ok(m) => println!("OK: {m}"),
+            Err(e) => println!("ERR: {e}"),
+        }
+        return true;
     }
 
-    #[test]
-    fn value_flag_takes_non_url_value() {
-        // -t 1 consumes "1"; the two URLs remain positional.
-        assert_eq!(
-            collect_urls(&v(&["disc://", "mkv://out.mkv", "-t", "1"])),
-            v(&["disc://", "mkv://out.mkv"])
-        );
-        // -k with a real path value.
-        assert_eq!(
-            collect_urls(&v(&["-k", "keydb.cfg", "disc://", "mkv://out.mkv"])),
-            v(&["disc://", "mkv://out.mkv"])
-        );
+    // FMKV_SCAN=<iso> exercises the engine bridge headlessly.
+    if let Ok(p) = std::env::var("FMKV_SCAN") {
+        match engine::scan_with_keys(
+            &p,
+            &engine::KeyConfig::from_settings(&settings::Settings::load()),
+        ) {
+            Ok(sc) => {
+                println!(
+                    "label={}  titles={}  keys={}",
+                    sc.label, sc.title_count, sc.key_summary
+                );
+                for r in sc.rows.iter().take(14) {
+                    println!(
+                        "{}{:<10} {}",
+                        "  ".repeat(r.depth as usize),
+                        r.type_s,
+                        r.desc
+                    );
+                }
+                match engine::preflight_with_keys(
+                    &p,
+                    "/tmp/out",
+                    &[],
+                    &engine::KeyConfig::from_settings(&settings::Settings::load()),
+                ) {
+                    Ok(v) if v.is_empty() => println!("preflight: READY"),
+                    Ok(v) => println!("preflight blocked: {v:?}"),
+                    Err(e) => println!("preflight err: {e}"),
+                }
+            }
+            Err(e) => println!("scan error: {e}"),
+        }
+        return true;
     }
 
-    #[test]
-    fn value_flag_does_not_swallow_positional_url() {
-        // Regression: `-k` must not eat `disc://`, leaving a single URL that
-        // silently routes to `info`. Both URLs must survive as positional.
-        assert_eq!(
-            collect_urls(&v(&["-k", "disc://", "mkv://out.mkv"])),
-            v(&["disc://", "mkv://out.mkv"])
-        );
-        assert_eq!(
-            collect_urls(&v(&["-t", "disc://", "mkv://out.mkv"])),
-            v(&["disc://", "mkv://out.mkv"])
-        );
-    }
-
-    #[test]
-    fn boolean_flags_ignored() {
-        assert_eq!(
-            collect_urls(&v(&["--multipass", "disc://", "iso://d.iso", "--raw"])),
-            v(&["disc://", "iso://d.iso"])
-        );
-    }
-
-    #[test]
-    fn key_url_value_is_not_a_positional() {
-        // `--key-url`'s value is an https:// URL — it must be consumed as the
-        // flag value, NOT reclassified as a third positional stream URL (which
-        // would break the 2-URL rip dispatch). Only the two stream URLs remain.
-        assert_eq!(
-            collect_urls(&v(&[
-                "disc://",
-                "mkv://out.mkv",
-                "--key-url",
-                "https://keys.example/keys",
-            ])),
-            v(&["disc://", "mkv://out.mkv"])
-        );
-        // With a bearer token too.
-        assert_eq!(
-            collect_urls(&v(&[
-                "--key-url",
-                "https://keys.example/keys",
-                "--key-auth",
-                "tok",
-                "disc://",
-                "mkv://out.mkv",
-            ])),
-            v(&["disc://", "mkv://out.mkv"])
-        );
-    }
-
-    #[test]
-    fn key_auth_token_value_consumed() {
-        // `--key-auth`'s opaque token must be consumed, not kept as a positional.
-        assert_eq!(
-            collect_urls(&v(&["--key-auth", "tok", "disc://", "mkv://out.mkv"])),
-            v(&["disc://", "mkv://out.mkv"])
-        );
-    }
+    false
 }
