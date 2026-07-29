@@ -495,13 +495,10 @@ pub const LOCALES: &[(&str, &str)] = &[
     ("Tiếng Việt", "vi"),
 ];
 
-/// Endonyms for the language picker, in order.
-pub fn locale_names() -> Vec<&'static str> {
-    LOCALES.iter().map(|(name, _)| *name).collect()
-}
-
 /// Map a stored setting (endonym OR code, any case) to a locale code.
-/// Anything unrecognized — including "Auto"/"" — resolves to `"auto"`.
+/// Anything unrecognized — including "Auto"/"" — resolves to `"auto"`. The
+/// picker itself is driven from `LOCALES` directly (see `enum_options`); this
+/// is the normalizer used at GUI startup and on settings load.
 pub fn locale_code(sel: &str) -> &'static str {
     let s = sel.trim();
     for (name, code) in LOCALES {
@@ -510,18 +507,6 @@ pub fn locale_code(sel: &str) -> &'static str {
         }
     }
     "auto"
-}
-
-/// Map a stored setting (code OR endonym) back to the picker endonym, so the
-/// popup re-selects the right row on reopen. Falls back to "Auto".
-pub fn locale_display(sel: &str) -> &'static str {
-    let s = sel.trim();
-    for (name, code) in LOCALES {
-        if s.eq_ignore_ascii_case(name) || s.eq_ignore_ascii_case(code) {
-            return name;
-        }
-    }
-    "Auto"
 }
 
 /// Overall progress across a multi-title run.
