@@ -399,15 +399,12 @@ fn disc_target(source: &str) -> libfreemkv::DeviceTarget {
     }
 }
 
-/// Host certs / credentials for the AACS bus handshake, from the keydb — mirrors
-/// the CLI's `drive_credentials`.
-fn session_keyspec(keys: &KeyConfig) -> libfreemkv::KeySpec {
+/// Host certs / credentials for the AACS bus handshake, from the keydb — the
+/// same input the CLI's `drive_credentials` builds. Passed to the shared
+/// `fe::open_scan_resolve`.
+fn session_credentials(keys: &KeyConfig) -> Option<libfreemkv::DriveCredentials> {
     let host_certs = freemkv_keysources::KeydbSource::new(keys.keydb_path.clone()).host_certs();
-    libfreemkv::KeySpec {
-        credentials: (!host_certs.is_empty())
-            .then_some(libfreemkv::DriveCredentials { host_certs }),
-        ..Default::default()
-    }
+    (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs })
 }
 
 /// The key-source factory used to resolve a disc's AACS keys (same sources the
@@ -438,23 +435,20 @@ fn won_from_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> Option<St
 /// so the title tree renders identically. Mirrors the CLI's `pipe_disc` scan.
 /// NEEDS HARDWARE to exercise; the session flow matches the proven CLI path.
 pub fn scan_disc_with_keys(source: &str, keys: &KeyConfig) -> Result<Scanned, String> {
-    let mut session = libfreemkv::DiscSession::open(disc_target(source), session_keyspec(keys))
-        .map_err(|e| match &e {
-            libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
-                "No optical drive found. Connect a Blu-ray/DVD drive with a disc.".to_string()
-            }
-            _ => format!("{e}"),
-        })?;
-    session.lock_tray();
-    session
-        .scan(libfreemkv::ScanOptions::default())
-        .map_err(|e| format!("E{} scan failed", e.code()))?;
-    // Key resolution failure must not abort the scan — the disc still lists
-    // (just "locked"); the rip surfaces a missing key with a clear error.
-    let won = match session.resolve_keys(key_factory(keys)) {
-        Ok(trace) => won_from_trace(&trace),
-        Err(_) => None,
-    };
+    // The shared drive bring-up (open + lock + scan + resolve) — the SAME core
+    // the CLI's pipe_disc uses; the GUI just renders the result.
+    let (session, trace) = fe::open_scan_resolve(
+        disc_target(source),
+        session_credentials(keys),
+        key_factory(keys),
+    )
+    .map_err(|e| match &e {
+        libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
+            "No optical drive found. Connect a Blu-ray/DVD drive with a disc.".to_string()
+        }
+        _ => format!("{e}"),
+    })?;
+    let won = won_from_trace(&trace);
     let disc = session.disc().ok_or("scan produced no disc")?;
     let summary = key_summary(disc, won.as_deref());
     Ok(scanned_from_disc(disc, summary))
@@ -1166,15 +1160,15 @@ fn session_mux_title(
     use std::sync::mpsc;
     use std::time::Duration;
 
-    let io = |e: libfreemkv::Error| std::io::Error::other(format!("{e}"));
-    let mut session =
-        libfreemkv::DiscSession::open(disc_target(source), session_keyspec(&req.keys))
-            .map_err(io)?;
-    session.lock_tray();
-    session
-        .scan(libfreemkv::ScanOptions::default())
-        .map_err(io)?;
-    let _ = session.resolve_keys(key_factory(&req.keys));
+    // Shared drive bring-up (open + lock + scan + resolve) — same core as the
+    // CLI's pipe_disc. A fresh session per title matches it (the staged reader
+    // is consumed by one mux).
+    let (mut session, _trace) = fe::open_scan_resolve(
+        disc_target(source),
+        session_credentials(&req.keys),
+        key_factory(&req.keys),
+    )
+    .map_err(|e| std::io::Error::other(format!("{e}")))?;
     session.stage_drive_as_reader();
 
     let opts = libfreemkv::MuxOptions {
@@ -1265,21 +1259,19 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         return Err("Whole-disc ISO image from a live drive isn't wired into the GUI yet — it needs the recovery/mapfile copy path (coming with drive validation). Use a title format or decrypted folder for now.".into());
     }
 
-    // Scan once: titles, label, key state, and the per-disc name.
+    // Scan once (shared drive core): titles, label, key state, per-disc name.
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
-    let mut session =
-        libfreemkv::DiscSession::open(disc_target(&req.source), session_keyspec(&req.keys))
-            .map_err(|e| match &e {
-                libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
-                    "No optical drive found. Connect a Blu-ray/DVD drive with a disc.".to_string()
-                }
-                _ => format!("{e}"),
-            })?;
-    session.lock_tray();
-    session
-        .scan(libfreemkv::ScanOptions::default())
-        .map_err(|e| format!("E{} scan failed", e.code()))?;
-    let _ = session.resolve_keys(key_factory(&req.keys));
+    let (mut session, _trace) = fe::open_scan_resolve(
+        disc_target(&req.source),
+        session_credentials(&req.keys),
+        key_factory(&req.keys),
+    )
+    .map_err(|e| match &e {
+        libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
+            "No optical drive found. Connect a Blu-ray/DVD drive with a disc.".to_string()
+        }
+        _ => format!("{e}"),
+    })?;
     let disc = session.disc().ok_or("scan produced no disc")?;
     let label = if disc.volume_id.is_empty() {
         "disc".to_string()
