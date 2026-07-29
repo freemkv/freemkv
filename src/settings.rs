@@ -43,7 +43,12 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             dest_dir: dirs_movies(),
-            container: "Matroska (.mkv)".into(),
+            // Canonical output-format string — must be one of the values
+            // `ui::output_formats` produces, so the Settings popup and the main
+            // window's format dropdown can both select it. (An older
+            // "Matroska (.mkv)" default matched no popup item and rendered
+            // blank.)
+            container: "Selected titles → MKV".into(),
             filename_template: "{title}_{n}".into(),
             keep_iso: false,
             selection: "Main film only".into(),
@@ -62,7 +67,7 @@ impl Default for Settings {
             raw: false,
             force: false,
             log_level: "Normal".into(),
-            language: "Auto".into(),
+            language: "auto".into(),
             decrypt_threads: "0".into(),
             debug_log: false,
             win_w: 1180.0,
@@ -163,10 +168,60 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        std::fs::read_to_string(settings_path())
+        let mut s: Settings = std::fs::read_to_string(settings_path())
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        s.normalize();
+        s
+    }
+
+    /// Every setting must carry a value the popup can select and the engine can
+    /// match on. `#[serde(default)]` fills fields missing from the file; this
+    /// additionally snaps an enum-valued field back to its default when the
+    /// persisted string is not one of the recognized options (a stale file from
+    /// an older build, or a hand-edit). Free-form fields (paths, URLs, numbers)
+    /// are left as-is.
+    fn normalize(&mut self) {
+        let d = Settings::default();
+        let snap = |cur: &mut String, opts: &[&str], def: &str| {
+            if !opts.contains(&cur.as_str()) {
+                *cur = def.to_string();
+            }
+        };
+        snap(
+            &mut self.selection,
+            &["Main film only", "All titles", "Longest title"],
+            &d.selection,
+        );
+        snap(
+            &mut self.rip_mode,
+            &["Multi-pass", "Single pass"],
+            &d.rip_mode,
+        );
+        snap(
+            &mut self.key_source,
+            &[
+                "Local keydb only",
+                "Online key service only",
+                "keydb, then online",
+            ],
+            &d.key_source,
+        );
+        snap(
+            &mut self.log_level,
+            &["Quiet", "Normal", "Verbose"],
+            &d.log_level,
+        );
+        // The output container must be one of the canonical format strings the
+        // dropdown offers, else it renders blank and the engine can't map it.
+        let known = crate::ui::output_formats(true, true).concat();
+        if !known.contains(&self.container.as_str()) {
+            self.container = d.container.clone();
+        }
+        // Language persists as a locale code (or "auto"); fold any legacy
+        // endonym / unknown value to a clean code.
+        self.language = crate::ui::locale_code(&self.language).to_string();
     }
 
     pub fn save(&self) -> Result<(), String> {

@@ -489,12 +489,23 @@ define_class!(
                     st.set_bool(k, { b.state() } != 0);
                 }
                 for (k, p) in self.ivars().pf_popups.borrow().iter() {
-                    if let Some(t) = { p.titleOfSelectedItem() } {
+                    let opts = enum_options(k);
+                    if !opts.is_empty() {
+                        // Enum popup: persist the canonical for the selected row
+                        // (index-mapped), never the localized label.
+                        let idx = p.indexOfSelectedItem();
+                        if idx >= 0 && (idx as usize) < opts.len() {
+                            st.set(k, opts[idx as usize].0.to_string());
+                        }
+                    } else if let Some(t) = { p.titleOfSelectedItem() } {
                         let sel = t.to_string();
-                        // The language popup shows endonyms but persists the
-                        // locale code freemkv-i18n understands.
-                        if k == "language" {
-                            st.set(k, crate::ui::locale_code(&sel).to_string());
+                        if k == "container" {
+                            // Popup shows the localized label; persist the
+                            // canonical format string the engine matches on.
+                            let canon = crate::ui::format_from_label(&sel, true, true)
+                                .map(str::to_string)
+                                .unwrap_or(sel);
+                            st.set(k, canon);
                         } else {
                             st.set(k, sel);
                         }
@@ -2445,6 +2456,45 @@ pub fn run() {
 
 // ── Preferences ───────────────────────────────────────────────────────────
 
+/// The option table for a settings dropdown: `(canonical, localized_label)`
+/// pairs in menu order. The canonical value is what persists and what the
+/// engine matches on (e.g. `key_source.starts_with("Online")`,
+/// `container_label`); the label is what the localized popup shows. So a combo
+/// displays translated text but stores a stable, English identifier — the same
+/// decoupling the format dropdown uses. An empty result means "not an enum
+/// popup" (free-form or format popup), handled separately.
+fn enum_options(key: &str) -> Vec<(&'static str, String)> {
+    let g = crate::strings::get;
+    match key {
+        "selection" => vec![
+            ("Main film only", g("gui.set.sel_main")),
+            ("All titles", g("gui.set.sel_all")),
+            ("Longest title", g("gui.set.sel_longest")),
+        ],
+        "rip_mode" => vec![
+            ("Multi-pass", g("gui.set.mode_multi")),
+            ("Single pass", g("gui.set.mode_single")),
+        ],
+        "key_source" => vec![
+            ("Local keydb only", g("gui.set.key_src_local")),
+            ("Online key service only", g("gui.set.key_src_online")),
+            ("keydb, then online", g("gui.set.key_src_both")),
+        ],
+        "log_level" => vec![
+            ("Quiet", g("gui.set.log_quiet")),
+            ("Normal", g("gui.set.log_normal")),
+            ("Verbose", g("gui.set.log_verbose")),
+        ],
+        // Language: canonical is the locale code, label the endonym (shown as-is
+        // in every locale). Drives the picker straight from the shipped list.
+        "language" => crate::ui::LOCALES
+            .iter()
+            .map(|(endonym, code)| (*code, (*endonym).to_string()))
+            .collect(),
+        _ => vec![],
+    }
+}
+
 /// One labelled row inside a preferences tab. Right-aligned label at a fixed
 /// gutter, control to its right — the layout the reference uses throughout.
 struct Rows {
@@ -2508,7 +2558,10 @@ impl Rows {
         self.y -= 30.0;
     }
 
-    fn combo(&mut self, mtm: MainThreadMarker, _key: &str, s: &str, items: &[&str], w: f64) {
+    /// A settings dropdown. Items come from `enum_options(key)` (localized
+    /// labels), and the popup is registered under `key` so OK can read the
+    /// selection back and persist its canonical value.
+    fn combo(&mut self, mtm: MainThreadMarker, key: &str, s: &str, w: f64) {
         self.label(mtm, s);
         let p = {
             NSPopUpButton::initWithFrame_pullsDown(
@@ -2517,10 +2570,11 @@ impl Rows {
                 false,
             )
         };
-        for it in items {
-            p.addItemWithTitle(&NSString::from_str(it));
+        for (_canon, label) in enum_options(key) {
+            p.addItemWithTitle(&NSString::from_str(&label));
         }
         self.view.addSubview(&p);
+        self.popups.push((key.to_string(), p));
         self.y -= 30.0;
     }
     fn field(&mut self, mtm: MainThreadMarker, _key: &str, s: &str, val: &str, w: f64) {
@@ -2589,7 +2643,10 @@ impl Rows {
 }
 
 fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
-    let (w, h) = (580.0, 470.0);
+    // Wide enough that the widest label ("Keep encrypted (raw passthrough) :",
+    // "Minimum title length (seconds) :") — and its longer translations — fits
+    // the label gutter without clipping, while the controls still have room.
+    let (w, h) = (640.0, 470.0);
     let win: Retained<NSWindow> = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -2653,7 +2710,7 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     // than left as a switch that does nothing.
 
     // ── Output ── engine Job.dest + the GUI's own naming
-    let mut t = Rows::new(mtm, tw, th, 200.0);
+    let mut t = Rows::new(mtm, tw, th, 250.0);
     t.popup(
         mtm,
         "container",
@@ -2686,18 +2743,11 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     add_tab(&crate::strings::get("gui.tab.output"), t);
 
     // ── Selection ── engine Job.selection
-    let mut t = Rows::new(mtm, tw, th, 200.0);
-    let sel_items = [
-        crate::strings::get("gui.set.sel_main"),
-        crate::strings::get("gui.set.sel_all"),
-        crate::strings::get("gui.set.sel_longest"),
-    ];
-    let sel_refs: Vec<&str> = sel_items.iter().map(|s| s.as_str()).collect();
+    let mut t = Rows::new(mtm, tw, th, 250.0);
     t.combo(
         mtm,
         "selection",
         &crate::strings::get("gui.set.default_selection"),
-        &sel_refs,
         220.0,
     );
     t.field(
@@ -2711,17 +2761,11 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     add_tab(&crate::strings::get("gui.tab.selection"), t);
 
     // ── Recovery ── engine Job.mode / abort_on_lost_secs / raw
-    let mut t = Rows::new(mtm, tw, th, 200.0);
-    let mode_items = [
-        crate::strings::get("gui.set.mode_multi"),
-        crate::strings::get("gui.set.mode_single"),
-    ];
-    let mode_refs: Vec<&str> = mode_items.iter().map(|s| s.as_str()).collect();
+    let mut t = Rows::new(mtm, tw, th, 250.0);
     t.combo(
         mtm,
         "rip_mode",
         &crate::strings::get("gui.set.rip_mode"),
-        &mode_refs,
         220.0,
     );
     t.field(
@@ -2764,18 +2808,11 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     add_tab(&crate::strings::get("gui.tab.recovery"), t);
 
     // ── Keys ── keydb + the online key service
-    let mut t = Rows::new(mtm, tw, th, 200.0);
-    let key_items = [
-        crate::strings::get("gui.set.key_src_local"),
-        crate::strings::get("gui.set.key_src_online"),
-        crate::strings::get("gui.set.key_src_both"),
-    ];
-    let key_refs: Vec<&str> = key_items.iter().map(|s| s.as_str()).collect();
+    let mut t = Rows::new(mtm, tw, th, 250.0);
     t.combo(
         mtm,
         "key_source",
         &crate::strings::get("gui.set.key_source"),
-        &key_refs,
         240.0,
     );
     t.gap();
@@ -2830,14 +2867,14 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     add_tab(&crate::strings::get("gui.tab.keys"), t);
 
     // ── Advanced
-    let mut t = Rows::new(mtm, tw, th, 200.0);
-    // Picker rows come straight from the shipped locale list, so the menu can
-    // never drift from what freemkv-i18n can actually load.
+    let mut t = Rows::new(mtm, tw, th, 250.0);
+    // Picker rows come straight from the shipped locale list (via
+    // enum_options("language")), so the menu can never drift from what
+    // freemkv-i18n can actually load.
     t.combo(
         mtm,
         "language",
         &crate::strings::get("gui.set.language"),
-        &crate::ui::locale_names(),
         200.0,
     );
     t.note(mtm, &crate::strings::get("gui.set.language_note"), tw);
@@ -2854,17 +2891,10 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         tw,
     );
     t.gap();
-    let log_items = [
-        crate::strings::get("gui.set.log_quiet"),
-        crate::strings::get("gui.set.log_normal"),
-        crate::strings::get("gui.set.log_verbose"),
-    ];
-    let log_refs: Vec<&str> = log_items.iter().map(|s| s.as_str()).collect();
     t.combo(
         mtm,
         "log_level",
         &crate::strings::get("gui.set.log_detail"),
-        &log_refs,
         160.0,
     );
     t.check(
@@ -2891,11 +2921,23 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         }
         for (k, p) in &all_popups {
             let want = st.get(k);
-            if k == "language" {
-                // Stored as a locale code; re-select by its picker endonym.
-                p.selectItemWithTitle(&NSString::from_str(crate::ui::locale_display(&want)));
+            let opts = enum_options(k);
+            if !opts.is_empty() {
+                // Enum popup: map the stored canonical to its menu index.
+                if let Some(i) = opts.iter().position(|(canon, _)| *canon == want) {
+                    p.selectItemAtIndex(i as isize);
+                }
+            } else if k == "container" {
+                // Canonical format string; the popup shows the localized label.
+                p.selectItemWithTitle(&NSString::from_str(&crate::ui::format_label(&want)));
             } else if !want.is_empty() {
                 p.selectItemWithTitle(&NSString::from_str(&want));
+            }
+            // A stored value that matched no item leaves nothing selected (a
+            // blank popup). Fall back to the first row so every popup always
+            // shows a value.
+            if p.indexOfSelectedItem() < 0 {
+                p.selectItemAtIndex(0);
             }
         }
     }
