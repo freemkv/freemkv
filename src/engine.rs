@@ -2,9 +2,6 @@
 //! rips comes through here — no engine types leak into the AppKit shell.
 
 use freemkv_engine as fe;
-// The Sink trait's methods (progress/should_cancel/log) are called directly on
-// UiSink in the disc:// session mux; bring them into scope.
-use freemkv_engine::Sink as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -1139,111 +1136,13 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     })
 }
 
-/// Mux one title straight off a live drive — the `disc://` analogue of
-/// `fe::mux_title`. Mirrors the CLI's `pipe_disc`: open a fresh `DiscSession`,
-/// lock the tray, scan, resolve keys, stage the drive as the reader, and drive
-/// `mux_stream(MuxInput::Session)`. A watcher thread forwards write progress to
-/// the UI and mirrors cancel → halt, exactly like `fe::mux_title`.
-///
-/// A fresh session per title matches the CLI (its dispatcher calls `pipe_disc`
-/// once per requested title); one session's staged reader is consumed by a
-/// single mux. NEEDS HARDWARE VALIDATION — the flow matches the proven CLI path
-/// but has not run against a real drive here.
-fn session_mux_title(
-    source: &str,
-    title_index: usize,
-    dest_url: &str,
-    selection: libfreemkv::StreamSelection,
-    req: &RipRequest,
-    sink: &UiSink,
-) -> std::io::Result<libfreemkv::MuxOutcome> {
-    use std::sync::mpsc;
-    use std::time::Duration;
-
-    // Shared drive bring-up (open + lock + scan + resolve) — same core as the
-    // CLI's pipe_disc. A fresh session per title matches it (the staged reader
-    // is consumed by one mux).
-    let (mut session, _trace) = fe::open_scan_resolve(
-        disc_target(source),
-        session_credentials(&req.keys),
-        key_factory(&req.keys),
-    )
-    .map_err(|e| std::io::Error::other(format!("{e}")))?;
-    session.stage_drive_as_reader();
-
-    let opts = libfreemkv::MuxOptions {
-        skip_errors: false,
-        batch_sectors: 64,
-        raw: req.raw,
-        // Session arm reads selection from MuxOptions (unlike the Url arm).
-        selection,
-        send_deadline: Some(Duration::from_secs(60)),
-    };
-
-    let halt = libfreemkv::Halt::new();
-    let (tx, rx) = mpsc::channel::<(u64, u64)>();
-    struct Ev {
-        tx: mpsc::Sender<(u64, u64)>,
-    }
-    impl libfreemkv::MuxEvents for Ev {
-        fn on_write_progress(&self, w: u64, t: u64) {
-            let _ = self.tx.send((w, t));
-        }
-    }
-    let done = Arc::new(AtomicBool::new(false));
-
-    std::thread::scope(|s| {
-        let wh = halt.clone();
-        let wd = done.clone();
-        s.spawn(move || {
-            loop {
-                let mut latest = None;
-                while let Ok(m) = rx.try_recv() {
-                    latest = Some(m);
-                }
-                if let Some((d, t)) = latest {
-                    // Speed/ETA aren't derived here (the engine's estimator is
-                    // internal to fe::mux_title); the bar still tracks bytes.
-                    let p = fe::Progress {
-                        pass: "mux".to_string(),
-                        bytes_done: d,
-                        bytes_total: t,
-                        sectors_bad: 0,
-                        speed_bps: 0,
-                        eta_secs: None,
-                    };
-                    sink.progress(&p);
-                }
-                if sink.should_cancel() {
-                    wh.cancel();
-                }
-                if wd.load(Ordering::Relaxed) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        });
-        let events: Arc<dyn libfreemkv::MuxEvents> = Arc::new(Ev { tx });
-        let outcome = libfreemkv::mux_stream(
-            libfreemkv::MuxInput::Session {
-                session: &mut session,
-                title_index,
-            },
-            dest_url,
-            &opts,
-            &halt,
-            events,
-        );
-        done.store(true, Ordering::Relaxed);
-        outcome
-    })
-}
-
 /// Rip from a live optical drive (`disc://`). Scans once to resolve titles and
 /// keys, then runs the chosen sink. Title/metadata/demux sinks mux each selected
-/// title off a fresh session (`session_mux_title`); decrypted-folder extracts
-/// the UDF tree to a per-disc subdir. Whole-disc ISO image is flagged as not yet
-/// wired for the GUI (needs the mapfile copy path — see below).
+/// title off a fresh session (`fe::mux_title_session`, driven through
+/// `fe::run_titles` for the shared fail-fast/skip/halt policy — the exact loop
+/// the ISO path uses); decrypted-folder extracts the UDF tree to a per-disc
+/// subdir. Whole-disc ISO image is flagged as not yet wired for the GUI (needs
+/// the mapfile copy path — see below).
 ///
 /// NEEDS HARDWARE VALIDATION end-to-end.
 fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
@@ -1278,7 +1177,6 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
     } else {
         disc.volume_id.clone()
     };
-    let title_count = disc.titles.len();
 
     // Decrypted folder: extract the UDF tree off the staged drive into a
     // per-disc subdir (same helper the ISO path uses).
@@ -1290,34 +1188,33 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         let disc = session.disc().ok_or("scan produced no disc")?;
         return run_extract_folder(req, disc, reader.as_mut(), &label, state);
     }
-    // The scan session is dropped here (releasing the drive) — each title's mux
-    // reopens its own session, mirroring the CLI.
-    drop(session);
 
-    // Which titles to rip.
-    let indices: Vec<usize> = if req.titles.is_empty() {
-        // Main-title default: the longest is a safe stand-in without a scan of
-        // the engine's Selection here; but keep it simple — title 0.
-        vec![0]
+    // Which titles to rip — same Selection/resolve_selection the ISO path
+    // uses, so a live-drive rip gets the same main-title default and
+    // out-of-range filtering.
+    let sel = if req.titles.is_empty() {
+        fe::Selection::MainMovie
     } else {
-        req.titles
-            .iter()
-            .copied()
-            .filter(|&i| i < title_count)
-            .collect()
+        fe::Selection::Titles(req.titles.clone())
     };
+    let indices = fe::resolve_selection(disc, &sel);
     if indices.is_empty() {
         return Err("Nothing selected to rip.".into());
     }
     let multi = indices.len() > 1;
     let selection = stream_selection(req);
+    // Byte-size hints per title, banked before the scan session is dropped
+    // (releasing the drive) — each title's mux reopens its own session,
+    // mirroring the CLI.
+    let hints: Vec<u64> = disc.titles.iter().map(|t| t.size_bytes).collect();
+    drop(session);
 
-    let mut written = 0usize;
-    let mut partial = 0usize;
-    for &idx in &indices {
-        if sink.should_cancel() {
-            break;
-        }
+    // The engine owns the per-title loop (skip/abort policy); we only supply
+    // "mux one title" — exactly the ISO path's shape, but each title reopens
+    // its own DiscSession off the live drive.
+    let written = std::cell::Cell::new(0usize);
+    let partial = std::cell::Cell::new(0usize);
+    let outcome = fe::run_titles(&indices, !req.titles.is_empty(), sink, |idx| {
         let (dest_url, target) = match kind {
             OutKind::File(scheme) => {
                 let base = title_basename(&req.filename_template, &label, idx + 1);
@@ -1334,47 +1231,91 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             }
             OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
         };
-        match session_mux_title(&req.source, idx, &dest_url, selection.clone(), req, sink) {
-            Ok(o) if o.completed => {
+        let hint = hints.get(idx).copied().unwrap_or(0);
+
+        // Shared drive bring-up (open + lock + scan + resolve) — same core as
+        // the CLI's pipe_disc. A fresh session per title matches it (the
+        // staged reader is consumed by one mux).
+        let (mut session, _trace) = fe::open_scan_resolve(
+            disc_target(&req.source),
+            session_credentials(&req.keys),
+            key_factory(&req.keys),
+        )
+        .map_err(|e| std::io::Error::other(format!("{e}")))?;
+        session.stage_drive_as_reader();
+
+        let opts = libfreemkv::MuxOptions {
+            skip_errors: false,
+            batch_sectors: 64,
+            raw: req.raw,
+            // Session arm reads selection from MuxOptions (unlike the Url arm).
+            selection: selection.clone(),
+            send_deadline: Some(std::time::Duration::from_secs(60)),
+        };
+
+        match fe::mux_title_session(&mut session, idx, &dest_url, &opts, hint, sink) {
+            Ok(o) => {
+                if !o.completed {
+                    // Cancelled or truncated: a partial file is on disk — keep
+                    // it, don't count it as a full write, and say it's partial.
+                    partial.set(partial.get() + 1);
+                    state.lines.lock().unwrap().push(format!(
+                        "title {} cancelled — partial output kept: {}",
+                        idx + 1,
+                        target
+                    ));
+                    return Ok(());
+                }
                 state
                     .lines
                     .lock()
                     .unwrap()
                     .push(format!("title {} -> {}", idx + 1, target));
-                written += 1;
+                written.set(written.get() + 1);
                 state.titles_done.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok(_) => {
-                partial += 1;
-                state.lines.lock().unwrap().push(format!(
-                    "title {} cancelled — partial output kept: {}",
-                    idx + 1,
-                    target
-                ));
+                Ok(())
             }
             Err(e) => {
-                let code = e.to_string().trim_start_matches('E').parse().unwrap_or(0);
-                state
-                    .lines
-                    .lock()
-                    .unwrap()
-                    .push(format!("Title {}: {}", idx + 1, explain(code)));
+                state.lines.lock().unwrap().push(format!(
+                    "Title {}: {}",
+                    idx + 1,
+                    explain(error_code(&e))
+                ));
+                // A failed per-title FILE mux leaves a 0-byte file behind that
+                // looks like output. Remove it so the folder never shows a
+                // broken result. (Demux writes into a directory — nothing to
+                // clean.)
                 if matches!(kind, OutKind::File(_)) {
                     let _ = std::fs::remove_file(&target);
                 }
+                Err(e)
             }
         }
-    }
+    });
 
-    Ok(if written == 0 && partial > 0 {
-        format!(
-            "Cancelled — {partial} partial file(s) kept in {}",
-            req.dest_dir
-        )
-    } else if written == 0 {
-        "Nothing was written".to_string()
-    } else {
-        format!("{written} title(s) written to {}", req.dest_dir)
+    // A "partial N kept" note whenever a cancel left one or more partial
+    // files, so the result never reads "Nothing was written" while a file is
+    // on disk.
+    let partial_note = |lead: &str| {
+        if partial.get() > 0 {
+            format!(
+                "{lead} — {} partial file(s) kept in {}",
+                partial.get(),
+                req.dest_dir
+            )
+        } else {
+            lead.to_string()
+        }
+    };
+    Ok(match outcome {
+        fe::RipOutcome::Halted => partial_note(&format!(
+            "Cancelled — {} of {} title(s) completed",
+            written.get(),
+            indices.len()
+        )),
+        _ if written.get() == 0 && partial.get() > 0 => partial_note("Cancelled"),
+        _ if written.get() == 0 => "Nothing was written".to_string(),
+        _ => format!("{} title(s) written to {}", written.get(), req.dest_dir),
     })
 }
 
