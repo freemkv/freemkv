@@ -954,6 +954,7 @@ impl App {
                 max_passes,
                 abort_lost_secs: self.settings.abort_lost_secs.trim().parse().unwrap_or(0),
                 keep_iso: self.settings.keep_iso,
+                auto_eject: self.settings.auto_eject,
                 keys: KeyConfig::from_settings(&self.settings),
             },
             state,

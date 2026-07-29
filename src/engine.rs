@@ -396,6 +396,25 @@ fn disc_target(source: &str) -> libfreemkv::DeviceTarget {
     }
 }
 
+/// Eject the disc in `device` — the GUI analogue of autorip's `eject_drive`:
+/// reopen the drive by its resolved device path and eject, surfacing a failure
+/// to the log rather than silently doing nothing (the "auto_eject is on but the
+/// disc stayed put, no idea why" symptom autorip hit). Called once, after the
+/// rip is done reading the drive, when the `auto_eject` setting is on.
+fn eject_disc(device: &str, sink: &UiSink) {
+    use freemkv_engine::Sink as _;
+    match libfreemkv::Drive::open(std::path::Path::new(device)) {
+        Ok(mut drive) => match drive.eject() {
+            Ok(()) => sink.log(fe::Level::Info, &format!("ejected {device}")),
+            Err(e) => sink.log(fe::Level::Warn, &format!("eject failed: {e}")),
+        },
+        Err(e) => sink.log(
+            fe::Level::Warn,
+            &format!("eject skipped — drive open failed: {e}"),
+        ),
+    }
+}
+
 /// Host certs / credentials for the AACS bus handshake, from the keydb — the
 /// same input the CLI's `drive_credentials` builds. Passed to the shared
 /// `fe::open_scan_resolve`.
@@ -673,6 +692,11 @@ pub struct RipRequest {
     /// `keep_iso` setting). Ignored for a "Whole disc → ISO image" output (the
     /// ISO is the deliverable).
     pub keep_iso: bool,
+    /// Eject the disc once the drive is done being read (the `auto_eject`
+    /// setting, mirrors autorip). For a multipass/ISO rip that's after recovery
+    /// (before muxing from the staged ISO); for a single-pass rip it's after the
+    /// last title is muxed off the drive.
+    pub auto_eject: bool,
     pub keys: KeyConfig,
 }
 
@@ -1164,6 +1188,9 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         }
         _ => format!("{e}"),
     })?;
+    // The resolved device path (autodetect included) — captured now so we can
+    // eject after the drive is done being read, whichever branch runs.
+    let device = session.device_path().to_string();
     let disc = session.disc().ok_or("scan produced no disc")?;
     let label = if disc.volume_id.is_empty() {
         "disc".to_string()
@@ -1179,7 +1206,13 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             .take_reader()
             .ok_or("could not stage the drive for extraction")?;
         let disc = session.disc().ok_or("scan produced no disc")?;
-        return run_extract_folder(req, disc, reader.as_mut(), &label, sink, state);
+        let result = run_extract_folder(req, disc, reader.as_mut(), &label, sink, state);
+        drop(reader);
+        drop(session);
+        if req.auto_eject {
+            eject_disc(&device, sink);
+        }
+        return result;
     }
 
     // True-multipass recovery, or a whole-disc ISO image: recover the disc to a
@@ -1216,6 +1249,12 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         .map_err(|e| format!("recovery failed: {e}"))?;
         drop(reader);
         drop(session);
+        // Read phase done: the deliverable (ISO) or the mux source is on disk,
+        // so the drive is no longer needed — eject now, exactly like autorip
+        // (which ejects at read-complete and muxes from the staged ISO).
+        if req.auto_eject {
+            eject_disc(&device, sink);
+        }
 
         if want_iso {
             if result.halted {
@@ -1351,6 +1390,12 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             }
         }
     });
+
+    // Single-pass reads each title straight off the drive, so the drive is only
+    // free once the whole loop is done — eject here (autorip's auto_eject).
+    if req.auto_eject {
+        eject_disc(&device, sink);
+    }
 
     // A "partial N kept" note whenever a cancel left one or more partial
     // files, so the result never reads "Nothing was written" while a file is

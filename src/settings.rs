@@ -12,6 +12,9 @@ pub struct Settings {
     pub container: String,
     pub filename_template: String,
     pub keep_iso: bool,
+    /// Eject the disc when the rip finishes reading it (mirrors autorip's
+    /// `auto_eject`; default on).
+    pub auto_eject: bool,
     // Selection
     pub selection: String,
     pub min_title_secs: String,
@@ -51,6 +54,9 @@ impl Default for Settings {
             container: "Selected titles → MKV".into(),
             filename_template: "{title}_t{n}".into(),
             keep_iso: false,
+            // Mirror autorip's auto_eject default (on): pop the disc when the
+            // read phase completes so the user can grab it / load the next.
+            auto_eject: true,
             selection: "Main film only".into(),
             min_title_secs: "120".into(),
             rip_mode: "Multi-pass".into(),
@@ -126,6 +132,7 @@ impl Settings {
     pub fn get_bool(&self, key: &str) -> bool {
         match key {
             "keep_iso" => self.keep_iso,
+            "auto_eject" => self.auto_eject,
             "capture_without_keys" => self.capture_without_keys,
             "debug_log" => self.debug_log,
             "raw" => self.raw,
@@ -159,6 +166,7 @@ impl Settings {
     pub fn set_bool(&mut self, key: &str, v: bool) {
         match key {
             "keep_iso" => self.keep_iso = v,
+            "auto_eject" => self.auto_eject = v,
             "capture_without_keys" => self.capture_without_keys = v,
             "debug_log" => self.debug_log = v,
             "raw" => self.raw = v,
