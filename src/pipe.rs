@@ -1635,26 +1635,32 @@ pub(crate) fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::Pat
 /// SSRF-rejected `--key-url` is silently dropped here; the visible warning is
 /// emitted ONCE up front by [`build_key_sources`] / [`key_source_factory`].
 fn build_key_sources_quiet(keys: &KeyConfig) -> Vec<Box<dyn freemkv_keysources::KeySource>> {
-    let mut sources: Vec<Box<dyn freemkv_keysources::KeySource>> = Vec::new();
+    freemkv_engine::key_sources(&key_params(keys))
+}
 
+/// Normalize the CLI's flags into the engine's `KeyParams`, preserving the
+/// CLI's IMPLICIT online-only derivation (`--key-url` alone, no `--keydb`) and
+/// its default-keydb-location search chain — both stay CLI-boundary concerns;
+/// the engine only sees the already-resolved result.
+fn key_params(keys: &KeyConfig) -> freemkv_engine::KeyParams {
     // Local keydb is added whenever the user didn't ask for online-only. (An
     // explicit --keydb, or no key flags at all, both want the keydb.)
     let online_only = keys.key_url.is_some() && keys.keydb_path.is_none();
-    if !online_only {
-        sources.push(Box::new(freemkv_keysources::KeydbSource::new(
-            resolved_keydb_path(&keys.keydb_path),
-        )));
+    let keydb_path = if online_only {
+        None
+    } else {
+        Some(
+            resolved_keydb_path(&keys.keydb_path)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
+    freemkv_engine::KeyParams {
+        keydb_path,
+        key_url: keys.key_url.clone(),
+        key_auth: keys.key_auth.clone(),
+        online_only,
     }
-
-    if let Some(url) = &keys.key_url {
-        if freemkv_keysources::validate_keyserver_url(url).is_ok() {
-            sources.push(Box::new(freemkv_keysources::OnlineSource::new(
-                url.clone(),
-                keys.key_auth.clone().unwrap_or_default(),
-            )));
-        }
-    }
-    sources
 }
 
 /// Print the SSRF-rejected-`--key-url` warning (once) if the configured key URL
