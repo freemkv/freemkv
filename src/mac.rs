@@ -566,6 +566,12 @@ define_class!(
         #[unsafe(method(onClosePrefs:))]
         fn on_close_prefs(&self, _s: Option<&AnyObject>) {
             self.read_prefs_form();
+            // Push the freshly-edited settings into the running App so changes
+            // (log detail, key source, multipass, dest dir, …) take effect at
+            // once — App holds its own copy, loaded at startup, and would
+            // otherwise stay stale until the next launch.
+            let edited = self.ivars().settings.borrow().clone();
+            self.app_mut(|a| a.settings = edited);
             match self.ivars().settings.borrow().save() {
                 Ok(()) => self.app_mut(|a| {
                     a.say(
@@ -2729,6 +2735,7 @@ fn enum_options(key: &str) -> Vec<(&'static str, String)> {
             ("Quiet", g("gui.set.log_quiet")),
             ("Normal", g("gui.set.log_normal")),
             ("Verbose", g("gui.set.log_verbose")),
+            ("Debug", g("gui.set.log_debug")),
         ],
         // Language: canonical is the locale code, label the endonym (shown as-is
         // in every locale). Drives the picker straight from the shipped list.
@@ -3167,12 +3174,6 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         "log_level",
         &crate::strings::get("gui.set.log_detail"),
         160.0,
-    );
-    t.check(
-        mtm,
-        "debug_log",
-        &crate::strings::get("gui.set.log_debug"),
-        false,
     );
     add_tab(&crate::strings::get("gui.tab.advanced"), t);
 

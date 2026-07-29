@@ -25,12 +25,20 @@ rm -rf macos/freemkv.iconset
 
 cp macos/Info.plist "$APP/Contents/Info.plist"
 
+# Build first so the bundle can never ship a stale binary. (`precommit` only
+# builds debug, so relying on a pre-existing target/release/freemkv silently
+# bundled whatever was last compiled — a real footgun during QA.)
+BUILD=(cargo build --bin freemkv)
+[ "$PROFILE" = release ] && BUILD+=(--release)
+[ -n "$TARGET" ] && BUILD+=(--target "$TARGET")
+"${BUILD[@]}"
+
 if [ -n "$TARGET" ]; then
   BIN="target/$TARGET/$PROFILE/freemkv"
 else
   BIN="target/$PROFILE/freemkv"
 fi
-[ -f "$BIN" ] || { echo "missing $BIN — build it first" >&2; exit 1; }
+[ -f "$BIN" ] || { echo "missing $BIN — build failed?" >&2; exit 1; }
 cp "$BIN" "$APP/Contents/MacOS/freemkv"
 
 # Ad-hoc signature. Not notarized, so first launch still needs right-click →
