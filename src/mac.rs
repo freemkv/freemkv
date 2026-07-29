@@ -534,6 +534,19 @@ define_class!(
         #[unsafe(method(onNoop:))]
         fn on_noop(&self, _s: Option<&AnyObject>) {}
 
+        /// Settings → Default destination "…": pick a folder and drop it into the
+        /// dest_dir field (OK then persists it, like any other edited field).
+        #[unsafe(method(onBrowseDestDir:))]
+        fn on_browse_dest_dir(&self, _s: Option<&AnyObject>) {
+            if let Some(dir) = self.pick(true, "Choose the default output folder") {
+                for (k, f) in self.ivars().pf_fields.borrow().iter() {
+                    if k == "dest_dir" {
+                        f.setStringValue(&NSString::from_str(&dir));
+                    }
+                }
+            }
+        }
+
         #[unsafe(method(onPrefs:))]
         fn on_prefs(&self, _s: Option<&AnyObject>) {
             self.act(crate::ui::Cmd::Settings);
@@ -2781,12 +2794,19 @@ impl Rows {
             self.view.addSubview(&f);
         }
         self.fields.push((key.to_string(), f));
+        // The browse "…" opens a picker that fills THIS field. dest_dir picks a
+        // folder; other path fields keep the no-op until wired.
+        let action = if key == "dest_dir" {
+            sel!(onBrowseDestDir:)
+        } else {
+            sel!(onNoop:)
+        };
         let b = btn(
             mtm,
             &crate::strings::get("gui.btn.browse"),
             r(self.gutter + w - 34.0, self.y - 4.0, 34.0, 25.0),
             c,
-            sel!(onNoop:),
+            action,
         );
         self.view.addSubview(&b);
         self.y -= 30.0;
