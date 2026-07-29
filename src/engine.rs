@@ -18,6 +18,10 @@ pub struct Row {
     /// Transport PID for audio/subtitle rows — what `StreamSelection` filters
     /// on. `None` for video (always kept) and for non-stream rows.
     pub pid: Option<u16>,
+    /// Title duration in seconds — populated for Title rows (depth 1) so the UI
+    /// can honor "Longest title" default selection and the minimum-length
+    /// filter. `0.0` for non-title rows (File/disc header, stream rows).
+    pub duration_secs: f64,
 }
 
 /// What the shell needs after a scan. Pure data — no engine types.
@@ -156,6 +160,7 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                 title: ti,
                 info,
                 pid,
+                duration_secs: 0.0,
             }
         })
         .collect()
@@ -200,6 +205,7 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
             fmt_dur(t.duration_secs)
         ),
         pid: None,
+        duration_secs: 0.0,
     }];
     rows.push(Row {
         type_s: "Title".into(),
@@ -218,6 +224,7 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
             t.chapters.len()
         ),
         pid: None,
+        duration_secs: t.duration_secs,
     });
     rows.extend(stream_rows(t, 0));
 
@@ -273,6 +280,7 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
             disc.titles.len()
         ),
         pid: None,
+        duration_secs: 0.0,
     });
 
     for (ti, t) in disc.titles.iter().enumerate() {
@@ -307,6 +315,7 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
                 t.streams.len()
             ),
             pid: None,
+            duration_secs: t.duration_secs,
         });
         rows.extend(stream_rows(t, ti));
     }
@@ -563,6 +572,13 @@ pub struct RipRequest {
     pub raw: bool,
     /// Overwrite a non-empty destination — the CLI's `--force`.
     pub force: bool,
+    /// Output filename template (the `filename_template` setting). `{title}` is
+    /// the disc/volume label, `{n}` the title number. Empty or placeholder-free
+    /// falls back to `<label>_t<n>`.
+    pub filename_template: String,
+    /// AACS decrypt thread count (the `decrypt_threads` setting). `0` = auto
+    /// (the library sizes its pool itself); `>0` pins the pool to that many.
+    pub decrypt_threads: usize,
     pub keys: KeyConfig,
 }
 
@@ -735,6 +751,25 @@ fn out_kind(format: &str) -> OutKind {
     }
 }
 
+/// Build a per-title output basename from the filename template. `{title}` →
+/// the disc/volume label (or container name), `{n}` → the 1-based title number.
+/// An empty template falls back to the historical `<label>_t<n>`; a template
+/// with no `{n}` gets `_t<n>` appended so multi-title output can never collide.
+/// Path separators a user might type are neutralized to keep output in-folder.
+fn title_basename(template: &str, label: &str, n: usize) -> String {
+    let t = template.trim();
+    if t.is_empty() {
+        return format!("{label}_t{n}");
+    }
+    let mut name = t.replace("{title}", label);
+    if name.contains("{n}") {
+        name = name.replace("{n}", &n.to_string());
+    } else {
+        name = format!("{name}_t{n}");
+    }
+    name.replace('/', "_")
+}
+
 /// The audio/subtitle selection for this request. It goes on `InputOptions`,
 /// NOT `MuxOptions`: our mux uses a URL source (`iso://…`), and `mux_stream`'s
 /// Url arm prunes via `InputOptions.selection` — `MuxOptions.selection` is only
@@ -783,7 +818,10 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
     // operations have no meaning for one media file.
     let (dest_url, target) = match out_kind(&req.format) {
         OutKind::File(scheme) => {
-            let out = format!("{}/{}.{}", req.dest_dir, name, scheme);
+            // A container is one title (n = 1); honor the template with the
+            // file's own name as {title}.
+            let base = title_basename(&req.filename_template, &name, 1);
+            let out = format!("{}/{}.{}", req.dest_dir, base, scheme);
             (format!("{scheme}://{out}"), out)
         }
         OutKind::Demux => {
@@ -817,6 +855,11 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
 fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
     if is_stream_source(&req.source) {
         return run_stream(req, sink, state);
+    }
+    // Pin the AACS decrypt pool if the user set a thread count; 0 leaves the
+    // library to size it automatically.
+    if req.decrypt_threads > 0 {
+        libfreemkv::set_decrypt_threads(req.decrypt_threads);
     }
     let (mut disc, mut reader) = libfreemkv::scan_iso(
         std::path::Path::new(&req.source),
@@ -878,7 +921,8 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
         // naming) for separate track files.
         let (dest_url, target) = match kind {
             OutKind::File(scheme) => {
-                let out = format!("{}/{}_t{}.{}", req.dest_dir, label, idx + 1, scheme);
+                let base = title_basename(&req.filename_template, &label, idx + 1);
+                let out = format!("{}/{}.{}", req.dest_dir, base, scheme);
                 (format!("{scheme}://{out}"), out)
             }
             OutKind::Demux => {

@@ -19,9 +19,21 @@ use objc2_app_kit::{
     NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSDate, NSDictionary, NSNumber, NSPoint, NSRect, NSRunLoop, NSSize, NSString,
-    NSTimer,
+    MainThreadMarker, NSDate, NSDictionary, NSLocale, NSNumber, NSPoint, NSRect, NSRunLoop, NSSize,
+    NSString, NSTimer,
 };
+
+/// The macOS preferred UI language as a BCP-47 tag ("en-US", "de-DE", "pt-BR",
+/// "zh-Hans-CN"), or None. A Finder-launched `.app` inherits no `LANG`, so the
+/// i18n crate's env-based detection would wrongly fall back to English; this
+/// reads the real system language for the "Auto" case. The raw tag is returned
+/// as-is — `freemkv_i18n` normalizes and region-resolves it.
+pub fn system_locale_code() -> Option<String> {
+    NSLocale::preferredLanguages()
+        .iter()
+        .next()
+        .map(|s| s.to_string())
+}
 
 const W: f64 = 1180.0;
 const H: f64 = 760.0;
@@ -2833,7 +2845,7 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         mtm,
         "filename_template",
         &crate::strings::get("gui.set.filename_template"),
-        "{title}_{n}",
+        "{title}_t{n}",
         220.0,
     );
     t.gap();

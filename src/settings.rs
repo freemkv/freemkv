@@ -49,7 +49,7 @@ impl Default for Settings {
             // "Matroska (.mkv)" default matched no popup item and rendered
             // blank.)
             container: "Selected titles → MKV".into(),
-            filename_template: "{title}_{n}".into(),
+            filename_template: "{title}_t{n}".into(),
             keep_iso: false,
             selection: "Main film only".into(),
             min_title_secs: "120".into(),

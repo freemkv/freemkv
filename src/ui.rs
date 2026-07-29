@@ -59,17 +59,73 @@ pub struct Tree {
 impl Tree {
     /// Build from an engine scan. An empty scan yields an empty tree — the
     /// shell shows its empty page rather than inventing rows.
-    pub fn from_scan(sc: &Scanned) -> Self {
+    ///
+    /// `sel_mode` is the "Default selection" setting ("Main film only" / "All
+    /// titles" / "Longest title") — it decides which titles start checked.
+    /// `min_secs` is the "Minimum title length" setting: titles shorter than it
+    /// (with a known, non-zero duration) are hidden from the list, since they
+    /// are almost always menus and stings — but never so aggressively that the
+    /// list would be empty. Canonical `title_idx` values are preserved on the
+    /// rows that survive; the engine selects by those, not by tree position.
+    pub fn from_scan(sc: &Scanned, sel_mode: &str, min_secs: f64) -> Self {
+        // Titles present in the scan, with durations, for the filter + defaults.
+        let titles: Vec<(usize, f64)> = sc
+            .rows
+            .iter()
+            .filter(|r| r.depth == 1 && r.type_s == "Title")
+            .map(|r| (r.title, r.duration_secs))
+            .collect();
+        // Never hide every title: if none clear the bar, disable the filter.
+        let min_eff = if titles.iter().any(|(_, d)| *d >= min_secs) {
+            min_secs
+        } else {
+            0.0
+        };
+        // Which title indices start checked.
+        let selected: std::collections::HashSet<usize> = match sel_mode {
+            "All titles" => titles
+                .iter()
+                .filter(|(_, d)| *d >= min_eff)
+                .map(|(i, _)| *i)
+                .collect(),
+            "Longest title" => titles
+                .iter()
+                .filter(|(_, d)| *d >= min_eff)
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| *i)
+                .into_iter()
+                .collect(),
+            // "Main film only" (default): the first disc title.
+            _ => std::iter::once(0usize).collect(),
+        };
+
         let mut arena: Vec<Node> = Vec::new();
         let mut roots = Vec::new();
         let mut last_title: Option<usize> = None;
+        let mut skip_title = false;
         for r in &sc.rows {
+            match r.depth {
+                0 => skip_title = false,
+                1 => {
+                    // Hide a too-short title (and everything under it).
+                    skip_title =
+                        r.type_s == "Title" && r.duration_secs > 0.0 && r.duration_secs < min_eff;
+                    if skip_title {
+                        continue;
+                    }
+                }
+                _ => {
+                    if skip_title {
+                        continue;
+                    }
+                }
+            }
             let idx = arena.len();
             arena.push(Node {
                 type_s: r.type_s.clone(),
                 desc: r.desc.clone(),
                 checkable: r.checkable,
-                checked: RefCell::new(r.depth == 1 && r.title == 0),
+                checked: RefCell::new(r.depth == 1 && selected.contains(&r.title)),
                 children: vec![],
                 info: r.info.clone(),
                 pid: r.pid,
@@ -782,7 +838,13 @@ impl App {
                     ),
                 );
                 self.video_codecs = sc.video_codecs.clone();
-                self.tree = Tree::from_scan(&sc);
+                let min_secs = self
+                    .settings
+                    .min_title_secs
+                    .trim()
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
+                self.tree = Tree::from_scan(&sc, &self.settings.selection, min_secs);
                 self.source = path.to_string();
                 self.page = Page::Titles;
                 self.selected_row = None;
@@ -873,6 +935,13 @@ impl App {
                 explicit_streams,
                 raw: self.settings.raw,
                 force: self.settings.force,
+                filename_template: self.settings.filename_template.clone(),
+                decrypt_threads: self
+                    .settings
+                    .decrypt_threads
+                    .trim()
+                    .parse::<usize>()
+                    .unwrap_or(0),
                 keys: KeyConfig::from_settings(&self.settings),
             },
             state,
@@ -1087,13 +1156,17 @@ mod tests {
     fn an_empty_scan_yields_an_empty_tree() {
         // No source means no rows — the shell shows its empty page rather
         // than a placeholder disc.
-        let t = Tree::from_scan(&crate::engine::Scanned {
-            label: String::new(),
-            title_count: 0,
-            key_summary: String::new(),
-            video_codecs: vec![],
-            rows: vec![],
-        });
+        let t = Tree::from_scan(
+            &crate::engine::Scanned {
+                label: String::new(),
+                title_count: 0,
+                key_summary: String::new(),
+                video_codecs: vec![],
+                rows: vec![],
+            },
+            "Main film only",
+            0.0,
+        );
         assert!(t.roots.is_empty());
         assert!(t.arena.is_empty());
     }
