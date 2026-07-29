@@ -927,73 +927,37 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
     Ok(format!("Written to {}", req.dest_dir))
 }
 
-fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
-    if is_disc_source(&req.source) {
-        return run_disc(req, sink, state);
-    }
-    if is_stream_source(&req.source) {
-        return run_stream(req, sink, state);
-    }
-    // Pin the AACS decrypt pool if the user set a thread count; 0 leaves the
-    // library to size it automatically.
-    if req.decrypt_threads > 0 {
-        libfreemkv::set_decrypt_threads(req.decrypt_threads);
-    }
-    let (mut disc, mut reader) = libfreemkv::scan_iso(
-        std::path::Path::new(&req.source),
-        libfreemkv::ScanOptions::default(),
-    )
-    .map_err(|e| format!("E{} scan failed", e.code()))?;
-    // Resolve decryption keys onto the disc BEFORE muxing.
-    resolve_disc_keys(&mut disc, reader.as_mut(), &req.keys);
-
+/// Mux the selected titles from `source_url` (an `iso://<path>` — either the
+/// original ISO source, or a staging ISO a multipass recovery just produced)
+/// into the sinks the request's format maps to. Shared by `run_blocking`'s
+/// ISO-source path and the title-multipass staging-ISO path in `run_disc` —
+/// both need exactly the same per-title mux loop, they differ only in which
+/// ISO the titles come from.
+fn mux_selected_titles(
+    disc: &libfreemkv::Disc,
+    source_url: &str,
+    req: &RipRequest,
+    indices: &[usize],
+    sink: &UiSink,
+    state: &Arc<RunState>,
+) -> Result<String, String> {
     let kind = out_kind(&req.format);
     let label = if disc.volume_id.is_empty() {
         "disc".to_string()
     } else {
         disc.volume_id.clone()
     };
-
-    // Whole-disc sinks bypass the per-title mux loop entirely — they operate on
-    // the disc as a whole, not on a selected title.
-    match kind {
-        OutKind::DecryptedFolder => {
-            std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
-            return run_extract_folder(req, &disc, reader.as_mut(), &label, sink, state);
-        }
-        OutKind::IsoImage => {
-            return Err("ISO-image output needs a physical disc (disc://). This source is already an ISO — choose “decrypted folder” to unpack its files.".into());
-        }
-        _ => {}
-    }
-    let disc = disc;
-
-    let sel = if req.titles.is_empty() {
-        fe::Selection::MainMovie
-    } else {
-        fe::Selection::Titles(req.titles.clone())
-    };
-    let indices = fe::resolve_selection(&disc, &sel);
-    state
-        .lines
-        .lock()
-        .unwrap()
-        .push(format!("selection resolved to titles {indices:?}"));
-    if indices.is_empty() {
-        return Err("Nothing selected to rip.".into());
-    }
     // Demux fans a single title straight into the dest dir but gives each title
     // of a multi-title rip its own subdir so their track files never collide.
     let multi = indices.len() > 1;
 
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
-    let src_url = format!("iso://{}", req.source);
 
     // The engine owns the per-title loop (skip/abort policy); we only supply
     // "mux one title".
     let written = std::cell::Cell::new(0usize);
     let partial = std::cell::Cell::new(0usize);
-    let outcome = fe::run_titles(&indices, !req.titles.is_empty(), sink, |idx| {
+    let outcome = fe::run_titles(indices, !req.titles.is_empty(), sink, |idx| {
         // Destination per output kind: a per-title file for the container /
         // metadata / index sinks, or a demux directory (its own per-track
         // naming) for separate track files.
@@ -1011,7 +975,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
                 };
                 (format!("demux://{dir}"), dir)
             }
-            // Whole-disc kinds returned above.
+            // Whole-disc kinds handled by their own callers.
             OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
         };
         let hint = disc.titles.get(idx).map(|t| t.size_bytes).unwrap_or(0);
@@ -1030,7 +994,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             ..Default::default()
         };
         let mux = mux_opts(req);
-        match fe::mux_title(&src_url, &dest_url, input, &mux, hint, sink) {
+        match fe::mux_title(source_url, &dest_url, input, &mux, hint, sink) {
             Ok(o) => {
                 if !o.completed {
                     // Cancelled or truncated: a partial file is on disk. Keep it —
@@ -1096,6 +1060,65 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
         _ if written.get() == 0 => "Nothing was written".to_string(),
         _ => format!("{} title(s) written to {}", written.get(), req.dest_dir),
     })
+}
+
+fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
+    if is_disc_source(&req.source) {
+        return run_disc(req, sink, state);
+    }
+    if is_stream_source(&req.source) {
+        return run_stream(req, sink, state);
+    }
+    // Pin the AACS decrypt pool if the user set a thread count; 0 leaves the
+    // library to size it automatically.
+    if req.decrypt_threads > 0 {
+        libfreemkv::set_decrypt_threads(req.decrypt_threads);
+    }
+    let (mut disc, mut reader) = libfreemkv::scan_iso(
+        std::path::Path::new(&req.source),
+        libfreemkv::ScanOptions::default(),
+    )
+    .map_err(|e| format!("E{} scan failed", e.code()))?;
+    // Resolve decryption keys onto the disc BEFORE muxing.
+    resolve_disc_keys(&mut disc, reader.as_mut(), &req.keys);
+
+    let kind = out_kind(&req.format);
+    let label = if disc.volume_id.is_empty() {
+        "disc".to_string()
+    } else {
+        disc.volume_id.clone()
+    };
+
+    // Whole-disc sinks bypass the per-title mux loop entirely — they operate on
+    // the disc as a whole, not on a selected title.
+    match kind {
+        OutKind::DecryptedFolder => {
+            std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
+            return run_extract_folder(req, &disc, reader.as_mut(), &label, sink, state);
+        }
+        OutKind::IsoImage => {
+            return Err("ISO-image output needs a physical disc (disc://). This source is already an ISO — choose “decrypted folder” to unpack its files.".into());
+        }
+        _ => {}
+    }
+    let disc = disc;
+
+    let sel = if req.titles.is_empty() {
+        fe::Selection::MainMovie
+    } else {
+        fe::Selection::Titles(req.titles.clone())
+    };
+    let indices = fe::resolve_selection(&disc, &sel);
+    state
+        .lines
+        .lock()
+        .unwrap()
+        .push(format!("selection resolved to titles {indices:?}"));
+    if indices.is_empty() {
+        return Err("Nothing selected to rip.".into());
+    }
+    let src_url = format!("iso://{}", req.source);
+    mux_selected_titles(&disc, &src_url, req, &indices, sink, state)
 }
 
 /// Rip from a live optical drive (`disc://`). Scans once to resolve titles and
