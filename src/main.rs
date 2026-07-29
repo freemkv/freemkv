@@ -355,6 +355,7 @@ fn dev_harness() -> bool {
         match engine::scan_with_keys(
             &p,
             &engine::KeyConfig::from_settings(&settings::Settings::load()),
+            std::env::var("FMKV_VERBOSE").is_ok(),
         ) {
             Ok(sc) => {
                 println!(

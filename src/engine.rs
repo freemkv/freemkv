@@ -254,12 +254,13 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
 
 /// Scan a source (ISO path today) and flatten it into display rows.
 pub fn scan(path: &str) -> Result<Scanned, String> {
-    scan_with_keys(path, &KeyConfig::default())
+    scan_with_keys(path, &KeyConfig::default(), false)
 }
 
 /// Scan, then consult the key sources so the key strip reflects a real
-/// resolution rather than the scan-time placeholder.
-pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+/// resolution rather than the scan-time placeholder. `verbose` mirrors the
+/// CLI's `info -v`: the logged detail block gains the resolved keys.
+pub fn scan_with_keys(path: &str, keys: &KeyConfig, verbose: bool) -> Result<Scanned, String> {
     let (mut disc, mut reader) = libfreemkv::scan_iso(
         std::path::Path::new(path),
         libfreemkv::ScanOptions::default(),
@@ -268,7 +269,7 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
 
     let won = resolve_disc_keys(&mut disc, reader.as_mut(), keys);
     let summary = key_summary(&disc, won.as_deref());
-    Ok(scanned_from_disc(&disc, summary))
+    Ok(scanned_from_disc(&disc, summary, verbose))
 }
 
 /// Build the title tree + info rows from a scanned `Disc`. Shared by the ISO
@@ -277,7 +278,7 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
 /// The `freemkv info -v` detail block for a scanned disc/ISO — the same facts
 /// the CLI prints (format, capacity, region, MKB version, disc hash, VID, key
 /// state, title list), as log lines the desktop app shows on open.
-fn disc_details(disc: &libfreemkv::Disc, key_summary: &str) -> Vec<String> {
+fn disc_details(disc: &libfreemkv::Disc, key_summary: &str, verbose: bool) -> Vec<String> {
     let mut d = Vec::new();
     d.push(format!("Type: {:?}", disc.format));
     if disc.capacity_bytes > 0 {
@@ -313,26 +314,27 @@ fn disc_details(disc: &libfreemkv::Disc, key_summary: &str) -> Vec<String> {
         }
     }
     d.push(format!("Protection: {key_summary}"));
-    d.push(format!("Titles: {}", disc.titles.len()));
-    for (i, t) in disc.titles.iter().enumerate() {
-        let name = if t.playlist.is_empty() {
-            String::new()
-        } else {
-            format!("{}  ", t.playlist)
-        };
-        d.push(format!(
-            "  {}. {}{} ch, {}, {}",
-            i + 1,
-            name,
-            t.chapters.len(),
-            fmt_dur(t.duration_secs),
-            fmt_gb(t.size_bytes),
-        ));
+    // Verbose (Log detail: Verbose) reveals the resolved keys, like `info -v`:
+    // the Volume Unique Key and each CPS unit key.
+    if verbose {
+        if let Some(aacs) = &disc.aacs {
+            if let Some(vuk) = aacs.vuk {
+                let h: String = vuk.iter().map(|b| format!("{b:02x}")).collect();
+                d.push(format!("  VUK: 0x{h}"));
+            }
+            for (cps, key) in &aacs.unit_keys {
+                let h: String = key.iter().map(|b| format!("{b:02x}")).collect();
+                d.push(format!("  CPS {cps}: 0x{h}"));
+            }
+        }
     }
+    // Just the count — the per-title list lives in the UI tree, no need to
+    // duplicate it in the log.
+    d.push(format!("Titles: {}", disc.titles.len()));
     d
 }
 
-fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
+fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String, verbose: bool) -> Scanned {
     let mut rows = Vec::new();
     let label = if disc.volume_id.is_empty() {
         "(no label)".to_string()
@@ -394,7 +396,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
         rows.extend(stream_rows(t, ti));
     }
 
-    let details = disc_details(disc, &summary);
+    let details = disc_details(disc, &summary, verbose);
     Scanned {
         label,
         title_count: disc.titles.len(),
@@ -527,7 +529,11 @@ fn won_from_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> Option<St
 /// and resolve its keys, returning the SAME `Scanned` shape the ISO path does —
 /// so the title tree renders identically. Mirrors the CLI's `pipe_disc` scan.
 /// NEEDS HARDWARE to exercise; the session flow matches the proven CLI path.
-pub fn scan_disc_with_keys(source: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+pub fn scan_disc_with_keys(
+    source: &str,
+    keys: &KeyConfig,
+    verbose: bool,
+) -> Result<Scanned, String> {
     // The shared drive bring-up (open + lock + scan + resolve) — the SAME core
     // the CLI's pipe_disc uses; the GUI just renders the result.
     let (session, trace) = fe::open_scan_resolve(
@@ -544,7 +550,7 @@ pub fn scan_disc_with_keys(source: &str, keys: &KeyConfig) -> Result<Scanned, St
     let won = won_from_trace(&trace);
     let disc = session.disc().ok_or("scan produced no disc")?;
     let summary = key_summary(disc, won.as_deref());
-    Ok(scanned_from_disc(disc, summary))
+    Ok(scanned_from_disc(disc, summary, verbose))
 }
 
 /// Ask the engine whether a job can run, without executing it.
