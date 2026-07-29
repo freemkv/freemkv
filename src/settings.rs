@@ -230,6 +230,17 @@ impl Settings {
         // Language persists as a locale code (or "auto"); fold any legacy
         // endonym / unknown value to a clean code.
         self.language = crate::ui::locale_code(&self.language).to_string();
+        // A destination that isn't an absolute path (empty, or a stale "..."
+        // placeholder from an older build) can't be written to and shows blank
+        // in the field — fall back to the default output folder.
+        if self.dest_dir.trim().is_empty() || !self.dest_dir.starts_with('/') {
+            self.dest_dir = d.dest_dir.clone();
+        }
+        // keydb.cfg location, likewise: never leave it empty (the default is a
+        // real path in Application Support).
+        if self.keydb_path.trim().is_empty() {
+            self.keydb_path = d.keydb_path.clone();
+        }
     }
 
     pub fn save(&self) -> Result<(), String> {
