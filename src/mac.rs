@@ -1286,6 +1286,15 @@ impl Controller {
         let _src = build_ui(mtm, &win, self);
         install_drop_view(mtm, &win, self);
 
+        // The Settings and About windows are cached (built once, reused on
+        // reopen). They were built in the old language, so drop them — the next
+        // open rebuilds them in the new one. (Settings is already closing when
+        // this runs; close a stray About too.)
+        *self.ivars().win_prefs.borrow_mut() = None;
+        if let Some(w) = self.ivars().win_about.borrow_mut().take() {
+            w.close();
+        }
+
         // Restore what's on screen from the core: render() repopulates the log
         // from App state and paints the correct page; relayout fits the current
         // window size.
@@ -2931,7 +2940,9 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         &crate::strings::get("gui.set.language"),
         200.0,
     );
-    t.note(mtm, &crate::strings::get("gui.set.language_note"), tw);
+    // No "restart to apply" note: the switch is live (see relocalize), and
+    // Settings can't be opened mid-rip, so it always takes effect at once.
+    // (gui.set.language_note stays in the catalogs for locale parity.)
     t.field(
         mtm,
         "decrypt_threads",
