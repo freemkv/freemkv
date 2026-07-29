@@ -58,6 +58,9 @@ fn cmd_for(a: Sel) -> Option<crate::ui::Cmd> {
     use crate::ui::Cmd;
     Some(if a == sel!(onOpenFiles:) {
         Cmd::Open
+    } else if a == sel!(onOpenDisc:) {
+        // Opening a disc is an Open for menu-enable purposes (blocked mid-rip).
+        Cmd::Open
     } else if a == sel!(onCloseDisc:) {
         Cmd::Close
     } else if a == sel!(onBrowseOutput:) {
@@ -482,6 +485,50 @@ define_class!(
         #[unsafe(method(onOpenFiles:))]
         fn on_open_files(&self, _s: Option<&AnyObject>) {
             self.act(crate::ui::Cmd::Open);
+        }
+
+        /// Open a live optical drive. Enumerates drives (registry only, no
+        /// exclusive access); opens the one drive directly, or autodetects the
+        /// drive with media when several are attached.
+        #[unsafe(method(onOpenDisc:))]
+        fn on_open_disc(&self, _s: Option<&AnyObject>) {
+            let drives = crate::engine::list_optical_drives();
+            if drives.is_empty() {
+                self.app_mut(|a| {
+                    a.say(
+                        crate::ui::LogKind::Notice,
+                        "No optical drive found. Connect a Blu-ray/DVD drive with a disc.",
+                    )
+                });
+                self.render();
+                return;
+            }
+            // One drive → that device; several → autodetect the one with media,
+            // and log what was found so the user knows which drives are present.
+            let url = if drives.len() == 1 {
+                self.app_mut(|a| {
+                    a.say(
+                        crate::ui::LogKind::Detail,
+                        &format!("Opening {} ({})", drives[0].label, drives[0].device),
+                    )
+                });
+                format!("disc://{}", drives[0].device)
+            } else {
+                let list = drives
+                    .iter()
+                    .map(|d| format!("{} ({})", d.label, d.device))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.app_mut(|a| {
+                    a.say(
+                        crate::ui::LogKind::Detail,
+                        &format!("{} drives found: {list} — using the one with a disc", drives.len()),
+                    )
+                });
+                "disc://".to_string()
+            };
+            let fx = self.app_mut(|a| a.open(&url));
+            self.perform(fx);
         }
 
         #[unsafe(method(onNoop:))]
@@ -1678,12 +1725,17 @@ fn build_menus(mtm: MainThreadMarker, app: &NSApplication, c: &Controller) {
     main.addItem(&mk(
         &crate::strings::get("gui.menu.file"),
         vec![
-            // One Open. A separate "Open disc" returns when drive support
-            // lands; a folder entry when folder sources do.
             (
                 crate::strings::get("gui.menu.open"),
                 "o",
                 sel!(onOpenFiles:),
+            ),
+            // Rip from a live optical drive (disc://). Enumerates drives and
+            // opens the one with media.
+            (
+                crate::strings::get("gui.menu.open_disc"),
+                "d",
+                sel!(onOpenDisc:),
             ),
             (
                 crate::strings::get("gui.menu.close"),
