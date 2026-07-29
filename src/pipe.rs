@@ -711,6 +711,11 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // identical to no flags.
     let stream_sel_active = !streams.is_all();
 
+    // Whether the user EXPLICITLY narrowed the rip — captured BEFORE the `-t`
+    // default below normalizes an empty selection to `[1]`, so a plain rip with
+    // no flags reads as "no selection". `-t all` (all_titles) counts as explicit.
+    let selection_flags_used = stream_sel_active || !title_nums.is_empty() || all_titles;
+
     // `-t` DEFAULT (1.6.0): with no `-t N` and no `-t all`, rip the MAIN TITLE
     // only (title 1). Pre-1.6 the empty case meant all-titles, which on an
     // obfuscated disc (50+ near-equal-length playlists) rips everything — a
@@ -750,6 +755,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         raw,
         multipass,
         force,
+        selection_flags_used,
     ) {
         out.raw(Normal, &msg);
         return false;
@@ -1030,6 +1036,7 @@ fn is_scheme_only_sink(parsed_dest: &libfreemkv::StreamUrl) -> bool {
 /// Deep validation (a real UDF/ISO filesystem probe, a live drive handshake) is
 /// left to the scan step, which surfaces its own typed errors; this is the
 /// cheap, side-effect-free gate that catches the common mistakes instantly.
+#[allow(clippy::too_many_arguments)] // cohesive one-shot invocation validator
 fn preflight_validate(
     source: &str,
     dest: &str,
@@ -1038,6 +1045,7 @@ fn preflight_validate(
     raw: bool,
     multipass: bool,
     force: bool,
+    selection_flags_used: bool,
 ) -> Result<(), String> {
     // 1a. Destination must have a recognized scheme. A schemeless dest
     // (`out.mkv`, `/path/out.mkv`) parses as Unknown — guide the user to add a
@@ -1051,6 +1059,18 @@ fn preflight_validate(
     if matches!(parsed_source, libfreemkv::StreamUrl::Unknown { .. }) {
         return Err(strings::fmt(
             "error.source_needs_scheme",
+            &[("source", source)],
+        ));
+    }
+
+    // 1c. Title/stream selection (`-t` / `-a` / `-s`) applies only to a source
+    // that is scanned into a title list — disc:// or iso://. A stream/file
+    // source (mkv://, m2ts://, network://, stdio://) is remuxed as one opaque
+    // stream: it has no title list and no per-stream language/PID map, so the
+    // flags cannot be honored. Fail loud rather than silently ignore them.
+    if selection_flags_used && !parsed_source.is_disc_source() {
+        return Err(strings::fmt(
+            "error.selection_disc_only",
             &[("source", source)],
         ));
     }
@@ -3846,7 +3866,29 @@ mod tests {
     ) -> Result<(), String> {
         let ps = parse_url(source);
         let pd = parse_url(dest);
-        preflight_validate(source, dest, &ps, &pd, raw, multipass, force)
+        preflight_validate(source, dest, &ps, &pd, raw, multipass, force, false)
+    }
+
+    /// `preflight` with title/stream selection flags marked as used.
+    fn preflight_sel(source: &str, dest: &str) -> Result<(), String> {
+        let ps = parse_url(source);
+        let pd = parse_url(dest);
+        preflight_validate(source, dest, &ps, &pd, false, false, false, true)
+    }
+
+    #[test]
+    fn selection_flags_require_disc_or_iso_source() {
+        // File/stream sources have no title list: -t/-a/-s must fail loud.
+        assert!(preflight_sel("mkv://in.mkv", "mkv://out.mkv").is_err());
+        assert!(preflight_sel("m2ts://in.m2ts", "mkv://out.mkv").is_err());
+        assert!(preflight_sel("network://0.0.0.0:9000", "mkv://out.mkv").is_err());
+        // disc:// IS scanned into titles: selection passes this gate. (iso://
+        // shares the same is_disc_source() branch — see libfreemkv's
+        // is_disc_source_only_for_disc_and_iso — but needs a real file to clear
+        // the later reachability check, so it isn't asserted here.)
+        assert!(preflight_sel("disc://", "mkv://out.mkv").is_ok());
+        // No selection flags: a plain file remux stays legal.
+        assert!(preflight("mkv://in.mkv", "mkv://out.mkv", false, false).is_ok());
     }
 
     /// A unique temp path under the system temp dir (no tempfile dep). Caller
