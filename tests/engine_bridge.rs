@@ -206,41 +206,39 @@ fn every_title_is_distinguishable_and_indices_are_canonical() {
 }
 
 #[test]
-fn force_only_guards_a_decrypted_folder_target() {
-    // Regression: the non-empty check once applied to every rip, which made
-    // writing an MKV into ~/Movies impossible. It guards `dir://` only, like
-    // the CLI's --force.
-    let dir = std::env::temp_dir().join(format!("fmkv_force_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("existing.txt"), b"x").unwrap();
-    let d = dir.to_string_lossy().to_string();
+fn decrypted_folder_extraction_guards_a_populated_subdir() {
+    // A decrypted-folder rip extracts into a per-disc SUBDIR of the destination
+    // (never the raw dest_dir — that once made it collide with everything in
+    // ~/Movies). The --force gate applies to that subdir: a populated one needs
+    // force, a fresh one is always fine, and ordinary file output is never gated.
+    let base = std::env::temp_dir().join(format!("fmkv_force_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
 
-    let mk = |fmt: &str, force: bool| engine::RipRequest {
-        source: "/x.iso".into(),
-        dest_dir: d.clone(),
-        titles: vec![],
-        format: fmt.into(),
-        audio_pids: vec![],
-        sub_pids: vec![],
-        explicit_streams: false,
-        raw: false,
-        force,
-        keys: engine::KeyConfig::default(),
-    };
+    // The target is a per-disc subdir, not the destination itself.
+    assert_eq!(
+        engine::extract_target("/out", "MOVIE_LABEL"),
+        std::path::Path::new("/out/MOVIE_LABEL"),
+    );
 
+    // A fresh (missing) subdir is always writable.
+    let fresh = base.join("BRAND_NEW");
     assert!(
-        engine::dest_is_writable(&mk("Selected titles → MKV", false)).is_ok(),
-        "a populated folder must accept file output"
+        engine::folder_writable(&fresh, false).is_ok(),
+        "a fresh subdir must accept an extraction"
+    );
+
+    // A populated subdir needs force.
+    std::fs::create_dir_all(&fresh).unwrap();
+    std::fs::write(fresh.join("existing.txt"), b"x").unwrap();
+    assert!(
+        engine::folder_writable(&fresh, false).is_err(),
+        "unpacking into a populated subdir needs --force"
     );
     assert!(
-        engine::dest_is_writable(&mk("Whole disc → decrypted folder", false)).is_err(),
-        "unpacking a file tree into a populated folder needs --force"
-    );
-    assert!(
-        engine::dest_is_writable(&mk("Whole disc → decrypted folder", true)).is_ok(),
+        engine::folder_writable(&fresh, true).is_ok(),
         "force overrides it"
     );
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// The key strip must never claim a key the disc does not have.
