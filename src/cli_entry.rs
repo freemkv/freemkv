@@ -302,24 +302,32 @@ fn fail_mark() -> &'static str {
 /// that silently routes to `info` instead of ripping. So if a value-flag is
 /// followed by a URL token, the URL is kept as positional and the flag's value
 /// is treated as absent (crate::pipe::run then reports the missing value).
-fn collect_urls(args: &[String]) -> Vec<String> {
-    // Flags that consume the next argument as a value.
-    const VALUE_FLAGS: &[&str] = &[
-        "-t",
-        "--title",
-        "-k",
-        "--keydb",
-        "--key-url",
-        "--key-auth",
-        "--log-file",
-        "--log-level",
-    ];
+/// Every flag that consumes the following token as its value. This is the ONE
+/// source of truth for flag arity, shared by `collect_urls` (below) and asserted
+/// against `parse_flags` by `value_flag_set_matches_parser` — so adding a
+/// value-flag to the parser without listing it here fails a test rather than
+/// silently mis-parsing (the `-a`/`-s` bug). Boolean flags (`--raw`,
+/// `--multipass`, `-q`) are deliberately absent.
+pub(crate) const VALUE_FLAGS: &[&str] = &[
+    "-t",
+    "--title",
+    "-a",
+    "--audio",
+    "-s",
+    "--subtitles",
+    "-k",
+    "--keydb",
+    "--key-url",
+    "--key-auth",
+    "--log-file",
+    "--log-level",
+];
 
-    // `--key-url`'s value is itself an `http(s)://` URL — so unlike `-t`/`-k`
-    // (whose value is never a stream URL), its value MUST be consumed even though
-    // it matches `is_url`. Otherwise the reclassify-as-positional fallback below
-    // would treat the key-service URL as a third stream URL and break the
-    // 2-URL rip dispatch. Track whether the flag we're skipping for is key-url.
+fn collect_urls(args: &[String]) -> Vec<String> {
+    // A positional token (not a flag, not a flag's value) is a stream URL — even
+    // a schemeless one, which we KEEP so `parse_url` can reject it with a clear
+    // "needs a scheme" error rather than silently dropping it. To tell a flag's
+    // value apart from a positional we must know flag arity: `VALUE_FLAGS`.
     let mut urls = Vec::new();
     let mut skip_next = false;
     let mut skip_is_key_url = false;
@@ -328,10 +336,10 @@ fn collect_urls(args: &[String]) -> Vec<String> {
             skip_next = false;
             let consume_key_url = skip_is_key_url;
             skip_is_key_url = false;
-            // `--key-url`'s value is always consumed (it's the key-service URL,
-            // not a positional stream URL). For the other value-flags, a value
-            // that looks like a stream URL is actually a misplaced positional —
-            // reclassify it so `-k disc:// mkv://out` still rips.
+            // `--key-url`'s value is itself a URL (the key service) — always
+            // consumed. For other value-flags, a value that looks like a stream
+            // URL is a misplaced positional; reclassify it so `-k disc:// mkv://`
+            // still rips.
             if !consume_key_url && is_url(arg) {
                 urls.push(arg.clone());
             }
@@ -697,6 +705,41 @@ mod tests {
     fn plain_two_urls() {
         assert_eq!(
             collect_urls(&v(&["disc://", "mkv://out.mkv"])),
+            v(&["disc://", "mkv://out.mkv"])
+        );
+    }
+
+    #[test]
+    fn stream_selection_flag_values_are_not_read_as_urls() {
+        // Regression: `-a`/`-s` (and any flag whose value isn't a URL) must not
+        // let their value (`none`/`eng`/…) be collected as a third stream URL.
+        // Before the scheme://-only rewrite these weren't in the value-flag list,
+        // so `freemkv iso://x mkv://y -a none` collected `none` as a URL → 3 URLs
+        // → the rip printed usage and silently did nothing. The whole class of
+        // "add a flag, forget the list" bug is gone: values are never URLs.
+        assert_eq!(
+            collect_urls(&v(&[
+                "iso://d.iso",
+                "mkv://out.mkv",
+                "-t",
+                "1",
+                "-a",
+                "none",
+                "-s",
+                "eng",
+            ])),
+            v(&["iso://d.iso", "mkv://out.mkv"])
+        );
+        // Flags-first ordering, and comma lists, are equally safe.
+        assert_eq!(
+            collect_urls(&v(&[
+                "-a",
+                "eng,spa",
+                "-s",
+                "none",
+                "disc://",
+                "mkv://out.mkv"
+            ])),
             v(&["disc://", "mkv://out.mkv"])
         );
     }

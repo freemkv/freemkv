@@ -639,20 +639,29 @@ fn out_ext(format: &str) -> &'static str {
     }
 }
 
-fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
-    let selection = if req.explicit_streams {
+/// The audio/subtitle selection for this request. It goes on `InputOptions`,
+/// NOT `MuxOptions`: our mux uses a URL source (`iso://…`), and `mux_stream`'s
+/// Url arm prunes via `InputOptions.selection` — `MuxOptions.selection` is only
+/// consulted on the File/Session (live-drive) arms. Putting it on MuxOptions
+/// silently kept every track. Empty PID lists = keep none of that class.
+fn stream_selection(req: &RipRequest) -> libfreemkv::StreamSelection {
+    if req.explicit_streams {
         libfreemkv::StreamSelection {
             audio: libfreemkv::PidFilter::Only(req.audio_pids.clone()),
             subtitle: libfreemkv::PidFilter::Only(req.sub_pids.clone()),
         }
     } else {
         libfreemkv::StreamSelection::default()
-    };
+    }
+}
+
+fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
     libfreemkv::MuxOptions {
         skip_errors: false,
         batch_sectors: 64,
         raw: req.raw,
-        selection,
+        // Selection lives on InputOptions for the Url mux path — see stream_selection.
+        selection: libfreemkv::StreamSelection::default(),
         send_deadline: Some(std::time::Duration::from_secs(60)),
     }
 }
@@ -739,6 +748,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     // The engine owns the per-title loop (skip/abort policy); we only supply
     // "mux one title".
     let written = std::cell::Cell::new(0usize);
+    let partial = std::cell::Cell::new(0usize);
     let outcome = fe::run_titles(&indices, !req.titles.is_empty(), sink, |idx| {
         let out = format!("{}/{}_t{}.{}", req.dest_dir, label, idx + 1, ext);
         let hint = disc.titles.get(idx).map(|t| t.size_bytes).unwrap_or(0);
@@ -752,6 +762,8 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
                 .as_ref()
                 .map(|a| a.unit_keys.clone())
                 .unwrap_or_default(),
+            // The ticked audio/subtitle tracks — applied by the Url mux path.
+            selection: stream_selection(req),
             ..Default::default()
         };
         let mux = mux_opts(req);
@@ -759,10 +771,13 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
         match fe::mux_title(&src_url, &dest_url, input, &mux, hint, sink) {
             Ok(o) => {
                 if !o.completed {
-                    // Cancelled or truncated: the file exists but is partial.
-                    // Counting it as written would be a lie.
+                    // Cancelled or truncated: a partial file is on disk. Keep it —
+                    // a partial mp4/mkv is usually watchable up to the cut — but
+                    // don't count it as a full write, and SAY it's partial. Never
+                    // "nothing written" when a file is sitting in the folder.
+                    partial.set(partial.get() + 1);
                     state.lines.lock().unwrap().push(format!(
-                        "title {} incomplete — {} is partial",
+                        "title {} cancelled — partial file kept: {}",
                         idx + 1,
                         out
                     ));
@@ -793,12 +808,26 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
         }
     });
 
+    // A "partial N kept" note whenever a cancel left one or more partial files,
+    // so the result never reads "Nothing was written" while a file is on disk.
+    let partial_note = |lead: &str| {
+        if partial.get() > 0 {
+            format!(
+                "{lead} — {} partial file(s) kept in {}",
+                partial.get(),
+                req.dest_dir
+            )
+        } else {
+            lead.to_string()
+        }
+    };
     Ok(match outcome {
-        fe::RipOutcome::Halted => format!(
+        fe::RipOutcome::Halted => partial_note(&format!(
             "Cancelled — {} of {} title(s) completed",
             written.get(),
             indices.len()
-        ),
+        )),
+        _ if written.get() == 0 && partial.get() > 0 => partial_note("Cancelled"),
         _ if written.get() == 0 => "Nothing was written".to_string(),
         _ => format!("{} title(s) written to {}", written.get(), req.dest_dir),
     })

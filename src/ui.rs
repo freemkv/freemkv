@@ -204,7 +204,13 @@ pub fn fmt_bytes(b: u64) -> String {
 
 /// `h:mm:ss`.
 pub fn fmt_hms(secs: u64) -> String {
-    format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    // Drop the hours field entirely under an hour: "1:36", not "0:01:36".
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
 }
 
 /// Free space on the volume holding `path`.
@@ -638,7 +644,7 @@ impl App {
                 self.log.clear();
                 self.say(
                     LogKind::Result,
-                    &format!("freemkv {} — engine 1.6.0", env!("CARGO_PKG_VERSION")),
+                    &format!("freemkv {}", env!("CARGO_PKG_VERSION")),
                 );
                 self.say(
                     LogKind::Detail,

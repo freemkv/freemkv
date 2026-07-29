@@ -10,11 +10,11 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceNameAqua, NSApplication, NSApplicationActivationPolicy,
+    NSAlert, NSAppearance, NSAppearanceNameAqua, NSApplication, NSApplicationActivationPolicy,
     NSBackingStoreType, NSBezelStyle, NSBitmapImageFileType, NSBox, NSBoxType, NSButton,
-    NSButtonCell, NSButtonType, NSColor, NSComboBox, NSControlTextEditingDelegate, NSFont, NSMenu,
-    NSMenuItem, NSOpenPanel, NSOutlineView, NSOutlineViewDataSource, NSOutlineViewDelegate,
-    NSPopUpButton, NSProgressIndicator, NSScrollView, NSTableColumn,
+    NSButtonCell, NSButtonType, NSColor, NSComboBox, NSControlTextEditingDelegate, NSFont,
+    NSFontWeightRegular, NSMenu, NSMenuItem, NSOpenPanel, NSOutlineView, NSOutlineViewDataSource,
+    NSOutlineViewDelegate, NSPopUpButton, NSProgressIndicator, NSScrollView, NSTableColumn,
     NSTableViewSelectionHighlightStyle, NSTextAlignment, NSTextField, NSTextView, NSView, NSWindow,
     NSWindowDelegate, NSWindowStyleMask,
 };
@@ -775,6 +775,41 @@ define_class!(
             if let Some(cv) = win.contentView() {
                 let b = cv.frame();
                 self.relayout(b.size.width, b.size.height);
+            }
+        }
+
+        // Closing the window mid-rip must not silently tear down the rip worker.
+        // Confirm first; on "Stop & Quit" signal the cooperative cancel, then
+        // allow the close (the process exits, the partial file is left on disk).
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _sender: &NSWindow) -> objc2::runtime::Bool {
+            if !self.ivars().app.borrow().running() {
+                return objc2::runtime::Bool::YES;
+            }
+            let mtm = MainThreadMarker::new().unwrap();
+            let alert = NSAlert::new(mtm);
+            alert.setMessageText(&NSString::from_str("A rip is in progress."));
+            alert.setInformativeText(&NSString::from_str(
+                "Quitting will stop it. The partial file so far is kept.",
+            ));
+            alert.addButtonWithTitle(&NSString::from_str("Stop & Quit"));
+            alert.addButtonWithTitle(&NSString::from_str("Keep Ripping"));
+            // First button (Stop & Quit) is NSAlertFirstButtonReturn.
+            if alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn {
+                self.act(crate::ui::Cmd::Cancel);
+                objc2::runtime::Bool::YES
+            } else {
+                objc2::runtime::Bool::new(false)
+            }
+        }
+
+        // Open the freemkv.org link in the About panel.
+        #[unsafe(method(onAboutWebsite:))]
+        fn on_about_website(&self, _s: Option<&AnyObject>) {
+            if let Some(url) =
+                objc2_foundation::NSURL::URLWithString(&NSString::from_str("https://freemkv.org"))
+            {
+                objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
             }
         }
 
@@ -1830,7 +1865,11 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
             true,
             false,
         );
-        l1.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        // Monospaced digits: the Elapsed/Remaining/% caption must not shift as
+        // its digits change width (a plain proportional font jumps every tick).
+        let cap_font =
+            unsafe { NSFont::monospacedDigitSystemFontOfSize_weight(11.0, NSFontWeightRegular) };
+        l1.setFont(Some(&cap_font));
         mask(
             &l1,
             objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin,
@@ -1875,7 +1914,9 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
             true,
             false,
         );
-        l2.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        let cap_font2 =
+            unsafe { NSFont::monospacedDigitSystemFontOfSize_weight(11.0, NSFontWeightRegular) };
+        l2.setFont(Some(&cap_font2));
         mask(
             &l2,
             objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin,
@@ -2694,8 +2735,32 @@ fn build_about(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     ];
     let mut y = h - 96.0;
     for (k, v) in rows {
-        {
-            bd.addSubview(&text(mtm, k, r(20.0, y, 130.0, 18.0), true, false));
+        bd.addSubview(&text(mtm, k, r(20.0, y, 130.0, 18.0), true, false));
+        if v.starts_with("http") {
+            // Clickable link → opens in the default browser (onAboutWebsite:).
+            let lb = {
+                NSButton::initWithFrame(NSButton::alloc(mtm), r(158.0, y - 2.0, w - 175.0, 20.0))
+            };
+            unsafe {
+                lb.setBordered(false);
+                lb.setButtonType(NSButtonType::MomentaryChange);
+                lb.setAlignment(NSTextAlignment::Left);
+                lb.setTarget(Some(c));
+                lb.setAction(Some(sel!(onAboutWebsite:)));
+                // Blue title so it reads as a link.
+                let keys: [&objc2_foundation::NSString; 1] =
+                    [objc2_app_kit::NSForegroundColorAttributeName];
+                let vals: [&AnyObject; 1] =
+                    [&*Retained::cast_unchecked::<AnyObject>(NSColor::linkColor())];
+                let attrs = NSDictionary::from_slices(&keys, &vals);
+                let title = objc2_foundation::NSAttributedString::new_with_attributes(
+                    &NSString::from_str(v),
+                    &Retained::cast_unchecked(attrs),
+                );
+                lb.setAttributedTitle(&title);
+            }
+            bd.addSubview(&lb);
+        } else {
             bd.addSubview(&text(mtm, v, r(160.0, y, w - 175.0, 18.0), false, false));
         }
         y -= 24.0;

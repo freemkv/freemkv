@@ -261,13 +261,13 @@ fn byte_formatting_rolls_units() {
 
 /// Durations use a single shape app-wide, matching the title column.
 #[test]
-fn duration_formatting_is_one_shape_everywhere() {
-    // h:mm:ss throughout, matching the title-duration column and the CLI —
-    // one shape everywhere beats a shorter string that disagrees with the
-    // number directly above it.
-    assert_eq!(fmt_hms(0), "0:00:00");
-    assert_eq!(fmt_hms(59), "0:00:59");
-    assert_eq!(fmt_hms(600), "0:10:00");
+fn duration_formatting_drops_the_hours_field_under_an_hour() {
+    // The progress caption's Elapsed/Remaining: `m:ss` under an hour (no odd
+    // leading "0:"), `h:mm:ss` once there's an hour to show.
+    assert_eq!(fmt_hms(0), "0:00");
+    assert_eq!(fmt_hms(59), "0:59");
+    assert_eq!(fmt_hms(96), "1:36");
+    assert_eq!(fmt_hms(600), "10:00");
     assert_eq!(fmt_hms(3_600), "1:00:00");
     assert_eq!(fmt_hms(7_187), "1:59:47");
 }
