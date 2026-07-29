@@ -482,70 +482,74 @@ define_class!(
 
         #[unsafe(method(onClosePrefs:))]
         fn on_close_prefs(&self, _s: Option<&AnyObject>) {
-            // Capture the language before the form overwrites it, so we can tell
-            // whether the user actually changed it (and switch live if so).
-            let old_lang = self.ivars().settings.borrow().language.clone();
-            {
-                let mut st = self.ivars().settings.borrow_mut();
-                for (k, f) in self.ivars().pf_fields.borrow().iter() {
-                    st.set(k, { f.stringValue() }.to_string());
-                }
-                for (k, b) in self.ivars().pf_checks.borrow().iter() {
-                    st.set_bool(k, { b.state() } != 0);
-                }
-                for (k, p) in self.ivars().pf_popups.borrow().iter() {
-                    let opts = enum_options(k);
-                    if !opts.is_empty() {
-                        // Enum popup: persist the canonical for the selected row
-                        // (index-mapped), never the localized label.
-                        let idx = p.indexOfSelectedItem();
-                        if idx >= 0 && (idx as usize) < opts.len() {
-                            st.set(k, opts[idx as usize].0.to_string());
-                        }
-                    } else if let Some(t) = { p.titleOfSelectedItem() } {
-                        let sel = t.to_string();
-                        if k == "container" {
-                            // Popup shows the localized label; persist the
-                            // canonical format string the engine matches on.
-                            let canon = crate::ui::format_from_label(&sel, true, true)
-                                .map(str::to_string)
-                                .unwrap_or(sel);
-                            st.set(k, canon);
-                        } else {
-                            st.set(k, sel);
-                        }
-                    }
-                }
-                match st.save() {
-                    Ok(()) => self.app_mut(|a| {
-                        a.say(
-                            crate::ui::LogKind::Result,
-                            &crate::strings::get("gui.log.settings_saved"),
-                        )
-                    }),
-                    Err(e) => self.app_mut(|a| {
-                        a.say(
-                            crate::ui::LogKind::Notice,
-                            &crate::strings::fmt(
-                                "gui.log.settings_save_error",
-                                &[("e", &e.to_string())],
-                            ),
-                        )
-                    }),
-                }
+            self.read_prefs_form();
+            match self.ivars().settings.borrow().save() {
+                Ok(()) => self.app_mut(|a| {
+                    a.say(
+                        crate::ui::LogKind::Result,
+                        &crate::strings::get("gui.log.settings_saved"),
+                    )
+                }),
+                Err(e) => self.app_mut(|a| {
+                    a.say(
+                        crate::ui::LogKind::Notice,
+                        &crate::strings::fmt(
+                            "gui.log.settings_save_error",
+                            &[("e", &e.to_string())],
+                        ),
+                    )
+                }),
             }
             if let Some(w) = self.ivars().win_prefs.borrow().as_ref() {
                 w.close();
             }
-            // Live language switch: if the interface language changed and no rip
-            // is running, swap the catalog and rebuild the UI so it takes effect
-            // without a restart. (Settings can't be opened mid-rip, so the guard
-            // is belt-and-braces; the "restart" note only matters as a fallback.)
-            let new_lang = self.ivars().settings.borrow().language.clone();
-            if old_lang != new_lang && !self.ivars().app.borrow().running() {
-                crate::strings::set_locale(crate::ui::locale_code(&new_lang));
-                let mtm = MainThreadMarker::new().unwrap();
-                self.relocalize(mtm);
+        }
+
+        /// The interface-language dropdown fires this the instant a language is
+        /// picked. The actual switch (which rebuilds — and so destroys — this
+        /// very Settings window) is deferred one runloop tick, because tearing
+        /// down the popup mid-action would crash AppKit.
+        #[unsafe(method(onPickLanguage:))]
+        fn on_pick_language(&self, _s: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::new().unwrap();
+            unsafe {
+                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                    0.0,
+                    self,
+                    sel!(onApplyLanguage:),
+                    None,
+                    false,
+                );
+            }
+            let _ = mtm;
+        }
+
+        /// Apply the picked language live: persist the form, swap the catalog,
+        /// rebuild the whole UI (main window, menu, and the Settings window
+        /// itself), and land back on the same Settings tab — now translated.
+        #[unsafe(method(onApplyLanguage:))]
+        fn on_apply_language(&self, _s: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::new().unwrap();
+            // Commit every field first so switching language loses no edits.
+            self.read_prefs_form();
+            let _ = self.ivars().settings.borrow().save();
+            let code = self.ivars().settings.borrow().language.clone();
+            // Remember the visible tab so we can restore it after the rebuild.
+            let tab_idx = self.ivars().tabs.borrow().as_ref().and_then(|tv| {
+                tv.selectedTabViewItem().map(|it| tv.indexOfTabViewItem(&it))
+            });
+            crate::strings::set_locale(crate::ui::locale_code(&code));
+            // Close the current (old-language) Settings window; relocalize
+            // clears its cache so the reopen rebuilds it fresh.
+            if let Some(w) = self.ivars().win_prefs.borrow_mut().take() {
+                w.close();
+            }
+            self.relocalize(mtm);
+            self.act(crate::ui::Cmd::Settings);
+            if let Some(i) = tab_idx {
+                if let Some(tv) = self.ivars().tabs.borrow().as_ref() {
+                    tv.selectTabViewItemAtIndex(i);
+                }
             }
         }
 
@@ -1256,6 +1260,42 @@ impl Controller {
             if let Some(sup) = unsafe { v.superview() } {
                 let b = sup.frame();
                 self.relayout(b.size.width, b.size.height);
+            }
+        }
+    }
+
+    /// Read every Settings control back into the stored `Settings` (no save, no
+    /// close). Shared by OK and the live language switch so the form-reading
+    /// rules (canonical enum values, container/format mapping) live in one place.
+    fn read_prefs_form(&self) {
+        let mut st = self.ivars().settings.borrow_mut();
+        for (k, f) in self.ivars().pf_fields.borrow().iter() {
+            st.set(k, { f.stringValue() }.to_string());
+        }
+        for (k, b) in self.ivars().pf_checks.borrow().iter() {
+            st.set_bool(k, { b.state() } != 0);
+        }
+        for (k, p) in self.ivars().pf_popups.borrow().iter() {
+            let opts = enum_options(k);
+            if !opts.is_empty() {
+                // Enum popup: persist the canonical for the selected row
+                // (index-mapped), never the localized label.
+                let idx = p.indexOfSelectedItem();
+                if idx >= 0 && (idx as usize) < opts.len() {
+                    st.set(k, opts[idx as usize].0.to_string());
+                }
+            } else if let Some(t) = { p.titleOfSelectedItem() } {
+                let sel = t.to_string();
+                if k == "container" {
+                    // Popup shows the localized label; persist the canonical
+                    // format string the engine matches on.
+                    let canon = crate::ui::format_from_label(&sel, true, true)
+                        .map(str::to_string)
+                        .unwrap_or(sel);
+                    st.set(k, canon);
+                } else {
+                    st.set(k, sel);
+                }
             }
         }
     }
@@ -3003,6 +3043,13 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
             // shows a value.
             if p.indexOfSelectedItem() < 0 {
                 p.selectItemAtIndex(0);
+            }
+            // The language popup applies live the instant it changes.
+            if k == "language" {
+                unsafe {
+                    p.setTarget(Some(c));
+                    p.setAction(Some(sel!(onPickLanguage:)));
+                }
             }
         }
     }
