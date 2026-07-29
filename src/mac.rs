@@ -3075,12 +3075,6 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     t.gap();
     t.check(
         mtm,
-        "capture_without_keys",
-        &crate::strings::get("gui.set.capture_no_keys"),
-        false,
-    );
-    t.check(
-        mtm,
         "raw",
         &crate::strings::get("gui.set.keep_encrypted"),
         false,
