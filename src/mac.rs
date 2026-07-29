@@ -2907,6 +2907,12 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         &crate::strings::get("gui.set.keep_iso"),
         false,
     );
+    t.check(
+        mtm,
+        "auto_eject",
+        &crate::strings::get("gui.set.auto_eject"),
+        true,
+    );
     add_tab(&crate::strings::get("gui.tab.output"), t);
 
     // ── Selection ── engine Job.selection

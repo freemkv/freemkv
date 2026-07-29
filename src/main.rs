@@ -308,6 +308,9 @@ fn dev_harness() -> bool {
                     .and_then(|v| v.trim().parse().ok())
                     .unwrap_or(0),
                 keep_iso: std::env::var("FMKV_KEEPISO").is_ok(),
+                // Dev harness: default off so a headless rip never pops the tray
+                // unless asked (FMKV_EJECT set).
+                auto_eject: std::env::var("FMKV_EJECT").is_ok(),
                 keys: engine::KeyConfig::from_settings(&settings::Settings::load()),
             },
             st.clone(),
