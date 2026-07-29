@@ -733,13 +733,20 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         key_auth,
     };
 
-    let out = Output::new(verbose, quiet);
+    let parsed_source = libfreemkv::parse_url(source);
+    let parsed_dest = libfreemkv::parse_url(dest);
+
+    // When the destination is `stdio://`, stdout IS the ripped byte stream, so
+    // every human-facing line must go to stderr — otherwise the banner and
+    // progress corrupt the piped output. (Progress already writes to stderr; this
+    // routes the Output sink too.)
+    let mut out = Output::new(verbose, quiet);
+    if matches!(parsed_dest, libfreemkv::StreamUrl::Stdio) {
+        out = out.to_stderr();
+    }
 
     out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
     out.blank(Normal);
-
-    let parsed_source = libfreemkv::parse_url(source);
-    let parsed_dest = libfreemkv::parse_url(dest);
 
     // Fail loud and EARLY: validate the whole invocation (URL schemes, ISO-only
     // flags, source reachability, dest writability) BEFORE any drive open, scan,

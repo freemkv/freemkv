@@ -31,6 +31,10 @@ pub enum Level {
 #[derive(Clone, Copy)]
 pub struct Output {
     level: Level,
+    /// Route all human-facing text to stderr instead of stdout. Set when stdout
+    /// IS the data channel (a `stdio://` destination), so logs never corrupt the
+    /// piped stream.
+    stderr: bool,
 }
 
 impl Output {
@@ -46,28 +50,53 @@ impl Output {
         } else {
             Level::Normal
         };
-        Output { level }
+        Output {
+            level,
+            stderr: false,
+        }
+    }
+
+    /// Route all output to stderr instead of stdout. Use when stdout is the data
+    /// channel (a `stdio://` destination) so logs never corrupt the piped stream.
+    pub fn to_stderr(mut self) -> Self {
+        self.stderr = true;
+        self
     }
 
     /// Print a string from the locale file.
     pub fn print(&self, level: Level, key: &str) {
         if self.level >= level {
-            println!("{}", strings::get(key));
+            self.line(&strings::get(key));
         }
     }
 
     /// Print a raw string (not from locale — for computed values like hex, paths).
     pub fn raw(&self, level: Level, text: &str) {
         if self.level >= level {
-            println!("{}", text);
+            self.line(text);
         }
     }
 
     /// Print raw text without newline.
     pub fn raw_inline(&self, level: Level, text: &str) {
         if self.level >= level {
-            print!("{}", text);
-            let _ = std::io::stdout().flush();
+            if self.stderr {
+                eprint!("{}", text);
+                let _ = std::io::stderr().flush();
+            } else {
+                print!("{}", text);
+                let _ = std::io::stdout().flush();
+            }
+        }
+    }
+
+    /// Emit one line to the configured channel (stderr when stdout is the data
+    /// channel, stdout otherwise).
+    fn line(&self, text: &str) {
+        if self.stderr {
+            eprintln!("{}", text);
+        } else {
+            println!("{}", text);
         }
     }
 
@@ -78,7 +107,11 @@ impl Output {
     /// Print a blank line.
     pub fn blank(&self, level: Level) {
         if self.level >= level {
-            println!();
+            if self.stderr {
+                eprintln!();
+            } else {
+                println!();
+            }
         }
     }
 }
