@@ -363,6 +363,10 @@ struct Ivars {
     bar_all: RefCell<Option<Retained<NSProgressIndicator>>>,
     lbl_cur: RefCell<Option<Retained<NSTextField>>>,
     lbl_all: RefCell<Option<Retained<NSTextField>>>,
+    // "Saving to <container> file" labels — updated from the View at rip start
+    // so they read MP4/M2TS/MKV to match the chosen format.
+    lbl_saving_cur: RefCell<Option<Retained<NSTextField>>>,
+    lbl_saving_all: RefCell<Option<Retained<NSTextField>>>,
     fields: RefCell<Vec<Retained<NSTextField>>>,
     timer: RefCell<Option<Retained<NSTimer>>>,
 }
@@ -1006,6 +1010,12 @@ impl Controller {
             }
             if let Some(l) = iv.lbl_all.borrow().as_ref() {
                 l.setStringValue(&NSString::from_str(&v.caption_overall));
+            }
+            if let Some(l) = iv.lbl_saving_cur.borrow().as_ref() {
+                l.setStringValue(&NSString::from_str(&v.saving_current));
+            }
+            if let Some(l) = iv.lbl_saving_all.borrow().as_ref() {
+                l.setStringValue(&NSString::from_str(&v.saving_overall));
             }
             for x in iv.bar2_row.borrow().iter() {
                 x.setHidden(!v.show_overall_bar);
@@ -1972,6 +1982,8 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         *c.ivars().bar_all.borrow_mut() = Some(p2);
         *c.ivars().lbl_cur.borrow_mut() = Some(l1);
         *c.ivars().lbl_all.borrow_mut() = Some(l2);
+        *c.ivars().lbl_saving_cur.borrow_mut() = Some(c1);
+        *c.ivars().lbl_saving_all.borrow_mut() = Some(c2);
         *c.ivars().fields.borrow_mut() = vals;
     }
     *c.ivars().page_empty.borrow_mut() = Some(page_empty);
@@ -2467,6 +2479,11 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         )
     };
     win.setTitle(&NSString::from_str("freemkv Settings"));
+    // NSWindow defaults to releasedWhenClosed=YES: `close()` would deallocate
+    // the window while `win_prefs` still holds a Retained ref, so reopening
+    // Settings after an OK/close is a use-after-free (crash). Keep it alive and
+    // let the Retained own the lifetime; reopen reuses the same window.
+    unsafe { win.setReleasedWhenClosed(false) };
     let content = win.contentView().unwrap();
     let bd = { NSBox::initWithFrame(NSBox::alloc(mtm), r(0.0, 0.0, w, h)) };
     {
@@ -2711,6 +2728,9 @@ fn build_about(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         )
     };
     win.setTitle(&NSString::from_str("About freemkv"));
+    // See build_prefs: keep the window alive across close/reopen (the Retained
+    // in win_about owns the lifetime), else reopen is a use-after-free.
+    unsafe { win.setReleasedWhenClosed(false) };
     let content = win.contentView().unwrap();
     let bd = { NSBox::initWithFrame(NSBox::alloc(mtm), r(0.0, 0.0, w, h)) };
     {

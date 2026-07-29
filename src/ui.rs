@@ -394,6 +394,19 @@ pub fn bar_caption(pct: f64, elapsed_secs: u64, eta_secs: Option<u64>) -> String
     }
 }
 
+/// The container word for a chosen output format ("MKV" / "MP4" / "M2TS").
+/// Single source of the format→container mapping the shells display, so the
+/// progress caption ("Saving to MP4 file") always matches the real extension.
+pub fn container_label(format: &str) -> &'static str {
+    if format.contains("MP4") {
+        "MP4"
+    } else if format.contains("M2TS") {
+        "M2TS"
+    } else {
+        "MKV"
+    }
+}
+
 /// Overall progress across a multi-title run.
 pub fn overall_pct(titles_done: usize, total: usize, current_pct: f64) -> f64 {
     let total = total.max(1) as f64;
@@ -819,6 +832,11 @@ impl App {
                 None,
             ),
             show_overall_bar: self.run_titles > 1,
+            saving_current: format!("Saving to {} file", container_label(&self.format)),
+            saving_overall: format!(
+                "Saving all titles to {} files",
+                container_label(&self.format)
+            ),
             output_dir: self.output_dir.clone(),
             format: self.format.clone(),
             formats: output_formats(!is_container(&self.source), self.mp4_possible()),
@@ -897,6 +915,11 @@ pub struct View {
     pub bar_overall: f64,
     pub caption_current: String,
     pub caption_overall: String,
+    /// "Saving to <container> file" — the per-title bar label, format-aware so
+    /// it reads "MP4" when MP4 is chosen (never a hardcoded "MKV").
+    pub saving_current: String,
+    /// "Saving all titles to <container> files" — the overall-bar label.
+    pub saving_overall: String,
     pub show_overall_bar: bool,
     pub output_dir: String,
     pub format: String,
