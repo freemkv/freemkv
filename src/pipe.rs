@@ -378,10 +378,14 @@ fn check_selection_coverage(
     }
     let mut first_error = None;
     for u in &unmatched {
-        let class = strings::get(&format!("stream.class.{}", u.class));
+        // One full message per track class, NOT one message with the class
+        // interpolated as a noun. Interpolating it cannot be translated
+        // correctly: German needs "keine Tonspur"/"keine Untertitelspur" and
+        // Polish/Russian need case agreement, so a shared "no {class} track"
+        // template forces every translator into broken grammar. `u.class` is
+        // "audio" or "subtitle", giving `..._audio` / `..._subtitle`.
         let args = [
             ("num", title_num.to_string()),
-            ("class", class),
             ("requested", u.requested.join(", ")),
             ("available", u.available.join(", ")),
         ];
@@ -390,10 +394,13 @@ fn check_selection_coverage(
             // A skipped track is important — show it even in quiet mode.
             out.raw(
                 crate::output::Level::Always,
-                &strings::fmt("warn.no_lang_match", &args),
+                &strings::fmt(&format!("warn.no_lang_match_{}", u.class), &args),
             );
         } else if first_error.is_none() {
-            first_error = Some(render_error(&strings::fmt("error.no_lang_match", &args)));
+            first_error = Some(render_error(&strings::fmt(
+                &format!("error.no_lang_match_{}", u.class),
+                &args,
+            )));
         }
     }
     match first_error {

@@ -505,7 +505,10 @@ fn session_credentials(keys: &KeyConfig) -> Option<libfreemkv::DriveCredentials>
 fn key_params(keys: &KeyConfig) -> freemkv_engine::KeyParams {
     let keydb_path = (!keys.keydb_path.trim().is_empty())
         .then(|| crate::settings::shellexpand(&keys.keydb_path));
-    let key_url = (!keys.keyserver_url.trim().is_empty()).then(|| keys.keyserver_url.clone());
+    // Gated on the dropdown, not just on "is a URL configured": "Local keydb
+    // only" must drop the online source even when a URL is saved.
+    let key_url = (!keys.local_only && !keys.keyserver_url.trim().is_empty())
+        .then(|| keys.keyserver_url.clone());
     freemkv_engine::KeyParams {
         keydb_path,
         key_url,
@@ -683,12 +686,27 @@ pub(crate) fn key_summary(disc: &libfreemkv::Disc, won: Option<&str>) -> String 
 
 /// Recover the library's numeric error code from a muxed `std::io::Error`.
 ///
-/// The library's `Display` is exactly `E<code>` (it carries zero English by
-/// design), so this parse is against a stable contract rather than prose.
-/// libfreemkv has `io_error_code` internally but does not export it — when it
-/// does, delete this and call it.
+/// The library's `Display` is `E<code>` OR `E<code>: <data>` (it carries zero
+/// English by design), so parse the leading digit run rather than the whole
+/// string. libfreemkv has `io_error_code` internally but does not export it —
+/// when it does, delete this and call it.
+///
+/// Regression: this used to be `trim_start_matches('E').parse()`, which parses
+/// only the bare form. Every code that carries data — `E7022: <disc hash>`,
+/// `E8005: <keydb path>`, `E6000: <sector> <sense>`, `E6014: <pid>` — returned
+/// 0, so `explain(0)` produced "Mux failed (E0)." for the single most common
+/// real failure (an AACS disc with no key), and the dedicated message for that
+/// code was unreachable from the desktop app. The CLI was unaffected: it uses
+/// `pipe::parse_error_code`, which already parses the digit run.
 pub fn error_code(e: &std::io::Error) -> u16 {
-    e.to_string().trim_start_matches('E').parse().unwrap_or(0)
+    let s = e.to_string();
+    let Some(rest) = s.strip_prefix('E') else {
+        return 0;
+    };
+    let digits_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..digits_end].parse().unwrap_or(0)
 }
 
 /// Turn a library error code into something a person can act on.
@@ -698,8 +716,13 @@ pub fn error_code(e: &std::io::Error) -> u16 {
 /// something about are spelled out; the rest keep the code for a bug report.
 pub fn explain(code: u16) -> String {
     match code {
-        9048 => "MP4 cannot store this title's video (MP4 holds H.264, HEVC \
-                 and AV1 only). Choose MKV, which keeps everything."
+        // Must match `error.E9048` in freemkv-i18n and `ui::MP4_VIDEO`: the mux
+        // gate admits H.264 and HEVC only. This used to also claim AV1, so the
+        // message could list the user's own failing codec as supported. E9048
+        // covers both causes — an unmappable codec AND a title with no video
+        // track at all — so the wording names what MP4 needs, not what is wrong.
+        9048 => "MP4 needs a video track it can carry (H.264 or HEVC); this \
+                 title has none. Choose MKV, which keeps everything."
             .to_string(),
         7022 | 8005 => "No decryption key for this disc. Check the keydb or \
                         online key service in Settings."
@@ -716,15 +739,29 @@ pub struct KeyConfig {
     pub keyserver_url: String,
     pub keyserver_token: String,
     pub online_only: bool,
+    /// The user chose "Local keydb only": the online key service must NOT be
+    /// consulted even when a URL is configured.
+    ///
+    /// Without this, `key_params` derived the online source purely from "is the
+    /// URL non-empty", so "Local keydb only" and "keydb, then online" produced
+    /// identical key sources — a user who configured a key service and then
+    /// switched to local-only for privacy still had disc ciphertext POSTed to
+    /// that service on every keydb miss, and the key strip could even report
+    /// the disc as unlocked via "online".
+    pub local_only: bool,
 }
 
 impl KeyConfig {
     pub fn from_settings(s: &crate::settings::Settings) -> Self {
+        // `key_source` is one of "Local keydb only" / "Online key service only"
+        // / "keydb, then online". All three must be represented: matching only
+        // the Online arm silently collapses the other two.
         KeyConfig {
             keydb_path: s.keydb_path.clone(),
             keyserver_url: s.keyserver_url.clone(),
             keyserver_token: s.keyserver_token.clone(),
             online_only: s.key_source.starts_with("Online"),
+            local_only: s.key_source.starts_with("Local"),
         }
     }
 }
@@ -1332,15 +1369,42 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             eject_disc(&device, sink);
         }
 
-        if want_iso {
-            if result.halted {
-                return Ok(format!("Cancelled — partial ISO kept: {iso_path}"));
-            }
-            if result.aborted_for_loss {
-                return Ok(format!(
+        // Recovery verdicts are checked for BOTH output kinds, before the
+        // want_iso split. They used to live inside the ISO branch only, which
+        // got the gate exactly backwards: `effective_abort_secs` forces the
+        // tolerance to 0 for ISO output, so `abort_on_lost_secs` is only ever a
+        // meaningful setting on the title/MKV path — and that path muxed the
+        // partial image anyway and reported "N title(s) written". A user who set
+        // a 30-second tolerance could be handed a playable MKV missing four
+        // minutes of the feature, with nothing in the result to say so.
+        //
+        // The recovered image is kept in every case, so an abort never throws
+        // away the read; the user can retry the mux or keep recovering.
+        if result.halted {
+            return Ok(if want_iso {
+                format!("Cancelled — partial ISO kept: {iso_path}")
+            } else {
+                format!("Cancelled — nothing muxed; partial ISO kept: {iso_path}")
+            });
+        }
+        if result.aborted_for_loss {
+            // Not an Ok: a title muxed from an image this damaged would be
+            // missing footage, and reporting that as a written title is the
+            // silent-loss failure the gate exists to prevent.
+            return if want_iso {
+                Ok(format!(
                     "Recovery aborted — too much unreadable data; partial ISO kept: {iso_path}"
-                ));
-            }
+                ))
+            } else {
+                Err(format!(
+                    "Recovery aborted — too much unreadable data to mux a complete title \
+                     (raise the lost-seconds tolerance to accept it, or re-run recovery). \
+                     Partial ISO kept: {iso_path}"
+                ))
+            };
+        }
+
+        if want_iso {
             return Ok(format!("ISO image written to {iso_path}"));
         }
 
@@ -1501,7 +1565,7 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
 
 #[cfg(test)]
 mod key_summary_tests {
-    use super::key_summary;
+    use super::{error_code, key_summary};
 
     fn disc(encrypted: bool) -> libfreemkv::Disc {
         libfreemkv::Disc {
@@ -1595,5 +1659,63 @@ mod key_summary_tests {
         a.vuk = Some([0x11; 16]);
         d.aacs = Some(a);
         assert_eq!(key_summary(&d, Some("keydb")), "unlocked via keydb");
+    }
+
+    /// `error_code` must parse the digit run, not the whole Display string.
+    ///
+    /// Regression: `trim_start_matches('E').parse()` returned 0 for every error
+    /// that carries data after the code, so the desktop app rendered "Mux failed
+    /// (E0)." for an AACS disc with no key (E7022 carries the disc hash) and
+    /// never reached the dedicated message for it.
+    #[test]
+    fn error_code_parses_codes_that_carry_data() {
+        let c = |s: &str| error_code(&std::io::Error::other(s.to_string()));
+        // Bare form (already worked).
+        assert_eq!(c("E9048"), 9048);
+        // Data-carrying forms — all of these used to yield 0.
+        assert_eq!(c("E7022: 8f3a1c0d"), 7022);
+        assert_eq!(c("E8005: /path/to/keydb.cfg"), 8005);
+        assert_eq!(c("E6000: 12345 0x02"), 6000);
+        assert_eq!(c("E6014: 0x1100"), 6014);
+        // Not a library code.
+        assert_eq!(c("No drive found"), 0);
+        assert_eq!(c("E"), 0);
+        assert_eq!(c("Eabc"), 0);
+    }
+
+    /// All three `key_source` values must produce distinct key sources.
+    ///
+    /// Regression: `key_url` was derived only from "is the URL non-empty", so
+    /// "Local keydb only" and "keydb, then online" were identical — choosing
+    /// local-only for privacy still sent disc ciphertext to the configured key
+    /// service on every keydb miss.
+    #[test]
+    fn key_source_setting_controls_whether_the_online_service_is_used() {
+        let cfg = |src: &str| super::KeyConfig {
+            keydb_path: "/tmp/keydb.cfg".into(),
+            keyserver_url: "https://keys.example/decode".into(),
+            keyserver_token: "t".into(),
+            online_only: src.starts_with("Online"),
+            local_only: src.starts_with("Local"),
+        };
+
+        let local = super::key_params(&cfg("Local keydb only"));
+        assert!(
+            local.key_url.is_none(),
+            "Local keydb only must NOT consult the online service"
+        );
+        assert!(local.keydb_path.is_some());
+
+        let both = super::key_params(&cfg("keydb, then online"));
+        assert!(
+            both.key_url.is_some(),
+            "keydb, then online must consult the online service"
+        );
+        assert!(both.keydb_path.is_some());
+        assert!(!both.online_only);
+
+        let online = super::key_params(&cfg("Online key service only"));
+        assert!(online.key_url.is_some());
+        assert!(online.online_only, "Online-only must set online_only");
     }
 }

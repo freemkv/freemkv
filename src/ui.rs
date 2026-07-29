@@ -308,10 +308,15 @@ pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>>
     }
 }
 
-/// Video codecs MP4 can actually carry. Anything else (MPEG-2 from a DVD,
-/// VC-1 from an HD DVD) has no MP4 mapping, so the mux fails with E9048 after
-/// the user has already waited — say it up front instead.
-const MP4_VIDEO: &[&str] = &["H.264", "HEVC", "AV1"];
+/// Video codecs MP4 can actually carry. Anything else — MPEG-2 from a DVD,
+/// VC-1 from an HD DVD, AV1 — has no MP4 mapping, so the mux fails with E9048
+/// after the user has already waited; say it up front instead.
+///
+/// This list MUST match the mux gate in `libfreemkv::mux::mp4`, which admits
+/// exactly `Codec::Hevc | Codec::H264`. It previously also listed AV1, so the
+/// desktop app offered MP4 for an AV1 title, suppressed the pre-rip warning,
+/// and then failed at mux time with a message naming AV1 as supported.
+const MP4_VIDEO: &[&str] = &["H.264", "HEVC"];
 
 /// Resolve a popup's visible text back to the canonical format string.
 ///
