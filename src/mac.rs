@@ -538,12 +538,17 @@ define_class!(
         /// dest_dir field (OK then persists it, like any other edited field).
         #[unsafe(method(onBrowseDestDir:))]
         fn on_browse_dest_dir(&self, _s: Option<&AnyObject>) {
-            if let Some(dir) = self.pick(true, "Choose the default output folder") {
-                for (k, f) in self.ivars().pf_fields.borrow().iter() {
-                    if k == "dest_dir" {
-                        f.setStringValue(&NSString::from_str(&dir));
-                    }
-                }
+            if let Some(dir) = self.pick(true, false, "Choose the default output folder") {
+                self.set_pref_field("dest_dir", &dir);
+            }
+        }
+
+        /// Settings → keydb.cfg location "…": pick a file (any type — a keydb is
+        /// not a source media type) and drop it into the keydb_path field.
+        #[unsafe(method(onBrowseKeydb:))]
+        fn on_browse_keydb(&self, _s: Option<&AnyObject>) {
+            if let Some(path) = self.pick(false, false, "Choose the keydb.cfg file") {
+                self.set_pref_field("keydb_path", &path);
             }
         }
 
@@ -1025,14 +1030,17 @@ impl Controller {
         for e in effects {
             match e {
                 E::PickSource => {
-                    if let Some(p) = self.pick(false, &crate::strings::get("gui.panel.source_msg"))
+                    if let Some(p) =
+                        self.pick(false, true, &crate::strings::get("gui.panel.source_msg"))
                     {
                         let fx = self.app_mut(|a| a.open(&p));
                         self.perform(fx);
                     }
                 }
                 E::PickOutputDir => {
-                    if let Some(p) = self.pick(true, &crate::strings::get("gui.panel.output_msg")) {
+                    if let Some(p) =
+                        self.pick(true, false, &crate::strings::get("gui.panel.output_msg"))
+                    {
                         self.app_mut(|a| a.output_dir = p);
                     }
                 }
@@ -1082,7 +1090,16 @@ impl Controller {
         self.render();
     }
 
-    fn pick(&self, dirs: bool, msg: &str) -> Option<String> {
+    /// Set a Preferences text/path field by key (used by the browse pickers).
+    fn set_pref_field(&self, key: &str, value: &str) {
+        for (k, f) in self.ivars().pf_fields.borrow().iter() {
+            if k == key {
+                f.setStringValue(&NSString::from_str(value));
+            }
+        }
+    }
+
+    fn pick(&self, dirs: bool, filter_types: bool, msg: &str) -> Option<String> {
         let mtm = MainThreadMarker::new().unwrap();
         let panel = { NSOpenPanel::openPanel(mtm) };
         {
@@ -1091,7 +1108,7 @@ impl Controller {
             panel.setCanCreateDirectories(dirs);
             panel.setAllowsMultipleSelection(false);
             panel.setMessage(Some(&NSString::from_str(msg)));
-            if !dirs {
+            if !dirs && filter_types {
                 let types: Vec<Retained<NSString>> = crate::ui::SOURCE_EXTS
                     .iter()
                     .map(|e| NSString::from_str(e))
@@ -2794,12 +2811,12 @@ impl Rows {
             self.view.addSubview(&f);
         }
         self.fields.push((key.to_string(), f));
-        // The browse "…" opens a picker that fills THIS field. dest_dir picks a
-        // folder; other path fields keep the no-op until wired.
-        let action = if key == "dest_dir" {
-            sel!(onBrowseDestDir:)
-        } else {
-            sel!(onNoop:)
+        // The browse "…" opens a picker that fills THIS field: dest_dir picks a
+        // folder, keydb_path picks a file.
+        let action = match key {
+            "dest_dir" => sel!(onBrowseDestDir:),
+            "keydb_path" => sel!(onBrowseKeydb:),
+            _ => sel!(onNoop:),
         };
         let b = btn(
             mtm,
