@@ -635,6 +635,7 @@ impl KeyConfig {
 }
 
 /// Which titles the user ticked, as canonical indices.
+#[derive(Clone)]
 pub struct RipRequest {
     pub source: String,
     pub dest_dir: String,
@@ -658,6 +659,20 @@ pub struct RipRequest {
     /// AACS decrypt thread count (the `decrypt_threads` setting). `0` = auto
     /// (the library sizes its pool itself); `>0` pins the pool to that many.
     pub decrypt_threads: usize,
+    /// True when true-multipass recovery is requested for a disc source
+    /// (`rip_mode == "Multi-pass"` and `max_passes > 0`). A disc rip then
+    /// recovers to a staged ISO via `fe::multipass_rip` before muxing; a
+    /// "Whole disc → ISO image" output always recovers to an ISO regardless.
+    pub multipass: bool,
+    /// Max patch passes for multipass recovery (the `max_passes` setting).
+    pub max_passes: u32,
+    /// Abort the rip if more than this many seconds of the main title are lost
+    /// after recovery (the `abort_lost_secs` setting). `0` = abort on any loss.
+    pub abort_lost_secs: u64,
+    /// Keep the intermediate ISO after a multipass title rip muxes from it (the
+    /// `keep_iso` setting). Ignored for a "Whole disc → ISO image" output (the
+    /// ISO is the deliverable).
+    pub keep_iso: bool,
     pub keys: KeyConfig,
 }
 
@@ -1136,13 +1151,6 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
     }
     let kind = out_kind(&req.format);
 
-    // ISO image needs the mapfile-driven disc→ISO copy (the CLI's disc_to_iso /
-    // Disc::copy). Not ported to the GUI engine yet — say so plainly rather than
-    // write the wrong thing. Every other sink works off the session below.
-    if matches!(kind, OutKind::IsoImage) {
-        return Err("Whole-disc ISO image from a live drive isn't wired into the GUI yet — it needs the recovery/mapfile copy path (coming with drive validation). Use a title format or decrypted folder for now.".into());
-    }
-
     // Scan once (shared drive core): titles, label, key state, per-disc name.
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
     let (mut session, _trace) = fe::open_scan_resolve(
@@ -1172,6 +1180,72 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             .ok_or("could not stage the drive for extraction")?;
         let disc = session.disc().ok_or("scan produced no disc")?;
         return run_extract_folder(req, disc, reader.as_mut(), &label, sink, state);
+    }
+
+    // True-multipass recovery, or a whole-disc ISO image: recover the disc to a
+    // (staged) ISO via the shared fe::multipass_rip loop — the same strategy
+    // autorip uses (sweep + patch passes to convergence, abort-on-lost). For
+    // "Whole disc → ISO image" the recovered ISO IS the deliverable; for a title
+    // output with multipass enabled, we then mux the selected titles from the
+    // recovered ISO. multipass_rip writes a DECRYPTED ISO, so the mux runs the
+    // ordinary iso:// path over it (fresh scan → clear, no keys) — never
+    // double-decrypting.
+    let want_iso = matches!(kind, OutKind::IsoImage);
+    if want_iso || req.multipass {
+        let iso_path = format!("{}/{}.iso", req.dest_dir, label);
+        session.stage_drive_as_reader();
+        let mut reader = session
+            .take_reader()
+            .ok_or("could not stage the drive for recovery")?;
+        let disc = session.disc().ok_or("scan produced no disc")?;
+        let mut job = fe::Job::new(format!("disc://{}", req.source), iso_path.clone());
+        job.raw = req.raw;
+        let opts = fe::MultipassOpts {
+            max_passes: req.max_passes,
+            abort_on_lost_secs: req.abort_lost_secs,
+            is_iso_output: want_iso,
+        };
+        let result = fe::multipass_rip(
+            disc,
+            reader.as_mut(),
+            std::path::Path::new(&iso_path),
+            &job,
+            &opts,
+            sink,
+        )
+        .map_err(|e| format!("recovery failed: {e}"))?;
+        drop(reader);
+        drop(session);
+
+        if want_iso {
+            if result.halted {
+                return Ok(format!("Cancelled — partial ISO kept: {iso_path}"));
+            }
+            if result.aborted_for_loss {
+                return Ok(format!(
+                    "Recovery aborted — too much unreadable data; partial ISO kept: {iso_path}"
+                ));
+            }
+            return Ok(format!("ISO image written to {iso_path}"));
+        }
+
+        // Title output: mux the selected titles from the recovered ISO by
+        // running the ordinary ISO-source path on it (it's decrypted, so the
+        // fresh scan finds no keys to apply). Delete the staging ISO after,
+        // unless the user asked to keep it.
+        if result.good_bytes == 0 {
+            let _ = std::fs::remove_file(&iso_path);
+            return Err("Recovery produced no readable data — nothing to mux.".into());
+        }
+        let iso_req = RipRequest {
+            source: iso_path.clone(),
+            ..req.clone()
+        };
+        let mux = run_blocking(&iso_req, sink, state);
+        if !req.keep_iso {
+            let _ = std::fs::remove_file(&iso_path);
+        }
+        return mux;
     }
 
     // Which titles to rip — same Selection/resolve_selection the ISO path
