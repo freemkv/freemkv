@@ -415,7 +415,7 @@ define_class!(
                     c.app_mut(|a| {
                         a.say(
                             crate::ui::LogKind::Notice,
-                            &format!("Not a supported source: {p}"),
+                            &crate::strings::fmt("gui.log.not_supported", &[("p", &p)]),
                         )
                     });
                     c.render();
@@ -490,12 +490,32 @@ define_class!(
                 }
                 for (k, p) in self.ivars().pf_popups.borrow().iter() {
                     if let Some(t) = { p.titleOfSelectedItem() } {
-                        st.set(k, t.to_string());
+                        let sel = t.to_string();
+                        // The language popup shows endonyms but persists the
+                        // locale code freemkv-i18n understands.
+                        if k == "language" {
+                            st.set(k, crate::ui::locale_code(&sel).to_string());
+                        } else {
+                            st.set(k, sel);
+                        }
                     }
                 }
                 match st.save() {
-                    Ok(()) => self.app_mut(|a| a.say(crate::ui::LogKind::Result, "Settings saved")),
-                    Err(e) => self.app_mut(|a| a.say(crate::ui::LogKind::Notice, &format!("Could not save settings: {e}"))),
+                    Ok(()) => self.app_mut(|a| {
+                        a.say(
+                            crate::ui::LogKind::Result,
+                            &crate::strings::get("gui.log.settings_saved"),
+                        )
+                    }),
+                    Err(e) => self.app_mut(|a| {
+                        a.say(
+                            crate::ui::LogKind::Notice,
+                            &crate::strings::fmt(
+                                "gui.log.settings_save_error",
+                                &[("e", &e.to_string())],
+                            ),
+                        )
+                    }),
                 }
             }
             if let Some(w) = self.ivars().win_prefs.borrow().as_ref() {
@@ -524,14 +544,29 @@ define_class!(
                 }
             }
             if url.trim().is_empty() {
-                self.app_mut(|a| a.say(crate::ui::LogKind::Result, "No key service URL set."));
+                self.app_mut(|a| {
+                    a.say(
+                        crate::ui::LogKind::Result,
+                        &crate::strings::get("gui.log.no_keyserver"),
+                    )
+                });
                 return;
             }
             // Validated by the same rule the key layer uses, so the UI can't
             // accept a URL the engine would later reject.
             match freemkv_keysources::validate_keyserver_url(&url) {
-                Ok(_) => self.app_mut(|a| a.say(crate::ui::LogKind::Result, &format!("Key service URL is valid: {url}"))),
-                Err(e) => self.app_mut(|a| a.say(crate::ui::LogKind::Result, &format!("Key service URL rejected: {e}"))),
+                Ok(_) => self.app_mut(|a| {
+                    a.say(
+                        crate::ui::LogKind::Result,
+                        &crate::strings::fmt("gui.log.keyserver_valid", &[("url", &url)]),
+                    )
+                }),
+                Err(e) => self.app_mut(|a| {
+                    a.say(
+                        crate::ui::LogKind::Result,
+                        &crate::strings::fmt("gui.log.keyserver_rejected", &[("e", &e.to_string())]),
+                    )
+                }),
             }
         }
 
@@ -554,7 +589,12 @@ define_class!(
             if path.is_empty() {
                 path = self.ivars().settings.borrow().keydb_path.clone();
             }
-            self.app_mut(|a| a.say(crate::ui::LogKind::Result, "Fetching keydb …"));
+            self.app_mut(|a| {
+                a.say(
+                    crate::ui::LogKind::Result,
+                    &crate::strings::get("gui.log.fetching_keydb"),
+                )
+            });
             let inbox = self.ivars().inbox.clone();
             std::thread::spawn(move || {
                 let msg = match crate::settings::update_keydb(&url, &path) {
@@ -609,16 +649,31 @@ define_class!(
                 panel.setCanChooseDirectories(true);
                 panel.setCanChooseFiles(false);
                 panel.setCanCreateDirectories(true);
-                panel.setPrompt(Some(&NSString::from_str("Back up")));
-                panel.setMessage(Some(&NSString::from_str(
-                    "Back up the entire disc (all titles, decrypted) to:",
-                )));
+                panel.setPrompt(Some(&NSString::from_str(&crate::strings::get(
+                    "gui.panel.backup_prompt",
+                ))));
+                panel.setMessage(Some(&NSString::from_str(&crate::strings::get(
+                    "gui.panel.backup_msg",
+                ))));
             }
             if { panel.runModal() } == 1 {
                 if let Some(url) = { panel.URL() } {
                     if let Some(p) = { url.path() } {
-                        self.app_mut(|a| a.say(crate::ui::LogKind::Result, &format!("Backing up whole disc to {p}")));
-                        self.app_mut(|a| a.say(crate::ui::LogKind::Result, "Backup ignores the title selection and the loss tolerance."));
+                        self.app_mut(|a| {
+                            a.say(
+                                crate::ui::LogKind::Result,
+                                &crate::strings::fmt(
+                                    "gui.log.backing_up",
+                                    &[("p", &p.to_string())],
+                                ),
+                            )
+                        });
+                        self.app_mut(|a| {
+                            a.say(
+                                crate::ui::LogKind::Result,
+                                &crate::strings::get("gui.log.backup_note"),
+                            )
+                        });
                     }
                 }
             }
@@ -638,9 +693,11 @@ define_class!(
             let src = self.ivars().app.borrow().source.clone();
             let disc = !crate::ui::is_container(&src);
             let mp4 = self.ivars().app.borrow().mp4_possible();
-            // Resolve against the core's list rather than trusting the widget
-            // text, so an unknown title can never reach the model.
-            if let Some(f) = crate::ui::format_by_title(&t.to_string(), disc, mp4) {
+            // Resolve the LOCALIZED popup label against the core's list rather
+            // than trusting the widget text, so an unknown title can never
+            // reach the model — and so selection works in every locale (the
+            // popup shows format_label(canonical), not the canonical string).
+            if let Some(f) = crate::ui::format_from_label(&t.to_string(), disc, mp4) {
                 self.act(crate::ui::Cmd::SetFormat(f));
             }
         }
@@ -738,17 +795,25 @@ define_class!(
             {
                 panel.setCanChooseDirectories(true);
                 panel.setCanChooseFiles(false);
-                panel.setPrompt(Some(&NSString::from_str("Open")));
-                panel.setMessage(Some(&NSString::from_str(
-                    "Select a VIDEO_TS or BDMV folder",
-                )));
+                panel.setPrompt(Some(&NSString::from_str(&crate::strings::get(
+                    "gui.panel.open_prompt",
+                ))));
+                panel.setMessage(Some(&NSString::from_str(&crate::strings::get(
+                    "gui.panel.folder_msg",
+                ))));
             }
             if { panel.runModal() } == 1 {
                 if let Some(url) = { panel.URL() } {
                     if let Some(p) = { url.path() } {
-                        self.app_mut(|a| a.say(crate::ui::LogKind::Result, &format!(
-                            "Folder sources are not supported yet: {p}"
-                        )));
+                        self.app_mut(|a| {
+                            a.say(
+                                crate::ui::LogKind::Result,
+                                &crate::strings::fmt(
+                                    "gui.log.folder_unsupported",
+                                    &[("p", &p.to_string())],
+                                ),
+                            )
+                        });
                     }
                 }
             }
@@ -792,12 +857,16 @@ define_class!(
             }
             let mtm = MainThreadMarker::new().unwrap();
             let alert = NSAlert::new(mtm);
-            alert.setMessageText(&NSString::from_str("A rip is in progress."));
-            alert.setInformativeText(&NSString::from_str(
-                "Quitting will stop it. The partial file so far is kept.",
-            ));
-            alert.addButtonWithTitle(&NSString::from_str("Stop & Quit"));
-            alert.addButtonWithTitle(&NSString::from_str("Keep Ripping"));
+            alert.setMessageText(&NSString::from_str(&crate::strings::get("gui.alert.rip_title")));
+            alert.setInformativeText(&NSString::from_str(&crate::strings::get(
+                "gui.alert.rip_body",
+            )));
+            alert.addButtonWithTitle(&NSString::from_str(&crate::strings::get(
+                "gui.alert.stop_quit",
+            )));
+            alert.addButtonWithTitle(&NSString::from_str(&crate::strings::get(
+                "gui.alert.keep_ripping",
+            )));
             // First button (Stop & Quit) is NSAlertFirstButtonReturn.
             if alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn {
                 self.act(crate::ui::Cmd::Cancel);
@@ -854,13 +923,14 @@ impl Controller {
         for e in effects {
             match e {
                 E::PickSource => {
-                    if let Some(p) = self.pick(false, "Select a disc image or video stream") {
+                    if let Some(p) = self.pick(false, &crate::strings::get("gui.panel.source_msg"))
+                    {
                         let fx = self.app_mut(|a| a.open(&p));
                         self.perform(fx);
                     }
                 }
                 E::PickOutputDir => {
-                    if let Some(p) = self.pick(true, "Choose an output folder") {
+                    if let Some(p) = self.pick(true, &crate::strings::get("gui.panel.output_msg")) {
                         self.app_mut(|a| a.output_dir = p);
                     }
                 }
@@ -1189,9 +1259,12 @@ impl Controller {
             return;
         };
         let existing: Vec<String> = p.itemTitles().iter().map(|t| t.to_string()).collect();
+        // Compare against the LOCALIZED labels actually shown, so the equality
+        // short-circuit is correct in every locale (items are added via
+        // format_label below).
         let wanted: Vec<String> = groups
             .iter()
-            .flat_map(|g| g.iter().map(|s| s.to_string()))
+            .flat_map(|g| g.iter().map(|s| crate::ui::format_label(s)))
             .collect();
         // Rebuilding unconditionally would drop the open menu mid-click.
         if existing == wanted {
@@ -1206,7 +1279,7 @@ impl Controller {
                 let mi = unsafe {
                     NSMenuItem::initWithTitle_action_keyEquivalent(
                         NSMenuItem::alloc(mtm),
-                        &NSString::from_str(label),
+                        &NSString::from_str(&crate::ui::format_label(label)),
                         None,
                         &NSString::from_str(""),
                     )
@@ -1215,7 +1288,8 @@ impl Controller {
             }
         }
         p.setMenu(Some(&menu));
-        p.selectItemWithTitle(&NSString::from_str(current));
+        // `current` is the canonical format; the menu shows localized labels.
+        p.selectItemWithTitle(&NSString::from_str(&crate::ui::format_label(current)));
         if p.indexOfSelectedItem() < 0 {
             p.selectItemAtIndex(0);
         }
@@ -1328,7 +1402,7 @@ fn popup_fmt_for(mtm: MainThreadMarker, fr: NSRect, disc: bool) -> Retained<NSPo
             for label in g.iter() {
                 let mi = NSMenuItem::initWithTitle_action_keyEquivalent(
                     NSMenuItem::alloc(mtm),
-                    &NSString::from_str(label),
+                    &NSString::from_str(&crate::ui::format_label(label)),
                     None,
                     &NSString::from_str(""),
                 );
@@ -1358,8 +1432,9 @@ fn group(mtm: MainThreadMarker, title: &str, fr: NSRect) -> Retained<NSBox> {
 /// commands. Binding our commands to ⌘A/⌘C would break text editing.
 fn mk_edit(mtm: MainThreadMarker, c: &Controller) -> Retained<NSMenuItem> {
     let item = NSMenuItem::new(mtm);
-    item.setTitle(&NSString::from_str("Edit"));
-    let menu = { NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Edit")) };
+    let edit = crate::strings::get("gui.menu.edit");
+    item.setTitle(&NSString::from_str(&edit));
+    let menu = { NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(&edit)) };
 
     // nil target => dispatched down the responder chain to the focused view.
     for (label, key, sel) in [
@@ -1383,14 +1458,26 @@ fn mk_edit(mtm: MainThreadMarker, c: &Controller) -> Retained<NSMenuItem> {
 
     // Our tree commands — deliberately without the standard shortcuts.
     for (label, key, sel) in [
-        ("Select All Titles", "A", sel!(onSelectAll:)),
-        ("Select No Titles", "", sel!(onSelectNone:)),
-        ("Invert Title Selection", "", sel!(onInvert:)),
+        (
+            crate::strings::get("gui.menu.select_all_titles"),
+            "A",
+            sel!(onSelectAll:),
+        ),
+        (
+            crate::strings::get("gui.menu.select_no_titles"),
+            "",
+            sel!(onSelectNone:),
+        ),
+        (
+            crate::strings::get("gui.menu.invert_titles"),
+            "",
+            sel!(onInvert:),
+        ),
     ] {
         let mi = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
-                &NSString::from_str(label),
+                &NSString::from_str(&label),
                 Some(sel),
                 &NSString::from_str(key),
             )
@@ -1405,20 +1492,20 @@ fn mk_edit(mtm: MainThreadMarker, c: &Controller) -> Retained<NSMenuItem> {
 fn build_menus(mtm: MainThreadMarker, app: &NSApplication, c: &Controller) {
     let main = NSMenu::new(mtm);
 
-    let mk = |title: &str, items: &[(&str, &str, Sel)]| -> Retained<NSMenuItem> {
+    let mk = |title: &str, items: Vec<(String, &str, Sel)>| -> Retained<NSMenuItem> {
         let item = NSMenuItem::new(mtm);
         item.setTitle(&NSString::from_str(title));
         let menu = { NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title)) };
         for (label, key, sel) in items {
-            if *label == "-" {
+            if label == "-" {
                 menu.addItem(&NSMenuItem::separatorItem(mtm));
                 continue;
             }
             let mi = unsafe {
                 NSMenuItem::initWithTitle_action_keyEquivalent(
                     NSMenuItem::alloc(mtm),
-                    &NSString::from_str(label),
-                    Some(*sel),
+                    &NSString::from_str(&label),
+                    Some(sel),
                     &NSString::from_str(key),
                 )
             };
@@ -1436,7 +1523,7 @@ fn build_menus(mtm: MainThreadMarker, app: &NSApplication, c: &Controller) {
     let about = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
-            &NSString::from_str("About freemkv"),
+            &NSString::from_str(&crate::strings::get("gui.menu.app_about")),
             Some(sel!(onAbout:)),
             &NSString::from_str(""),
         )
@@ -1447,7 +1534,7 @@ fn build_menus(mtm: MainThreadMarker, app: &NSApplication, c: &Controller) {
     let prefs = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
-            &NSString::from_str("Settings…"),
+            &NSString::from_str(&crate::strings::get("gui.menu.settings")),
             Some(sel!(onPrefs:)),
             &NSString::from_str(","),
         )
@@ -1458,7 +1545,7 @@ fn build_menus(mtm: MainThreadMarker, app: &NSApplication, c: &Controller) {
     let quit = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
-            &NSString::from_str("Quit freemkv"),
+            &NSString::from_str(&crate::strings::get("gui.menu.quit")),
             Some(sel!(onQuit:)),
             &NSString::from_str("q"),
         )
@@ -1468,17 +1555,29 @@ fn build_menus(mtm: MainThreadMarker, app: &NSApplication, c: &Controller) {
     main.addItem(&app_item);
 
     main.addItem(&mk(
-        "File",
-        &[
+        &crate::strings::get("gui.menu.file"),
+        vec![
             // One Open. A separate "Open disc" returns when drive support
             // lands; a folder entry when folder sources do.
-            ("Open…", "o", sel!(onOpenFiles:)),
-            ("Close", "w", sel!(onCloseDisc:)),
-            ("-", "", sel!(onNoop:)),
-            ("Set output folder…", "", sel!(onBrowseOutput:)),
-            ("Start rip", "r", sel!(onRip:)),
-            ("-", "", sel!(onNoop:)),
-            ("Eject disc", "e", sel!(onEject:)),
+            (
+                crate::strings::get("gui.menu.open"),
+                "o",
+                sel!(onOpenFiles:),
+            ),
+            (
+                crate::strings::get("gui.menu.close"),
+                "w",
+                sel!(onCloseDisc:),
+            ),
+            ("-".to_string(), "", sel!(onNoop:)),
+            (
+                crate::strings::get("gui.menu.set_output"),
+                "",
+                sel!(onBrowseOutput:),
+            ),
+            (crate::strings::get("gui.menu.start_rip"), "r", sel!(onRip:)),
+            ("-".to_string(), "", sel!(onNoop:)),
+            (crate::strings::get("gui.menu.eject"), "e", sel!(onEject:)),
         ],
     ));
     main.addItem(&mk_edit(mtm, c));
@@ -1486,17 +1585,29 @@ fn build_menus(mtm: MainThreadMarker, app: &NSApplication, c: &Controller) {
     // it under View is the oddity, not its absence. On Windows there is no app
     // menu, so the Windows shell puts Settings under File instead.
     main.addItem(&mk(
-        "View",
-        &[
-            ("Show log", "l", sel!(onToggleLog:)),
-            ("Clear log", "k", sel!(onClearLog:)),
+        &crate::strings::get("gui.menu.view"),
+        vec![
+            (
+                crate::strings::get("gui.menu.show_log"),
+                "l",
+                sel!(onToggleLog:),
+            ),
+            (
+                crate::strings::get("gui.menu.clear_log"),
+                "k",
+                sel!(onClearLog:),
+            ),
         ],
     ));
     main.addItem(&mk(
-        "Help",
-        &[
-            ("freemkv Documentation", "?", sel!(onDocs:)),
-            ("Check for updates…", "", sel!(onCheckUpdates:)),
+        &crate::strings::get("gui.menu.help"),
+        vec![
+            (crate::strings::get("gui.menu.docs"), "?", sel!(onDocs:)),
+            (
+                crate::strings::get("gui.menu.check_updates"),
+                "",
+                sel!(onCheckUpdates:),
+            ),
         ],
     ));
 
@@ -1542,14 +1653,14 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         let eh = top_h;
         let head = text(
             mtm,
-            "No disc inserted",
+            &crate::strings::get("gui.page.empty_title"),
             r(0.0, eh * 0.55, W, 26.0),
             false,
             false,
         );
         let sub = text(
             mtm,
-            "Insert a disc, or open a file, folder or ISO image.",
+            &crate::strings::get("gui.page.empty_subtitle"),
             r(0.0, eh * 0.55 - 26.0, W, 20.0),
             false,
             true,
@@ -1563,7 +1674,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         }
         let b = btn(
             mtm,
-            "Open file or ISO…",
+            &crate::strings::get("gui.btn.open_file"),
             r(W / 2.0 - 80.0, eh * 0.55 - 70.0, 160.0, 30.0),
             c,
             sel!(onOpenFiles:),
@@ -1580,7 +1691,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     {
         let head = text(
             mtm,
-            "Finished",
+            &crate::strings::get("gui.result.finished"),
             r(0.0, RESULT_H - 54.0, W, 24.0),
             false,
             false,
@@ -1595,14 +1706,14 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         }
         let reveal = btn(
             mtm,
-            "Show in Finder",
+            &crate::strings::get("gui.btn.show_finder"),
             r(W / 2.0 - 170.0, RESULT_H - 138.0, 160.0, 32.0),
             c,
             sel!(onReveal:),
         );
         let done = btn(
             mtm,
-            "Done",
+            &crate::strings::get("gui.btn.done"),
             r(W / 2.0 + 10.0, RESULT_H - 138.0, 160.0, 32.0),
             c,
             sel!(onDoneResult:),
@@ -1672,8 +1783,8 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         cell.setTitle(Some(&NSString::from_str("")));
         c_check.setDataCell(&cell);
     }
-    let c_type = mk_col("type", "Type", 96.0);
-    let c_desc = mk_col("desc", "Description", tree_w - 150.0);
+    let c_type = mk_col("type", &crate::strings::get("gui.col.type"), 96.0);
+    let c_desc = mk_col("desc", &crate::strings::get("gui.col.desc"), tree_w - 150.0);
     unsafe {
         ov.addTableColumn(&c_check);
         ov.addTableColumn(&c_type);
@@ -1721,14 +1832,18 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     let _mk_w = 64.0;
 
     // Output folder group
-    let of = group(mtm, "Output", r(rx, top_h + top_y - 110.0, rw, 110.0));
+    let of = group(
+        mtm,
+        &crate::strings::get("gui.group.output"),
+        r(rx, top_h + top_y - 110.0, rw, 110.0),
+    );
     let ofv = { of.contentView() }.unwrap();
     let inner_w = rw;
     let fmt = popup_fmt(mtm, r(10.0, 14.0, 260.0, 24.0));
     ofv.addSubview(&fmt);
     let run = btn(
         mtm,
-        "Run Now",
+        &crate::strings::get("gui.btn.run_now"),
         r(inner_w - 130.0, 12.0, 108.0, 28.0),
         c,
         sel!(onRip:),
@@ -1767,7 +1882,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     );
     let browse = btn(
         mtm,
-        "…",
+        &crate::strings::get("gui.btn.browse"),
         r(inner_w - 56.0, 50.0, 34.0, 26.0),
         c,
         sel!(onBrowseOutput:),
@@ -1786,7 +1901,11 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
 
     // Info group
     let info_h = top_h - 84.0 - PAD;
-    let info = group(mtm, "Info", r(rx, top_y, rw, info_h));
+    let info = group(
+        mtm,
+        &crate::strings::get("gui.group.info"),
+        r(rx, top_y, rw, info_h),
+    );
     let iv = { info.contentView() }.unwrap();
     let iscroll = {
         NSScrollView::initWithFrame(
@@ -1804,7 +1923,9 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         itv.setEditable(false);
         itv.setSelectable(true);
         itv.setDrawsBackground(false);
-        itv.setString(&NSString::from_str("Open a disc image to see its titles."));
+        itv.setString(&NSString::from_str(&crate::strings::get(
+            "gui.page.detail_default",
+        )));
         itv.setFont(Some(&NSFont::systemFontOfSize(11.0)));
         iscroll.setDocumentView(Some(&itv));
         iscroll.setDrawsBackground(false);
@@ -1829,11 +1950,15 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         let padd = |v: &NSView| page_prog.addSubview(v);
         let info_h = 132.0;
         let gy = PROG_H - info_h - 14.0;
-        let g = group(mtm, "Information", r(PAD, gy, W - PAD * 2.0, info_h));
+        let g = group(
+            mtm,
+            &crate::strings::get("gui.group.information"),
+            r(PAD, gy, W - PAD * 2.0, info_h),
+        );
         let gv = { g.contentView() }.unwrap();
         // Labels come from the core, never from the shell — otherwise a
         // renamed row here would silently disagree with the Windows shell.
-        let rows = crate::ui::InfoRows::LABELS;
+        let rows = crate::ui::InfoRows::labels();
         let mut vals: Vec<Retained<NSTextField>> = Vec::new();
         let lh = 15.0;
         // An NSBox's contentView is inset below its title, so rows must be
@@ -1967,7 +2092,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
             .push(unsafe { Retained::cast_unchecked::<NSView>(l2.clone()) });
         let cancel = btn(
             mtm,
-            "Cancel",
+            &crate::strings::get("gui.btn.cancel"),
             r(W - PAD - 110.0, 10.0, 110.0, 30.0),
             c,
             sel!(onCancelRip:),
@@ -1996,10 +2121,8 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     };
     let tv =
         { NSTextView::initWithFrame(NSTextView::alloc(mtm), r(0.0, 0.0, W - PAD * 2.0, LOG_H)) };
-    let log_lines: &[(&str, u8)] = &[(
-        concat!("freemkv ", env!("CARGO_PKG_VERSION"), " — ready"),
-        2,
-    )];
+    let ready_line =
+        crate::strings::fmt("gui.log.ready", &[("version", env!("CARGO_PKG_VERSION"))]);
     {
         tv.setEditable(false);
         // Read-only but selectable: the log is the thing users paste into bug
@@ -2007,9 +2130,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         tv.setSelectable(true);
         tv.setFont(Some(&NSFont::userFixedPitchFontOfSize(11.0).unwrap()));
     }
-    for (line, kind) in log_lines {
-        log_append(&tv, line, *kind);
-    }
+    log_append(&tv, &ready_line, 2);
     {
         logscroll.setDocumentView(Some(&tv));
         logscroll.setHasVerticalScroller(true);
@@ -2441,7 +2562,7 @@ impl Rows {
         self.fields.push((key.to_string(), f));
         let b = btn(
             mtm,
-            "…",
+            &crate::strings::get("gui.btn.browse"),
             r(self.gutter + w - 34.0, self.y - 4.0, 34.0, 25.0),
             c,
             sel!(onNoop:),
@@ -2478,7 +2599,9 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
             false,
         )
     };
-    win.setTitle(&NSString::from_str("freemkv Settings"));
+    win.setTitle(&NSString::from_str(&crate::strings::get(
+        "gui.win.settings",
+    )));
     // NSWindow defaults to releasedWhenClosed=YES: `close()` would deallocate
     // the window while `win_prefs` still holds a Retained ref, so reopening
     // Settings after an OK/close is a use-after-free (crash). Keep it alive and
@@ -2534,140 +2657,223 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     t.popup(
         mtm,
         "container",
-        "Default output :",
+        &crate::strings::get("gui.set.default_output"),
         popup_fmt(mtm, r(0.0, 0.0, 300.0, 24.0)),
         300.0,
     );
-    t.path(mtm, "dest_dir", "Default destination :", "", 300.0, c);
+    t.path(
+        mtm,
+        "dest_dir",
+        &crate::strings::get("gui.set.default_dest"),
+        "",
+        300.0,
+        c,
+    );
     t.field(
         mtm,
         "filename_template",
-        "Filename template :",
+        &crate::strings::get("gui.set.filename_template"),
         "{title}_{n}",
         220.0,
     );
     t.gap();
-    t.check(mtm, "keep_iso", "Keep intermediate ISO :", false);
-    add_tab("Output", t);
+    t.check(
+        mtm,
+        "keep_iso",
+        &crate::strings::get("gui.set.keep_iso"),
+        false,
+    );
+    add_tab(&crate::strings::get("gui.tab.output"), t);
 
     // ── Selection ── engine Job.selection
     let mut t = Rows::new(mtm, tw, th, 200.0);
+    let sel_items = [
+        crate::strings::get("gui.set.sel_main"),
+        crate::strings::get("gui.set.sel_all"),
+        crate::strings::get("gui.set.sel_longest"),
+    ];
+    let sel_refs: Vec<&str> = sel_items.iter().map(|s| s.as_str()).collect();
     t.combo(
         mtm,
         "selection",
-        "Default selection :",
-        &["Main film only", "All titles", "Longest title"],
+        &crate::strings::get("gui.set.default_selection"),
+        &sel_refs,
         220.0,
     );
     t.field(
         mtm,
         "min_title_secs",
-        "Minimum title length (seconds) :",
+        &crate::strings::get("gui.set.min_length"),
         "120",
         80.0,
     );
-    t.note(
-        mtm,
-        "Shorter titles are hidden from the list — most are menus and stings.",
-        tw,
-    );
-    add_tab("Selection", t);
+    t.note(mtm, &crate::strings::get("gui.set.min_length_note"), tw);
+    add_tab(&crate::strings::get("gui.tab.selection"), t);
 
     // ── Recovery ── engine Job.mode / abort_on_lost_secs / raw
     let mut t = Rows::new(mtm, tw, th, 200.0);
+    let mode_items = [
+        crate::strings::get("gui.set.mode_multi"),
+        crate::strings::get("gui.set.mode_single"),
+    ];
+    let mode_refs: Vec<&str> = mode_items.iter().map(|s| s.as_str()).collect();
     t.combo(
         mtm,
         "rip_mode",
-        "Rip mode :",
-        &["Multi-pass", "Single pass"],
+        &crate::strings::get("gui.set.rip_mode"),
+        &mode_refs,
         220.0,
     );
-    t.field(mtm, "max_passes", "Max recovery passes :", "5", 70.0);
-    t.field(mtm, "abort_lost_secs", "Abort on lost seconds :", "0", 70.0);
-    t.note(
+    t.field(
         mtm,
-        "0 = require a perfect rip; e.g. 30 tolerates up to 30 s of loss in the main feature.",
-        tw,
+        "max_passes",
+        &crate::strings::get("gui.set.max_passes"),
+        "5",
+        70.0,
     );
+    t.field(
+        mtm,
+        "abort_lost_secs",
+        &crate::strings::get("gui.set.abort_lost"),
+        "0",
+        70.0,
+    );
+    t.note(mtm, &crate::strings::get("gui.set.abort_lost_note"), tw);
     t.gap();
     t.check(
         mtm,
         "capture_without_keys",
-        "Capture even without keys :",
+        &crate::strings::get("gui.set.capture_no_keys"),
         false,
     );
-    t.check(mtm, "raw", "Keep encrypted (raw passthrough) :", false);
-    t.note(
+    t.check(
         mtm,
-        "Writes ciphertext untouched — ISO output only. Matches the CLI's --raw.",
-        tw,
+        "raw",
+        &crate::strings::get("gui.set.keep_encrypted"),
+        false,
     );
+    t.note(mtm, &crate::strings::get("gui.set.raw_note"), tw);
     t.gap();
-    t.check(mtm, "force", "Overwrite existing files :", false);
-    t.note(
+    t.check(
         mtm,
-        "Writes the still-encrypted image so it can be decrypted later once a key is available.",
-        tw,
+        "force",
+        &crate::strings::get("gui.set.overwrite"),
+        false,
     );
-    add_tab("Recovery", t);
+    t.note(mtm, &crate::strings::get("gui.set.capture_note"), tw);
+    add_tab(&crate::strings::get("gui.tab.recovery"), t);
 
     // ── Keys ── keydb + the online key service
     let mut t = Rows::new(mtm, tw, th, 200.0);
+    let key_items = [
+        crate::strings::get("gui.set.key_src_local"),
+        crate::strings::get("gui.set.key_src_online"),
+        crate::strings::get("gui.set.key_src_both"),
+    ];
+    let key_refs: Vec<&str> = key_items.iter().map(|s| s.as_str()).collect();
     t.combo(
         mtm,
         "key_source",
-        "Key source :",
-        &[
-            "Local keydb only",
-            "Online key service only",
-            "keydb, then online",
-        ],
+        &crate::strings::get("gui.set.key_source"),
+        &key_refs,
         240.0,
     );
     t.gap();
-    t.path(mtm, "keydb_path", "keydb.cfg location :", "", 300.0, c);
-    t.field(mtm, "keydb_url", "keydb update URL :", "", 300.0);
-    t.button(mtm, "Update keydb now", c, sel!(onUpdateKeys:), 160.0);
+    t.path(
+        mtm,
+        "keydb_path",
+        &crate::strings::get("gui.set.keydb_path"),
+        "",
+        300.0,
+        c,
+    );
+    t.field(
+        mtm,
+        "keydb_url",
+        &crate::strings::get("gui.set.keydb_url"),
+        "",
+        300.0,
+    );
+    t.button(
+        mtm,
+        &crate::strings::get("gui.set.update_keydb"),
+        c,
+        sel!(onUpdateKeys:),
+        160.0,
+    );
     {
         let status = c.ivars().settings.borrow().keydb_status();
         t.note(mtm, &status, tw);
     }
     t.gap();
-    t.field(mtm, "keyserver_url", "Key service URL :", "", 300.0);
-    t.field(mtm, "keyserver_token", "Key service token :", "", 300.0);
-    t.button(mtm, "Test connection", c, sel!(onTestKeyserver:), 160.0);
-    add_tab("Keys", t);
+    t.field(
+        mtm,
+        "keyserver_url",
+        &crate::strings::get("gui.set.keyserver_url"),
+        "",
+        300.0,
+    );
+    t.field(
+        mtm,
+        "keyserver_token",
+        &crate::strings::get("gui.set.keyserver_token"),
+        "",
+        300.0,
+    );
+    t.button(
+        mtm,
+        &crate::strings::get("gui.set.test_connection"),
+        c,
+        sel!(onTestKeyserver:),
+        160.0,
+    );
+    add_tab(&crate::strings::get("gui.tab.keys"), t);
 
     // ── Advanced
     let mut t = Rows::new(mtm, tw, th, 200.0);
+    // Picker rows come straight from the shipped locale list, so the menu can
+    // never drift from what freemkv-i18n can actually load.
     t.combo(
         mtm,
         "language",
-        "Interface language :",
-        &[
-            "Auto",
-            "English",
-            "Deutsch",
-            "Español",
-            "Français",
-            "Italiano",
-            "Nederlands",
-            "Português",
-        ],
+        &crate::strings::get("gui.set.language"),
+        &crate::ui::locale_names(),
         200.0,
     );
-    t.field(mtm, "decrypt_threads", "Decrypt threads :", "0", 70.0);
-    t.note(mtm, "0 = one per CPU core.", tw);
+    t.note(mtm, &crate::strings::get("gui.set.language_note"), tw);
+    t.field(
+        mtm,
+        "decrypt_threads",
+        &crate::strings::get("gui.set.decrypt_threads"),
+        "0",
+        70.0,
+    );
+    t.note(
+        mtm,
+        &crate::strings::get("gui.set.decrypt_threads_note"),
+        tw,
+    );
     t.gap();
+    let log_items = [
+        crate::strings::get("gui.set.log_quiet"),
+        crate::strings::get("gui.set.log_normal"),
+        crate::strings::get("gui.set.log_verbose"),
+    ];
+    let log_refs: Vec<&str> = log_items.iter().map(|s| s.as_str()).collect();
     t.combo(
         mtm,
         "log_level",
-        "Log detail :",
-        &["Quiet", "Normal", "Verbose"],
+        &crate::strings::get("gui.set.log_detail"),
+        &log_refs,
         160.0,
     );
-    t.check(mtm, "debug_log", "Log debug messages :", false);
-    add_tab("Advanced", t);
+    t.check(
+        mtm,
+        "debug_log",
+        &crate::strings::get("gui.set.log_debug"),
+        false,
+    );
+    add_tab(&crate::strings::get("gui.tab.advanced"), t);
 
     bd.addSubview(&tabs);
     *c.ivars().tabs.borrow_mut() = Some(tabs.clone());
@@ -2685,7 +2891,10 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         }
         for (k, p) in &all_popups {
             let want = st.get(k);
-            if !want.is_empty() {
+            if k == "language" {
+                // Stored as a locale code; re-select by its picker endonym.
+                p.selectItemWithTitle(&NSString::from_str(crate::ui::locale_display(&want)));
+            } else if !want.is_empty() {
                 p.selectItemWithTitle(&NSString::from_str(&want));
             }
         }
@@ -2695,7 +2904,7 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     *c.ivars().pf_popups.borrow_mut() = all_popups;
     let ok = btn(
         mtm,
-        "OK",
+        &crate::strings::get("gui.btn.ok"),
         r(w - 100.0, 12.0, 88.0, 28.0),
         c,
         sel!(onClosePrefs:),
@@ -2705,7 +2914,7 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         bd.addSubview(&ok);
         bd.addSubview(&btn(
             mtm,
-            "Cancel",
+            &crate::strings::get("gui.btn.cancel"),
             r(w - 194.0, 12.0, 88.0, 28.0),
             c,
             sel!(onClosePrefs:),
@@ -2727,7 +2936,9 @@ fn build_about(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
             false,
         )
     };
-    win.setTitle(&NSString::from_str("About freemkv"));
+    win.setTitle(&NSString::from_str(&crate::strings::get(
+        "gui.menu.app_about",
+    )));
     // See build_prefs: keep the window alive across close/reopen (the Retained
     // in win_about owns the lifetime), else reopen is a use-after-free.
     unsafe { win.setReleasedWhenClosed(false) };
@@ -2746,16 +2957,22 @@ fn build_about(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         title.setFont(Some(&NSFont::boldSystemFontOfSize(18.0)));
         bd.addSubview(&title);
     }
-    let rows: [(&str, &str); 5] = [
-        ("Version :", "1.6.0 (macOS)"),
-        ("Engine :", "libfreemkv 1.6.0"),
-        ("Licence :", "MIT"),
-        ("Keys :", "keydb ✓ 3 971 entries"),
-        ("Website :", "https://freemkv.org"),
+    let rows: [(String, &str); 5] = [
+        (crate::strings::get("gui.about.version"), "1.6.0 (macOS)"),
+        (crate::strings::get("gui.about.engine"), "libfreemkv 1.6.0"),
+        (crate::strings::get("gui.about.licence"), "MIT"),
+        (
+            crate::strings::get("gui.about.keys"),
+            "keydb ✓ 3 971 entries",
+        ),
+        (
+            crate::strings::get("gui.about.website"),
+            "https://freemkv.org",
+        ),
     ];
     let mut y = h - 96.0;
     for (k, v) in rows {
-        bd.addSubview(&text(mtm, k, r(20.0, y, 130.0, 18.0), true, false));
+        bd.addSubview(&text(mtm, &k, r(20.0, y, 130.0, 18.0), true, false));
         if v.starts_with("http") {
             // Clickable link → opens in the default browser (onAboutWebsite:).
             let lb = {
@@ -2787,7 +3004,7 @@ fn build_about(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     }
     let close = btn(
         mtm,
-        "Close",
+        &crate::strings::get("gui.btn.close"),
         r(w - 100.0, 14.0, 86.0, 28.0),
         c,
         sel!(onCloseAbout:),
