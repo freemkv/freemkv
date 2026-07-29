@@ -354,6 +354,54 @@ pub fn render_error(e: &dyn std::fmt::Display) -> String {
     format!("{}: {}", level, fmt_err(e))
 }
 
+/// Handle the `-a`/`-s` "no matching stream" case for ONE title: a requested
+/// language is absent from a track class the title actually carries. Without
+/// this the rip silently ships a file missing that whole class.
+///
+/// - Returns `Ok(())` to proceed. For a **multi-title** rip the missing class is
+///   a per-title WARNING (printed here) and the title keeps its video + whatever
+///   else matched — a batch over a mixed-language library must not hard-fail on
+///   one title.
+/// - Returns `Err(rendered)` for a **single-title** rip: the user asked for a
+///   language that isn't there, so fail loud with the languages that ARE. The
+///   caller prints/propagates `rendered` in its own idiom.
+fn check_selection_coverage(
+    streams: &freemkv_engine::StreamChoice,
+    title: &libfreemkv::DiscTitle,
+    title_num: usize,
+    multi_title: bool,
+    out: &Output,
+) -> Result<(), String> {
+    let unmatched = streams.unmatched(title);
+    if unmatched.is_empty() {
+        return Ok(());
+    }
+    let mut first_error = None;
+    for u in &unmatched {
+        let class = strings::get(&format!("stream.class.{}", u.class));
+        let args = [
+            ("num", title_num.to_string()),
+            ("class", class),
+            ("requested", u.requested.join(", ")),
+            ("available", u.available.join(", ")),
+        ];
+        let args: Vec<(&str, &str)> = args.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        if multi_title {
+            // A skipped track is important — show it even in quiet mode.
+            out.raw(
+                crate::output::Level::Always,
+                &strings::fmt("warn.no_lang_match", &args),
+            );
+        } else if first_error.is_none() {
+            first_error = Some(render_error(&strings::fmt("error.no_lang_match", &args)));
+        }
+    }
+    match first_error {
+        Some(msg) => Err(msg),
+        None => Ok(()),
+    }
+}
+
 /// Render a stream-selection error for the user. An unknown language tag lists
 /// the languages actually present on the scanned title, so the user can correct
 /// the typo against real data (mirroring what `disc-info` shows).
@@ -917,6 +965,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                 raw,
                 multipass,
                 &streams,
+                multi_title,
                 &out,
             )
         } else {
@@ -926,7 +975,18 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
             // every title identically.
             let selection = match (&titles, title_idx) {
                 (Some(t), Some(idx)) if stream_sel_active => match streams.resolve(&t[*idx]) {
-                    Ok(sel) => sel,
+                    Ok(sel) => {
+                        // A requested language that's simply absent from this
+                        // title: error (single) or warn+keep-video (batch).
+                        if let Err(msg) =
+                            check_selection_coverage(&streams, &t[*idx], idx + 1, multi_title, &out)
+                        {
+                            out.raw(Normal, &msg);
+                            ok = false;
+                            break;
+                        }
+                        sel
+                    }
                     Err(e) => {
                         out.raw(Normal, &render_stream_sel_error(&e, &t[*idx]));
                         ok = false;
@@ -1801,6 +1861,7 @@ fn render_resolution_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> 
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // cohesive single-title disc rip
 fn pipe_disc(
     source: &str,
     dest: &str,
@@ -1809,6 +1870,7 @@ fn pipe_disc(
     raw: bool,
     _multipass: bool,
     streams: &freemkv_engine::StreamChoice,
+    multi_title: bool,
     out: &Output,
 ) -> Result<(), PipeFail> {
     let parsed = libfreemkv::parse_url(source);
@@ -1876,6 +1938,10 @@ fn pipe_disc(
             selection = streams
                 .resolve(title)
                 .map_err(|e| PipeFail::fatal(render_stream_sel_error(&e, title)))?;
+            // A requested language absent from this title: error (single) or
+            // warn+keep-video (batch) — never silently ship a track-less file.
+            check_selection_coverage(streams, title, title_idx + 1, multi_title, out)
+                .map_err(PipeFail::fatal)?;
         }
 
         // Pre-flight decrypt gate (disc-wide): catches a scrambled-but-uncracked
