@@ -367,6 +367,9 @@ struct Ivars {
     bar2_row: RefCell<Vec<Retained<NSView>>>,
     settings: RefCell<crate::settings::Settings>,
     pf_fields: RefCell<Vec<(String, Retained<NSTextField>)>>,
+    /// The keydb status note in Settings ▸ Keys, kept so a running "Update
+    /// keydb now" can show progress + the result in place.
+    keydb_note: RefCell<Option<Retained<NSTextField>>>,
     pf_checks: RefCell<Vec<(String, Retained<NSButton>)>>,
     pf_popups: RefCell<Vec<(String, Retained<NSPopUpButton>)>>,
     /// True only when the open source is a physical drive; Eject is
@@ -696,12 +699,21 @@ define_class!(
             if path.is_empty() {
                 path = self.ivars().settings.borrow().keydb_path.clone();
             }
+            if url.trim().is_empty() {
+                // Nothing to fetch — tell the user in place instead of silently
+                // spawning a thread that errors into the (maybe-hidden) log.
+                self.set_keydb_note("No keydb update URL set — add one above, then click Update.");
+                return;
+            }
             self.app_mut(|a| {
                 a.say(
                     crate::ui::LogKind::Result,
                     &crate::strings::get("gui.log.fetching_keydb"),
                 )
             });
+            // Immediate in-Settings feedback: the download is ~20 MB and takes a
+            // few seconds; the drain updates this note to the result when done.
+            self.set_keydb_note("Updating keydb… downloading, please wait.");
             let inbox = self.ivars().inbox.clone();
             std::thread::spawn(move || {
                 let msg = match crate::settings::update_keydb(&url, &path) {
@@ -883,15 +895,19 @@ define_class!(
                 Ok(mut v) => v.drain(..).collect(),
                 Err(_) => return,
             };
-            for m in msgs {
-                self.app_mut(|a| a.say(crate::ui::LogKind::Result, &m));
+            if msgs.is_empty() {
+                return;
             }
-            // A finished keydb update changes the status line; rebuild prefs
-            // next time it opens rather than showing a stale figure.
-            if let Some(w) = self.ivars().win_prefs.borrow().as_ref() {
-                if !w.isVisible() {
-                    // dropped below
-                }
+            // Each say() goes through app_mut, which repaints — so worker-thread
+            // messages (keydb update, etc.) show the moment they arrive.
+            for m in &msgs {
+                self.app_mut(|a| a.say(crate::ui::LogKind::Result, m));
+            }
+            // This drain path is the keydb-update worker; surface its outcome
+            // (success "keydb updated — N entries" or the error) in the Settings
+            // note so the user sees the result in place, not just in the log.
+            if let Some(last) = msgs.last() {
+                self.set_keydb_note(last);
             }
         }
 
@@ -1013,8 +1029,16 @@ define_class!(
 
 impl Controller {
     /// Borrow the model mutably. Every mutation goes through the core.
+    /// Mutate the core model and REPAINT. This is the single choke-point for
+    /// every state change, so rendering here means no event handler can ever
+    /// mutate state and forget to redraw (the "I said something but the log
+    /// didn't update" class of bug). The mutable borrow is released before
+    /// `render()` (which takes its own immutable borrow), so there's no
+    /// re-entrancy — and `render()` never calls back into `app_mut`.
     fn app_mut<R>(&self, f: impl FnOnce(&mut crate::ui::App) -> R) -> R {
-        f(&mut self.ivars().app.borrow_mut())
+        let r = f(&mut self.ivars().app.borrow_mut());
+        self.render();
+        r
     }
 
     /// The shell's entire job: hand the command to the core, perform the
@@ -1096,6 +1120,14 @@ impl Controller {
             if k == key {
                 f.setStringValue(&NSString::from_str(value));
             }
+        }
+    }
+
+    /// Put arbitrary text in the Settings ▸ Keys keydb status note (e.g.
+    /// "Updating…" or the update result). No-op if Settings isn't open.
+    fn set_keydb_note(&self, text: &str) {
+        if let Some(note) = self.ivars().keydb_note.borrow().as_ref() {
+            note.setStringValue(&NSString::from_str(text));
         }
     }
 
@@ -2833,13 +2865,14 @@ impl Rows {
         self.view.addSubview(&b);
         self.y -= 32.0;
     }
-    fn note(&mut self, mtm: MainThreadMarker, s: &str, w: f64) {
+    fn note(&mut self, mtm: MainThreadMarker, s: &str, w: f64) -> Retained<NSTextField> {
         let l = text(mtm, s, r(16.0, self.y - 18.0, w - 32.0, 36.0), false, true);
         {
             l.setUsesSingleLineMode(false);
             self.view.addSubview(&l);
         }
         self.y -= 44.0;
+        l
     }
     fn gap(&mut self) {
         self.y -= 14.0;
@@ -3050,7 +3083,8 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     );
     {
         let status = c.ivars().settings.borrow().keydb_status();
-        t.note(mtm, &status, tw);
+        let note = t.note(mtm, &status, tw);
+        *c.ivars().keydb_note.borrow_mut() = Some(note);
     }
     t.gap();
     t.field(
