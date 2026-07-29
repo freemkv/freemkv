@@ -28,6 +28,7 @@ pub enum Level {
 /// Holds the configured verbosity; each `print`/`raw`/`blank` call passes the
 /// [`Level`] of that line and is emitted only when the configured level is high
 /// enough.
+#[derive(Clone, Copy)]
 pub struct Output {
     level: Level,
 }

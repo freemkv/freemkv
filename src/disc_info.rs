@@ -7,8 +7,8 @@ use crate::output::{Level::Normal, Output};
 use crate::strings;
 use libfreemkv::disc::{BdRegion, DiscRegion};
 use libfreemkv::{
-    AudioStream, Codec, ColorSpace, Disc, DiscFormat, Drive, HdrFormat, LabelPurpose,
-    LabelQualifier, ScanOptions, Stream, SubtitleStream, VideoStream,
+    AudioStream, Codec, ColorSpace, Disc, DiscFormat, HdrFormat, LabelPurpose, LabelQualifier,
+    ScanOptions, Stream, SubtitleStream, VideoStream,
 };
 
 /// Strip control/escape characters from untrusted on-disc metadata (title,
@@ -91,52 +91,59 @@ pub fn run(device: Option<&str>, args: &[String]) {
     out.print(Normal, "disc.scanning");
     out.blank(Normal);
 
-    let mut drive = match device {
-        Some(p) => Drive::open(std::path::Path::new(p)).unwrap_or_else(|e| {
-            eprintln!("{}", crate::pipe::fmt_err(&e));
-            std::process::exit(1);
-        }),
-        None => libfreemkv::find_drive().unwrap_or_else(|| {
-            eprintln!("{}", strings::get("error.no_drive"));
-            std::process::exit(1);
-        }),
+    let target = match device {
+        Some(p) => libfreemkv::DeviceTarget::Path(std::path::PathBuf::from(p)),
+        None => libfreemkv::DeviceTarget::Autodetect,
     };
-    // init()/probe_disc() are intentionally best-effort: drives without the
-    // probed firmware support return UnsupportedDrive, which is fine here —
-    // `Disc::scan` below is the authoritative gate and reports the real error.
-    let _ = drive.wait_ready();
-    let _ = drive.init();
-    let _ = drive.probe_disc();
-
-    // Normal `info` is a fast keyless scan. `-v` scans with the AACS host
+    // Normal `info` is a fast keyless scan. `-v` supplies the AACS host
     // credentials (from the local keydb) so the handshake captures the Volume
     // ID + Unit_Key_RO.inf a live-drive key resolution needs; without them a
-    // locked drive yields no VID and no resolvable keys.
-    let mut scan_opts = if verbose {
-        crate::pipe::drive_scan_opts(&keydb)
-    } else {
-        ScanOptions::default()
+    // locked drive yields no VID and no resolvable keys. `DiscSession::open`
+    // runs the same advisory wait_ready/init/probe_disc bring-up as before —
+    // best-effort, non-fatal; `session.scan` below is the authoritative gate.
+    let keyspec = libfreemkv::KeySpec {
+        credentials: if verbose {
+            crate::pipe::drive_credentials(&keydb)
+        } else {
+            None
+        },
+        ..Default::default()
     };
+    let mut session = libfreemkv::DiscSession::open(target, keyspec).unwrap_or_else(|e| {
+        match &e {
+            // Autodetect with no drive surfaces as an empty-path DeviceNotFound;
+            // keep the dedicated "no drive" message. Any other open failure (or a
+            // real path that won't open) renders through the E-code humanizer.
+            libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
+                eprintln!("{}", strings::get("error.no_drive"));
+            }
+            _ => eprintln!("{}", crate::pipe::fmt_err(&e)),
+        }
+        std::process::exit(1);
+    });
+
     // Read the PGS streams to detect forced subtitles from their content, so the
     // reported forced flags match what a rip's muxer produces. Gated to verbose:
     // it needs the AACS keys to read encrypted UHD subtitle content, and it reads
     // the clip (slow) — keyless `info` stays fast and uses vendor-label forced.
-    if verbose {
-        scan_opts.probe_forced_subtitles = true;
-    }
-    let mut disc = match Disc::scan(&mut drive, &scan_opts) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                strings::fmt(
-                    "error.scan_failed",
-                    &[("detail", &crate::pipe::fmt_err(&e))]
-                )
-            );
-            std::process::exit(1);
-        }
+    let scan_opts = ScanOptions {
+        probe_forced_subtitles: verbose,
+        ..Default::default()
     };
+    if let Err(e) = session.scan(scan_opts) {
+        eprintln!(
+            "{}",
+            strings::fmt(
+                "error.scan_failed",
+                &[("detail", &crate::pipe::fmt_err(&e))]
+            )
+        );
+        std::process::exit(1);
+    }
+    // Decompose the session into the owned disc + drive the rest of this command
+    // already worked with, so downstream rendering is untouched.
+    let mut disc = session.take_disc().expect("scan populated the disc");
+    let mut drive = session.into_drive();
 
     // Disc title
     if let Some(ref title) = disc.meta_title {
@@ -560,9 +567,9 @@ fn aacs_generation(disc: &Disc) -> String {
     }
 }
 
-/// Whether the disc format is a known AACS carrier (BD / UHD / FMTS). A DVD or
-/// unclassified disc is NOT — so an encrypted-but-unresolved DVD (e.g. a failed
-/// CSS crack) is never mislabeled with an AACS generation.
+/// Whether the disc format is a known AACS carrier (BD / UHD / FMTS / HD DVD). A
+/// DVD or unclassified disc is NOT — so an encrypted-but-unresolved DVD (e.g. a
+/// failed CSS crack) is never mislabeled with an AACS generation.
 fn is_aacs_format(disc: &Disc) -> bool {
     matches!(
         disc.format,
@@ -581,10 +588,6 @@ enum EncLabel {
     GenericAacs,
 }
 
-/// Decide which encryption line to show. `None` for an unencrypted disc. CSS
-/// wins whenever any CSS signal is present (resolved state OR a recorded
-/// css_error from a failed crack) — a failed-CSS DVD must never be mislabeled as
-/// AACS; the AACS generation is used only for a real AACS carrier / state.
 /// Emit the one-line encryption/generation label ("AACS 2.0 encrypted",
 /// "CSS encrypted", …) for a scanned disc, returning whether a line was printed
 /// (so a caller can follow it with a blank). Shared by the drive (`disc://`) and
@@ -606,6 +609,10 @@ fn emit_encryption_line(out: &Output, disc: &Disc) -> bool {
     true
 }
 
+/// Decide which encryption line to show. `None` for an unencrypted disc. CSS
+/// wins whenever any CSS signal is present (resolved state OR a recorded
+/// css_error from a failed crack) — a failed-CSS DVD must never be mislabeled as
+/// AACS; the AACS generation is used only for a real AACS carrier / state.
 fn encryption_label(disc: &Disc) -> Option<EncLabel> {
     if !disc.encrypted {
         return None;

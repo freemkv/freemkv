@@ -1,57 +1,71 @@
 [package]
 name = "freemkv"
-version = "1.5.2"
+version = "1.6.0"
 edition = "2024"
 rust-version = "1.86"
 license = "MIT"
-description = "Open source 4K UHD / Blu-ray / DVD backup tool"
-repository = "https://github.com/freemkv/freemkv"
-readme = "README.md"
-keywords = ["bluray", "uhd", "dvd", "ripper", "backup"]
-categories = ["command-line-utilities", "multimedia"]
-exclude = ["CLAUDE.md"]
+description = "Desktop UI for freemkv"
+
+[lib]
+name = "freemkv"
+path = "src/lib.rs"
 
 [[bin]]
 name = "freemkv"
 path = "src/main.rs"
 
 [dependencies]
+freemkv-engine = "1.6"
 libfreemkv = "1.5"
 freemkv-keysources = "1.5"
 freemkv-i18n = "1.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
 isolang = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-ureq = { version = "2", features = ["json"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
-serde_json = "1"
 libc = "0.2"
-# Global allocator. The mux consumer thread frees PesPacket buffers
-# whose backing Vec<u8> was allocated by the demux thread — musl's
-# mallocng cross-thread free path was visibly slowing the null://
-# benchmark relative to autorip (which already uses mimalloc).
-# Matching allocators across binaries makes perf numbers comparable.
 mimalloc = "0.1"
 
-[profile.release]
-lto = "thin"
-codegen-units = 1
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+  "NSApplication", "NSWindow", "NSView", "NSControl", "NSButton",
+  "NSTextField", "NSPopUpButton", "NSMenu", "NSMenuItem", "NSResponder",
+  "NSProgressIndicator", "NSBox", "NSOutlineView", "NSTableView",
+  "NSTableColumn", "NSScrollView", "NSOpenPanel", "NSSavePanel",
+  "NSPanel", "NSGraphics", "NSCell", "NSTextFieldCell", "NSStackView",
+  "NSLayoutConstraint", "NSFont", "NSColor", "NSImage", "NSRunningApplication",
+  "NSTextView", "NSText", "NSButtonCell", "NSActionCell", "NSComboBox",
+  "NSPasteboard", "NSDragging", "NSAlert", "NSApplication",
+  "NSBitmapImageRep", "NSImageRep", "NSGraphicsContext", "NSSplitView",
+  "NSTabView", "NSTabViewItem", "NSStepper", "NSSlider", "NSWorkspace",
+  "NSPasteboardItem", "NSFilePromiseReceiver",
+] }
+objc2-foundation = { version = "0.3", features = [
+  "NSString", "NSGeometry", "NSArray", "NSObjCRuntime", "NSNotification",
+  "NSDate", "NSTimer", "NSRunLoop", "NSURL", "NSValue", "NSDictionary",
+  "NSEnumerator", "NSError", "NSRange", "NSAttributedString", "NSDictionary",
+] }
 
-# Resolve libfreemkv + freemkv-keysources from their GIT TAGS. Both are OFF
-# crates.io now (publish = false — libfreemkv git-deps the firmware crate, and
-# keysources deps libfreemkv), so this [patch.crates-io] git-tag redirect is the
-# ONLY resolution path; there is no crates.io publish for these crates at all.
+# Resolve the freemkv crates from their GIT TAGS. They are OFF crates.io
+# (libfreemkv git-deps the firmware crate, and keysources deps libfreemkv), so
+# this [patch.crates-io] git-tag redirect is the ONLY resolution path — there is
+# no crates.io publish for these crates at all.
 #
-# This [patch.crates-io] is committed (CI-visible) and applies to BOTH the
-# direct deps above AND the transitive reference that freemkv-keysources makes
-# to libfreemkv — unifying every libfreemkv ref to the single git-tag source
-# (no duplicate crate, no trait-identity mismatch).
+# Committed (CI-visible) so the release workflow can resolve on a clean runner.
+# It applies to the direct deps above AND the transitive references the other
+# crates make, unifying every libfreemkv ref to one source (no duplicate crate,
+# no trait-identity mismatch).
 #
-# The release script rewrites these tags to the new version before
-# regenerating Cargo.lock. Local dev overrides this
-# patch with a path patch via the gitignored .cargo/config.toml (a config-level
-# [patch.crates-io] wins over this manifest one for the same crate).
+# The release script rewrites these tags before regenerating Cargo.lock. Local
+# dev overrides this with a path patch in the gitignored .cargo/config.toml (a
+# config-level [patch.crates-io] wins over this manifest one).
 [patch.crates-io]
 libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.5.2" }
+freemkv-engine = { git = "https://github.com/freemkv/freemkv-engine", tag = "v1.6.0" }
 freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.5.2" }
 freemkv-i18n = { git = "https://github.com/freemkv/freemkv-i18n", tag = "v1.5.2" }

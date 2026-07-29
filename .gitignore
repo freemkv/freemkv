@@ -1,14 +1,2 @@
-.aider*
-target/
-.claude/
-.cargo/
-
-# session scratch — never track (may contain RE breadcrumbs)
-scratch/
-
-# internal agent context — never publish
-CLAUDE.md
-
-# stray local build/debug artifacts
-/rust_out
-/stdin
+/target
+.cargo/config.toml

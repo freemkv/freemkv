@@ -13,8 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          submodules: true
       - name: Verify Cargo.toml version matches tag
         run: |
           CARGO_VER="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
@@ -23,27 +21,28 @@ jobs:
             exit 1
           fi
           echo "Version match: $CARGO_VER"
+      # The .app's version is what the user sees in About, so it must agree too.
+      # A stale Info.plist ships a build that lies about which release it is.
+      - name: Verify Info.plist version matches tag
+        run: |
+          PLIST_VER="v$(sed -n 's/.*<key>CFBundleShortVersionString<\/key><string>\(.*\)<\/string>.*/\1/p' macos/Info.plist)"
+          if [ "$PLIST_VER" != "${{ github.ref_name }}" ]; then
+            echo "::error::Info.plist says $PLIST_VER but tag is ${{ github.ref_name }}"
+            exit 1
+          fi
+          echo "Info.plist match: $PLIST_VER"
 
-  # Tests run as a PARALLEL TRIPWIRE: they fail the run if they fail, but the
-  # build job does NOT `needs:` this job, so the artifact build starts the moment
-  # `verify` passes rather than serializing behind the test suite. The tag
-  # decision was already gated by the local precommit (same Rust 1.86, same
-  # commit) — CI tests here are a safety net, not the gate.
+  # Parallel tripwire, exactly as the CLI does it: fails the run, but `build`
+  # does NOT `needs:` it, so packaging starts as soon as `verify` passes. The
+  # tag decision was already gated by the local precommit on the same Rust 1.86.
   test:
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.86.0
-        with:
-          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
-      - name: Install musl tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-      - name: Test
-        run: cargo test --target x86_64-unknown-linux-musl
+      - run: cargo test --tests
 
   build:
     # NOTE: deliberately does NOT `needs: test` — see the test job above.
@@ -51,25 +50,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # x86_64-apple-darwin is intentionally dropped: it has a pre-existing
-        # linker issue on the macOS runners and built nothing (a no-op leg that
-        # only added wall-clock to the matrix). aarch64-apple-darwin covers
-        # macOS. Fix the linker before re-adding x86_64 macOS.
+        # Two macOS flavors, mirroring the CLI. (The CLI drops
+        # x86_64-apple-darwin over a linker issue in a C dependency the GUI
+        # does not pull in, so both legs genuinely build here.)
         include:
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-            asset: freemkv-x86_64-linux
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-            asset: freemkv-aarch64-linux
           - target: aarch64-apple-darwin
-            os: macos-latest
             asset: freemkv-aarch64-macos
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            asset: freemkv-x86_64-windows.zip
+          - target: x86_64-apple-darwin
+            asset: freemkv-x86_64-macos
 
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.86.0
@@ -79,77 +69,109 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install musl tools
-        if: contains(matrix.target, 'musl')
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Bundle freemkv.app
+        run: bash macos/bundle.sh release ${{ matrix.target }}
+
+      - name: Package
         run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-
-      - name: Install cross
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: |
-          curl -sL https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-musl.tar.gz | tar xz
-          sudo mv cross /usr/local/bin/
-
-      # Per-target test step removed: tests run once in the dedicated parallel
-      # `test` job, off the build critical path.
-
-      - name: Build (native)
-        if: matrix.target != 'aarch64-unknown-linux-musl'
-        shell: bash
-        run: |
-          # Ubuntu's gcc defaults to -D_FORTIFY_SOURCE=2 which makes
-          # mimalloc-sys (transitive C dep) emit calls to glibc-only
-          # __memcpy_chk / __memset_chk that aren't in musl. Disable
-          # fortify for the C portion of the build.
-          export CFLAGS="-U_FORTIFY_SOURCE"
-          cargo build --release --target ${{ matrix.target }}
-
-      - name: Build (cross)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: cross build --release --target ${{ matrix.target }}
-
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          cd target/${{ matrix.target }}/release
-          # Versioned + unversioned tarballs (existing convention).
-          tar czf "../../../freemkv-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" freemkv
-          tar czf "../../../freemkv-${{ matrix.target }}.tar.gz" freemkv
-          cd ../../..
-          # Plain, runnable binary asset (download → chmod +x → run).
-          cp "target/${{ matrix.target }}/release/freemkv" "${{ matrix.asset }}"
-          chmod +x "${{ matrix.asset }}"
+          VER="${{ github.ref_name }}"
+          A="${{ matrix.asset }}"
+          # .dmg is what a Mac user expects to double-click; the .zip is for
+          # scripted installs (brew casks, MDM) that would rather not mount.
+          hdiutil create -volname "freemkv" -srcfolder target/freemkv.app \
+            -ov -format UDZO "$A.dmg"
+          ditto -c -k --keepParent target/freemkv.app "$A.zip"
+          # Versioned copies, mirroring the CLI's versioned/unversioned pair.
+          cp "$A.dmg" "freemkv-$VER-${{ matrix.target }}.dmg"
+          cp "$A.zip" "freemkv-$VER-${{ matrix.target }}.zip"
           shasum -a 256 \
-            "freemkv-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" \
-            "freemkv-${{ matrix.target }}.tar.gz" \
-            "${{ matrix.asset }}" \
-            > "${{ matrix.asset }}.sha256"
+            "$A.dmg" "$A.zip" \
+            "freemkv-$VER-${{ matrix.target }}.dmg" \
+            "freemkv-$VER-${{ matrix.target }}.zip" \
+            > "$A.dmg.sha256"
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+      - name: Verify the bundle
         run: |
-          # Windows ships as a .zip ONLY (no bare .exe). Versioned + unversioned,
-          # mirroring the Unix tarball convention; ${{ matrix.asset }} is the
-          # unversioned .zip the download page links.
-          Compress-Archive -Path "target/${{ matrix.target }}/release/freemkv.exe" -DestinationPath "freemkv-${{ github.ref_name }}-x86_64-windows.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/freemkv.exe" -DestinationPath "${{ matrix.asset }}"
-          $h = Get-FileHash -Algorithm SHA256 "${{ matrix.asset }}"
-          "$($h.Hash.ToLower())  ${{ matrix.asset }}" | Out-File -Encoding ascii "${{ matrix.asset }}.sha256"
+          BIN=target/freemkv.app/Contents/MacOS/freemkv
+          # A .dmg built for the wrong arch is indistinguishable from the right
+          # one until a user double-clicks it, so pin the arch here.
+          case "${{ matrix.target }}" in
+            aarch64-*) WANT=arm64 ;;
+            x86_64-*)  WANT=x86_64 ;;
+          esac
+          lipo -archs "$BIN"
+          lipo -archs "$BIN" | grep -qw "$WANT" \
+            || { echo "::error::expected $WANT in $(lipo -archs "$BIN")"; exit 1; }
+          # An .app that fails signature validation is one Gatekeeper refuses
+          # to open, which users report as "the app is damaged".
+          codesign --verify --deep --strict --verbose=2 target/freemkv.app
 
       - name: Upload
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            *.tar.gz
-            *.zip
-            ${{ matrix.asset }}
-            ${{ matrix.asset }}.sha256
+            ${{ matrix.asset }}.dmg
+            ${{ matrix.asset }}.zip
+            ${{ matrix.asset }}.dmg.sha256
+            freemkv-*-${{ matrix.target }}.dmg
+            freemkv-*-${{ matrix.target }}.zip
+
+  # ── Standalone CLI binaries for the platforms without a desktop app ─────────
+  # The GUI is target-gated off, so these are pure CLI. Linux ships musl-static
+  # (no glibc version coupling); Windows is CLI-only until the Windows shell
+  # lands. macOS CLI users get the binary inside the .dmg's .app.
+  cli-binaries:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: freemkv-x86_64-linux
+            ext: ''
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: freemkv-x86_64-windows
+            ext: '.exe'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.86.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build CLI
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          VER="${{ github.ref_name }}"
+          A="${{ matrix.asset }}"
+          E="${{ matrix.ext }}"
+          BIN="target/${{ matrix.target }}/release/freemkv$E"
+          cp "$BIN" "$A$E"
+          cp "$BIN" "$A-$VER$E"
+          sha256sum "$A$E" "$A-$VER$E" > "$A$E.sha256"
+      - name: Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ matrix.asset }}${{ matrix.ext }}
+            ${{ matrix.asset }}-*${{ matrix.ext }}
+            ${{ matrix.asset }}${{ matrix.ext }}.sha256
 
   update-homepage:
-    needs: build
-    if: always() && needs.build.result != 'cancelled'
+    needs: [build, cli-binaries]
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Update org README with new version

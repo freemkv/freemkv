@@ -9,9 +9,12 @@
 use crate::disc_info::sanitize;
 use crate::output::{Level::Normal, Output};
 use crate::strings;
-use libfreemkv::pes::Stream as PesStream;
+use libfreemkv::{MuxEvents, MuxInput, MuxOptions};
 use std::io::Write;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -55,6 +58,228 @@ extern "C" fn handle_sigint(_sig: libc::c_int) {
         unsafe { libc::_exit(130) };
     }
     INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+/// Bridge the process-wide SIGINT flag ([`INTERRUPTED`]) into a real
+/// [`libfreemkv::Halt`] that the library's long-running loops poll.
+///
+/// `libfreemkv::mux_stream` (and `extract_tree`) take a `&Halt`, not the global
+/// flag — there is no `None` and no hidden global to consult. A watcher thread
+/// flips the halt the moment SIGINT arrives so a long mux/extract stops at the
+/// next frame/file boundary; the guard signals the watcher to exit and joins it
+/// on drop (normal return OR unwind). This is the ONE place the CLI's SIGINT
+/// reaches libfreemkv, replacing the old `INTERRUPTED`-polled-in-the-mux-loop.
+struct SigintHalt {
+    halt: libfreemkv::Halt,
+    done: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SigintHalt {
+    fn install() -> Self {
+        let halt = libfreemkv::Halt::new();
+        let done = Arc::new(AtomicBool::new(false));
+        // A SIGINT that already landed (before the mux starts) cancels up front.
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            halt.cancel();
+        }
+        let handle = {
+            let halt = halt.clone();
+            let done = done.clone();
+            std::thread::spawn(move || {
+                while !done.load(Ordering::SeqCst) {
+                    if INTERRUPTED.load(Ordering::SeqCst) {
+                        halt.cancel();
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            })
+        };
+        SigintHalt {
+            halt,
+            done,
+            handle: Some(handle),
+        }
+    }
+
+    fn halt(&self) -> &libfreemkv::Halt {
+        &self.halt
+    }
+}
+
+impl Drop for SigintHalt {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// A per-title mux failure carrying both the display string (for the localized
+/// render / skip notice) and whether it was a *skippable title stub*.
+///
+/// The skippability is decided by [`libfreemkv::error::is_skippable_title_stub`]
+/// on the typed `io::Error` `mux_stream` returns — NOT by matching `E7023`/`E6008`
+/// substrings. Setup failures (no drive, out-of-range title, decrypt gate) are
+/// never skippable stubs and construct with [`PipeFail::fatal`].
+struct PipeFail {
+    display: String,
+    /// How the multi-title loop should classify this failure. The loop feeds it
+    /// to `freemkv_engine::decide_title` — the SINGLE source of the skip / stop
+    /// / fail policy, shared with autorip and the desktop UI. (Replaces the old
+    /// `skippable_stub` bool: the engine now also distinguishes a halt and a
+    /// disc-level no-key so the loop can full-stop / fail-fast.)
+    result: freemkv_engine::TitleResult,
+}
+
+impl PipeFail {
+    /// A hard failure that can never be skipped (setup / preflight). Classified
+    /// `Failed` so the loop treats it as a hard error for the current title.
+    fn fatal(display: String) -> Self {
+        PipeFail {
+            display,
+            result: freemkv_engine::TitleResult::Failed,
+        }
+    }
+
+    /// A cooperative user stop (Ctrl-C). Classified `Halted` so the loop treats
+    /// it as a FULL STOP — not a per-title cancel that carries on.
+    fn halted(display: String) -> Self {
+        PipeFail {
+            display,
+            result: freemkv_engine::TitleResult::Halted,
+        }
+    }
+
+    /// A typed library error (a preflight decrypt gate). The engine classifier
+    /// maps a disc-level no-key (NoDiscKey / KeydbLoad / AacsNoKeys) to
+    /// `DiscLevelNoKey` so the loop fails fast instead of iterating every title
+    /// with the same error. Display is the error's own `E<code>` rendering.
+    fn from_typed(e: libfreemkv::Error) -> Self {
+        let display = e.to_string();
+        let io: std::io::Error = e.into();
+        PipeFail {
+            result: freemkv_engine::classify_title_error(&io),
+            display,
+        }
+    }
+
+    /// A failure surfaced by `mux_stream`. Classifies the typed `io::Error` via
+    /// the engine (kills the CLI E-code string-match) and renders its `E<code>`
+    /// Display for the user.
+    fn from_mux(e: std::io::Error) -> Self {
+        PipeFail {
+            result: freemkv_engine::classify_title_error(&e),
+            display: format!("{e}"),
+        }
+    }
+}
+
+/// The CLI's [`MuxEvents`] implementation: it renders exactly what `pipe`/
+/// `pipe_disc` used to print inline around the frame loop — the stream-info
+/// block, the destination "opening…/ok" pair, and the throttled progress line —
+/// now driven by callbacks from inside `mux_stream`.
+///
+/// Progress is driven from the WRITE side ([`Self::on_write_progress`],
+/// `output.bytes_written()`), exactly as the old loop's
+/// `print_progress(output.bytes_written(), …)`. Reader-side events are ignored
+/// (the CLI never rendered per-sector skips / batch changes on this path).
+///
+/// `Output` is `Copy` (a single verbosity level) so the handle is `'static` and
+/// `Send + Sync`, satisfying `Arc<dyn MuxEvents>`.
+struct CliMuxEvents {
+    out: Output,
+    dest: String,
+    /// A metadata sink (`chapters://` / `json://`): suppress the post-open blank
+    /// line and (at the call site) the completion summary — matching the old
+    /// short-circuit which printed neither.
+    metadata_sink: bool,
+    /// When the frame pump began — set in `on_output_opened`, read back for the
+    /// completion summary. `None` until the sink opens.
+    start: Mutex<Option<Instant>>,
+    /// Last time the progress line was repainted (0.5 s throttle).
+    last_update: Mutex<Instant>,
+}
+
+impl CliMuxEvents {
+    fn new(out: Output, dest: String, metadata_sink: bool) -> Self {
+        CliMuxEvents {
+            out,
+            dest,
+            metadata_sink,
+            start: Mutex::new(None),
+            last_update: Mutex::new(Instant::now()),
+        }
+    }
+
+    /// The instant the pump began, for the completion summary.
+    fn start(&self) -> Option<Instant> {
+        *self.start.lock().expect("start mutex")
+    }
+}
+
+impl MuxEvents for CliMuxEvents {
+    fn on_output_opened(&self, title: &libfreemkv::DiscTitle) {
+        // The stream-info block and mp4-fit warnings, from the resolved title.
+        print_stream_info(&self.out, title);
+        print_mp4_skips(&self.out, &self.dest, title);
+        // The destination open notice (the sink is already open here).
+        self.out.raw_inline(
+            Normal,
+            &strings::fmt("rip.opening", &[("device", &self.dest)]),
+        );
+        self.out.raw(Normal, &strings::get("rip.ok"));
+        if !self.metadata_sink {
+            self.out.blank(Normal);
+        }
+        let now = Instant::now();
+        *self.start.lock().expect("start mutex") = Some(now);
+        *self.last_update.lock().expect("last_update mutex") = now;
+    }
+
+    fn on_write_progress(&self, bytes_written: u64, bytes_total: u64) {
+        if self.out.is_quiet() {
+            return;
+        }
+        let now = Instant::now();
+        let mut last = self.last_update.lock().expect("last_update mutex");
+        if now.duration_since(*last).as_secs_f64() >= 0.5 {
+            if let Some(start) = *self.start.lock().expect("start mutex") {
+                print_progress(bytes_written, bytes_total, &start);
+            }
+            *last = now;
+        }
+    }
+}
+
+/// Render the outcome of a `mux_stream` run into the CLI's exit contract, shared
+/// by `pipe` and `pipe_disc`:
+/// - `Ok(completed)` → clear the progress line, print the completion summary
+///   (unless a metadata sink, which prints none), succeed;
+/// - `Ok(!completed)` → an operator interrupt (SIGINT flipped the halt) or a
+///   finalize wedge — print the "incomplete" notice and fail (non-zero exit),
+///   NEVER report a truncated file as success;
+/// - `Err(e)` → the typed failure, classified for the per-title skip triage.
+fn finalize_mux(
+    result: std::io::Result<libfreemkv::MuxOutcome>,
+    out: &Output,
+    events: &CliMuxEvents,
+) -> Result<(), PipeFail> {
+    match result {
+        Ok(outcome) if outcome.completed => {
+            if !events.metadata_sink {
+                let start = events.start().unwrap_or_else(Instant::now);
+                print_completion_summary(out, outcome.bytes_written, start);
+            }
+            Ok(())
+        }
+        // mux completed == false → a mid-run halt (Ctrl-C). Classify as Halted
+        // so the multi-title loop FULL-STOPS instead of cancelling each title.
+        Ok(_) => Err(PipeFail::halted(interrupted_error(out))),
+        Err(e) => Err(PipeFail::from_mux(e)),
+    }
 }
 
 /// Format an error for display using i18n strings.
@@ -129,6 +354,43 @@ pub fn render_error(e: &dyn std::fmt::Display) -> String {
     format!("{}: {}", level, fmt_err(e))
 }
 
+/// Render a stream-selection error for the user. An unknown language tag lists
+/// the languages actually present on the scanned title, so the user can correct
+/// the typo against real data (mirroring what `disc-info` shows).
+fn render_stream_sel_error(
+    e: &freemkv_engine::StreamSelError,
+    title: &libfreemkv::DiscTitle,
+) -> String {
+    match e {
+        freemkv_engine::StreamSelError::UnknownLanguage { tag } => {
+            let mut langs: Vec<String> = title
+                .streams
+                .iter()
+                .filter_map(|s| match s {
+                    libfreemkv::Stream::Audio(a) if !a.language.is_empty() => {
+                        Some(a.language.clone())
+                    }
+                    libfreemkv::Stream::Subtitle(s) if !s.language.is_empty() => {
+                        Some(s.language.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            langs.sort();
+            langs.dedup();
+            let available = if langs.is_empty() {
+                strings::get("error.stream_none")
+            } else {
+                langs.join(", ")
+            };
+            render_error(&strings::fmt(
+                "error.unknown_language",
+                &[("tag", tag), ("available", &available)],
+            ))
+        }
+    }
+}
+
 /// Parse a libfreemkv Display string of the form `E<code>` or
 /// `E<code>: <data>` into `("E<code>", "<data>")` (data empty when absent).
 /// Returns `None` for any string that isn't an `E<digits>` code (so arbitrary
@@ -164,6 +426,40 @@ struct ParsedFlags {
     key_url: Option<String>,
     key_auth: Option<String>,
     title_nums: Vec<usize>,
+    /// `-t all`: rip every title. Without it (and without any `-t N`), the
+    /// default is the MAIN TITLE only — obfuscated discs with 50+ similar-
+    /// length playlists must not rip everything by accident. See the `-t`
+    /// normalization in [`run`].
+    all_titles: bool,
+    /// `-a`/`-s`: which audio + subtitle streams to keep, as one bundle (video
+    /// is always kept). Default keeps everything (archival).
+    streams: freemkv_engine::StreamChoice,
+}
+
+/// Parse an `-a`/`-s` value into a [`freemkv_engine::StreamFilter`]:
+/// `all` → All, `none` → None (video-only for that class), otherwise a
+/// comma-separated language list (names or ISO codes, trimmed, empties
+/// dropped). Keywords are case-insensitive.
+fn parse_stream_spec(spec: &str) -> freemkv_engine::StreamFilter {
+    use freemkv_engine::StreamFilter;
+    if spec.eq_ignore_ascii_case("all") {
+        return StreamFilter::All;
+    }
+    if spec.eq_ignore_ascii_case("none") {
+        return StreamFilter::None;
+    }
+    let langs: Vec<String> = spec
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if langs.is_empty() {
+        // `-a ,` or `-a ` → treat as keep-all rather than an empty selection.
+        StreamFilter::All
+    } else {
+        StreamFilter::Langs(langs)
+    }
 }
 
 /// Where the CLI looks up AACS keys for a disc, assembled from the key flags.
@@ -242,6 +538,11 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
             "-t" | "--title" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
+                    // `-t all` — rip every title (the pre-1.6 default; now opt-in).
+                    Some(v) if v.eq_ignore_ascii_case("all") => {
+                        i += 1;
+                        f.all_titles = true;
+                    }
                     Some(v) if !is_url_token(v) => {
                         i += 1;
                         match v.parse::<usize>() {
@@ -255,6 +556,36 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                         return Err(strings::fmt(
                             "error.flag_needs_value",
                             &[("flag", flag), ("example", "-t 1")],
+                        ));
+                    }
+                }
+            }
+            "-a" | "--audio" => {
+                let flag = &args[i];
+                match args.get(i + 1) {
+                    Some(v) if !is_url_token(v) => {
+                        i += 1;
+                        f.streams.audio = parse_stream_spec(v);
+                    }
+                    _ => {
+                        return Err(strings::fmt(
+                            "error.flag_needs_value",
+                            &[("flag", flag), ("example", "-a eng,spa")],
+                        ));
+                    }
+                }
+            }
+            "-s" | "--subtitles" => {
+                let flag = &args[i];
+                match args.get(i + 1) {
+                    Some(v) if !is_url_token(v) => {
+                        i += 1;
+                        f.streams.subtitles = parse_stream_spec(v);
+                    }
+                    _ => {
+                        return Err(strings::fmt(
+                            "error.flag_needs_value",
+                            &[("flag", flag), ("example", "-s eng")],
                         ));
                     }
                 }
@@ -371,8 +702,25 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         keydb_path,
         key_url,
         key_auth,
-        title_nums,
+        mut title_nums,
+        all_titles,
+        streams,
     } = flags;
+    // Stream selection is active when the user narrowed either class; the
+    // default (All/All) short-circuits to a no-op so the output is byte-
+    // identical to no flags.
+    let stream_sel_active = !streams.is_all();
+
+    // `-t` DEFAULT (1.6.0): with no `-t N` and no `-t all`, rip the MAIN TITLE
+    // only (title 1). Pre-1.6 the empty case meant all-titles, which on an
+    // obfuscated disc (50+ near-equal-length playlists) rips everything — a
+    // 40 GB disc became ~200 GB of near-duplicate MKVs. `-t all` restores the
+    // all-titles behaviour explicitly. Normalizing to `[1]` here reuses the
+    // existing single-`-t 1` path in build_jobs unchanged; `-t all` leaves
+    // title_nums empty, which build_jobs already treats as all-titles.
+    if title_nums.is_empty() && !all_titles {
+        title_nums.push(1);
+    }
 
     let keys = KeyConfig {
         keydb_path,
@@ -427,7 +775,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     }
 
     // Everything else: figure out titles, pipe each one
-    // For disc with explicit -t, skip scan_titles (pipe_disc does its own scan)
+    // For disc with explicit -t, skip the upfront ISO scan (pipe_disc scans itself)
     let is_disc = matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. });
 
     // `--multipass` (and `--raw`) on a non-iso:// destination is rejected up
@@ -435,13 +783,13 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // warn-and-ignore here is gone: reaching this point with `multipass` set
     // means the destination IS iso:// (handled by the disc_to_iso branch above)
     // or it's a non-disc source where multipass never applied. No action needed.
-    // For a disc source we skip the upfront `scan_titles` (pipe_disc does its
+    // For a disc source we skip the upfront `scan_iso` (pipe_disc does its
     // own scan per title); we still need to honor MULTIPLE `-t` flags, so build
     // jobs straight from `title_nums` rather than collapsing to a single title.
     // Scan the ISO structure ONCE (keyless) and share it: titles here, unit keys
     // below (`resolve_iso_unit_keys`). A disc source scans per-title in `pipe_disc`.
     let iso_disc = if is_disc { None } else { scan_iso(source) };
-    let titles = iso_disc.as_ref().map(|d| d.titles.clone());
+    let titles = iso_disc.as_ref().map(|(d, _)| d.titles.clone());
     let is_dir_dest = dest.ends_with('/') || std::path::Path::new(parsed_dest.path_str()).is_dir();
 
     // Resolve the per-title indices we will rip. For a scanned source this comes
@@ -485,7 +833,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // keydb → decrypt_with) and hand them to each title's stream — libfreemkv
     // does no lookup. A disc source resolves per-title inside `pipe_disc`.
     let iso_unit_keys = match iso_disc {
-        Some(disc) => resolve_iso_unit_keys(source, disc, &keys, &out),
+        Some((disc, reader)) => resolve_iso_unit_keys(disc, reader, &keys, &out),
         None => Vec::new(),
     };
 
@@ -555,41 +903,84 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                 &keys,
                 raw,
                 multipass,
+                &streams,
                 &out,
             )
         } else {
-            // Non-disc (ISO): hand in the caller-resolved unit keys.
+            // Non-disc (ISO): translate the -a/-s language policy into PIDs
+            // against THIS scanned title, then hand it in with the unit keys.
+            // A bad language tag (typo) fails the whole rip — it would fail
+            // every title identically.
+            let selection = match (&titles, title_idx) {
+                (Some(t), Some(idx)) if stream_sel_active => match streams.resolve(&t[*idx]) {
+                    Ok(sel) => sel,
+                    Err(e) => {
+                        out.raw(Normal, &render_stream_sel_error(&e, &t[*idx]));
+                        ok = false;
+                        break;
+                    }
+                },
+                _ => libfreemkv::StreamSelection::default(),
+            };
             let opts = libfreemkv::InputOptions {
                 unit_keys: iso_unit_keys.clone(),
                 title_index: *title_idx,
                 raw,
                 key_fetch: iso_key_fetch.clone(),
+                selection,
             };
             pipe(source, dest_url, &opts, &out)
         };
 
         if let Err(e) = result {
-            if is_title_failure_fatal(&e, multi_title, explicit_selection, is_feature) {
-                // The title the user actually wants (a `-t N` selection, or the
-                // main feature) failed, or the failure is not a recoverable
-                // per-title copy-protection skip — a genuine hard error. Print
-                // it (E7023 / NoDiscKey / IO …) and fail the command.
-                out.raw(Normal, &render_error(&e));
-                ok = false;
-            } else {
-                // An incidental extra title in an all-titles rip is a stub:
-                // either copy-protected-but-uncrackable (E7023) or empty / no
-                // muxable frames (E6008, an empty nav/menu PGC that emits no
-                // frames). `is_title_failure_fatal` classified it non-fatal, so
-                // skip it with a clear, non-error notice and keep muxing the
-                // rest; the command can still exit 0 if the feature / requested
-                // titles succeed. NO FALSE ERRORS.
-                let num = title_idx.map(|i| i + 1).unwrap_or(0);
-                let key = match parse_error_code(&e) {
-                    Some(("E6008", _)) => "rip.title_skipped_empty",
-                    _ => "rip.title_skipped",
-                };
-                out.raw(Normal, &strings::fmt(key, &[("num", &num.to_string())]));
+            // The skip / stop / fail decision is the ENGINE's single policy
+            // (freemkv_engine::decide_title), shared with autorip + the desktop
+            // UI. The CLI keeps only the presentation of each outcome.
+            match freemkv_engine::decide_title(
+                &e.result,
+                is_feature,
+                multi_title,
+                explicit_selection,
+            ) {
+                freemkv_engine::TitleAction::Skip => {
+                    // An incidental extra title in an all-titles rip is a stub
+                    // (copy-protected-but-uncrackable E7023, or empty/no muxable
+                    // frames E6008). Skip it with a clear, non-error notice and
+                    // keep muxing the rest — the command can still exit 0. The
+                    // E6008-vs-other distinction only picks the notice flavor.
+                    let num = title_idx.map(|i| i + 1).unwrap_or(0);
+                    let key = match parse_error_code(&e.display) {
+                        Some(("E6008", _)) => "rip.title_skipped_empty",
+                        _ => "rip.title_skipped",
+                    };
+                    out.raw(Normal, &strings::fmt(key, &[("num", &num.to_string())]));
+                }
+                freemkv_engine::TitleAction::StopHalt => {
+                    // Ctrl-C is a FULL STOP: surface the interrupt and break the
+                    // whole loop — do NOT continue cancelling each later title.
+                    out.raw(Normal, &render_error(&e.display));
+                    ok = false;
+                    break;
+                }
+                freemkv_engine::TitleAction::StopNoKey => {
+                    // The disc as a whole has no key — every remaining title
+                    // fails identically. Fail fast: print once and stop, instead
+                    // of iterating all N titles re-printing the same error.
+                    out.raw(Normal, &render_error(&e.display));
+                    ok = false;
+                    break;
+                }
+                freemkv_engine::TitleAction::StopFatal => {
+                    // The title the user actually wants (a `-t N` selection, or
+                    // the main feature) failed hard. Print it and fail the
+                    // command, but keep the loop shape identical to before for a
+                    // multi-title rip where a LATER wanted title might differ.
+                    out.raw(Normal, &render_error(&e.display));
+                    ok = false;
+                }
+                // `Continue` is the `Ok(())` arm above; a decided-Continue on an
+                // Err cannot happen (Ok/Halted/NoKey/Stub/Failed are exhaustive).
+                freemkv_engine::TitleAction::Continue => {}
             }
         }
         out.blank(Normal);
@@ -1081,14 +1472,22 @@ fn keyless_scan_opts() -> libfreemkv::ScanOptions {
 /// A locked drive needs the cert to read its Volume ID; an unlocked / LibreDrive
 /// drive takes the OEM path and ignores them. ISO scans use [`keyless_scan_opts`].
 pub(crate) fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOptions {
-    let path = resolved_keydb_path(keydb_path);
-    let host_certs = freemkv_keysources::KeydbSource::new(path).host_certs();
-    let credentials =
-        (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs });
     libfreemkv::ScanOptions {
-        credentials,
+        credentials: drive_credentials(keydb_path),
         ..Default::default()
     }
+}
+
+/// Build the AACS host credentials for a live-drive handshake from the local
+/// keydb — the CONSUMER-side cert extraction (libfreemkv derives none of this;
+/// it only forwards what we hand it). `None` when the keydb carries no host
+/// cert. Used to populate [`libfreemkv::KeySpec::credentials`].
+pub(crate) fn drive_credentials(
+    keydb_path: &Option<String>,
+) -> Option<libfreemkv::DriveCredentials> {
+    let path = resolved_keydb_path(keydb_path);
+    let host_certs = freemkv_keysources::KeydbSource::new(path).host_certs();
+    (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs })
 }
 
 /// Resolve a **live drive's** AACS unit keys in place for `disc-info -v`: sample
@@ -1104,65 +1503,41 @@ pub(crate) fn resolve_info_keys(
     keydb_path: &Option<String>,
     out: &Output,
 ) {
-    let samples = disc
-        .titles
-        .iter()
-        .max_by_key(|t| t.size_bytes)
-        .cloned()
-        .map(|t| libfreemkv::read_encrypted_units(drive, &t, freemkv_keysources::MIN_SAMPLE_UNITS))
-        .unwrap_or_default();
     let keys = KeyConfig {
         keydb_path: keydb_path.clone(),
         key_url: None,
         key_auth: None,
     };
-    apply_keys(disc, &keys, samples, out);
+    resolve_disc_keys(disc, drive, &keys, out);
 }
 
 /// Scan an `iso://` source's structure ONCE (keyless). The resulting `Disc` is
 /// shared by title enumeration and unit-key resolution so the ISO is not
-/// re-parsed per step. `None` for a non-iso source or an unreadable image.
-fn scan_iso(source: &str) -> Option<libfreemkv::Disc> {
+/// re-parsed per step; the returned reader is reused for ciphertext sampling
+/// in `resolve_iso_unit_keys`. `None` for a non-iso source or an unreadable
+/// image.
+fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>)> {
     let path = match libfreemkv::parse_url(source) {
         libfreemkv::StreamUrl::Iso { path } => path,
         _ => return None,
     };
-    let mut reader = libfreemkv::FileSectorSource::open(&path).ok()?;
-    let capacity =
-        <libfreemkv::FileSectorSource as libfreemkv::SectorSource>::capacity_sectors(&reader);
-    libfreemkv::Disc::scan_image(&mut reader, capacity, &keyless_scan_opts()).ok()
+    libfreemkv::scan_iso(std::path::Path::new(&path), keyless_scan_opts()).ok()
 }
 
 /// Resolve an ISO's AACS unit keys from an already-scanned `Disc`: sample its
 /// largest title, then local keydb, then decrypt_with. Empty for an unencrypted
 /// ISO or when no key resolves.
+///
+/// Reuses the reader returned by `scan_iso` (the ISO was already opened +
+/// scanned once) purely to sample ciphertext — no second file open, no second
+/// structure scan.
 fn resolve_iso_unit_keys(
-    source: &str,
     mut disc: libfreemkv::Disc,
+    mut reader: Box<dyn libfreemkv::SectorSource>,
     keys: &KeyConfig,
     out: &Output,
 ) -> Vec<(u32, [u8; 16])> {
-    let path = match libfreemkv::parse_url(source) {
-        libfreemkv::StreamUrl::Iso { path } => path,
-        _ => return Vec::new(),
-    };
-    // The ISO was already scanned once by the caller (`scan_iso`); we only open a
-    // cheap reader here to sample ciphertext — no second structure scan.
-    let Ok(mut reader) = libfreemkv::FileSectorSource::open(&path) else {
-        return Vec::new();
-    };
-    // Sample encrypted units from the largest title so key resolution can
-    // validate a keydb key against real ciphertext (and reject a wrong one).
-    let samples = disc
-        .titles
-        .iter()
-        .max_by_key(|t| t.size_bytes)
-        .cloned()
-        .map(|t| {
-            libfreemkv::read_encrypted_units(&mut reader, &t, freemkv_keysources::MIN_SAMPLE_UNITS)
-        })
-        .unwrap_or_default();
-    apply_keys(&mut disc, keys, samples, out);
+    resolve_disc_keys(&mut disc, reader.as_mut(), keys, out);
     match disc.decrypt_keys() {
         libfreemkv::DecryptKeys::Aacs { unit_keys, .. } => unit_keys,
         _ => Vec::new(),
@@ -1254,10 +1629,12 @@ pub(crate) fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::Pat
 /// added; a rejected URL prints a warning and the online source is dropped (the
 /// keydb, if any, still applies) rather than POSTing key material to an
 /// internal/metadata host.
-fn build_key_sources(
-    keys: &KeyConfig,
-    out: &Output,
-) -> Vec<Box<dyn freemkv_keysources::KeySource>> {
+/// The ordered `KeySource` list, WITHOUT any user-facing warning — the pure
+/// build used inside the [`libfreemkv::KeySourceFactory`] closure, which is
+/// invoked repeatedly (per on-decrypt-miss fetch) and must not re-warn. An
+/// SSRF-rejected `--key-url` is silently dropped here; the visible warning is
+/// emitted ONCE up front by [`build_key_sources`] / [`key_source_factory`].
+fn build_key_sources_quiet(keys: &KeyConfig) -> Vec<Box<dyn freemkv_keysources::KeySource>> {
     let mut sources: Vec<Box<dyn freemkv_keysources::KeySource>> = Vec::new();
 
     // Local keydb is added whenever the user didn't ask for online-only. (An
@@ -1270,47 +1647,64 @@ fn build_key_sources(
     }
 
     if let Some(url) = &keys.key_url {
-        match freemkv_keysources::validate_keyserver_url(url) {
-            Ok(()) => sources.push(Box::new(freemkv_keysources::OnlineSource::new(
+        if freemkv_keysources::validate_keyserver_url(url).is_ok() {
+            sources.push(Box::new(freemkv_keysources::OnlineSource::new(
                 url.clone(),
                 keys.key_auth.clone().unwrap_or_default(),
-            ))),
-            Err(e) => {
-                out.raw(
-                    Normal,
-                    &strings::fmt("error.keyserver_url_rejected", &[("error", &e)]),
-                );
-            }
+            )));
         }
     }
     sources
 }
 
-/// Resolve an AACS key for a keyless-scanned `disc` from the configured sources
-/// and apply it via `Disc::decrypt_with`. No-op for an unencrypted disc (no AACS
-/// inputs). Each source hands its candidates out best-first and the shared loop
-/// keeps the first whose key actually decrypts a `samples` unit (a wrong
-/// candidate is rejected and the next tried). Sources are local-first — see
-/// [`build_key_sources`].
-fn apply_keys(disc: &mut libfreemkv::Disc, keys: &KeyConfig, samples: Vec<Vec<u8>>, out: &Output) {
-    let Some(mut inputs) = disc.inputs() else {
-        return; // not AACS-encrypted (or no inputs captured)
-    };
-    inputs.samples = samples;
-    let sources = build_key_sources(keys, out);
-    // The `_traced` variant resolves AND hands back the structured per-source
-    // walk; each source's `get_uk` is tried in order and the first whose Unit
-    // Keys validate against the samples is committed.
-    let (_resolved, trace) =
-        libfreemkv::keysource::resolve_and_apply_traced(&sources, &inputs, disc);
-    // Render the structured walk to STDERR (never stdout — that may carry the
-    // piped disc stream), suppressed only when quiet. English lives here in the
-    // app layer; the library trace is typed enums only.
+/// Print the SSRF-rejected-`--key-url` warning (once) if the configured key URL
+/// fails validation — matching the pre-hoist `build_key_sources` behaviour.
+fn warn_ssrf_rejected(keys: &KeyConfig, out: &Output) {
+    if let Some(url) = &keys.key_url {
+        if let Err(e) = freemkv_keysources::validate_keyserver_url(url) {
+            out.raw(
+                Normal,
+                &strings::fmt("error.keyserver_url_rejected", &[("error", &e)]),
+            );
+        }
+    }
+}
+
+/// Build the [`libfreemkv::KeySourceFactory`] the library's key resolution
+/// ([`libfreemkv::resolve_keys_for`] / [`libfreemkv::DiscSession::resolve_keys`])
+/// calls to (re)build the ordered sources. Emits the one-time SSRF warning here;
+/// the returned factory is quiet.
+fn key_source_factory(keys: &KeyConfig, out: &Output) -> libfreemkv::KeySourceFactory {
+    warn_ssrf_rejected(keys, out);
+    let keys = keys.clone();
+    std::sync::Arc::new(move || build_key_sources_quiet(&keys))
+}
+
+/// Render the AACS resolution trace to STDERR (never stdout — that may carry the
+/// piped disc stream), suppressed when quiet. English lives here in the app
+/// layer; the library trace is typed enums only.
+fn emit_resolution_trace(out: &Output, trace: &libfreemkv::aacs::trace::ResolutionTrace) {
     if !out.is_quiet() {
-        for line in render_resolution_trace(&trace) {
+        for line in render_resolution_trace(trace) {
             eprintln!("{line}");
         }
     }
+}
+
+/// Resolve an AACS key for a keyless-scanned `disc` from the configured sources,
+/// reading ciphertext samples through `reader`, and render the structured walk.
+/// No-op for an unencrypted disc (no AACS inputs). Thin app-layer wrapper over
+/// [`libfreemkv::resolve_keys_for`] (which owns sampling / ordered-apply /
+/// banking / fetch construction).
+fn resolve_disc_keys(
+    disc: &mut libfreemkv::Disc,
+    reader: &mut dyn libfreemkv::SectorSource,
+    keys: &KeyConfig,
+    out: &Output,
+) {
+    let factory = key_source_factory(keys, out);
+    let resolved = libfreemkv::resolve_keys_for(reader, disc, factory);
+    emit_resolution_trace(out, &resolved.trace);
 }
 
 /// Render a [`libfreemkv::aacs::trace::ResolutionTrace`] into human-readable
@@ -1373,6 +1767,7 @@ fn render_resolution_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> 
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pipe_disc(
     source: &str,
     dest: &str,
@@ -1380,23 +1775,38 @@ fn pipe_disc(
     keys: &KeyConfig,
     raw: bool,
     _multipass: bool,
+    streams: &freemkv_engine::StreamChoice,
     out: &Output,
-) -> Result<(), String> {
+) -> Result<(), PipeFail> {
     let parsed = libfreemkv::parse_url(source);
-    let device = match &parsed {
-        libfreemkv::StreamUrl::Disc { device: Some(p) } => p.clone(),
-        _ => libfreemkv::find_drive()
-            .map(|d| std::path::PathBuf::from(d.device_path()))
-            .ok_or_else(|| strings::get("error.no_drive"))?,
+    let target = match &parsed {
+        libfreemkv::StreamUrl::Disc { device: Some(p) } => {
+            libfreemkv::DeviceTarget::Path(p.clone())
+        }
+        _ => libfreemkv::DeviceTarget::Autodetect,
     };
 
     out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", source)]));
-    let mut drive = libfreemkv::Drive::open(&device).map_err(|e| format!("{}", e))?;
-    debug_drive_step("wait_ready", drive.wait_ready());
-    debug_drive_step("init", drive.init());
-    // probe_disc is advisory: it routinely fails (no disc, already probed) and
-    // the scan below re-derives what it needs, so its result stays discarded.
-    let _ = drive.probe_disc();
+    // Drive open + SCSI bring-up (wait_ready/init/probe_disc, all advisory) now
+    // lives in `DiscSession::open`; the AACS host creds ride in on the KeySpec
+    // instead of being pre-baked into ScanOptions. The advisory wait_ready/init
+    // failures that `debug_drive_step` used to print to stderr are now logged via
+    // the library's tracing (semantics — non-fatal — unchanged).
+    let keyspec = libfreemkv::KeySpec {
+        credentials: drive_credentials(keys.keydb_path()),
+        ..Default::default()
+    };
+    let mut session = libfreemkv::DiscSession::open(target, keyspec).map_err(|e| {
+        // Autodetect with no drive surfaces as an empty-path DeviceNotFound —
+        // keep the dedicated "no drive" message; any other open failure renders
+        // through the E-code Display.
+        PipeFail::fatal(match &e {
+            libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
+                strings::get("error.no_drive")
+            }
+            _ => format!("{}", e),
+        })
+    })?;
     // Lock the tray so the disc cannot eject mid-rip. The unlock is guaranteed
     // by `Drive::drop` (which calls `unlock_tray`): on every early-return path
     // below the local `drive` is dropped, and after it is moved into
@@ -1404,228 +1814,121 @@ fn pipe_disc(
     // any return. The only path that bypasses Drop is a SECOND Ctrl-C
     // (`_exit(130)`) — the first Ctrl-C now halts cleanly (loop check below)
     // and lets the stream drop, so the common interrupt case unlocks the tray.
-    drive.lock_tray();
+    session.lock_tray();
 
-    let mut disc = libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keys.keydb_path()))
-        .map_err(|e| format!("{}", e))?;
-    // Sample encrypted units from the largest title to validate the resolved key
-    // against real ciphertext before muxing.
-    let samples = disc
-        .titles
-        .iter()
-        .max_by_key(|t| t.size_bytes)
-        .cloned()
-        .map(|t| {
-            libfreemkv::read_encrypted_units(&mut drive, &t, freemkv_keysources::MIN_SAMPLE_UNITS)
-        })
-        .unwrap_or_default();
-    apply_keys(&mut disc, keys, samples, out);
+    session
+        .scan(libfreemkv::ScanOptions::default())
+        .map_err(|e| PipeFail::fatal(format!("{}", e)))?;
+    // Resolve + bank the disc's base AACS unit keys off the live drive (samples
+    // the largest title's ciphertext internally to validate the key), then
+    // render the structured walk. The library owns the sampling / ordered-apply /
+    // banking; the CLI just supplies the source factory and prints the trace.
+    let factory = key_source_factory(keys, out);
+    let trace = session
+        .resolve_keys(factory)
+        .map_err(|e| PipeFail::fatal(format!("{}", e)))?;
+    emit_resolution_trace(out, &trace);
+    // ── Pre-flight validation (borrows the scanned disc; no drive I/O) ──
+    //
+    // The session is KEPT intact so `mux_stream(MuxInput::Session)` can take its
+    // staged reader. Range-check + the decrypt gates run against the scanned
+    // `disc` by immutable borrow.
+    let batch = libfreemkv::disc::detect_max_batch_sectors(session.device_path());
+    // Resolved -a/-s PID selection for this title (default = keep all).
+    let mut selection = libfreemkv::StreamSelection::default();
+    {
+        let disc = session.disc().expect("scan populated the disc");
+        if title_idx >= disc.titles.len() {
+            return Err(PipeFail::fatal(strings::fmt(
+                "error.title_out_of_range",
+                &[
+                    ("num", &(title_idx + 1).to_string()),
+                    ("count", &disc.titles.len().to_string()),
+                ],
+            )));
+        }
 
-    if title_idx >= disc.titles.len() {
-        return Err(strings::fmt(
-            "error.title_out_of_range",
-            &[
-                ("num", &(title_idx + 1).to_string()),
-                ("count", &disc.titles.len().to_string()),
-            ],
-        ));
+        // Translate the -a/-s language policy into PIDs against this scanned
+        // title. A bad tag is a hard error (typo). Default All/All is a no-op.
+        if !streams.is_all() {
+            let title = &disc.titles[title_idx];
+            selection = streams
+                .resolve(title)
+                .map_err(|e| PipeFail::fatal(render_stream_sel_error(&e, title)))?;
+        }
+
+        // Pre-flight decrypt gate (disc-wide): catches a scrambled-but-uncracked
+        // CSS disc and an AACS disc with no resolved key BEFORE the mux — so the
+        // failure surfaces as the dedicated NoDiscKey/CssKeyMissing message, not
+        // a downstream zero-output guard. `--raw` and unencrypted discs pass.
+        disc.ensure_decryptable(raw).map_err(PipeFail::from_typed)?;
+
+        // Per-title decrypt gate for the AACS / non-DVD path. For AACS,
+        // `decrypt_keys_for_title` does NO drive I/O — it returns
+        // `(disc.decrypt_keys(), false)`, the SAME keys `mux_stream`'s Session
+        // arm resolves — so the gate here is equivalent to the old per-title
+        // check without a second drive read. A `None` key means no usable disc
+        // key (would mux garbage at exit 0); fail loudly with NoDiscKey. The DVD
+        // path is gated inside `DiscStream::new` (its per-title CSS crack, driven
+        // by `mux_stream`), so it is deliberately not pre-cracked here; `--raw`
+        // passes.
+        let is_dvd = matches!(disc.format, libfreemkv::DiscFormat::Dvd);
+        if !is_dvd {
+            let keys = disc.decrypt_keys();
+            disc.ensure_title_decryptable(raw, &keys, false)
+                .map_err(PipeFail::from_typed)?;
+        }
     }
 
-    // Pre-flight decrypt gate (disc-wide): catches a scrambled-but-uncracked
-    // CSS disc (`css_error` set, `css` None — the content IS encrypted) and an
-    // AACS disc with no resolved key, BEFORE building the stream. The per-title
-    // (multi-VTS CSS) check runs again below once the chosen title's key is
-    // resolved. `--raw` and unencrypted discs pass. Single verdict source as the
-    // ISO mux path (`Disc::ensure_decryptable`).
-    disc.ensure_decryptable(raw).map_err(|e| e.to_string())?;
-
-    let title = disc.titles[title_idx].clone();
-    let batch = libfreemkv::disc::detect_max_batch_sectors(drive.device_path());
-
-    // Per-title key resolution (mirrors the ISO path's per-title key block in
-    // libfreemkv mux/resolve.rs). For a DVD, `decrypt_keys_for_title` cracks the
-    // chosen title's CSS key from that title's OWN extents (in playback order),
-    // NOT from disc-wide detection — so the correct per-VTS key is used and a
-    // detection miss can never gate the mux into raw passthrough. It reads sectors
-    // off the live `drive` (a `SectorSource`), still owned here (only moved into
-    // `DiscStream` below). AACS / non-DVD discs short-circuit to `decrypt_keys()`.
-    // The bool reports whether the title proved GENUINELY CLEAR (an unencrypted
-    // stub needing no key): the gate below must not false-error such a title,
-    // while a scrambled-but-uncrackable title (bool false, key `None`) hard-fails.
-    // DVD CSS is resolved at exactly ONE site — the per-title crack inside
-    // `DiscStream::new` (which decrypts a crackable title, passes a genuinely
-    // clear one through, and hard-fails an uncrackable one with CssKeyMissing).
-    // So for a DVD we do NOT pre-crack here: pass `None` and let the constructor
-    // own it. Pre-cracking would scan the live drive a second time for every
-    // clear title (`decrypt_keys_for_title` → None → constructor re-cracks).
-    // `--raw` (any format) is deliberate ciphertext passthrough — also `None`,
-    // no crack, no gate.
-    let is_dvd = matches!(disc.format, libfreemkv::DiscFormat::Dvd);
-    let (keys, title_is_clear) = if raw || is_dvd {
-        (libfreemkv::DecryptKeys::None, false)
-    } else {
-        disc.decrypt_keys_for_title(title_idx, &mut drive, batch)
-    };
-
-    // Per-title decrypt gate for the AACS / non-DVD path: a None key here means
-    // no usable disc key, which would mux ciphertext as an empty/garbage MKV at
-    // exit 0 — fail loudly with NoDiscKey (named by hash). The DVD path is gated
-    // inside `DiscStream::new` instead (its CSS hard-fail), and `--raw` passes.
-    if !is_dvd {
-        disc.ensure_title_decryptable(raw, &keys, title_is_clear)
-            .map_err(|e| e.to_string())?;
-    }
-
-    let format = disc.content_format;
-
-    // `raw` here skips the CSS self-crack (ciphertext passthrough); `set_raw()`
-    // below additionally nulls the reader keys for the raw-AACS case.
-    let mut input =
-        libfreemkv::DiscStream::new(Box::new(drive), title, keys, batch, format, raw, None)
-            .map_err(|e| e.to_string())?;
-
-    if raw {
-        input.set_raw();
-    }
-
+    // The live drive is opened and the source is ready — complete the source
+    // "opening…" line started above. The disc→PES construction (DiscStream::new,
+    // the per-title CSS crack, the header pump) now lives inside `mux_stream`.
     out.raw(Normal, &strings::get("rip.ok"));
 
-    // From here, same as pipe(): headers → output → frame loop
-    let mut buffered = Vec::new();
-    while !input.headers_ready() {
-        match input.read() {
-            Ok(Some(frame)) => buffered.push(frame),
-            Ok(None) => break,
-            Err(e) => return Err(format!("{}", e)),
-        }
-    }
-
-    // The header loop breaks on EOF (`Ok(None)`) without re-checking
-    // `headers_ready()`. If we drained the input before the video codec
-    // parser emitted its codec_private (hvcC/avcC) — a damaged or very
-    // short title — `codec_private()` returns `None` for the video track
-    // and the muxer writes a track header with no CODEC_PRIVATE element.
-    // The downstream zero-output guard does NOT catch this (one stray audio
-    // PES byte clears it), so we would finalize a structurally-invalid MKV
-    // and exit 0. Refuse here, mirroring autorip's run_mux gate.
-    if !headers_resolved(input.headers_ready()) {
-        return Err(libfreemkv::Error::MkvInvalid.to_string());
-    }
-
-    let info = input.info().clone();
-    print_stream_info(out, &info);
-    print_mp4_skips(out, dest, &info);
-
-    let mut title = info.clone();
-    let disc_name = disc.meta_title.as_deref().unwrap_or(&disc.volume_id);
-    title.playlist = disc_name.to_string();
-    title.codec_privates = (0..info.streams.len())
-        .map(|i| input.codec_private(i))
-        .collect();
-
-    out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", dest)]));
-    let raw_output = match libfreemkv::output(dest, &title) {
-        Ok(s) => {
-            out.raw(Normal, &strings::get("rip.ok"));
-            s
-        }
-        Err(e) => {
-            out.raw(Normal, &strings::get("rip.failed"));
-            return Err(format!("{}", e));
-        }
+    // Stage the drive as the session's boxed reader so the Session arm can take
+    // it, then run the shared driver: it builds the `DiscStream`, pumps headers
+    // (chapters:// / json:// short-circuit BEFORE the header gate — the metadata
+    // export no longer false-fails on a title whose video headers never resolve),
+    // opens the sink, and pumps frames through the write pipeline to EOF or halt.
+    session.stage_drive_as_reader();
+    let metadata_sink = is_metadata_sink(dest);
+    let events = Arc::new(CliMuxEvents::new(*out, dest.to_string(), metadata_sink));
+    let opts = MuxOptions {
+        skip_errors: false,
+        batch_sectors: batch,
+        raw,
+        // Interactive stdout / network sink: NO per-frame send deadline. A
+        // slow-but-alive downstream (paused pager, backpressured pipe, slow
+        // peer) must block, not be reported as an interrupted mux after 60 s of
+        // backpressure — matching the pre-refactor inline blocking write. Ctrl-C
+        // still interrupts via the SIGINT halt.
+        send_deadline: None,
+        selection,
     };
-    let mut output = libfreemkv::pes::CountingStream::new(raw_output);
-    // Metadata sinks (chapters:// / json://) already wrote their whole file from
-    // the scanned title in output()/create(); they consume no PES frames. Skip
-    // the demux entirely — reading the title just to feed a no-op write() is
-    // pure waste (and on a disc, needless drive wear), and the zero-payload
-    // guard below would otherwise false-fail on a frameless sink.
-    if matches!(
-        libfreemkv::parse_url(dest),
-        libfreemkv::StreamUrl::Chapters { .. } | libfreemkv::StreamUrl::Json { .. }
-    ) {
-        output.finish().map_err(|e| format!("{}", e))?;
-        return Ok(());
-    }
-
-    out.blank(Normal);
-
-    let total_bytes = info.size_bytes;
-    let start = std::time::Instant::now();
-    let mut last_update = start;
-
-    for frame in &buffered {
-        output.write(frame).map_err(|e| format!("{}", e))?;
-    }
-
-    let mut interrupted = false;
-    loop {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            interrupted = true;
-            break;
-        }
-
-        match input.read() {
-            Ok(Some(frame)) => {
-                output.write(&frame).map_err(|e| format!("{}", e))?;
-
-                let now = std::time::Instant::now();
-                if !out.is_quiet() && now.duration_since(last_update).as_secs_f64() >= 0.5 {
-                    print_progress(output.bytes_written(), total_bytes, &start);
-                    last_update = now;
-                }
-            }
-            Ok(None) => break,
-            Err(e) => return Err(format!("{}", e)),
-        }
-    }
-
-    // On interrupt do NOT finalize: a SIGINT mid-mux leaves a truncated file.
-    // Calling `output.finish()` + returning Ok would write the container footer
-    // and report success, presenting a partial MKV as complete (exit 0). Bail
-    // with an error so the exit code is non-zero and we don't claim success.
-    // Re-read the flag here too: a SIGINT that lands during the final
-    // `input.read()` (the one returning `Ok(None)`) breaks the loop without
-    // tripping the top-of-loop check, so the in-loop `interrupted` can be stale.
-    if mux_was_interrupted(interrupted, INTERRUPTED.load(Ordering::SeqCst)) {
-        return Err(interrupted_error(out));
-    }
-
-    // Zero-output guard (Theme A): a natural drain that wrote no streams / no
-    // frame bytes must NOT be finalized and reported "Complete" — that is the
-    // empty/garbage-output silent failure (undecryptable input → demuxer emits
-    // nothing). Surface `Error::NoStreams` (as the ISO path does via the
-    // NoStreams gate in libfreemkv mux/resolve.rs) so the exit code is nonzero
-    // and the user sees a localized message instead of a header-only "success".
-    if !mux_produced_output(info.streams.len(), output.bytes_written()) {
-        return Err(libfreemkv::Error::NoStreams.to_string());
-    }
-
-    output.finish().map_err(|e| format!("{}", e))?;
-
-    print_completion_summary(out, output.bytes_written(), start);
-    Ok(())
+    let sigint = SigintHalt::install();
+    let result = libfreemkv::mux_stream(
+        MuxInput::Session {
+            session: &mut session,
+            title_index: title_idx,
+        },
+        dest,
+        &opts,
+        sigint.halt(),
+        events.clone() as Arc<dyn MuxEvents>,
+    );
+    drop(sigint);
+    finalize_mux(result, out, &events)
 }
 
-/// Minimum plausible PES-frame payload for a non-empty mux. `CountingStream`
-/// counts only the bytes of `PesFrame.data` actually handed to the sink, so a
-/// successful mux of even one tiny audio frame clears this. A value of 0 means
-/// the frame loop drained on the first `Ok(None)` having written nothing —
-/// the symptom of undecryptable/empty input (no TS syncs → demuxer emits
-/// nothing). We require strictly more than zero rather than a header threshold
-/// because `bytes_written()` is frame-payload bytes (not container bytes), so
-/// even a 1-byte payload is real media and any container header is not counted.
-const MIN_MUX_PAYLOAD_BYTES: u64 = 1;
-
-/// Whether a completed mux actually produced output, the guard both pipe paths
-/// run before declaring success (Theme A). A "natural drain" (`Ok(None)` on the
-/// first read) followed by `output.finish()` + a "Complete" summary must NOT be
-/// reported as success when the title carried no streams OR not a single frame
-/// payload byte reached the sink — that is the zero-output / undecryptable-input
-/// silent failure. Returns `false` (→ caller errors, nonzero exit) in those
-/// cases; `true` only when there is at least one stream and ≥1 payload byte.
-fn mux_produced_output(num_streams: usize, bytes_written: u64) -> bool {
-    num_streams > 0 && bytes_written >= MIN_MUX_PAYLOAD_BYTES
+/// Whether a destination URL is a metadata sink (`chapters://` / `json://`) —
+/// one that writes its whole file from the scanned title at `output()` time and
+/// consumes no PES frames. `mux_stream` short-circuits these BEFORE the header
+/// gate; the CLI only needs to know so it suppresses the completion summary.
+fn is_metadata_sink(dest: &str) -> bool {
+    matches!(
+        libfreemkv::parse_url(dest),
+        libfreemkv::StreamUrl::Chapters { .. } | libfreemkv::StreamUrl::Json { .. }
+    )
 }
 
 /// Whether a completed disc→ISO sweep actually recovered any readable data,
@@ -1637,19 +1940,6 @@ fn mux_produced_output(num_streams: usize, bytes_written: u64) -> bool {
 /// at least one byte was recovered.
 fn disc_copy_recovered_data(bytes_good: u64) -> bool {
     bytes_good > 0
-}
-
-/// The header-resolution gate both pipe paths run after their
-/// `while !input.headers_ready()` loop. That loop breaks on EOF (`Ok(None)`)
-/// without re-checking, so a disc with damaged video sectors or a very short
-/// title can drain before the video codec parser emits its codec_private
-/// (hvcC/avcC). Muxing then writes a track header with no CODEC_PRIVATE
-/// element — a structurally-invalid MKV that the zero-output guard does NOT
-/// catch (one stray audio PES byte clears it). Returns `false` (→ caller
-/// errors with `MkvInvalid`, nonzero exit) when headers never resolved;
-/// `true` only when `headers_ready()` actually became true.
-fn headers_resolved(headers_ready: bool) -> bool {
-    headers_ready
 }
 
 /// Print the interrupt notice and return the error string both pipe paths use
@@ -1666,50 +1956,6 @@ fn interrupted_error(out: &Output) -> String {
 ///
 /// Core principle: **NO FALSE ERRORS, and a failure in one extra title must not
 /// kill the whole rip.** When `freemkv iso://X mkv://dir/` muxes ALL titles, one
-/// incidental copy-protected-but-uncrackable stub (a 0.5 s menu loop, an
-/// FBI-warning title) used to abort the entire mux with `E7023` and make users
-/// think freemkv was broken. It must instead skip that title and finish the rest.
-///
-/// A failure is FATAL (hard error, non-zero exit) when ANY of:
-/// - the error is NOT a skippable per-title stub failure. Two codes are
-///   skippable: `E7023` / [`libfreemkv::Error::CssKeyMissing`] (copy-protected,
-///   no key recoverable) and `E6008` / [`libfreemkv::Error::MkvInvalid`] (the
-///   title produced no muxable frames — an empty nav/menu PGC stub). Every other
-///   error (IO, NoDiscKey/E7022 AACS, …) is a real problem and stays fatal;
-/// - the user explicitly selected titles with `-t N` (`explicit_selection`) —
-///   the title they asked for failing is exactly what they need to know about;
-/// - this title IS the main feature (`is_feature`, title index 0) — the movie
-///   itself failing is never "incidental";
-/// - the rip targets a single title (`!multi_title`) — there is no "other title"
-///   to carry on with, so the lone failure is the result.
-///
-/// It is SKIPPABLE (warn + continue, command may still exit 0) ONLY when an
-/// all-titles rip (`multi_title && !explicit_selection`) hits a non-feature
-/// title whose failure is one of the skippable stub codes. This runtime
-/// classification is the operative mechanism for empty nav/menu PGC stubs:
-/// rather than pre-filtering the job set, a title that scans as non-empty yet
-/// still muxes to nothing (E6008) is caught here at rip time and skipped with a
-/// clear notice (`rip.title_skipped_empty`) instead of printing a scary error.
-fn is_title_failure_fatal(
-    err: &str,
-    multi_title: bool,
-    explicit_selection: bool,
-    is_feature: bool,
-) -> bool {
-    // Only a per-title STUB failure is ever a candidate for skipping:
-    // E7023 (CssKeyMissing — copy-protected) or E6008 (MkvInvalid — empty/no
-    // frames). Anything else is always fatal. The error string is libfreemkv's
-    // `E<code>[: <data>]` Display form (see `parse_error_code`).
-    let is_skippable_code =
-        parse_error_code(err).is_some_and(|(code, _)| matches!(code, "E7023" | "E6008"));
-    if !is_skippable_code {
-        return true;
-    }
-    // A stub failure on the feature, an explicitly-requested title, or in a
-    // single-title rip is the title the user actually wants — hard error.
-    is_feature || explicit_selection || !multi_title
-}
-
 /// One title: open input, open output, stream PES frames.
 /// Used for non-disc sources (ISO, MKV, M2TS, network, stdio).
 fn pipe(
@@ -1717,134 +1963,41 @@ fn pipe(
     dest: &str,
     opts: &libfreemkv::InputOptions,
     out: &Output,
-) -> Result<(), String> {
-    // Open input
+) -> Result<(), PipeFail> {
+    // The source open (`input()`), the header pump + gate, the sink open, the
+    // chapters:// / json:// short-circuit (now BEFORE the header gate — the
+    // metadata-export bug fix), the frame pump, and the NoStreams guard all live
+    // inside `mux_stream` now. The CLI keeps only the presentation: the source
+    // "opening…/ok" line and — via `CliMuxEvents` — the stream-info block, the
+    // destination open line, and the throttled progress bar.
     out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", source)]));
-    let mut input = match libfreemkv::input(source, opts) {
-        Ok(s) => {
-            out.raw(Normal, &strings::get("rip.ok"));
-            s
-        }
-        Err(e) => {
-            out.raw(Normal, &strings::get("rip.failed"));
-            return Err(format!("{}", e));
-        }
+    out.raw(Normal, &strings::get("rip.ok"));
+
+    let metadata_sink = is_metadata_sink(dest);
+    let events = Arc::new(CliMuxEvents::new(*out, dest.to_string(), metadata_sink));
+    let mux_opts = MuxOptions {
+        skip_errors: false,
+        batch_sectors: 0, // unused by the URL arm (input() owns batching)
+        raw: opts.raw,
+        // No per-frame send deadline on the CLI's stdout / network sinks — a
+        // slow-but-alive consumer must block rather than surface a spurious
+        // interrupt. Ctrl-C still stops the pump via the SIGINT halt.
+        send_deadline: None,
+        selection: Default::default(),
     };
-
-    // Read frames until codec headers are ready (also parses metadata headers for stdio/network)
-    let mut buffered = Vec::new();
-    while !input.headers_ready() {
-        match input.read() {
-            Ok(Some(frame)) => buffered.push(frame),
-            Ok(None) => break,
-            Err(e) => return Err(format!("{}", e)),
-        }
-    }
-
-    // The header loop breaks on EOF (`Ok(None)`) without re-checking
-    // `headers_ready()`. If the input drained before the video codec parser
-    // emitted its codec_private (hvcC/avcC), `codec_private()` yields `None`
-    // for the video track and the muxer writes a track header with no
-    // CODEC_PRIVATE element — a structurally-invalid MKV. The zero-output
-    // guard below does NOT catch this (one stray audio PES byte clears it),
-    // so without this check we would finalize the broken file and exit 0.
-    // Refuse here, mirroring autorip's run_mux gate.
-    if !headers_resolved(input.headers_ready()) {
-        return Err(libfreemkv::Error::MkvInvalid.to_string());
-    }
-
-    // Get info after header scanning (stdio/network populate info during read)
-    let info = input.info().clone();
-    print_stream_info(out, &info);
-    print_mp4_skips(out, dest, &info);
-
-    // Build output title with codec_privates from input
-    let mut title = info.clone();
-    title.codec_privates = (0..info.streams.len())
-        .map(|i| input.codec_private(i))
-        .collect();
-
-    // Open output, wrapped with byte counter for progress
-    out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", dest)]));
-    let raw_output = match libfreemkv::output(dest, &title) {
-        Ok(s) => {
-            out.raw(Normal, &strings::get("rip.ok"));
-            s
-        }
-        Err(e) => {
-            out.raw(Normal, &strings::get("rip.failed"));
-            return Err(format!("{}", e));
-        }
-    };
-    let mut output = libfreemkv::pes::CountingStream::new(raw_output);
-    // Metadata sinks (chapters:// / json://) already wrote their whole file from
-    // the scanned title in output()/create(); they consume no PES frames. Skip
-    // the demux entirely — reading the title just to feed a no-op write() is
-    // pure waste (and on a disc, needless drive wear), and the zero-payload
-    // guard below would otherwise false-fail on a frameless sink.
-    if matches!(
-        libfreemkv::parse_url(dest),
-        libfreemkv::StreamUrl::Chapters { .. } | libfreemkv::StreamUrl::Json { .. }
-    ) {
-        output.finish().map_err(|e| format!("{}", e))?;
-        return Ok(());
-    }
-
-    out.blank(Normal);
-
-    let total_bytes = info.size_bytes;
-    let start = std::time::Instant::now();
-    let mut last_update = start;
-
-    // Write buffered frames
-    for frame in &buffered {
-        output.write(frame).map_err(|e| format!("{}", e))?;
-    }
-
-    // Stream remaining frames
-    let mut interrupted = false;
-    loop {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            interrupted = true;
-            break;
-        }
-
-        match input.read() {
-            Ok(Some(frame)) => {
-                output.write(&frame).map_err(|e| format!("{}", e))?;
-
-                let now = std::time::Instant::now();
-                if !out.is_quiet() && now.duration_since(last_update).as_secs_f64() >= 0.5 {
-                    print_progress(output.bytes_written(), total_bytes, &start);
-                    last_update = now;
-                }
-            }
-            Ok(None) => break,
-            Err(e) => return Err(format!("{}", e)),
-        }
-    }
-
-    // See `pipe_disc`: a SIGINT mid-mux must not finalize a truncated file as
-    // success. Re-read the flag so a SIGINT during the final read (which breaks
-    // the loop via `Ok(None)` without hitting the top-of-loop check) is caught.
-    if mux_was_interrupted(interrupted, INTERRUPTED.load(Ordering::SeqCst)) {
-        return Err(interrupted_error(out));
-    }
-
-    // Zero-output guard (Theme A): a natural drain that wrote no streams / no
-    // frame bytes must NOT be finalized and reported "Complete" — that is the
-    // empty/garbage-output silent failure (undecryptable input → demuxer emits
-    // nothing). Surface `Error::NoStreams` (as the ISO path does via the
-    // NoStreams gate in libfreemkv mux/resolve.rs) so the exit code is nonzero
-    // and the user sees a localized message instead of a header-only "success".
-    if !mux_produced_output(info.streams.len(), output.bytes_written()) {
-        return Err(libfreemkv::Error::NoStreams.to_string());
-    }
-
-    output.finish().map_err(|e| format!("{}", e))?;
-
-    print_completion_summary(out, output.bytes_written(), start);
-    Ok(())
+    let sigint = SigintHalt::install();
+    let result = libfreemkv::mux_stream(
+        MuxInput::Url {
+            url: source,
+            opts: opts.clone(),
+        },
+        dest,
+        &mux_opts,
+        sigint.halt(),
+        events.clone() as Arc<dyn MuxEvents>,
+    );
+    drop(sigint);
+    finalize_mux(result, out, &events)
 }
 
 // ── Disc → ISO (raw sector copy, not a stream) ────────────────────────────
@@ -1904,18 +2057,9 @@ fn disc_to_iso(
         }
     };
     // Resolve + apply the AACS key so the keys persist in the mapfile during
-    // disc→ISO copy (the mux step reads them back to decrypt). Sample encrypted
-    // units first so the resolved key is validated against real ciphertext.
-    let samples = disc
-        .titles
-        .iter()
-        .max_by_key(|t| t.size_bytes)
-        .cloned()
-        .map(|t| {
-            libfreemkv::read_encrypted_units(&mut drive, &t, freemkv_keysources::MIN_SAMPLE_UNITS)
-        })
-        .unwrap_or_default();
-    apply_keys(&mut disc, keys, samples, out);
+    // disc→ISO copy (the mux step reads them back to decrypt). Ciphertext is
+    // sampled internally so the resolved key is validated against real data.
+    resolve_disc_keys(&mut disc, &mut drive, keys, out);
 
     // Pre-flight decrypt gate: a decrypting disc→ISO copy (not --raw) of an
     // encrypted disc with no usable key would write ciphertext to the ISO and
@@ -1964,14 +2108,14 @@ fn disc_to_iso(
     drive.lock_tray();
     let start = std::time::Instant::now();
     let last_update = std::cell::Cell::new(start);
-    let last_work_done = std::cell::Cell::new(None::<u64>);
-    let last_speed_time = std::cell::Cell::new(start);
+    // Speed + ETA come from the ENGINE's one derivation (no local math). The CLI
+    // only throttles the display and formats the numbers.
+    let speed_est = std::cell::RefCell::new(freemkv_engine::SpeedEstimator::new());
 
     struct CliProgress<'a> {
         out: &'a Output,
         last_update: &'a std::cell::Cell<std::time::Instant>,
-        last_work_done: &'a std::cell::Cell<Option<u64>>,
-        last_speed_time: &'a std::cell::Cell<std::time::Instant>,
+        speed_est: &'a std::cell::RefCell<freemkv_engine::SpeedEstimator>,
     }
     impl libfreemkv::progress::Progress for CliProgress<'_> {
         fn report(&self, p: &libfreemkv::progress::PassProgress) -> bool {
@@ -1979,23 +2123,11 @@ fn disc_to_iso(
                 let now = std::time::Instant::now();
                 if now.duration_since(self.last_update.get()).as_secs_f64() >= 0.5 {
                     self.last_update.set(now);
-
-                    let inst_speed = match self.last_work_done.get() {
-                        Some(prev) => {
-                            let prev_time = self.last_speed_time.get();
-                            let dt = now.duration_since(prev_time).as_secs_f64();
-                            if dt > 0.0 {
-                                (p.work_done.saturating_sub(prev) as f64 / 1_048_576.0) / dt
-                            } else {
-                                0.0
-                            }
-                        }
-                        None => 0.0,
-                    };
-                    self.last_work_done.set(Some(p.work_done));
-                    self.last_speed_time.set(now);
-
-                    print_disc_progress(p, inst_speed);
+                    let (speed_bps, eta_secs) = self
+                        .speed_est
+                        .borrow_mut()
+                        .sample(p.work_done, p.work_total);
+                    print_disc_progress(p, speed_bps, eta_secs);
                 }
             }
             // Returning false halts the copy. Consult the global SIGINT flag so
@@ -2009,18 +2141,17 @@ fn disc_to_iso(
     let progress = CliProgress {
         out,
         last_update: &last_update,
-        last_work_done: &last_work_done,
-        last_speed_time: &last_speed_time,
+        speed_est: &speed_est,
     };
 
-    let copy_opts = libfreemkv::disc::CopyOptions {
+    let copy_opts = freemkv_engine::CopyOptions {
         decrypt: !raw,
         multipass,
         halt: None,
         progress: Some(&progress),
         ..Default::default()
     };
-    let success = match disc.copy(&mut drive, &iso_path, &copy_opts) {
+    let success = match freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts) {
         Ok(r) if r.halted => {
             // Ctrl-C halted the copy (report() returned false). Don't print
             // "Complete" over a partial ISO — say it was interrupted and report
@@ -2075,7 +2206,7 @@ fn disc_to_iso(
                 let mapfile_path = disc.mapfile_for(&iso_path);
                 let main_title = disc.titles.first();
                 let main_title_bad = main_title
-                    .map(|t| disc.bytes_bad_in_title(&mapfile_path, t))
+                    .map(|t| freemkv_engine::bytes_bad_in_title_from_mapfile(&mapfile_path, t))
                     .unwrap_or(0);
                 // Report damage as a MAIN-TITLE duration only. The previous
                 // disc-wide figure multiplied a whole-disc bad-byte ratio by
@@ -2182,20 +2313,7 @@ fn dir_to_extract(
                         return false;
                     }
                 };
-            let samples = disc
-                .titles
-                .iter()
-                .max_by_key(|t| t.size_bytes)
-                .cloned()
-                .map(|t| {
-                    libfreemkv::read_encrypted_units(
-                        &mut drive,
-                        &t,
-                        freemkv_keysources::MIN_SAMPLE_UNITS,
-                    )
-                })
-                .unwrap_or_default();
-            apply_keys(&mut disc, keys, samples, out);
+            resolve_disc_keys(&mut disc, &mut drive, keys, out);
             if let Err(e) = disc.ensure_decryptable(false) {
                 out.raw(Normal, &render_error(&e));
                 return false;
@@ -2206,23 +2324,9 @@ fn dir_to_extract(
             ok
         }
         libfreemkv::StreamUrl::Iso { path } => {
-            let mut reader = match libfreemkv::FileSectorSource::open(path) {
-                Ok(r) => r,
-                Err(e) => {
-                    out.raw(
-                        Normal,
-                        &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
-                    );
-                    return false;
-                }
-            };
-            let capacity =
-                <libfreemkv::FileSectorSource as libfreemkv::SectorSource>::capacity_sectors(
-                    &reader,
-                );
-            let mut disc =
-                match libfreemkv::Disc::scan_image(&mut reader, capacity, &keyless_scan_opts()) {
-                    Ok(d) => d,
+            let (mut disc, mut reader) =
+                match libfreemkv::scan_iso(std::path::Path::new(path), keyless_scan_opts()) {
+                    Ok(pair) => pair,
                     Err(e) => {
                         out.raw(
                             Normal,
@@ -2231,20 +2335,7 @@ fn dir_to_extract(
                         return false;
                     }
                 };
-            let samples = disc
-                .titles
-                .iter()
-                .max_by_key(|t| t.size_bytes)
-                .cloned()
-                .map(|t| {
-                    libfreemkv::read_encrypted_units(
-                        &mut reader,
-                        &t,
-                        freemkv_keysources::MIN_SAMPLE_UNITS,
-                    )
-                })
-                .unwrap_or_default();
-            apply_keys(&mut disc, keys, samples, out);
+            resolve_disc_keys(&mut disc, reader.as_mut(), keys, out);
             if let Err(e) = disc.ensure_decryptable(false) {
                 out.raw(Normal, &render_error(&e));
                 return false;
@@ -2280,63 +2371,21 @@ fn run_extract(
     );
     out.blank(Normal);
 
-    // Bridge the CLI's SIGINT flag into a libfreemkv Halt the producer polls
-    // at file / batch boundaries. A watcher thread flips the halt when SIGINT
-    // arrives mid-extraction so a long extract stops promptly (the producer
+    // Bridge the CLI's SIGINT flag into a libfreemkv Halt the producer polls at
+    // file / batch boundaries, so a long extract stops promptly (the producer
     // leaves the in-flight file as `.partial`, never a half-written file that
-    // looks complete). The watcher exits when extraction finishes (via `done`).
-    let halt = libfreemkv::Halt::new();
-    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    if INTERRUPTED.load(Ordering::SeqCst) {
-        halt.cancel();
-    }
-    let watcher = {
-        let halt = halt.clone();
-        let done = done.clone();
-        std::thread::spawn(move || {
-            while !done.load(Ordering::SeqCst) {
-                if INTERRUPTED.load(Ordering::SeqCst) {
-                    halt.cancel();
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-        })
-    };
-
-    // Signal `done` and join the watcher from a Drop guard so the watcher is
-    // ALWAYS released — including the unwind path. `extract_tree` is not
-    // panic-free (a slice/arithmetic bug could panic); without the guard a
-    // panic would skip the `done.store`/`join` below and leave the watcher
-    // spinning its 200 ms poll until process exit. The guard's Drop runs on
-    // both normal return and unwind, so the thread is signalled and reaped
-    // either way.
-    struct WatcherGuard {
-        done: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        handle: Option<std::thread::JoinHandle<()>>,
-    }
-    impl Drop for WatcherGuard {
-        fn drop(&mut self) {
-            self.done.store(true, Ordering::SeqCst);
-            if let Some(h) = self.handle.take() {
-                let _ = h.join();
-            }
-        }
-    }
-    let _watcher_guard = WatcherGuard {
-        done: done.clone(),
-        handle: Some(watcher),
-    };
+    // looks complete). `SigintHalt`'s guard joins the watcher on drop — even on
+    // the unwind path, since `extract_tree` is not panic-free.
+    let sigint = SigintHalt::install();
 
     let opts = libfreemkv::ExtractOptions {
         force,
         progress: None,
-        halt: Some(halt.clone()),
+        halt: Some(sigint.halt().clone()),
     };
 
     let outcome = disc.extract_tree(reader, dest_path, &opts);
-    // `_watcher_guard`'s Drop (at end of scope, or on unwind) signals `done`
-    // and joins the watcher; no explicit store/join needed here.
+    drop(sigint);
 
     match outcome {
         Ok(res) => {
@@ -2487,7 +2536,14 @@ fn fmt_disc_damage(p: &libfreemkv::progress::PassProgress) -> String {
     }
 }
 
-fn print_disc_progress(p: &libfreemkv::progress::PassProgress, inst_speed_mbps: f64) {
+fn print_disc_progress(
+    p: &libfreemkv::progress::PassProgress,
+    speed_bps: u64,
+    eta_secs: Option<u64>,
+) {
+    // Speed + ETA are the ENGINE's derivation (freemkv_engine::SpeedEstimator);
+    // the CLI only formats them. bps → MB/s for display.
+    let inst_speed_mbps = speed_bps as f64 / 1_048_576.0;
     let bytes_disc = p.bytes_total_disc;
     if bytes_disc == 0 {
         return;
@@ -2512,11 +2568,10 @@ fn print_disc_progress(p: &libfreemkv::progress::PassProgress, inst_speed_mbps: 
     // can't produce a `NaN%`. Patch modes (Trim/Scrape) show progress through
     // bad ranges; Sweep/Mux show work_done/work_total — same formula either way.
     let pct = p.work_pct();
-    let eta = if inst_speed_mbps > 0.01 && p.work_total > p.work_done {
-        let remaining_mb = (p.work_total - p.work_done) as f64 / 1_048_576.0;
-        fmt_eta(remaining_mb / inst_speed_mbps)
-    } else {
-        "?:??".into()
+    // ETA comes from the engine estimator (seconds), not re-derived here.
+    let eta = match eta_secs {
+        Some(s) => fmt_eta(s as f64),
+        None => "?:??".into(),
     };
     let damage = fmt_disc_damage(p);
     eprint!(
@@ -2681,8 +2736,10 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
 }
 
 /// For an `mp4://` destination, print the tracks that can't be carried in MP4
-/// (bitmap subs, TrueHD/DTS, secondary video) so a compatibility export is never
-/// a silent drop. No-op for every other scheme.
+/// (bitmap subs; unmappable audio like TrueHD/LPCM — DTS/DTS-HD ARE carried;
+/// secondary video views; and primary video whose codec has no MP4 mapping like
+/// VC-1/MPEG-2) so a compatibility export is never a silent drop. No-op for
+/// every other scheme.
 fn print_mp4_skips(out: &Output, dest: &str, title: &libfreemkv::DiscTitle) {
     if !matches!(
         libfreemkv::parse_url(dest),
@@ -2702,20 +2759,29 @@ fn print_mp4_skips(out: &Output, dest: &str, title: &libfreemkv::DiscTitle) {
         ),
     );
     for (idx, reason) in &report.skipped {
-        let reason_key = match reason {
-            libfreemkv::Mp4SkipReason::BitmapSubtitle => "mp4.reason.subtitle",
-            libfreemkv::Mp4SkipReason::UnmappableAudio => "mp4.reason.audio",
-            libfreemkv::Mp4SkipReason::SecondaryVideo => "mp4.reason.video",
-        };
         out.raw(
             Normal,
             &format!(
                 "    - {} {}: {}",
                 strings::get("stream.track"),
                 idx + 1,
-                strings::get(reason_key)
+                strings::get(mp4_skip_reason_key(reason))
             ),
         );
+    }
+}
+
+/// The i18n key for an `mp4://` exclusion reason. Each variant maps to a DISTINCT
+/// string — in particular `SecondaryVideo` ("secondary video view", a dependent
+/// MVC/3D view) must NOT share a message with `UnmappableVideo` (a PRIMARY codec
+/// the MP4 writer can't carry, e.g. VC-1/MPEG-2), or a DVD/BD→mp4:// export would
+/// print "secondary video view" for the main video it is actually dropping.
+fn mp4_skip_reason_key(reason: &libfreemkv::Mp4SkipReason) -> &'static str {
+    match reason {
+        libfreemkv::Mp4SkipReason::BitmapSubtitle => "mp4.reason.subtitle",
+        libfreemkv::Mp4SkipReason::UnmappableAudio => "mp4.reason.audio",
+        libfreemkv::Mp4SkipReason::SecondaryVideo => "mp4.reason.video",
+        libfreemkv::Mp4SkipReason::UnmappableVideo => "mp4.reason.video_unmappable",
     }
 }
 
@@ -2740,16 +2806,6 @@ fn is_keyserver_url(s: &str) -> bool {
 /// cleanly (letting the tray unlock on drop) instead of being ignored.
 fn copy_should_continue(interrupted: bool) -> bool {
     !interrupted
-}
-
-/// Whether a mux must bail instead of finalizing the output. True if SIGINT was
-/// seen at any point: either mid-loop (`loop_interrupted`) OR during the final
-/// `input.read()` that returned `Ok(None)` and broke the loop without tripping
-/// the top-of-loop check (`flag_now` re-reads the global flag right before
-/// `output.finish()`). Finalizing after an interrupt would write the container
-/// footer over a truncated body and report success on a partial file.
-fn mux_was_interrupted(loop_interrupted: bool, flag_now: bool) -> bool {
-    loop_interrupted || flag_now
 }
 
 /// Whether a 0-based title index is within a source's title count. An explicit
@@ -2785,16 +2841,129 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyConfig, build_jobs, build_key_sources, copy_should_continue, dest_is_iso,
-        disc_copy_recovered_data, fmt_disc_damage, fmt_err, fmt_err_str, headers_resolved,
-        is_keyserver_url, is_scheme_only_sink, is_title_failure_fatal, is_url_token,
-        mux_produced_output, mux_was_interrupted, parse_error_code, parse_flags,
-        preflight_validate, render_error, resolved_keydb_path, sanitize_name, title_in_range,
-        validate_file_dest, validate_iso_input,
+        KeyConfig, PipeFail, build_jobs, build_key_sources_quiet, copy_should_continue,
+        dest_is_iso, disc_copy_recovered_data, fmt_disc_damage, fmt_err, fmt_err_str,
+        is_keyserver_url, is_metadata_sink, is_scheme_only_sink, is_url_token, mp4_skip_reason_key,
+        parse_error_code, parse_flags, parse_stream_spec, preflight_validate, render_error,
+        resolved_keydb_path, sanitize_name, title_in_range, validate_file_dest, validate_iso_input,
     };
     use crate::output::Output;
     use crate::strings;
     use libfreemkv::parse_url;
+
+    // ── `-t` default (1.6.0): main title unless `-t N` / `-t all` ───────────────
+    // Normalization lives in `run()` (not parse_flags): no `-t` and no `-t all`
+    // rips the MAIN title only; `-t all` rips everything; `-t N` rips title N.
+    // These pin the parse layer; the run()-level normalization is exercised by
+    // the default→[1] injection asserted here against parse_flags output.
+
+    #[test]
+    fn t_all_sets_all_titles_flag_and_no_nums() {
+        let f = parse_flags(&["-t".into(), "all".into()]).unwrap();
+        assert!(f.all_titles, "-t all must set all_titles");
+        assert!(
+            f.title_nums.is_empty(),
+            "-t all carries no explicit numbers"
+        );
+    }
+
+    #[test]
+    fn t_all_is_case_insensitive() {
+        assert!(
+            parse_flags(&["-t".into(), "ALL".into()])
+                .unwrap()
+                .all_titles
+        );
+        assert!(
+            parse_flags(&["--title".into(), "All".into()])
+                .unwrap()
+                .all_titles
+        );
+    }
+
+    #[test]
+    fn no_title_flag_leaves_empty_nums_and_not_all() {
+        // run() then normalizes this to [1] (main title). parse_flags itself
+        // leaves it empty + all_titles=false — the state the default keys off.
+        let f = parse_flags(&["--raw".into()]).unwrap();
+        assert!(f.title_nums.is_empty());
+        assert!(!f.all_titles);
+    }
+
+    #[test]
+    fn explicit_t_number_still_parses() {
+        let f = parse_flags(&["-t".into(), "3".into()]).unwrap();
+        assert_eq!(f.title_nums, vec![3]);
+        assert!(!f.all_titles);
+    }
+
+    #[test]
+    fn t_zero_still_rejected() {
+        // `-t 0` remains invalid (1-based); `all` is the way to get everything.
+        assert!(parse_flags(&["-t".into(), "0".into()]).is_err());
+    }
+
+    // ── `-a`/`-s` stream selection ─────────────────────────────────────────────
+    use freemkv_engine::StreamFilter;
+
+    #[test]
+    fn absent_a_s_flags_default_to_all() {
+        let f = parse_flags(&["--raw".into()]).unwrap();
+        assert_eq!(f.streams.audio, StreamFilter::All);
+        assert_eq!(f.streams.subtitles, StreamFilter::All);
+        assert!(f.streams.is_all());
+    }
+
+    #[test]
+    fn audio_langs_parse_into_a_lang_list() {
+        let f = parse_flags(&["-a".into(), "eng,spa".into()]).unwrap();
+        assert_eq!(
+            f.streams.audio,
+            StreamFilter::Langs(vec!["eng".into(), "spa".into()])
+        );
+        // subtitles untouched.
+        assert_eq!(f.streams.subtitles, StreamFilter::All);
+    }
+
+    #[test]
+    fn subtitle_flag_sets_only_subtitles() {
+        let f = parse_flags(&["-s".into(), "English".into()]).unwrap();
+        assert_eq!(
+            f.streams.subtitles,
+            StreamFilter::Langs(vec!["English".into()])
+        );
+        assert_eq!(f.streams.audio, StreamFilter::All);
+    }
+
+    #[test]
+    fn spec_keywords_all_and_none_are_case_insensitive() {
+        assert_eq!(parse_stream_spec("all"), StreamFilter::All);
+        assert_eq!(parse_stream_spec("ALL"), StreamFilter::All);
+        assert_eq!(parse_stream_spec("none"), StreamFilter::None);
+        assert_eq!(parse_stream_spec("None"), StreamFilter::None);
+    }
+
+    #[test]
+    fn spec_trims_and_drops_empty_langs() {
+        assert_eq!(
+            parse_stream_spec(" eng , , spa "),
+            StreamFilter::Langs(vec!["eng".into(), "spa".into()])
+        );
+    }
+
+    #[test]
+    fn a_flag_value_is_not_swallowed_as_a_url() {
+        // `-a eng` between two URLs: the value must be consumed, not left to be
+        // mistaken for a positional stream URL.
+        let f = parse_flags(&["-a".into(), "eng".into(), "iso://x".into()]).unwrap();
+        assert_eq!(f.streams.audio, StreamFilter::Langs(vec!["eng".into()]));
+    }
+
+    #[test]
+    fn a_flag_needs_a_value() {
+        // `-a` with a URL immediately after (no value) is an error.
+        assert!(parse_flags(&["-a".into(), "iso://x".into(), "mkv://o".into()]).is_err());
+    }
 
     // The decrypt no-key verdict matrix (AACS / CSS / css_error / --raw /
     // unencrypted) now lives in `libfreemkv::Disc::ensure_decryptable[_keys]`,
@@ -2805,83 +2974,76 @@ mod tests {
     // `Error::NoDiscKey` renders to an English message with no raw code leak — is
     // covered by `no_keydb_aacs_disc_surfaces_e7022_in_english` below.
 
-    // ── zero-output guard (Theme A fix #1/#2) ───────────────────────────────
+    // ── PipeFail::from_mux skippable-stub classification (the is_skippable swap) ─
 
-    /// The success guard both pipe paths run before `output.finish()` +
-    /// "Complete": a drain that wrote no streams OR no frame bytes must be
-    /// reported as NOT produced (→ caller errors with NoStreams, nonzero
-    /// exit), never finalized as an empty/garbage "success".
+    /// `PipeFail::from_mux` classifies the typed `io::Error` `mux_stream` returns
+    /// via `libfreemkv::error::is_skippable_title_stub` — NOT an E-code string
+    /// match. The two stub codes (E7023 CssKeyMissing, E6008 MkvInvalid) are
+    /// skippable; every other libfreemkv error is fatal.
+    ///
+    /// Mutation: swapping to the wrong codes (e.g. matching E6009/NoStreams or
+    /// E7022/NoDiscKey) flips one of these asserts and fails.
     #[test]
-    fn mux_produced_output_requires_streams_and_bytes() {
-        // Real output: at least one stream AND ≥1 payload byte.
-        assert!(mux_produced_output(2, 1));
-        assert!(mux_produced_output(1, 5_000_000));
-        // Zero streams → never produced (even if some bytes somehow counted).
-        assert!(!mux_produced_output(0, 0));
-        assert!(!mux_produced_output(0, 1000));
-        // Zero bytes written → never produced (the natural-drain-on-first-None
-        // empty-output silent failure).
-        assert!(!mux_produced_output(3, 0));
-    }
-
-    // ── is_title_failure_fatal: skip an incidental copy-protected extra ───────
-
-    /// The E7023 Display string libfreemkv emits for a `CssKeyMissing` per-title
-    /// failure (a bare-code error, no trailing data).
-    const E7023: &str = "E7023";
-
-    /// (a) Multi-title all-titles rip, a NON-feature title hits E7023: SKIP, not
-    /// fatal. The remaining titles still mux and the command can exit 0. This is
-    /// the core "one extra protected stub must not kill the whole rip" fix.
-    #[test]
-    fn title_failure_e7023_non_feature_all_titles_is_skippable() {
-        // multi_title=true, explicit_selection=false, is_feature=false.
-        assert!(
-            !is_title_failure_fatal(E7023, true, false, false),
-            "an incidental copy-protected extra title must be skipped, not fatal"
+    fn pipefail_classifies_via_the_engine() {
+        use freemkv_engine::TitleResult;
+        let r = |e: libfreemkv::Error| PipeFail::from_mux(e.into()).result;
+        // Skippable stubs (E7023 CssKeyMissing, E6008 MkvInvalid).
+        assert_eq!(
+            r(libfreemkv::Error::CssKeyMissing),
+            TitleResult::SkippableStub
         );
+        assert_eq!(r(libfreemkv::Error::MkvInvalid), TitleResult::SkippableStub);
+        // Disc-level no-key (E7022 NoDiscKey, E7000 AacsNoKeys) → fail-fast.
+        assert_eq!(
+            r(libfreemkv::Error::NoDiscKey {
+                disc_hash: "abcd1234".into()
+            }),
+            TitleResult::DiscLevelNoKey
+        );
+        assert_eq!(
+            r(libfreemkv::Error::AacsNoKeys),
+            TitleResult::DiscLevelNoKey
+        );
+        // A real non-stub failure is Failed (never silently skipped).
+        assert_eq!(r(libfreemkv::Error::NoStreams), TitleResult::Failed);
+        assert_eq!(
+            PipeFail::from_mux(std::io::Error::other("boom")).result,
+            TitleResult::Failed
+        );
+        // Halt (Ctrl-C) and typed-error constructors classify correctly too.
+        assert_eq!(
+            PipeFail::halted("interrupted".into()).result,
+            TitleResult::Halted
+        );
+        assert_eq!(
+            PipeFail::from_typed(libfreemkv::Error::NoDiscKey {
+                disc_hash: "x".into()
+            })
+            .result,
+            TitleResult::DiscLevelNoKey
+        );
+        // A plain fatal setup failure is Failed.
+        assert_eq!(PipeFail::fatal("boom".into()).result, TitleResult::Failed);
     }
 
-    /// (c) `-t N` on a ScrambledUncracked title — the title the user explicitly
-    /// asked for — DOES hard-error, even though it's not the feature.
-    #[test]
-    fn title_failure_e7023_explicit_selection_is_fatal() {
-        // explicit_selection=true → fatal regardless of multi_title / is_feature.
-        assert!(is_title_failure_fatal(E7023, true, true, false));
-        assert!(is_title_failure_fatal(E7023, false, true, false));
-    }
+    // The skip/stop/fail POLICY itself (decide_title) is unit-tested in
+    // freemkv-engine; the CLI only classifies its PipeFail into a TitleResult
+    // (above) and renders each TitleAction, so it does not re-test the policy.
 
-    /// The MAIN FEATURE failing with E7023 is always a hard error — even in an
-    /// all-titles rip with no explicit selection. The user wants the movie.
-    #[test]
-    fn title_failure_e7023_feature_is_fatal() {
-        assert!(is_title_failure_fatal(E7023, true, false, true));
-    }
+    // ── metadata sink detection (bug #1: header gate can't false-fail these) ──
 
-    /// A single-title rip (only one job) that hits E7023 is fatal: there is no
-    /// "other title" to carry on with, so the lone failure is the result.
+    /// `chapters://` / `json://` are metadata sinks. `mux_stream` short-circuits
+    /// them BEFORE its header gate (proven in `libfreemkv::mux::driver` tests),
+    /// so a metadata export on a title whose video headers never resolve now
+    /// succeeds — the CLI's old post-gate short-circuit (and its `headers_resolved`
+    /// helper) are deleted, so the bug cannot recur. The CLI keeps this predicate
+    /// only to suppress the completion summary for these sinks.
     #[test]
-    fn title_failure_e7023_single_title_is_fatal() {
-        // multi_title=false, not the feature, no explicit selection.
-        assert!(is_title_failure_fatal(E7023, false, false, false));
-    }
-
-    /// A NON-E7023 error (IO, AACS NoDiscKey/E7022, MkvInvalid, …) is ALWAYS
-    /// fatal — only a copy-protection skip (E7023) is ever skippable. A real
-    /// problem must never be silently swallowed as "skip the title".
-    #[test]
-    fn title_failure_non_e7023_is_always_fatal() {
-        // Even in the otherwise-skippable shape (multi/non-explicit/non-feature).
-        assert!(is_title_failure_fatal(
-            "E7022: abcd1234",
-            true,
-            false,
-            false
-        ));
-        assert!(is_title_failure_fatal("E6000: 12345", true, false, false));
-        assert!(is_title_failure_fatal("E8001", true, false, false));
-        // A non-code CLI string is also fatal (not a CSS skip).
-        assert!(is_title_failure_fatal("some io error", true, false, false));
+    fn metadata_sink_detected_for_chapters_and_json() {
+        assert!(is_metadata_sink("chapters:///tmp/out.xml"));
+        assert!(is_metadata_sink("json:///tmp/out.json"));
+        assert!(!is_metadata_sink("mkv:///tmp/out.mkv"));
+        assert!(!is_metadata_sink("null://"));
     }
 
     /// The skip warning the loop prints (`rip.title_skipped`) exists in en.json
@@ -2912,20 +3074,12 @@ mod tests {
         assert!(disc_copy_recovered_data(50_000_000_000));
     }
 
-    /// The header-resolution gate both pipe paths run after their
-    /// `while !input.headers_ready()` loop. EOF can break that loop before the
-    /// video codec_private (hvcC/avcC) resolves; proceeding would mux a track
-    /// header with no CODEC_PRIVATE and still exit 0 (the zero-output guard
-    /// passes once any audio byte is written). `headers_resolved(false)` must
-    /// be `false` so the caller errors with `MkvInvalid` instead of finalizing
-    /// a structurally-invalid MKV.
-    #[test]
-    fn headers_resolved_rejects_unready_headers() {
-        // Headers never became ready (EOF before video codec_private) → abort.
-        assert!(!headers_resolved(false));
-        // Headers resolved normally → proceed to mux.
-        assert!(headers_resolved(true));
-    }
+    // The header-resolution gate that used to live in the CLI (`headers_resolved`
+    // + the `while !input.headers_ready()` loop) now lives inside
+    // `libfreemkv::mux::mux_stream` (the header pump + `Error::MkvInvalid` gate),
+    // covered by `header_gate_rejects_unresolved_codec_private` there. The CLI no
+    // longer carries its own gate, so it can no longer place it after the
+    // metadata short-circuit (bug #1).
 
     // ── fmt_err generalization (english errors for ALL codes) ───────────────
 
@@ -3087,22 +3241,14 @@ mod tests {
         assert!(!copy_should_continue(true), "interrupt → halt the copy");
     }
 
-    #[test]
-    fn mux_bails_when_interrupt_arrives_during_final_read() {
-        // The window: a SIGINT during the final `input.read()` (the one that
-        // returns `Ok(None)`) breaks the loop WITHOUT setting `loop_interrupted`,
-        // so the pre-`finish()` re-read of the global flag is what catches it.
-        assert!(
-            !mux_was_interrupted(false, false),
-            "clean finish → finalize"
-        );
-        assert!(mux_was_interrupted(true, false), "mid-loop SIGINT → bail");
-        assert!(
-            mux_was_interrupted(false, true),
-            "SIGINT during the final read (flag set, loop flag stale) → still bail"
-        );
-        assert!(mux_was_interrupted(true, true), "both → bail");
-    }
+    // The mux interrupt check that used to live here (`mux_was_interrupted`, an
+    // `||` of the loop flag and a pre-`finish()` re-read of the global SIGINT
+    // flag) is gone: the CLI no longer runs the frame loop. `mux_stream` polls a
+    // real `libfreemkv::Halt` (flipped by `SigintHalt`'s watcher) and reports an
+    // interrupt as `MuxOutcome { completed: false }`; `finalize_mux` maps that to
+    // `interrupted_error` (non-zero exit, never a finalized truncated file). The
+    // halt-mid-pump behaviour is covered by `halt_mid_pump_stops_cleanly` in
+    // `libfreemkv::mux::driver`.
 
     #[test]
     fn work_pct_is_finite_when_work_total_zero() {
@@ -3533,17 +3679,12 @@ mod tests {
     /// each source's stable `label()` (`"keydb"` before `"online"`).
     #[test]
     fn build_key_sources_orders_local_first() {
-        let out = Output::new(false, true);
-
         // keydb only → [Keydb]. (Default location is fine; we only inspect order.)
-        let s = build_key_sources(
-            &KeyConfig {
-                keydb_path: Some("keydb.cfg".into()),
-                key_url: None,
-                key_auth: None,
-            },
-            &out,
-        );
+        let s = build_key_sources_quiet(&KeyConfig {
+            keydb_path: Some("keydb.cfg".into()),
+            key_url: None,
+            key_auth: None,
+        });
         assert_eq!(s.len(), 1);
         assert_eq!(
             s[0].label(),
@@ -3552,19 +3693,16 @@ mod tests {
         );
 
         // neither flag → still [Keydb] (default keydb location).
-        let s = build_key_sources(&KeyConfig::default(), &out);
+        let s = build_key_sources_quiet(&KeyConfig::default());
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].label(), "keydb", "no flags → keydb only");
 
         // --key-url only → [Online] (no keydb consulted).
-        let s = build_key_sources(
-            &KeyConfig {
-                keydb_path: None,
-                key_url: Some("https://8.8.8.8/keys".into()),
-                key_auth: None,
-            },
-            &out,
-        );
+        let s = build_key_sources_quiet(&KeyConfig {
+            keydb_path: None,
+            key_url: Some("https://8.8.8.8/keys".into()),
+            key_auth: None,
+        });
         assert_eq!(s.len(), 1);
         assert_eq!(
             s[0].label(),
@@ -3573,14 +3711,11 @@ mod tests {
         );
 
         // both → [Keydb, Online] — LOCAL-FIRST.
-        let s = build_key_sources(
-            &KeyConfig {
-                keydb_path: Some("keydb.cfg".into()),
-                key_url: Some("https://8.8.8.8/keys".into()),
-                key_auth: Some("tok".into()),
-            },
-            &out,
-        );
+        let s = build_key_sources_quiet(&KeyConfig {
+            keydb_path: Some("keydb.cfg".into()),
+            key_url: Some("https://8.8.8.8/keys".into()),
+            key_auth: Some("tok".into()),
+        });
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].label(), "keydb", "local keydb is tried first");
         assert_eq!(s[1].label(), "online", "online service is the fallback");
@@ -3592,42 +3727,31 @@ mod tests {
     /// sources at all.
     #[test]
     fn build_key_sources_drops_ssrf_rejected_url() {
-        let out = Output::new(false, true);
-
         // url-only, metadata endpoint → rejected → zero sources.
-        let s = build_key_sources(
-            &KeyConfig {
-                keydb_path: None,
-                key_url: Some("http://169.254.169.254/latest/meta-data".into()),
-                key_auth: None,
-            },
-            &out,
-        );
+        let s = build_key_sources_quiet(&KeyConfig {
+            keydb_path: None,
+            key_url: Some("http://169.254.169.254/latest/meta-data".into()),
+            key_auth: None,
+        });
         assert!(
             s.is_empty(),
             "SSRF-rejected url-only must add no online source"
         );
 
         // url-only, loopback → rejected → zero sources.
-        let s = build_key_sources(
-            &KeyConfig {
-                keydb_path: None,
-                key_url: Some("https://127.0.0.1:8443/keys".into()),
-                key_auth: None,
-            },
-            &out,
-        );
+        let s = build_key_sources_quiet(&KeyConfig {
+            keydb_path: None,
+            key_url: Some("https://127.0.0.1:8443/keys".into()),
+            key_auth: None,
+        });
         assert!(s.is_empty(), "loopback url must be rejected");
 
         // keydb + rejected url → only the keydb survives.
-        let s = build_key_sources(
-            &KeyConfig {
-                keydb_path: Some("keydb.cfg".into()),
-                key_url: Some(format!("http://{}.{}.{}.{}/keys", 10, 0, 0, 5)),
-                key_auth: None,
-            },
-            &out,
-        );
+        let s = build_key_sources_quiet(&KeyConfig {
+            keydb_path: Some("keydb.cfg".into()),
+            key_url: Some(format!("http://{}.{}.{}.{}/keys", 10, 0, 0, 5)),
+            key_auth: None,
+        });
         assert_eq!(s.len(), 1, "rejected url dropped; keydb remains");
         assert_eq!(s[0].label(), "keydb", "the surviving source is the keydb");
     }
@@ -4154,6 +4278,87 @@ mod tests {
                 matches!(parse_url(url), libfreemkv::StreamUrl::Demux { .. }),
                 "the job URL must re-parse to Demux (not Unknown): {url}"
             );
+        }
+    }
+
+    /// A multi-title `video://` (kind-filter) dest must carry its OWN scheme into
+    /// each per-title subdir job — NOT collapse to `demux://`, which would drop
+    /// the video-only filter and dump every track. Same guarantee for `audio://`
+    /// and `sub://`. (Regression: `demux_jobs` once hardcoded `demux://`.)
+    #[test]
+    fn kind_filter_dest_multi_title_urls_carry_own_scheme() {
+        for scheme in ["video", "audio", "sub"] {
+            let titles = Some(vec![
+                libfreemkv::DiscTitle::empty(),
+                libfreemkv::DiscTitle::empty(),
+            ]);
+            let out = Output::new(false, true);
+            let dest = format!("{scheme}://out/");
+            let parsed = parse_url(&dest);
+            let jobs = build_jobs(&titles, false, &[], false, &dest, &parsed, &out)
+                .unwrap_or_else(|| panic!("{scheme}:// multi-title must build jobs"));
+            assert_eq!(jobs.len(), 2, "{scheme}: one job per title");
+            assert_eq!(jobs[0].1, format!("{scheme}://out/t01/"), "{scheme} t01");
+            assert_eq!(jobs[1].1, format!("{scheme}://out/t02/"), "{scheme} t02");
+            for (idx, url) in &jobs {
+                assert!(idx.is_some(), "{scheme}: each job names its title index");
+                // Must re-parse to its OWN kind, not Demux and not Unknown — this
+                // is what preserves the kind filter through multi-title fan-out.
+                let reparsed = parse_url(url);
+                let ok = match scheme {
+                    "video" => matches!(reparsed, libfreemkv::StreamUrl::Video { .. }),
+                    "audio" => matches!(reparsed, libfreemkv::StreamUrl::Audio { .. }),
+                    "sub" => matches!(reparsed, libfreemkv::StreamUrl::Sub { .. }),
+                    _ => unreachable!(),
+                };
+                assert!(ok, "{scheme}: job URL must re-parse to its own kind: {url}");
+            }
+        }
+    }
+
+    /// Every `mp4://` exclusion reason renders a DISTINCT, resolving string. This
+    /// locks Fix 1: `SecondaryVideo` (a dependent MVC/3D view) and
+    /// `UnmappableVideo` (a primary codec MP4 can't carry) must NOT share a
+    /// message, or the main video being dropped is mislabeled "secondary video
+    /// view". Mirrors the messaging-contract pattern: enumerate every variant,
+    /// assert each key resolves (not the raw dotted sentinel) and all are unique.
+    #[test]
+    fn mp4_skip_reasons_render_distinct_resolving_strings() {
+        let variants = [
+            libfreemkv::Mp4SkipReason::BitmapSubtitle,
+            libfreemkv::Mp4SkipReason::UnmappableAudio,
+            libfreemkv::Mp4SkipReason::SecondaryVideo,
+            libfreemkv::Mp4SkipReason::UnmappableVideo,
+        ];
+        let mut seen_keys = std::collections::BTreeSet::new();
+        let mut seen_msgs = std::collections::BTreeSet::new();
+        for v in &variants {
+            let key = mp4_skip_reason_key(v);
+            // Each variant maps to a distinct i18n key.
+            assert!(seen_keys.insert(key), "{v:?}: duplicate reason key {key}");
+            // The key resolves — `strings::get` returns the dotted path verbatim
+            // on a miss, so a stale/typo'd key would equal the key itself.
+            let msg = strings::get(key);
+            assert_ne!(msg, key, "{v:?}: key {key} does not resolve in en.json");
+            // …and to a distinct rendered message (no two reasons read alike).
+            assert!(
+                seen_msgs.insert(msg.clone()),
+                "{v:?}: duplicate message {msg:?}"
+            );
+        }
+        // The specific Fix-1 pin: the two video reasons must differ.
+        assert_ne!(
+            strings::get(mp4_skip_reason_key(
+                &libfreemkv::Mp4SkipReason::SecondaryVideo
+            )),
+            strings::get(mp4_skip_reason_key(
+                &libfreemkv::Mp4SkipReason::UnmappableVideo
+            )),
+            "SecondaryVideo and UnmappableVideo must render different strings"
+        );
+        // The other keys the function emits must also resolve.
+        for key in ["stream.track", "mp4.excluded_header"] {
+            assert_ne!(strings::get(key), key, "{key} must resolve in en.json");
         }
     }
 
