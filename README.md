@@ -3,7 +3,7 @@
 
 # freemkv
 
-Open source 4K UHD / Blu-ray / DVD backup tool. Two arguments — source and destination. Stream URLs let you rip, remux, and transfer between any combination of disc, file, and network.
+Open source 4K UHD / Blu-ray / DVD backup tool — a **command-line tool and a native desktop app in one binary**. On the command line it's two arguments — source and destination; stream URLs let you rip, remux, and transfer between any combination of disc, file, and network. Or open the desktop app (macOS today, Windows next; `freemkv gui` or the `.app`): pick titles and tracks, choose a format, press Rip. Same binary, same engine — the app just opens a window.
 
 DVDs (CSS) need no setup. Blu-ray and UHD (AACS) require a `keydb.cfg` supplying disc-specific volume unique keys.
 
