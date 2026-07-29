@@ -29,7 +29,6 @@ pub struct Settings {
     pub keyserver_url: String,
     pub keyserver_token: String,
     // Protection
-    pub capture_without_keys: bool,
     pub raw: bool,
     pub force: bool,
     pub log_level: String,
@@ -68,7 +67,6 @@ impl Default for Settings {
             keydb_url: String::new(),
             keyserver_url: String::new(),
             keyserver_token: String::new(),
-            capture_without_keys: false,
             raw: false,
             force: false,
             log_level: "Normal".into(),
@@ -131,7 +129,6 @@ impl Settings {
         match key {
             "keep_iso" => self.keep_iso,
             "auto_eject" => self.auto_eject,
-            "capture_without_keys" => self.capture_without_keys,
             "raw" => self.raw,
             "force" => self.force,
             _ => false,
@@ -164,7 +161,6 @@ impl Settings {
         match key {
             "keep_iso" => self.keep_iso = v,
             "auto_eject" => self.auto_eject = v,
-            "capture_without_keys" => self.capture_without_keys = v,
             "raw" => self.raw = v,
             "force" => self.force = v,
             _ => {}

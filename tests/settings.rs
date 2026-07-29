@@ -56,7 +56,10 @@ fn get_set_round_trips_every_key() {
 #[test]
 fn bool_keys_round_trip() {
     let mut s = Settings::default();
-    for k in ["keep_iso", "capture_without_keys", "auto_eject"] {
+    // `capture_without_keys` was removed: it was a checkbox wired to nothing,
+    // and "Keep encrypted (raw passthrough)" already covers the one output where
+    // writing ciphertext means anything.
+    for k in ["keep_iso", "auto_eject"] {
         s.set_bool(k, true);
         assert!(s.get_bool(k), "bool key {k} did not round-trip");
         s.set_bool(k, false);
