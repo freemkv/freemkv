@@ -35,6 +35,10 @@ pub struct Scanned {
     /// UI say "MP4 cannot hold MPEG-2" BEFORE a rip instead of surfacing a
     /// bare E9048 after one.
     pub video_codecs: Vec<String>,
+    /// The `freemkv info -v` detail block (format, capacity, region, MKB
+    /// version, disc hash, VID, key state, title list) — shown in the log on
+    /// open so the desktop app surfaces the same disc facts the CLI does.
+    pub details: Vec<String>,
 }
 
 fn fmt_dur(secs: f64) -> String {
@@ -228,6 +232,11 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
     });
     rows.extend(stream_rows(t, 0));
 
+    let details = vec![
+        format!("File: {name}"),
+        format!("Duration: {}", fmt_dur(t.duration_secs)),
+        format!("Streams: {}", t.streams.len()),
+    ];
     Ok(Scanned {
         label: name,
         title_count: 1,
@@ -239,6 +248,7 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
                 .unwrap_or_default(),
         ],
         rows,
+        details,
     })
 }
 
@@ -264,6 +274,64 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
 /// Build the title tree + info rows from a scanned `Disc`. Shared by the ISO
 /// (`scan_with_keys`) and live-drive (`scan_disc_with_keys`) paths so a disc
 /// looks identical whether it came from a file or a physical drive.
+/// The `freemkv info -v` detail block for a scanned disc/ISO — the same facts
+/// the CLI prints (format, capacity, region, MKB version, disc hash, VID, key
+/// state, title list), as log lines the desktop app shows on open.
+fn disc_details(disc: &libfreemkv::Disc, key_summary: &str) -> Vec<String> {
+    let mut d = Vec::new();
+    d.push(format!("Type: {:?}", disc.format));
+    if disc.capacity_bytes > 0 {
+        let gb = disc.capacity_bytes as f64 / 1_000_000_000.0;
+        d.push(format!("Capacity: {gb:.1} GB, {} layer(s)", disc.layers));
+    }
+    match &disc.region {
+        libfreemkv::disc::DiscRegion::Free => d.push("Region: free".to_string()),
+        libfreemkv::disc::DiscRegion::BluRay(rs) if !rs.is_empty() => {
+            let names: Vec<String> = rs.iter().map(|r| format!("{r:?}")).collect();
+            d.push(format!("Region: Blu-ray {}", names.join("/")));
+        }
+        libfreemkv::disc::DiscRegion::Dvd(ns) if !ns.is_empty() => {
+            let names: Vec<String> = ns.iter().map(|n| n.to_string()).collect();
+            d.push(format!("Region: DVD {}", names.join(",")));
+        }
+        _ => {}
+    }
+    if let Some(aacs) = &disc.aacs {
+        d.push(format!(
+            "MKB v{}{}",
+            aacs.mkb_version.unwrap_or(0),
+            if aacs.bus_encryption {
+                " (bus encryption)"
+            } else {
+                ""
+            }
+        ));
+        d.push(format!("Disc hash: {}", aacs.disc_hash));
+        if aacs.volume_id.iter().any(|&b| b != 0) {
+            let vid: String = aacs.volume_id.iter().map(|b| format!("{b:02x}")).collect();
+            d.push(format!("VID: 0x{vid}"));
+        }
+    }
+    d.push(format!("Protection: {key_summary}"));
+    d.push(format!("Titles: {}", disc.titles.len()));
+    for (i, t) in disc.titles.iter().enumerate() {
+        let name = if t.playlist.is_empty() {
+            String::new()
+        } else {
+            format!("{}  ", t.playlist)
+        };
+        d.push(format!(
+            "  {}. {}{} ch, {}, {}",
+            i + 1,
+            name,
+            t.chapters.len(),
+            fmt_dur(t.duration_secs),
+            fmt_gb(t.size_bytes),
+        ));
+    }
+    d
+}
+
 fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
     let mut rows = Vec::new();
     let label = if disc.volume_id.is_empty() {
@@ -326,6 +394,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
         rows.extend(stream_rows(t, ti));
     }
 
+    let details = disc_details(disc, &summary);
     Scanned {
         label,
         title_count: disc.titles.len(),
@@ -341,6 +410,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
             })
             .collect(),
         rows,
+        details,
     }
 }
 

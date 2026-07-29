@@ -840,6 +840,12 @@ impl App {
                         ],
                     ),
                 );
+                // The `info -v` detail block (format, capacity, region, MKB
+                // version, disc hash, VID, key state, titles) — so the desktop
+                // app surfaces the same disc facts the CLI prints.
+                for line in &sc.details {
+                    self.say(LogKind::Detail, line);
+                }
                 self.video_codecs = sc.video_codecs.clone();
                 let min_secs = self
                     .settings
@@ -1176,6 +1182,7 @@ mod tests {
                 key_summary: String::new(),
                 video_codecs: vec![],
                 rows: vec![],
+                details: vec![],
             },
             "Main film only",
             0.0,

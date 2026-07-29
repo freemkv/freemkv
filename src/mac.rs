@@ -370,6 +370,9 @@ struct Ivars {
     /// The keydb status note in Settings ▸ Keys, kept so a running "Update
     /// keydb now" can show progress + the result in place.
     keydb_note: RefCell<Option<Retained<NSTextField>>>,
+    /// The "Update keydb now" button — disabled while an update is in flight so
+    /// a second click can't spawn a concurrent download.
+    keydb_btn: RefCell<Option<Retained<NSButton>>>,
     pf_checks: RefCell<Vec<(String, Retained<NSButton>)>>,
     pf_popups: RefCell<Vec<(String, Retained<NSPopUpButton>)>>,
     /// True only when the open source is a physical drive; Eject is
@@ -714,6 +717,9 @@ define_class!(
             // Immediate in-Settings feedback: the download is ~20 MB and takes a
             // few seconds; the drain updates this note to the result when done.
             self.set_keydb_note("Updating keydb… downloading, please wait.");
+            // Disable the button so a second click can't start a concurrent
+            // download; the drain re-enables it when the result arrives.
+            self.set_keydb_updating(true);
             let inbox = self.ivars().inbox.clone();
             std::thread::spawn(move || {
                 let msg = match crate::settings::update_keydb(&url, &path) {
@@ -905,10 +911,12 @@ define_class!(
             }
             // This drain path is the keydb-update worker; surface its outcome
             // (success "keydb updated — N entries" or the error) in the Settings
-            // note so the user sees the result in place, not just in the log.
+            // note so the user sees the result in place, not just in the log,
+            // and re-enable the button now that the update is done.
             if let Some(last) = msgs.last() {
                 self.set_keydb_note(last);
             }
+            self.set_keydb_updating(false);
         }
 
         #[unsafe(method(onOpenFolder:))]
@@ -1128,6 +1136,14 @@ impl Controller {
     fn set_keydb_note(&self, text: &str) {
         if let Some(note) = self.ivars().keydb_note.borrow().as_ref() {
             note.setStringValue(&NSString::from_str(text));
+        }
+    }
+
+    /// Enable/disable the "Update keydb now" button so a second click can't
+    /// spawn a concurrent download while one is in flight.
+    fn set_keydb_updating(&self, updating: bool) {
+        if let Some(b) = self.ivars().keydb_btn.borrow().as_ref() {
+            b.setEnabled(!updating);
         }
     }
 
@@ -2860,10 +2876,18 @@ impl Rows {
         self.view.addSubview(&b);
         self.y -= 30.0;
     }
-    fn button(&mut self, mtm: MainThreadMarker, title: &str, c: &Controller, a: Sel, w: f64) {
+    fn button(
+        &mut self,
+        mtm: MainThreadMarker,
+        title: &str,
+        c: &Controller,
+        a: Sel,
+        w: f64,
+    ) -> Retained<NSButton> {
         let b = btn(mtm, title, r(self.gutter, self.y - 4.0, w, 26.0), c, a);
         self.view.addSubview(&b);
         self.y -= 32.0;
+        b
     }
     fn note(&mut self, mtm: MainThreadMarker, s: &str, w: f64) -> Retained<NSTextField> {
         let l = text(mtm, s, r(16.0, self.y - 18.0, w - 32.0, 36.0), false, true);
@@ -3074,13 +3098,14 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         "",
         300.0,
     );
-    t.button(
+    let update_btn = t.button(
         mtm,
         &crate::strings::get("gui.set.update_keydb"),
         c,
         sel!(onUpdateKeys:),
         160.0,
     );
+    *c.ivars().keydb_btn.borrow_mut() = Some(update_btn);
     {
         let status = c.ivars().settings.borrow().keydb_status();
         let note = t.note(mtm, &status, tw);
