@@ -295,6 +295,19 @@ fn dev_harness() -> bool {
                     .ok()
                     .and_then(|v| v.trim().parse().ok())
                     .unwrap_or(0),
+                max_passes: std::env::var("FMKV_MAXPASSES")
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0),
+                multipass: std::env::var("FMKV_MAXPASSES")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<u32>().ok())
+                    .is_some_and(|n| n > 0),
+                abort_lost_secs: std::env::var("FMKV_ABORTLOST")
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0),
+                keep_iso: std::env::var("FMKV_KEEPISO").is_ok(),
                 keys: engine::KeyConfig::from_settings(&settings::Settings::load()),
             },
             st.clone(),

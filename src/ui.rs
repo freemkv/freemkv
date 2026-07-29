@@ -931,6 +931,7 @@ impl App {
             LogKind::Result,
             &crate::strings::fmt("gui.log.starting_rip", &[("dir", &self.output_dir)]),
         );
+        let max_passes: u32 = self.settings.max_passes.trim().parse().unwrap_or(0);
         crate::engine::start_rip(
             RipRequest {
                 source: self.source.clone(),
@@ -949,6 +950,10 @@ impl App {
                     .trim()
                     .parse::<usize>()
                     .unwrap_or(0),
+                multipass: self.settings.rip_mode == "Multi-pass" && max_passes > 0,
+                max_passes,
+                abort_lost_secs: self.settings.abort_lost_secs.trim().parse().unwrap_or(0),
+                keep_iso: self.settings.keep_iso,
                 keys: KeyConfig::from_settings(&self.settings),
             },
             state,
