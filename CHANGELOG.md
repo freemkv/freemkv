@@ -87,6 +87,27 @@ follows semantic versioning.
 - **Ctrl-C is a full stop.** Interrupting a multi-title rip previously cancelled
   only the title in progress and moved on. Ctrl-C now stops the whole rip
   immediately; the mapfile/staging is preserved, so re-running resumes.
+- **`stdio://` no longer corrupts the piped stream.** Ripping to `stdio://`
+  (e.g. `freemkv disc:// stdio:// | …`) used to prepend the banner and
+  "opening…" lines to stdout — the same channel carrying the byte stream — so
+  the consumer received a corrupted stream. All human-facing text now goes to
+  stderr when the destination is `stdio://`; stdout is pure stream data.
+- **Title/stream selection on a file source fails loud.** `-t`, `-a`, and `-s`
+  only apply to a source that is scanned into a title list (`disc://` /
+  `iso://`). Given a stream/file source (`mkv://`, `m2ts://`, `network://`,
+  `stdio://`) they were silently ignored. They now error up front with clear
+  guidance instead of producing output that quietly kept every track.
+
+### Testing
+
+- **`tests/cli-integration.sh` — a self-contained CLI acceptance test.**
+  Builds the binary, generates its own Blu-ray-legal media with ffmpeg
+  (H.264 + two AC-3 tracks), and verifies every file-reachable function with
+  ffprobe/ffmpeg: version/help, `info` (and its error/exit-code contract),
+  remux (streams, languages, and duration preserved, output fully decodes),
+  `null://`, `stdio://` (pure-wire-data guard + a freemkv round-trip), the
+  selection and `--raw`/`--multipass` gates, and — with `FMKV_ISO_DIR` set —
+  read-only `info` on real ISOs. Run it before a release.
 
 ### Known limitations
 
