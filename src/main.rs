@@ -63,14 +63,28 @@ fn main() {
 /// Launch the desktop shell for this platform.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn run_gui() {
-    // Apply the saved interface language BEFORE any UI string is looked up.
-    // `freemkv_i18n` locks the locale on first `get()` and refuses a later
-    // change (OnceLock), so this must run before the shell builds anything.
-    // "auto" (the default) leaves the crate to follow the system locale.
-    let code = ui::locale_code(&settings::Settings::load().language);
-    if code != "auto" {
+    let cfg = settings::Settings::load();
+
+    // Apply the saved interface language before the shell builds anything, so
+    // the first string lookup resolves in the right locale. (A later change in
+    // Settings switches live via `strings::set_locale`.)
+    let code = ui::locale_code(&cfg.language);
+    if code == "auto" {
+        // "Auto" follows the OS language. A Finder-launched `.app` inherits no
+        // LANG, so the crate's env detection would fall back to English —
+        // read the macOS preferred language directly instead.
+        #[cfg(target_os = "macos")]
+        if let Some(sys) = mac::system_locale_code() {
+            strings::set_locale(&sys);
+        }
+    } else {
         strings::set_language(code);
     }
+
+    // Diagnostic logging, mirroring the CLI: only install a tracing subscriber
+    // when the user asks for detail; otherwise the library's tracing events are
+    // dropped and no log file is written.
+    init_gui_logging(&cfg);
 
     // Development harness (scan / rip / screenshot hooks). Debug builds only —
     // the shipped release binary has no environment switches.
@@ -82,6 +96,46 @@ fn run_gui() {
     mac::run();
     #[cfg(target_os = "windows")]
     eprintln!("the Windows desktop shell is not built yet — run `freemkv <args>` for the CLI");
+}
+
+/// Diagnostic-log guard for the GUI (keeps the non-blocking writer alive).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+static GUI_LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuard> =
+    std::sync::OnceLock::new();
+
+/// Install a file tracing subscriber from the GUI's log settings. Only "Verbose"
+/// or the "Log debug messages" toggle turn it on (mapping to debug / trace);
+/// Quiet and Normal install nothing, exactly like the CLI's common path. The log
+/// is written to `log.txt` in the app-support dir, never the terminal.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn init_gui_logging(s: &settings::Settings) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let level = if s.debug_log {
+        "trace"
+    } else {
+        match s.log_level.as_str() {
+            "Verbose" => "debug",
+            // Quiet / Normal: no diagnostic file log.
+            _ => return,
+        }
+    };
+
+    let dir = settings::support_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let file_appender = tracing_appender::rolling::never(&dir, "log.txt");
+    let (nb, guard) = tracing_appender::non_blocking(file_appender);
+    let _ = GUI_LOG_GUARD.set(guard);
+    let filter = EnvFilter::new(format!("error,freemkv={level},libfreemkv={level}"));
+    // try_init: never panic if a subscriber somehow already exists.
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_ansi(false).with_writer(nb))
+        .try_init();
 }
 
 /// True when this invocation should open the desktop UI rather than the CLI:
@@ -236,6 +290,11 @@ fn dev_harness() -> bool {
                 explicit_streams: std::env::var("FMKV_APIDS").is_ok(),
                 raw: std::env::var("FMKV_RAW").is_ok(),
                 force: true,
+                filename_template: std::env::var("FMKV_TEMPLATE").unwrap_or_default(),
+                decrypt_threads: std::env::var("FMKV_THREADS")
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0),
                 keys: engine::KeyConfig::from_settings(&settings::Settings::load()),
             },
             st.clone(),
