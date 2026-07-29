@@ -565,13 +565,28 @@ define_class!(
 
         #[unsafe(method(onClosePrefs:))]
         fn on_close_prefs(&self, _s: Option<&AnyObject>) {
+            // Remember the default destination BEFORE reading the form so we can
+            // tell whether the user changed it in this Settings session.
+            let old_dest = self.ivars().settings.borrow().dest_dir.clone();
             self.read_prefs_form();
             // Push the freshly-edited settings into the running App so changes
             // (log detail, key source, multipass, dest dir, …) take effect at
             // once — App holds its own copy, loaded at startup, and would
             // otherwise stay stale until the next launch.
             let edited = self.ivars().settings.borrow().clone();
-            self.app_mut(|a| a.settings = edited);
+            // The active output directory is a separate live value (a one-off
+            // folder pick in the main window overrides the default). Re-point it
+            // ONLY when the user actually changed the default here — so editing
+            // the default destination takes effect, without clobbering a
+            // deliberate one-off pick on an unrelated settings edit.
+            let new_dest = edited.dest_dir.clone();
+            let dest_changed = new_dest != old_dest && !new_dest.trim().is_empty();
+            self.app_mut(|a| {
+                a.settings = edited;
+                if dest_changed {
+                    a.output_dir = new_dest.clone();
+                }
+            });
             match self.ivars().settings.borrow().save() {
                 Ok(()) => self.app_mut(|a| {
                     a.say(

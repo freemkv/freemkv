@@ -212,9 +212,9 @@ impl Tree {
             .collect()
     }
 
-    /// Number of title rows in the tree. Used by the cross-platform tests to
-    /// assert the tree matches the scan; the shells read `View` instead.
-    #[allow(dead_code)]
+    /// Number of title rows in the tree. Used by `start_run` to tell a
+    /// disc/ISO scan (has titles) from a container (none), and by the
+    /// cross-platform tests to assert the tree matches the scan.
     pub fn title_count(&self) -> usize {
         self.arena.iter().filter(|n| n.type_s == "Title").count()
     }
@@ -918,7 +918,46 @@ impl App {
             return vec![Effect::Redraw];
         }
         let titles = self.tree.ticked_titles();
+        // A disc/ISO scan has title rows; if the user unchecked them all, refuse
+        // rather than silently ripping the main title (the engine maps an empty
+        // list to the main movie). A container source has no title rows, so this
+        // guard doesn't fire — the whole stream is the "title".
+        if self.tree.title_count() > 0 && titles.is_empty() {
+            self.say(
+                LogKind::Notice,
+                &crate::strings::get("gui.log.select_title_first"),
+            );
+            return vec![Effect::Redraw];
+        }
         let (audio_pids, sub_pids, explicit_streams) = self.tree.ticked_streams();
+        // The user narrowed the tracks down to nothing (every audio AND subtitle
+        // unchecked): allowed — some want a video-only extract — but never
+        // silently. Surface it so an accidental result is caught before the rip.
+        if explicit_streams && audio_pids.is_empty() && sub_pids.is_empty() {
+            self.say(
+                LogKind::Notice,
+                &crate::strings::get("gui.log.video_only_warning"),
+            );
+        }
+        // Re-check the MP4/codec mismatch NOW (not just when the format was
+        // picked): the user may have ticked an MPEG-2/VC-1 title after choosing
+        // MP4, which the picker-time check never saw. Better an up-front notice
+        // than a late per-title mux failure.
+        if let Some(msg) = self.container_mismatch() {
+            self.say(LogKind::Notice, &msg);
+        }
+        // `--raw` (keep-encrypted) only means anything for a "Whole disc → ISO
+        // image" output; for any mux it would write ciphertext into the
+        // container. Mirror the CLI's iso-only rule instead of silently
+        // forwarding it.
+        let iso_output = self.format.contains("ISO image");
+        let raw = self.settings.raw && iso_output;
+        if self.settings.raw && !iso_output {
+            self.say(
+                LogKind::Notice,
+                &crate::strings::get("gui.log.raw_iso_only"),
+            );
+        }
         let state = Arc::new(RunState::default());
         self.run = Some(state.clone());
         self.reported_bad = 0;
@@ -954,7 +993,7 @@ impl App {
                 audio_pids,
                 sub_pids,
                 explicit_streams,
-                raw: self.settings.raw,
+                raw,
                 force: self.settings.force,
                 filename_template: self.settings.filename_template.clone(),
                 decrypt_threads: self
