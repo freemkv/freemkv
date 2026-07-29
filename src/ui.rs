@@ -455,20 +455,44 @@ pub fn format_from_label(label: &str, disc_source: bool, mp4_ok: bool) -> Option
 }
 
 /// The interface languages the GUI offers, matched 1:1 to the locale files
-/// shipped by `freemkv-i18n` (`en de es fr it nl pt`). Each entry is
-/// `(endonym, code)`; the endonym is shown in the picker (language names are
-/// conventionally written in their own language, so they are not translated),
-/// the code is what `freemkv_i18n::set_language` expects. `"auto"` follows the
-/// system locale. Adding a locale file means adding one row here.
+/// shipped by `freemkv-i18n`. Each entry is `(endonym, code)`; the endonym is
+/// shown in the picker (language names are conventionally written in their own
+/// language, so they are not translated), the code is the locale-file stem that
+/// `freemkv_i18n::set_language` expects. `"auto"` follows the system locale.
+/// Regional variants (`pt-br`, `es-419`, `zh-hans`, `zh-hant`) resolve via the
+/// crate's full-tag → base-language → English fallback. Adding a locale file
+/// means adding one row here.
 pub const LOCALES: &[(&str, &str)] = &[
     ("Auto", "auto"),
     ("English", "en"),
     ("Deutsch", "de"),
     ("Español", "es"),
+    ("Español (Latinoamérica)", "es-419"),
     ("Français", "fr"),
     ("Italiano", "it"),
     ("Nederlands", "nl"),
     ("Português", "pt"),
+    ("Português (Brasil)", "pt-br"),
+    ("Polski", "pl"),
+    ("Русский", "ru"),
+    ("Українська", "uk"),
+    ("Čeština", "cs"),
+    ("Slovenčina", "sk"),
+    ("Svenska", "sv"),
+    ("Dansk", "da"),
+    ("Norsk", "no"),
+    ("Suomi", "fi"),
+    ("Română", "ro"),
+    ("Magyar", "hu"),
+    ("Ελληνικά", "el"),
+    ("Türkçe", "tr"),
+    ("Català", "ca"),
+    ("日本語", "ja"),
+    ("한국어", "ko"),
+    ("简体中文", "zh-hans"),
+    ("繁體中文", "zh-hant"),
+    ("Bahasa Indonesia", "id"),
+    ("Tiếng Việt", "vi"),
 ];
 
 /// Endonyms for the language picker, in order.
