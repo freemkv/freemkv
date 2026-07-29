@@ -811,8 +811,11 @@ impl App {
     /// Open a source: scan it, rebuild the tree, report honestly on failure.
     pub fn open(&mut self, path: &str) -> Vec<Effect> {
         let container = is_container(path);
+        let disc = crate::engine::is_disc_source(path);
         let scanned = if container {
             crate::engine::scan_stream(path)
+        } else if disc {
+            crate::engine::scan_disc_with_keys(path, &KeyConfig::from_settings(&self.settings))
         } else {
             crate::engine::scan_with_keys(path, &KeyConfig::from_settings(&self.settings))
         };
@@ -853,6 +856,10 @@ impl App {
                         LogKind::Result,
                         &crate::strings::get("gui.log.ready_convert"),
                     );
+                } else if disc {
+                    // A live drive isn't a file the ISO preflight can re-scan;
+                    // the rip itself surfaces any missing-key error.
+                    self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"));
                 } else {
                     match crate::engine::preflight_with_keys(
                         path,

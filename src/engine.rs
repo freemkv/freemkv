@@ -2,6 +2,9 @@
 //! rips comes through here — no engine types leak into the AppKit shell.
 
 use freemkv_engine as fe;
+// The Sink trait's methods (progress/should_cancel/log) are called directly on
+// UiSink in the disc:// session mux; bring them into scope.
+use freemkv_engine::Sink as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -257,8 +260,14 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
     .map_err(|e| format!("E{} scan failed", e.code()))?;
 
     let won = resolve_disc_keys(&mut disc, reader.as_mut(), keys);
-    let disc = disc;
     let summary = key_summary(&disc, won.as_deref());
+    Ok(scanned_from_disc(&disc, summary))
+}
+
+/// Build the title tree + info rows from a scanned `Disc`. Shared by the ISO
+/// (`scan_with_keys`) and live-drive (`scan_disc_with_keys`) paths so a disc
+/// looks identical whether it came from a file or a physical drive.
+fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
     let mut rows = Vec::new();
     let label = if disc.volume_id.is_empty() {
         "(no label)".to_string()
@@ -320,7 +329,7 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
         rows.extend(stream_rows(t, ti));
     }
 
-    Ok(Scanned {
+    Scanned {
         label,
         title_count: disc.titles.len(),
         key_summary: summary,
@@ -335,7 +344,120 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
             })
             .collect(),
         rows,
+    }
+}
+
+// ── live optical drive (disc://) ────────────────────────────────────────────
+
+/// An optical drive the GUI can rip from.
+#[derive(Debug, Clone)]
+pub struct OpticalDrive {
+    /// Platform device path (`/dev/diskN` on macOS) — becomes `disc://<path>`.
+    pub device: String,
+    /// Human label ("HL-DT-ST BD-RE BU40N") for the picker.
+    pub label: String,
+}
+
+/// Enumerate the optical drives attached to the machine. Empty if none. This is
+/// registry/enumeration only — no exclusive access or disc I/O.
+pub fn list_optical_drives() -> Vec<OpticalDrive> {
+    libfreemkv::list_drives()
+        .into_iter()
+        .map(|d| {
+            let label = format!("{} {}", d.vendor.trim(), d.model.trim())
+                .trim()
+                .to_string();
+            OpticalDrive {
+                device: d.path,
+                label: if label.is_empty() {
+                    "Optical drive".to_string()
+                } else {
+                    label
+                },
+            }
+        })
+        .collect()
+}
+
+/// True for a `disc://` live-drive source.
+pub fn is_disc_source(source: &str) -> bool {
+    source.starts_with("disc://")
+}
+
+/// The device path from a `disc://<device>` source, or `None` for bare
+/// `disc://` (autodetect the first drive with media).
+fn disc_device(source: &str) -> Option<String> {
+    let dev = source.strip_prefix("disc://").unwrap_or("");
+    (!dev.is_empty()).then(|| dev.to_string())
+}
+
+/// `DeviceTarget` for a `disc://` source: an explicit path, or autodetect.
+fn disc_target(source: &str) -> libfreemkv::DeviceTarget {
+    match disc_device(source) {
+        Some(p) => libfreemkv::DeviceTarget::Path(p.into()),
+        None => libfreemkv::DeviceTarget::Autodetect,
+    }
+}
+
+/// Host certs / credentials for the AACS bus handshake, from the keydb — mirrors
+/// the CLI's `drive_credentials`.
+fn session_keyspec(keys: &KeyConfig) -> libfreemkv::KeySpec {
+    let host_certs = freemkv_keysources::KeydbSource::new(keys.keydb_path.clone()).host_certs();
+    libfreemkv::KeySpec {
+        credentials: (!host_certs.is_empty())
+            .then_some(libfreemkv::DriveCredentials { host_certs }),
+        ..Default::default()
+    }
+}
+
+/// The key-source factory used to resolve a disc's AACS keys (same sources the
+/// ISO path uses, built from the user's settings).
+fn key_factory(keys: &KeyConfig) -> libfreemkv::KeySourceFactory {
+    let k = keys.clone();
+    std::sync::Arc::new(move || {
+        key_sources(
+            &k.keydb_path,
+            &k.keyserver_url,
+            &k.keyserver_token,
+            k.online_only,
+        )
     })
+}
+
+/// Which key source won, from a resolution trace (for the key strip).
+fn won_from_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> Option<String> {
+    trace
+        .keys
+        .iter()
+        .find(|s| s.outcome == libfreemkv::aacs::trace::KeyOutcome::Resolved)
+        .map(|s| s.who.clone())
+}
+
+/// Scan a live optical drive (`disc://<device>` or bare `disc://` autodetect)
+/// and resolve its keys, returning the SAME `Scanned` shape the ISO path does —
+/// so the title tree renders identically. Mirrors the CLI's `pipe_disc` scan.
+/// NEEDS HARDWARE to exercise; the session flow matches the proven CLI path.
+pub fn scan_disc_with_keys(source: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+    let mut session = libfreemkv::DiscSession::open(disc_target(source), session_keyspec(keys))
+        .map_err(|e| match &e {
+            libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
+                "No optical drive found. Connect a Blu-ray/DVD drive with a disc.".to_string()
+            }
+            _ => format!("{e}"),
+        })?;
+    session.lock_tray();
+    session
+        .scan(libfreemkv::ScanOptions::default())
+        .map_err(|e| format!("E{} scan failed", e.code()))?;
+    // Key resolution failure must not abort the scan — the disc still lists
+    // (just "locked"); the rip surfaces a missing key with a clear error.
+    let won = match session.resolve_keys(key_factory(keys)) {
+        Ok(trace) => won_from_trace(&trace),
+        Err(_) => None,
+    };
+    let disc = session.disc().ok_or("scan produced no disc")?;
+    let summary = key_summary(disc, won.as_deref());
+    Ok(scanned_from_disc(disc, summary))
 }
 
 /// Ask the engine whether a job can run, without executing it.
@@ -853,6 +975,9 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
 }
 
 fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
+    if is_disc_source(&req.source) {
+        return run_disc(req, sink, state);
+    }
     if is_stream_source(&req.source) {
         return run_stream(req, sink, state);
     }
@@ -1017,6 +1142,247 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
         _ if written.get() == 0 && partial.get() > 0 => partial_note("Cancelled"),
         _ if written.get() == 0 => "Nothing was written".to_string(),
         _ => format!("{} title(s) written to {}", written.get(), req.dest_dir),
+    })
+}
+
+/// Mux one title straight off a live drive — the `disc://` analogue of
+/// `fe::mux_title`. Mirrors the CLI's `pipe_disc`: open a fresh `DiscSession`,
+/// lock the tray, scan, resolve keys, stage the drive as the reader, and drive
+/// `mux_stream(MuxInput::Session)`. A watcher thread forwards write progress to
+/// the UI and mirrors cancel → halt, exactly like `fe::mux_title`.
+///
+/// A fresh session per title matches the CLI (its dispatcher calls `pipe_disc`
+/// once per requested title); one session's staged reader is consumed by a
+/// single mux. NEEDS HARDWARE VALIDATION — the flow matches the proven CLI path
+/// but has not run against a real drive here.
+fn session_mux_title(
+    source: &str,
+    title_index: usize,
+    dest_url: &str,
+    selection: libfreemkv::StreamSelection,
+    req: &RipRequest,
+    sink: &UiSink,
+) -> std::io::Result<libfreemkv::MuxOutcome> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let io = |e: libfreemkv::Error| std::io::Error::other(format!("{e}"));
+    let mut session =
+        libfreemkv::DiscSession::open(disc_target(source), session_keyspec(&req.keys))
+            .map_err(io)?;
+    session.lock_tray();
+    session
+        .scan(libfreemkv::ScanOptions::default())
+        .map_err(io)?;
+    let _ = session.resolve_keys(key_factory(&req.keys));
+    session.stage_drive_as_reader();
+
+    let opts = libfreemkv::MuxOptions {
+        skip_errors: false,
+        batch_sectors: 64,
+        raw: req.raw,
+        // Session arm reads selection from MuxOptions (unlike the Url arm).
+        selection,
+        send_deadline: Some(Duration::from_secs(60)),
+    };
+
+    let halt = libfreemkv::Halt::new();
+    let (tx, rx) = mpsc::channel::<(u64, u64)>();
+    struct Ev {
+        tx: mpsc::Sender<(u64, u64)>,
+    }
+    impl libfreemkv::MuxEvents for Ev {
+        fn on_write_progress(&self, w: u64, t: u64) {
+            let _ = self.tx.send((w, t));
+        }
+    }
+    let done = Arc::new(AtomicBool::new(false));
+
+    std::thread::scope(|s| {
+        let wh = halt.clone();
+        let wd = done.clone();
+        s.spawn(move || {
+            loop {
+                let mut latest = None;
+                while let Ok(m) = rx.try_recv() {
+                    latest = Some(m);
+                }
+                if let Some((d, t)) = latest {
+                    // Speed/ETA aren't derived here (the engine's estimator is
+                    // internal to fe::mux_title); the bar still tracks bytes.
+                    let p = fe::Progress {
+                        pass: "mux".to_string(),
+                        bytes_done: d,
+                        bytes_total: t,
+                        sectors_bad: 0,
+                        speed_bps: 0,
+                        eta_secs: None,
+                    };
+                    sink.progress(&p);
+                }
+                if sink.should_cancel() {
+                    wh.cancel();
+                }
+                if wd.load(Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let events: Arc<dyn libfreemkv::MuxEvents> = Arc::new(Ev { tx });
+        let outcome = libfreemkv::mux_stream(
+            libfreemkv::MuxInput::Session {
+                session: &mut session,
+                title_index,
+            },
+            dest_url,
+            &opts,
+            &halt,
+            events,
+        );
+        done.store(true, Ordering::Relaxed);
+        outcome
+    })
+}
+
+/// Rip from a live optical drive (`disc://`). Scans once to resolve titles and
+/// keys, then runs the chosen sink. Title/metadata/demux sinks mux each selected
+/// title off a fresh session (`session_mux_title`); decrypted-folder extracts
+/// the UDF tree to a per-disc subdir. Whole-disc ISO image is flagged as not yet
+/// wired for the GUI (needs the mapfile copy path — see below).
+///
+/// NEEDS HARDWARE VALIDATION end-to-end.
+fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
+    if req.decrypt_threads > 0 {
+        libfreemkv::set_decrypt_threads(req.decrypt_threads);
+    }
+    let kind = out_kind(&req.format);
+
+    // ISO image needs the mapfile-driven disc→ISO copy (the CLI's disc_to_iso /
+    // Disc::copy). Not ported to the GUI engine yet — say so plainly rather than
+    // write the wrong thing. Every other sink works off the session below.
+    if matches!(kind, OutKind::IsoImage) {
+        return Err("Whole-disc ISO image from a live drive isn't wired into the GUI yet — it needs the recovery/mapfile copy path (coming with drive validation). Use a title format or decrypted folder for now.".into());
+    }
+
+    // Scan once: titles, label, key state, and the per-disc name.
+    std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
+    let mut session =
+        libfreemkv::DiscSession::open(disc_target(&req.source), session_keyspec(&req.keys))
+            .map_err(|e| match &e {
+                libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
+                    "No optical drive found. Connect a Blu-ray/DVD drive with a disc.".to_string()
+                }
+                _ => format!("{e}"),
+            })?;
+    session.lock_tray();
+    session
+        .scan(libfreemkv::ScanOptions::default())
+        .map_err(|e| format!("E{} scan failed", e.code()))?;
+    let _ = session.resolve_keys(key_factory(&req.keys));
+    let disc = session.disc().ok_or("scan produced no disc")?;
+    let label = if disc.volume_id.is_empty() {
+        "disc".to_string()
+    } else {
+        disc.volume_id.clone()
+    };
+    let title_count = disc.titles.len();
+
+    // Decrypted folder: extract the UDF tree off the staged drive into a
+    // per-disc subdir (same helper the ISO path uses).
+    if matches!(kind, OutKind::DecryptedFolder) {
+        session.stage_drive_as_reader();
+        let mut reader = session
+            .take_reader()
+            .ok_or("could not stage the drive for extraction")?;
+        let disc = session.disc().ok_or("scan produced no disc")?;
+        return run_extract_folder(req, disc, reader.as_mut(), &label, state);
+    }
+    // The scan session is dropped here (releasing the drive) — each title's mux
+    // reopens its own session, mirroring the CLI.
+    drop(session);
+
+    // Which titles to rip.
+    let indices: Vec<usize> = if req.titles.is_empty() {
+        // Main-title default: the longest is a safe stand-in without a scan of
+        // the engine's Selection here; but keep it simple — title 0.
+        vec![0]
+    } else {
+        req.titles
+            .iter()
+            .copied()
+            .filter(|&i| i < title_count)
+            .collect()
+    };
+    if indices.is_empty() {
+        return Err("Nothing selected to rip.".into());
+    }
+    let multi = indices.len() > 1;
+    let selection = stream_selection(req);
+
+    let mut written = 0usize;
+    let mut partial = 0usize;
+    for &idx in &indices {
+        if sink.should_cancel() {
+            break;
+        }
+        let (dest_url, target) = match kind {
+            OutKind::File(scheme) => {
+                let base = title_basename(&req.filename_template, &label, idx + 1);
+                let out = format!("{}/{}.{}", req.dest_dir, base, scheme);
+                (format!("{scheme}://{out}"), out)
+            }
+            OutKind::Demux => {
+                let dir = if multi {
+                    format!("{}/t{:02}/", req.dest_dir, idx + 1)
+                } else {
+                    format!("{}/", req.dest_dir)
+                };
+                (format!("demux://{dir}"), dir)
+            }
+            OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
+        };
+        match session_mux_title(&req.source, idx, &dest_url, selection.clone(), req, sink) {
+            Ok(o) if o.completed => {
+                state
+                    .lines
+                    .lock()
+                    .unwrap()
+                    .push(format!("title {} -> {}", idx + 1, target));
+                written += 1;
+                state.titles_done.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(_) => {
+                partial += 1;
+                state.lines.lock().unwrap().push(format!(
+                    "title {} cancelled — partial output kept: {}",
+                    idx + 1,
+                    target
+                ));
+            }
+            Err(e) => {
+                let code = e.to_string().trim_start_matches('E').parse().unwrap_or(0);
+                state
+                    .lines
+                    .lock()
+                    .unwrap()
+                    .push(format!("Title {}: {}", idx + 1, explain(code)));
+                if matches!(kind, OutKind::File(_)) {
+                    let _ = std::fs::remove_file(&target);
+                }
+            }
+        }
+    }
+
+    Ok(if written == 0 && partial > 0 {
+        format!(
+            "Cancelled — {partial} partial file(s) kept in {}",
+            req.dest_dir
+        )
+    } else if written == 0 {
+        "Nothing was written".to_string()
+    } else {
+        format!("{written} title(s) written to {}", req.dest_dir)
     })
 }
 
