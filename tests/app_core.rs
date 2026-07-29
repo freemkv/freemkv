@@ -527,3 +527,27 @@ fn a_dvd_hides_mp4_end_to_end() {
     // A fresh app knows no codecs and must not hide the option on a guess.
     assert!(App::new().mp4_possible());
 }
+
+/// The GUI language picker must list exactly the locales the i18n crate ships —
+/// no dead row that resolves to English, no shipped locale the user can't pick.
+/// `ui::LOCALES` carries an extra "auto" row (system locale); every other code
+/// must be a real locale file, and every shipped file must have a picker row.
+#[test]
+fn locale_picker_matches_shipped_catalogs() {
+    use std::collections::BTreeSet;
+    let picker: BTreeSet<&str> = freemkv::ui::LOCALES
+        .iter()
+        .map(|(_, code)| *code)
+        .filter(|c| *c != "auto")
+        .collect();
+    let shipped: BTreeSet<&str> = freemkv::strings::SHIPPED_CODES.iter().copied().collect();
+    assert_eq!(
+        picker,
+        shipped,
+        "picker rows and shipped locale files disagree\n  picker-only: {:?}\n  shipped-only: {:?}",
+        picker.difference(&shipped).collect::<Vec<_>>(),
+        shipped.difference(&picker).collect::<Vec<_>>(),
+    );
+    // Auto is always offered and always first.
+    assert_eq!(freemkv::ui::LOCALES.first().map(|(_, c)| *c), Some("auto"));
+}
