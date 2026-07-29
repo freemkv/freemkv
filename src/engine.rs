@@ -583,23 +583,83 @@ pub fn start_rip(req: RipRequest, state: Arc<RunState>) {
     });
 }
 
-/// Mirror the CLI's `--force`, which guards exactly one case: writing a
-/// decrypted file tree (`dir://`) into a non-empty directory. Ordinary file
-/// output into a populated folder is normal and must not be blocked.
-pub fn dest_is_writable(req: &RipRequest) -> Result<(), String> {
-    if req.force || !req.format.contains("decrypted folder") {
-        return Ok(());
-    }
-    let non_empty = std::fs::read_dir(&req.dest_dir)
+/// The decrypted-folder target for a rip: a per-disc subdirectory of the
+/// destination, named by the disc's volume label. Exposed so the writability
+/// gate is testable without a real disc.
+pub fn extract_target(dest_dir: &str, label: &str) -> std::path::PathBuf {
+    std::path::Path::new(dest_dir).join(label)
+}
+
+/// Whether a decrypted-folder extraction may proceed into `dest`: a fresh or
+/// empty subdir always may; a populated one needs `force` (the CLI's `--force`).
+/// Only a `dir://` tree is gated — ordinary file/MKV output into a populated
+/// folder is normal and never blocked.
+pub fn folder_writable(dest: &std::path::Path, force: bool) -> Result<(), String> {
+    let non_empty = std::fs::read_dir(dest)
         .map(|mut d| d.next().is_some())
         .unwrap_or(false);
-    if non_empty {
+    if !force && non_empty {
         return Err(format!(
-            "{} is not empty — enable “Overwrite existing files” in Settings to unpack into it.",
-            req.dest_dir
+            "{} already exists and is not empty — enable “Overwrite existing files” in Settings to unpack into it.",
+            dest.display()
         ));
     }
     Ok(())
+}
+
+/// Extract the disc's decrypted UDF file tree to a per-disc SUBDIRECTORY of the
+/// destination (`<dest_dir>/<label>/`) — the CLI's `dir://` → `Disc::extract_tree`.
+/// Targeting a subdir (never the raw dest_dir) is what stops it dumping into
+/// ~/Movies and colliding with everything already there — the reported bug.
+fn run_extract_folder(
+    req: &RipRequest,
+    disc: &libfreemkv::Disc,
+    reader: &mut dyn libfreemkv::SectorSource,
+    label: &str,
+    state: &Arc<RunState>,
+) -> Result<String, String> {
+    let dest = extract_target(&req.dest_dir, label);
+    // A non-empty target means a previous extract (or another disc). Mirror the
+    // CLI's --force gate, but check the SUBDIR — a fresh one is never "not empty".
+    folder_writable(&dest, req.force)?;
+    state.lines.lock().unwrap().push(format!(
+        "extracting decrypted file tree → {}",
+        dest.display()
+    ));
+    let opts = libfreemkv::ExtractOptions {
+        force: req.force,
+        progress: None,
+        halt: None,
+    };
+    match disc.extract_tree(reader, &dest, &opts) {
+        Ok(res) => {
+            for f in &res.files {
+                if f.bytes_unreadable > 0 {
+                    state.lines.lock().unwrap().push(format!(
+                        "  {} — {:.1} MB unreadable",
+                        f.path.display(),
+                        f.bytes_unreadable as f64 / 1_048_576.0
+                    ));
+                }
+            }
+            let n = res.files.len();
+            if res.bytes_unreadable > 0 {
+                Ok(format!(
+                    "Decrypted file tree written to {} — {} file(s), {:.1} MB unreadable",
+                    dest.display(),
+                    n,
+                    res.bytes_unreadable as f64 / 1_048_576.0
+                ))
+            } else {
+                Ok(format!(
+                    "Decrypted file tree written to {} — {} file(s)",
+                    dest.display(),
+                    n
+                ))
+            }
+        }
+        Err(e) => Err(format!("Extraction failed: E{}", e.code())),
+    }
 }
 
 fn is_stream_source(path: &str) -> bool {
@@ -629,13 +689,49 @@ fn source_scheme(path: &str) -> &'static str {
     }
 }
 
-fn out_ext(format: &str) -> &'static str {
-    if format.contains("MP4") {
-        "mp4"
+/// What real operation an output format maps to. The picker offers nine format
+/// strings; six of them used to fall through to a per-title MKV mux. Each now
+/// resolves to its true sink so the file the user gets matches what they chose.
+#[derive(Clone, Copy)]
+enum OutKind {
+    /// A per-title file produced through the mux pipeline. The `&str` is BOTH
+    /// the dest-URL scheme AND the file extension — `mkv`/`mp4`/`m2ts` for
+    /// containers, or `chapters`/`json`/`fvi` for the metadata / index sinks the
+    /// resolve layer dispatches on (same as the CLI's `dir_jobs`).
+    File(&'static str),
+    /// Each title's tracks fanned out to elementary-stream files in a directory
+    /// (the CLI's `demux://` sink, which does its own per-track naming).
+    Demux,
+    /// The whole disc's decrypted UDF file tree, extracted to a per-disc
+    /// subdirectory (the CLI's `dir://` → `Disc::extract_tree`).
+    DecryptedFolder,
+    /// A whole-disc sector image. Needs a physical disc (`disc://`); there is no
+    /// iso-file → iso-file decrypt copy, so this is not offered for an ISO source
+    /// yet — see the disc:// live-drive work.
+    IsoImage,
+}
+
+/// Map a picker format string to its real output kind. Order matters only in
+/// that each branch's marker is unique across the nine format strings.
+fn out_kind(format: &str) -> OutKind {
+    if format.contains("decrypted folder") {
+        OutKind::DecryptedFolder
+    } else if format.contains("ISO image") {
+        OutKind::IsoImage
+    } else if format.contains("separate track") {
+        OutKind::Demux
+    } else if format.contains("MP4") {
+        OutKind::File("mp4")
     } else if format.contains("M2TS") {
-        "m2ts"
+        OutKind::File("m2ts")
+    } else if format.contains("Chapters") {
+        OutKind::File("chapters")
+    } else if format.contains("JSON") {
+        OutKind::File("json")
+    } else if format.contains(".fvi") {
+        OutKind::File("fvi")
     } else {
-        "mkv"
+        OutKind::File("mkv")
     }
 }
 
@@ -675,17 +771,29 @@ fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
 /// than silently writing tracks they deselected.
 fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
-    dest_is_writable(req)?;
     let name = std::path::Path::new(&req.source)
         .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or("output")
         .to_string();
-    let ext = out_ext(&req.format);
-    let out = format!("{}/{}.{}", req.dest_dir, name, ext);
     let hint = std::fs::metadata(&req.source).map(|m| m.len()).unwrap_or(0);
     let src_url = format!("{}://{}", source_scheme(&req.source), req.source);
-    let dest_url = format!("{ext}://{out}");
+
+    // A container is a single title. Route to the chosen sink; the whole-disc
+    // operations have no meaning for one media file.
+    let (dest_url, target) = match out_kind(&req.format) {
+        OutKind::File(scheme) => {
+            let out = format!("{}/{}.{}", req.dest_dir, name, scheme);
+            (format!("{scheme}://{out}"), out)
+        }
+        OutKind::Demux => {
+            let dir = format!("{}/", req.dest_dir);
+            (format!("demux://{dir}"), format!("{dir} (per-track files)"))
+        }
+        OutKind::DecryptedFolder | OutKind::IsoImage => {
+            return Err("That output is for a disc source — open an ISO or disc to use it.".into());
+        }
+    };
 
     if req.explicit_streams {
         state.lines.lock().unwrap().push(
@@ -702,8 +810,8 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
         sink,
     )
     .map_err(|e| format!("convert failed: {e}"))?;
-    state.lines.lock().unwrap().push(format!("wrote {out}"));
-    Ok(format!("1 file written to {}", req.dest_dir))
+    state.lines.lock().unwrap().push(format!("wrote {target}"));
+    Ok(format!("Written to {}", req.dest_dir))
 }
 
 fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
@@ -717,6 +825,26 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     .map_err(|e| format!("E{} scan failed", e.code()))?;
     // Resolve decryption keys onto the disc BEFORE muxing.
     resolve_disc_keys(&mut disc, reader.as_mut(), &req.keys);
+
+    let kind = out_kind(&req.format);
+    let label = if disc.volume_id.is_empty() {
+        "disc".to_string()
+    } else {
+        disc.volume_id.clone()
+    };
+
+    // Whole-disc sinks bypass the per-title mux loop entirely — they operate on
+    // the disc as a whole, not on a selected title.
+    match kind {
+        OutKind::DecryptedFolder => {
+            std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
+            return run_extract_folder(req, &disc, reader.as_mut(), &label, state);
+        }
+        OutKind::IsoImage => {
+            return Err("ISO-image output needs a physical disc (disc://). This source is already an ISO — choose “decrypted folder” to unpack its files.".into());
+        }
+        _ => {}
+    }
     let disc = disc;
 
     let sel = if req.titles.is_empty() {
@@ -733,24 +861,37 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     if indices.is_empty() {
         return Err("Nothing selected to rip.".into());
     }
+    // Demux fans a single title straight into the dest dir but gives each title
+    // of a multi-title rip its own subdir so their track files never collide.
+    let multi = indices.len() > 1;
 
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
-    dest_is_writable(req)?;
     let src_url = format!("iso://{}", req.source);
-    let ext = out_ext(&req.format);
-    let scheme = ext;
-    let label = if disc.volume_id.is_empty() {
-        "disc"
-    } else {
-        &disc.volume_id
-    };
 
     // The engine owns the per-title loop (skip/abort policy); we only supply
     // "mux one title".
     let written = std::cell::Cell::new(0usize);
     let partial = std::cell::Cell::new(0usize);
     let outcome = fe::run_titles(&indices, !req.titles.is_empty(), sink, |idx| {
-        let out = format!("{}/{}_t{}.{}", req.dest_dir, label, idx + 1, ext);
+        // Destination per output kind: a per-title file for the container /
+        // metadata / index sinks, or a demux directory (its own per-track
+        // naming) for separate track files.
+        let (dest_url, target) = match kind {
+            OutKind::File(scheme) => {
+                let out = format!("{}/{}_t{}.{}", req.dest_dir, label, idx + 1, scheme);
+                (format!("{scheme}://{out}"), out)
+            }
+            OutKind::Demux => {
+                let dir = if multi {
+                    format!("{}/t{:02}/", req.dest_dir, idx + 1)
+                } else {
+                    format!("{}/", req.dest_dir)
+                };
+                (format!("demux://{dir}"), dir)
+            }
+            // Whole-disc kinds returned above.
+            OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
+        };
         let hint = disc.titles.get(idx).map(|t| t.size_bytes).unwrap_or(0);
         // AACS unit keys must reach the mux or every encrypted title fails
         // with E7022 — the scan resolving them is not enough on its own.
@@ -767,7 +908,6 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             ..Default::default()
         };
         let mux = mux_opts(req);
-        let dest_url = format!("{scheme}://{out}");
         match fe::mux_title(&src_url, &dest_url, input, &mux, hint, sink) {
             Ok(o) => {
                 if !o.completed {
@@ -777,9 +917,9 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
                     // "nothing written" when a file is sitting in the folder.
                     partial.set(partial.get() + 1);
                     state.lines.lock().unwrap().push(format!(
-                        "title {} cancelled — partial file kept: {}",
+                        "title {} cancelled — partial output kept: {}",
                         idx + 1,
-                        out
+                        target
                     ));
                     return Ok(());
                 }
@@ -787,7 +927,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
                     .lines
                     .lock()
                     .unwrap()
-                    .push(format!("title {} -> {}", idx + 1, out));
+                    .push(format!("title {} -> {}", idx + 1, target));
                 written.set(written.get() + 1);
                 state
                     .titles_done
@@ -800,9 +940,12 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
                     idx + 1,
                     explain(error_code(&e))
                 ));
-                // A failed mux leaves a 0-byte file behind that looks like
-                // output. Remove it so the folder never shows a broken result.
-                let _ = std::fs::remove_file(&out);
+                // A failed per-title FILE mux leaves a 0-byte file behind that
+                // looks like output. Remove it so the folder never shows a broken
+                // result. (Demux writes into a directory — nothing to clean.)
+                if matches!(kind, OutKind::File(_)) {
+                    let _ = std::fs::remove_file(&target);
+                }
                 Err(e)
             }
         }

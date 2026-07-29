@@ -329,6 +329,8 @@ struct Ivars {
     on_prog: RefCell<bool>,
     win_prefs: RefCell<Option<Retained<NSWindow>>>,
     win_about: RefCell<Option<Retained<NSWindow>>>,
+    /// The main window, kept so a live language switch can rebuild its content.
+    win_main: RefCell<Option<Retained<NSWindow>>>,
     tree: RefCell<Option<Retained<NSOutlineView>>>,
     src: RefCell<Option<Retained<TitlesSource>>>,
     page_empty: RefCell<Option<Retained<NSView>>>,
@@ -480,6 +482,9 @@ define_class!(
 
         #[unsafe(method(onClosePrefs:))]
         fn on_close_prefs(&self, _s: Option<&AnyObject>) {
+            // Capture the language before the form overwrites it, so we can tell
+            // whether the user actually changed it (and switch live if so).
+            let old_lang = self.ivars().settings.borrow().language.clone();
             {
                 let mut st = self.ivars().settings.borrow_mut();
                 for (k, f) in self.ivars().pf_fields.borrow().iter() {
@@ -531,6 +536,16 @@ define_class!(
             }
             if let Some(w) = self.ivars().win_prefs.borrow().as_ref() {
                 w.close();
+            }
+            // Live language switch: if the interface language changed and no rip
+            // is running, swap the catalog and rebuild the UI so it takes effect
+            // without a restart. (Settings can't be opened mid-rip, so the guard
+            // is belt-and-braces; the "restart" note only matters as a fallback.)
+            let new_lang = self.ivars().settings.borrow().language.clone();
+            if old_lang != new_lang && !self.ivars().app.borrow().running() {
+                crate::strings::set_locale(crate::ui::locale_code(&new_lang));
+                let mtm = MainThreadMarker::new().unwrap();
+                self.relocalize(mtm);
             }
         }
 
@@ -1245,6 +1260,40 @@ impl Controller {
         }
     }
 
+    /// Apply a language change live: rebuild the menu bar and the main window's
+    /// content in the newly-active locale (which the caller has already swapped
+    /// in via `strings::set_locale`), then re-render from the core so the open
+    /// disc, log, and selection all come back — just in the new language.
+    fn relocalize(&self, mtm: MainThreadMarker) {
+        // Menu bar: build_menus installs a fresh main menu, replacing the old.
+        let app = NSApplication::sharedApplication(mtm);
+        build_menus(mtm, &app, self);
+
+        let Some(win) = self.ivars().win_main.borrow().clone() else {
+            return;
+        };
+        let content = win.contentView().unwrap();
+        // Tear down the existing content before rebuilding, else the new
+        // controls stack on top of the old ones. Snapshot the subviews first —
+        // removeFromSuperview mutates the live subview list.
+        let subs: Vec<Retained<NSView>> = content.subviews().iter().collect();
+        for v in subs {
+            v.removeFromSuperview();
+        }
+        // Rebuild every control (build_ui re-stores all the ivars it owns,
+        // including `src`, `log`, the bars and the format popup) and re-add the
+        // drag-and-drop overlay.
+        let _src = build_ui(mtm, &win, self);
+        install_drop_view(mtm, &win, self);
+
+        // Restore what's on screen from the core: render() repopulates the log
+        // from App state and paints the correct page; relayout fits the current
+        // window size.
+        self.render();
+        let b = content.bounds();
+        self.relayout(b.size.width, b.size.height);
+    }
+
     fn start_drain(&self) {
         if self.ivars().drain.borrow().is_some() {
             return;
@@ -1626,6 +1675,32 @@ fn build_menus(mtm: MainThreadMarker, app: &NSApplication, c: &Controller) {
 }
 
 // ── build ─────────────────────────────────────────────────────────────────
+
+/// Install the Finder drag-and-drop overlay behind every control, so a user
+/// can drop a file/ISO onto the window. Factored out of `run` so a live
+/// language rebuild (`relocalize`) can re-add it after tearing the content down.
+fn install_drop_view(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) {
+    unsafe {
+        let content = window.contentView().unwrap();
+        let drop = DropView::alloc(mtm).set_ivars(RefCell::new(Some(c.retain())));
+        let drop: Retained<DropView> = msg_send![super(drop), init];
+        drop.setFrame(content.bounds());
+        drop.setAutoresizingMask(
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        let types =
+            objc2_foundation::NSArray::from_slice(&[objc2_app_kit::NSPasteboardTypeFileURL]);
+        drop.registerForDraggedTypes(&types);
+        // Behind every control: the drop view must not intercept clicks.
+        content.addSubview_positioned_relativeTo(
+            &drop,
+            objc2_app_kit::NSWindowOrderingMode::Below,
+            None,
+        );
+        std::mem::forget(drop);
+    }
+}
 
 fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retained<TitlesSource> {
     let content = window.contentView().unwrap();
@@ -2231,35 +2306,14 @@ pub fn run() {
     }
 
     let c = Controller::new(mtm);
+    *c.ivars().win_main.borrow_mut() = Some(window.clone());
     build_menus(mtm, &app, &c);
     let src = build_ui(mtm, &window, &c);
 
     {
         window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*c)));
     }
-    // Accept files dragged from Finder onto the window — the ordinary way a
-    // Mac user opens something they can already see.
-    unsafe {
-        let content = window.contentView().unwrap();
-        let drop = DropView::alloc(mtm).set_ivars(RefCell::new(Some(c.clone())));
-        let drop: Retained<DropView> = msg_send![super(drop), init];
-        drop.setFrame(content.bounds());
-        drop.setAutoresizingMask(
-            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
-                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
-        );
-        let types =
-            objc2_foundation::NSArray::from_slice(&[objc2_app_kit::NSPasteboardTypeFileURL]);
-        drop.registerForDraggedTypes(&types);
-        content.addSubview(&drop);
-        // Behind every control: the drop view must not intercept clicks.
-        content.addSubview_positioned_relativeTo(
-            &drop,
-            objc2_app_kit::NSWindowOrderingMode::Below,
-            None,
-        );
-        std::mem::forget(drop);
-    }
+    install_drop_view(mtm, &window, &c);
 
     // FMKV_DEMO=<path> drives the real controls on a timer so a human can
     // watch: open → tick → choose format → Run. Debug builds only.
