@@ -133,6 +133,16 @@ jobs:
             target: x86_64-unknown-linux-musl
             asset: freemkv-x86_64-linux
             ext: ''
+          # Bare macOS CLI binaries (the .dmg already bundles the CLI; these are
+          # for scripted installs / brew formulae that want just the binary).
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: freemkv-aarch64-macos
+            ext: ''
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: freemkv-x86_64-macos
+            ext: ''
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: freemkv-x86_64-windows
