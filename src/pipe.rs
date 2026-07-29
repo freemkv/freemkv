@@ -2341,8 +2341,22 @@ fn dir_to_extract(
     }
 }
 
-/// Run `Disc::extract_tree` and render the result. Shared by the disc:// and
-/// iso:// `dir://` paths.
+/// A [`freemkv_engine::Sink`] that forwards `should_cancel` to a
+/// [`libfreemkv::Halt`] the CLI already maintains (bridged from SIGINT via
+/// [`SigintHalt`]). `freemkv_engine::extract_tree` does its own should_cancel
+/// → Halt bridging internally (a second, generic layer); this adapter is the
+/// thin seam that lets the CLI keep `SigintHalt` — the actual OS-signal
+/// bridge — entirely in the shell, as required.
+struct HaltSink<'a>(&'a libfreemkv::Halt);
+
+impl freemkv_engine::Sink for HaltSink<'_> {
+    fn should_cancel(&self) -> bool {
+        self.0.is_cancelled()
+    }
+}
+
+/// Run `Disc::extract_tree` (via `freemkv_engine::extract_tree`) and render
+/// the result. Shared by the disc:// and iso:// `dir://` paths.
 fn run_extract(
     disc: &libfreemkv::Disc,
     reader: &mut dyn libfreemkv::SectorSource,
@@ -2366,13 +2380,8 @@ fn run_extract(
     // the unwind path, since `extract_tree` is not panic-free.
     let sigint = SigintHalt::install();
 
-    let opts = libfreemkv::ExtractOptions {
-        force,
-        progress: None,
-        halt: Some(sigint.halt().clone()),
-    };
-
-    let outcome = disc.extract_tree(reader, dest_path, &opts);
+    let outcome =
+        freemkv_engine::extract_tree(disc, reader, dest_path, force, &HaltSink(sigint.halt()));
     drop(sigint);
 
     match outcome {

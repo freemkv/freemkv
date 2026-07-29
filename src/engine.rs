@@ -745,6 +745,7 @@ fn run_extract_folder(
     disc: &libfreemkv::Disc,
     reader: &mut dyn libfreemkv::SectorSource,
     label: &str,
+    sink: &UiSink,
     state: &Arc<RunState>,
 ) -> Result<String, String> {
     let dest = extract_target(&req.dest_dir, label);
@@ -755,12 +756,7 @@ fn run_extract_folder(
         "extracting decrypted file tree → {}",
         dest.display()
     ));
-    let opts = libfreemkv::ExtractOptions {
-        force: req.force,
-        progress: None,
-        halt: None,
-    };
-    match disc.extract_tree(reader, &dest, &opts) {
+    match fe::extract_tree(disc, reader, &dest, req.force, sink) {
         Ok(res) => {
             for f in &res.files {
                 if f.bytes_unreadable > 0 {
@@ -997,7 +993,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     match kind {
         OutKind::DecryptedFolder => {
             std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
-            return run_extract_folder(req, &disc, reader.as_mut(), &label, state);
+            return run_extract_folder(req, &disc, reader.as_mut(), &label, sink, state);
         }
         OutKind::IsoImage => {
             return Err("ISO-image output needs a physical disc (disc://). This source is already an ISO — choose “decrypted folder” to unpack its files.".into());
@@ -1186,7 +1182,7 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             .take_reader()
             .ok_or("could not stage the drive for extraction")?;
         let disc = session.disc().ok_or("scan produced no disc")?;
-        return run_extract_folder(req, disc, reader.as_mut(), &label, state);
+        return run_extract_folder(req, disc, reader.as_mut(), &label, sink, state);
     }
 
     // Which titles to rip — same Selection/resolve_selection the ISO path
