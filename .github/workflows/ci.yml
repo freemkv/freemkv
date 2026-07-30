@@ -79,6 +79,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
 
+  # ── Intel Mac: a target we SHIP but never otherwise compile ─────────────────
+  # Both the .dmg and the bare CLI binary ship an x86_64-apple-darwin build, and
+  # until this job existed no CI leg compiled that target at all — the runners
+  # are arm64, so a break would have surfaced at tag time, in the release
+  # workflow, after the version bump and the tag push. Cheap insurance: the
+  # toolchain already has the target available on a macOS runner.
+  build-macos-intel:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target x86_64-apple-darwin
+
   # ── Linux: the CLI (what Linux ships) ───────────────────────────────────────
   # The GUI is target-gated off, so this builds the pure CLI. If any GUI code or
   # OS assumption leaked into the always-compiled path it would fail here on
