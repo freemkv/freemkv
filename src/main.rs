@@ -42,6 +42,8 @@ mod ui;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "windows")]
+mod win_layout;
+#[cfg(target_os = "windows")]
 mod windows;
 
 fn main() {

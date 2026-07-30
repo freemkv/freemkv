@@ -49,25 +49,18 @@ use crate::ui::{App, Check, Cmd, Effect, LogKind, Page, Row, View};
 
 // ── window geometry ───────────────────────────────────────────────────────
 //
-// The same proportions the macOS shell uses, so the two look like one product:
-// tree 46.4% wide, log 32% of the height on the tree page and 62% while
+// The numbers live in `win_layout`, which turns a DPI plus a client size into
+// every rectangle. NOTHING here may position a control from a bare constant:
+// the manifest declares PerMonitorV2, so Windows hands this process the real
+// DPI and does no scaling of its own. A literal `8` is 8 physical pixels at
+// 200% just as it is at 100% — half the intended padding, with the text
+// clipped to match.
+//
+// The proportions are the macOS shell's, so the two look like one product:
+// tree 46.4% wide, log 32% of the height on the tree page and more while
 // ripping, Output/Info groups stacked on the right.
 
-const W: i32 = 1180;
-const H: i32 = 760;
-const MIN_W: i32 = 1020;
-const MIN_H: i32 = 620;
-const PAD: i32 = 8;
-/// Reserved strip under the in-window menu bar.
-const TB_H: i32 = 4;
-/// Progress page height with both bars, and with only the per-title bar.
-const PROG_H: i32 = 292;
-const PROG_H_ONE: i32 = 246;
-/// Result page height — fixed so its contents never drift off-screen.
-const RESULT_H: i32 = 200;
-/// Height of the Output group on the right column.
-const OUT_H: i32 = 110;
-const TREE_FRAC: f64 = 0.464;
+use crate::win_layout as lay;
 
 /// Poll interval for a running job, in milliseconds. Matches the macOS timer.
 const TICK_MS: u32 = 200;
@@ -216,7 +209,25 @@ mod extra {
         /// Classic (unthemed) checkbox glyph — the fallback when the user has
         /// theming switched off, so the tri-state ticks never come out blank.
         pub fn DrawFrameControl(hdc: *mut c_void, rc: *mut c_void, ty: u32, state: u32) -> i32;
+        /// The DPI-aware `SystemParametersInfo`. The plain one answers for the
+        /// *system* DPI whatever monitor the window is on, so a caption font
+        /// read through it comes back the wrong size on every secondary
+        /// display — the exact bug this file exists to avoid.
+        pub fn SystemParametersInfoForDpi(
+            action: u32,
+            ui_param: u32,
+            pv_param: *mut c_void,
+            win_ini: u32,
+            dpi: u32,
+        ) -> i32;
+        /// The system (primary-monitor) DPI. Needed before any window exists,
+        /// which is when the shell has to choose its initial size.
+        pub fn GetDpiForSystem() -> u32;
     }
+
+    /// `SPI_GETNONCLIENTMETRICS` — the shell UI font lives in the returned
+    /// `NONCLIENTMETRICS`.
+    pub const SPI_GETNONCLIENTMETRICS: u32 = 0x0029;
 
     /// `PW_RENDERFULLCONTENT` — required to capture DirectComposition-rendered
     /// content; without it modern controls come back blank.
@@ -226,6 +237,125 @@ mod extra {
     pub const DFCS_BUTTONCHECK: u32 = 0x0000_0000;
     pub const DFCS_CHECKED: u32 = 0x0000_0400;
     pub const DFCS_BUTTON3STATE: u32 = 0x0000_0008;
+}
+
+// ── DPI ───────────────────────────────────────────────────────────────────
+//
+// Every physical length in this shell comes from one of these three calls.
+// `win_layout` does the arithmetic; this section is the only place that asks
+// Windows what the DPI *is*.
+
+/// The DPI of the monitor `hwnd` is currently on.
+///
+/// `GetDpiForWindow` answers 0 for a window that does not exist yet, which
+/// happens for real: `WM_GETMINMAXINFO` is delivered during `CreateWindowEx`,
+/// before the handle is stored. The system DPI is the right answer then.
+#[must_use]
+fn window_dpi(hwnd: &w::HWND) -> u32 {
+    match hwnd.GetDpiForWindow() {
+        0 => system_dpi(),
+        d => d,
+    }
+}
+
+/// The primary monitor's DPI — the only figure available before any window
+/// exists, which is when the shell has to pick its initial size and build the
+/// Settings and About forms.
+#[must_use]
+fn system_dpi() -> u32 {
+    match unsafe { extra::GetDpiForSystem() } {
+        0 => lay::BASE_DPI,
+        d => d,
+    }
+}
+
+thread_local! {
+    /// The UI font per DPI, kept alive for the life of the GUI thread.
+    ///
+    /// A control keeps only a borrowed `HFONT`; deleting the object while it is
+    /// still selected paints garbage. Caching also means dragging back and
+    /// forth between two monitors creates two fonts, not one per crossing.
+    static UI_FONTS: RefCell<Vec<(u32, w::guard::DeleteObjectGuard<w::HFONT>)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// The shell UI font at `dpi`.
+///
+/// winsafe builds its own global UI font exactly once, from the plain
+/// `SystemParametersInfo` — that is, at the DPI of the primary monitor — and
+/// sends it to each control as the control is created. Under PerMonitorV2 that
+/// font is right only on the monitor the process started on, and never changes
+/// again. A layout that scales under a font that does not is arguably worse
+/// than neither, so the shell creates its own.
+#[must_use]
+fn ui_font(dpi: u32) -> Option<w::HFONT> {
+    UI_FONTS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((_, f)) = cache.iter().find(|(d, _)| *d == dpi) {
+            return Some(unsafe { f.raw_copy() });
+        }
+
+        let mut ncm = w::NONCLIENTMETRICS::default();
+        let sz = std::mem::size_of::<w::NONCLIENTMETRICS>() as u32;
+        let got = unsafe {
+            extra::SystemParametersInfoForDpi(
+                extra::SPI_GETNONCLIENTMETRICS,
+                sz,
+                &mut ncm as *mut _ as *mut std::ffi::c_void,
+                0,
+                dpi,
+            ) != 0
+        };
+        if !got {
+            // The per-DPI call refused (it validates its arguments). Fall back
+            // to the metrics at the system DPI and rescale the height by hand.
+            //
+            // Not a compatibility path: both imports above are Windows 10 1607
+            // and the PerMonitorV2 manifest already requires 1703, so a machine
+            // that lacked them could not start this binary at all.
+            unsafe {
+                w::SystemParametersInfo(
+                    co::SPI::GETNONCLIENTMETRICS,
+                    sz,
+                    &mut ncm,
+                    co::SPIF::NoValue,
+                )
+                .ok()?;
+            }
+            let sys = system_dpi() as i32;
+            ncm.lfMenuFont.lfHeight = w::MulDiv(ncm.lfMenuFont.lfHeight, dpi as i32, sys);
+        }
+
+        // `lfMenuFont` rather than `lfMessageFont`, matching the font winsafe
+        // itself puts on every control — so this changes the *size*, and only
+        // the size, of the type the shell already renders.
+        let font = w::HFONT::CreateFontIndirect(&ncm.lfMenuFont).ok()?;
+        let handle = unsafe { font.raw_copy() };
+        cache.push((dpi, font));
+        Some(handle)
+    })
+}
+
+/// Put the DPI-correct UI font on a window and every control under it.
+///
+/// The tree view is included deliberately: winsafe sets no font on it at all,
+/// so it inherits the stock system font, which is a fixed-size relic that does
+/// not scale with anything.
+fn apply_ui_font(hwnd: &w::HWND, dpi: u32) {
+    let Some(font) = ui_font(dpi) else { return };
+    let set = |h: &w::HWND| {
+        unsafe {
+            h.SendMessage(msg::WmSetFont {
+                hfont: font.raw_copy(),
+                redraw: true,
+            });
+        };
+    };
+    set(hwnd);
+    hwnd.EnumChildWindows(|child: w::HWND| {
+        set(&child);
+        true
+    });
 }
 
 /// The Windows preferred UI language as a BCP-47 tag ("en-GB", "pt-BR",
@@ -320,12 +450,29 @@ fn set_icons(hwnd: &w::HWND) {
 ///
 /// The glyphs are drawn by the **theme engine** (`DrawThemeBackground` with the
 /// real `BUTTON`/checkbox parts), so they are pixel-identical to every other
-/// checkbox on the system at any DPI, rather than hand-painted approximations.
-fn build_check_images<T: 'static>(tree: &gui::TreeView<T>) -> w::AnyResult<()> {
-    let il = tree.image_list(co::TVSIL::STATE)?;
-    if il.GetImageCount() >= 4 {
-        return Ok(()); // already built
+/// checkbox on the system rather than hand-painted approximations.
+///
+/// The list is built at the size the OS reports for a small icon **at this
+/// window's DPI** (`GetSystemMetricsForDpi`, not `GetSystemMetrics` — the
+/// latter always answers for the primary monitor), and rebuilt when the DPI
+/// changes. winsafe's `TreeView::image_list` helper cannot be used: it creates
+/// its list hard-coded at 16 × 16, which is a half-size tick at 200%.
+fn build_check_images<T: 'static>(tree: &gui::TreeView<T>, dpi: u32) -> w::AnyResult<()> {
+    let side =
+        w::GetSystemMetricsForDpi(co::SM::CXSMICON, dpi).unwrap_or(lay::Scale::new(dpi).px(16));
+
+    // Already the right size for this DPI — nothing to do.
+    if let Some(cur) = unsafe {
+        tree.hwnd().SendMessage(msg::TvmGetImageList {
+            kind: co::TVSIL::STATE,
+        })
+    } && cur.GetImageCount() >= 4
+        && cur.GetIconSize().is_ok_and(|s| s.cx == side)
+    {
+        return Ok(());
     }
+
+    let mut il = w::HIMAGELIST::Create(w::SIZE::with(side, side), co::ILC::COLOR32, 4, 0)?;
 
     let desktop = w::HWND::GetDesktopWindow();
     let screen_dc = desktop.GetDC()?;
@@ -334,8 +481,8 @@ fn build_check_images<T: 'static>(tree: &gui::TreeView<T>) -> w::AnyResult<()> {
     let rc = w::RECT {
         left: 0,
         top: 0,
-        right: 16,
-        bottom: 16,
+        right: side,
+        bottom: side,
     };
 
     // Index 0 is "no state image" as far as the tree is concerned, so a
@@ -352,7 +499,7 @@ fn build_check_images<T: 'static>(tree: &gui::TreeView<T>) -> w::AnyResult<()> {
 
     for (part_state, classic_state) in states {
         let mem_dc = screen_dc.CreateCompatibleDC()?;
-        let bmp = screen_dc.CreateCompatibleBitmap(16, 16)?;
+        let bmp = screen_dc.CreateCompatibleBitmap(side, side)?;
         {
             let _sel = mem_dc.SelectObject(&*bmp)?;
             mem_dc.FillRect(rc, &bg)?;
@@ -373,6 +520,19 @@ fn build_check_images<T: 'static>(tree: &gui::TreeView<T>) -> w::AnyResult<()> {
             }
         }
         il.Add(&bmp, None)?;
+    }
+
+    // Hand the list to the tree and destroy whatever it held before, so a
+    // window dragged back and forth between two monitors does not leak one
+    // image list per crossing.
+    let old = unsafe {
+        tree.hwnd().SendMessage(msg::TvmSetImageList {
+            kind: co::TVSIL::STATE,
+            himagelist: Some(il.leak()),
+        })
+    };
+    if let Some(old) = old {
+        drop(unsafe { w::guard::ImageListDestroyGuard::new(old) });
     }
     Ok(())
 }
@@ -477,6 +637,13 @@ impl Shell {
     fn new() -> Self {
         let settings = crate::settings::Settings::load();
 
+        // No window exists yet, so the only DPI on offer is the system one.
+        // Every size below is a placeholder anyway — `relayout` runs on the
+        // first `WM_SIZE`, at the DPI of the monitor the window actually opens
+        // on — but the *window* size is used as given, so it must be scaled or
+        // the app opens as a postage stamp on a HiDPI screen.
+        let s = lay::Scale::new(system_dpi());
+
         let wnd = gui::WindowMain::new(gui::WindowMainOpts {
             title: "freemkv",
             class_name: "FmkvMain",
@@ -486,7 +653,7 @@ impl Shell {
             // which always returns the 32 px frame, so the title bar would show
             // a 32→16 downscale. `set_icons` below fixes that with WM_SETICON.
             class_icon: gui::Icon::Id(IDI_APP),
-            size: (W, H),
+            size: lay::default_size(s.dpi()),
             style: co::WS::CAPTION
                 | co::WS::SYSMENU
                 | co::WS::CLIPCHILDREN
@@ -505,7 +672,7 @@ impl Shell {
             &wnd,
             gui::LabelOpts {
                 text: &crate::strings::get("gui.page.empty_title"),
-                size: (W - PAD * 2, 26),
+                size: (s.px(lay::W - lay::PAD * 2), s.px(26)),
                 control_style: co::SS::CENTER,
                 ..Default::default()
             },
@@ -514,7 +681,7 @@ impl Shell {
             &wnd,
             gui::LabelOpts {
                 text: &crate::strings::get("gui.page.empty_subtitle"),
-                size: (W - PAD * 2, 20),
+                size: (s.px(lay::W - lay::PAD * 2), s.px(20)),
                 control_style: co::SS::CENTER,
                 ..Default::default()
             },
@@ -523,8 +690,8 @@ impl Shell {
             &wnd,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.btn.open_file"),
-                width: 180,
-                height: 30,
+                width: s.px(180),
+                height: s.px(30),
                 ctrl_id: ID_OPEN_EMPTY,
                 ..Default::default()
             },
@@ -534,7 +701,7 @@ impl Shell {
         let tree = gui::TreeView::new(
             &wnd,
             gui::TreeViewOpts {
-                size: (400, 400),
+                size: (s.px(400), s.px(400)),
                 // No TVS::CHECKBOXES: that control-owned list is two-state
                 // only. The state image list built in `build_check_images`
                 // carries the third (mixed) glyph the core can ask for.
@@ -551,8 +718,8 @@ impl Shell {
             &wnd,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.group.output"),
-                width: 300,
-                height: OUT_H,
+                width: s.px(300),
+                height: s.px(lay::OUT_H),
                 control_style: co::BS::GROUPBOX,
                 window_style: co::WS::CHILD | co::WS::VISIBLE,
                 ..Default::default()
@@ -561,7 +728,7 @@ impl Shell {
         let cmb_format = gui::ComboBox::new(
             &wnd,
             gui::ComboBoxOpts {
-                width: 280,
+                width: s.px(280),
                 ctrl_id: ID_FORMAT,
                 ..Default::default()
             },
@@ -570,8 +737,8 @@ impl Shell {
             &wnd,
             gui::EditOpts {
                 text: &settings.dest_dir,
-                width: 240,
-                height: 23,
+                width: s.px(240),
+                height: s.px(23),
                 ctrl_id: ID_OUTDIR,
                 ..Default::default()
             },
@@ -580,8 +747,8 @@ impl Shell {
             &wnd,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.btn.browse"),
-                width: 34,
-                height: 25,
+                width: s.px(34),
+                height: s.px(25),
                 ctrl_id: ID_BROWSE,
                 ..Default::default()
             },
@@ -590,8 +757,8 @@ impl Shell {
             &wnd,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.btn.run_now"),
-                width: 110,
-                height: 28,
+                width: s.px(110),
+                height: s.px(28),
                 control_style: co::BS::DEFPUSHBUTTON,
                 ctrl_id: ID_RUN,
                 ..Default::default()
@@ -601,8 +768,8 @@ impl Shell {
             &wnd,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.menu.eject"),
-                width: 110,
-                height: 26,
+                width: s.px(110),
+                height: s.px(26),
                 ctrl_id: ID_EJECT,
                 ..Default::default()
             },
@@ -611,8 +778,8 @@ impl Shell {
             &wnd,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.group.info"),
-                width: 300,
-                height: 200,
+                width: s.px(300),
+                height: s.px(200),
                 control_style: co::BS::GROUPBOX,
                 window_style: co::WS::CHILD | co::WS::VISIBLE,
                 ..Default::default()
@@ -622,8 +789,8 @@ impl Shell {
             &wnd,
             gui::EditOpts {
                 text: &crate::strings::get("gui.page.detail_default"),
-                width: 280,
-                height: 160,
+                width: s.px(280),
+                height: s.px(160),
                 // Read-only but selectable: the detail block is something users
                 // paste into bug reports.
                 control_style: co::ES::MULTILINE | co::ES::READONLY | co::ES::AUTOVSCROLL,
@@ -638,8 +805,8 @@ impl Shell {
             &wnd,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.group.information"),
-                width: W - PAD * 2,
-                height: 132,
+                width: s.px(lay::W - lay::PAD * 2),
+                height: s.px(132),
                 control_style: co::BS::GROUPBOX,
                 window_style: co::WS::CHILD | co::WS::VISIBLE,
                 ..Default::default()
@@ -655,7 +822,7 @@ impl Shell {
                 &wnd,
                 gui::LabelOpts {
                     text: k,
-                    size: (110, 16),
+                    size: (s.px(110), s.px(16)),
                     control_style: co::SS::RIGHT,
                     ..Default::default()
                 },
@@ -664,7 +831,7 @@ impl Shell {
                 &wnd,
                 gui::LabelOpts {
                     text: "",
-                    size: (W - 200, 16),
+                    size: (s.px(lay::W - 200), s.px(16)),
                     control_style: co::SS::LEFT | co::SS::ENDELLIPSIS,
                     ..Default::default()
                 },
@@ -675,21 +842,21 @@ impl Shell {
                 &wnd,
                 gui::LabelOpts {
                     text,
-                    size: (wd, 16),
+                    size: (wd, s.px(16)),
                     control_style: style,
                     ..Default::default()
                 },
             )
         };
-        let lbl_saving_cur = mk_label("", 320, co::SS::LEFT);
-        let lbl_cur = mk_label("", 330, co::SS::RIGHT);
-        let lbl_saving_all = mk_label("", 320, co::SS::LEFT);
-        let lbl_all = mk_label("", 330, co::SS::RIGHT);
+        let lbl_saving_cur = mk_label("", s.px(320), co::SS::LEFT);
+        let lbl_cur = mk_label("", s.px(330), co::SS::RIGHT);
+        let lbl_saving_all = mk_label("", s.px(320), co::SS::LEFT);
+        let lbl_all = mk_label("", s.px(330), co::SS::RIGHT);
         let mk_bar = |id: u16| {
             gui::ProgressBar::new(
                 &wnd,
                 gui::ProgressBarOpts {
-                    size: (W - PAD * 2, 20),
+                    size: (s.px(lay::W - lay::PAD * 2), s.px(20)),
                     range: (0, 100),
                     ctrl_id: id,
                     ..Default::default()
@@ -702,8 +869,8 @@ impl Shell {
             &wnd,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.btn.cancel"),
-                width: 110,
-                height: 30,
+                width: s.px(110),
+                height: s.px(30),
                 ctrl_id: ID_CANCEL,
                 ..Default::default()
             },
@@ -714,7 +881,7 @@ impl Shell {
             &wnd,
             gui::LabelOpts {
                 text: &crate::strings::get("gui.result.finished"),
-                size: (W - PAD * 2, 26),
+                size: (s.px(lay::W - lay::PAD * 2), s.px(26)),
                 control_style: co::SS::CENTER,
                 ..Default::default()
             },
@@ -723,7 +890,7 @@ impl Shell {
             &wnd,
             gui::LabelOpts {
                 text: "",
-                size: (W - PAD * 2, 20),
+                size: (s.px(lay::W - lay::PAD * 2), s.px(20)),
                 control_style: co::SS::CENTER | co::SS::ENDELLIPSIS,
                 ..Default::default()
             },
@@ -732,8 +899,8 @@ impl Shell {
             &wnd,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.btn.show_explorer"),
-                width: 170,
-                height: 32,
+                width: s.px(170),
+                height: s.px(32),
                 ctrl_id: ID_REVEAL,
                 ..Default::default()
             },
@@ -742,8 +909,8 @@ impl Shell {
             &wnd,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.btn.done"),
-                width: 170,
-                height: 32,
+                width: s.px(170),
+                height: s.px(32),
                 control_style: co::BS::DEFPUSHBUTTON,
                 ctrl_id: ID_DONE,
                 ..Default::default()
@@ -755,8 +922,8 @@ impl Shell {
             &wnd,
             gui::EditOpts {
                 text: "",
-                width: W - PAD * 2,
-                height: 200,
+                width: s.px(lay::W - lay::PAD * 2),
+                height: s.px(200),
                 // Read-only but SELECTABLE: the log is the thing users paste
                 // into bug reports, so copying out of it has to work.
                 control_style: co::ES::MULTILINE | co::ES::READONLY | co::ES::AUTOVSCROLL,
@@ -1003,6 +1170,11 @@ fn place(c: &impl GuiWindow, x: i32, y: i32, cx: i32, cy: i32) {
     );
 }
 
+/// Move one control to a rectangle computed by `win_layout`.
+fn put(c: &impl GuiWindow, r: lay::Rect) {
+    place(c, r.x, r.y, r.w, r.h);
+}
+
 fn show(c: &impl GuiWindow, visible: bool) {
     c.hwnd().ShowWindow(if visible {
         co::SW::SHOWNA
@@ -1017,102 +1189,83 @@ impl Shell {
     /// Single source of geometry truth, so the layout is identical at every
     /// window size — and deliberately the same proportions as the macOS shell,
     /// expressed top-down (Win32 y grows downward, AppKit's grows upward).
+    ///
+    /// The numbers come from `win_layout::main_layout`, which takes the DPI of
+    /// the monitor the window is on. `cw`/`ch` are physical pixels, as `WM_SIZE`
+    /// reports them, and so are the rectangles that come back.
     fn relayout(&self, cw: i32, ch: i32) {
         let v = self.app.borrow().view();
-        let two_bars = v.show_overall_bar;
         let hidden = v.log_hidden;
+        let l = lay::main_layout(
+            window_dpi(self.wnd.hwnd()),
+            cw,
+            ch,
+            lay::MainState {
+                page: v.page,
+                two_bars: v.show_overall_bar,
+                log_hidden: hidden,
+                info_rows: self.lbl_keys.len(),
+            },
+        );
 
-        // The log takes a fixed share of the height; more while ripping, and on
-        // the result page it fills everything the fixed-height panel leaves.
-        let page_h = match v.page {
-            Page::Progress => {
-                if two_bars {
-                    PROG_H
-                } else {
-                    PROG_H_ONE
-                }
-            }
-            Page::Result => RESULT_H,
-            _ => 0,
-        };
-        let log_h = if hidden {
-            0
-        } else if page_h > 0 {
-            (ch - TB_H - page_h - PAD * 3).max(120)
-        } else {
-            ((ch as f64 * 0.32) as i32).max(120)
-        };
-
-        let top_y = TB_H + PAD;
-        let top_h = (ch - log_h - PAD * 3 - TB_H).max(80);
-        let log_y = ch - PAD - log_h;
-
-        place(&self.log, PAD, log_y, cw - PAD * 2, log_h);
+        put(&self.log, l.log);
         show(&self.log, !hidden);
 
         // ── empty page ──
-        let cy = top_y + top_h / 2;
-        place(&self.lbl_empty_head, PAD, cy - 50, cw - PAD * 2, 26);
-        place(&self.lbl_empty_sub, PAD, cy - 22, cw - PAD * 2, 20);
-        place(&self.btn_open, cw / 2 - 90, cy + 16, 180, 30);
+        put(&self.lbl_empty_head, l.empty_head);
+        put(&self.lbl_empty_sub, l.empty_sub);
+        put(&self.btn_open, l.btn_open);
 
         // ── titles page ──
-        let tree_w = ((cw - PAD * 2) as f64 * TREE_FRAC) as i32;
-        place(&self.tree, PAD, top_y, tree_w, top_h);
-        let rx = PAD + tree_w + PAD;
-        let rw = cw - rx - PAD;
-        place(&self.grp_out, rx, top_y, rw, OUT_H);
-        place(&self.edit_out, rx + 12, top_y + 22, rw - 60, 23);
-        place(&self.btn_browse, rx + rw - 44, top_y + 21, 34, 25);
-        place(&self.cmb_format, rx + 12, top_y + 56, rw - 150, 24);
-        place(&self.btn_run, rx + rw - 128, top_y + 54, 116, 28);
-        place(&self.btn_eject, rx + 12, top_y + OUT_H + 4, 110, 26);
-        let info_y = top_y + OUT_H + PAD + 30;
-        let info_h = (top_h - OUT_H - PAD - 30).max(60);
-        place(&self.grp_info, rx, info_y, rw, info_h);
-        place(
-            &self.detail,
-            rx + 10,
-            info_y + 20,
-            rw - 20,
-            (info_h - 32).max(20),
-        );
+        put(&self.tree, l.tree);
+        put(&self.grp_out, l.grp_out);
+        put(&self.edit_out, l.edit_out);
+        put(&self.btn_browse, l.btn_browse);
+        put(&self.cmb_format, l.cmb_format);
+        put(&self.btn_run, l.btn_run);
+        put(&self.btn_eject, l.btn_eject);
+        put(&self.grp_info, l.grp_info);
+        put(&self.detail, l.detail);
 
         // ── progress page ──
-        let gh = 132;
-        place(&self.grp_prog, PAD, top_y, cw - PAD * 2, gh);
-        for i in 0..self.lbl_keys.len() {
-            let yy = top_y + 20 + i as i32 * 15;
-            place(&self.lbl_keys[i], PAD + 6, yy, 110, 15);
-            place(&self.lbl_vals[i], PAD + 124, yy, cw - PAD * 2 - 140, 15);
+        put(&self.grp_prog, l.grp_prog);
+        for (i, (key, val)) in l.info_rows.iter().enumerate() {
+            put(&self.lbl_keys[i], *key);
+            put(&self.lbl_vals[i], *val);
         }
-        let bar1_y = top_y + gh + 22;
-        place(&self.lbl_saving_cur, PAD, bar1_y - 18, 340, 16);
-        place(&self.lbl_cur, cw - PAD - 340, bar1_y - 18, 340, 16);
-        place(&self.bar_cur, PAD, bar1_y, cw - PAD * 2, 20);
-        let bar2_y = bar1_y + 46;
-        place(&self.lbl_saving_all, PAD, bar2_y - 18, 340, 16);
-        place(&self.lbl_all, cw - PAD - 340, bar2_y - 18, 340, 16);
-        place(&self.bar_all, PAD, bar2_y, cw - PAD * 2, 20);
-        place(
-            &self.btn_cancel,
-            cw - PAD - 120,
-            top_y + page_h - 36,
-            120,
-            30,
-        );
+        put(&self.lbl_saving_cur, l.lbl_saving_cur);
+        put(&self.lbl_cur, l.lbl_cur);
+        put(&self.bar_cur, l.bar_cur);
+        put(&self.lbl_saving_all, l.lbl_saving_all);
+        put(&self.lbl_all, l.lbl_all);
+        put(&self.bar_all, l.bar_all);
+        put(&self.btn_cancel, l.btn_cancel);
 
         // ── result page ──
-        place(&self.lbl_result_head, PAD, top_y + 26, cw - PAD * 2, 26);
-        place(&self.lbl_result_line, PAD, top_y + 58, cw - PAD * 2, 20);
-        place(&self.btn_reveal, cw / 2 - 180, top_y + 100, 170, 32);
-        place(&self.btn_done, cw / 2 + 10, top_y + 100, 170, 32);
+        put(&self.lbl_result_head, l.result_head);
+        put(&self.lbl_result_line, l.result_line);
+        put(&self.btn_reveal, l.btn_reveal);
+        put(&self.btn_done, l.btn_done);
     }
 
     fn relayout_now(&self) {
         if let Ok(rc) = self.wnd.hwnd().GetClientRect() {
             self.relayout(rc.right, rc.bottom);
         }
+    }
+
+    /// Re-derive everything that is a function of the DPI, at the DPI the
+    /// window is on right now.
+    fn apply_dpi(&self) {
+        self.apply_dpi_at(window_dpi(self.wnd.hwnd()));
+    }
+
+    /// The two things besides the rectangles that scale: the type, and the
+    /// tri-state tick glyphs in the tree's state image list. Called from
+    /// `WM_CREATE` and again from every `WM_DPICHANGED`.
+    fn apply_dpi_at(&self, dpi: u32) {
+        apply_ui_font(self.wnd.hwnd(), dpi);
+        let _ = build_check_images(&self.tree, dpi);
     }
 }
 
@@ -1594,9 +1747,15 @@ impl Shell {
 
         let me = self.clone();
         self.wnd.on().wm_create(move |_| {
-            // The tri-state glyphs must exist before the first render paints a
-            // row, and the control must already be created — hence wm_create.
-            let _ = build_check_images(&me.tree);
+            // The window now exists, so its real DPI is finally knowable —
+            // which may not be the system DPI the controls were created at, if
+            // freemkv opened on a secondary display. `apply_dpi` rebuilds the
+            // font AND the tri-state glyph image list at that DPI, so it
+            // replaces the fixed-size `build_check_images` this used to call:
+            // building glyphs at 16 px first would just be work thrown away,
+            // and on a HiDPI panel the wrong size until the first DPI change.
+            me.apply_dpi();
+            // Title-bar icons need the window, so they belong here too.
             set_icons(me.wnd.hwnd());
             me.wnd.hwnd().DragAcceptFiles(true);
             // Nothing is open at launch: show the empty state rather than a
@@ -1611,9 +1770,58 @@ impl Shell {
             Ok(())
         });
 
+        // ── the window moved to a monitor with different scaling ──
+        //
+        // Under PerMonitorV2 this is the app's cue to redraw itself at the new
+        // scale; Windows does nothing on its own. Without it freemkv is correct
+        // only on the display it opened on, and drags between a laptop panel
+        // and an external monitor — the ordinary case — leave it wrong.
+        //
+        // `lParam` carries the rectangle Windows suggests: the size the window
+        // *should* become so it keeps its apparent size and stays under the
+        // cursor. Ignoring it and resizing by hand fights the drag.
+        let me = self.clone();
+        self.wnd.on().wm(co::WM::DPICHANGED, move |p: msg::Wm| {
+            // LOWORD is the X DPI; Windows keeps X and Y equal in practice.
+            let dpi = (p.wparam & 0xffff) as u32;
+            let sug = unsafe { std::ptr::read(p.lparam as *const w::RECT) };
+
+            // Fonts and glyphs first: the resize below triggers WM_SIZE, and
+            // the relayout it runs should already be measuring the new type.
+            me.apply_dpi_at(dpi);
+
+            let _ = me.wnd.hwnd().SetWindowPos(
+                w::HwndPlace::None,
+                w::POINT::with(sug.left, sug.top),
+                w::SIZE::with(sug.right - sug.left, sug.bottom - sug.top),
+                co::SWP::NOZORDER | co::SWP::NOACTIVATE,
+            );
+            // Belt and braces: SetWindowPos normally raises WM_SIZE, but not
+            // when only the position changed (two monitors at the same scale
+            // either side of a scale change, or a maximized window).
+            me.relayout_now();
+            Ok(0)
+        });
+
         // Never let the window shrink below the point the layout stops working.
+        //
+        // `ptMinTrackSize` is an OUTER window size, so the frame and caption
+        // have to be added to the client minimum — and both of those are
+        // themselves DPI-dependent, which is what `GetSystemMetricsForDpi` is
+        // for. `GetSystemMetrics` would answer for the primary monitor.
+        let me = self.clone();
         self.wnd.on().wm_get_min_max_info(move |p| {
-            p.info.ptMinTrackSize = w::POINT::with(MIN_W, MIN_H);
+            let dpi = window_dpi(me.wnd.hwnd());
+            let (mw, mh) = lay::min_size(dpi);
+            let metric = |sm: co::SM| {
+                w::GetSystemMetricsForDpi(sm, dpi).unwrap_or_else(|_| w::GetSystemMetrics(sm))
+            };
+            let frame_x = metric(co::SM::CXSIZEFRAME) * 2 + metric(co::SM::CXPADDEDBORDER) * 2;
+            let frame_y = metric(co::SM::CYSIZEFRAME) * 2
+                + metric(co::SM::CXPADDEDBORDER) * 2
+                + metric(co::SM::CYCAPTION)
+                + metric(co::SM::CYMENU);
+            p.info.ptMinTrackSize = w::POINT::with(mw + frame_x, mh + frame_y);
             Ok(())
         });
 
@@ -1899,20 +2107,30 @@ fn enum_options(key: &str) -> Vec<(&'static str, String)> {
 
 /// Builds one labelled row per call, walking a y-cursor down a tab page — the
 /// right-aligned label / control-to-its-right layout the macOS Settings uses.
+///
+/// Every step and every control size is DPI-scaled. The `wd` widths the callers
+/// pass are 96-DPI baselines, scaled here rather than at each of the twenty-odd
+/// call sites — so a row reads the same as it always did and still comes out
+/// the right physical size at 150%.
 struct Rows<'a> {
     page: &'a gui::TabPage,
+    s: lay::Scale,
+    m: lay::FormMetrics,
     y: i32,
     gutter: i32,
     width: i32,
 }
 
 impl<'a> Rows<'a> {
-    fn new(page: &'a gui::TabPage) -> Self {
+    fn new(page: &'a gui::TabPage, dpi: u32) -> Self {
+        let m = lay::form_metrics(dpi);
         Rows {
             page,
-            y: 16,
-            gutter: 250,
-            width: 620,
+            s: lay::Scale::new(dpi),
+            m,
+            y: m.top,
+            gutter: m.gutter,
+            width: m.width,
         }
     }
 
@@ -1922,8 +2140,8 @@ impl<'a> Rows<'a> {
             self.page,
             gui::LabelOpts {
                 text,
-                position: (8, self.y + 3),
-                size: (self.gutter - 16, 18),
+                position: (self.s.px(8), self.y + self.s.px(3)),
+                size: (self.gutter - self.s.px(16), self.s.px(18)),
                 control_style: co::SS::RIGHT,
                 ..Default::default()
             },
@@ -1937,12 +2155,12 @@ impl<'a> Rows<'a> {
             gui::EditOpts {
                 text: val,
                 position: (self.gutter, self.y),
-                width: wd,
-                height: 22,
+                width: self.s.px(wd),
+                height: self.m.field_h,
                 ..Default::default()
             },
         );
-        self.y += 30;
+        self.y += self.m.row_step;
         e
     }
 
@@ -1954,8 +2172,8 @@ impl<'a> Rows<'a> {
             gui::EditOpts {
                 text: val,
                 position: (self.gutter, self.y),
-                width: wd - 40,
-                height: 22,
+                width: self.s.px(wd - 40),
+                height: self.m.field_h,
                 ..Default::default()
             },
         );
@@ -1963,13 +2181,13 @@ impl<'a> Rows<'a> {
             self.page,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.btn.browse"),
-                position: (self.gutter + wd - 36, self.y - 1),
-                width: 34,
-                height: 24,
+                position: (self.gutter + self.s.px(wd - 36), self.y - self.s.px(1)),
+                width: self.s.px(34),
+                height: self.s.px(24),
                 ..Default::default()
             },
         );
-        self.y += 30;
+        self.y += self.m.row_step;
         (e, b)
     }
 
@@ -1979,12 +2197,12 @@ impl<'a> Rows<'a> {
             self.page,
             gui::CheckBoxOpts {
                 text: "",
-                position: (self.gutter, self.y + 2),
-                size: (20, 18),
+                position: (self.gutter, self.y + self.s.px(2)),
+                size: (self.s.px(20), self.s.px(18)),
                 ..Default::default()
             },
         );
-        self.y += 28;
+        self.y += self.m.check_step;
         c
     }
 
@@ -1995,12 +2213,12 @@ impl<'a> Rows<'a> {
             self.page,
             gui::ComboBoxOpts {
                 position: (self.gutter, self.y),
-                width: wd,
+                width: self.s.px(wd),
                 items: &labels.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                 ..Default::default()
             },
         );
-        self.y += 30;
+        self.y += self.m.row_step;
         c
     }
 
@@ -2010,12 +2228,12 @@ impl<'a> Rows<'a> {
             gui::ButtonOpts {
                 text,
                 position: (self.gutter, self.y),
-                width: wd,
-                height: 26,
+                width: self.s.px(wd),
+                height: self.s.px(26),
                 ..Default::default()
             },
         );
-        self.y += 32;
+        self.y += self.m.button_step;
         b
     }
 
@@ -2025,17 +2243,17 @@ impl<'a> Rows<'a> {
             self.page,
             gui::LabelOpts {
                 text,
-                position: (16, self.y),
-                size: (self.width - 32, 32),
+                position: (self.s.px(16), self.y),
+                size: (self.width - self.s.px(32), self.s.px(32)),
                 ..Default::default()
             },
         );
-        self.y += 38;
+        self.y += self.m.note_step;
         l
     }
 
     fn gap(&mut self) {
-        self.y += 12;
+        self.y += self.m.gap;
     }
 }
 
@@ -2072,7 +2290,15 @@ impl Prefs {
         // Wide enough that the longest label ("Keep encrypted (raw
         // passthrough) :") and its longer translations fit the gutter without
         // clipping, while the controls still have room.
-        let (ww, wh) = (680, 520);
+        //
+        // Built before the main window is created, so the system DPI is the
+        // only one available. That is also the DPI this form stays at: its rows
+        // are laid out once, at creation, and a Settings window is opened on
+        // the same monitor as the app that opened it in every case but a
+        // dragged-across-monitors one.
+        let dpi = system_dpi();
+        let s = lay::Scale::new(dpi);
+        let (ww, wh) = (s.px(lay::PREFS_W), s.px(lay::PREFS_H));
         let wnd = gui::WindowModeless::new(
             parent,
             gui::WindowModelessOpts {
@@ -2108,7 +2334,7 @@ impl Prefs {
         let mut combos: Vec<(&'static str, gui::ComboBox)> = Vec::new();
 
         // ── Output ── engine Job.dest + the GUI's own naming
-        let mut r = Rows::new(&pages[0]);
+        let mut r = Rows::new(&pages[0], dpi);
         combos.push((
             "container",
             r.combo("container", &g("gui.set.default_output"), 320),
@@ -2124,7 +2350,7 @@ impl Prefs {
         checks.push(("auto_eject", r.check(&g("gui.set.auto_eject"))));
 
         // ── Selection ── engine Job.selection
-        let mut r = Rows::new(&pages[1]);
+        let mut r = Rows::new(&pages[1], dpi);
         combos.push((
             "selection",
             r.combo("selection", &g("gui.set.default_selection"), 240),
@@ -2136,7 +2362,7 @@ impl Prefs {
         r.note(&g("gui.set.min_length_note"));
 
         // ── Recovery ── engine Job.mode / abort_on_lost_secs / raw
-        let mut r = Rows::new(&pages[2]);
+        let mut r = Rows::new(&pages[2], dpi);
         combos.push(("rip_mode", r.combo("rip_mode", &g("gui.set.rip_mode"), 240)));
         fields.push((
             "max_passes",
@@ -2155,7 +2381,7 @@ impl Prefs {
         r.note(&g("gui.set.capture_note"));
 
         // ── Keys ── keydb + the online key service
-        let mut r = Rows::new(&pages[3]);
+        let mut r = Rows::new(&pages[3], dpi);
         combos.push((
             "key_source",
             r.combo("key_source", &g("gui.set.key_source"), 260),
@@ -2181,7 +2407,7 @@ impl Prefs {
         let btn_test = r.button(&g("gui.set.test_connection"), 170);
 
         // ── Advanced
-        let mut r = Rows::new(&pages[4]);
+        let mut r = Rows::new(&pages[4], dpi);
         combos.push(("language", r.combo("language", &g("gui.set.language"), 220)));
         fields.push((
             "decrypt_threads",
@@ -2209,8 +2435,8 @@ impl Prefs {
         let tab = gui::Tab::new(
             &wnd,
             gui::TabOpts {
-                position: (10, 10),
-                size: (ww - 20, wh - 66),
+                position: (s.px(10), s.px(10)),
+                size: (ww - s.px(20), wh - s.px(66)),
                 pages: &page_pairs,
                 ..Default::default()
             },
@@ -2220,9 +2446,9 @@ impl Prefs {
             &wnd,
             gui::ButtonOpts {
                 text: &g("gui.btn.ok"),
-                position: (ww - 108, wh - 44),
-                width: 96,
-                height: 28,
+                position: (ww - s.px(108), wh - s.px(44)),
+                width: s.px(96),
+                height: s.px(28),
                 control_style: co::BS::DEFPUSHBUTTON,
                 ..Default::default()
             },
@@ -2231,9 +2457,9 @@ impl Prefs {
             &wnd,
             gui::ButtonOpts {
                 text: &g("gui.btn.cancel"),
-                position: (ww - 212, wh - 44),
-                width: 96,
-                height: 28,
+                position: (ww - s.px(212), wh - s.px(44)),
+                width: s.px(96),
+                height: s.px(28),
                 ..Default::default()
             },
         );
@@ -2272,10 +2498,13 @@ impl Prefs {
         let Ok(rc) = self.wnd.hwnd().GetClientRect() else {
             return;
         };
-        let (cw, ch) = (rc.right, rc.bottom);
-        place(&self.tab, 10, 10, cw - 20, ch - 56);
-        place(&self.btn_ok, cw - 108, ch - 38, 96, 28);
-        place(&self.btn_cancel, cw - 212, ch - 38, 96, 28);
+        // The DPI the form's rows were built at, NOT the window's current DPI:
+        // the tab pages inside are fixed at creation, so scaling the chrome to
+        // a different figure would leave the two disagreeing. See `Prefs::new`.
+        let l = lay::prefs_layout(system_dpi(), rc.right, rc.bottom);
+        put(&self.tab, l.tab);
+        put(&self.btn_ok, l.btn_ok);
+        put(&self.btn_cancel, l.btn_cancel);
     }
 
     fn populate(&self, st: &crate::settings::Settings) {
@@ -2383,7 +2612,11 @@ struct About {
 impl About {
     fn new(parent: &gui::WindowMain) -> Self {
         let g = crate::strings::get;
-        let (ww, wh) = (420, 260);
+        // As with Settings: built before the main window exists, so the system
+        // DPI is the only one on offer, and it is the DPI this form stays at.
+        let dpi = system_dpi();
+        let s = lay::Scale::new(dpi);
+        let (ww, wh) = (s.px(lay::ABOUT_W), s.px(lay::ABOUT_H));
         let wnd = gui::WindowModeless::new(
             parent,
             gui::WindowModelessOpts {
@@ -2399,8 +2632,8 @@ impl About {
             &wnd,
             gui::LabelOpts {
                 text: "freemkv",
-                position: (0, 18),
-                size: (ww, 26),
+                position: (0, s.px(18)),
+                size: (ww, s.px(26)),
                 control_style: co::SS::CENTER,
                 ..Default::default()
             },
@@ -2420,14 +2653,14 @@ impl About {
                 crate::settings::Settings::load().keydb_status(),
             ),
         ];
-        let mut y = 62;
+        let mut y = s.px(62);
         for (k, v) in rows {
             let _ = gui::Label::new(
                 &wnd,
                 gui::LabelOpts {
                     text: &k,
-                    position: (20, y),
-                    size: (130, 18),
+                    position: (s.px(20), y),
+                    size: (s.px(130), s.px(18)),
                     control_style: co::SS::RIGHT,
                     ..Default::default()
                 },
@@ -2436,20 +2669,20 @@ impl About {
                 &wnd,
                 gui::LabelOpts {
                     text: &v,
-                    position: (160, y),
-                    size: (ww - 175, 18),
+                    position: (s.px(160), y),
+                    size: (ww - s.px(175), s.px(18)),
                     control_style: co::SS::LEFT | co::SS::ENDELLIPSIS,
                     ..Default::default()
                 },
             );
-            y += 24;
+            y += s.px(24);
         }
         let _ = gui::Label::new(
             &wnd,
             gui::LabelOpts {
                 text: &g("gui.about.website"),
-                position: (20, y),
-                size: (130, 18),
+                position: (s.px(20), y),
+                size: (s.px(130), s.px(18)),
                 control_style: co::SS::RIGHT,
                 ..Default::default()
             },
@@ -2460,9 +2693,9 @@ impl About {
             &wnd,
             gui::ButtonOpts {
                 text: "https://freemkv.org",
-                position: (156, y - 3),
-                width: 200,
-                height: 24,
+                position: (s.px(156), y - s.px(3)),
+                width: s.px(200),
+                height: s.px(24),
                 control_style: co::BS::FLAT,
                 ..Default::default()
             },
@@ -2471,9 +2704,9 @@ impl About {
             &wnd,
             gui::ButtonOpts {
                 text: &g("gui.btn.close"),
-                position: (ww - 110, wh - 46),
-                width: 96,
-                height: 28,
+                position: (ww - s.px(110), wh - s.px(46)),
+                width: s.px(96),
+                height: s.px(28),
                 control_style: co::BS::DEFPUSHBUTTON,
                 ..Default::default()
             },
@@ -2496,7 +2729,11 @@ impl About {
     /// falls off the bottom edge by the height of the title bar.
     fn relayout(&self) {
         if let Ok(rc) = self.wnd.hwnd().GetClientRect() {
-            place(&self.btn_close, rc.right - 110, rc.bottom - 38, 96, 28);
+            // The creation DPI, for the reason given in `Prefs::relayout`.
+            put(
+                &self.btn_close,
+                lay::about_close_rect(system_dpi(), rc.right, rc.bottom),
+            );
         }
     }
 
@@ -3387,8 +3624,14 @@ impl Shell {
             "File/Edit/View/Help",
         );
 
-        // 8 ── layout at the extremes
-        for (cw, ch) in [(MIN_W, MIN_H), (1700, 1050), (W, H)] {
+        // 8 ── layout at the extremes, at this window's real DPI
+        let dpi = window_dpi(self.wnd.hwnd());
+        let big = lay::Scale::new(dpi).px(1700);
+        for (cw, ch) in [
+            lay::min_size(dpi),
+            (big, big * 1050 / 1700),
+            lay::default_size(dpi),
+        ] {
             self.relayout(cw, ch);
         }
         check("resize", true, "min, large and default");
