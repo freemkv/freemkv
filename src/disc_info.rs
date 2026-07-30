@@ -874,10 +874,7 @@ mod tests {
 
     #[test]
     fn no_flags_is_all_defaults() {
-        assert_eq!(
-            parse_info_flags(&[]),
-            InfoParse::Ok(Box::new(InfoFlags::default()))
-        );
+        assert_eq!(parse_info_flags(&[]), InfoParse::Ok(Box::default()));
     }
 
     use libfreemkv::{
