@@ -1,4 +1,4 @@
-// freemkv disc-info — Show disc titles, streams, and sizes
+// freemkv info disc:// — Show disc titles, streams, and sizes
 // MIT — freemkv project
 //
 // CLI is dumb — all logic in libfreemkv. This file only formats output.
@@ -35,25 +35,47 @@ fn is_unsafe_display_char(c: char) -> bool {
             | '\u{FEFF}')
 }
 
-pub fn run(device: Option<&str>, args: &[String]) {
-    let mut quiet = false;
-    let mut verbose = false;
-    let mut full = false;
-    let mut basic = false;
-    let mut keydb: Option<String> = None;
+/// Flags accepted by `freemkv info <url>`, for every URL scheme.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub(crate) struct InfoFlags {
+    pub quiet: bool,
+    pub verbose: bool,
+    pub full: bool,
+    pub basic: bool,
+    pub keydb: Option<String>,
+}
 
+/// Outcome of parsing an `info` flag list. `Help` and `Unknown` are returned
+/// rather than acted on so the parser stays testable — the caller prints and
+/// exits.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InfoParse {
+    Ok(Box<InfoFlags>),
+    Help,
+    /// An option the `info` route does not accept, carrying the offending token.
+    Unknown(String),
+}
+
+/// Parse `freemkv info <url>` flags. ONE parser for every scheme: the `iso://`
+/// route used to read `--full` out of the argument list and ignore everything
+/// else, so `freemkv info iso://x.iso --fulll` (or `--quiet`, or any typo)
+/// silently produced output that had quietly dropped what the user asked for,
+/// while the same typo on `disc://` exited 1. Same vocabulary, same rejection,
+/// whatever the URL.
+pub(crate) fn parse_info_flags(args: &[String]) -> InfoParse {
+    let mut f = InfoFlags::default();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--quiet" | "-q" => quiet = true,
-            "--verbose" | "-v" => verbose = true,
+            "--quiet" | "-q" => f.quiet = true,
+            "--verbose" | "-v" => f.verbose = true,
             // `--keydb PATH` — used ONLY on `-v` to resolve keys (host-cert
             // handshake + local keydb lookup) so the crypto block shows a real
             // unit-key set. Accept + capture its value on every path so it is
             // not mistaken for a positional / unknown option.
             "--keydb" => {
                 i += 1;
-                keydb = args.get(i).cloned();
+                f.keydb = args.get(i).cloned();
             }
             // `--log-level N` sets the tracing level (in main::init_logging);
             // here it also widens stdout detail at level >= 2. Accept + skip
@@ -61,28 +83,52 @@ pub fn run(device: Option<&str>, args: &[String]) {
             "--log-level" => {
                 i += 1;
                 if args.get(i).and_then(|s| s.parse::<u8>().ok()).unwrap_or(1) >= 2 {
-                    verbose = true;
+                    f.verbose = true;
                 }
             }
             "--log-file" => {
                 i += 1; // skip the path value
             }
-            "--full" | "-f" => full = true,
-            "--basic" | "-b" => basic = true,
-            "--help" | "-h" => {
-                println!("{}", strings::get("disc.usage"));
-                return;
+            "--full" | "-f" => f.full = true,
+            "--basic" | "-b" => f.basic = true,
+            "--share" | "-s" | "--mask" | "-m" => {
+                // Drive-profile capture — meaningful only for `disc://`, and
+                // consumed by `info::run` before this parser is reached. Listed
+                // so a `disc://`-shaped flag on an `iso://` URL is reported as
+                // unsupported-here rather than silently accepted.
+                return InfoParse::Unknown(args[i].clone());
             }
-            _ => {
-                eprintln!(
-                    "{}",
-                    strings::fmt("app.unknown_option", &[("opt", &args[i])])
-                );
-                std::process::exit(1);
-            }
+            "--help" | "-h" => return InfoParse::Help,
+            other => return InfoParse::Unknown(other.to_string()),
         }
         i += 1;
     }
+    InfoParse::Ok(Box::new(f))
+}
+
+/// Print the offending option and exit 1 — the shared unknown-flag behaviour
+/// for every `info` route.
+pub(crate) fn reject_unknown_option(opt: &str) -> ! {
+    eprintln!("{}", strings::fmt("app.unknown_option", &[("opt", opt)]));
+    std::process::exit(1);
+}
+
+pub fn run(device: Option<&str>, args: &[String]) {
+    let flags = match parse_info_flags(args) {
+        InfoParse::Ok(f) => f,
+        InfoParse::Help => {
+            println!("{}", strings::get("disc.usage"));
+            return;
+        }
+        InfoParse::Unknown(opt) => reject_unknown_option(&opt),
+    };
+    let InfoFlags {
+        quiet,
+        verbose,
+        full,
+        basic,
+        keydb,
+    } = *flags;
 
     let out = Output::new(verbose, quiet);
 
@@ -285,8 +331,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
 /// path produces: duration, size, clip count, and video/audio/subtitle streams.
 ///
 /// `full` shows every title (otherwise the first 5, with a "+N more" footer).
-pub fn print_disc_titles(disc: &Disc, full: bool) {
-    let out = Output::new(false, false);
+pub fn print_disc_titles(disc: &Disc, flags: &InfoFlags) {
+    let out = Output::new(flags.verbose, flags.quiet);
+    let full = flags.full;
     // The iso:// path is keyless, but the disc format and MKB generation are
     // read at scan time, so state the encryption generation here with the SAME
     // renderer the drive path uses (`emit_encryption_line`) — no duplicated
@@ -294,7 +341,7 @@ pub fn print_disc_titles(disc: &Disc, full: bool) {
     if emit_encryption_line(&out, disc) {
         out.blank(Normal);
     }
-    print_titles(&out, disc, full, false, false);
+    print_titles(&out, disc, full, flags.verbose, flags.basic);
 }
 
 /// Shared title-list renderer. Used by both `run` (drive scan, honoring its
@@ -748,6 +795,91 @@ fn format_volume_id(vol_id: &str) -> String {
 mod tests {
     use super::*;
     use libfreemkv::disc::DiscRegion;
+
+    // ── `info` flag validation is the same for every URL scheme ────────────
+    //
+    // `freemkv info disc:// --typo` exited 1, but `freemkv info iso://x.iso
+    // --typo` printed a listing and said nothing: that route scanned the
+    // argument list for `--full` with an `.any()` and dropped every other
+    // token. A user who mistyped a flag got output that had silently ignored
+    // what they asked for. Both routes now go through `parse_info_flags`.
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_unknown_info_flag_is_rejected() {
+        for bad in ["--fulll", "--typo", "-z", "--verbse", "--no-such-thing"] {
+            assert_eq!(
+                parse_info_flags(&args(&[bad])),
+                InfoParse::Unknown(bad.to_string()),
+                "{bad} must be reported, not silently dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_flag_is_rejected_even_after_valid_ones() {
+        // The offending token must be the one named, not the first flag seen.
+        assert_eq!(
+            parse_info_flags(&args(&["--full", "--quiet", "--oops"])),
+            InfoParse::Unknown("--oops".to_string())
+        );
+    }
+
+    #[test]
+    fn known_info_flags_are_honoured() {
+        let InfoParse::Ok(f) = parse_info_flags(&args(&[
+            "--full",
+            "--quiet",
+            "--verbose",
+            "--basic",
+            "--keydb",
+            "/tmp/k.cfg",
+        ])) else {
+            panic!("a list of valid flags must parse");
+        };
+        assert!(f.full && f.quiet && f.verbose && f.basic);
+        assert_eq!(f.keydb.as_deref(), Some("/tmp/k.cfg"));
+        // Short forms too.
+        let InfoParse::Ok(f) = parse_info_flags(&args(&["-f", "-q", "-v", "-b"])) else {
+            panic!("short forms must parse");
+        };
+        assert!(f.full && f.quiet && f.verbose && f.basic);
+    }
+
+    #[test]
+    fn flag_values_are_not_mistaken_for_unknown_options() {
+        // `--log-level 3` / `--log-file p.txt` are consumed by logging init; the
+        // VALUE must be skipped, or it lands in the unknown-option branch.
+        let InfoParse::Ok(f) = parse_info_flags(&args(&[
+            "--log-level",
+            "3",
+            "--log-file",
+            "p.txt",
+            "--full",
+        ])) else {
+            panic!("logging flags and their values must be consumed");
+        };
+        assert!(f.full);
+        assert!(f.verbose, "--log-level 3 widens stdout detail");
+    }
+
+    #[test]
+    fn help_is_reported_rather_than_printed_by_the_parser() {
+        assert_eq!(parse_info_flags(&args(&["--help"])), InfoParse::Help);
+        assert_eq!(parse_info_flags(&args(&["-h"])), InfoParse::Help);
+    }
+
+    #[test]
+    fn no_flags_is_all_defaults() {
+        assert_eq!(
+            parse_info_flags(&[]),
+            InfoParse::Ok(Box::new(InfoFlags::default()))
+        );
+    }
+
     use libfreemkv::{
         AudioChannels, ColorSpace, ContentFormat, DiscFormat, DiscTitle, FrameRate, HdrFormat,
         LabelPurpose, LabelQualifier, Resolution, SampleRate,

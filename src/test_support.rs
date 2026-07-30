@@ -57,6 +57,11 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::MplsParse,
         Error::ClpiParse,
         Error::UdfNotFound { path: p() },
+        // E6013/E6014 were absent from this fixture, so the contract test never
+        // asked for their strings and both shipped rendering as a bare code via
+        // the `error.generic` fallback. Listed here so the missing-string case
+        // is caught the way every other variant's is.
+        Error::UdfNotFilesystem,
         Error::UdfBufferTooSmall,
         Error::DiscTitleRange { index: 0, count: 0 },
         Error::IfoParse,
@@ -71,6 +76,9 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::CssNoDiscKey,
         Error::MuxHeaderBufferExceeded { bytes: 0 },
         Error::NoStreams,
+        // `pid` is rendered into the message as `{detail}` (`E6014: 0x1011`), so
+        // pick a realistic non-zero PID rather than 0.
+        Error::SelectionPidUnknown { pid: 0x1011 },
         Error::MapfileInvalid { kind: "hex" },
         Error::AacsNoKeys,
         Error::AacsCertShort,

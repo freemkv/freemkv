@@ -130,6 +130,15 @@ fn init_logging(args: &[String]) {
         .init();
 }
 
+/// Every word the dispatcher in [`run`] matches `args[1]` against. Anything NOT
+/// here falls through to the source→destination URL grammar, so a string that
+/// tells the user to run `freemkv <word>` for some other `<word>` is telling
+/// them to run a command that does not exist — which is exactly how
+/// `drive-info`, `disc-info`, `remux` and `verify` shipped in the catalogues.
+/// Kept in step with the match arms by `every_command_named_in_a_locale_exists`.
+#[cfg(test)]
+pub(crate) const SUBCOMMANDS: &[&str] = &["info", "update-keys", "version", "help", "gui"];
+
 /// CLI shell entry point — the gold-standard `freemkv` CLI, replicated 1:1.
 ///
 /// Invoked by `main.rs`'s dispatcher for CLI-style invocations. `args` is the
@@ -384,9 +393,23 @@ fn info_cmd(args: &[String]) {
             // (duration, size, clip count, video/audio/subtitle streams).
             // Going through the key-gated `input()` here would hit libfreemkv's
             // no-key gate and surface E7022 for an encrypted disc, and would
-            // only ever open a single title. `-k`/`--keydb` is accepted but the
+            // only ever open a single title. `--keydb` is accepted but the
             // listing never requires it. `--full` shows every title.
-            let full = args[1..].iter().any(|a| a == "--full" || a == "-f");
+            //
+            // Flags go through the SAME parser the `disc://` route uses, so an
+            // unknown one exits 1 here too. This route used to scan the list for
+            // `--full` and ignore every other token, so a typo'd flag produced
+            // output that had quietly dropped what the user asked for.
+            let flags = match crate::disc_info::parse_info_flags(&args[1..]) {
+                crate::disc_info::InfoParse::Ok(f) => f,
+                crate::disc_info::InfoParse::Help => {
+                    println!("{}", crate::strings::get("disc.usage"));
+                    return;
+                }
+                crate::disc_info::InfoParse::Unknown(opt) => {
+                    crate::disc_info::reject_unknown_option(&opt)
+                }
+            };
             let (disc, _reader) = match libfreemkv::scan_iso(
                 std::path::Path::new(path),
                 libfreemkv::ScanOptions::default(),
@@ -394,9 +417,11 @@ fn info_cmd(args: &[String]) {
                 Ok(pair) => pair,
                 Err(e) => fatal("error.op_info", &crate::pipe::fmt_err(&e)),
             };
-            println!("freemkv {}", libfreemkv::VERSION_LABEL);
-            println!();
-            crate::disc_info::print_disc_titles(&disc, full);
+            if !flags.quiet {
+                println!("freemkv {}", libfreemkv::VERSION_LABEL);
+                println!();
+            }
+            crate::disc_info::print_disc_titles(&disc, &flags);
         }
         libfreemkv::StreamUrl::M2ts { .. } | libfreemkv::StreamUrl::Mkv { .. } => {
             match libfreemkv::input(url, &libfreemkv::InputOptions::default()) {
@@ -516,7 +541,6 @@ fn usage() {
     println!("{}", crate::strings::get("usage.ex.rip_iso"));
     println!("{}", crate::strings::get("usage.ex.rip_iso_raw"));
     println!("{}", crate::strings::get("usage.ex.rip_iso_mp"));
-    println!("{}", crate::strings::get("usage.ex.rip_iso_patch"));
     println!("{}", crate::strings::get("usage.ex.iso_to_mkv"));
     println!("{}", crate::strings::get("usage.ex.network"));
     println!("{}", crate::strings::get("usage.ex.network_recv"));
@@ -660,7 +684,92 @@ fn update_keys(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_urls, update_keys_dest};
+    use super::{SUBCOMMANDS, collect_urls, update_keys_dest};
+
+    /// Walk every string value in a locale document.
+    fn each_string(v: &serde_json::Value, f: &mut impl FnMut(&str)) {
+        match v {
+            serde_json::Value::Object(m) => m.values().for_each(|x| each_string(x, f)),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| each_string(x, f)),
+            serde_json::Value::String(s) => f(s),
+            _ => {}
+        }
+    }
+
+    /// Subcommand names a string tells the user to TYPE, as opposed to the many
+    /// places "freemkv" is just the product name in a sentence ("Quit freemkv",
+    /// "Wordt van kracht nadat u freemkv opnieuw start"). A command claim is a
+    /// `freemkv <word>` whose `<word>` is followed by something argument-shaped:
+    /// a flag, a `<placeholder>`, an `[optional]`, a `scheme://` URL, the
+    /// description column of a usage example, or a closing quote.
+    fn commands_named_in(value: &str) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        let mut from = 0;
+        while let Some(off) = value[from..].find("freemkv ") {
+            let start = from + off + "freemkv ".len();
+            from = start;
+            let word: String = value[start..]
+                .chars()
+                .take_while(|c| (c.is_ascii_lowercase()) || c.is_ascii_digit() || *c == '-')
+                .collect();
+            if word.is_empty() {
+                continue;
+            }
+            let rest = &value[start + word.len()..];
+            // `freemkv disc://…` — the URL grammar, not a subcommand. An empty
+            // remainder is the product name ending a sentence.
+            if rest.starts_with("://") || rest.is_empty() {
+                continue;
+            }
+            let spaces = rest.len() - rest.trim_start_matches(' ').len();
+            let next = rest.trim_start_matches(' ');
+            let is_command = match spaces {
+                // `'freemkv info'` — a quoted command reference.
+                0 => rest.starts_with(['\'', '»', '`', '"']),
+                // `freemkv update-keys --url <u>` / `freemkv verify [disc://]`
+                // / `freemkv verify disc:///dev/sg4`.
+                1 => {
+                    next.starts_with(['-', '[', '<'])
+                        || next.split(' ').next().is_some_and(|t| t.contains("://"))
+                }
+                // The description column of a `usage.ex.*` line.
+                _ => true,
+            };
+            if is_command {
+                out.insert(word);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_command_named_in_a_locale_exists() {
+        // `error.E2000`, `error.E7020`, `drive.share_hint`, `drive.share_usage`,
+        // `disc.usage`, `remux.usage`, `help.remux.*` and `help.verify.*` all
+        // instructed the user to run `freemkv drive-info` / `disc-info` /
+        // `remux` / `verify`. None of those are dispatched: they fall through to
+        // the URL grammar and fail. Checked across ALL bundled locales, since
+        // the strings were wrong in all 29.
+        let mut offenders: std::collections::BTreeSet<(String, String)> = Default::default();
+        for code in freemkv_i18n::SHIPPED_CODES {
+            let raw = freemkv_i18n::bundled_locale_json(code)
+                .unwrap_or_else(|| panic!("{code} listed as shipped but not loadable"));
+            let doc: serde_json::Value =
+                serde_json::from_str(raw).unwrap_or_else(|e| panic!("{code}.json invalid: {e}"));
+            each_string(&doc, &mut |s| {
+                for cmd in commands_named_in(s) {
+                    if !SUBCOMMANDS.contains(&cmd.as_str()) {
+                        offenders.insert((code.to_string(), cmd));
+                    }
+                }
+            });
+        }
+        assert!(
+            offenders.is_empty(),
+            "locale strings tell the user to run subcommands that do not exist \
+             (the dispatcher accepts {SUBCOMMANDS:?}): {offenders:?}"
+        );
+    }
 
     /// Regression: `update-keys --keydb <path>` must save the download to that
     /// path. The flag used to be ignored (the keydb always went to the default
