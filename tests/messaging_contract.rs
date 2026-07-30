@@ -100,10 +100,11 @@ fn error_code_keys(loc: &Value) -> std::collections::BTreeSet<String> {
     if let Some(err) = loc.get("error").and_then(|v| v.as_object()) {
         for k in err.keys() {
             // `E` followed by at least one digit, all digits.
-            if let Some(rest) = k.strip_prefix('E') {
-                if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
-                    out.insert(k.clone());
-                }
+            if let Some(rest) = k.strip_prefix('E')
+                && !rest.is_empty()
+                && rest.bytes().all(|b| b.is_ascii_digit())
+            {
+                out.insert(k.clone());
             }
         }
     }
