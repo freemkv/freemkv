@@ -75,6 +75,11 @@ const TIMER_TICK: usize = 1;
 /// Drain interval for worker-thread messages (the keydb update).
 const TIMER_DRAIN: usize = 2;
 
+/// Resource id of the application icon group embedded by `build.rs`. Must stay
+/// in step with `IDI_APP` there — there is no shared header between a build
+/// script and the crate it builds, so the two constants are the contract.
+const IDI_APP: u16 = 1;
+
 // ── control and menu ids ──────────────────────────────────────────────────
 
 const ID_TREE: u16 = 1000;
@@ -243,6 +248,65 @@ pub fn system_locale_code() -> Option<String> {
     }
     // The count includes the terminating NUL.
     Some(String::from_utf16_lossy(&buf[..(n as usize - 1)]))
+}
+
+// ── window icon ───────────────────────────────────────────────────────────
+
+/// Attach the embedded application icon to the window itself.
+///
+/// The executable's icon resource and the *window's* icon are two separate
+/// mechanisms: the resource is what Explorer shows for the file, while the
+/// title bar, Alt-Tab and the taskbar read the window's own `WM_SETICON` pair.
+/// Setting only the class icon leaves the title bar with a blurry downscale,
+/// because winsafe derives `hIconSm` from `LoadIcon`, which ignores the small
+/// size and always hands back the 32 px frame.
+///
+/// So load each slot explicitly with `LoadImage` at the size Windows actually
+/// wants, which makes it select the matching frame out of the icon group — the
+/// purpose-drawn 16 px artwork for the title bar, the full-detail 32 px one for
+/// Alt-Tab. Sizes come from `GetSystemMetricsForDpi` at the window's own DPI
+/// rather than `GetSystemMetrics`: the manifest declares PerMonitorV2, so on a
+/// 200% display the small-icon metric is 32, not 16, and the un-scaled call
+/// would pick a frame half the size the title bar is about to draw.
+///
+/// Best-effort throughout: a missing or unreadable icon costs the default
+/// Windows glyph, which is never worth failing a launch over.
+fn set_icons(hwnd: &w::HWND) {
+    let Ok(hinst) = w::HINSTANCE::GetModuleHandle(None) else {
+        return;
+    };
+    let dpi = hwnd.GetDpiForWindow();
+
+    // (which slot, which metric pair)
+    let slots = [
+        (co::ICON_SZ::SMALL, co::SM::CXSMICON, co::SM::CYSMICON),
+        (co::ICON_SZ::BIG, co::SM::CXICON, co::SM::CYICON),
+    ];
+
+    for (slot, cx_metric, cy_metric) in slots {
+        let cx = w::GetSystemMetricsForDpi(cx_metric, dpi)
+            .unwrap_or_else(|_| w::GetSystemMetrics(cx_metric));
+        let cy = w::GetSystemMetricsForDpi(cy_metric, dpi)
+            .unwrap_or_else(|_| w::GetSystemMetrics(cy_metric));
+
+        let loaded = hinst.LoadImageIcon(
+            w::IdOicStr::Id(IDI_APP),
+            w::SIZE::with(cx, cy),
+            co::LR::DEFAULTCOLOR,
+        );
+        let Ok(mut icon) = loaded else { continue };
+
+        // Leak deliberately. The icon must outlive this call for as long as the
+        // window exists, and there is exactly one window per process lifetime,
+        // so letting the guard drop here would destroy the HICON the title bar
+        // is still pointing at. Not `LR::SHARED`: that is documented as
+        // unreliable for a non-default requested size, which is the whole point
+        // of loading these two explicitly.
+        let hicon = icon.leak();
+        unsafe {
+            hwnd.SendMessage(msg::WmSetIcon { size: slot, hicon });
+        }
+    }
 }
 
 // ── tri-state checkboxes ──────────────────────────────────────────────────
@@ -416,6 +480,12 @@ impl Shell {
         let wnd = gui::WindowMain::new(gui::WindowMainOpts {
             title: "freemkv",
             class_name: "FmkvMain",
+            // The window class icon is what Windows falls back to for the
+            // taskbar and Alt-Tab. It is NOT enough on its own: winsafe fills
+            // both `hIcon` and `hIconSm` from this one value via `LoadIcon`,
+            // which always returns the 32 px frame, so the title bar would show
+            // a 32→16 downscale. `set_icons` below fixes that with WM_SETICON.
+            class_icon: gui::Icon::Id(IDI_APP),
             size: (W, H),
             style: co::WS::CAPTION
                 | co::WS::SYSMENU
@@ -1527,6 +1597,7 @@ impl Shell {
             // The tri-state glyphs must exist before the first render paints a
             // row, and the control must already be created — hence wm_create.
             let _ = build_check_images(&me.tree);
+            set_icons(me.wnd.hwnd());
             me.wnd.hwnd().DragAcceptFiles(true);
             // Nothing is open at launch: show the empty state rather than a
             // tree of invented rows.
@@ -3325,14 +3396,20 @@ impl Shell {
 
         // 9 ── REAL RUN: click Run Now, watch it start, click Cancel
         self.act(Cmd::SelectNone);
-        if let Some(t) = self
+        // Resolve the index in its OWN statement, exactly as step 3 does. An
+        // `if let Some(t) = self.app.borrow()…` keeps the `Ref` alive for the
+        // whole then-block — including across `app_mut`, whose `borrow_mut`
+        // then panics with "RefCell already borrowed" and, because it unwinds
+        // out of a Win32 window procedure, aborts the process outright. The
+        // index is a plain `usize`, so there is no reason to hold the borrow.
+        let first_title = self
             .app
             .borrow()
             .tree
             .arena
             .iter()
-            .position(|n| n.type_s == "Title")
-        {
+            .position(|n| n.type_s == "Title");
+        if let Some(t) = first_title {
             self.app_mut(|a| a.tree.set_checked(t, true));
         }
         self.drive_set_output(shot_dir);

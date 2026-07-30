@@ -1,0 +1,23 @@
+<!--
+  Small-size variant of the freemkv mark, for icon sizes <= 24 px.
+
+  The full-detail mark (freemkv-icon.svg) does not survive downscaling below
+  32 px: its light centre has a teal pupil (r=15 inside r=28) which becomes a
+  sub-pixel annulus, the play-arrow glyph shrinks to ~1 px of grey mush, and
+  the two teal tones (#0D9488 / #0F766E) are too close in luminance to hold a
+  ring edge once antialiased. The result is a soft blob, not a mark.
+
+  This variant keeps the identity — concentric teal rings, light centre — but:
+    * drops the play arrow and the highlight arc (both illegible that small),
+    * makes the centre a SOLID light disc (no pupil),
+    * deepens the middle ring to #115E59 so the ring edge actually reads.
+
+  Authored on a 16-unit grid so edges land near pixel boundaries at 16 px; it
+  scales cleanly to 20 and 24 px. Regenerate the .ico with res/make-ico.py.
+-->
+<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="8" cy="8" r="7.5" fill="#0D9488" />
+  <circle cx="8" cy="8" r="5.5" fill="#115E59" />
+  <circle cx="8" cy="8" r="3.5" fill="#0D9488" />
+  <circle cx="8" cy="8" r="2" fill="#F0FDFA" />
+</svg>
