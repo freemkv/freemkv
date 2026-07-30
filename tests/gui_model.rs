@@ -1,0 +1,998 @@
+//! The decisions the desktop shells make, with NO shell and NO disc attached.
+//!
+//! `windows.rs` and `mac.rs` are 7,700 lines between them, and almost none of
+//! it is drawing: what is selectable, what a tri-state checkbox shows, which
+//! titles are ticked, what the output file is called, what the log line says,
+//! which rows hang off which. Every one of those is a decision, and a decision
+//! belongs in `ui`, where BOTH shells read it and one test covers both.
+//!
+//! Everything here is driven from a SYNTHETIC scan built in this file, so these
+//! run on any host, in CI, with no drive, no disc image and no window server —
+//! unlike `tests/app_core.rs`'s tri-state coverage, which is gated behind an
+//! `FMKV_TEST_ISO` fixture and therefore does not run in CI today.
+
+use freemkv::engine::{Row as ScanRow, Scanned};
+use freemkv::ui::*;
+
+// ── synthetic scans ────────────────────────────────────────────────────────
+//
+// Shaped exactly like `engine::scan_disc`'s output: a depth-0 disc row, then
+// per title a depth-1 Title row followed by its depth-2 stream rows. `title` is
+// the CANONICAL disc title index and is deliberately not the row position.
+
+fn row(type_s: &str, desc: &str, depth: u8, checkable: bool, title: usize) -> ScanRow {
+    ScanRow {
+        type_s: type_s.into(),
+        desc: desc.into(),
+        depth,
+        checkable,
+        title,
+        info: format!("{type_s} — {desc}"),
+        pid: None,
+        duration_secs: 0.0,
+    }
+}
+
+/// One title, with `audio` audio tracks and one always-on video track.
+fn title_block(ti: usize, secs: f64, audio: usize) -> Vec<ScanRow> {
+    let mut t = row("Title", &format!("{}.  playlist", ti + 1), 1, true, ti);
+    t.duration_secs = secs;
+    let mut out = vec![t, row("Video", "H.264  1080p", 2, false, ti)];
+    for a in 0..audio {
+        let mut r = row("Audio", &format!("DTS-HD  track {a}"), 2, true, ti);
+        r.pid = Some((0x1100 + ti * 16 + a) as u16);
+        out.push(r);
+    }
+    out
+}
+
+/// A disc whose titles have the given `(duration_secs, audio_track_count)`.
+fn disc(titles: &[(f64, usize)]) -> Scanned {
+    let mut rows = vec![row("Bluray disc", "TEST_DISC", 0, false, usize::MAX)];
+    for (ti, (secs, audio)) in titles.iter().enumerate() {
+        rows.extend(title_block(ti, *secs, *audio));
+    }
+    Scanned {
+        label: "TEST_DISC".into(),
+        rows,
+        key_summary: "keys: none needed".into(),
+        title_count: titles.len(),
+        video_codecs: vec!["H.264".into(); titles.len()],
+        details: vec![],
+    }
+}
+
+/// The default fixture: a main feature with two audio tracks and a short extra
+/// with one.
+fn two_title_disc() -> Scanned {
+    disc(&[(5400.0, 2), (600.0, 1)])
+}
+
+fn tree(sc: &Scanned, sel_mode: &str, min_secs: f64) -> Tree {
+    Tree::from_scan(sc, sel_mode, min_secs)
+}
+
+/// Arena position of the `n`th row of a given type.
+fn nth(t: &Tree, type_s: &str, n: usize) -> usize {
+    t.arena
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| x.type_s == type_s)
+        .nth(n)
+        .unwrap_or_else(|| panic!("no {type_s} row #{n}"))
+        .0
+}
+
+// ══ what is selectable ═════════════════════════════════════════════════════
+
+#[test]
+fn the_disc_row_is_not_a_choice() {
+    // Ticking "the disc" means nothing — the choice is which titles. A
+    // checkbox there is a control that cannot do anything.
+    // VERIFIED against the shells' own rule: both render a row with no
+    // checkbox as a blank spacer / no state image.
+    let t = tree(&two_title_disc(), "Main film only", 0.0);
+    let root = t.roots[0];
+    assert!(!t.arena[root].checkable(), "the disc root grew a checkbox");
+    assert_eq!(t.arena[root].type_s, "Bluray disc");
+}
+
+#[test]
+fn video_is_implicit_and_carries_no_checkbox() {
+    // Every rip includes the video; offering to untick it would offer a
+    // combination the engine does not produce. VERIFIED: `engine::stream_rows`
+    // sets `checkable: ty != "Video"` for exactly this reason.
+    let t = tree(&two_title_disc(), "Main film only", 0.0);
+    let videos: Vec<usize> = t
+        .arena
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.type_s == "Video")
+        .map(|(i, _)| i)
+        .collect();
+    assert!(!videos.is_empty(), "fixture must contain video rows");
+    for v in videos {
+        assert!(!t.arena[v].checkable(), "row {v} (Video) grew a checkbox");
+    }
+}
+
+#[test]
+fn titles_and_audio_tracks_are_choices() {
+    let t = tree(&two_title_disc(), "Main film only", 0.0);
+    for ty in ["Title", "Audio"] {
+        let any = t.arena.iter().filter(|n| n.type_s == ty).count();
+        assert!(any > 0, "fixture must contain {ty} rows");
+        for n in t.arena.iter().filter(|n| n.type_s == ty) {
+            assert!(n.checkable(), "a {ty} row lost its checkbox");
+        }
+    }
+}
+
+#[test]
+fn bulk_selection_never_touches_a_row_that_has_no_checkbox() {
+    // Select All / Select None / Invert are advertised as acting on the
+    // selection; silently flipping the hidden `checked` flag of a Video or the
+    // disc row would put the model in a state no click can produce.
+    let t = tree(&two_title_disc(), "Main film only", 0.0);
+    let uncheckable: Vec<usize> = t
+        .arena
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !n.checkable())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(!uncheckable.is_empty());
+    let before: Vec<bool> = uncheckable
+        .iter()
+        .map(|&i| *t.arena[i].checked.borrow())
+        .collect();
+    t.set_all(true);
+    t.invert();
+    t.set_all(false);
+    t.invert();
+    let after: Vec<bool> = uncheckable
+        .iter()
+        .map(|&i| *t.arena[i].checked.borrow())
+        .collect();
+    assert_eq!(before, after, "a bulk command flipped an uncheckable row");
+}
+
+// ══ what the tri-state checkbox shows ══════════════════════════════════════
+
+#[test]
+fn a_title_with_every_stream_on_reads_on() {
+    let t = tree(&two_title_disc(), "All titles", 0.0);
+    let title = nth(&t, "Title", 0);
+    t.set_checked(title, true);
+    assert_eq!(t.check_state(title), Check::On);
+}
+
+#[test]
+fn a_title_with_every_stream_off_reads_off() {
+    let t = tree(&two_title_disc(), "All titles", 0.0);
+    let title = nth(&t, "Title", 0);
+    t.set_checked(title, false);
+    assert_eq!(t.check_state(title), Check::Off);
+}
+
+#[test]
+fn a_title_with_some_streams_off_reads_mixed() {
+    // The whole reason the tri-state exists: On would claim the user is
+    // getting tracks they unticked, Off would claim they are getting none.
+    let t = tree(&two_title_disc(), "All titles", 0.0);
+    let title = nth(&t, "Title", 0);
+    t.set_checked(title, true);
+    let one_audio = nth(&t, "Audio", 0);
+    *t.arena[one_audio].checked.borrow_mut() = false;
+    assert_eq!(
+        t.check_state(title),
+        Check::Mixed,
+        "a title with one of two audio tracks off must read Mixed"
+    );
+}
+
+#[test]
+fn the_video_row_does_not_drag_a_title_into_mixed() {
+    // Video is uncheckable and its `checked` flag is meaningless, so folding it
+    // into the tri-state would show Mixed for a title with everything ticked.
+    // VERIFIED: `check_state` filters children by `checkable()`.
+    let t = tree(&two_title_disc(), "All titles", 0.0);
+    let title = nth(&t, "Title", 0);
+    t.set_checked(title, true);
+    let video = nth(&t, "Video", 0);
+    assert!(!t.arena[video].checkable());
+    *t.arena[video].checked.borrow_mut() = false;
+    assert_eq!(
+        t.check_state(title),
+        Check::On,
+        "an uncheckable Video row was folded into the title's tri-state"
+    );
+}
+
+#[test]
+fn a_title_with_a_single_audio_track_is_never_mixed() {
+    // One checkable child can only be all-on or all-off; a Mixed glyph there
+    // would be unreachable by any click.
+    let t = tree(&disc(&[(5400.0, 1)]), "All titles", 0.0);
+    let title = nth(&t, "Title", 0);
+    for on in [true, false] {
+        t.set_checked(title, on);
+        assert_eq!(
+            t.check_state(title),
+            if on { Check::On } else { Check::Off },
+            "a single-track title read as Mixed"
+        );
+    }
+}
+
+#[test]
+fn a_leaf_row_shows_its_own_tick_and_nothing_else() {
+    let t = tree(&two_title_disc(), "All titles", 0.0);
+    let audio = nth(&t, "Audio", 0);
+    assert!(t.arena[audio].children.is_empty());
+    *t.arena[audio].checked.borrow_mut() = true;
+    assert_eq!(t.check_state(audio), Check::On);
+    *t.arena[audio].checked.borrow_mut() = false;
+    assert_eq!(t.check_state(audio), Check::Off);
+}
+
+#[test]
+fn ticking_a_title_cascades_to_its_streams() {
+    // Ticking a title must actually select its tracks, not just paint the
+    // parent: `ticked_streams` reads the CHILDREN.
+    let t = tree(&two_title_disc(), "All titles", 0.0);
+    let title = nth(&t, "Title", 0);
+    t.set_checked(title, false);
+    for &c in &t.arena[title].children {
+        assert!(!*t.arena[c].checked.borrow(), "a stream survived an untick");
+    }
+    t.set_checked(title, true);
+    for &c in &t.arena[title].children {
+        assert!(*t.arena[c].checked.borrow(), "a stream missed the tick");
+    }
+}
+
+// ══ how a View maps to rows ════════════════════════════════════════════════
+
+#[test]
+fn every_arena_row_becomes_exactly_one_view_row_in_order() {
+    // A shell builds its control straight from `title_rows`; a dropped or
+    // reordered row is a row the user cannot reach.
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.page = Page::Titles;
+    let v = app.view();
+    assert_eq!(v.title_rows.len(), app.tree.arena.len());
+    for (i, r) in v.title_rows.iter().enumerate() {
+        assert_eq!(r.index, i, "row {i} carries the wrong arena index");
+        assert_eq!(r.type_s, app.tree.arena[i].type_s);
+        assert_eq!(r.desc, app.tree.arena[i].desc);
+    }
+}
+
+#[test]
+fn a_view_row_carries_a_tick_only_when_the_row_is_a_choice() {
+    // `Row::check == None` is what both shells render as "no checkbox at all".
+    // If it disagreed with `checkable()`, one shell would show a checkbox the
+    // model refuses to change — the exact macOS bug the self-test was written
+    // for.
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.page = Page::Titles;
+    for r in app.view().title_rows {
+        assert_eq!(
+            r.check.is_some(),
+            app.tree.arena[r.index].checkable(),
+            "row {} ({}) disagrees about carrying a checkbox",
+            r.index,
+            r.type_s
+        );
+    }
+}
+
+#[test]
+fn a_view_row_reports_the_same_tri_state_the_tree_computed() {
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.page = Page::Titles;
+    // Force one of each state onto the screen at once.
+    let t0 = nth(&app.tree, "Title", 0);
+    let t1 = nth(&app.tree, "Title", 1);
+    app.tree.set_checked(t0, true);
+    *app.tree.arena[nth(&app.tree, "Audio", 0)]
+        .checked
+        .borrow_mut() = false;
+    app.tree.set_checked(t1, false);
+    let rows = app.view().title_rows;
+    assert_eq!(rows[t0].check, Some(Check::Mixed));
+    assert_eq!(rows[t1].check, Some(Check::Off));
+    for r in &rows {
+        assert_eq!(
+            r.check,
+            app.tree.arena[r.index]
+                .checkable()
+                .then(|| app.tree.check_state(r.index)),
+            "row {} lost its tri-state on the way into the View",
+            r.index
+        );
+    }
+}
+
+#[test]
+fn view_rows_are_indented_disc_then_title_then_stream() {
+    // The depth column is the ONLY thing telling a shell how to nest the tree.
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.page = Page::Titles;
+    let v = app.view();
+    let depths: Vec<(&str, u8)> = v
+        .title_rows
+        .iter()
+        .map(|r| (r.type_s.as_str(), r.depth))
+        .collect();
+    assert_eq!(
+        depths,
+        vec![
+            ("Bluray disc", 0),
+            ("Title", 1),
+            ("Video", 2),
+            ("Audio", 2),
+            ("Audio", 2),
+            ("Title", 1),
+            ("Video", 2),
+            ("Audio", 2),
+        ]
+    );
+}
+
+// ══ the shared depth → parent walk ═════════════════════════════════════════
+
+#[test]
+fn row_parents_rebuilds_the_disc_title_stream_hierarchy() {
+    // Both shells rebuild a hierarchical control from the flat row list. This
+    // is the walk they share.
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.page = Page::Titles;
+    let rows = app.view().title_rows;
+    let parents = row_parents(&rows);
+    assert_eq!(
+        parents,
+        vec![
+            None,    // disc
+            Some(0), // title 1 → disc
+            Some(1), // video → title 1
+            Some(1), // audio → title 1
+            Some(1), // audio → title 1
+            Some(0), // title 2 → disc
+            Some(5), // video → title 2
+            Some(5), // audio → title 2
+        ]
+    );
+}
+
+#[test]
+fn a_stream_hangs_off_its_own_title_not_the_previous_one() {
+    // The bug this guards: resetting the "current title" only on a new disc row
+    // would file title 2's tracks under title 1.
+    let mut app = App::new();
+    app.tree = tree(
+        &disc(&[(5400.0, 1), (600.0, 1), (300.0, 1)]),
+        "All titles",
+        0.0,
+    );
+    app.page = Page::Titles;
+    let rows = app.view().title_rows;
+    let parents = row_parents(&rows);
+    for (i, r) in rows.iter().enumerate() {
+        if r.depth == 2 {
+            let p = parents[i].expect("a stream must have a parent");
+            assert_eq!(rows[p].depth, 1, "stream {i} hung off a non-title row");
+            assert_eq!(
+                app.tree.arena[i].title_idx, app.tree.arena[p].title_idx,
+                "stream {i} was filed under the wrong title"
+            );
+        }
+    }
+}
+
+#[test]
+fn row_parents_never_drops_a_row() {
+    // A row the core decided to show must always be reachable. A malformed
+    // list (a stream before any title) must put the orphan at the top level,
+    // not swallow it — a silently vanishing row is the worse failure.
+    let orphan = |depth: u8| Row {
+        index: 0,
+        depth,
+        type_s: "Audio".into(),
+        desc: "stray".into(),
+        check: Some(Check::Off),
+    };
+    for rows in [vec![orphan(2)], vec![orphan(1)], vec![orphan(2), orphan(1)]] {
+        let parents = row_parents(&rows);
+        assert_eq!(parents.len(), rows.len(), "row_parents lost a row");
+        for (i, p) in parents.iter().enumerate() {
+            assert!(
+                p.is_none() || p.unwrap() < i,
+                "row {i} claims a parent that comes after it"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_parent_always_precedes_its_children() {
+    // Both shells add a child to an already-created parent, so a forward
+    // reference would drop the row on the floor.
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.page = Page::Titles;
+    let rows = app.view().title_rows;
+    for (i, p) in row_parents(&rows).into_iter().enumerate() {
+        if let Some(p) = p {
+            assert!(p < i, "row {i} hangs off row {p}, which comes later");
+            assert_eq!(
+                rows[p].depth + 1,
+                rows[i].depth,
+                "parent is not one level up"
+            );
+        }
+    }
+}
+
+// ══ which titles are ticked ════════════════════════════════════════════════
+
+#[test]
+fn the_default_selection_setting_decides_what_starts_ticked() {
+    // Three modes, three different answers, all on the same disc. "Main film
+    // only" means title 1; "All titles" means every title; "Longest title"
+    // means the longest, which here is NOT title 1.
+    let sc = disc(&[(600.0, 1), (5400.0, 1), (900.0, 1)]);
+
+    let main = tree(&sc, "Main film only", 0.0);
+    assert_eq!(main.ticked_titles(), vec![0]);
+
+    let all = tree(&sc, "All titles", 0.0);
+    assert_eq!(all.ticked_titles(), vec![0, 1, 2]);
+
+    let longest = tree(&sc, "Longest title", 0.0);
+    assert_eq!(
+        longest.ticked_titles(),
+        vec![1],
+        "\"Longest title\" ticked something other than the longest title"
+    );
+}
+
+#[test]
+fn an_unrecognized_selection_setting_falls_back_to_the_main_film() {
+    // A settings file from a newer build must not open a disc with nothing
+    // ticked, which would make Rip refuse with "select a title first".
+    let sc = two_title_disc();
+    assert_eq!(tree(&sc, "Every third title", 0.0).ticked_titles(), vec![0]);
+    assert_eq!(tree(&sc, "", 0.0).ticked_titles(), vec![0]);
+}
+
+#[test]
+fn ticked_titles_are_canonical_disc_indices_not_tree_positions() {
+    // THE bug this guards: the minimum-length filter removes short titles from
+    // the tree, so the third surviving row can be disc title 5. The engine
+    // selects by disc index, so returning a row position would rip the wrong
+    // film.
+    let sc = disc(&[(30.0, 1), (30.0, 1), (5400.0, 1), (30.0, 1), (3600.0, 1)]);
+    let t = tree(&sc, "All titles", 300.0);
+    assert_eq!(
+        t.title_count(),
+        2,
+        "the filter should have left exactly the two long titles"
+    );
+    assert_eq!(
+        t.ticked_titles(),
+        vec![2, 4],
+        "ticked titles must be canonical disc indices, not tree positions"
+    );
+    // And the tree positions really are different, or the test proves nothing.
+    let positions: Vec<usize> = t
+        .arena
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.type_s == "Title")
+        .map(|(i, _)| i)
+        .collect();
+    assert_ne!(positions, vec![2, 4], "fixture failed to separate the two");
+}
+
+#[test]
+fn the_disc_row_never_counts_as_a_ticked_title() {
+    // The root carries `title_idx == usize::MAX`; leaking it into the
+    // selection would hand the engine a nonsense title number.
+    let t = tree(&two_title_disc(), "All titles", 0.0);
+    t.set_all(true);
+    assert_eq!(t.ticked_titles(), vec![0, 1]);
+    assert!(!t.ticked_titles().contains(&usize::MAX));
+}
+
+#[test]
+fn ticked_streams_reports_pids_and_whether_the_user_narrowed_them() {
+    // `explicit_streams` is what tells the engine "the user made a choice";
+    // reporting it when everything is on would turn a default rip into a
+    // filtered one.
+    let t = tree(&two_title_disc(), "All titles", 0.0);
+    t.set_all(true);
+    let (audio, subs, explicit) = t.ticked_streams();
+    assert_eq!(audio.len(), 3, "every audio PID should be selected");
+    assert!(subs.is_empty(), "the fixture has no subtitle tracks");
+    assert!(!explicit, "everything ticked is not a narrowed selection");
+
+    let one = nth(&t, "Audio", 0);
+    *t.arena[one].checked.borrow_mut() = false;
+    let (audio, _, explicit) = t.ticked_streams();
+    assert_eq!(audio.len(), 2);
+    assert!(explicit, "unticking a track must be reported as explicit");
+    assert!(
+        !audio.contains(&t.arena[one].pid.unwrap()),
+        "the unticked track's PID is still being sent to the engine"
+    );
+}
+
+#[test]
+fn unticking_every_track_is_an_explicit_empty_selection() {
+    // A video-only extract is legal, and it must be distinguishable from "the
+    // user chose nothing, give them everything".
+    let t = tree(&two_title_disc(), "All titles", 0.0);
+    t.set_all(false);
+    let (audio, subs, explicit) = t.ticked_streams();
+    assert!(audio.is_empty() && subs.is_empty());
+    assert!(
+        explicit,
+        "an all-off selection must read as explicit, or the engine will \
+         silently include every track"
+    );
+}
+
+// ══ the minimum-title-length filter ════════════════════════════════════════
+
+#[test]
+fn short_titles_are_hidden_along_with_their_streams() {
+    let sc = disc(&[(5400.0, 2), (30.0, 2)]);
+    let t = tree(&sc, "All titles", 300.0);
+    assert_eq!(t.title_count(), 1);
+    // The hidden title's tracks must go with it — an orphan Audio row under
+    // the wrong title is worse than no row.
+    assert_eq!(
+        t.arena.iter().filter(|n| n.type_s == "Audio").count(),
+        2,
+        "the short title's tracks survived the filter"
+    );
+}
+
+#[test]
+fn the_filter_never_empties_the_list() {
+    // A disc of nothing but short titles must still show them: an empty tree
+    // reads as "this disc has nothing on it", which is a lie.
+    let sc = disc(&[(30.0, 1), (45.0, 1)]);
+    let t = tree(&sc, "All titles", 3600.0);
+    assert_eq!(
+        t.title_count(),
+        2,
+        "an aggressive minimum length hid every title"
+    );
+}
+
+#[test]
+fn a_title_with_no_known_duration_is_never_hidden() {
+    // Duration 0.0 means "unknown", not "zero seconds". Hiding on missing
+    // information would make a scan that failed to time its titles look empty.
+    let mut sc = disc(&[(5400.0, 1)]);
+    sc.rows.extend(title_block(1, 0.0, 1));
+    sc.title_count = 2;
+    sc.video_codecs.push("H.264".into());
+    let t = tree(&sc, "All titles", 300.0);
+    assert_eq!(t.title_count(), 2, "a title of unknown length was hidden");
+}
+
+// ══ what the output file is called ═════════════════════════════════════════
+
+#[test]
+fn the_output_file_is_named_after_the_source_and_the_first_ticked_title() {
+    // The Information panel shows this path while the rip runs, so it has to
+    // be the file that actually lands on disk.
+    assert_eq!(
+        output_file_name(
+            "/media/Greenland.iso",
+            "/out",
+            "Selected titles → MKV",
+            Some(0)
+        ),
+        "/out/Greenland_t1.mkv"
+    );
+    // The title number is 1-based, matching `freemkv -t N` and the tree labels.
+    assert_eq!(
+        output_file_name(
+            "/media/Greenland.iso",
+            "/out",
+            "Selected titles → MKV",
+            Some(4)
+        ),
+        "/out/Greenland_t5.mkv"
+    );
+}
+
+#[test]
+fn the_output_extension_follows_the_chosen_container() {
+    // Showing "…_t1.mkv" while ripping an MP4 was a reported defect: the panel
+    // named a file that never appeared.
+    for (format, ext) in [
+        ("Selected titles → MKV", "mkv"),
+        ("Selected titles → MP4", "mp4"),
+        ("Selected titles → M2TS", "m2ts"),
+    ] {
+        assert_eq!(
+            output_file_name("/media/Disc.iso", "/out", format, Some(0)),
+            format!("/out/Disc_t1.{ext}"),
+            "{format} produced the wrong extension"
+        );
+        // And it must agree with the caption on the progress bar, which is
+        // built from the same format string by a different function.
+        assert_eq!(
+            container_label(format).to_ascii_lowercase(),
+            ext,
+            "the progress caption and the filename disagree for {format}"
+        );
+    }
+}
+
+#[test]
+fn a_run_with_no_ticked_title_still_names_the_file_the_engine_will_write() {
+    // A container source has no title rows, so nothing is "ticked"; the engine
+    // rips the single title and numbers it 1.
+    assert_eq!(
+        output_file_name("/media/clip.mkv", "/out", "Selected titles → MKV", None),
+        "/out/clip_t1.mkv"
+    );
+}
+
+#[test]
+fn a_source_with_no_stem_still_produces_a_usable_name() {
+    // Never a path ending in "_t1.mkv" with nothing in front of it, and never
+    // a panic on an odd source string.
+    let n = output_file_name("/", "/out", "Selected titles → MKV", Some(0));
+    assert_eq!(n, "/out/output_t1.mkv");
+}
+
+// ══ the Information panel ══════════════════════════════════════════════════
+
+#[test]
+fn the_information_panel_has_a_label_for_every_value() {
+    // The shells zip labels against values positionally; a mismatch shifts
+    // every row's meaning by one.
+    let rows = InfoRows::starting("/media/Disc.iso", "/out/Disc_t1.mkv");
+    assert_eq!(InfoRows::labels().len(), rows.as_array().len());
+}
+
+#[test]
+fn no_information_row_is_ever_blank() {
+    // A blank field reads as a broken panel (reported). An unknown value is an
+    // em dash, which reads as "not known yet".
+    let rows = InfoRows::starting("/no/such/file.iso", "/out/file_t1.mkv");
+    for (label, value) in InfoRows::labels().iter().zip(rows.as_array()) {
+        assert!(!value.is_empty(), "the {label:?} row is blank");
+    }
+    // Specifically: a source that does not exist has no size, and says so.
+    assert_eq!(rows.source_size, "—");
+}
+
+// ══ settings dropdowns ═════════════════════════════════════════════════════
+
+#[test]
+fn every_settings_dropdown_stores_a_canonical_value_the_code_matches_on() {
+    // The label is translated; the stored value is not. These canonical
+    // strings are compared verbatim elsewhere (`selection` in `Tree::from_scan`,
+    // `rip_mode` in `start_run`, `key_source` in `KeyConfig`), so renaming one
+    // here silently disables the feature it selects.
+    let expect: &[(&str, &[&str])] = &[
+        (
+            "selection",
+            &["Main film only", "All titles", "Longest title"],
+        ),
+        ("rip_mode", &["Multi-pass", "Single pass"]),
+        (
+            "key_source",
+            &[
+                "Local keydb only",
+                "Online key service only",
+                "keydb, then online",
+            ],
+        ),
+        ("log_level", &["Quiet", "Normal", "Verbose", "Debug"]),
+    ];
+    for (key, want) in expect {
+        let got: Vec<&str> = enum_options(key).iter().map(|(c, _)| *c).collect();
+        assert_eq!(&got, want, "{key} option values changed");
+    }
+}
+
+#[test]
+fn the_selection_dropdown_offers_exactly_the_modes_the_tree_implements() {
+    // A mode on offer that `Tree::from_scan` does not implement falls into its
+    // catch-all and silently behaves as "Main film only" — a setting that
+    // appears to work and does not.
+    let sc = disc(&[(600.0, 1), (5400.0, 1)]);
+    let main = tree(&sc, "Main film only", 0.0).ticked_titles();
+    let distinct: Vec<Vec<usize>> = enum_options("selection")
+        .iter()
+        .map(|(canon, _)| tree(&sc, canon, 0.0).ticked_titles())
+        .collect();
+    assert_eq!(distinct.len(), 3);
+    assert_eq!(distinct[0], main);
+    assert_ne!(
+        distinct[1], main,
+        "\"All titles\" behaves identically to \"Main film only\""
+    );
+    assert_ne!(
+        distinct[2], main,
+        "\"Longest title\" behaves identically to \"Main film only\""
+    );
+}
+
+#[test]
+fn the_language_dropdown_offers_every_shipped_locale_and_nothing_else() {
+    use std::collections::BTreeSet;
+    let offered: BTreeSet<&str> = enum_options("language").iter().map(|(c, _)| *c).collect();
+    let from_table: BTreeSet<&str> = LOCALES.iter().map(|(_, c)| *c).collect();
+    assert_eq!(
+        offered, from_table,
+        "the language dropdown and LOCALES disagree"
+    );
+    // Every offered code must normalize back to itself, or picking a language
+    // would store a value the startup path then resolves to "auto".
+    for (code, _) in enum_options("language") {
+        assert_eq!(locale_code(code), code, "{code} does not round-trip");
+    }
+}
+
+#[test]
+fn every_dropdown_label_is_a_real_translation_not_a_lookup_key() {
+    // `strings::get` returns the dotted key verbatim on a miss, so a typo'd or
+    // missing key shows up in the UI as "gui.set.sel_main". Nothing in a
+    // dropdown may look like that.
+    for key in ["selection", "rip_mode", "key_source", "log_level"] {
+        for (canon, label) in enum_options(key) {
+            assert!(!label.is_empty(), "{key}/{canon} has an empty label");
+            assert!(
+                !(label.starts_with("gui.") && !label.contains(' ')),
+                "{key}/{canon} shows the lookup key {label:?} — the string is \
+                 missing from the locale catalog"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_key_with_no_fixed_option_list_is_not_a_dropdown() {
+    // Both shells use an empty result to mean "this is a free-form field".
+    // A spurious arm here would make a text field persist a menu index.
+    for key in [
+        "dest_dir",
+        "filename_template",
+        "max_passes",
+        "container",
+        "",
+    ] {
+        assert!(
+            enum_options(key).is_empty(),
+            "{key} is being treated as an enum dropdown by both shells"
+        );
+    }
+}
+
+// ══ when Rip is enabled, and what it refuses ═══════════════════════════════
+
+#[test]
+fn rip_is_offered_only_once_there_is_something_to_rip() {
+    let mut app = App::new();
+    assert!(!app.view().can_run, "Rip was offered with no source open");
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.page = Page::Titles;
+    assert!(
+        !app.view().can_run,
+        "Rip was offered for a tree with no source path behind it"
+    );
+    app.source = "/media/Disc.iso".into();
+    assert!(app.view().can_run, "Rip stayed disabled with a source open");
+}
+
+#[test]
+fn rip_refuses_a_disc_with_every_title_unticked() {
+    // An empty title list means "main movie" to the engine, so silently
+    // accepting it would rip something the user explicitly deselected.
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.source = "/media/Disc.iso".into();
+    app.output_dir = "/out".into();
+    app.page = Page::Titles;
+    app.tree.set_all(false);
+    let before = app.log.len();
+    app.dispatch(Cmd::Run);
+    assert!(!app.running(), "a rip started with no title selected");
+    assert!(
+        app.log.len() > before,
+        "the refusal was silent — the user gets no explanation"
+    );
+    assert!(
+        matches!(app.log.last().map(|l| l.kind), Some(LogKind::Notice)),
+        "the refusal was not logged as a notice"
+    );
+}
+
+#[test]
+fn rip_refuses_without_an_output_folder_and_says_so() {
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.source = "/media/Disc.iso".into();
+    app.output_dir = "   ".into();
+    app.page = Page::Titles;
+    app.dispatch(Cmd::Run);
+    assert!(!app.running());
+    assert_eq!(app.page, Page::Titles, "the page moved on despite refusing");
+    assert!(matches!(
+        app.log.last().map(|l| l.kind),
+        Some(LogKind::Notice)
+    ));
+}
+
+// ══ what the log line says ═════════════════════════════════════════════════
+
+#[test]
+fn an_mp4_that_cannot_hold_the_ticked_titles_is_flagged_before_the_rip() {
+    // Named codecs in the warning, not a bare "wrong format": the user has to
+    // know WHICH titles are the problem. VERIFIED against `MP4_VIDEO`, which
+    // mirrors libfreemkv's mux gate (H.264/HEVC only).
+    let mut app = App::new();
+    app.tree = tree(&disc(&[(5400.0, 1), (600.0, 1)]), "All titles", 0.0);
+    app.video_codecs = vec!["MPEG-2".into(), "H.264".into()];
+    app.format = "Selected titles → MP4".into();
+    let msg = app
+        .container_mismatch()
+        .expect("an MPEG-2 title in an MP4 must be flagged");
+    assert!(msg.contains("MPEG-2"), "the warning names no codec: {msg}");
+    assert!(
+        !msg.contains("H.264"),
+        "the warning blames a codec MP4 can hold: {msg}"
+    );
+
+    // Untick the MPEG-2 title and the objection must disappear — a warning
+    // that will not clear teaches the user to ignore it.
+    app.tree.set_checked(nth(&app.tree, "Title", 0), false);
+    assert_eq!(app.container_mismatch(), None);
+}
+
+#[test]
+fn a_container_the_source_can_actually_use_raises_no_objection() {
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.video_codecs = vec!["H.264".into(), "HEVC".into()];
+    for f in [
+        "Selected titles → MKV",
+        "Selected titles → MP4",
+        "Selected titles → M2TS",
+    ] {
+        app.format = f.into();
+        assert_eq!(
+            app.container_mismatch(),
+            None,
+            "{f} was wrongly objected to"
+        );
+    }
+}
+
+#[test]
+fn mp4_is_withdrawn_rather_than_offered_and_refused() {
+    // A choice that always fails is worse than no choice.
+    let mut app = App::new();
+    app.video_codecs = vec!["MPEG-2".into()];
+    assert!(!app.mp4_possible());
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.source = "/media/Disc.iso".into();
+    app.page = Page::Titles;
+    let offered = app.view().formats.concat();
+    assert!(
+        !offered.iter().any(|f| f.contains("MP4")),
+        "MP4 is still on offer for a source that cannot produce one: {offered:?}"
+    );
+    assert!(
+        offered.iter().any(|f| f.contains("MKV")),
+        "MKV vanished too"
+    );
+}
+
+#[test]
+fn unknown_codecs_never_withdraw_an_option() {
+    // Missing information must not remove a capability — the container source
+    // path reports no codecs at all.
+    let app = App::new();
+    assert!(app.mp4_possible(), "no codec information blocked MP4");
+}
+
+#[test]
+fn a_log_line_carries_the_severity_a_shell_renders_it_with() {
+    // The two shells mark a Notice differently (colour on macOS, a gutter
+    // character on Windows) but both read the SAME `kind`, so the kind has to
+    // be right at the source.
+    let mut app = App::new();
+    app.say(LogKind::Notice, "a problem");
+    app.say(LogKind::Detail, "chatter");
+    let kinds: Vec<LogKind> = app.view().log.iter().map(|l| l.kind).collect();
+    assert_eq!(kinds[kinds.len() - 2], LogKind::Notice);
+    assert_eq!(kinds[kinds.len() - 1], LogKind::Detail);
+}
+
+#[test]
+fn clearing_the_log_empties_what_the_shells_render() {
+    let mut app = App::new();
+    app.say(LogKind::Detail, "something");
+    assert!(!app.view().log.is_empty());
+    app.dispatch(Cmd::ClearLog);
+    assert!(app.view().log.is_empty(), "Clear log left lines behind");
+    assert!(
+        !app.view().log_hidden,
+        "Clear log must not also hide the pane"
+    );
+}
+
+// ══ pages ══════════════════════════════════════════════════════════════════
+
+#[test]
+fn dismissing_the_result_returns_to_the_titles_when_a_disc_is_still_open() {
+    // Dropping back to the empty page after a rip would look as if the app had
+    // closed the disc.
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.source = "/media/Disc.iso".into();
+    app.result_summary = "2 title(s) written".into();
+    app.page = Page::Result;
+    app.dismiss_result();
+    assert_eq!(app.page, Page::Titles);
+}
+
+#[test]
+fn dismissing_the_result_returns_to_the_empty_page_when_nothing_is_open() {
+    let mut app = App::new();
+    app.result_summary = "2 title(s) written".into();
+    app.page = Page::Result;
+    app.dismiss_result();
+    assert_eq!(app.page, Page::Empty);
+}
+
+#[test]
+fn the_second_progress_bar_appears_only_for_a_multi_title_run() {
+    // Two identical bars for a single title is a reported defect.
+    let mut app = App::new();
+    app.run_titles = 1;
+    assert!(!app.view().show_overall_bar);
+    app.run_titles = 2;
+    assert!(app.view().show_overall_bar);
+}
+
+#[test]
+fn the_progress_captions_name_the_container_the_user_chose() {
+    // "Saving to MKV file" while writing an MP4 was a reported defect.
+    let mut app = App::new();
+    for (format, word) in [
+        ("Selected titles → MP4", "MP4"),
+        ("Selected titles → M2TS", "M2TS"),
+        ("Selected titles → MKV", "MKV"),
+    ] {
+        app.format = format.into();
+        let v = app.view();
+        assert!(
+            v.saving_current.contains(word),
+            "per-title caption {:?} does not name {word}",
+            v.saving_current
+        );
+        assert!(
+            v.saving_overall.contains(word),
+            "overall caption {:?} does not name {word}",
+            v.saving_overall
+        );
+    }
+}

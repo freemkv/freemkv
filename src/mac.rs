@@ -290,26 +290,14 @@ impl TitlesSource {
 
     /// Take the freshly-decided rows from the core and rebuild the outline.
     fn apply(&self, rows: &[crate::ui::Row]) {
+        // The depth → parent walk is the same decision on both shells, so it
+        // comes from the core rather than being re-derived here.
         let mut kids: Vec<Vec<usize>> = vec![Vec::new(); rows.len()];
         let mut roots = Vec::new();
-        let (mut last_root, mut last_title) = (None, None);
-        for (i, r) in rows.iter().enumerate() {
-            match r.depth {
-                0 => {
-                    roots.push(i);
-                    last_root = Some(i);
-                }
-                1 => {
-                    if let Some(p) = last_root {
-                        kids[p].push(i);
-                    }
-                    last_title = Some(i);
-                }
-                _ => {
-                    if let Some(p) = last_title {
-                        kids[p].push(i);
-                    }
-                }
+        for (i, parent) in crate::ui::row_parents(rows).into_iter().enumerate() {
+            match parent {
+                Some(p) => kids[p].push(i),
+                None => roots.push(i),
             }
         }
         *self.ivars().rows.borrow_mut() = rows.to_vec();
@@ -1292,12 +1280,7 @@ impl Controller {
             if cur.trim_end() != want {
                 tv.setString(&NSString::from_str(""));
                 for l in &v.log {
-                    let kind = match l.kind {
-                        crate::ui::LogKind::Notice => 0,
-                        crate::ui::LogKind::Detail => 1,
-                        crate::ui::LogKind::Result => 2,
-                    };
-                    log_append(tv, &l.text, kind);
+                    log_append(tv, &l.text, log_colour(l.kind));
                 }
             }
         }
@@ -1558,6 +1541,19 @@ impl Controller {
 }
 
 // ── widget helpers ────────────────────────────────────────────────────────
+
+/// Which colour bucket a log line belongs in: 0 = notice, 1 = detail,
+/// 2 = result. A separate function from `log_append` so the mapping can be
+/// checked without a window server — the point is that a Notice never shares a
+/// bucket with an ordinary line, since colour is the only thing marking a
+/// problem in this shell.
+fn log_colour(kind: crate::ui::LogKind) -> u8 {
+    match kind {
+        crate::ui::LogKind::Notice => 0,
+        crate::ui::LogKind::Detail => 1,
+        crate::ui::LogKind::Result => 2,
+    }
+}
 
 /// Append one colour-coded line to a log text view.
 /// kind: 0 = notice (maroon), 1 = detail (olive), 2 = result (black)
@@ -2714,45 +2710,11 @@ pub fn run() {
 
 // ── Preferences ───────────────────────────────────────────────────────────
 
-/// The option table for a settings dropdown: `(canonical, localized_label)`
-/// pairs in menu order. The canonical value is what persists and what the
-/// engine matches on (e.g. `key_source.starts_with("Online")`,
-/// `container_label`); the label is what the localized popup shows. So a combo
-/// displays translated text but stores a stable, English identifier — the same
-/// decoupling the format dropdown uses. An empty result means "not an enum
-/// popup" (free-form or format popup), handled separately.
-fn enum_options(key: &str) -> Vec<(&'static str, String)> {
-    let g = crate::strings::get;
-    match key {
-        "selection" => vec![
-            ("Main film only", g("gui.set.sel_main")),
-            ("All titles", g("gui.set.sel_all")),
-            ("Longest title", g("gui.set.sel_longest")),
-        ],
-        "rip_mode" => vec![
-            ("Multi-pass", g("gui.set.mode_multi")),
-            ("Single pass", g("gui.set.mode_single")),
-        ],
-        "key_source" => vec![
-            ("Local keydb only", g("gui.set.key_src_local")),
-            ("Online key service only", g("gui.set.key_src_online")),
-            ("keydb, then online", g("gui.set.key_src_both")),
-        ],
-        "log_level" => vec![
-            ("Quiet", g("gui.set.log_quiet")),
-            ("Normal", g("gui.set.log_normal")),
-            ("Verbose", g("gui.set.log_verbose")),
-            ("Debug", g("gui.set.log_debug")),
-        ],
-        // Language: canonical is the locale code, label the endonym (shown as-is
-        // in every locale). Drives the picker straight from the shipped list.
-        "language" => crate::ui::LOCALES
-            .iter()
-            .map(|(endonym, code)| (*code, (*endonym).to_string()))
-            .collect(),
-        _ => vec![],
-    }
-}
+/// The option table for a settings dropdown — see [`crate::ui::enum_options`],
+/// which owns it so the two shells cannot offer different option sets. An empty
+/// result means "not an enum popup" (a free-form field, or the format popup,
+/// which carries separator rows and so maps by title rather than by index).
+use crate::ui::enum_options;
 
 /// One labelled row inside a preferences tab. Right-aligned label at a fixed
 /// gutter, control to its right — the layout the reference uses throughout.
@@ -4107,10 +4069,187 @@ impl Controller {
 
 // ── tests ─────────────────────────────────────────────────────────────────
 //
-// Only the pure, widget-free helpers are tested here. Anything that touches
-// AppKit needs a main thread and a window server, so it is exercised by the
-// screenshot harness (FMKV_SHOT / FMKV_PAGE) instead.
-
-// Model tests live in `tests/app_core.rs` and run with no shell attached —
-// keeping a shell-side copy would be exactly the duplication this split
+// Only the pure, widget-free decisions this shell makes are tested here.
+// Anything that touches AppKit needs a main thread AND a window server, and
+// `cargo test` gives a harness thread with neither — so the widget-driving
+// assertions stay in the `FMKV_SELFTEST` harness on this platform. See the
+// report in CHANGELOG/CI notes for what that costs.
+//
+// Behaviour over `App`/`Tree`/`View` is NOT repeated here: it lives in
+// `tests/gui_model.rs`, runs on every host, and covers both shells at once.
+// Keeping a shell-side copy would be exactly the duplication this split
 // exists to prevent.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::Cmd;
+
+    // ── menu routing ──────────────────────────────────────────────────────
+
+    #[test]
+    fn the_menu_reaches_every_command_the_core_defines() {
+        // `validateMenuItem:` asks `cmd_for` whether an item is blocked
+        // mid-rip. A selector that falls off the end of `cmd_for` is a menu
+        // item with NO rule: it stays live during a rip and runs anyway. So
+        // the property is coverage — every command the core can dispatch must
+        // be produced by some menu selector.
+        //
+        // `SetFormat` is excluded (it comes from the format popup, not a menu)
+        // and so is `Cancel` (the progress page's button, always reachable).
+        let sels = [
+            sel!(onOpenFiles:),
+            sel!(onOpenDisc:),
+            sel!(onCloseDisc:),
+            sel!(onBrowseOutput:),
+            sel!(onRip:),
+            sel!(onCancelRip:),
+            sel!(onEject:),
+            sel!(onSelectAll:),
+            sel!(onSelectNone:),
+            sel!(onInvert:),
+            sel!(onClearLog:),
+            sel!(onToggleLog:),
+            sel!(onPrefs:),
+            sel!(onAbout:),
+            sel!(onDocs:),
+            sel!(onCheckUpdates:),
+            sel!(onQuit:),
+        ];
+        let reached: Vec<Cmd> = sels.iter().filter_map(|s| cmd_for(*s)).collect();
+        let unrouted: Vec<&Sel> = sels.iter().filter(|s| cmd_for(**s).is_none()).collect();
+        assert!(
+            unrouted.is_empty(),
+            "menu selectors with no cmd_for arm — they would never be greyed \
+             during a rip: {unrouted:?}"
+        );
+        for want in [
+            Cmd::Open,
+            Cmd::Close,
+            Cmd::SetOutput,
+            Cmd::Run,
+            Cmd::Cancel,
+            Cmd::Eject,
+            Cmd::SelectAll,
+            Cmd::SelectNone,
+            Cmd::Invert,
+            Cmd::ClearLog,
+            Cmd::ToggleLog,
+            Cmd::Settings,
+            Cmd::About,
+            Cmd::Docs,
+            Cmd::CheckUpdates,
+            Cmd::Quit,
+        ] {
+            assert!(
+                reached.contains(&want),
+                "{want:?} is not reachable from any menu selector"
+            );
+        }
+    }
+
+    #[test]
+    fn opening_a_disc_is_an_open_for_enablement_purposes() {
+        // Two menu items, one rule: File ▸ Open… and File ▸ Open Disc… must
+        // both be blocked mid-rip. Mapping Open Disc to anything else (or to
+        // nothing) would leave a live "Open Disc" during a rip.
+        assert_eq!(cmd_for(sel!(onOpenFiles:)), Some(Cmd::Open));
+        assert_eq!(cmd_for(sel!(onOpenDisc:)), Some(Cmd::Open));
+        assert!(crate::ui::blocked_while_running(Cmd::Open));
+    }
+
+    #[test]
+    fn a_selector_that_is_not_a_command_routes_nowhere() {
+        // The catch-all must not fall through: the checkbox and popup actions
+        // are not menu commands and must not be treated as ones.
+        assert_eq!(cmd_for(sel!(onToggle:)), None);
+        assert_eq!(cmd_for(sel!(onPickFormat:)), None);
+        assert_eq!(cmd_for(sel!(onPickLanguage:)), None);
+    }
+
+    // ── the log pane ──────────────────────────────────────────────────────
+
+    #[test]
+    fn a_notice_gets_its_own_colour_bucket() {
+        // Colour is the ONLY thing marking a problem in this shell's log (the
+        // Windows shell uses a gutter character instead), so a Notice sharing
+        // a bucket with an ordinary line makes warnings invisible.
+        let notice = log_colour(crate::ui::LogKind::Notice);
+        let detail = log_colour(crate::ui::LogKind::Detail);
+        let result = log_colour(crate::ui::LogKind::Result);
+        assert_ne!(notice, detail, "a notice reads as an ordinary detail line");
+        assert_ne!(notice, result, "a notice reads as an ordinary result line");
+        assert_ne!(detail, result, "detail and result share a colour");
+        // `log_append` only has three colours; anything else falls into its
+        // catch-all and silently renders as a result line.
+        for k in [
+            crate::ui::LogKind::Notice,
+            crate::ui::LogKind::Detail,
+            crate::ui::LogKind::Result,
+        ] {
+            assert!(log_colour(k) <= 2, "no colour defined for {k:?}");
+        }
+    }
+
+    // ── settings dropdowns ────────────────────────────────────────────────
+
+    #[test]
+    fn the_format_popup_is_not_an_index_mapped_enum() {
+        // This shell's default-output popup interleaves group SEPARATOR rows,
+        // so its selected index does not line up with the core's flat format
+        // list — `read_prefs_form` therefore maps it back by TITLE. Adding a
+        // "container" arm to the shared table would silently switch it to
+        // index mapping and persist the wrong format, so the absence of that
+        // arm is a contract this shell depends on.
+        assert!(
+            enum_options("container").is_empty(),
+            "the container popup must not be index-mapped: this shell's popup \
+             carries separator rows, so index N is not option N"
+        );
+        // And the title-based path must actually resolve: every canonical
+        // format's localized label round-trips back to the canonical string.
+        for canon in crate::ui::output_formats(true, true).into_iter().flatten() {
+            let label = crate::ui::format_label(canon);
+            assert_eq!(
+                crate::ui::format_from_label(&label, true, true),
+                Some(canon),
+                "{label:?} does not resolve back to {canon:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shared_dropdowns_come_from_the_core() {
+        // A shell-local copy of this table is how the two shells drifted
+        // before, so this shell must hold none.
+        for key in [
+            "selection",
+            "rip_mode",
+            "key_source",
+            "log_level",
+            "language",
+        ] {
+            let opts = enum_options(key);
+            assert!(!opts.is_empty(), "{key} lost its options");
+            assert_eq!(
+                opts.into_iter()
+                    .map(|(c, l)| (c.to_string(), l))
+                    .collect::<Vec<_>>(),
+                crate::ui::enum_options(key)
+                    .into_iter()
+                    .map(|(c, l)| (c.to_string(), l))
+                    .collect::<Vec<_>>(),
+                "{key} is not the shared table"
+            );
+        }
+    }
+
+    #[test]
+    fn a_free_form_setting_is_not_an_enum_popup() {
+        // `read_prefs_form` uses an empty result to mean "not an enum": a
+        // spurious arm here would make a text field persist an index.
+        for key in ["dest_dir", "filename_template", "max_passes", ""] {
+            assert!(enum_options(key).is_empty(), "{key} became an enum popup");
+        }
+    }
+}

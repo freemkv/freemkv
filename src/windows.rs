@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex};
 
 use winsafe::{self as w, co, gui, msg, prelude::*};
 
-use crate::ui::{App, Check, Cmd, Effect, LogKind, Page, Row, View};
+use crate::ui::{App, Check, Cmd, Effect, LogKind, LogLine, Page, Row, View};
 
 // ── window geometry ───────────────────────────────────────────────────────
 //
@@ -1303,47 +1303,37 @@ impl Shell {
         self.set_tree_redraw(false);
         let _ = self.tree.items().delete_all();
 
-        // depth 0 = the disc, 1 = a title, 2 = a stream under that title.
-        let mut last_root: Option<w::HTREEITEM> = None;
-        let mut last_title: Option<w::HTREEITEM> = None;
-        for r in rows {
+        // Which row hangs off which comes from the core (`ui::row_parents`), so
+        // this shell and the macOS outline cannot nest the same rows
+        // differently. Handles are kept per ROW POSITION, so a child always
+        // attaches to its own parent rather than to whichever row happened to
+        // come last.
+        let parents = crate::ui::row_parents(rows);
+        let mut handles: Vec<Option<w::HTREEITEM>> = Vec::with_capacity(rows.len());
+        for (i, r) in rows.iter().enumerate() {
             let text = row_text(r);
-            let added = match r.depth {
-                0 => self
+            // A row whose parent is missing is added at the top level rather
+            // than dropped: a row the core decided to show must be reachable.
+            let parent = parents[i].and_then(|p| handles[p].as_ref());
+            let added = match parent {
+                None => self
                     .tree
                     .items()
                     .add_root(&text, None, r.index)
                     .ok()
-                    .map(|i| {
-                        let h = unsafe { i.htreeitem().raw_copy() };
-                        last_root = Some(unsafe { h.raw_copy() });
-                        last_title = None;
-                        h
-                    }),
-                1 => last_root.as_ref().and_then(|p| {
-                    self.tree
-                        .items()
-                        .get(p)
-                        .add_child(&text, None, r.index)
-                        .ok()
-                        .map(|i| {
-                            let h = unsafe { i.htreeitem().raw_copy() };
-                            last_title = Some(unsafe { h.raw_copy() });
-                            h
-                        })
-                }),
-                _ => last_title.as_ref().and_then(|p| {
-                    self.tree
-                        .items()
-                        .get(p)
-                        .add_child(&text, None, r.index)
-                        .ok()
-                        .map(|i| unsafe { i.htreeitem().raw_copy() })
-                }),
+                    .map(|it| unsafe { it.htreeitem().raw_copy() }),
+                Some(p) => self
+                    .tree
+                    .items()
+                    .get(p)
+                    .add_child(&text, None, r.index)
+                    .ok()
+                    .map(|it| unsafe { it.htreeitem().raw_copy() }),
             };
-            if let Some(h) = added {
-                self.set_row_state(&h, state_for(r.check));
+            if let Some(h) = &added {
+                self.set_row_state(h, state_for(r.check));
             }
+            handles.push(added);
         }
         // The macOS outline opens everything on load; match it so both shells
         // show the same thing without a click.
@@ -1526,19 +1516,7 @@ impl Shell {
         // ── log ──
         // Rewritten only when it grew, so selection survives an ordinary tick.
         if self.memo.borrow().log_len != v.log.len() {
-            // A plain EDIT control cannot colour individual lines, which is how
-            // the macOS shell shows severity. Rather than drop the information,
-            // notices carry a one-character gutter so a problem is still visible
-            // in a monochrome control. (Per-line colour would need a RichEdit.)
-            let text = v
-                .log
-                .iter()
-                .map(|l| match l.kind {
-                    LogKind::Notice => format!("! {}", l.text),
-                    LogKind::Detail | LogKind::Result => l.text.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join("\r\n");
+            let text = log_text(&v.log);
             let _ = self.log.set_text(&text);
             // Keep the newest line in view, as the macOS log does.
             let n = text.chars().count() as i32;
@@ -1599,6 +1577,23 @@ impl Shell {
 /// Win32 EDIT controls need CRLF; a bare LF renders as one run-on line.
 fn crlf(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+/// The exact text the log pane shows for a set of log lines.
+///
+/// A plain EDIT control cannot colour individual lines, which is how the macOS
+/// shell shows severity. Rather than drop the information, notices carry a
+/// one-character gutter so a problem is still visible in a monochrome control.
+/// (Per-line colour would need a RichEdit.) Pulled out of `render` so the
+/// gutter rule can be checked without a window.
+fn log_text(log: &[LogLine]) -> String {
+    log.iter()
+        .map(|l| match l.kind {
+            LogKind::Notice => format!("! {}", l.text),
+            LogKind::Detail | LogKind::Result => l.text.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
 }
 
 // ── platform effects ──────────────────────────────────────────────────────
@@ -2066,42 +2061,22 @@ impl Shell {
 /// identifier — the same decoupling the format dropdown uses. An empty result
 /// means "not an enum combo".
 fn enum_options(key: &str) -> Vec<(&'static str, String)> {
-    let g = crate::strings::get;
     match key {
-        "selection" => vec![
-            ("Main film only", g("gui.set.sel_main")),
-            ("All titles", g("gui.set.sel_all")),
-            ("Longest title", g("gui.set.sel_longest")),
-        ],
-        "rip_mode" => vec![
-            ("Multi-pass", g("gui.set.mode_multi")),
-            ("Single pass", g("gui.set.mode_single")),
-        ],
-        "key_source" => vec![
-            ("Local keydb only", g("gui.set.key_src_local")),
-            ("Online key service only", g("gui.set.key_src_online")),
-            ("keydb, then online", g("gui.set.key_src_both")),
-        ],
-        "log_level" => vec![
-            ("Quiet", g("gui.set.log_quiet")),
-            ("Normal", g("gui.set.log_normal")),
-            ("Verbose", g("gui.set.log_verbose")),
-            ("Debug", g("gui.set.log_debug")),
-        ],
-        // Language: canonical is the locale code, label the endonym (shown as-is
-        // in every locale). Driven straight from the shipped list, so the picker
-        // can never drift from what freemkv-i18n can actually load.
-        "language" => crate::ui::LOCALES
-            .iter()
-            .map(|(endonym, code)| (*code, (*endonym).to_string()))
-            .collect(),
         // The output container is the format list, localized for display.
+        //
+        // Windows-only: this shell's default-output control is a FLAT combo box
+        // with no separator rows, so the format list maps 1:1 onto its indices
+        // and can be treated as an enum here. The macOS popup interleaves group
+        // separators, so it maps by title instead — which is why this arm stays
+        // in the shell and is deliberately absent from `ui::enum_options`.
         "container" => crate::ui::output_formats(true, true)
             .into_iter()
             .flatten()
             .map(|c| (c, crate::ui::format_label(c)))
             .collect(),
-        _ => vec![],
+        // Every other dropdown is the shared table, owned by the core so the
+        // two shells cannot offer different option sets.
+        _ => crate::ui::enum_options(key),
     }
 }
 
@@ -3302,6 +3277,140 @@ impl Shell {
     }
 }
 
+/// The WIDGET-level assertions: what the controls are actually showing, versus
+/// what the core's `View` said they should show.
+///
+/// These are the checks a model test can never make — the missing-checkbox bug
+/// on macOS lived exactly here, with a correct `View` and a wrong cell. They
+/// depend only on whatever source is currently loaded (including none), so both
+/// the interactive `self_test` and the `#[test]` in this file's test module run
+/// the same code against the same real window. Returns `(passed, description)`
+/// per check rather than panicking, so the interactive mode can print a full
+/// report instead of dying on the first failure.
+#[cfg(any(test, debug_assertions))]
+impl Shell {
+    fn widget_checks(&self) -> Vec<(bool, String)> {
+        let mut out: Vec<(bool, String)> = Vec::new();
+        let mut check = |name: &str, ok: bool, detail: String| {
+            out.push((ok, format!("{name} — {detail}")));
+        };
+        let v = self.app.borrow().view();
+
+        // ── the tree shows one item per row the core decided on ──
+        check(
+            "widget-tree-populated",
+            self.tree.items().count() as usize == v.title_rows.len(),
+            format!(
+                "{} tree items vs {} rows",
+                self.tree.items().count(),
+                v.title_rows.len()
+            ),
+        );
+
+        // ── every row's state image matches the tick the core decided ──
+        //
+        // Asserted against `state_for(row.check)`, i.e. the whole mapping, not
+        // just "the root has none": a row the core says carries no checkbox
+        // must show NO state image, and a row it says is Mixed must show the
+        // third glyph rather than falling back to checked or unchecked.
+        for r in &v.title_rows {
+            let want = state_for(r.check);
+            let got = self.widget_state(r.index);
+            check(
+                "widget-row-state-matches-the-core",
+                got == Some(want),
+                format!(
+                    "row {} ({} {:?}): widget shows {got:?}, core says {want}",
+                    r.index, r.type_s, r.check
+                ),
+            );
+        }
+
+        // ── the format combo shows exactly the core's list, localized ──
+        //
+        // Not "the combo is non-empty": the CONTENT is the property. This is
+        // what catches an ISO sink still on offer for an MKV source.
+        let want: Vec<String> = v
+            .formats
+            .iter()
+            .flat_map(|g| g.iter().map(|s| crate::ui::format_label(s)))
+            .collect();
+        let got = self.combo_titles();
+        check(
+            "widget-format-combo-matches-the-core",
+            got == want,
+            format!("combo shows {got:?}, core offers {want:?}"),
+        );
+        let selected: Option<String> = self
+            .cmb_format
+            .items()
+            .selected_index()
+            .and_then(|i| self.combo_titles().into_iter().nth(i as usize));
+        let want_label = crate::ui::format_label(&v.format);
+        check(
+            "widget-format-combo-selects-the-current-format",
+            selected.as_deref() == Some(want_label.as_str()),
+            format!("combo shows {selected:?}, model holds {:?}", v.format),
+        );
+
+        // ── Run Now's enablement is the model's, in the widget ──
+        check(
+            "widget-run-button-follows-can-run",
+            self.btn_run.hwnd().IsWindowEnabled() == v.can_run,
+            format!(
+                "button enabled = {}, View::can_run = {}",
+                self.btn_run.hwnd().IsWindowEnabled(),
+                v.can_run
+            ),
+        );
+
+        // ── the log pane shows exactly the text the shell decided on ──
+        check(
+            "widget-log-shows-the-rendered-lines",
+            self.drive_log() == log_text(&v.log),
+            format!("log pane holds {:?}", self.drive_log()),
+        );
+        check(
+            "widget-log-is-readonly-and-selectable",
+            self.log.hwnd().style().has(co::WS::TABSTOP),
+            "log text can be focused, selected and copied".to_string(),
+        );
+
+        // ── every menu command is present and routes to a core command ──
+        let bar = self.wnd.hwnd().GetMenu();
+        check(
+            "widget-menu-bar",
+            bar.as_ref().and_then(|m| m.GetMenuItemCount().ok()) == Some(4),
+            format!(
+                "{:?} top-level menus (File/Edit/View/Help)",
+                bar.as_ref().and_then(|m| m.GetMenuItemCount().ok())
+            ),
+        );
+        let missing: Vec<u16> = match &bar {
+            Some(m) => MENU_CMD_IDS
+                .iter()
+                .copied()
+                .filter(|id| m.GetMenuState(w::IdPos::Id(*id)).is_err())
+                .collect(),
+            None => MENU_CMD_IDS.to_vec(),
+        };
+        check(
+            "widget-every-command-id-is-on-the-menu",
+            missing.is_empty(),
+            format!("ids present in MENU_CMD_IDS but absent from the bar: {missing:?}"),
+        );
+
+        // ── Settings has every tab the shell builds ──
+        check(
+            "widget-settings-tabs",
+            self.prefs.tab.items().count().unwrap_or(0) == 5,
+            format!("{} tabs", self.prefs.tab.items().count().unwrap_or(0)),
+        );
+
+        out
+    }
+}
+
 /// Scripted end-user test. Drives the REAL controls and asserts against both the
 /// core's `View` and the widgets, so it validates the shell and the model
 /// together. Debug builds only.
@@ -3379,40 +3488,16 @@ impl Shell {
         );
         check("info-text", !v.detail.is_empty(), "detail pane populated");
 
-        // ── WIDGET-level checks: what the tree actually shows, not what the
-        // model said. Model-level tests pass while the widget is broken.
-        let title_row = v
-            .title_rows
-            .iter()
-            .position(|x| x.type_s == "Title")
-            .unwrap_or(1);
-        check(
-            "widget-root-has-no-tick",
-            self.widget_state(0) == Some(ST_NONE),
-            &format!("root state image = {:?}", self.widget_state(0)),
-        );
-        check(
-            "widget-title-has-a-tick",
-            self.widget_state(title_row)
-                .is_some_and(|s| s == ST_CHECKED || s == ST_UNCHECKED || s == ST_MIXED),
-            &format!("title state image = {:?}", self.widget_state(title_row)),
-        );
-        if let Some(vr) = v.title_rows.iter().position(|x| x.type_s == "Video") {
-            check(
-                "widget-video-has-no-tick",
-                self.widget_state(vr) == Some(ST_NONE),
-                &format!("video state image = {:?}", self.widget_state(vr)),
-            );
-        }
-        check(
-            "widget-tree-populated",
-            self.tree.items().count() as usize == v.title_rows.len(),
-            &format!(
-                "{} tree items vs {} rows",
-                self.tree.items().count(),
-                v.title_rows.len()
-            ),
-        );
+        // ── WIDGET-level checks: what the controls actually show, not what the
+        // model said. Model-level tests pass while the widget is broken. The
+        // same sweep runs as an ordinary `#[test]` (see this file's test
+        // module), so a regression is caught by `cargo test` too.
+        // (`check` borrows `results`; its borrow ends at the line above, so the
+        // batch append is legal and a fresh recorder is bound afterwards.)
+        results.extend(self.widget_checks());
+        let mut check = |name: &str, ok: bool, detail: &str| {
+            results.push((ok, format!("{name} — {detail}")));
+        };
         snap("02-titles");
 
         // ── driving the real tick box changes the model AND the widget
@@ -3568,11 +3653,6 @@ impl Shell {
 
         // 5 ── the log commands
         check("log-content", !view().log.is_empty(), "carries real events");
-        check(
-            "log-is-readonly-and-selectable",
-            self.log.hwnd().style().has(co::WS::TABSTOP),
-            "log text can be focused, selected and copied",
-        );
         self.act(Cmd::ClearLog);
         check("log-clear", view().log.is_empty(), "Clear log empties it");
         self.act(Cmd::ToggleLog);
@@ -3598,11 +3678,6 @@ impl Shell {
             !crate::settings::Settings::load().dest_dir.is_empty(),
             "destination restored from disk",
         );
-        check(
-            "settings-tabs",
-            self.prefs.tab.items().count().unwrap_or(0) == 5,
-            &format!("{} tabs", self.prefs.tab.items().count().unwrap_or(0)),
-        );
         self.prefs.show(&self.settings.borrow());
         pump(250);
         let _ = snapshot(
@@ -3614,15 +3689,6 @@ impl Shell {
         pump(250);
         let _ = snapshot(self.about.wnd.hwnd(), &format!("{shot_dir}/11-about.bmp"));
         self.about.hide();
-        check(
-            "menu-bar",
-            self.wnd
-                .hwnd()
-                .GetMenu()
-                .and_then(|m| m.GetMenuItemCount().ok())
-                == Some(4),
-            "File/Edit/View/Help",
-        );
 
         // 8 ── layout at the extremes, at this window's real DPI
         let dpi = window_dpi(self.wnd.hwnd());
@@ -3926,5 +3992,486 @@ impl Shell {
         }
 
         false
+    }
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────
+//
+// Two tiers, both reachable from `cargo test` on a Windows host:
+//
+//   * the pure shell decisions (menu routing, tick glyphs, the redraw memo,
+//     row text, the log gutter) — no window, no message loop;
+//   * `widget_checks`, the same sweep the interactive `FMKV_SELFTEST` mode
+//     runs, driven here against a real window built from a synthetic scan.
+//
+// The behaviour tests over `App`/`Tree`/`View` are NOT repeated here: they live
+// in `tests/gui_model.rs`, run on every host, and cover both shells at once.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{Row as ScanRow, Scanned};
+
+    // ── fixtures ──────────────────────────────────────────────────────────
+
+    /// A two-title disc scan with real stream rows, built by hand so the tests
+    /// need no disc, no drive and no fixture file. Title 0 has one video and
+    /// two audio tracks; title 1 has one video and one audio.
+    fn synthetic_disc() -> Scanned {
+        fn row(type_s: &str, desc: &str, depth: u8, checkable: bool, title: usize) -> ScanRow {
+            ScanRow {
+                type_s: type_s.into(),
+                desc: desc.into(),
+                depth,
+                checkable,
+                title,
+                info: format!("{type_s} info"),
+                pid: None,
+                duration_secs: 0.0,
+            }
+        }
+        let mut rows = vec![row("Bluray disc", "TEST_DISC", 0, false, usize::MAX)];
+        for (ti, secs) in [(0usize, 5400.0f64), (1, 600.0)] {
+            let mut t = row("Title", &format!("{}.  playlist", ti + 1), 1, true, ti);
+            t.duration_secs = secs;
+            rows.push(t);
+            rows.push(row("Video", "H.264  1080p", 2, false, ti));
+            let mut a = row("Audio", "DTS-HD  eng", 2, true, ti);
+            a.pid = Some(0x1100 + ti as u16);
+            rows.push(a);
+            if ti == 0 {
+                let mut a2 = row("Audio", "AC-3  fra", 2, true, ti);
+                a2.pid = Some(0x1200);
+                rows.push(a2);
+            }
+        }
+        Scanned {
+            label: "TEST_DISC".into(),
+            rows,
+            key_summary: "keys: none needed".into(),
+            title_count: 2,
+            video_codecs: vec!["H.264".into(), "H.264".into()],
+            details: vec![],
+        }
+    }
+
+    fn view_rows() -> Vec<Row> {
+        let mut app = App::new();
+        app.tree = crate::ui::Tree::from_scan(&synthetic_disc(), "All titles", 0.0);
+        app.page = Page::Titles;
+        app.view().title_rows
+    }
+
+    // ── menu routing ──────────────────────────────────────────────────────
+
+    #[test]
+    fn every_menu_id_the_shell_enables_also_routes_to_a_command() {
+        // `sync_menu_enabled` walks MENU_CMD_IDS and asks `cmd_for` for the
+        // rule; an id in the list that `cmd_for` does not know is a menu item
+        // that is greyed on no rule at all.
+        let unrouted: Vec<u16> = MENU_CMD_IDS
+            .iter()
+            .copied()
+            .filter(|id| cmd_for(*id).is_none())
+            .collect();
+        assert!(
+            unrouted.is_empty(),
+            "MENU_CMD_IDS entries with no cmd_for mapping: {unrouted:?}"
+        );
+    }
+
+    #[test]
+    fn the_menu_reaches_every_command_the_core_defines() {
+        // The real contract: a command the core knows how to dispatch but no
+        // menu id produces is unreachable by keyboard or menu. `SetFormat` is
+        // deliberately excluded — it comes from the format combo, not a menu.
+        let reachable: Vec<Cmd> = MENU_CMD_IDS.iter().filter_map(|id| cmd_for(*id)).collect();
+        for want in [
+            Cmd::Open,
+            Cmd::Close,
+            Cmd::SetOutput,
+            Cmd::Run,
+            Cmd::Eject,
+            Cmd::Settings,
+            Cmd::Quit,
+            Cmd::SelectAll,
+            Cmd::SelectNone,
+            Cmd::Invert,
+            Cmd::ToggleLog,
+            Cmd::ClearLog,
+            Cmd::Docs,
+            Cmd::CheckUpdates,
+            Cmd::About,
+        ] {
+            assert!(
+                reachable.contains(&want),
+                "{want:?} is not reachable from any menu id"
+            );
+        }
+        // Cancel is the one command with no menu item: it lives on the
+        // progress page's button, where it is always reachable mid-rip.
+        assert!(
+            !reachable.contains(&Cmd::Cancel),
+            "Cancel gained a menu id; `blocked_while_running` never greys it, \
+             so the enable pass would leave a live Cancel on a page with no run"
+        );
+    }
+
+    #[test]
+    fn an_id_that_is_not_a_command_routes_nowhere() {
+        // Separators and the accelerator-only ids must not fall through to a
+        // command; `cmd_for`'s catch-all is what guarantees it.
+        assert_eq!(cmd_for(0), None);
+        assert_eq!(cmd_for(IDM_COPY), None);
+        assert_eq!(cmd_for(IDM_SELECT_ALL_TEXT), None);
+        assert_eq!(cmd_for(ID_TREE), None);
+    }
+
+    // ── tick glyphs ───────────────────────────────────────────────────────
+
+    #[test]
+    fn a_row_with_no_checkbox_shows_no_state_image() {
+        // Index 0 is the tree control's "no state image" — the disc root and
+        // the implicit Video rows must land there, not on an unchecked box the
+        // user would reasonably try to tick.
+        assert_eq!(state_for(None), 0);
+    }
+
+    #[test]
+    fn each_tick_state_gets_its_own_glyph() {
+        // Mixed must not collapse onto checked or unchecked: the third glyph is
+        // the only thing telling a user some streams under a title are off.
+        let all = [
+            state_for(None),
+            state_for(Some(Check::Off)),
+            state_for(Some(Check::On)),
+            state_for(Some(Check::Mixed)),
+        ];
+        let mut sorted = all.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4, "two tick states share a glyph: {all:?}");
+        // And they must be indices into the image list built by
+        // `build_check_images`, which installs exactly three bitmaps at the
+        // 1-based indices the tree control reserves.
+        for s in [
+            state_for(Some(Check::Off)),
+            state_for(Some(Check::On)),
+            state_for(Some(Check::Mixed)),
+        ] {
+            assert!((1..=3).contains(&s), "state image index {s} has no bitmap");
+        }
+    }
+
+    // ── the redraw memo ───────────────────────────────────────────────────
+
+    #[test]
+    fn the_row_signature_ignores_tick_state() {
+        // `render` rebuilds the tree whenever the signature changes, and a
+        // rebuild destroys the user's expansion and selection. Ticking a box
+        // must therefore NOT change the signature — it goes down the
+        // `sync_tree_states` path instead.
+        let rows = view_rows();
+        let before = rows_sig(&rows);
+        let flipped: Vec<Row> = rows
+            .iter()
+            .cloned()
+            .map(|mut r| {
+                r.check = match r.check {
+                    Some(Check::Off) => Some(Check::On),
+                    Some(Check::On) => Some(Check::Mixed),
+                    other => other,
+                };
+                r
+            })
+            .collect();
+        assert_ne!(
+            rows.iter().map(|r| r.check).collect::<Vec<_>>(),
+            flipped.iter().map(|r| r.check).collect::<Vec<_>>(),
+            "the fixture must actually change some tick states"
+        );
+        assert_eq!(
+            before,
+            rows_sig(&flipped),
+            "a tick change altered the row signature, so every toggle now \
+             rebuilds the tree and loses the user's expansion state"
+        );
+    }
+
+    #[test]
+    fn the_row_signature_notices_a_different_set_of_rows() {
+        // The other half of the contract: if the rows really did change, the
+        // signature must too, or the tree would keep showing the old disc.
+        let rows = view_rows();
+        let base = rows_sig(&rows);
+
+        let mut renamed = rows.clone();
+        renamed[1].desc.push_str(" (remastered)");
+        assert_ne!(base, rows_sig(&renamed), "a renamed row went unnoticed");
+
+        let mut retyped = rows.clone();
+        retyped[2].type_s = "Subtitle".into();
+        assert_ne!(base, rows_sig(&retyped), "a retyped row went unnoticed");
+
+        let mut reindented = rows.clone();
+        reindented[2].depth = 1;
+        assert_ne!(
+            base,
+            rows_sig(&reindented),
+            "a re-indented row went unnoticed"
+        );
+
+        let mut dropped = rows.clone();
+        dropped.pop();
+        assert_ne!(base, rows_sig(&dropped), "a removed row went unnoticed");
+
+        let mut swapped = rows.clone();
+        swapped.swap(2, 3);
+        assert_ne!(base, rows_sig(&swapped), "a reordered tree went unnoticed");
+    }
+
+    // ── row text ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_row_label_carries_both_columns_the_mac_outline_shows() {
+        // `SysTreeView32` has one column, so the Type and Description the macOS
+        // outline shows side by side are joined here. Both must survive the
+        // join or this shell shows strictly less than the other one.
+        let rows = view_rows();
+        let title = rows.iter().find(|r| r.type_s == "Title").unwrap();
+        let text = row_text(title);
+        assert!(text.contains(&title.type_s), "type dropped from {text:?}");
+        assert!(
+            text.contains(&title.desc),
+            "description dropped from {text:?}"
+        );
+    }
+
+    #[test]
+    fn the_disc_row_does_not_repeat_its_type_in_the_label() {
+        // The root's Description is the volume label and its Type is the disc
+        // format; the macOS outline has a Type column to put that in, this
+        // shell does not, and prefixing "Bluray disc   " to the volume label
+        // reads as noise. Recorded as the shell's deliberate rule.
+        let rows = view_rows();
+        let root = &rows[0];
+        assert_eq!(root.depth, 0);
+        assert!(!root.type_s.is_empty(), "fixture root must carry a type");
+        assert_eq!(row_text(root), root.desc);
+    }
+
+    // ── the log pane ──────────────────────────────────────────────────────
+
+    #[test]
+    fn a_notice_is_marked_in_a_control_that_cannot_show_colour() {
+        // macOS colours notices red. A Win32 EDIT cannot colour a single line,
+        // so severity is carried by a gutter character instead. Losing it would
+        // make a warning indistinguishable from ordinary chatter.
+        let log = vec![
+            LogLine {
+                text: "ordinary".into(),
+                kind: LogKind::Detail,
+            },
+            LogLine {
+                text: "something went wrong".into(),
+                kind: LogKind::Notice,
+            },
+            LogLine {
+                text: "done".into(),
+                kind: LogKind::Result,
+            },
+        ];
+        let rendered = log_text(&log);
+        let lines: Vec<&str> = rendered.split("\r\n").map(|s| s.trim_end()).collect();
+        assert_eq!(lines.len(), 3, "one rendered line per log line");
+        assert_eq!(lines[0], "ordinary", "a detail line is shown verbatim");
+        assert_eq!(lines[2], "done", "a result line is shown verbatim");
+        assert!(
+            lines[1].starts_with("! ") && lines[1].ends_with("something went wrong"),
+            "a notice must be marked and still readable: {:?}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn the_log_pane_uses_crlf_so_lines_do_not_run_together() {
+        // A bare LF renders as one run-on line in a Win32 EDIT control.
+        let log = vec![
+            LogLine {
+                text: "one".into(),
+                kind: LogKind::Detail,
+            },
+            LogLine {
+                text: "two".into(),
+                kind: LogKind::Detail,
+            },
+        ];
+        assert_eq!(log_text(&log), "one\r\ntwo");
+    }
+
+    #[test]
+    fn crlf_normalizes_every_newline_exactly_once() {
+        assert_eq!(crlf("a\nb"), "a\r\nb");
+        // Already-CRLF text must not become CRCRLF — the detail pane is
+        // re-rendered on every tick, so a doubling bug compounds.
+        assert_eq!(crlf("a\r\nb"), "a\r\nb");
+        assert_eq!(crlf(&crlf("a\nb")), "a\r\nb");
+        assert_eq!(crlf("a\n\nb"), "a\r\n\r\nb");
+        assert_eq!(crlf("no breaks"), "no breaks");
+    }
+
+    // ── settings dropdowns ────────────────────────────────────────────────
+
+    #[test]
+    fn the_shared_dropdowns_come_from_the_core() {
+        // Every enum combo but "container" must be the core's table verbatim —
+        // a shell-local copy is how the two shells drifted before.
+        for key in [
+            "selection",
+            "rip_mode",
+            "key_source",
+            "log_level",
+            "language",
+        ] {
+            assert_eq!(
+                enum_options(key)
+                    .into_iter()
+                    .map(|(c, l)| (c.to_string(), l))
+                    .collect::<Vec<_>>(),
+                crate::ui::enum_options(key)
+                    .into_iter()
+                    .map(|(c, l)| (c.to_string(), l))
+                    .collect::<Vec<_>>(),
+                "{key} is not the shared table"
+            );
+            assert!(!enum_options(key).is_empty(), "{key} lost its options");
+        }
+    }
+
+    #[test]
+    fn the_container_dropdown_stores_a_canonical_format_not_a_label() {
+        // This combo is flat, so the shell maps the selected INDEX back to
+        // `opts[i].0`. That value is persisted and matched by the engine, so it
+        // must be the canonical English string even when the label is not.
+        let opts = enum_options("container");
+        let canonical: Vec<&str> = opts.iter().map(|(c, _)| *c).collect();
+        let expected: Vec<&str> = crate::ui::output_formats(true, true)
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(
+            canonical, expected,
+            "the container combo no longer offers the core's format list in order"
+        );
+        for (canon, label) in &opts {
+            assert_eq!(*label, crate::ui::format_label(canon), "label mismatch");
+            assert!(
+                crate::ui::format_by_title(canon, true, true).is_some(),
+                "{canon:?} is not a format the core recognizes"
+            );
+        }
+    }
+
+    // ── the real window ───────────────────────────────────────────────────
+
+    /// Builds the real window, loads a synthetic disc into it, renders, and
+    /// runs the SAME widget sweep the interactive `FMKV_SELFTEST` mode runs.
+    ///
+    /// This is the test that makes `self_test`'s widget assertions reachable
+    /// from `cargo test`: no disc, no drive and no screenshots, but real
+    /// controls, driven through the real message loop (which is the only place
+    /// the window exists and the controls have handles).
+    ///
+    /// One test, not several: the shell registers a window class by name, so a
+    /// second window in the same process would collide.
+    #[test]
+    fn the_real_controls_show_what_the_core_decided() {
+        let _com = w::CoInitializeEx(co::COINIT::APARTMENTTHREADED | co::COINIT::DISABLE_OLE1DDE);
+        let shell = Shell::new();
+        shell.events();
+
+        /// `(passed, description)` for each widget check, filled in from
+        /// inside the message loop and read back once it has exited.
+        type Report = Rc<RefCell<Option<Vec<(bool, String)>>>>;
+        let results: Report = Rc::new(RefCell::new(None));
+
+        let me = shell.clone();
+        let sink = results.clone();
+        shell.wnd.on().wm_timer(TIMER_HARNESS, move || {
+            let _ = me.wnd.hwnd().KillTimer(TIMER_HARNESS);
+            // A scan the shell has never seen, with a partial stream selection
+            // so a Mixed glyph is actually on screen.
+            me.app_mut(|a| {
+                a.tree = crate::ui::Tree::from_scan(&synthetic_disc(), "All titles", 0.0);
+                a.source = "Z:\\synthetic.iso".into();
+                a.page = Page::Titles;
+            });
+            let mixed = me
+                .app
+                .borrow()
+                .tree
+                .arena
+                .iter()
+                .enumerate()
+                .find(|(_, n)| n.type_s == "Audio")
+                .map(|(i, _)| i);
+            if let Some(i) = mixed {
+                me.app_mut(|a| a.tree.set_checked(i, false));
+            }
+            me.render();
+            pump(120);
+            *sink.borrow_mut() = Some(me.widget_checks());
+            w::PostQuitMessage(0);
+            Ok(())
+        });
+        // Armed from BOTH create and show. A runner that creates the window but
+        // never raises WM_SHOWWINDOW would otherwise leave `run_main` pumping
+        // forever with nothing to quit it — a CI hang instead of a failure.
+        // Re-arming the same timer id just restarts it, so firing twice is
+        // harmless.
+        let me = shell.clone();
+        shell.wnd.on().wm_create(move |_| {
+            let _ = me.wnd.hwnd().SetTimer(TIMER_HARNESS, 200, None);
+            Ok(0)
+        });
+        let me = shell.clone();
+        shell.wnd.on().wm_show_window(move |_| {
+            let _ = me.wnd.hwnd().SetTimer(TIMER_HARNESS, 200, None);
+            Ok(())
+        });
+
+        shell
+            .wnd
+            .run_main(None)
+            .expect("the main window could not be created or pumped");
+
+        let results = results.borrow_mut().take().expect(
+            "the harness timer never fired — the window was never shown, so no \
+             widget was ever checked",
+        );
+        assert!(!results.is_empty(), "the widget sweep checked nothing");
+        // A Mixed glyph must actually have been exercised, or the sweep proved
+        // nothing about the state a plain checkbox cannot show.
+        assert!(
+            results
+                .iter()
+                .any(|(_, m)| m.contains("Some(Mixed)") || m.contains("Mixed")),
+            "no Mixed row reached the widget sweep:\n{}",
+            results
+                .iter()
+                .map(|(_, m)| m.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let failed: Vec<&str> = results
+            .iter()
+            .filter(|(ok, _)| !ok)
+            .map(|(_, m)| m.as_str())
+            .collect();
+        assert!(
+            failed.is_empty(),
+            "widget checks failed:\n{}",
+            failed.join("\n")
+        );
     }
 }

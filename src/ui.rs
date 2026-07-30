@@ -576,6 +576,126 @@ pub fn overall_pct(titles_done: usize, total: usize, current_pct: f64) -> f64 {
     ((titles_done as f64 + current_pct / 100.0) / total * 100.0).min(100.0)
 }
 
+// ── settings dropdowns ────────────────────────────────────────────────────
+
+/// The option table for a settings dropdown: `(canonical, localized_label)`
+/// pairs in menu order.
+///
+/// The canonical value is what persists and what the engine matches on (e.g.
+/// `key_source.starts_with("Online")`); the label is what the localized
+/// dropdown shows. So a dropdown displays translated text but stores a stable,
+/// English identifier — the same decoupling the format picker uses. An empty
+/// result means "not an enum dropdown" (a free-form field, or the format
+/// picker, which each shell builds for itself).
+///
+/// Lives here, not in a shell: this table was duplicated verbatim in
+/// `windows.rs` and `mac.rs` and had already drifted (Windows had grown an
+/// extra arm). A shell that renders a different option set from the other is
+/// a bug by construction, so there is one table and both read it.
+///
+/// NOTE for shells: the returned order is the menu order, and callers are
+/// entitled to map a selected INDEX back to `opts[i].0`. Do not add a key here
+/// whose control interleaves separators or is otherwise not 1:1 with this list
+/// — `"container"` is deliberately absent for exactly that reason (the macOS
+/// format popup carries separator rows, so it maps by title, not by index).
+pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
+    let g = crate::strings::get;
+    match key {
+        "selection" => vec![
+            ("Main film only", g("gui.set.sel_main")),
+            ("All titles", g("gui.set.sel_all")),
+            ("Longest title", g("gui.set.sel_longest")),
+        ],
+        "rip_mode" => vec![
+            ("Multi-pass", g("gui.set.mode_multi")),
+            ("Single pass", g("gui.set.mode_single")),
+        ],
+        "key_source" => vec![
+            ("Local keydb only", g("gui.set.key_src_local")),
+            ("Online key service only", g("gui.set.key_src_online")),
+            ("keydb, then online", g("gui.set.key_src_both")),
+        ],
+        "log_level" => vec![
+            ("Quiet", g("gui.set.log_quiet")),
+            ("Normal", g("gui.set.log_normal")),
+            ("Verbose", g("gui.set.log_verbose")),
+            ("Debug", g("gui.set.log_debug")),
+        ],
+        // Language: canonical is the locale code, label the endonym (shown
+        // as-is in every locale). Driven straight from the shipped list, so
+        // the picker can never drift from what freemkv-i18n can load.
+        "language" => LOCALES
+            .iter()
+            .map(|(endonym, code)| (*code, (*endonym).to_string()))
+            .collect(),
+        _ => vec![],
+    }
+}
+
+// ── tree shape ────────────────────────────────────────────────────────────
+
+/// The parent of every row, derived from the `depth` column alone.
+///
+/// Both shells rebuild a hierarchical control (an `NSOutlineView`, a
+/// `SysTreeView32`) from the flat `Vec<Row>` the core hands them, and both were
+/// walking the depths themselves. The walk is the same decision on both, so it
+/// lives here: depth 0 starts a new root, depth 1 hangs off the most recent
+/// root, anything deeper hangs off the most recent depth-1 row.
+///
+/// A row that arrives before its parent has no parent to hang from. It becomes
+/// a root rather than being dropped — a row the core decided to show must
+/// always be reachable, and a silently-vanishing title is far worse than one
+/// shown at the wrong indent.
+pub fn row_parents(rows: &[Row]) -> Vec<Option<usize>> {
+    let (mut last_root, mut last_title) = (None, None);
+    let mut out = Vec::with_capacity(rows.len());
+    for (i, r) in rows.iter().enumerate() {
+        match r.depth {
+            0 => {
+                last_root = Some(i);
+                last_title = None;
+                out.push(None);
+            }
+            1 => {
+                last_title = Some(i);
+                out.push(last_root);
+            }
+            _ => out.push(last_title),
+        }
+    }
+    out
+}
+
+// ── output naming ─────────────────────────────────────────────────────────
+
+/// The path the Information panel shows as "Output file".
+///
+/// Named the way the engine will name it, so the row matches what actually
+/// lands on disk: `<dir>/<source stem>_t<N>.<ext>`, where `N` is the 1-based
+/// number of the first ticked title. Extracted from `start_run` so it can be
+/// checked without launching a rip.
+pub fn output_file_name(
+    source: &str,
+    dir: &str,
+    format: &str,
+    first_title: Option<usize>,
+) -> String {
+    let label = std::path::Path::new(source)
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("output");
+    let ext = if format.contains("MP4") {
+        "mp4"
+    } else if format.contains("M2TS") {
+        "m2ts"
+    } else {
+        "mkv"
+    };
+    // No ticked title means the engine rips the main movie, which it numbers 1.
+    let n = first_title.unwrap_or(0) + 1;
+    format!("{dir}/{label}_t{n}.{ext}")
+}
+
 // ══ the application core ══════════════════════════════════════════════════
 //
 // Model / Update / View. `App` owns every piece of state and every decision;
@@ -649,8 +769,11 @@ pub struct App {
     pub result_summary: String,
     pub selected_row: Option<usize>,
     /// Video codec per title, from the scan — used to warn when the chosen
-    /// container cannot carry them.
-    video_codecs: Vec<String>,
+    /// container cannot carry them. Public alongside the rest of the model so
+    /// the container gate can be exercised without a real disc: it is the one
+    /// input to `mp4_possible`/`container_mismatch`, and gating those tests
+    /// behind a fixture is why they did not run in CI.
+    pub video_codecs: Vec<String>,
     /// Highest unreadable-sector count already announced, so the notice is
     /// not repeated on every 100 ms tick.
     reported_bad: u64,
@@ -969,19 +1092,12 @@ impl App {
         self.run_titles = titles.len().max(1);
         self.run_started = Some(std::time::Instant::now());
         // Name the file the way the engine will, so the row matches reality.
-        let label = std::path::Path::new(&self.source)
-            .file_stem()
-            .and_then(|n| n.to_str())
-            .unwrap_or("output");
-        let ext = if self.format.contains("MP4") {
-            "mp4"
-        } else if self.format.contains("M2TS") {
-            "m2ts"
-        } else {
-            "mkv"
-        };
-        let first = titles.first().copied().unwrap_or(0) + 1;
-        let out_file = format!("{}/{}_t{}.{}", self.output_dir, label, first, ext);
+        let out_file = output_file_name(
+            &self.source,
+            &self.output_dir,
+            &self.format,
+            titles.first().copied(),
+        );
         self.info = Some(InfoRows::starting(&self.source, &out_file));
         self.page = Page::Progress;
         self.say(
