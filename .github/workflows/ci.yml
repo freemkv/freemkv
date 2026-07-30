@@ -6,20 +6,21 @@ on:
   pull_request:
 
 # `freemkv` is one binary with two shells: the CLI (every OS) and the native
-# desktop GUI (macOS today, Windows next). So CI verifies BOTH halves:
+# desktop GUI (macOS + Windows). So CI verifies BOTH halves:
 #   - the macOS jobs build/lint/test the whole crate incl. the AppKit shell —
 #     where the dead-state bugs live;
+#   - the Windows jobs do the same for the winsafe shell, and are the only jobs
+#     that compile the `#[cfg(windows)]` half of platform.rs at all;
 #   - the Linux job builds/lints/tests the CLI, which is what Linux ships (the
 #     GUI is target-gated off, so a Linux build is pure CLI);
-#   - a lib-only check keeps the shared core (ui.rs/engine.rs) portable so the
-#     Windows shell inherits a clean base.
+#   - a lib-only check keeps the shared core (ui.rs/engine.rs) portable.
 jobs:
   # ── macOS: the whole crate, GUI shell included ──────────────────────────────
   lint-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -31,11 +32,52 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
       # The disc-backed tests skip themselves when FMKV_TEST_ISO is unset, so
       # this runs the platform-neutral suite without needing media on the runner.
       - run: cargo test --tests
+
+  # ── Windows: the whole crate, the winsafe shell included ────────────────────
+  # The peer of the macOS jobs. Without these, the Windows desktop shell would
+  # be compiled for the first time by the RELEASE workflow — i.e. a broken
+  # Windows shell would be discovered at tag time, not at PR time. `platform.rs`
+  # in particular has a `#[cfg(windows)]` `GetDiskFreeSpaceExW` arm that no
+  # other job compiles, so nothing else can catch a regression in it.
+  lint-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      # --all-targets so the tests and the Windows shell are linted too.
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+      # The suite is platform-neutral by contract (the disc-backed tests skip
+      # themselves when FMKV_TEST_ISO is unset). If a test needs editing to pass
+      # on Windows, the Windows port has broken something — that is the signal.
+      - run: cargo test --tests
+
+  # The shippable Windows product is a release build of the one `freemkv` bin
+  # (CLI + desktop shell). `cargo test` above only builds dev profile, and
+  # release-only failures are real (LTO, codegen-units, opt-level). Cheap
+  # insurance that the artifact the release workflow zips actually links.
+  release-build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
 
   # ── Linux: the CLI (what Linux ships) ───────────────────────────────────────
   # The GUI is target-gated off, so this builds the pure CLI. If any GUI code or
@@ -45,7 +87,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -60,6 +102,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --lib

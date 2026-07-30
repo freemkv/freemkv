@@ -41,6 +41,8 @@ mod ui;
 
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(target_os = "windows")]
+mod windows;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -70,11 +72,15 @@ fn run_gui() {
     // Settings switches live via `strings::set_locale`.)
     let code = ui::locale_code(&cfg.language);
     if code == "auto" {
-        // "Auto" follows the OS language. A Finder-launched `.app` inherits no
-        // LANG, so the crate's env detection would fall back to English —
-        // read the macOS preferred language directly instead.
+        // "Auto" follows the OS language. A Finder-launched `.app` (and a
+        // double-clicked `.exe`) inherits no LANG, so the crate's env detection
+        // would fall back to English — read the OS preferred language instead.
         #[cfg(target_os = "macos")]
         if let Some(sys) = mac::system_locale_code() {
+            strings::set_locale(&sys);
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(sys) = windows::system_locale_code() {
             strings::set_locale(&sys);
         }
     } else {
@@ -95,7 +101,7 @@ fn run_gui() {
     #[cfg(target_os = "macos")]
     mac::run();
     #[cfg(target_os = "windows")]
-    eprintln!("the Windows desktop shell is not built yet — run `freemkv <args>` for the CLI");
+    windows::run();
 }
 
 /// Diagnostic-log guard for the GUI (keeps the non-blocking writer alive).

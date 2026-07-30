@@ -13,8 +13,54 @@ pub fn free_space_bytes(path: &str) -> Option<u64> {
     imp::free_space_bytes(path)
 }
 
+/// The user's home directory.
+///
+/// `$HOME` is a Unix convention — Windows does not set it, so reading it there
+/// yielded an empty path and every derived location (settings file, default
+/// destination, keydb) silently became relative. Windows uses `%USERPROFILE%`.
+pub fn home_dir() -> std::path::PathBuf {
+    imp::home_dir()
+}
+
+/// Where this app keeps its own writable state (settings JSON, keydb, log).
+///
+/// Per-OS by convention, not by preference: `~/Library/Application Support` on
+/// macOS, `%APPDATA%` on Windows. An app bundle / Program Files directory is not
+/// writable, so this must never be derived from the executable's location.
+pub fn support_dir() -> std::path::PathBuf {
+    imp::support_dir()
+}
+
+/// The default output folder offered for rips — the OS's own video folder.
+pub fn default_dest_dir() -> std::path::PathBuf {
+    imp::default_dest_dir()
+}
+
+/// Whether `p` is an absolute path *on this OS*.
+///
+/// Used to reject a stale or placeholder destination. Testing `starts_with('/')`
+/// is a Unix-only rule that called every valid Windows path (`C:\Users\…`)
+/// relative and reset the user's destination on every load.
+pub fn is_absolute(p: &str) -> bool {
+    !p.trim().is_empty() && std::path::Path::new(p.trim()).is_absolute()
+}
+
 #[cfg(unix)]
 mod imp {
+    use std::path::PathBuf;
+
+    pub fn home_dir() -> PathBuf {
+        std::env::var("HOME").map(PathBuf::from).unwrap_or_default()
+    }
+
+    pub fn support_dir() -> PathBuf {
+        home_dir().join("Library/Application Support/freemkv")
+    }
+
+    pub fn default_dest_dir() -> PathBuf {
+        home_dir().join("Movies")
+    }
+
     pub fn free_space_bytes(path: &str) -> Option<u64> {
         let p = std::path::Path::new(path);
         // A destination that does not exist yet is normal (we are about to
@@ -30,7 +76,7 @@ mod imp {
         let text = String::from_utf8_lossy(&out.stdout);
         // `df` wraps long device names onto a second line, so the available
         // column is not reliably on line 2 — take the last non-empty line.
-        let line = text.lines().filter(|l| !l.trim().is_empty()).next_back()?;
+        let line = text.lines().rev().find(|l| !l.trim().is_empty())?;
         let kb: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
         Some(kb.saturating_mul(1024))
     }
@@ -38,6 +84,28 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
+    use std::path::PathBuf;
+
+    pub fn home_dir() -> PathBuf {
+        std::env::var("USERPROFILE")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+    }
+
+    /// `%APPDATA%` (roaming). Falls back to `%USERPROFILE%\AppData\Roaming` when
+    /// the variable is missing, so the path is never relative.
+    pub fn support_dir() -> PathBuf {
+        std::env::var("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home_dir().join("AppData").join("Roaming"))
+            .join("freemkv")
+    }
+
+    /// The Windows equivalent of `~/Movies` is the Videos known folder.
+    pub fn default_dest_dir() -> PathBuf {
+        home_dir().join("Videos")
+    }
+
     // `GetDiskFreeSpaceExW` gives the free bytes available to the calling user
     // (which is what a rip is actually limited by — not the raw volume free).
     // Declared directly so the core carries no extra dependency.

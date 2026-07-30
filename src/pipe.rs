@@ -29,7 +29,9 @@ fn install_signal_handler() {
         // SA_RESTART (and no SA_RESETHAND) keeps the handler installed across
         // every delivery on both musl and glibc, and restarts slow syscalls.
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = handle_sigint as usize;
+        // Cast through a thin pointer: a bare `fn as usize` is a double
+        // coercion that clippy 1.97 rejects.
+        sa.sa_sigaction = handle_sigint as *const () as usize;
         libc::sigemptyset(&mut sa.sa_mask);
         sa.sa_flags = libc::SA_RESTART;
         // On failure, degrade gracefully: the handler simply isn't installed.
@@ -878,20 +880,20 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     };
 
     // Show summary for multi-title
-    if let Some(ref t) = titles {
-        if jobs.len() > 1 {
-            out.raw(
-                Normal,
-                &strings::fmt(
-                    "rip.titles_summary",
-                    &[
-                        ("total", &t.len().to_string()),
-                        ("selected", &jobs.len().to_string()),
-                    ],
-                ),
-            );
-            out.blank(Normal);
-        }
+    if let Some(ref t) = titles
+        && jobs.len() > 1
+    {
+        out.raw(
+            Normal,
+            &strings::fmt(
+                "rip.titles_summary",
+                &[
+                    ("total", &t.len().to_string()),
+                    ("selected", &jobs.len().to_string()),
+                ],
+            ),
+        );
+        out.blank(Normal);
     }
 
     // Pipe each title
@@ -1760,13 +1762,13 @@ fn key_params(keys: &KeyConfig) -> freemkv_engine::KeyParams {
 /// Print the SSRF-rejected-`--key-url` warning (once) if the configured key URL
 /// fails validation — matching the pre-hoist `build_key_sources` behaviour.
 fn warn_ssrf_rejected(keys: &KeyConfig, out: &Output) {
-    if let Some(url) = &keys.key_url {
-        if let Err(e) = freemkv_keysources::validate_keyserver_url(url) {
-            out.raw(
-                Normal,
-                &strings::fmt("error.keyserver_url_rejected", &[("error", &e)]),
-            );
-        }
+    if let Some(url) = &keys.key_url
+        && let Err(e) = freemkv_keysources::validate_keyserver_url(url)
+    {
+        out.raw(
+            Normal,
+            &strings::fmt("error.keyserver_url_rejected", &[("error", &e)]),
+        );
     }
 }
 
@@ -1867,7 +1869,6 @@ fn render_resolution_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> 
     lines
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)] // cohesive single-title disc rip
 fn pipe_disc(
     source: &str,
@@ -2885,6 +2886,20 @@ fn mp4_skip_reason_key(reason: &libfreemkv::Mp4SkipReason) -> &'static str {
         libfreemkv::Mp4SkipReason::UnmappableAudio => "mp4.reason.audio",
         libfreemkv::Mp4SkipReason::SecondaryVideo => "mp4.reason.video",
         libfreemkv::Mp4SkipReason::UnmappableVideo => "mp4.reason.video_unmappable",
+        // Post-mux reasons added in 1.6.0. Both reuse the existing, fully
+        // TRANSLATED strings whose user-visible meaning matches — the track did not
+        // make it into the file because its audio could not be carried. Dedicated
+        // wording ("carried no samples", "no frame described the audio") would need
+        // 29 real translations; reusing a correct localisation beats shipping
+        // English into every locale, and beats inventing translations. Tracked as
+        // follow-up.
+        libfreemkv::Mp4SkipReason::UndescribableAudio | libfreemkv::Mp4SkipReason::NoSamples => {
+            "mp4.reason.audio"
+        }
+        // Mp4SkipReason is #[non_exhaustive] as of 1.6.0, so a new variant must not
+        // break this build again. Falling back to the audio wording is a compromise
+        // a future variant should replace with its own key.
+        _ => "mp4.reason.audio",
     }
 }
 

@@ -79,15 +79,20 @@ impl Default for Settings {
 }
 
 fn home() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_default()
+    crate::platform::home_dir()
 }
 
+/// Per-OS writable state directory — see `platform::support_dir`. Kept as a
+/// re-export so the many existing `settings::support_dir()` call sites (and the
+/// GUI log writer in `main.rs`) are unchanged.
 pub fn support_dir() -> PathBuf {
-    home().join("Library/Application Support/freemkv")
+    crate::platform::support_dir()
 }
 
 fn dirs_movies() -> String {
-    home().join("Movies").to_string_lossy().into_owned()
+    crate::platform::default_dest_dir()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn default_keydb_path() -> String {
@@ -224,8 +229,10 @@ impl Settings {
         self.language = crate::ui::locale_code(&self.language).to_string();
         // A destination that isn't an absolute path (empty, or a stale "..."
         // placeholder from an older build) can't be written to and shows blank
-        // in the field — fall back to the default output folder.
-        if self.dest_dir.trim().is_empty() || !self.dest_dir.starts_with('/') {
+        // in the field — fall back to the default output folder. The test is
+        // per-OS: `starts_with('/')` called every valid Windows path relative
+        // and silently reset the user's destination on each load.
+        if !crate::platform::is_absolute(&self.dest_dir) {
             self.dest_dir = d.dest_dir.clone();
         }
         // keydb.cfg location, likewise: never leave it empty (the default is a
