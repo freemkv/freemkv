@@ -14,6 +14,18 @@ path = "src/lib.rs"
 name = "freemkv"
 path = "src/main.rs"
 
+# The double-clickable Windows image. `freemkv.exe` is console-subsystem and
+# must stay the CLI byte-for-byte, and a PE subsystem is fixed at link time —
+# so the windowed launch has to be a second binary, not a runtime branch.
+#
+# Cargo has no `[target.'cfg(windows)'.bin]`, so the platform gate lives inside
+# the file: on macOS and Linux it is an empty `main` that links nothing. It is
+# NOT behind `required-features`, deliberately — a feature that CI forgets to
+# pass would silently ship the release zip without the app in it.
+[[bin]]
+name = "freemkv-gui"
+path = "src/bin/freemkv-gui.rs"
+
 [dependencies]
 freemkv-engine = "1.6"
 libfreemkv = "1.5"
