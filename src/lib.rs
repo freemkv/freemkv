@@ -14,3 +14,8 @@ pub mod settings;
 // target needs it too (it is just a re-export of `freemkv_i18n`).
 pub mod strings;
 pub mod ui;
+// The Windows shell's DPI→geometry arithmetic. Pure, Win32-free and therefore
+// deliberately NOT `cfg(windows)`: gating it would make its unit tests
+// unrunnable anywhere but Windows, and the arithmetic is the part most likely
+// to be wrong.
+pub mod win_layout;
