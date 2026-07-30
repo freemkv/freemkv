@@ -61,6 +61,15 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::DiscTitleRange { index: 0, count: 0 },
         Error::IfoParse,
         Error::MkvInvalid,
+        // Added by the 1.6.0 audit. E9053/E9054 split the read and write sides
+        // out of MkvInvalid, and E7027 split the disc-wide CSS failure out of
+        // CssKeyMissing — in both cases because one code was carrying two
+        // conditions and a total failure was being reported as success.
+        Error::MkvSourceInvalid,
+        Error::MkvUnencodable,
+        Error::MkvLacingInvalid,
+        Error::CssNoDiscKey,
+        Error::MuxHeaderBufferExceeded { bytes: 0 },
         Error::NoStreams,
         Error::MapfileInvalid { kind: "hex" },
         Error::AacsNoKeys,
