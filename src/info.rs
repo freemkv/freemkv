@@ -1,4 +1,4 @@
-// freemkv drive-info — Show drive information and capture profiles
+// freemkv info disc:// — Show drive information and capture profiles
 // MIT — freemkv project
 //
 // CLI is dumb — all drive data from libfreemkv.
@@ -8,6 +8,14 @@ use crate::strings;
 use libfreemkv::Drive;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
+
+/// The invocation that produces a drive profile, as printed into artifacts that
+/// LEAVE this machine: the profile TOML header and the auto-filed GitHub issue
+/// body. It shipped as `freemkv drive-info`, a subcommand the dispatcher has
+/// never accepted — so every filed drive-support issue told the next reader to
+/// run a command that does not exist. Named once here, and pinned against the
+/// real dispatcher by `capture_command_is_a_real_subcommand`.
+const CAPTURE_COMMAND: &str = "freemkv info disc://";
 
 pub fn run(device: Option<&str>, args: &[String]) {
     let mut share = false;
@@ -279,7 +287,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
     };
     let mut toml = String::new();
     toml.push_str(&format!(
-        "# {} {} {} — freemkv drive-info\n\n",
+        "# {} {} {} — {CAPTURE_COMMAND}\n\n",
         id.vendor_id.trim(),
         id.product_id.trim(),
         id.product_revision.trim()
@@ -470,7 +478,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
     body.push_str("```\n\n");
     body.push_str("</details>\n\n");
 
-    body.push_str("---\n*Captured by `freemkv drive-info --share`*\n");
+    body.push_str(&format!("---\n*Captured by `{CAPTURE_COMMAND} --share`*\n"));
 
     let title = format!(
         "Drive profile: {} {}",
@@ -838,9 +846,31 @@ fn toml_basic_unescape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_decode, base64_encode, format_date, hex_dump, json_escape, sanitize_component,
-        toml_basic_unescape, toml_escape,
+        CAPTURE_COMMAND, base64_decode, base64_encode, format_date, hex_dump, json_escape,
+        sanitize_component, toml_basic_unescape, toml_escape,
     };
+
+    #[test]
+    fn capture_command_is_a_real_subcommand() {
+        // This string is stamped into the profile TOML header AND into the body
+        // of the GitHub issue `--share` files, so a wrong command here does not
+        // just mislead one user — it is published to a public tracker and read
+        // by everyone who opens the issue. It shipped as `freemkv drive-info`,
+        // which the dispatcher has never accepted.
+        let word = CAPTURE_COMMAND
+            .strip_prefix("freemkv ")
+            .unwrap_or_else(|| panic!("CAPTURE_COMMAND must invoke freemkv: {CAPTURE_COMMAND}"))
+            .split_whitespace()
+            .next()
+            .expect("a command word");
+        assert!(
+            crate::cli_entry::SUBCOMMANDS.contains(&word),
+            "the drive-profile capture command is published in shared artifacts but \
+             `{word}` is not a subcommand the dispatcher accepts \
+             ({:?})",
+            crate::cli_entry::SUBCOMMANDS
+        );
+    }
 
     #[test]
     fn json_escape_handles_quotes_backslashes_control_chars() {

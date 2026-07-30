@@ -860,7 +860,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // below (`resolve_iso_unit_keys`). A disc source scans per-title in `pipe_disc`.
     let iso_disc = if is_disc { None } else { scan_iso(source) };
     let titles = iso_disc.as_ref().map(|(d, _)| d.titles.clone());
-    let is_dir_dest = dest.ends_with('/') || std::path::Path::new(parsed_dest.path_str()).is_dir();
+    let is_dir_dest = dest_is_directory(dest, &parsed_dest);
 
     // Resolve the per-title indices we will rip. For a scanned source this comes
     // from its title list; for a disc source it comes straight from `title_nums`
@@ -1572,6 +1572,15 @@ pub(crate) fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOp
         credentials: drive_credentials(keydb_path),
         ..Default::default()
     }
+}
+
+/// Is the destination directory-STYLE — a trailing `/`, or an existing
+/// directory on disk? Decides whether a multi-title rip is allowed (one file per
+/// title inside it) or rejected (a single file cannot hold several titles).
+/// Extracted from [`run`] so tests can classify a destination through the same
+/// code the CLI uses instead of restating the rule.
+fn dest_is_directory(dest: &str, parsed_dest: &libfreemkv::StreamUrl) -> bool {
+    dest.ends_with('/') || std::path::Path::new(parsed_dest.path_str()).is_dir()
 }
 
 /// Build the AACS host credentials for a live-drive handshake from the local
@@ -2960,14 +2969,173 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 mod tests {
     use super::{
         KeyConfig, PipeFail, build_jobs, build_key_sources_quiet, copy_should_continue,
-        dest_is_iso, disc_copy_recovered_data, fmt_disc_damage, fmt_err, fmt_err_str,
-        is_keyserver_url, is_metadata_sink, is_scheme_only_sink, is_url_token, mp4_skip_reason_key,
-        parse_error_code, parse_flags, parse_stream_spec, preflight_validate, render_error,
-        resolved_keydb_path, sanitize_name, title_in_range, validate_file_dest, validate_iso_input,
+        dest_is_directory, dest_is_iso, disc_copy_recovered_data, fmt_disc_damage, fmt_err,
+        fmt_err_str, is_keyserver_url, is_metadata_sink, is_scheme_only_sink, is_url_token,
+        mp4_skip_reason_key, parse_error_code, parse_flags, parse_stream_spec, preflight_validate,
+        render_error, resolved_keydb_path, sanitize_name, title_in_range, validate_file_dest,
+        validate_iso_input,
     };
     use crate::output::Output;
     use crate::strings;
     use libfreemkv::parse_url;
+
+    // ── The `--help` examples must actually run ─────────────────────────────
+    //
+    // `usage()` prints a block of `usage.ex.*` lines as the binary's headline
+    // documentation. Nothing connected those strings to the parser, so
+    // `usage.ex.rip_titles` shipped as `disc:// mkv://Movie.mkv -t 1 -t 3` —
+    // two `-t` flags at a single-FILE destination, which `build_jobs` rejects
+    // outright. The first example a new user copies exited non-zero.
+    //
+    // This drives each shipped example through the REAL `parse_flags` and
+    // `build_jobs`, so an example that the CLI would reject fails here instead
+    // of in a user's terminal.
+
+    /// Split a `usage.ex.*` line into its command tokens, dropping the leading
+    /// `freemkv` and the trailing right-hand description column (separated from
+    /// the command by a run of two or more spaces).
+    fn example_argv(line: &str) -> Vec<String> {
+        let cmd = line.trim_start().split("  ").next().unwrap_or("").trim();
+        cmd.split_whitespace()
+            .skip(1) // the `freemkv` program name
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Every rip example printed by `usage()`, straight from the English
+    /// catalogue — the exact text a user reads from `freemkv --help`.
+    fn shipped_rip_examples() -> Vec<(&'static str, String)> {
+        let en: serde_json::Value =
+            serde_json::from_str(freemkv_i18n::bundled_locale_json("en").expect("en bundled"))
+                .expect("en.json parses");
+        // The keys `usage()` prints, in order. `info` is not a rip (no
+        // destination URL) and is exercised by the `info` route's own tests.
+        let keys = [
+            "rip_mkv",
+            "rip_m2ts",
+            "rip_drive",
+            "rip_title",
+            "rip_titles",
+            "rip_iso",
+            "rip_iso_raw",
+            "rip_iso_mp",
+            "iso_to_mkv",
+            "network",
+            "network_recv",
+            "stdio",
+            "benchmark",
+        ];
+        keys.iter()
+            .map(|k| {
+                let line = en
+                    .get("usage")
+                    .and_then(|u| u.get("ex"))
+                    .and_then(|e| e.get(k))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "usage.ex.{k} is listed here but missing from en.json — \
+                             keep this list in step with the block `usage()` prints"
+                        )
+                    });
+                (*k, line.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn shipped_help_examples_parse_and_build_runnable_jobs() {
+        let found = shipped_rip_examples();
+        // A scratch root so a directory-style example's `create_dir_all` lands
+        // in target/, not the crate root.
+        let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-scratch")
+            .join(format!("help_examples_{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("scratch dir");
+
+        let out = Output::new(false, true);
+        for (key, line) in &found {
+            let argv = example_argv(line);
+            assert!(!argv.is_empty(), "usage.ex.{key}: no command in {line:?}");
+
+            // 1. The flags must parse.
+            let flags = parse_flags(&argv)
+                .unwrap_or_else(|e| panic!("usage.ex.{key}: flags rejected: {e}\n  {line}"));
+
+            // 2. Source and destination URLs.
+            let urls: Vec<&String> = argv.iter().filter(|a| is_url_token(a)).collect();
+            assert_eq!(
+                urls.len(),
+                2,
+                "usage.ex.{key}: expected a source and a destination URL, got {urls:?}"
+            );
+            let (source, dest) = (urls[0].as_str(), urls[1].as_str());
+            let is_disc = matches!(parse_url(source), libfreemkv::StreamUrl::Disc { .. });
+
+            // Relocate a filesystem destination under the scratch root so the
+            // example's own path is never created in the crate root. The
+            // trailing slash (and hence its directory-ness) is preserved.
+            let parsed_shipped = parse_url(dest);
+            let dest_owned = match parsed_shipped {
+                libfreemkv::StreamUrl::Mkv { .. }
+                | libfreemkv::StreamUrl::M2ts { .. }
+                | libfreemkv::StreamUrl::Iso { .. } => format!(
+                    "{}://{}/{}",
+                    parsed_shipped.scheme(),
+                    scratch.display(),
+                    parsed_shipped.path_str()
+                ),
+                _ => dest.to_string(),
+            };
+            let parsed_dest = parse_url(&dest_owned);
+
+            // 3. The job set must build. `None` is the CLI's hard rejection —
+            //    the exact path `-t 1 -t 3` into `mkv://Movie.mkv` took.
+            let titles = None;
+            let jobs = build_jobs(
+                &titles,
+                is_disc,
+                &flags.title_nums,
+                dest_is_directory(&dest_owned, &parsed_dest),
+                &dest_owned,
+                &parsed_dest,
+                &out,
+            );
+            assert!(
+                jobs.is_some(),
+                "usage.ex.{key} is printed by `freemkv --help` but the CLI rejects it:\n  {line}"
+            );
+            // Every requested title must get its own job — an example that
+            // asks for two titles and silently produces one is still wrong.
+            if flags.title_nums.len() > 1 {
+                assert_eq!(
+                    jobs.as_ref().unwrap().len(),
+                    flags.title_nums.len(),
+                    "usage.ex.{key}: {} titles requested, {} job(s) built:\n  {line}",
+                    flags.title_nums.len(),
+                    jobs.as_ref().unwrap().len()
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn no_two_help_examples_show_the_same_command() {
+        // `rip_iso_mp` and `rip_iso_patch` rendered byte-identical commands under
+        // different descriptions, so `--help` showed the same invocation twice and
+        // one of the two descriptions was necessarily wrong about it.
+        let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+        for (key, line) in shipped_rip_examples() {
+            let cmd = example_argv(&line).join(" ");
+            if let Some(prev) = seen.insert(cmd.clone(), key) {
+                panic!(
+                    "usage.ex.{prev} and usage.ex.{key} print the SAME command \
+                     under different descriptions: `freemkv {cmd}`"
+                );
+            }
+        }
+    }
 
     // ── `-t` default (1.6.0): main title unless `-t N` / `-t all` ───────────────
     // Normalization lives in `run()` (not parse_flags): no `-t` and no `-t all`
