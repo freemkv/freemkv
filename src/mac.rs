@@ -459,12 +459,11 @@ unsafe fn dropped_paths(sender: &AnyObject) -> Vec<String> {
             // The UTI is an extern static, so reading it is unsafe even
             // inside an `unsafe fn` under this lint level.
             let uti = unsafe { objc2_app_kit::NSPasteboardTypeFileURL };
-            if let Some(s) = it.stringForType(uti) {
-                if let Some(url) = objc2_foundation::NSURL::URLWithString(&s) {
-                    if let Some(path) = url.path() {
-                        out.push(path.to_string());
-                    }
-                }
+            if let Some(s) = it.stringForType(uti)
+                && let Some(url) = objc2_foundation::NSURL::URLWithString(&s)
+                && let Some(path) = url.path()
+            {
+                out.push(path.to_string());
             }
         }
     }
@@ -650,11 +649,10 @@ define_class!(
             }
             self.relocalize(mtm);
             self.act(crate::ui::Cmd::Settings);
-            if let Some(i) = tab_idx {
-                if let Some(tv) = self.ivars().tabs.borrow().as_ref() {
+            if let Some(i) = tab_idx
+                && let Some(tv) = self.ivars().tabs.borrow().as_ref() {
                     tv.selectTabViewItemAtIndex(i);
                 }
-            }
         }
 
         #[unsafe(method(onAbout:))]
@@ -802,9 +800,9 @@ define_class!(
                     "gui.panel.backup_msg",
                 ))));
             }
-            if { panel.runModal() } == 1 {
-                if let Some(url) = { panel.URL() } {
-                    if let Some(p) = { url.path() } {
+            if { panel.runModal() } == 1
+                && let Some(url) = { panel.URL() }
+                    && let Some(p) = { url.path() } {
                         self.app_mut(|a| {
                             a.say(
                                 crate::ui::LogKind::Result,
@@ -821,8 +819,6 @@ define_class!(
                             )
                         });
                     }
-                }
-            }
         }
 
         #[unsafe(method(onDocs:))]
@@ -954,9 +950,9 @@ define_class!(
                     "gui.panel.folder_msg",
                 ))));
             }
-            if { panel.runModal() } == 1 {
-                if let Some(url) = { panel.URL() } {
-                    if let Some(p) = { url.path() } {
+            if { panel.runModal() } == 1
+                && let Some(url) = { panel.URL() }
+                    && let Some(p) = { url.path() } {
                         self.app_mut(|a| {
                             a.say(
                                 crate::ui::LogKind::Result,
@@ -967,8 +963,6 @@ define_class!(
                             )
                         });
                     }
-                }
-            }
         }
 
         #[unsafe(method(onDoneResult:))]
@@ -1234,10 +1228,10 @@ impl Controller {
 
         // output row
         {
-            if let Some(f) = iv.out_field.borrow().as_ref() {
-                if f.stringValue().to_string() != v.output_dir {
-                    f.setStringValue(&NSString::from_str(&v.output_dir));
-                }
+            if let Some(f) = iv.out_field.borrow().as_ref()
+                && f.stringValue().to_string() != v.output_dir
+            {
+                f.setStringValue(&NSString::from_str(&v.output_dir));
             }
             if let Some(b) = iv.run_btn.borrow().as_ref() {
                 b.setEnabled(v.can_run);
@@ -1414,11 +1408,11 @@ impl Controller {
 
     /// Re-run layout against the window's current size.
     fn relayout_now(&self) {
-        if let Some(v) = self.ivars().page_main.borrow().as_ref() {
-            if let Some(sup) = unsafe { v.superview() } {
-                let b = sup.frame();
-                self.relayout(b.size.width, b.size.height);
-            }
+        if let Some(v) = self.ivars().page_main.borrow().as_ref()
+            && let Some(sup) = unsafe { v.superview() }
+        {
+            let b = sup.frame();
+            self.relayout(b.size.width, b.size.height);
         }
     }
 
@@ -2635,13 +2629,12 @@ pub fn run() {
     }
 
     // FMKV_SIZE=WxH resizes before snapshotting, to test the resize behaviour
-    if let Ok(sz) = dev_env("FMKV_SIZE") {
-        if let Some((ws, hs)) = sz.split_once('x') {
-            if let (Ok(nw), Ok(nh)) = (ws.parse::<f64>(), hs.parse::<f64>()) {
-                window.setContentSize(NSSize::new(nw, nh));
-                c.relayout(nw, nh);
-            }
-        }
+    if let Ok(sz) = dev_env("FMKV_SIZE")
+        && let Some((ws, hs)) = sz.split_once('x')
+        && let (Ok(nw), Ok(nh)) = (ws.parse::<f64>(), hs.parse::<f64>())
+    {
+        window.setContentSize(NSSize::new(nw, nh));
+        c.relayout(nw, nh);
     }
 
     if let Ok(src) = dev_env("FMKV_OPEN") {
@@ -2664,12 +2657,11 @@ pub fn run() {
             "prefs" => build_prefs(mtm, &c),
             _ => build_about(mtm, &c),
         };
-        if let Ok(tab) = dev_env("FMKV_TAB") {
-            if let Ok(i) = tab.parse::<isize>() {
-                if let Some(tv) = c.ivars().tabs.borrow().as_ref() {
-                    tv.selectTabViewItemAtIndex(i);
-                }
-            }
+        if let Ok(tab) = dev_env("FMKV_TAB")
+            && let Ok(i) = tab.parse::<isize>()
+            && let Some(tv) = c.ivars().tabs.borrow().as_ref()
+        {
+            tv.selectTabViewItemAtIndex(i);
         }
         w.center();
         w.makeKeyAndOrderFront(None);
@@ -3449,10 +3441,10 @@ impl Controller {
     pub fn drive_click_button(&self, title: &str) -> bool {
         fn walk(v: &NSView, title: &str) -> Option<Retained<NSButton>> {
             for sub in { v.subviews() }.iter() {
-                if let Ok(b) = sub.clone().downcast::<NSButton>() {
-                    if { b.title() }.to_string() == title {
-                        return Some(b);
-                    }
+                if let Ok(b) = sub.clone().downcast::<NSButton>()
+                    && { b.title() }.to_string() == title
+                {
+                    return Some(b);
                 }
                 if let Some(found) = walk(&sub, title) {
                     return Some(found);
@@ -3559,14 +3551,14 @@ impl Controller {
                 let rl = NSRunLoop::currentRunLoop();
                 rl.runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.35));
             }
-            if let Some(v) = self.ivars().page_main.borrow().as_ref() {
-                if let Some(sup) = unsafe { v.superview() } {
-                    {
-                        sup.setNeedsDisplay(true);
-                        sup.displayIfNeeded();
-                    }
-                    snapshot(&sup, &format!("{shot_dir}/{n}.png"));
+            if let Some(v) = self.ivars().page_main.borrow().as_ref()
+                && let Some(sup) = unsafe { v.superview() }
+            {
+                {
+                    sup.setNeedsDisplay(true);
+                    sup.displayIfNeeded();
                 }
+                snapshot(&sup, &format!("{shot_dir}/{n}.png"));
             }
         };
         let view = || self.ivars().app.borrow().view();

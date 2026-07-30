@@ -122,9 +122,12 @@ fn keydb_status_reports_missing_file() {
 #[test]
 fn shellexpand_expands_tilde_only_at_start() {
     let e = freemkv::settings::shellexpand("~/x");
+    // "Absolute" is spelled differently per OS: a leading slash on Unix, a
+    // drive letter on Windows. Requiring '/' tested the spelling, not the
+    // property, so it failed on Windows for a correctly-expanded path.
     assert!(
-        e.starts_with('/'),
-        "tilde should expand to an absolute path"
+        std::path::Path::new(&e).is_absolute(),
+        "tilde should expand to an absolute path, got: {e}"
     );
     assert_eq!(freemkv::settings::shellexpand("/a/~/b"), "/a/~/b");
 }

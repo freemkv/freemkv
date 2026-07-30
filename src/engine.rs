@@ -316,16 +316,14 @@ fn disc_details(disc: &libfreemkv::Disc, key_summary: &str, verbose: bool) -> Ve
     d.push(format!("Protection: {key_summary}"));
     // Verbose (Log detail: Verbose) reveals the resolved keys, like `info -v`:
     // the Volume Unique Key and each CPS unit key.
-    if verbose {
-        if let Some(aacs) = &disc.aacs {
-            if let Some(vuk) = aacs.vuk {
-                let h: String = vuk.iter().map(|b| format!("{b:02x}")).collect();
-                d.push(format!("  VUK: 0x{h}"));
-            }
-            for (cps, key) in &aacs.unit_keys {
-                let h: String = key.iter().map(|b| format!("{b:02x}")).collect();
-                d.push(format!("  CPS {cps}: 0x{h}"));
-            }
+    if verbose && let Some(aacs) = &disc.aacs {
+        if let Some(vuk) = aacs.vuk {
+            let h: String = vuk.iter().map(|b| format!("{b:02x}")).collect();
+            d.push(format!("  VUK: 0x{h}"));
+        }
+        for (cps, key) in &aacs.unit_keys {
+            let h: String = key.iter().map(|b| format!("{b:02x}")).collect();
+            d.push(format!("  CPS {cps}: 0x{h}"));
         }
     }
     // Just the count — the per-title list lives in the UI tree, no need to

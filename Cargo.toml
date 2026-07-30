@@ -2,7 +2,7 @@
 name = "freemkv"
 version = "1.6.0"
 edition = "2024"
-rust-version = "1.86"
+rust-version = "1.97"
 license = "MIT"
 description = "Desktop UI for freemkv"
 
@@ -28,6 +28,18 @@ tracing-appender = "0.2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 libc = "0.2"
 mimalloc = "0.1"
+
+# ── Windows desktop shell ───────────────────────────────────────────────────
+# `winsafe` is idiomatic safe Win32 with ZERO dependencies — it owns the message
+# loop, window classes and control lifetimes, and asks the OS to draw every
+# control, which is what makes the app indistinguishable from a native Windows
+# program. Chosen over `native-windows-gui` (unmaintained since 2022) and the
+# raw `windows` bindings (far more unsafe boilerplate for a plain desktop app).
+#
+# PINNED with `=`: winsafe is pre-1.0 and moves on a quarterly cadence, so it
+# reserves the right to break the API. Upgrade deliberately, never implicitly.
+[target.'cfg(target_os = "windows")'.dependencies]
+winsafe = { version = "=0.0.28", features = ["gui", "shell"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

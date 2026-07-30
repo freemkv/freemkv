@@ -34,13 +34,13 @@ jobs:
 
   # Parallel tripwire, exactly as the CLI does it: fails the run, but `build`
   # does NOT `needs:` it, so packaging starts as soon as `verify` passes. The
-  # tag decision was already gated by the local precommit on the same Rust 1.86.
+  # tag decision was already gated by the local precommit on the same Rust 1.89.
   test:
     needs: verify
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --tests
 
@@ -62,7 +62,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -119,10 +119,106 @@ jobs:
             freemkv-*-${{ matrix.target }}.dmg
             freemkv-*-${{ matrix.target }}.zip
 
+  # ── Windows desktop app ─────────────────────────────────────────────────────
+  # The peer of the macOS `build` job above. Windows has no bundle format, so
+  # the shippable unit is a .zip holding the single `freemkv.exe` — the same
+  # binary that serves the CLI (`main.rs` routes `freemkv gui` to the desktop
+  # shell), exactly as the macOS .app wraps the same binary. That is why there
+  # is no separate GUI cargo target or feature to select: the desktop shell is
+  # `#[cfg(target_os = "windows")]`-gated inside the one `freemkv` bin.
+  #
+  # This job is deliberately SEPARATE from `cli-binaries` even though both
+  # compile the same target: the CLI leg's product is the bare, runnable
+  # `.exe` asset, and this leg's product is the desktop-app `.zip` (plus, in
+  # future, an icon/manifest/installer, which must not leak into the CLI
+  # asset). Keeping them apart means the download page's two sections point at
+  # two independently-named assets, and neither can silently become the other.
+  #
+  # Asset names (mirroring the macOS leg's unversioned + versioned pair):
+  #   freemkv-x86_64-windows.zip                    ← linked from the site
+  #   freemkv-<tag>-x86_64-pc-windows-msvc.zip
+  #   freemkv-x86_64-windows.zip.sha256
+  # No collision with the CLI leg, which owns `freemkv-x86_64-windows.exe*`.
+  build-windows:
+    # Same rationale as `build`: does NOT `needs: test` (parallel tripwire).
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        # Single leg today. aarch64-pc-windows-msvc is not shipped: there is no
+        # ARM64 Windows runner in the hosted pool, and x64 runs under emulation
+        # on ARM Windows. Add a leg here when that changes.
+        include:
+          - target: x86_64-pc-windows-msvc
+            asset: freemkv-x86_64-windows
+
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-app
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}"
+          $a   = "${{ matrix.asset }}"
+          $bin = "target/${{ matrix.target }}/release/freemkv.exe"
+          # Unversioned .zip is the stable URL the download page links via
+          # `releases/latest/download/<asset>`; the versioned copy mirrors the
+          # macOS leg so a specific release can be pinned.
+          Compress-Archive -Path $bin -DestinationPath "$a.zip" -Force
+          Compress-Archive -Path $bin -DestinationPath "freemkv-$ver-${{ matrix.target }}.zip" -Force
+          $h = Get-FileHash -Algorithm SHA256 "$a.zip"
+          "$($h.Hash.ToLower())  $a.zip" | Out-File -Encoding ascii "$a.zip.sha256"
+
+      - name: Verify the binary
+        shell: pwsh
+        run: |
+          # A .zip whose .exe cannot start is indistinguishable from a good one
+          # until a user double-clicks it — so actually run it. `--version` is
+          # the cheapest path that exercises process start + the linked
+          # libfreemkv, and it needs no disc.
+          $out = & "target/${{ matrix.target }}/release/freemkv.exe" --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::freemkv.exe --version exited $LASTEXITCODE"
+            exit 1
+          }
+          if ([string]::IsNullOrWhiteSpace($out)) {
+            Write-Output "::error::freemkv.exe --version printed nothing"
+            exit 1
+          }
+          Write-Output "freemkv.exe --version => $out"
+          # The .zip must contain exactly the one program, at the archive root
+          # (the Windows docs tell users to extract and run `freemkv.exe`).
+          $zip = (Resolve-Path "${{ matrix.asset }}.zip").Path
+          $names = [IO.Compression.ZipFile]::OpenRead($zip).Entries.FullName
+          Write-Output "zip contents: $($names -join ', ')"
+          if ($names -notcontains 'freemkv.exe') {
+            Write-Output "::error::freemkv.exe missing from ${{ matrix.asset }}.zip"
+            exit 1
+          }
+
+      - name: Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ matrix.asset }}.zip
+            ${{ matrix.asset }}.zip.sha256
+            freemkv-*-${{ matrix.target }}.zip
+
   # ── Standalone CLI binaries for the platforms without a desktop app ─────────
-  # The GUI is target-gated off, so these are pure CLI. Linux ships musl-static
-  # (no glibc version coupling); Windows is CLI-only until the Windows shell
-  # lands. macOS CLI users get the binary inside the .dmg's .app.
+  # The GUI is target-gated off on Linux, so that leg is pure CLI. Linux ships
+  # musl-static (no glibc version coupling). The Windows and macOS legs here are
+  # the BARE binary for scripted installs — the windowed product ships from
+  # `build-windows` (.zip) and `build` (.dmg) respectively.
   cli-binaries:
     needs: verify
     strategy:
@@ -150,7 +246,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -180,8 +276,14 @@ jobs:
             ${{ matrix.asset }}${{ matrix.ext }}.sha256
 
   update-homepage:
-    needs: [build, cli-binaries]
-    if: always() && needs.build.result == 'success'
+    needs: [build, build-windows, cli-binaries]
+    # Gated on the desktop apps only (macOS + Windows): the org README advertises
+    # the release, and a release with no shippable app is not one to advertise.
+    # `always()` + explicit result checks so a failed CLI leg does not silently
+    # skip the dispatch, and a failed app leg definitively does.
+    # NOTE: bracket form for `build-windows` — a hyphen in a job id is parsed as
+    # subtraction in the dot form, so `needs.build-windows.result` is invalid.
+    if: always() && needs.build.result == 'success' && needs['build-windows'].result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Update org README with new version

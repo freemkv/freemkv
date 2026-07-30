@@ -20,7 +20,7 @@ fallback / mental model — **prefer the script.**
 **FAILURE MODES FROM DEVIATION:**
 - v0.17.2: Tagged before bumping Cargo.toml → CI verify failed
 - v0.18.7: Used `cargo update --workspace` instead of manual Cargo.lock regeneration → libfreemkv 0.18.6 still baked in release
-- Any time: Skipping pre-commit → Mac default Rust accepts lints that CI's 1.86 rejects
+- Any time: Skipping pre-commit → Mac default Rust accepts lints that CI's 1.89 rejects
 
 ---
 
@@ -97,7 +97,7 @@ freemkv-unlock = { path = "../freemkv-unlock" }
 **Regenerate a release `Cargo.lock`** (the v0.18.7 trap):
 ```bash
 mv .cargo/config.toml /tmp/cfg.bak     # disable the dev patch (move OUT of the repo)
-rm -f Cargo.lock && cargo +1.86 generate-lockfile
+rm -f Cargo.lock && cargo +1.89 generate-lockfile
 # verify: EXACTLY ONE libfreemkv entry, source = git+...libfreemkv?tag=vX.Y.Z
 mv /tmp/cfg.bak .cargo/config.toml
 ```
@@ -139,25 +139,25 @@ it never reaches CI (which builds each repo standalone).
 
 ### Toolchain
 ```bash
-rustup toolchain install 1.86 --component clippy,rustfmt
+rustup toolchain install 1.89 --component clippy,rustfmt
 ```
 
-CI uses Rust 1.86 pinned in `.github/workflows/ci.yml`. The Mac default toolchain is newer and accepts lints that 1.86 rejects — always use `+1.86` locally before pushing.
+CI uses Rust 1.89 pinned in `.github/workflows/ci.yml`. The Mac default toolchain is newer and accepts lints that 1.89 rejects — always use `+1.89` locally before pushing.
 
 ### Local Verification Commands
 ```bash
 # All must pass with zero errors/warnings
-cargo +1.86 clippy --locked -- -D warnings
-cargo +1.86 test --tests
-cargo +1.86 build --release
+cargo +1.89 clippy --locked -- -D warnings
+cargo +1.89 test --tests
+cargo +1.89 build --release
 ```
 
-Run the Rust 1.86 pre-commit checks (the same fmt + clippy + tests CI runs):
+Run the Rust 1.89 pre-commit checks (the same fmt + clippy + tests CI runs):
 ```bash
-cargo +1.86 fmt --check                             # all crates
-cargo +1.86 clippy --locked -- -D warnings          # all crates
-cargo +1.86 test                                    # all crates
-cargo +1.86 clippy -p freemkv-autorip --locked -- -D warnings   # one crate
+cargo +1.89 fmt --check                             # all crates
+cargo +1.89 clippy --locked -- -D warnings          # all crates
+cargo +1.89 test                                    # all crates
+cargo +1.89 clippy -p freemkv-autorip --locked -- -D warnings   # one crate
 ```
 
 ---
@@ -186,7 +186,7 @@ so its TAG must exist before anything downstream resolves.
 ```bash
 cd ~/freemkv/freemkv-unlock
 # bump root Cargo.toml version → 0.X.Y, then:
-cargo +1.86 build --all-features                  # proof (covers bdemu's emulation feature)
+cargo +1.89 build --all-features                  # proof (covers bdemu's emulation feature)
 git add Cargo.toml && git commit -m "v0.X.Y: bump version"
 git push origin main
 git tag -a v0.X.Y -m "v0.X.Y" && git push origin v0.X.Y
@@ -250,7 +250,7 @@ cd ~/freemkv/<crate-name>
 
 ```bash
 mv .cargo/config.toml /tmp/cfg.bak     # disable the dev path patch
-rm -f Cargo.lock && cargo +1.86 generate-lockfile
+rm -f Cargo.lock && cargo +1.89 generate-lockfile
 # verify: EXACTLY ONE libfreemkv entry, source = git+...libfreemkv?tag=v0.X.Y
 mv /tmp/cfg.bak .cargo/config.toml
 ```
@@ -341,7 +341,7 @@ Build and deploy:
 ```bash
 # Build release binary for linux-musl
 cd ~/freemkv/autorip
-cargo +1.86 build --release --target x86_64-unknown-linux-musl
+cargo +1.89 build --release --target x86_64-unknown-linux-musl
 
 # Deploy to the host (adjust version as needed)
 scp target/x86_64-unknown-linux-musl/release/autorip deploy@deploy.example.com:/tmp/autorip-0.X.Y
@@ -368,7 +368,7 @@ docker logs autorip --tail=500 -f | grep '\[mux\]'
 ## Phase 6: Failure Recovery
 
 ### If Clippy Fails Locally
-Run `cargo +1.86 clippy --locked` first to catch issues before pushing. Common failures:
+Run `cargo +1.89 clippy --locked` first to catch issues before pushing. Common failures:
 - `cfg!(feature = "debug")` errors → remove feature check, use only env var
 - Missing Cargo.lock commit → ensure both Cargo.toml and Cargo.lock are committed together
 
@@ -412,10 +412,10 @@ A missing tag, or a base version req that the patched tag can't satisfy, makes
 
 ### Pre-commit Checklist
 ```bash
-# From workspace root (Rust 1.86 — matches CI)
-cargo +1.86 fmt --check
-cargo +1.86 clippy --locked -- -D warnings
-cargo +1.86 test --tests
+# From workspace root (Rust 1.89 — matches CI)
+cargo +1.89 fmt --check
+cargo +1.89 clippy --locked -- -D warnings
+cargo +1.89 test --tests
 ```
 
 **STOP IF PRE-COMMIT FAILS** — do not proceed until all checks pass.
@@ -445,7 +445,7 @@ git tag -a v0.X.Y -m "v0.X.Y" && git push origin v0.X.Y --force
 
 2. **Don't tag before bumping Cargo.toml.** CI verify job catches mismatch (v0.17.2 bug). **STOP if you tagged first — delete and recreate the tag.**
 
-3. **Don't skip precommit.** CI's Rust 1.86 catches what Mac default (1.9x) silently accepts. **STOP if clippy fails locally — fix before pushing.**
+3. **Don't skip precommit.** CI's Rust 1.89 catches what Mac default (1.9x) silently accepts. **STOP if clippy fails locally — fix before pushing.**
 
 4. **Don't deploy without `privileged: true`.** Drive enumeration returns 0; UI shows "No drives detected." **STOP deployment if drive_count=0 in logs.**
 
@@ -466,7 +466,7 @@ git tag -a v0.X.Y -m "v0.X.Y" && git push origin v0.X.Y --force
 ## References
 
 - CI workflows: `.github/workflows/ci.yml`, `.github/workflows/release.yml`
-- Pre-commit checks (Rust 1.86): `cargo +1.86 fmt --check`, `cargo +1.86 clippy --locked -- -D warnings`, `cargo +1.86 test`
+- Pre-commit checks (Rust 1.89): `cargo +1.89 fmt --check`, `cargo +1.89 clippy --locked -- -D warnings`, `cargo +1.89 test`
 - Release automation: workspace `release.sh`
 - Test plan: internal test plan
 - Watchtower pause guidance: see release notes
@@ -479,6 +479,6 @@ git tag -a v0.X.Y -m "v0.X.Y" && git push origin v0.X.Y --force
 |-------------|-----------|--------|
 | v0.17.2 | Tagged before bumping Cargo.toml | CI verify job failed, release blocked |
 | v0.18.7 | Used `cargo update --workspace` | libfreemkv 0.18.6 baked in release image |
-| Any time | Skipped Rust 1.86 requirement | Mac default toolchain accepts lints that CI rejects |
+| Any time | Skipped Rust 1.89 requirement | Mac default toolchain accepts lints that CI rejects |
 
 **IF ANY STEP FAILS:** STOP immediately. Report the exact error. Do not proceed until resolved.
