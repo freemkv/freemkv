@@ -1842,6 +1842,7 @@ fn render_resolution_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> 
             .map(|n| match n {
                 KeyNode::MatchedDisc => "matched disc",
                 KeyNode::NoEntry => "no entry",
+                KeyNode::SourceFailed => "source failed",
                 KeyNode::FoundUnitKeys => "found unit keys",
                 KeyNode::FoundVuk => "found VUK",
                 KeyNode::FoundMediaKey => "found media key",
