@@ -50,9 +50,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two macOS flavors, mirroring the CLI. (The CLI drops
-        # x86_64-apple-darwin over a linker issue in a C dependency the GUI
-        # does not pull in, so both legs genuinely build here.)
+        # Two macOS flavors, mirroring the CLI — which ships BOTH, so these
+        # genuinely mirror it. (This comment used to claim the CLI dropped
+        # x86_64-apple-darwin over a linker issue; its own matrix below
+        # contradicted that, and the target builds. Corrected rather than
+        # deleted so nobody re-derives the false constraint from the history.)
         include:
           - target: aarch64-apple-darwin
             asset: freemkv-aarch64-macos
@@ -229,6 +231,16 @@ jobs:
             target: x86_64-unknown-linux-musl
             asset: freemkv-x86_64-linux
             ext: ''
+          # arm64 Linux. Dropped by accident in the 1.6.0 workflow unification
+          # and caught before the tag: the asset exists at v1.5.2 and is served
+          # from the stable `releases/latest/download/` URL, so losing it would
+          # 404 every bookmark, script and Dockerfile pinned to that path — and
+          # silently, because no download button links it. autorip never stopped
+          # shipping its arm64 leg, so the two would also have disagreed.
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            asset: freemkv-aarch64-linux
+            ext: ''
           # Bare macOS CLI binaries (the .dmg already bundles the CLI; these are
           # for scripted installs / brew formulae that want just the binary).
           - os: macos-latest
@@ -255,8 +267,21 @@ jobs:
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # arm64 musl cross-builds through `cross` (a container with the right
+      # sysroot), which is how this leg was built up to v1.5.2. A plain
+      # `cargo build --target` on an x86 runner cannot link it: mimalloc-sys
+      # and ring both compile C.
+      - name: Install cross
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          curl -sL https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-musl.tar.gz | tar xz
+          sudo mv cross /usr/local/bin/
       - name: Build CLI
+        if: matrix.target != 'aarch64-unknown-linux-musl'
         run: cargo build --release --target ${{ matrix.target }}
+      - name: Build CLI (cross)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cross build --release --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
