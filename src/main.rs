@@ -1,14 +1,22 @@
-//! freemkv — one binary, two shells over the shared `freemkv-engine`:
+//! freemkv — the `freemkv` command: the CLI, plus a way into the desktop GUI.
 //!
 //! * the **CLI** — the gold-standard `freemkv` command line, replicated 1:1
 //!   (`cli_entry` + `pipe`/`info`/`disc_info`/… copied verbatim), and
-//! * the native desktop **GUI** (`mac`, AppKit — macOS only) over the shared
-//!   `ui`/`engine`/`settings` core.
+//! * the native desktop **GUI** — AppKit (`mac`) on macOS, Win32
+//!   (`freemkv::windows`) on Windows — over the shared `ui`/`engine`/`settings`
+//!   core.
 //!
 //! The dispatcher routes a CLI-style invocation (any args, or a bare launch
 //! from a terminal) to the CLI shell — byte-for-byte identical to the old
 //! `freemkv` binary — and a windowed launch (a `.app` double-click, or an
-//! explicit `freemkv gui`) to the desktop shell.
+//! explicit `freemkv gui`) to the desktop shell. The decision itself is
+//! `freemkv::app_entry::wants_gui`, where it can be unit-tested.
+//!
+//! **Windows note.** This image is console-subsystem and stays the CLI on a
+//! bare launch, because there is nothing to distinguish an Explorer
+//! double-click from a `cmd` invocation. The double-clickable image on Windows
+//! is the sibling binary `freemkv-gui.exe` (`src/bin/freemkv-gui.rs`), which is
+//! windows-subsystem and opens the same shell directly.
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -23,28 +31,28 @@ mod output;
 mod pipe;
 mod strings;
 
-// ── GUI shell — DESKTOP TARGETS ONLY ────────────────────────────────────────
+// ── GUI shell — macOS ───────────────────────────────────────────────────────
 // The shared GUI core (`ui`/`engine`/`settings`/`platform`) and the AppKit
-// shell exist only where there is a desktop shell to drive them. On Linux the
+// shell are compiled into this binary only where AppKit is. On Linux the
 // binary is pure CLI (like the historical `freemkv`), so none of this compiles
 // in — no dead code, no unused deps, and `clippy -D warnings` stays clean on a
 // Linux runner. (The lib target still exposes the core on every platform, so
 // CI's portable-core check keeps `ui.rs`/`engine.rs` honest.)
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+//
+// Windows is NOT here: its shell lives in the lib (`freemkv::win_app`) so the
+// second binary, `freemkv-gui.exe`, can open the same window. Declaring
+// `mod windows` here as well would compile those 4.4k lines a second time into
+// every binary.
+#[cfg(target_os = "macos")]
 mod engine;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-mod platform;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-mod settings;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-mod ui;
-
 #[cfg(target_os = "macos")]
 mod mac;
-#[cfg(target_os = "windows")]
-mod win_layout;
-#[cfg(target_os = "windows")]
-mod windows;
+#[cfg(target_os = "macos")]
+mod platform;
+#[cfg(target_os = "macos")]
+mod settings;
+#[cfg(target_os = "macos")]
+mod ui;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -53,7 +61,7 @@ fn main() {
     // On Linux there is no desktop shell, so this whole branch is compiled out
     // and `freemkv` is always the CLI.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    if wants_gui(&args) {
+    if freemkv::app_entry::wants_gui(&args, launched_windowed()) {
         run_gui();
         return;
     }
@@ -65,109 +73,57 @@ fn main() {
 }
 
 /// Launch the desktop shell for this platform.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+///
+/// macOS builds it here (the AppKit shell is a module of this binary); Windows
+/// hands off to the lib, which is where the Win32 shell lives so that
+/// `freemkv-gui.exe` can open the very same window.
+#[cfg(target_os = "macos")]
 fn run_gui() {
     let cfg = settings::Settings::load();
 
-    // Apply the saved interface language before the shell builds anything, so
-    // the first string lookup resolves in the right locale. (A later change in
-    // Settings switches live via `strings::set_locale`.)
-    let code = ui::locale_code(&cfg.language);
-    if code == "auto" {
-        // "Auto" follows the OS language. A Finder-launched `.app` (and a
-        // double-clicked `.exe`) inherits no LANG, so the crate's env detection
-        // would fall back to English — read the OS preferred language instead.
-        #[cfg(target_os = "macos")]
-        if let Some(sys) = mac::system_locale_code() {
-            strings::set_locale(&sys);
-        }
-        #[cfg(target_os = "windows")]
-        if let Some(sys) = windows::system_locale_code() {
-            strings::set_locale(&sys);
-        }
-    } else {
-        strings::set_language(code);
-    }
+    // "Auto" follows the OS language. A Finder-launched `.app` inherits no
+    // LANG, so the i18n crate's env detection would fall back to English —
+    // `apply_locale` reads the OS preferred language instead.
+    freemkv::app_entry::apply_locale(&cfg.language, mac::system_locale_code);
 
     // Diagnostic logging, mirroring the CLI: only install a tracing subscriber
     // when the user asks for detail; otherwise the library's tracing events are
     // dropped and no log file is written.
-    init_gui_logging(&cfg);
+    freemkv::app_entry::init_gui_logging(&cfg.log_level);
 
     // Development harness (scan / rip / screenshot hooks). Debug builds only —
     // the shipped release binary has no environment switches.
-    #[cfg(all(debug_assertions, target_os = "macos"))]
+    #[cfg(debug_assertions)]
     if dev_harness() {
         return;
     }
-    #[cfg(target_os = "macos")]
     mac::run();
-    #[cfg(target_os = "windows")]
-    windows::run();
 }
 
-/// Diagnostic-log guard for the GUI (keeps the non-blocking writer alive).
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-static GUI_LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuard> =
-    std::sync::OnceLock::new();
-
-/// Install a file tracing subscriber from the GUI's log settings. Only "Verbose"
-/// or the "Log debug messages" toggle turn it on (mapping to debug / trace);
-/// Quiet and Normal install nothing, exactly like the CLI's common path. The log
-/// is written to `log.txt` in the app-support dir, never the terminal.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn init_gui_logging(s: &settings::Settings) {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::{EnvFilter, fmt};
-
-    let level = match s.log_level.as_str() {
-        "Debug" => "trace",
-        "Verbose" => "debug",
-        // Quiet / Normal: no diagnostic file log.
-        _ => return,
-    };
-
-    let dir = settings::support_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let file_appender = tracing_appender::rolling::never(&dir, "log.txt");
-    let (nb, guard) = tracing_appender::non_blocking(file_appender);
-    let _ = GUI_LOG_GUARD.set(guard);
-    let filter = EnvFilter::new(format!("error,freemkv={level},libfreemkv={level}"));
-    // try_init: never panic if a subscriber somehow already exists.
-    let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_ansi(false).with_writer(nb))
-        .try_init();
+#[cfg(target_os = "windows")]
+fn run_gui() {
+    freemkv::win_app::run();
 }
 
-/// True when this invocation should open the desktop UI rather than the CLI:
-/// an explicit `freemkv gui`, or a bare launch from inside a macOS `.app`
-/// bundle (a Finder double-click passes no arguments). A bare launch from a
-/// terminal falls through to the CLI, so `freemkv` alone still prints usage and
-/// exits 2 — preserving the CLI contract byte-for-byte.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn wants_gui(args: &[String]) -> bool {
-    if args.get(1).map(String::as_str) == Some("gui") {
-        return true;
-    }
-    args.len() < 2 && launched_from_app_bundle()
-}
-
+/// Was this image started *as a window*, with no argument to say so?
+///
+/// macOS: a Finder double-click runs the binary from inside the `.app` bundle
+/// and passes no arguments, so the path is the only evidence there is.
 #[cfg(target_os = "macos")]
-fn launched_from_app_bundle() -> bool {
+fn launched_windowed() -> bool {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(|s| s.contains(".app/Contents/MacOS/")))
         .unwrap_or(false)
 }
 
+/// Windows: never. This image is console-subsystem, and an Explorer
+/// double-click of it is indistinguishable from a `cmd` invocation — guessing
+/// (parent process, console ownership) would make the CLI contract depend on
+/// how the terminal spawned it. The windowed image is the separate
+/// `freemkv-gui.exe`, which does not come through this dispatcher at all.
 #[cfg(target_os = "windows")]
-fn launched_from_app_bundle() -> bool {
-    // No bundle concept on Windows; the GUI is reached via `freemkv gui` (or a
-    // shortcut that passes it). A bare launch stays CLI.
+fn launched_windowed() -> bool {
     false
 }
 
