@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `dev` is where work lands and where CI must be green. `main` only ever
+    # moves at release time, to the tagged commit, so a push to it is the
+    # release validation run rather than day-to-day feedback.
+    branches: [main, dev]
   pull_request:
 
 # `freemkv` is one binary with two shells: the CLI (every OS) and the native
