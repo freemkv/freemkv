@@ -159,6 +159,15 @@ fn emit_icon_res() {
     // link.exe takes a .res as a plain input file and converts it in-process.
     // Absolute path: the linker's working directory is not the crate root.
     println!("cargo:rustc-link-arg-bins={}", out.display());
+    // Test harnesses need it too. `-bins` covers [[bin]] targets ONLY, so the
+    // test executable was linked without a resource section — and the window
+    // class registers `class_icon: Icon::Id(IDI_APP)`, so building the real
+    // shell inside `cargo test` failed in LoadIcon with 0x714 "The specified
+    // image file did not contain a resource section", which winsafe turns into
+    // a panic. The GUI test could therefore never pass on Windows. Giving the
+    // harness the same resource the product gets also means the test exercises
+    // the real icon path rather than a stubbed one.
+    println!("cargo:rustc-link-arg-tests={}", out.display());
 }
 
 struct IcoImage<'a> {
