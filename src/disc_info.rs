@@ -189,7 +189,13 @@ pub fn run(device: Option<&str>, args: &[String]) {
     // Decompose the session into the owned disc + drive the rest of this command
     // already worked with, so downstream rendering is untouched.
     let mut disc = session.take_disc().expect("scan populated the disc");
-    let mut drive = session.into_drive();
+    // into_drive is fallible: stage_drive_as_reader moves the drive out, so an
+    // empty slot is reachable through ordinary API use. Match the local style
+    // the session open above uses.
+    let mut drive = session.into_drive().unwrap_or_else(|e| {
+        eprintln!("{}", crate::pipe::fmt_err(&e));
+        std::process::exit(1);
+    });
 
     // Disc title
     if let Some(ref title) = disc.meta_title {

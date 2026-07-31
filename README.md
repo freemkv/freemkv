@@ -78,9 +78,10 @@ All URLs use the `scheme://path` format. No bare paths — always include the sc
 ### Rip a disc
 
 ```bash
-freemkv disc:// mkv://Movie.mkv                     # All titles to MKV
-freemkv disc:// mkv://Movie.mkv -t 1                # Main feature only
-freemkv disc:// mkv://Movie.mkv -t 1 -t 3           # Titles 1 and 3
+freemkv disc:// mkv://Movie.mkv                     # Main feature (the default since 1.6.0)
+freemkv disc:// mkv://Movie.mkv -t 1                # Title 1 explicitly
+freemkv disc:// mkv://out/ -t 1 -t 3                # Titles 1 and 3 (multiple titles need a directory)
+freemkv disc:// mkv://out/ -t all                   # Every title
 freemkv disc:// iso://Disc.iso                      # Full disc to ISO (decrypted)
 freemkv disc:// iso://Disc.iso --raw                # Full disc to ISO (encrypted)
 freemkv disc:///dev/sg4 mkv://Movie.mkv -t 1        # Specific drive
@@ -247,7 +248,7 @@ metadata, never CSS/AACS key material).
 
 ## Multi-language
 
-freemkv is fully localized. All output — errors, status, labels — adapts to your locale. Ships with English, Spanish, French, German, Italian, Portuguese, and Dutch. Contributions for additional languages welcome.
+freemkv is fully localized. All output — errors, status, labels — adapts to your locale. Ships with 29 complete translations: Catalan, Czech, Danish, Dutch, English, Finnish, French, German, Greek, Hungarian, Indonesian, Italian, Japanese, Korean, Norwegian, Polish, Portuguese (European and Brazilian), Romanian, Russian, Simplified and Traditional Chinese, Slovak, Spanish (European and Latin American), Swedish, Turkish, Ukrainian, and Vietnamese. Contributions for additional languages welcome.
 
 ## Building from Source
 
