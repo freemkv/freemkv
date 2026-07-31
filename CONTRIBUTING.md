@@ -3,7 +3,7 @@
 Thanks for your interest!
 
 - **Report a bug** — open an issue
-- **Submit your drive** — run `freemkv info --share`
+- **Submit your drive** — run `freemkv info disc:// --share`
 - **Fix a bug** — fork, branch, PR
 - **Suggest a feature** — open an issue first
 
