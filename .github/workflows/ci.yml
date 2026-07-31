@@ -8,6 +8,36 @@ on:
     branches: [main, dev]
   pull_request:
 
+# WHY THE SIBLING CHECKOUTS — this is NOT a monorepo.
+#
+# The committed Cargo.toml resolves every freemkv crate from a git TAG, and one
+# of those tags (freemkv-engine v1.6.0) DOES NOT EXIST — release.sh creates it.
+# So every job here failed at dependency resolution with "failed to find tag
+# v1.6.0", on all three OSes, before compiling a line. Even once that tag
+# exists, pinning it means CI validates this branch against the last release of
+# the libraries rather than their dev tips, so a change spanning repos cannot be
+# verified until the tags are cut — the worst moment to find a build error.
+#
+# The fix mirrors the developer's local layout. Every repo is checked out into a
+# subdirectory of $GITHUB_WORKSPACE, reproducing ~/Developer/freemkv/*, and a
+# generated .cargo/config.toml redirects the git-tag patches at those paths.
+# Config-level [patch.crates-io] wins over the manifest one — the same mechanism
+# local development already uses (see the note in Cargo.toml).
+#
+# Subdirectories rather than `../libfreemkv` because actions/checkout refuses
+# any `path:` outside $GITHUB_WORKSPACE, and the workspace IS the repo dir.
+# Repos stay separate, tags stay separate, the release cascade is untouched.
+#
+# freemkv-unlock gets a checkout but no patch entry: it is reached as
+# libfreemkv's path dep (../freemkv-unlock), which resolves to the workspace
+# root under this layout.
+#
+# `--locked` is not used. The committed Cargo.lock resolves the freemkv crates
+# as path packages and carries [[patch.unused]] entries — artifacts of whichever
+# local cargo config last wrote it, describing a developer's machine rather than
+# a release. release.sh regenerates it with the real tags at ship time, which is
+# where the pin has to hold.
+#
 # `freemkv` is one binary with two shells: the CLI (every OS) and the native
 # desktop GUI (macOS + Windows). So CI verifies BOTH halves:
 #   - the macOS jobs build/lint/test the whole crate incl. the AppKit shell —
@@ -18,59 +48,228 @@ on:
 #     GUI is target-gated off, so a Linux build is pure CLI);
 #   - a lib-only check keeps the shared core (ui.rs/engine.rs) portable.
 jobs:
-  # ── macOS: the whole crate, GUI shell included ──────────────────────────────
+  # ── macOS: the whole crate, GUI shell included ─────────────────────────────
+  # --all-targets so the tests and the AppKit shell are linted too.
   lint-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/libfreemkv
+          ref: dev
+          path: libfreemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: dev
+          path: freemkv-keysources
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-engine
+          ref: dev
+          path: freemkv-engine
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: dev
+          path: freemkv-i18n
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: dev
+          path: freemkv-unlock
+      - name: Resolve siblings from their dev tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: freemkv
       - run: cargo fmt --check
-      # --all-targets so the tests and the AppKit shell are linted too.
+        working-directory: freemkv
       - run: cargo clippy --all-targets -- -D warnings
+        working-directory: freemkv
 
+  # The disc-backed tests skip themselves when FMKV_TEST_ISO is unset, so
+  # this runs the platform-neutral suite without needing media on the runner.
   test-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/libfreemkv
+          ref: dev
+          path: libfreemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: dev
+          path: freemkv-keysources
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-engine
+          ref: dev
+          path: freemkv-engine
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: dev
+          path: freemkv-i18n
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: dev
+          path: freemkv-unlock
+      - name: Resolve siblings from their dev tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
-      # The disc-backed tests skip themselves when FMKV_TEST_ISO is unset, so
-      # this runs the platform-neutral suite without needing media on the runner.
+        with:
+          workspaces: freemkv
       - run: cargo test --tests
+        working-directory: freemkv
 
-  # ── Windows: the whole crate, the winsafe shell included ────────────────────
+  # ── Windows: the whole crate, the winsafe shell included ───────────────────
   # The peer of the macOS jobs. Without these, the Windows desktop shell would
   # be compiled for the first time by the RELEASE workflow — i.e. a broken
-  # Windows shell would be discovered at tag time, not at PR time. `platform.rs`
-  # in particular has a `#[cfg(windows)]` `GetDiskFreeSpaceExW` arm that no
-  # other job compiles, so nothing else can catch a regression in it.
+  # Windows shell would be discovered at tag time, not at PR time.
+  # `platform.rs` in particular has a `#[cfg(windows)]` `GetDiskFreeSpaceExW`
+  # arm that no other job compiles, so nothing else can catch a regression.
   lint-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/libfreemkv
+          ref: dev
+          path: libfreemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: dev
+          path: freemkv-keysources
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-engine
+          ref: dev
+          path: freemkv-engine
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: dev
+          path: freemkv-i18n
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: dev
+          path: freemkv-unlock
+      - name: Resolve siblings from their dev tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: freemkv
       - run: cargo fmt --check
-      # --all-targets so the tests and the Windows shell are linted too.
+        working-directory: freemkv
       - run: cargo clippy --all-targets -- -D warnings
+        working-directory: freemkv
 
+  # The suite is platform-neutral by contract (the disc-backed tests skip
+  # themselves when FMKV_TEST_ISO is unset). If a test needs editing to pass
+  # on Windows, the Windows port has broken something — that is the signal.
   test-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/libfreemkv
+          ref: dev
+          path: libfreemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: dev
+          path: freemkv-keysources
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-engine
+          ref: dev
+          path: freemkv-engine
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: dev
+          path: freemkv-i18n
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: dev
+          path: freemkv-unlock
+      - name: Resolve siblings from their dev tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
-      # The suite is platform-neutral by contract (the disc-backed tests skip
-      # themselves when FMKV_TEST_ISO is unset). If a test needs editing to pass
-      # on Windows, the Windows port has broken something — that is the signal.
+        with:
+          workspaces: freemkv
       - run: cargo test --tests
+        working-directory: freemkv
 
-  # The shippable Windows product is a release build of the one `freemkv` bin
+  # The shippable Windows product is a release build of the freemkv bins
   # (CLI + desktop shell). `cargo test` above only builds dev profile, and
   # release-only failures are real (LTO, codegen-units, opt-level). Cheap
   # insurance that the artifact the release workflow zips actually links.
@@ -78,49 +277,218 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/libfreemkv
+          ref: dev
+          path: libfreemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: dev
+          path: freemkv-keysources
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-engine
+          ref: dev
+          path: freemkv-engine
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: dev
+          path: freemkv-i18n
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: dev
+          path: freemkv-unlock
+      - name: Resolve siblings from their dev tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: freemkv
       - run: cargo build --release
+        working-directory: freemkv
 
-  # ── Intel Mac: a target we SHIP but never otherwise compile ─────────────────
-  # Both the .dmg and the bare CLI binary ship an x86_64-apple-darwin build, and
-  # until this job existed no CI leg compiled that target at all — the runners
-  # are arm64, so a break would have surfaced at tag time, in the release
-  # workflow, after the version bump and the tag push. Cheap insurance: the
-  # toolchain already has the target available on a macOS runner.
+  # ── Intel Mac: a target we SHIP but never otherwise compile ────────────────
+  # Both the .dmg and the bare CLI binary ship an x86_64-apple-darwin build,
+  # and until this job existed no CI leg compiled that target at all — the
+  # runners are arm64, so a break would have surfaced at tag time, in the
+  # release workflow, after the version bump and the tag push.
   build-macos-intel:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/libfreemkv
+          ref: dev
+          path: libfreemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: dev
+          path: freemkv-keysources
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-engine
+          ref: dev
+          path: freemkv-engine
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: dev
+          path: freemkv-i18n
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: dev
+          path: freemkv-unlock
+      - name: Resolve siblings from their dev tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
           targets: x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: freemkv
       - run: cargo build --release --target x86_64-apple-darwin
+        working-directory: freemkv
 
-  # ── Linux: the CLI (what Linux ships) ───────────────────────────────────────
-  # The GUI is target-gated off, so this builds the pure CLI. If any GUI code or
-  # OS assumption leaked into the always-compiled path it would fail here on
-  # `-D warnings` (dead code) long before a Linux user hit it.
+  # ── Linux: the CLI (what Linux ships) ──────────────────────────────────────
+  # The GUI is target-gated off, so this builds the pure CLI. If any GUI code
+  # or OS assumption leaked into the always-compiled path it would fail here
+  # on `-D warnings` (dead code) long before a Linux user hit it.
   cli-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/libfreemkv
+          ref: dev
+          path: libfreemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: dev
+          path: freemkv-keysources
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-engine
+          ref: dev
+          path: freemkv-engine
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: dev
+          path: freemkv-i18n
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: dev
+          path: freemkv-unlock
+      - name: Resolve siblings from their dev tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: freemkv
       - run: cargo clippy --all-targets -- -D warnings
+        working-directory: freemkv
       - run: cargo test --tests
+        working-directory: freemkv
       - run: cargo build --release
+        working-directory: freemkv
 
   # The shared core must stay platform-neutral: this checks the LIBRARY on
-  # Linux, so if a `df` call or any OS assumption creeps into ui.rs/engine.rs it
-  # fails here long before the Windows shell exists to notice.
+  # Linux, so if a `df` call or any OS assumption creeps into ui.rs/engine.rs
+  # it fails here long before the Windows shell exists to notice.
   core-is-portable:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/libfreemkv
+          ref: dev
+          path: libfreemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: dev
+          path: freemkv-keysources
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-engine
+          ref: dev
+          path: freemkv-engine
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: dev
+          path: freemkv-i18n
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: dev
+          path: freemkv-unlock
+      - name: Resolve siblings from their dev tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
       - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: freemkv
       - run: cargo check --lib
+        working-directory: freemkv
