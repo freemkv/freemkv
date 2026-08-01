@@ -4547,9 +4547,20 @@ mod tests {
     // `let _ = ...SetTimer(...)` with no error path) and fails again if the
     // error path is deleted, but it does NOT prove a MessageBox actually shows
     // up on a real timer-exhaustion failure. That needs a Windows CI run.
+    /// This file's own text, with CRLF folded to LF.
+    ///
+    /// The source-inspection stopgaps below match multi-line needles against
+    /// it. Windows CI checks the tree out with CRLF, so a raw `include_str!`
+    /// carries `\r\n` and every needle written with `\n` misses — passing on
+    /// Unix and failing only on the Windows runner, which is precisely where
+    /// nobody can reproduce it locally. Normalise once, here.
+    fn own_source() -> String {
+        include_str!("windows.rs").replace("\r\n", "\n")
+    }
+
     #[test]
     fn set_timer_failure_is_reported_source_inspection_only() {
-        let src = include_str!("windows.rs");
+        let src = own_source();
         // Split across concatenated literals so this needle can't match the
         // assertion's OWN text via `include_str!` of this same file — see
         // `mac.rs`'s identical guard against a self-matching tautology.
@@ -4591,7 +4602,7 @@ mod tests {
     // button already uses.
     #[test]
     fn language_switch_reports_a_failed_save_source_inspection_only() {
-        let src = include_str!("windows.rs");
+        let src = own_source();
         // `.settings.borrow().save` (…) should appear in exactly ONE place:
         // the shared helper. A second occurrence means some call site
         // re-inlined the Ok/Err match (or a bare `let _ =`) again — the exact
@@ -4634,7 +4645,7 @@ mod tests {
     // plain `field` constructor.
     #[test]
     fn the_keyserver_token_field_is_secure_source_inspection_only() {
-        let src = include_str!("windows.rs");
+        let src = own_source();
         let secure_ctor = format!("{}{}", "fn field_", "secure");
         assert!(
             src.contains(&secure_ctor),
