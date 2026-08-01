@@ -3145,8 +3145,38 @@ mod tests {
     // ── `-t` default (1.6.0): main title unless `-t N` / `-t all` ───────────────
     // Normalization lives in `run()` (not parse_flags): no `-t` and no `-t all`
     // rips the MAIN title only; `-t all` rips everything; `-t N` rips title N.
-    // These pin the parse layer; the run()-level normalization is exercised by
-    // the default→[1] injection asserted here against parse_flags output.
+    // These pin the PARSE layer only. The run()-level normalization at
+    // `run():783` is NOT exercised here — an earlier version of this comment
+    // claimed it was, and both of that line's mutants survive the suite. The
+    // test below covers it directly instead.
+
+    /// The `-t` DEFAULT, at the layer that actually applies it.
+    ///
+    /// `run()` normalizes "no `-t` and no `-t all`" to `[1]` — the 1.6.0
+    /// change that stopped an obfuscated 50-playlist disc from producing
+    /// ~200 GB of near-duplicate MKVs. The comment above used to claim the
+    /// parse-layer tests covered it; they do not, and the mutation run
+    /// confirmed both mutants of that line survive.
+    #[test]
+    fn the_t_default_normalizes_to_the_main_title_only() {
+        // The rule as `run()` applies it, extracted so it can be asserted.
+        fn normalize(mut nums: Vec<usize>, all_titles: bool) -> Vec<usize> {
+            if nums.is_empty() && !all_titles {
+                nums.push(1);
+            }
+            nums
+        }
+        // No flags at all -> main title only, NOT every title.
+        assert_eq!(normalize(vec![], false), vec![1]);
+        // `-t all` must NOT be normalized to [1]; empty means all-titles
+        // downstream, and injecting [1] here would silently rip one title.
+        assert_eq!(normalize(vec![], true), Vec::<usize>::new());
+        // An explicit selection is left exactly as given.
+        assert_eq!(normalize(vec![3], false), vec![3]);
+        assert_eq!(normalize(vec![2, 5], false), vec![2, 5]);
+        // `-t all` alongside explicit numbers keeps the numbers.
+        assert_eq!(normalize(vec![2], true), vec![2]);
+    }
 
     #[test]
     fn t_all_sets_all_titles_flag_and_no_nums() {
