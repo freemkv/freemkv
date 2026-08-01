@@ -574,7 +574,13 @@ mod tests {
         assert_eq!(l.grp_prog, Rect::new(8, 12, 1164, 132));
         assert_eq!(l.bar_cur, Rect::new(8, 166, 1164, 20));
         assert_eq!(l.lbl_cur, Rect::new(832, 148, 340, 16));
+        // The other three captions are computed the same way and were never
+        // asserted: cap_dy=18 above each bar, cap_w=340 wide, left-aligned for
+        // the "saving" labels and right-aligned for the percentage ones.
+        assert_eq!(l.lbl_saving_cur, Rect::new(8, 148, 340, 16));
         assert_eq!(l.bar_all, Rect::new(8, 212, 1164, 20)); // 166 + 46
+        assert_eq!(l.lbl_saving_all, Rect::new(8, 194, 340, 16)); // 212 - 18
+        assert_eq!(l.lbl_all, Rect::new(832, 194, 340, 16)); // cw - pad - 340
         // btn_cancel: top_y + PROG_H - 36 = 12 + 292 - 36 = 268.
         assert_eq!(l.btn_cancel, Rect::new(1052, 268, 120, 30));
         assert_eq!(l.info_rows.len(), 7);
@@ -589,7 +595,10 @@ mod tests {
         assert_eq!(l.grp_prog, Rect::new(12, 18, 1746, 198));
         assert_eq!(l.bar_cur, Rect::new(12, 249, 1746, 30));
         assert_eq!(l.lbl_cur, Rect::new(1248, 222, 510, 24));
+        assert_eq!(l.lbl_saving_cur, Rect::new(12, 222, 510, 24));
         assert_eq!(l.bar_all, Rect::new(12, 318, 1746, 30)); // 249 + 69
+        assert_eq!(l.lbl_saving_all, Rect::new(12, 291, 510, 24)); // 318 - 27
+        assert_eq!(l.lbl_all, Rect::new(1248, 291, 510, 24));
         // 18 + 438 - 54 = 402.
         assert_eq!(l.btn_cancel, Rect::new(1578, 402, 180, 45));
         assert_eq!(l.info_rows[0].0, Rect::new(21, 48, 165, 23));
@@ -619,12 +628,20 @@ mod tests {
         assert_eq!(l.result_line, Rect::new(8, 70, 1164, 20));
         assert_eq!(l.btn_reveal, Rect::new(410, 112, 170, 32));
         assert_eq!(l.btn_done, Rect::new(600, 112, 170, 32));
+        // The Result page reserves RESULT_H and the log takes the remainder.
+        // Without this the "delete the Page::Result arm" mutant is invisible:
+        // page_h would fall to 0 and log_h would switch to the LOG_FRAC branch,
+        // moving nothing the other assertions look at.
+        // 760 - 4 - 200 - 24 = 532.
+        assert_eq!(l.log.h, 532);
 
         let l = main_layout(192, 2360, 1520, st);
         assert_eq!(l.result_head, Rect::new(16, 76, 2328, 52));
         assert_eq!(l.result_line, Rect::new(16, 140, 2328, 40));
         assert_eq!(l.btn_reveal, Rect::new(820, 224, 340, 64));
         assert_eq!(l.btn_done, Rect::new(1200, 224, 340, 64));
+        // 1520 - 8 - 400 - 48 = 1064.
+        assert_eq!(l.log.h, 1064);
     }
 
     #[test]

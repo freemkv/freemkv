@@ -996,3 +996,218 @@ fn the_progress_captions_name_the_container_the_user_chose() {
         );
     }
 }
+
+// ── the decisions `start_run` makes on the way to the engine ────────────────
+
+/// `--multipass` is hours of extra drive time in one direction and a silently
+/// skipped recovery in the other. Both halves of the condition were
+/// unconstrained.
+#[test]
+fn multipass_needs_both_the_mode_and_a_pass_budget() {
+    assert!(wants_multipass("Multi-pass", 5));
+    assert!(wants_multipass("Multi-pass", 1));
+    // Zero passes is not multipass, whatever the mode says.
+    assert!(!wants_multipass("Multi-pass", 0));
+    assert!(!wants_multipass("Single pass", 5));
+    assert!(!wants_multipass("Single pass", 0));
+    // An unrecognised mode is never treated as multipass.
+    assert!(!wants_multipass("", 5));
+    assert!(!wants_multipass("multi-pass", 5));
+}
+
+/// Ciphertext passthrough only applies to a whole-disc ISO. Forwarded to a mux
+/// it writes encrypted bytes into a container that claims to hold video.
+#[test]
+fn raw_only_applies_to_an_iso_output() {
+    assert!(raw_applies(true, true));
+    assert!(!raw_applies(true, false));
+    assert!(!raw_applies(false, true));
+    assert!(!raw_applies(false, false));
+}
+
+/// Unticking every track is allowed but never silent — a file with no audio is
+/// usually an accident. "Made no choice" is a different thing from "chose
+/// nothing" and must not warn.
+#[test]
+fn a_video_only_selection_is_recognised_but_no_choice_at_all_is_not() {
+    assert!(is_video_only_selection(true, &[], &[]));
+    assert!(!is_video_only_selection(false, &[], &[]));
+    assert!(!is_video_only_selection(true, &[4352], &[]));
+    assert!(!is_video_only_selection(true, &[], &[4608]));
+    assert!(!is_video_only_selection(true, &[4352], &[4608]));
+}
+
+/// A rip that ticks no audio and no subtitle track starts, but SAYS so first.
+/// The notice is the whole point: the guard is not a refusal, so without the
+/// log line an accidental silent movie is discovered after the rip.
+#[test]
+fn a_video_only_rip_warns_before_it_starts() {
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.source = "/media/Disc.iso".into();
+    app.output_dir = "/out".into();
+    app.page = Page::Titles;
+    // Tick the titles, untick every stream row under them.
+    app.tree.set_all(true);
+    for i in 0..app.tree.arena.len() {
+        if app.tree.arena[i].type_s == "Audio" || app.tree.arena[i].type_s == "Subtitle" {
+            app.tree.set_checked(i, false);
+        }
+    }
+    let (audio, sub, explicit) = app.tree.ticked_streams();
+    assert!(
+        is_video_only_selection(explicit, &audio, &sub),
+        "the fixture did not produce a video-only selection: {audio:?} {sub:?} explicit={explicit}"
+    );
+
+    app.dispatch(Cmd::Run);
+    let notice = freemkv::strings::get("gui.log.video_only_warning");
+    assert!(
+        app.log.iter().any(|l| l.text == notice),
+        "no video-only notice in the log: {:?}",
+        app.log.iter().map(|l| &l.text).collect::<Vec<_>>()
+    );
+}
+
+/// `--raw` with a non-ISO output is dropped, and the user is told. Silently
+/// forwarding it writes ciphertext into an MKV; silently dropping it leaves the
+/// user believing they got an encrypted image.
+#[test]
+fn raw_on_a_non_iso_output_says_it_was_ignored() {
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.source = "/media/Disc.iso".into();
+    app.output_dir = "/out".into();
+    app.page = Page::Titles;
+    app.tree.set_all(true);
+    app.settings.raw = true;
+    app.format = "Selected titles → MKV".into();
+    assert!(
+        !app.format.contains("ISO image"),
+        "fixture must not be an ISO output"
+    );
+
+    app.dispatch(Cmd::Run);
+    let notice = freemkv::strings::get("gui.log.raw_iso_only");
+    assert!(
+        app.log.iter().any(|l| l.text == notice),
+        "no raw-is-iso-only notice in the log: {:?}",
+        app.log.iter().map(|l| &l.text).collect::<Vec<_>>()
+    );
+}
+
+/// The result heading is read from the TYPED verdict, never from the summary
+/// text.
+///
+/// This is the regression that shipped once already: the heading was chosen by
+/// substring-matching the engine's English summary, a message was reworded so
+/// it read "fail" rather than "failed", and an undecryptable disc rendered
+/// under the success heading. A failed run must never share a heading with a
+/// completed one, whatever the summary happens to say — including when the
+/// summary contains the word "finished" or nothing at all.
+#[test]
+fn the_result_heading_comes_from_the_verdict_not_the_summary_text() {
+    use freemkv::engine::RunOutcome;
+
+    let heading = |outcome, summary: &str| {
+        let mut app = App::new();
+        app.page = Page::Result;
+        app.result_outcome = outcome;
+        app.result_summary = summary.into();
+        app.view().result_heading
+    };
+
+    let finished = heading(RunOutcome::Completed, "2 title(s) written to /out");
+    let failed = heading(RunOutcome::Failed, "The disc has no decryption key");
+    let cancelled = heading(RunOutcome::Cancelled, "Cancelled — 1 of 3 completed");
+
+    assert_ne!(failed, finished, "a failed rip shares the success heading");
+    assert_ne!(cancelled, finished, "a cancelled rip reads as finished");
+    assert_ne!(cancelled, failed);
+
+    // And the summary text cannot move any of them. These are the exact
+    // wordings that defeated the old substring match.
+    for misleading in [
+        "Recovery aborted — too much unreadable data to mux a complete title",
+        "the mux did not fail cleanly",
+        "2 title(s) written to /out",
+        "finished",
+        "",
+    ] {
+        assert_eq!(
+            heading(RunOutcome::Failed, misleading),
+            failed,
+            "summary {misleading:?} changed the FAILED heading"
+        );
+        assert_eq!(
+            heading(RunOutcome::Completed, misleading),
+            finished,
+            "summary {misleading:?} changed the COMPLETED heading"
+        );
+    }
+}
+
+/// The whole GUI→engine seam, end to end, with no disc.
+///
+/// `start_rip` could be replaced with `()` and nothing in the suite noticed:
+/// nothing observed that the worker ran, that `finished` was ever set, or that
+/// a summary was filed. A `finished` that never arrives is not a cosmetic
+/// failure — `ui::tick` polls it, so the window shows a rip in progress
+/// FOREVER with no error, which is the exact hang the `SignalDone` guard was
+/// written to contain (its doc records two hand-rolled copies of the pattern
+/// that both had the bug).
+///
+/// A nonexistent source fails fast, so no fixture is needed.
+#[test]
+fn a_failed_run_always_finishes_and_is_reported_as_failed() {
+    use freemkv::engine::{KeyConfig, RipRequest, RunOutcome, RunState, start_rip};
+    use std::sync::Arc;
+
+    let state = Arc::new(RunState::default());
+    start_rip(
+        RipRequest {
+            source: "/definitely/not/a/real/file.iso".into(),
+            dest_dir: std::env::temp_dir()
+                .join("fmkv-gui-model")
+                .display()
+                .to_string(),
+            titles: vec![],
+            format: "Selected titles → MKV".into(),
+            audio_pids: vec![],
+            sub_pids: vec![],
+            explicit_streams: false,
+            raw: false,
+            force: false,
+            filename_template: String::new(),
+            decrypt_threads: 0,
+            multipass: false,
+            max_passes: 0,
+            abort_lost_secs: 0,
+            keep_iso: false,
+            auto_eject: false,
+            keys: KeyConfig::default(),
+        },
+        state.clone(),
+    );
+
+    // Bounded wait — a worker that never sets `finished` is the defect.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !state.finished.load(std::sync::atomic::Ordering::Relaxed) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the rip worker never set `finished` — this is the permanent \
+             in-progress hang, not a slow test"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        *state.outcome.lock().unwrap(),
+        RunOutcome::Failed,
+        "a rip of a nonexistent source reported something other than Failed"
+    );
+    assert!(
+        !state.summary.lock().unwrap().is_empty(),
+        "the result page would have shown a blank summary"
+    );
+}

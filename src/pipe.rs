@@ -780,9 +780,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // all-titles behaviour explicitly. Normalizing to `[1]` here reuses the
     // existing single-`-t 1` path in build_jobs unchanged; `-t all` leaves
     // title_nums empty, which build_jobs already treats as all-titles.
-    if title_nums.is_empty() && !all_titles {
-        title_nums.push(1);
-    }
+    normalize_title_nums(&mut title_nums, all_titles);
 
     let keys = KeyConfig {
         keydb_path,
@@ -940,19 +938,18 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // copy-protected-but-uncrackable (a 0.5 s menu stub, an FBI-warning loop,
     // any tiny CSS-locked nav title) must NOT abort the whole rip. We skip it
     // with a warning and keep muxing the rest. See `is_title_failure_fatal`.
-    let multi_title = jobs.len() > 1;
     // `-t all` asks for everything, which is NOT the same as naming titles: an
     // uncrackable menu stub must still be skipped, exactly as it is for an ISO
     // source (where `-t all` leaves `title_nums` empty). Without the
     // `!all_titles` term, expanding `-t all` into a title list below would make
     // the first stub abort the entire rip.
-    let explicit_selection = !title_nums.is_empty() && !all_titles;
+    let (multi_title, explicit_selection) = title_policy(jobs.len(), &title_nums, all_titles);
 
     for (title_idx, dest_url) in &jobs {
         // The MAIN FEATURE is title index 0 (the disc's primary title — first in
         // every title list throughout the codebase). A failure there is always a
         // hard error, even in an all-titles rip: the user wants the movie.
-        let is_feature = title_idx.unwrap_or(0) == 0;
+        let is_feature = is_feature_title(*title_idx);
         // Print title info if we have it
         if let (Some(idx), Some(t)) = (title_idx, &titles) {
             if !title_in_range(*idx, t.len()) {
@@ -2009,7 +2006,12 @@ fn pipe_disc(
     let mut selection = libfreemkv::StreamSelection::default();
     {
         let disc = session.disc().expect("scan populated the disc");
-        if title_idx >= disc.titles.len() {
+        // The SAME range rule the scanned-source path in `run()` applies —
+        // `title_in_range`, not a second hand-rolled copy of it. This one used
+        // to be spelled out inline, and inverted it does not merely reject a
+        // good title: `disc.titles[title_idx]` is indexed a few lines below, so
+        // an out-of-range index panics the rip on a live drive.
+        if !title_in_range(title_idx, disc.titles.len()) {
             return Err(PipeFail::fatal(strings::fmt(
                 "error.title_out_of_range",
                 &[
@@ -2047,8 +2049,7 @@ fn pipe_disc(
         // path is gated inside `DiscStream::new` (its per-title CSS crack, driven
         // by `mux_stream`), so it is deliberately not pre-cracked here; `--raw`
         // passes.
-        let is_dvd = matches!(disc.format, libfreemkv::DiscFormat::Dvd);
-        if !is_dvd {
+        if needs_pre_mux_title_key(disc.format) {
             let keys = disc.decrypt_keys();
             disc.ensure_title_decryptable(raw, &keys, false)
                 .map_err(PipeFail::from_typed)?;
@@ -2115,6 +2116,58 @@ fn is_metadata_sink(dest: &str) -> bool {
 /// at least one byte was recovered.
 fn disc_copy_recovered_data(bytes_good: u64) -> bool {
     bytes_good > 0
+}
+
+/// What a finished `disc:// → iso://` copy actually produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyVerdict {
+    /// Ctrl-C landed mid-sweep. The ISO on disk is a prefix of the disc; the
+    /// mapfile is preserved so a later run can resume.
+    Interrupted,
+    /// The sweep ran to the end and recovered ZERO readable bytes — the ISO is
+    /// all zeroes.
+    NoData,
+    /// A usable image.
+    Complete,
+}
+
+/// Grade a `CopyResult`. Two of the three verdicts are failures, and BOTH of
+/// them arrive as `Ok(_)` from the engine — a halted sweep and a whole-disc
+/// read failure are both "the copy function returned normally". If either is
+/// misgraded the CLI prints `rip.complete` over an unusable image and exits 0,
+/// which is the single failure this crate must never commit.
+///
+/// Order matters: a halt is reported as interrupted even when it also recovered
+/// nothing, because "you stopped it" is the more useful thing to tell the user
+/// and the mapfile makes it resumable.
+fn copy_verdict(r: &freemkv_engine::CopyResult) -> CopyVerdict {
+    if r.halted {
+        CopyVerdict::Interrupted
+    } else if !disc_copy_recovered_data(r.bytes_good) {
+        CopyVerdict::NoData
+    } else {
+        CopyVerdict::Complete
+    }
+}
+
+/// The copy options a CLI disc→ISO sweep runs under.
+///
+/// `decrypt: !raw` is the one that matters most: inverted, the default flags
+/// write a CIPHERTEXT ISO and say nothing. `multipass` dropped means `--multipass`
+/// is accepted and recovery never runs; `progress` dropped means a multi-hour
+/// sweep prints no progress at all.
+fn disc_copy_options<'a>(
+    raw: bool,
+    multipass: bool,
+    progress: &'a dyn libfreemkv::progress::Progress,
+) -> freemkv_engine::CopyOptions<'a> {
+    freemkv_engine::CopyOptions {
+        decrypt: !raw,
+        multipass,
+        halt: None,
+        progress: Some(progress),
+        ..Default::default()
+    }
 }
 
 /// Print the interrupt notice and return the error string both pipe paths use
@@ -2319,15 +2372,9 @@ fn disc_to_iso(
         speed_est: &speed_est,
     };
 
-    let copy_opts = freemkv_engine::CopyOptions {
-        decrypt: !raw,
-        multipass,
-        halt: None,
-        progress: Some(&progress),
-        ..Default::default()
-    };
+    let copy_opts = disc_copy_options(raw, multipass, &progress);
     let success = match freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts) {
-        Ok(r) if r.halted => {
+        Ok(r) if copy_verdict(&r) == CopyVerdict::Interrupted => {
             // Ctrl-C halted the copy (report() returned false). Don't print
             // "Complete" over a partial ISO — say it was interrupted and report
             // failure so the exit code is non-zero. The mapfile is preserved, so
@@ -2338,7 +2385,7 @@ fn disc_to_iso(
             out.raw(Normal, &strings::get("rip.interrupted"));
             false
         }
-        Ok(r) if !disc_copy_recovered_data(r.bytes_good) => {
+        Ok(r) if copy_verdict(&r) == CopyVerdict::NoData => {
             // The copy ran to completion but recovered ZERO readable bytes —
             // every ECC block was zero-filled and marked NonTrimmed (whole disc
             // unreadable). The ISO on disk is all zeroes and unusable. Don't
@@ -2544,6 +2591,19 @@ impl freemkv_engine::Sink for HaltSink<'_> {
 
 /// Run `Disc::extract_tree` (via `freemkv_engine::extract_tree`) and render
 /// the result. Shared by the disc:// and iso:// `dir://` paths.
+/// Whether a `dir://` extraction counts as a success — and therefore whether
+/// `freemkv` exits 0.
+///
+/// A halted extract is a failure (the tree is a prefix of the disc), and so is
+/// an incomplete one: `extract_tree` returns `Ok` for a run that wrote every
+/// file with holes in them, and a script that only checks `$?` would file a
+/// holed tree as finished media. Scripts rely on the non-zero exit to detect
+/// "extracted but holed" and re-run via ISO multipass, so this is a contract,
+/// not a nicety.
+fn extract_succeeded(halted: bool, complete: bool) -> bool {
+    !halted && complete
+}
+
 fn run_extract(
     disc: &libfreemkv::Disc,
     reader: &mut dyn libfreemkv::SectorSource,
@@ -2591,7 +2651,7 @@ fn run_extract(
             }
             if res.halted {
                 out.raw(Normal, &strings::get("rip.interrupted"));
-                return false;
+                return extract_succeeded(res.halted, res.complete);
             }
             let good_mb = res.bytes_good as f64 / 1_048_576.0;
             if res.complete {
@@ -2605,7 +2665,7 @@ fn run_extract(
                         ],
                     ),
                 );
-                true
+                extract_succeeded(res.halted, res.complete)
             } else {
                 let lost_mb = res.bytes_lost() as f64 / 1_048_576.0;
                 out.raw(
@@ -2620,7 +2680,7 @@ fn run_extract(
                 );
                 // A lossy extraction returns failure (non-zero exit) so scripts
                 // can detect "extracted but holed" and re-run via iso multipass.
-                false
+                extract_succeeded(res.halted, res.complete)
             }
         }
         Err(e) => {
@@ -3014,6 +3074,63 @@ fn title_in_range(idx: usize, count: usize) -> bool {
     idx < count
 }
 
+/// Whether a disc format needs its per-title key checked BEFORE the mux runs.
+///
+/// AACS and the other non-DVD formats: yes. `decrypt_keys_for_title` does no
+/// drive I/O for them, so the gate is free, and a `None` key means the mux
+/// would write garbage and exit 0 — the failure has to surface here as
+/// `NoDiscKey`.
+///
+/// DVD: no. Its per-title CSS crack happens inside `DiscStream::new`, driven by
+/// `mux_stream`, so pre-cracking here would be a second drive read. Inverted,
+/// this skips the AACS gate entirely and ships that garbage.
+fn needs_pre_mux_title_key(format: libfreemkv::DiscFormat) -> bool {
+    !matches!(format, libfreemkv::DiscFormat::Dvd)
+}
+
+/// The `-t` default: with no `-t N` and no `-t all`, rip the MAIN TITLE only.
+///
+/// Pre-1.6 an empty selection meant all-titles, which on an obfuscated disc
+/// (50+ near-equal-length playlists) turned a 40 GB disc into ~200 GB of
+/// near-duplicate MKVs. `-t all` restores that behaviour explicitly and must
+/// therefore be left ALONE here: normalizing it to `[1]` would silently rip one
+/// title from an explicit all-titles request.
+///
+/// This is a real function rather than three lines inside `run()` because a
+/// test that re-states the rule proves nothing about the caller — the previous
+/// one did exactly that, and both mutants of the line in `run()` survived it.
+fn normalize_title_nums(title_nums: &mut Vec<usize>, all_titles: bool) {
+    if title_nums.is_empty() && !all_titles {
+        title_nums.push(1);
+    }
+}
+
+/// The two inputs the per-title skip/stop policy runs on.
+///
+/// Returns `(multi_title, explicit_selection)`. Both feed
+/// `freemkv_engine::decide_title`, which is the single source of the skip / stop
+/// / fail rule shared with autorip and the desktop UI — but the CLI derives its
+/// arguments here, and getting either wrong changes the verdict without
+/// changing the policy:
+///
+/// - `multi_title` widened to `>=` makes every single-title rip look like a
+///   batch, so `decide_title` returns `Skip` instead of `StopFatal`: a hard
+///   failure on the one title the user asked for prints "title skipped" and the
+///   command EXITS 0. That is this crate's documented historical bug.
+/// - `explicit_selection` inverted does the same in the other direction: an
+///   incidental uncrackable menu stub in an all-titles rip aborts the whole run.
+fn title_policy(job_count: usize, title_nums: &[usize], all_titles: bool) -> (bool, bool) {
+    (job_count > 1, !title_nums.is_empty() && !all_titles)
+}
+
+/// Whether this job is the main feature — title index 0, the disc's primary
+/// title, first in every title list in the codebase. A failure there is always
+/// a hard error even in an all-titles rip: the user wants the movie. Inverted,
+/// a failure on the feature itself becomes a skippable extra.
+fn is_feature_title(title_idx: Option<usize>) -> bool {
+    title_idx.unwrap_or(0) == 0
+}
+
 fn sanitize_name(name: &str) -> String {
     let s = name
         .replace(
@@ -3279,11 +3396,11 @@ mod tests {
 
     #[test]
     fn the_t_default_normalizes_to_the_main_title_only() {
-        // The rule as `run()` applies it, extracted so it can be asserted.
+        // The rule `run()` itself applies, called directly. It used to be
+        // re-stated as a local copy here, which proved nothing about `run()` —
+        // both mutants of the real line survived this test.
         fn normalize(mut nums: Vec<usize>, all_titles: bool) -> Vec<usize> {
-            if nums.is_empty() && !all_titles {
-                nums.push(1);
-            }
+            super::normalize_title_nums(&mut nums, all_titles);
             nums
         }
         // No flags at all -> main title only, NOT every title.
@@ -3918,6 +4035,11 @@ mod tests {
         assert!(!title_in_range(3, 3), "one past the end is out of range");
         assert!(!title_in_range(99, 3), "far past the end is out of range");
         assert!(!title_in_range(0, 0), "no titles → any index out of range");
+        // The live-drive path (`pipe_disc`) applies the SAME rule through this
+        // same function now. It used to spell the comparison out inline, so
+        // hardening one copy left the other open — and inverted there it does
+        // not merely reject a good title: `disc.titles[title_idx]` is indexed
+        // two lines later, turning the rejection into an index panic mid-rip.
     }
 
     #[test]
@@ -5187,5 +5309,306 @@ mod tests {
         // Windows job even if a future change made it cfg-specific.)
         let s = sanitize_name(r"C:\Movie");
         assert!(!s.contains(':') && !s.contains('\\'), "got {s}");
+    }
+}
+
+/// The decisions that separate "the rip worked" from "the rip did not", pulled
+/// out of the I/O functions they used to live inside.
+///
+/// Every function under test here is reachable in production ONLY through a
+/// physical drive or a disc image, and there is no fixture in CI — which is why
+/// cargo-mutants could replace whole bodies with `Ok(())` / `true` and nothing
+/// failed. The verdicts themselves are pure, so they are tested as verdicts.
+#[cfg(test)]
+mod verdict_tests {
+    use super::{
+        CopyVerdict, PipeFail, check_selection_coverage, copy_verdict, disc_copy_options,
+        extract_succeeded, finalize_mux, is_feature_title, title_policy,
+    };
+    use crate::output::Output;
+
+    fn outcome(completed: bool, bytes: u64) -> libfreemkv::MuxOutcome {
+        libfreemkv::MuxOutcome {
+            completed,
+            output_opened: true,
+            bytes_written: bytes,
+            errors: 0,
+            lost_bytes: 0,
+            streams: 3,
+            undelivered_streams: vec![],
+        }
+    }
+
+    fn quiet() -> Output {
+        Output::new(false, true)
+    }
+
+    /// EVERY CLI mux funnels its result through `finalize_mux` — every
+    /// `iso://`→`mkv://`, every `disc://` title. `completed == false` means an
+    /// interrupted or wedged mux left a TRUNCATED file on disk. Forced to the
+    /// success arm, the title loop counts it as written and freemkv exits 0 on
+    /// a truncated rip: the one failure this crate must never commit.
+    #[test]
+    fn a_truncated_mux_is_a_failure_not_a_success() {
+        let events = super::CliMuxEvents::new(quiet(), "mkv:///out/x.mkv".into(), true);
+
+        let good = finalize_mux(Ok(outcome(true, 1_000_000)), &quiet(), &events);
+        assert!(good.is_ok(), "a completed mux is a success");
+
+        let truncated = finalize_mux(Ok(outcome(false, 1_000)), &quiet(), &events)
+            .expect_err("a mux that did not complete left a truncated file — never Ok");
+        // Halted, not Failed: the multi-title loop must FULL-STOP rather than
+        // cancel each remaining title one at a time.
+        assert_eq!(truncated.result, freemkv_engine::TitleResult::Halted);
+
+        // Bytes written is not the test — a halt after 5 GB is still a halt.
+        let big = finalize_mux(Ok(outcome(false, 5_000_000_000)), &quiet(), &events);
+        assert!(
+            big.is_err(),
+            "bytes written cannot excuse an incomplete mux"
+        );
+
+        // A hard I/O error is classified through the mux path, not as a halt.
+        let failed = finalize_mux(Err(std::io::Error::other("E7022")), &quiet(), &events)
+            .expect_err("an errored mux is a failure");
+        assert_ne!(failed.result, freemkv_engine::TitleResult::Halted);
+    }
+
+    fn copy_result(halted: bool, good: u64, unreadable: u64) -> freemkv_engine::CopyResult {
+        freemkv_engine::CopyResult {
+            bytes_total: good + unreadable,
+            bytes_good: good,
+            bytes_unreadable: unreadable,
+            bytes_pending: 0,
+            recovered_this_pass: good,
+            complete: !halted && unreadable == 0,
+            halted,
+        }
+    }
+
+    /// Both failure verdicts arrive from the engine as `Ok(_)`. A halted sweep
+    /// and a whole-disc read failure are equally "the copy function returned
+    /// normally", and either one misgraded prints `rip.complete` over an
+    /// unusable image and exits 0.
+    #[test]
+    fn copy_verdict_reports_a_halt_and_a_zero_recovery_as_failures() {
+        // Ctrl-C after 5 GB: a partial ISO, resumable from the mapfile.
+        assert_eq!(
+            copy_verdict(&copy_result(true, 5_000_000_000, 0)),
+            CopyVerdict::Interrupted
+        );
+        // Ran to the end and read NOTHING: the ISO on disk is all zeroes.
+        assert_eq!(
+            copy_verdict(&copy_result(false, 0, 50_000_000_000)),
+            CopyVerdict::NoData
+        );
+        // A single recovered byte is enough to have produced something.
+        assert_eq!(
+            copy_verdict(&copy_result(false, 1, 0)),
+            CopyVerdict::Complete
+        );
+        assert_eq!(
+            copy_verdict(&copy_result(false, 25_000_000_000, 4096)),
+            CopyVerdict::Complete
+        );
+        // A halt that also recovered nothing reads as the halt — it is
+        // resumable, and telling the user they stopped it is more useful.
+        assert_eq!(
+            copy_verdict(&copy_result(true, 0, 0)),
+            CopyVerdict::Interrupted
+        );
+    }
+
+    /// `decrypt: !raw` inverted writes a CIPHERTEXT ISO under the default
+    /// flags, silently. A dropped `multipass` accepts `--multipass` and never
+    /// recovers. A dropped `progress` leaves a multi-hour sweep printing
+    /// nothing at all.
+    #[test]
+    fn the_disc_copy_options_honour_raw_multipass_and_progress() {
+        let nop = |_: &libfreemkv::progress::PassProgress| true;
+
+        let default_flags = disc_copy_options(false, false, &nop);
+        assert!(
+            default_flags.decrypt,
+            "a plain disc->iso rip must DECRYPT; ciphertext is only ever --raw"
+        );
+        assert!(!default_flags.multipass);
+        assert!(
+            default_flags.progress.is_some(),
+            "a sweep must report progress"
+        );
+        assert!(default_flags.halt.is_none());
+
+        let raw = disc_copy_options(true, true, &nop);
+        assert!(!raw.decrypt, "--raw is ciphertext passthrough");
+        assert!(
+            raw.multipass,
+            "--multipass must reach the copy or recovery never runs"
+        );
+        assert!(raw.progress.is_some());
+    }
+
+    /// `dir://` extraction hands its bool straight to the process exit code.
+    /// `extract_tree` returns `Ok` for a tree written with holes in every file,
+    /// so "did it error" is not the question — scripts check `$?` to detect
+    /// "extracted but holed" and re-run via ISO multipass.
+    #[test]
+    fn a_halted_or_holed_extraction_exits_nonzero() {
+        assert!(extract_succeeded(false, true));
+        assert!(
+            !extract_succeeded(true, false),
+            "a halted extract is a failure"
+        );
+        assert!(
+            !extract_succeeded(false, false),
+            "a holed tree is a failure"
+        );
+        // Contradictory input still fails closed rather than reporting success.
+        assert!(!extract_succeeded(true, true));
+    }
+
+    /// One job and a named title can never produce the combination that turns a
+    /// hard failure into a skip. Widening `multi_title` to `>=` makes every
+    /// single-title rip look like a batch, and the engine then answers `Skip`
+    /// for a failure on the only title the user asked for — printing "title
+    /// skipped" and exiting 0.
+    #[test]
+    fn a_single_title_rip_never_downgrades_a_failure_to_a_skip() {
+        use freemkv_engine::{TitleAction, TitleResult, decide_title};
+
+        let (multi, explicit) = title_policy(1, &[2], false);
+        assert!(!multi, "one job is not a multi-title rip");
+        assert!(explicit, "a named -t is an explicit selection");
+        assert!(matches!(
+            decide_title(
+                &TitleResult::Failed,
+                is_feature_title(Some(1)),
+                multi,
+                explicit
+            ),
+            TitleAction::StopFatal
+        ));
+
+        // A real all-titles batch: an incidental uncrackable stub is skippable.
+        let (multi, explicit) = title_policy(12, &[], true);
+        assert!(multi);
+        assert!(
+            !explicit,
+            "-t all asks for everything, which is not the same as naming titles"
+        );
+
+        // `-t all` expanded into a list must still read as non-explicit, or the
+        // first menu stub on an obfuscated disc aborts the whole rip.
+        let (_, explicit) = title_policy(12, &[1, 2, 3], true);
+        assert!(!explicit);
+        // Named titles without -t all stay explicit even in a batch.
+        let (multi, explicit) = title_policy(3, &[1, 2, 3], false);
+        assert!(multi && explicit);
+        // No jobs, no flags: neither.
+        assert_eq!(title_policy(0, &[], false), (false, false));
+    }
+
+    /// The main feature is title index 0. A failure there is a hard error even
+    /// in an all-titles rip; inverted, the movie itself becomes skippable and
+    /// the run summarises as success.
+    #[test]
+    fn only_title_index_zero_is_the_main_feature() {
+        assert!(is_feature_title(Some(0)));
+        assert!(is_feature_title(None), "an unindexed job is the feature");
+        assert!(!is_feature_title(Some(1)));
+        assert!(!is_feature_title(Some(11)));
+    }
+
+    fn audio(pid: u16, lang: &str) -> libfreemkv::Stream {
+        libfreemkv::Stream::Audio(libfreemkv::AudioStream {
+            pid,
+            codec: libfreemkv::Codec::TrueHd,
+            channels: libfreemkv::AudioChannels::Stereo,
+            language: lang.into(),
+            sample_rate: libfreemkv::SampleRate::S48,
+            secondary: false,
+            purpose: libfreemkv::LabelPurpose::Normal,
+            label: String::new(),
+        })
+    }
+
+    /// `-a jpn` against a title that carries only English must not silently
+    /// ship a file with no audio at all. Single-title: a hard error. Batch: a
+    /// warning, because a library scan over mixed-language discs must not
+    /// hard-fail on one title. The whole function could be replaced with
+    /// `Ok(())` and nothing noticed — nothing observed the `Err` case.
+    #[test]
+    fn a_requested_language_absent_from_the_title_is_an_error_for_a_single_title() {
+        let mut title = libfreemkv::DiscTitle::empty();
+        title.streams = vec![audio(0x1100, "eng")];
+        let streams = freemkv_engine::StreamChoice {
+            audio: freemkv_engine::StreamFilter::Langs(vec!["jpn".into()]),
+            subtitles: freemkv_engine::StreamFilter::All,
+        };
+
+        let err = check_selection_coverage(&streams, &title, 1, false, &quiet())
+            .expect_err("a single-title rip must fail rather than ship a soundless file");
+        assert!(
+            err.to_lowercase().contains("eng") || err.contains("jpn"),
+            "the message should name the languages involved: {err}"
+        );
+
+        // The same title in a batch: warn and keep going.
+        assert!(
+            check_selection_coverage(&streams, &title, 4, true, &quiet()).is_ok(),
+            "a batch must not hard-fail on one title of the wrong language"
+        );
+
+        // A language the title DOES carry is not an error in either mode.
+        let matched = freemkv_engine::StreamChoice {
+            audio: freemkv_engine::StreamFilter::Langs(vec!["eng".into()]),
+            subtitles: freemkv_engine::StreamFilter::All,
+        };
+        assert!(check_selection_coverage(&matched, &title, 1, false, &quiet()).is_ok());
+    }
+
+    /// A `PipeFail` classification is what the loop acts on, so the
+    /// constructors must not collapse into each other.
+    #[test]
+    fn the_failure_classes_stay_distinct() {
+        assert_eq!(
+            PipeFail::fatal("x".into()).result,
+            freemkv_engine::TitleResult::Failed
+        );
+        assert_eq!(
+            PipeFail::halted("x".into()).result,
+            freemkv_engine::TitleResult::Halted
+        );
+    }
+}
+
+#[cfg(test)]
+mod disc_gate_tests {
+    use super::needs_pre_mux_title_key;
+    use libfreemkv::DiscFormat;
+
+    /// The per-title decrypt gate runs for every format EXCEPT DVD.
+    ///
+    /// For AACS the check is free (`decrypt_keys_for_title` does no drive I/O)
+    /// and a missing key means the mux would write garbage and exit 0 — the
+    /// comment on the gate says exactly that. For DVD the crack happens inside
+    /// `DiscStream::new`, so gating here would be a second drive read.
+    #[test]
+    fn every_format_but_dvd_is_key_checked_before_the_mux() {
+        for f in [
+            DiscFormat::BluRay,
+            DiscFormat::Uhd,
+            DiscFormat::Fmts,
+            DiscFormat::HdDvd,
+        ] {
+            assert!(
+                needs_pre_mux_title_key(f),
+                "{f:?} must be key-checked before the mux or it muxes garbage at exit 0"
+            );
+        }
+        assert!(
+            !needs_pre_mux_title_key(DiscFormat::Dvd),
+            "a DVD is cracked inside DiscStream::new — gating here is a second drive read"
+        );
     }
 }

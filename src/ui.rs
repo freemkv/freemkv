@@ -674,6 +674,40 @@ pub fn row_parents(rows: &[Row]) -> Vec<Option<usize>> {
 /// lands on disk: `<dir>/<source stem>_t<N>.<ext>`, where `N` is the 1-based
 /// number of the first ticked title. Extracted from `start_run` so it can be
 /// checked without launching a rip.
+/// Whether the request asks for true-multipass recovery.
+///
+/// Both halves are load-bearing and neither was asserted. Forced true, every
+/// single-pass rip runs a full sweep+patch recovery — hours of extra drive time
+/// the user did not ask for. Forced false, `--multipass` at 5 passes silently
+/// does nothing, and the abort-for-loss gate that depends on it never runs, so
+/// a damaged disc muxes to a hole-ridden file reported as written.
+///
+/// `max_passes == 0` means "no passes", so it is not multipass whatever the
+/// mode says.
+pub fn wants_multipass(rip_mode: &str, max_passes: u32) -> bool {
+    rip_mode == "Multi-pass" && max_passes > 0
+}
+
+/// Whether `--raw` (keep-encrypted) actually applies to this output.
+///
+/// Ciphertext passthrough only means anything for a whole-disc ISO image; for
+/// any mux it would write encrypted bytes into a container that claims to hold
+/// video. Mirrors the CLI's iso-only rule rather than silently forwarding the
+/// setting.
+pub fn raw_applies(raw_setting: bool, iso_output: bool) -> bool {
+    raw_setting && iso_output
+}
+
+/// Whether the user has narrowed the tracks down to video only.
+///
+/// Allowed — some people want a video-only extract — but never silently: a
+/// file with no audio is usually an accident, and it is far cheaper to say so
+/// before the rip than after. `explicit_streams` is what separates "unticked
+/// everything" from "made no choice at all", which keeps every track.
+pub fn is_video_only_selection(explicit_streams: bool, audio: &[u16], sub: &[u16]) -> bool {
+    explicit_streams && audio.is_empty() && sub.is_empty()
+}
+
 pub fn output_file_name(
     source: &str,
     dir: &str,
@@ -1082,7 +1116,7 @@ impl App {
         // The user narrowed the tracks down to nothing (every audio AND subtitle
         // unchecked): allowed — some want a video-only extract — but never
         // silently. Surface it so an accidental result is caught before the rip.
-        if explicit_streams && audio_pids.is_empty() && sub_pids.is_empty() {
+        if is_video_only_selection(explicit_streams, &audio_pids, &sub_pids) {
             self.say(
                 LogKind::Notice,
                 &crate::strings::get("gui.log.video_only_warning"),
@@ -1100,7 +1134,7 @@ impl App {
         // container. Mirror the CLI's iso-only rule instead of silently
         // forwarding it.
         let iso_output = self.format.contains("ISO image");
-        let raw = self.settings.raw && iso_output;
+        let raw = raw_applies(self.settings.raw, iso_output);
         if self.settings.raw && !iso_output {
             self.say(
                 LogKind::Notice,
@@ -1144,7 +1178,7 @@ impl App {
                     .trim()
                     .parse::<usize>()
                     .unwrap_or(0),
-                multipass: self.settings.rip_mode == "Multi-pass" && max_passes > 0,
+                multipass: wants_multipass(&self.settings.rip_mode, max_passes),
                 max_passes,
                 abort_lost_secs: self.settings.abort_lost_secs.trim().parse().unwrap_or(0),
                 keep_iso: self.settings.keep_iso,
