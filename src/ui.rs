@@ -1286,7 +1286,13 @@ impl App {
                 &crate::strings::fmt("gui.log.unreadable", &[("n", &p.sectors_bad.to_string())]),
             );
         }
-        if st.finished.load(std::sync::atomic::Ordering::Relaxed) {
+        // `Acquire`, pairing with the worker's `Release` store in
+        // `engine::start_rip`'s `SignalDone::drop`: seeing `true` here
+        // guarantees the `summary`/`outcome` writes sequenced-before that
+        // store are visible below, without leaning on an unstated
+        // assumption that locking `summary`/`outcome` will happen to
+        // provide the same guarantee on every platform this ever runs on.
+        if st.finished.load(std::sync::atomic::Ordering::Acquire) {
             let sum = st.summary.lock().map(|s| s.clone()).unwrap_or_default();
             self.say(LogKind::Result, &sum);
             self.result_summary = sum;
