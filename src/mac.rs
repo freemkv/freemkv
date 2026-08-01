@@ -203,11 +203,14 @@ define_class!(
             let Some(s) = sender else { return };
             let b: &NSButton = unsafe { &*(s as *const AnyObject as *const NSButton) };
             let i = { b.tag() } as usize;
-            let on = { b.state() } > 0;
             if let Some(c) = self.ivars().ctrl.borrow().as_ref() {
-                // The core owns cascade + tri-state; the shell only reports
-                // which row was clicked.
-                c.app_mut(|a| a.tree.set_checked(i, on));
+                // The core owns cascade, tri-state AND the toggle direction;
+                // the shell only reports which row was clicked. It used to read
+                // the direction off the button's own state, and an NSButton
+                // with allowsMixedState reports -1 for mixed — so a click on a
+                // partly-ticked title CLEARED it here while the Win32 shell,
+                // which read `Off | Mixed` as "turn on", selected all of it.
+                c.app_mut(|a| a.tree.toggle(i));
                 c.render();
             }
         }
@@ -548,6 +551,19 @@ define_class!(
         #[unsafe(method(onPrefs:))]
         fn on_prefs(&self, _s: Option<&AnyObject>) {
             self.act(crate::ui::Cmd::Settings);
+        }
+
+        /// Cancel: close the Settings window and keep NOTHING.
+        ///
+        /// Deliberately does not call `read_prefs_form`, does not touch the
+        /// running `App`, and does not save. `settings` is only mutated by
+        /// `read_prefs_form`, so simply not calling it leaves the stored copy
+        /// exactly as the window found it.
+        #[unsafe(method(onCancelPrefs:))]
+        fn on_cancel_prefs(&self, _s: Option<&AnyObject>) {
+            if let Some(w) = self.ivars().win_prefs.borrow().as_ref() {
+                w.close();
+            }
         }
 
         #[unsafe(method(onClosePrefs:))]
@@ -2798,7 +2814,19 @@ impl Rows {
         self.popups.push((key.to_string(), p));
         self.y -= 30.0;
     }
-    fn field(&mut self, mtm: MainThreadMarker, _key: &str, s: &str, val: &str, w: f64) {
+    /// A plain text row.
+    ///
+    /// It MUST register `(key, control)` in `self.fields`, exactly as `path`
+    /// below does. That list is the only thing `read_prefs_form` iterates and
+    /// the only thing the populate loop writes into, so a row missing from it
+    /// is write-only in both directions: it displays the hardcoded literal
+    /// passed at the call site rather than what is on disk, and OK discards
+    /// whatever the user typed. The key used to be `_key` here while `path`
+    /// pushed it — one form-row policy, two implementations, one of them
+    /// hardened — which silently dropped every free-form setting on this shell,
+    /// including `abort_lost_secs` (the abort-for-loss threshold) and
+    /// `max_passes` (which decides whether recovery runs at all).
+    fn field(&mut self, mtm: MainThreadMarker, key: &str, s: &str, val: &str, w: f64) {
         self.label(mtm, s);
         let f = {
             NSTextField::initWithFrame(
@@ -2811,6 +2839,7 @@ impl Rows {
             f.setFont(Some(&NSFont::systemFontOfSize(12.0)));
             self.view.addSubview(&f);
         }
+        self.fields.push((key.to_string(), f));
         self.y -= 30.0;
     }
     fn path(
@@ -3196,12 +3225,16 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     {
         ok.setKeyEquivalent(&NSString::from_str("\r"));
         bd.addSubview(&ok);
+        // Cancel must NOT be onClosePrefs: — that reads the form, pushes it
+        // into the running App and writes it to disk. Wired to the same
+        // selector as OK, Cancel committed every edit the user had just decided
+        // against, to disk, with a "Settings saved" line in the log.
         bd.addSubview(&btn(
             mtm,
             &crate::strings::get("gui.btn.cancel"),
             r(w - 194.0, 12.0, 88.0, 28.0),
             c,
-            sel!(onClosePrefs:),
+            sel!(onCancelPrefs:),
         ));
     }
     win

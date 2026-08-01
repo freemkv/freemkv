@@ -177,6 +177,23 @@ impl Tree {
         }
     }
 
+    /// What a CLICK on row `i`'s tick box does.
+    ///
+    /// This is a decision, so it lives here and not in a shell. Both shells
+    /// carried a comment saying "the core owns cascade + tri-state; the shell
+    /// only reports which row was clicked" while each in fact computed its own
+    /// answer, and the two answers disagreed: Windows read `Off | Mixed` as
+    /// "turn on", macOS read the NSButton's mixed state (`-1`) as "turn off".
+    /// So clicking a partly-ticked title selected all of it on one platform and
+    /// deselected all of it on the other.
+    ///
+    /// A partly-ticked title becomes fully ticked. Clicking again clears it —
+    /// which is the only reading that makes a second click undo the first.
+    pub fn toggle(&self, i: usize) {
+        let on = matches!(self.check_state(i), Check::Off | Check::Mixed);
+        self.set_checked(i, on);
+    }
+
     /// Tick a row and cascade to its streams.
     pub fn set_checked(&self, i: usize, on: bool) {
         *self.arena[i].checked.borrow_mut() = on;
@@ -674,6 +691,31 @@ pub fn row_parents(rows: &[Row]) -> Vec<Option<usize>> {
 /// lands on disk: `<dir>/<source stem>_t<N>.<ext>`, where `N` is the 1-based
 /// number of the first ticked title. Extracted from `start_run` so it can be
 /// checked without launching a rip.
+/// Whether `format` is one of the options `formats` currently offers.
+///
+/// `View` publishes the chosen format and the offered list as two independent
+/// fields, and nothing kept them in agreement. Opening a source that withdraws
+/// an option — an MPEG-2 DVD after an H.264 Blu-ray withdraws MP4 — left the
+/// model holding a format no longer on the list. A shell then has to invent a
+/// reconciliation policy, and the Win32 one snapped its dropdown to the first
+/// entry without telling the model: the user READ "MKV", pressed Run, and the
+/// engine was handed MP4, which fails at mux time with E9048.
+pub fn format_is_offered(format: &str, formats: &[Vec<&'static str>]) -> bool {
+    formats.iter().any(|g| g.contains(&format))
+}
+
+/// The format a source should end up on, given what it can actually offer.
+///
+/// Keeps the current choice when it is still available, and otherwise falls
+/// back to the first option on the list. Returning the fallback rather than
+/// applying it keeps this assertable on its own.
+pub fn reconcile_format<'a>(format: &'a str, formats: &[Vec<&'static str>]) -> &'a str {
+    if format_is_offered(format, formats) {
+        return format;
+    }
+    formats.iter().flatten().next().copied().unwrap_or(format)
+}
+
 /// Whether the request asks for true-multipass recovery.
 ///
 /// Both halves are load-bearing and neither was asserted. Forced true, every
@@ -881,6 +923,32 @@ impl App {
     pub fn mp4_possible(&self) -> bool {
         let known: Vec<&String> = self.video_codecs.iter().filter(|c| !c.is_empty()).collect();
         known.is_empty() || known.iter().any(|c| MP4_VIDEO.contains(&c.as_str()))
+    }
+
+    /// The output formats this source can actually produce.
+    pub fn offered_formats(&self) -> Vec<Vec<&'static str>> {
+        output_formats(!is_container(&self.source), self.mp4_possible())
+    }
+
+    /// The format this rip will ACTUALLY use.
+    ///
+    /// `self.format` is the user's standing preference and outlives the source
+    /// it was chosen for — `open()` deliberately does not reset it, so a choice
+    /// survives closing and reopening the same disc. But a new source may not
+    /// offer it: pick MP4 on an H.264 Blu-ray, then open an MPEG-2 DVD and MP4
+    /// leaves the list.
+    ///
+    /// Every consumer — the view, the progress captions, the output filename
+    /// and the `RipRequest` — reads the format through here, so there is one
+    /// answer instead of one per caller. Previously `view()` published the raw
+    /// preference alongside a list that no longer contained it, and the Win32
+    /// shell resolved the contradiction by snapping its dropdown to the first
+    /// entry and leaving the model alone: the user read "MKV", pressed Run, and
+    /// the engine was handed MP4, failing at mux time with E9048 after the
+    /// drive had already been read.
+    pub fn effective_format(&self) -> String {
+        let offered = self.offered_formats();
+        reconcile_format(&self.format, &offered).to_string()
     }
 
     /// Why the current format cannot hold the ticked titles, if it cannot.
@@ -1133,7 +1201,7 @@ impl App {
         // image" output; for any mux it would write ciphertext into the
         // container. Mirror the CLI's iso-only rule instead of silently
         // forwarding it.
-        let iso_output = self.format.contains("ISO image");
+        let iso_output = self.effective_format().contains("ISO image");
         let raw = raw_applies(self.settings.raw, iso_output);
         if self.settings.raw && !iso_output {
             self.say(
@@ -1150,7 +1218,7 @@ impl App {
         let out_file = output_file_name(
             &self.source,
             &self.output_dir,
-            &self.format,
+            &self.effective_format(),
             titles.first().copied(),
         );
         self.info = Some(InfoRows::starting(&self.source, &out_file));
@@ -1165,7 +1233,7 @@ impl App {
                 source: self.source.clone(),
                 dest_dir: self.output_dir.clone(),
                 titles,
-                format: self.format.clone(),
+                format: self.effective_format(),
                 audio_pids,
                 sub_pids,
                 explicit_streams,
@@ -1275,15 +1343,15 @@ impl App {
             show_overall_bar: self.run_titles > 1,
             saving_current: crate::strings::fmt(
                 "gui.progress.saving_current",
-                &[("container", container_label(&self.format))],
+                &[("container", container_label(&self.effective_format()))],
             ),
             saving_overall: crate::strings::fmt(
                 "gui.progress.saving_overall",
-                &[("container", container_label(&self.format))],
+                &[("container", container_label(&self.effective_format()))],
             ),
             output_dir: self.output_dir.clone(),
-            format: self.format.clone(),
-            formats: output_formats(!is_container(&self.source), self.mp4_possible()),
+            format: self.effective_format(),
+            formats: self.offered_formats(),
             can_run: !self.running() && !self.source.is_empty(),
             log: self.log.clone(),
             log_hidden: self.log_hidden,

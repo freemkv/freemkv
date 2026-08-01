@@ -218,8 +218,12 @@ pub fn run(device: Option<&str>, args: &[String]) {
         std::process::exit(1);
     }
 
+    // Every file this run writes, in order. Only these are archived — see
+    // `zip_files` for why walking the directory is not safe here.
+    let mut written: Vec<String> = Vec::new();
+
     // Save raw INQUIRY
-    save_bin(&profile_dir, "inquiry.bin", &capture.inquiry);
+    save_bin(&profile_dir, "inquiry.bin", &capture.inquiry, &mut written);
 
     // Save captured features
     let mut feat_lines = Vec::new();
@@ -233,7 +237,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
         }
 
         let fname = format!("gc_{:04x}.bin", feat.code);
-        save_bin(&profile_dir, &fname, &feat_data);
+        save_bin(&profile_dir, &fname, &feat_data, &mut written);
         feat_lines.push(format!(
             "0x{:04X} = \"{}\"  # {}",
             feat.code, fname, feat.name
@@ -260,22 +264,22 @@ pub fn run(device: Option<&str>, args: &[String]) {
             let masked = libfreemkv::mask_bytes(&data[0..12]);
             data[0..12].copy_from_slice(&masked);
         }
-        save_bin(&profile_dir, "rb_f1.bin", &data);
+        save_bin(&profile_dir, "rb_f1.bin", &data, &mut written);
     }
 
     // Save READ_BUFFER mode 6 (MTK)
     if let Some(ref data) = capture.rb_mode6 {
-        save_bin(&profile_dir, "rb_mode6.bin", data);
+        save_bin(&profile_dir, "rb_mode6.bin", data, &mut written);
     }
 
     // Save RPC state
     if let Some(ref data) = capture.rpc_state {
-        save_bin(&profile_dir, "rpc_state.bin", data);
+        save_bin(&profile_dir, "rpc_state.bin", data, &mut written);
     }
 
     // Save MODE SENSE 2A
     if let Some(ref data) = capture.mode_2a {
-        save_bin(&profile_dir, "mode_2a.bin", data);
+        save_bin(&profile_dir, "mode_2a.bin", data, &mut written);
     }
 
     // ── Generate drive.toml ────────────────────────────────────────────────
@@ -347,6 +351,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
         );
         std::process::exit(1);
     }
+    written.push("drive.toml".to_string());
 
     // ── Summarize captured profile ─────────────────────────────────────────
 
@@ -391,7 +396,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
 
     print!("  {}  ", strings::get("drive.submit_packaging"));
     let _ = std::io::stdout().flush();
-    let zip_data = match zip_directory(&profile_dir) {
+    let zip_data = match zip_files(&profile_dir, &written) {
         Ok(d) => d,
         Err(e) => {
             println!(
@@ -523,10 +528,16 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
     // posted profile carries the drive serial (unless --mask), so a default-yes
     // on EOF would upload identifying hardware data without the user agreeing.
     // In that case fall straight through to the manual flow below.
-    if !token.is_empty() && std::io::stdin().is_terminal() {
+    if may_prompt_for_consent(
+        token,
+        std::io::stdin().is_terminal(),
+        std::io::stderr().is_terminal(),
+    ) {
         println!();
         eprint!("Submit this profile to help expand drive support? [Y/n] ");
-        let _ = std::io::stdout().flush();
+        // Flush the stream the PROMPT went to. This used to flush stdout after
+        // an eprint!, which is the wrong stream.
+        let _ = std::io::stderr().flush();
         let mut input = String::new();
         let n = std::io::stdin().read_line(&mut input).unwrap_or(0);
         let ans = input.trim();
@@ -565,6 +576,24 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
     println!("────────────────────────────────────────");
     print!("{}", body);
     println!("────────────────────────────────────────");
+}
+
+/// Whether to offer the auto-submit prompt at all.
+///
+/// Both channels have to be a terminal, and that is the correction. The gate
+/// used to test stdin only while the question itself is printed to STDERR, so
+/// `freemkv info disc:// --share 2>/dev/null` passed the gate, asked nothing
+/// the user could see, and blocked on a read. A bare Enter — pressed to
+/// unstick an apparently hung command — is the [Y] default, and the posted
+/// profile carries the drive serial unless `--mask` was given. That is
+/// publishing identifying hardware data to a public tracker without the user
+/// having been asked a question they could read.
+///
+/// A non-interactive stdin (a CI runner, cron, `--share </dev/null`) cannot
+/// give informed consent either, and EOF there must never be read as yes.
+/// With no compiled-in token there is nothing to submit with, so no prompt.
+fn may_prompt_for_consent(token: &str, stdin_is_tty: bool, stderr_is_tty: bool) -> bool {
+    !token.is_empty() && stdin_is_tty && stderr_is_tty
 }
 
 /// POST a drive-profile issue to `freemkv/bdemu` via the GitHub Issues API.
@@ -631,39 +660,60 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-fn zip_directory(dir: &std::path::Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+/// Archive exactly the named files from `dir`.
+///
+/// It takes a manifest rather than walking the directory, and that is the whole
+/// point. `profile_dir` is derived from firmware-controlled INQUIRY strings and
+/// `create_dir_all` succeeds on a directory that ALREADY EXISTS, so a
+/// directory-walking archive published whatever else happened to be in there —
+/// unrelated local files, or a previous unmasked run's `gc_*.bin` that this
+/// capture did not overwrite. The archive is then base64'd into a GitHub issue
+/// body and can be posted to a public tracker, so "everything in this
+/// directory" is not a safe bound. "Everything this run wrote" is.
+///
+/// A name in the manifest that is missing on disk is skipped rather than
+/// failing the whole submission.
+fn zip_files(
+    dir: &std::path::Path,
+    names: &[String],
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     use std::io::Cursor;
     let buf = Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(buf);
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            // Skip our own output: a repeat `--share` in the same directory
-            // would otherwise nest the previous run's profile.zip inside the new
-            // archive.
-            if name == "profile.zip" {
-                continue;
-            }
-            zip.start_file(&name, options)?;
-            let data = std::fs::read(entry.path())?;
-            zip.write_all(&data)?;
+    let mut seen: Vec<&str> = Vec::new();
+    for name in names {
+        // Never our own output, and never the same entry twice (a duplicate
+        // start_file produces an archive some extractors reject).
+        if name == "profile.zip" || seen.contains(&name.as_str()) {
+            continue;
         }
+        let path = dir.join(name);
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        seen.push(name);
+        zip.start_file(name, options)?;
+        zip.write_all(&data)?;
     }
 
     let cursor = zip.finish()?;
     Ok(cursor.into_inner())
 }
 
-fn save_bin(dir: &std::path::Path, name: &str, data: &[u8]) {
+/// Write one capture file and RECORD its name in `written`.
+///
+/// The manifest is not bookkeeping — it is what bounds the archive. See
+/// `zip_files`.
+fn save_bin(dir: &std::path::Path, name: &str, data: &[u8], written: &mut Vec<String>) {
     let path = dir.join(name);
     if let Err(e) = std::fs::write(&path, data) {
         eprintln!("Cannot write {}: {}", path.display(), e);
         std::process::exit(1);
     }
+    written.push(name.to_string());
 }
 
 fn hex_dump(data: &[u8]) -> String {
@@ -1021,5 +1071,127 @@ mod tests {
         let dump = hex_dump(&data);
         assert!(dump.contains('\n'), "should wrap after 32 bytes: {dump}");
         assert!(dump.starts_with("00 01 02"), "{dump}");
+    }
+}
+
+#[cfg(test)]
+mod share_safety_tests {
+    use super::{may_prompt_for_consent, zip_files};
+    use std::io::Read as _;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn entries(zip: &[u8]) -> Vec<String> {
+        let mut a = zip::ZipArchive::new(std::io::Cursor::new(zip.to_vec())).expect("valid zip");
+        (0..a.len())
+            .map(|i| a.by_index(i).unwrap().name().to_string())
+            .collect()
+    }
+
+    /// The archive is bounded by what this run WROTE, not by what happens to be
+    /// in the directory.
+    ///
+    /// `profile_dir` is named from firmware-controlled INQUIRY strings and
+    /// `create_dir_all` succeeds on an existing directory, so a directory walk
+    /// published two things it should not: unrelated local files that were
+    /// already there, and a previous UNMASKED run's capture files that this
+    /// masked run did not happen to overwrite. The archive goes into a GitHub
+    /// issue body that can be posted to a public tracker.
+    #[test]
+    fn the_archive_carries_only_the_files_this_run_wrote() {
+        let dir = std::env::temp_dir().join("fmkv-zip-manifest-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("inquiry.bin"), b"this run").unwrap();
+        std::fs::write(dir.join("drive.toml"), b"[drive]\n").unwrap();
+        // Left over from an earlier, UNMASKED run of a different drive.
+        std::fs::write(dir.join("gc_0108.bin"), b"stale serial").unwrap();
+        // Nothing to do with freemkv at all.
+        std::fs::write(dir.join("tax-return.pdf"), b"private").unwrap();
+
+        let got =
+            entries(&zip_files(&dir, &names(&["inquiry.bin", "drive.toml"])).expect("zip built"));
+        assert_eq!(got, vec!["inquiry.bin", "drive.toml"]);
+        assert!(
+            !got.iter().any(|n| n == "gc_0108.bin"),
+            "a previous run's unmasked capture was published: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|n| n == "tax-return.pdf"),
+            "an unrelated local file was published: {got:?}"
+        );
+
+        // The contents really are the named files, not just the names.
+        let mut a = zip::ZipArchive::new(std::io::Cursor::new(
+            zip_files(&dir, &names(&["inquiry.bin"])).unwrap(),
+        ))
+        .unwrap();
+        let mut body = String::new();
+        a.by_name("inquiry.bin")
+            .unwrap()
+            .read_to_string(&mut body)
+            .unwrap();
+        assert_eq!(body, "this run");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A manifest entry that is not on disk, a duplicate, and our own output
+    /// are all handled without failing the submission or corrupting the zip.
+    #[test]
+    fn a_missing_duplicate_or_self_referential_entry_does_not_break_the_archive() {
+        let dir = std::env::temp_dir().join("fmkv-zip-edge-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("inquiry.bin"), b"x").unwrap();
+        std::fs::write(dir.join("profile.zip"), b"previous archive").unwrap();
+
+        let got = entries(
+            &zip_files(
+                &dir,
+                &names(&[
+                    "inquiry.bin",
+                    "inquiry.bin",
+                    "never_written.bin",
+                    "profile.zip",
+                ]),
+            )
+            .expect("a missing entry must not fail the submission"),
+        );
+        assert_eq!(
+            got,
+            vec!["inquiry.bin"],
+            "the archive must not nest itself or repeat an entry"
+        );
+
+        // An empty manifest is a valid, empty archive rather than an error.
+        assert!(entries(&zip_files(&dir, &[]).expect("empty manifest is valid")).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The consent prompt is only offered when the user can actually READ it.
+    ///
+    /// The question goes to stderr, so testing stdin alone let
+    /// `--share 2>/dev/null` reach a blocking read with nothing on screen —
+    /// and bare Enter is the [Y] default, which posts the drive serial to a
+    /// public tracker.
+    #[test]
+    fn consent_is_only_offered_when_the_question_is_visible_and_answerable() {
+        // Both channels interactive: ask.
+        assert!(may_prompt_for_consent("tok", true, true));
+
+        // stderr redirected — the question would be invisible.
+        assert!(!may_prompt_for_consent("tok", true, false));
+        // stdin redirected/piped — no informed answer is possible.
+        assert!(!may_prompt_for_consent("tok", false, true));
+        assert!(!may_prompt_for_consent("tok", false, false));
+
+        // No compiled-in token: nothing to submit with, so never ask. (The
+        // caller trims before passing, so the empty case covers whitespace.)
+        assert!(!may_prompt_for_consent("", true, true));
     }
 }
