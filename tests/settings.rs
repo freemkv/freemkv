@@ -147,3 +147,47 @@ fn cli_parity_flags_persist() {
     assert!(back.force);
     assert_eq!(back.log_level, "Verbose");
 }
+
+/// Every path this app derives from the user's home must be ABSOLUTE, even
+/// when the environment does not say where home is.
+///
+/// `home_dir()` used `unwrap_or_default()`, so an unset `HOME` produced an
+/// empty base and every derived path came out relative: `shellexpand("~/x")`
+/// returned `"x"`, `support_dir()` returned
+/// `"Library/Application Support/freemkv"`, `default_dest_dir()` returned
+/// `"Movies"`. Settings, the downloaded keydb and rip output then landed
+/// relative to the process's working directory.
+///
+/// This was invisible to CI, which always has `HOME` set. It surfaced on a
+/// bare EC2 runner (user-data runs as root with no `HOME`), where the existing
+/// `shellexpand_expands_tilde_only_at_start` assertion — which already
+/// demanded an absolute path — failed. The test was right; the code was wrong.
+///
+/// `HOME` is process-global, so this test mutates and restores it and must not
+/// run concurrently with anything else reading it; it is the only test here
+/// that touches the variable.
+#[test]
+fn derived_paths_stay_absolute_without_a_home_variable() {
+    let saved = std::env::var_os("HOME");
+    // SAFETY: single-threaded within this test binary's use of HOME; restored
+    // before returning on every path below.
+    unsafe { std::env::remove_var("HOME") };
+
+    let expanded = freemkv::settings::shellexpand("~/x");
+    let support = freemkv::platform::support_dir();
+    let dest = freemkv::platform::default_dest_dir();
+    let home = freemkv::platform::home_dir();
+
+    if let Some(v) = saved {
+        unsafe { std::env::set_var("HOME", v) };
+    }
+
+    assert!(!home.as_os_str().is_empty(), "home_dir() was empty");
+    assert!(home.is_absolute(), "home_dir() relative: {home:?}");
+    assert!(
+        std::path::Path::new(&expanded).is_absolute(),
+        "shellexpand relative without HOME: {expanded}"
+    );
+    assert!(support.is_absolute(), "support_dir relative: {support:?}");
+    assert!(dest.is_absolute(), "default_dest_dir relative: {dest:?}");
+}
