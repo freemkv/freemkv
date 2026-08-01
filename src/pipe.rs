@@ -4004,13 +4004,19 @@ mod tests {
         // returns None) when the dest is not directory-style, mirroring the
         // scanned-source guard.
         let out = Output::new(false, true);
-        let parsed_dest = libfreemkv::parse_url("mkv://movie.mkv");
+        // Under a temp path, not the process CWD: the negative assertion below
+        // is about a directory NOT existing, so a stray one left in the repo by
+        // anything else makes this test fail for the wrong reason.
+        let file = std::env::temp_dir().join("fmkv-multi-to-file/movie.mkv");
+        let _ = std::fs::remove_dir_all(&file);
+        let dest = format!("mkv://{}", file.display());
+        let parsed_dest = libfreemkv::parse_url(&dest);
         let jobs = build_jobs(
             &None,
             true, // is_disc
             &[1usize, 2usize],
             false, // is_dir_dest — a single file can't hold two titles
-            "mkv://movie.mkv",
+            &dest,
             &parsed_dest,
             &out,
         );
@@ -4018,11 +4024,12 @@ mod tests {
             jobs.is_none(),
             "multi-title disc to a file dest must be rejected, not silently turned into a dir"
         );
-        // The file `movie.mkv` must NOT have been created as a directory.
+        // The file must NOT have been created as a directory.
         assert!(
-            !std::path::Path::new("movie.mkv").is_dir(),
+            !file.is_dir(),
             "must not have created a directory at the file dest"
         );
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 
     #[test]
@@ -5609,6 +5616,192 @@ mod disc_gate_tests {
         assert!(
             !needs_pre_mux_title_key(DiscFormat::Dvd),
             "a DVD is cracked inside DiscStream::new — gating here is a second drive read"
+        );
+    }
+}
+
+#[cfg(test)]
+mod iso_key_tests {
+    use super::{KeyConfig, resolve_iso_unit_keys};
+    use crate::output::Output;
+
+    /// A reader that returns zeroes. `resolve_iso_unit_keys` only samples
+    /// ciphertext through it, and with no key source configured no sample is
+    /// consulted at all — the disc's already-resolved keys are what comes back.
+    struct ZeroSource;
+    impl libfreemkv::SectorSource for ZeroSource {
+        fn read_sectors(
+            &mut self,
+            _lba: u32,
+            count: u16,
+            buf: &mut [u8],
+            _recovery: bool,
+        ) -> libfreemkv::Result<usize> {
+            let n = count as usize * 2048;
+            buf[..n].fill(0);
+            Ok(n)
+        }
+    }
+
+    fn disc(aacs: Option<libfreemkv::AacsState>, encrypted: bool) -> libfreemkv::Disc {
+        libfreemkv::Disc {
+            volume_id: "TEST".into(),
+            meta_title: None,
+            format: libfreemkv::DiscFormat::BluRay,
+            capacity_sectors: 1,
+            capacity_bytes: 2048,
+            layers: 1,
+            titles: vec![],
+            region: libfreemkv::disc::DiscRegion::Free,
+            aacs,
+            css: None,
+            encrypted,
+            aacs_error: None,
+            css_error: None,
+            content_format: libfreemkv::ContentFormat::BdTs,
+        }
+    }
+
+    fn aacs(unit_keys: Vec<(u32, [u8; 16])>) -> libfreemkv::AacsState {
+        libfreemkv::AacsState {
+            version: 1,
+            bus_encryption: false,
+            mkb_version: None,
+            disc_hash: String::new(),
+            key_source: libfreemkv::KeyOrigin::ExternalUk,
+            vuk: None,
+            unit_keys,
+            read_data_key: None,
+            volume_id: [0u8; 16],
+            uk_ro: Vec::new(),
+            mkb: Vec::new(),
+        }
+    }
+
+    /// The keys the scan resolved must be the keys the mux is handed.
+    ///
+    /// Returning an empty vec makes every AACS ISO rip fail E7022 — or, with
+    /// `--raw`, write ciphertext into a container. Returning a placeholder
+    /// `[(0, [0; 16])]` is worse: the mux runs with a WRONG key and produces
+    /// garbage. The one test that would have noticed was fixture-gated and
+    /// vacuous.
+    #[test]
+    fn aacs_unit_keys_are_forwarded_from_the_scan() {
+        let out = Output::new(false, true);
+        // No keydb and no key URL: nothing is consulted, so what comes out is
+        // exactly what the scan already had.
+        let keys = KeyConfig {
+            keydb_path: None,
+            key_url: None,
+            key_auth: None,
+        };
+
+        let want = vec![(0u32, [0xABu8; 16]), (7u32, [0x5Cu8; 16])];
+        let got = resolve_iso_unit_keys(
+            disc(Some(aacs(want.clone())), true),
+            Box::new(ZeroSource),
+            &keys,
+            &out,
+        );
+        assert_eq!(got, want, "the scan's unit keys did not reach the mux");
+        assert!(
+            !got.iter().all(|(_, k)| *k == [0u8; 16]),
+            "an all-zero key is a placeholder, not a resolved key"
+        );
+
+        // An unencrypted disc contributes NO keys — not a placeholder entry.
+        let clear = resolve_iso_unit_keys(disc(None, false), Box::new(ZeroSource), &keys, &out);
+        assert!(
+            clear.is_empty(),
+            "an unencrypted ISO must yield no keys, got {clear:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod build_jobs_edge_tests {
+    use super::{build_jobs, disc_title_nums};
+    use crate::output::Output;
+    use libfreemkv::parse_url;
+
+    /// A scanned source whose title list came back EMPTY is not a scanned
+    /// source for job-building purposes.
+    ///
+    /// The guard is `Some(t) if !t.is_empty()`. Forced true, an empty list takes
+    /// the scanned arm, `(0..0)` yields no indices, and the rip builds ZERO jobs
+    /// — the title loop never runs and the command exits 0 having written
+    /// nothing. Falling through to the catch-all instead produces one job, which
+    /// then reports the real scan failure where the user can see it.
+    #[test]
+    fn an_empty_scanned_title_list_still_builds_a_job() {
+        let out = Output::new(false, true);
+        let dest = "mkv:///tmp/fmkv-empty-scan.mkv";
+        let parsed = parse_url(dest);
+        let jobs = build_jobs(&Some(vec![]), false, &[], false, dest, &parsed, &out)
+            .expect("an empty title list must not fail job building");
+        assert_eq!(
+            jobs.len(),
+            1,
+            "an empty scan produced {} jobs — a zero-job rip exits 0 having \
+             written nothing",
+            jobs.len()
+        );
+        assert_eq!(jobs[0].0, None, "no title was selected, so no index");
+    }
+
+    /// One title going to a DIRECTORY is named per-title inside it, not written
+    /// to the directory path itself. The guard is
+    /// `indices.len() == 1 && !is_dir_dest`; drop either half and a single-title
+    /// rip either writes to the bare directory or a multi-title rip collapses
+    /// onto one filename.
+    #[test]
+    fn one_title_into_a_directory_is_still_named_per_title() {
+        let out = Output::new(false, true);
+        let dir = std::env::temp_dir().join("fmkv-one-into-dir");
+        let dest = format!("mkv://{}/", dir.display());
+        let parsed = parse_url(&dest);
+
+        let titles = Some(vec![
+            libfreemkv::DiscTitle::empty(),
+            libfreemkv::DiscTitle::empty(),
+        ]);
+        let jobs = build_jobs(&titles, false, &[1], true, &dest, &parsed, &out)
+            .expect("a directory dest accepts a single title");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].0, Some(0), "-t 1 is the first title, 0-based");
+        assert!(
+            jobs[0].1.ends_with("_t1.mkv"),
+            "a directory dest must still name the file per title, got {}",
+            jobs[0].1
+        );
+        assert_ne!(
+            jobs[0].1, dest,
+            "the directory itself is not the output file"
+        );
+
+        // The same title against a single FILE dest goes straight to that file.
+        let file = "mkv:///tmp/fmkv-one.mkv";
+        let pf = parse_url(file);
+        let jobs = build_jobs(&titles, false, &[1], false, file, &pf, &out)
+            .expect("a file dest accepts a single title");
+        assert_eq!(jobs, vec![(Some(0), file.to_string())]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `-t all` on a disc must be REJECTED against a single-file destination
+    /// rather than silently writing twelve titles over one filename. This is the
+    /// rejection the `-t all` expansion newly makes reachable, so the shipped
+    /// help examples are checked against it elsewhere.
+    #[test]
+    fn an_expanded_disc_selection_refuses_a_single_file_destination() {
+        let out = Output::new(false, true);
+        let dest = "mkv:///tmp/fmkv-t-all-refuse.mkv";
+        let parsed = parse_url(dest);
+        let nums = disc_title_nums(true, &[], 12);
+        assert!(
+            build_jobs(&None, true, &nums, false, dest, &parsed, &out).is_none(),
+            "twelve titles were accepted into one file"
         );
     }
 }
