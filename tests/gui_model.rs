@@ -1211,3 +1211,105 @@ fn a_failed_run_always_finishes_and_is_reported_as_failed() {
         "the result page would have shown a blank summary"
     );
 }
+
+// ── policies the two shells used to own separately ─────────────────────────
+
+/// Clicking a partly-ticked title selects ALL of it, and clicking again clears
+/// it.
+///
+/// The direction is core policy. Both shells carried a comment saying "the core
+/// owns cascade + tri-state; the shell only reports which row was clicked" and
+/// both were wrong: each computed its own answer and the two disagreed. Windows
+/// read `Off | Mixed` as "turn on"; macOS read the NSButton's mixed state
+/// (`-1`) as "turn off". Same disc, same click, opposite results. The Win32
+/// self-test harness implemented the rule a third time, so it could never have
+/// caught the divergence.
+#[test]
+fn clicking_a_partly_ticked_title_selects_all_of_it() {
+    let t = tree(&two_title_disc(), "All titles", 0.0);
+    let title = t
+        .arena
+        .iter()
+        .position(|n| n.type_s == "Title" && !n.children.is_empty())
+        .expect("the fixture has a title with streams");
+
+    // Make it Mixed: title on, one stream off.
+    t.set_checked(title, true);
+    let stream = t.arena[title]
+        .children
+        .iter()
+        .copied()
+        .find(|&c| t.arena[c].checkable())
+        .expect("the title has a checkable stream");
+    t.set_checked(stream, false);
+    assert_eq!(t.check_state(title), Check::Mixed, "fixture is not mixed");
+
+    // Mixed -> fully on.
+    t.toggle(title);
+    assert_eq!(
+        t.check_state(title),
+        Check::On,
+        "a click on a partly-ticked title must select all of it"
+    );
+
+    // On -> off. A second click has to undo the first, or the control is a
+    // one-way door.
+    t.toggle(title);
+    assert_eq!(t.check_state(title), Check::Off);
+
+    // Off -> on.
+    t.toggle(title);
+    assert_eq!(t.check_state(title), Check::On);
+}
+
+/// Opening a source that cannot offer the current format moves the MODEL, not
+/// just the dropdown.
+///
+/// `View` publishes `format` and `formats` as two independent fields and
+/// nothing kept them in agreement. Pick MP4 on an H.264 disc, then open an
+/// MPEG-2 DVD: MP4 leaves the offered list, and the Win32 shell reconciled by
+/// snapping its dropdown to the first entry and leaving the model alone. The
+/// user READ "MKV", pressed Run, and the engine was handed MP4 — which fails at
+/// mux time with E9048, after the drive has already been read.
+#[test]
+fn a_format_the_source_cannot_offer_is_never_left_selected() {
+    // Pure rule first.
+    let offered = output_formats(true, false);
+    assert!(!format_is_offered("Selected titles → MP4", &offered));
+    assert!(format_is_offered(
+        reconcile_format("Selected titles → MP4", &offered),
+        &offered
+    ));
+    // A still-available choice is kept exactly as it was.
+    let keep = offered[0][0];
+    assert_eq!(reconcile_format(keep, &offered), keep);
+
+    // And the View can never publish a format its own list does not contain.
+    // An MPEG-2 source withdraws MP4; the standing preference is still MP4.
+    let mut app = App::new();
+    app.source = "/media/mpeg2.iso".into();
+    app.video_codecs = vec!["MPEG-2".to_string()];
+    app.format = "Selected titles → MP4".into();
+    assert!(!app.mp4_possible(), "fixture must withdraw MP4");
+
+    let v = app.view();
+    assert!(
+        format_is_offered(&v.format, &v.formats),
+        "the view offers {:?} but publishes {:?}",
+        v.formats,
+        v.format
+    );
+    assert_ne!(v.format, "Selected titles → MP4");
+    // The rip must agree with what the user was shown, not with the stale
+    // preference — this is the value that reaches the engine.
+    assert_eq!(app.effective_format(), v.format);
+
+    // A source that CAN offer MP4 keeps the preference untouched.
+    let mut ok = App::new();
+    ok.source = "/media/h264.iso".into();
+    ok.video_codecs = vec!["H.264".to_string()];
+    ok.format = "Selected titles → MP4".into();
+    assert!(ok.mp4_possible());
+    assert_eq!(ok.view().format, "Selected titles → MP4");
+    assert_eq!(ok.effective_format(), "Selected titles → MP4");
+}

@@ -1945,11 +1945,11 @@ impl Shell {
         let me = self.clone();
         self.tree.on().nm_click(move || {
             if let Some(row) = me.hit_state_icon() {
-                let on = matches!(
-                    me.app.borrow().tree.check_state(row),
-                    Check::Off | Check::Mixed
-                );
-                me.app_mut(|a| a.tree.set_checked(row, on));
+                // The toggle DIRECTION is core policy, not a shell decision.
+                // This used to read `Off | Mixed` here while mac.rs read the
+                // NSButton mixed state as "off", so a click on a partly-ticked
+                // title selected all of it on Windows and cleared it on macOS.
+                me.app_mut(|a| a.tree.toggle(row));
             }
             Ok(0)
         });
