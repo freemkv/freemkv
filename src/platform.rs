@@ -198,13 +198,13 @@ mod tests {
     fn is_absolute_accepts_the_platform_native_absolute_form() {
         #[cfg(unix)]
         {
-            assert!(super::is_absolute("/Users/x/Movies"));
-            assert!(super::is_absolute("  /Users/x/Movies  "));
-            assert!(!super::is_absolute(r"C:\Users\x\Movies"));
+            assert!(super::is_absolute("/opt/u/Movies"));
+            assert!(super::is_absolute("  /opt/u/Movies  "));
+            assert!(!super::is_absolute(r"C:\Users\u\Movies"));
         }
         #[cfg(windows)]
         {
-            assert!(super::is_absolute(r"C:\Users\x\Movies"));
+            assert!(super::is_absolute(r"C:\Users\u\Movies"));
             assert!(super::is_absolute(r"  C:\Users\x\Movies  "));
             assert!(super::is_absolute(r"\\server\share\x"));
             assert!(!super::is_absolute(r"\Movies"));
