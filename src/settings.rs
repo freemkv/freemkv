@@ -106,6 +106,25 @@ fn settings_path() -> PathBuf {
     support_dir().join("gui-settings.json")
 }
 
+/// Write a brand-new file with mode 0600 before any bytes land in it, so a
+/// secret (the settings file's `keyserver_token`) is never briefly readable
+/// at the process umask (typically 0644) between creation and a follow-up
+/// `set_permissions` call. `create_new` also refuses to reuse an existing
+/// path — this is only ever called on a fresh per-process temp filename.
+fn write_new_file_0600(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(data)?;
+    f.sync_all()
+}
+
 impl Settings {
     /// Read one keyed value as a display string.
     pub fn get(&self, key: &str) -> String {
@@ -246,7 +265,21 @@ impl Settings {
         let dir = support_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
         let json = serde_json::to_string_pretty(self).map_err(|e| format!("{e}"))?;
-        std::fs::write(settings_path(), json).map_err(|e| format!("{e}"))?;
+        let path = settings_path();
+        // This file holds `keyserver_token` in plaintext, so it gets the same
+        // two guards a secret on disk needs: mode 0600 (a plain `fs::write`
+        // leaves it at the process umask, typically 0644 — readable by every
+        // other local account) and an atomic write (temp file in the SAME
+        // directory, then rename). Without the rename, a crash/power-loss
+        // mid-write leaves a truncated/corrupt JSON file; `Settings::load`
+        // then silently falls back to defaults via `.ok()`, discarding the
+        // user's keyserver_url/keyserver_token/keydb_path with no warning.
+        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        write_new_file_0600(&tmp, json.as_bytes()).map_err(|e| format!("{e}"))?;
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("{e}")
+        })?;
         Ok(())
     }
 

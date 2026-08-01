@@ -1680,7 +1680,7 @@ impl Shell {
                 Effect::ShowSettings => self.prefs.show(&self.settings.borrow()),
                 Effect::ShowAbout => self.about.show(),
                 Effect::StartTicking => {
-                    let _ = self.wnd.hwnd().SetTimer(TIMER_TICK, TICK_MS, None);
+                    Self::report_timer_failure(&self.wnd, TIMER_TICK, TICK_MS);
                 }
                 Effect::StopTicking => {
                     let _ = self.wnd.hwnd().KillTimer(TIMER_TICK);
@@ -1692,8 +1692,32 @@ impl Shell {
         self.render();
     }
 
+    /// `SetTimer` can fail (Windows caps live timers per process/session). If
+    /// the poller never starts, nothing ever observes `RunState.finished`: the
+    /// worker thread runs the rip to completion in the background while this
+    /// window sits on the Progress page forever, with Cancel and every menu
+    /// command still disabled by `blocked_while_running` and no way for the
+    /// operator to learn anything is wrong short of a force-quit. A `let _ =`
+    /// here is the same "never die silently" gap `run_main`'s own error path
+    /// (below) exists to close — so it gets the same fix: a `MessageBox`,
+    /// since the timer that would carry a localized in-window notice is
+    /// exactly the one that failed to start.
+    fn report_timer_failure(wnd: &gui::WindowMain, id: usize, elapse_ms: u32) {
+        if let Err(e) = wnd.hwnd().SetTimer(id, elapse_ms, None) {
+            let _ = wnd.hwnd().MessageBox(
+                &format!(
+                    "freemkv could not start its progress timer ({e}). The rip \
+                     may still be running, but this window will not update. \
+                     Please restart freemkv."
+                ),
+                "freemkv",
+                co::MB::ICONERROR,
+            );
+        }
+    }
+
     fn start_drain(&self) {
-        let _ = self.wnd.hwnd().SetTimer(TIMER_DRAIN, TICK_MS, None);
+        Self::report_timer_failure(&self.wnd, TIMER_DRAIN, TICK_MS);
     }
 }
 
@@ -2139,6 +2163,29 @@ impl<'a> Rows<'a> {
         e
     }
 
+    /// Same contract as `field`, but for a secret (the keyserver bearer
+    /// token): `ES::PASSWORD` masks keystrokes with the system bullet
+    /// character, like every password box in Windows. Without this,
+    /// `keyserver_token` sat in a plain edit control — fully legible during
+    /// screen-sharing, presenting, or a screen recording, and the macOS shell
+    /// has the identical gap in its own plain `NSTextField`.
+    fn field_secure(&mut self, text: &str, val: &str, wd: i32) -> gui::Edit {
+        self.label(text);
+        let e = gui::Edit::new(
+            self.page,
+            gui::EditOpts {
+                text: val,
+                position: (self.gutter, self.y),
+                width: self.s.px(wd),
+                height: self.m.field_h,
+                control_style: co::ES::AUTOHSCROLL | co::ES::PASSWORD,
+                ..Default::default()
+            },
+        );
+        self.y += self.m.row_step;
+        e
+    }
+
     /// A path row: field plus a browse button that fills it.
     fn path(&mut self, text: &str, val: &str, wd: i32) -> (gui::Edit, gui::Button) {
         self.label(text);
@@ -2377,7 +2424,7 @@ impl Prefs {
         ));
         fields.push((
             "keyserver_token",
-            r.field(&g("gui.set.keyserver_token"), &st.keyserver_token, 320),
+            r.field_secure(&g("gui.set.keyserver_token"), &st.keyserver_token, 320),
         ));
         let btn_test = r.button(&g("gui.set.test_connection"), 170);
 
@@ -2738,6 +2785,33 @@ impl About {
     }
 }
 
+/// Save `Settings` to disk and tell the operator whether it worked.
+///
+/// This crate's dominant defect this round was exactly this policy
+/// implemented twice: the OK button reported a failed save
+/// (`gui.log.settings_save_error`), and the language-dropdown path saved the
+/// SAME struct a few lines away with a bare `let _ =` that dropped the error
+/// on the floor. A disk-full or permissions failure there looked identical to
+/// success — the operator picks a language, sees the UI relocalize, and has
+/// no way to know the keydb path/keyserver token/dest dir edited in the same
+/// session never reached `gui-settings.json`. One policy, one call site now.
+fn save_settings_reporting_error(sh: &Shell) {
+    match sh.settings.borrow().save() {
+        Ok(()) => sh.app_mut(|a| {
+            a.say(
+                LogKind::Result,
+                &crate::strings::get("gui.log.settings_saved"),
+            )
+        }),
+        Err(e) => sh.app_mut(|a| {
+            a.say(
+                LogKind::Notice,
+                &crate::strings::fmt("gui.log.settings_save_error", &[("e", &e)]),
+            )
+        }),
+    }
+}
+
 impl Prefs {
     fn events(&self, shell: &Shell) {
         // OK: commit the form, persist it, and push it into the running App so
@@ -2763,20 +2837,7 @@ impl Prefs {
                     a.output_dir = new_dest.clone();
                 }
             });
-            match sh.settings.borrow().save() {
-                Ok(()) => sh.app_mut(|a| {
-                    a.say(
-                        LogKind::Result,
-                        &crate::strings::get("gui.log.settings_saved"),
-                    )
-                }),
-                Err(e) => sh.app_mut(|a| {
-                    a.say(
-                        LogKind::Notice,
-                        &crate::strings::fmt("gui.log.settings_save_error", &[("e", &e)]),
-                    )
-                }),
-            }
+            save_settings_reporting_error(&sh);
             me.hide();
             Ok(())
         });
@@ -2904,7 +2965,7 @@ impl Prefs {
             #[allow(clippy::redundant_clone)]
             combo.on().cbn_sel_change(move || {
                 me.read_form(&mut sh.settings.borrow_mut());
-                let _ = sh.settings.borrow().save();
+                save_settings_reporting_error(&sh);
                 let code = sh.settings.borrow().language.clone();
                 crate::strings::set_locale(crate::ui::locale_code(&code));
                 sh.relocalize();
@@ -4472,6 +4533,129 @@ mod tests {
             failed.is_empty(),
             "widget checks failed:\n{}",
             failed.join("\n")
+        );
+    }
+
+    // ── timer failure is reported, not swallowed ────────────────────────────
+    //
+    // STOPGAP, NOT COVERAGE: this crate cannot compile `windows.rs` outside a
+    // Windows target (it is `#[cfg(target_os = "windows")]` all the way up in
+    // `lib.rs`), and this environment has no Windows toolchain to actually run
+    // `SetTimer` against — so unlike `the_real_controls_show_what_the_core_decided`
+    // above, this cannot drive a real HWND and force `SetTimer` to fail. This is
+    // a source-inspection check: it fails against the pre-fix source (a bare
+    // `let _ = ...SetTimer(...)` with no error path) and fails again if the
+    // error path is deleted, but it does NOT prove a MessageBox actually shows
+    // up on a real timer-exhaustion failure. That needs a Windows CI run.
+    #[test]
+    fn set_timer_failure_is_reported_source_inspection_only() {
+        let src = include_str!("windows.rs");
+        // Split across concatenated literals so this needle can't match the
+        // assertion's OWN text via `include_str!` of this same file — see
+        // `mac.rs`'s identical guard against a self-matching tautology.
+        let bare_tick = format!(
+            "{}{}",
+            "let _ = self.wnd.hwnd().SetTimer(TIMER_TICK", ", TICK_MS, None);"
+        );
+        assert!(
+            !src.contains(&bare_tick),
+            "Effect::StartTicking discards SetTimer's failure again with a \
+             bare `let _ =` — if the rip-progress timer fails to start, \
+             nothing ever observes RunState.finished and the window sits on \
+             the Progress page forever with no way for the operator to \
+             learn why"
+        );
+        let handler = format!("{}{}", "fn report_timer_", "failure");
+        assert!(
+            src.contains(&handler),
+            "no report_timer_failure (or equivalent) handler exists to \
+             surface a SetTimer failure to the operator"
+        );
+        let msgbox = format!("{}{}", "wnd.hwnd().Message", "Box(");
+        assert!(
+            src.contains(&msgbox),
+            "the timer-failure handler no longer shows a MessageBox — a \
+             silently-swallowed SetTimer failure is indistinguishable from \
+             a hung rip"
+        );
+    }
+
+    // ── one settings-save policy, not two ───────────────────────────────────
+    //
+    // STOPGAP, NOT COVERAGE: same caveat as the timer test above — this crate
+    // cannot compile or run `windows.rs` outside a Windows target, so this
+    // cannot drive the real language combo and force a save failure. Source
+    // inspection only: fails if the language-switch handler goes back to a
+    // bare `let _ = sh.settings.borrow().save` (…) (or re-inlines its own
+    // Ok/Err match) instead of routing through the shared helper the OK
+    // button already uses.
+    #[test]
+    fn language_switch_reports_a_failed_save_source_inspection_only() {
+        let src = include_str!("windows.rs");
+        // `.settings.borrow().save` (…) should appear in exactly ONE place:
+        // the shared helper. A second occurrence means some call site
+        // re-inlined the Ok/Err match (or a bare `let _ =`) again — the exact
+        // "one policy implemented twice" shape this crate already shipped
+        // once for this code path.
+        let direct_save = format!("{}{}", ".settings.borrow().save", "()");
+        let occurrences = src.matches(&direct_save).count();
+        assert_eq!(
+            occurrences, 1,
+            "the direct settings-save call appears {occurrences} times \
+             outside this test — it must appear exactly once, inside \
+             save_settings_reporting_error, or the language-switch path (or \
+             some future path) has silently grown its own copy again"
+        );
+        let helper = format!("{}{}", "fn save_settings_reporting", "_error");
+        assert!(
+            src.contains(&helper),
+            "the shared save_settings_reporting_error helper is gone"
+        );
+        let language_call = format!(
+            "{}{}",
+            "me.read_form(&mut sh.settings.borrow_mut());\n                save_settings_reporting",
+            "_error(&sh);"
+        );
+        assert!(
+            src.contains(&language_call),
+            "the language combo's cbn_sel_change handler no longer calls \
+             save_settings_reporting_error right after committing the form \
+             — a failed save on the language-switch path would go \
+             unreported again"
+        );
+    }
+
+    // ── the keyserver token is not shown in plaintext ───────────────────────
+    //
+    // STOPGAP, NOT COVERAGE: whether `ES::PASSWORD` actually masks keystrokes
+    // on screen needs a real HWND — the same gap noted on the timer and
+    // settings-save source-inspection tests above. Source inspection only:
+    // fails if the Keys tab goes back to building `keyserver_token` with the
+    // plain `field` constructor.
+    #[test]
+    fn the_keyserver_token_field_is_secure_source_inspection_only() {
+        let src = include_str!("windows.rs");
+        let secure_ctor = format!("{}{}", "fn field_", "secure");
+        assert!(
+            src.contains(&secure_ctor),
+            "the field_secure (ES::PASSWORD) constructor is gone"
+        );
+        assert!(
+            src.contains(&format!(
+                "{}{}",
+                "co::ES::AUTOHSCROLL | co::ES::PASS", "WORD"
+            )),
+            "field_secure no longer sets ES::PASSWORD"
+        );
+        let call = format!(
+            "{}{}",
+            "r.field_secure(&g(\"gui.set.keyserver_", "token\"), &st.keyserver_token, 320)"
+        );
+        assert!(
+            src.contains(&call),
+            "keyserver_token is no longer built with field_secure — the \
+             bearer token would render in a plain edit control again, fully \
+             legible during screen-sharing or a recording"
         );
     }
 }
