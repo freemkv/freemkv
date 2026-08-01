@@ -1287,6 +1287,48 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
     Ok(format!("Written to {}", req.dest_dir))
 }
 
+/// Whether a demux rip must give each title its own subdirectory.
+///
+/// A demux sink fans a title out into one file per elementary track, named by
+/// track — NOT by title. Two titles written to the same directory therefore
+/// overwrite each other's tracks. One title can go straight into the dest dir;
+/// more than one cannot. Extracted so the boundary is assertable: as an inline
+/// `indices.len() > 1` the off-by-one was invisible to every test.
+fn demux_needs_subdirs(title_count: usize) -> bool {
+    title_count > 1
+}
+
+/// The per-title mux input for `idx`.
+///
+/// Three fields, each of which fails silently and differently if it goes
+/// missing, which is why this is a named function rather than a struct literal
+/// buried in a closure:
+///
+/// - `title_index` — without it the library defaults to `None` and muxes the
+///   WRONG TITLE, under the filename the user asked for. Nothing downstream can
+///   tell.
+/// - `unit_keys` — the scan resolving a disc's AACS keys is not enough; they
+///   have to reach the mux or every encrypted title fails E7022. Mirrors the
+///   engine's own wiring in `run.rs`.
+/// - `selection` — the ticked audio/subtitle tracks, applied by the Url mux
+///   path. Dropped, the user gets every track they deselected.
+fn title_input_options(
+    disc: &libfreemkv::Disc,
+    req: &RipRequest,
+    idx: usize,
+) -> libfreemkv::InputOptions {
+    libfreemkv::InputOptions {
+        title_index: Some(idx),
+        unit_keys: disc
+            .aacs
+            .as_ref()
+            .map(|a| a.unit_keys.clone())
+            .unwrap_or_default(),
+        selection: stream_selection(req),
+        ..Default::default()
+    }
+}
+
 /// Mux the selected titles from `source_url` (an `iso://<path>` — either the
 /// original ISO source, or a staging ISO a multipass recovery just produced)
 /// into the sinks the request's format maps to. Shared by `run_blocking`'s
@@ -1309,7 +1351,7 @@ fn mux_selected_titles(
     };
     // Demux fans a single title straight into the dest dir but gives each title
     // of a multi-title rip its own subdir so their track files never collide.
-    let multi = indices.len() > 1;
+    let multi = demux_needs_subdirs(indices.len());
 
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
 
@@ -1339,20 +1381,7 @@ fn mux_selected_titles(
             OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
         };
         let hint = disc.titles.get(idx).map(|t| t.size_bytes).unwrap_or(0);
-        // AACS unit keys must reach the mux or every encrypted title fails
-        // with E7022 — the scan resolving them is not enough on its own.
-        // Mirrors the engine's own wiring in run.rs.
-        let input = libfreemkv::InputOptions {
-            title_index: Some(idx),
-            unit_keys: disc
-                .aacs
-                .as_ref()
-                .map(|a| a.unit_keys.clone())
-                .unwrap_or_default(),
-            // The ticked audio/subtitle tracks — applied by the Url mux path.
-            selection: stream_selection(req),
-            ..Default::default()
-        };
+        let input = title_input_options(disc, req, idx);
         let mux = mux_opts(req);
         match fe::mux_title(source_url, &dest_url, input, &mux, hint, sink) {
             Ok(o) => {
@@ -1465,6 +1494,47 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     mux_selected_titles(&disc, &src_url, req, &indices, sink, state)
 }
 
+/// What a `disc://` rip does with the drive, once the whole-disc extract case
+/// is out of the way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscPlan {
+    /// Sweep + patch to a recovered ISO first. `deliver_iso` means the ISO is
+    /// what the user asked for; otherwise it is staging for a title mux.
+    Recover { deliver_iso: bool },
+    /// Mux each selected title straight off the drive, one session per title.
+    PerTitle,
+}
+
+/// Which of those two a request wants.
+///
+/// This is `want_iso || multipass` and both halves matter. As `&&` a
+/// `--multipass` title rip silently loses its recovery passes — no patch
+/// passes, and the abort-for-loss gate below never runs, so a damaged disc
+/// muxes to a hole-ridden file reported as written. And a "whole disc → ISO
+/// image" request without multipass would fall through to the per-title loop
+/// and hit the `unreachable!()` in its dest match, i.e. panic the rip worker.
+fn recovery_plan(kind: OutKind, multipass: bool) -> DiscPlan {
+    let deliver_iso = matches!(kind, OutKind::IsoImage);
+    if deliver_iso || multipass {
+        DiscPlan::Recover { deliver_iso }
+    } else {
+        DiscPlan::PerTitle
+    }
+}
+
+/// A recovery that read nothing has nothing to mux. Separate from the caller so
+/// the boundary is assertable: as `!=` a perfectly good recovery deletes its own
+/// ISO and reports "no readable data".
+fn recovery_produced_no_data(good_bytes: u64) -> bool {
+    good_bytes == 0
+}
+
+/// Whether the staging ISO is removed after the title mux. Inverted, this
+/// deletes a multi-hour recovery the user explicitly asked to keep.
+fn should_delete_staging_iso(keep_iso: bool) -> bool {
+    !keep_iso
+}
+
 /// Rip from a live optical drive (`disc://`). Scans once to resolve titles and
 /// keys, then runs the chosen sink. Title/metadata/demux sinks mux each selected
 /// title off a fresh session (`fe::mux_title_session`, driven through
@@ -1529,7 +1599,7 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
     // ordinary iso:// path over it (fresh scan → clear, no keys) — never
     // double-decrypting.
     let want_iso = matches!(kind, OutKind::IsoImage);
-    if want_iso || req.multipass {
+    if recovery_plan(kind, req.multipass) != DiscPlan::PerTitle {
         let iso_path = format!("{}/{}.iso", req.dest_dir, label);
         session.stage_drive_as_reader();
         let mut reader = session
@@ -1607,7 +1677,7 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         // running the ordinary ISO-source path on it (it's decrypted, so the
         // fresh scan finds no keys to apply). Delete the staging ISO after,
         // unless the user asked to keep it.
-        if result.good_bytes == 0 {
+        if recovery_produced_no_data(result.good_bytes) {
             let _ = std::fs::remove_file(&iso_path);
             return Err("Recovery produced no readable data — nothing to mux.".into());
         }
@@ -1616,7 +1686,7 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             ..req.clone()
         };
         let mux = run_blocking(&iso_req, sink, state);
-        if !req.keep_iso {
+        if should_delete_staging_iso(req.keep_iso) {
             let _ = std::fs::remove_file(&iso_path);
         }
         return mux;
@@ -1634,7 +1704,7 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
     if indices.is_empty() {
         return Err("Nothing selected to rip.".into());
     }
-    let multi = indices.len() > 1;
+    let multi = demux_needs_subdirs(indices.len());
     let selection = stream_selection(req);
     // Byte-size hints per title, banked before the scan session is dropped
     // (releasing the drive) — each title's mux reopens its own session,
@@ -1850,7 +1920,7 @@ mod outcome_summary_tests {
 mod key_summary_tests {
     use super::{error_code, key_summary};
 
-    fn disc(encrypted: bool) -> libfreemkv::Disc {
+    pub(super) fn disc(encrypted: bool) -> libfreemkv::Disc {
         libfreemkv::Disc {
             volume_id: "T".into(),
             meta_title: None,
@@ -1869,7 +1939,7 @@ mod key_summary_tests {
         }
     }
 
-    fn aacs(unit_keys: Vec<(u32, [u8; 16])>) -> libfreemkv::AacsState {
+    pub(super) fn aacs(unit_keys: Vec<(u32, [u8; 16])>) -> libfreemkv::AacsState {
         libfreemkv::AacsState {
             version: 1,
             bus_encryption: false,
@@ -2000,5 +2070,292 @@ mod key_summary_tests {
         let online = super::key_params(&cfg("Online key service only"));
         assert!(online.key_url.is_some());
         assert!(online.online_only, "Online-only must set online_only");
+    }
+}
+
+/// The routing and per-title wiring decisions a rip makes before it touches a
+/// drive.
+///
+/// Every function below is pure over a `&str` or a `&RipRequest`, and every one
+/// of them could be replaced wholesale — `-> true`, `-> ""`,
+/// `-> Default::default()` — with the whole suite still green. The consequences
+/// are not cosmetic: `is_disc_source` forced false sends a live-drive rip down
+/// the ISO path, `stream_selection` defaulted discards every track the user
+/// ticked, and a missing `title_index` muxes the wrong title under the right
+/// filename.
+#[cfg(test)]
+mod routing_tests {
+    use super::{
+        DiscPlan, KeyConfig, OutKind, RipRequest, demux_needs_subdirs, disc_device, is_disc_source,
+        is_stream_source, mux_opts, out_kind, recovery_plan, recovery_produced_no_data,
+        should_delete_staging_iso, source_scheme, stream_selection, title_input_options,
+        won_from_trace,
+    };
+
+    fn req() -> RipRequest {
+        RipRequest {
+            source: "/media/movie.iso".into(),
+            dest_dir: "/out".into(),
+            titles: vec![],
+            format: "MKV".into(),
+            audio_pids: vec![],
+            sub_pids: vec![],
+            explicit_streams: false,
+            raw: false,
+            force: false,
+            filename_template: String::new(),
+            decrypt_threads: 0,
+            multipass: false,
+            max_passes: 0,
+            abort_lost_secs: 0,
+            keep_iso: false,
+            auto_eject: false,
+            keys: KeyConfig::default(),
+        }
+    }
+
+    /// A `disc://` source must route to the live-drive path and nothing else
+    /// must. Forced `true` an ISO is opened as a drive; forced `false` a drive
+    /// rip is handed to `scan_iso` with a path of `disc://`.
+    #[test]
+    fn only_a_disc_url_is_a_disc_source() {
+        assert!(is_disc_source("disc://"));
+        assert!(is_disc_source("disc:///dev/sr0"));
+        assert!(!is_disc_source("/media/movie.iso"));
+        assert!(!is_disc_source("iso:///media/movie.iso"));
+        assert!(!is_disc_source(""));
+        assert!(!is_disc_source("mkv:///x.mkv"));
+    }
+
+    /// Bare `disc://` means autodetect; `disc://<path>` means that drive. A
+    /// `Some("")` here becomes `DeviceTarget::Path("")` and opens nothing.
+    #[test]
+    fn the_device_path_is_whatever_follows_the_scheme() {
+        assert_eq!(disc_device("disc://"), None);
+        assert_eq!(disc_device("disc:///dev/sr0").as_deref(), Some("/dev/sr0"));
+        assert_eq!(
+            disc_device("disc://\\\\.\\D:").as_deref(),
+            Some("\\\\.\\D:")
+        );
+        // Not a disc URL at all — no prefix to strip, so no device.
+        assert_eq!(disc_device("/media/movie.iso"), None);
+    }
+
+    /// Container sources skip the disc scan entirely. An ISO must NOT be one of
+    /// them, or it goes to the single-title container path with no title list.
+    #[test]
+    fn container_extensions_are_stream_sources_and_iso_is_not() {
+        for good in ["a.mkv", "a.m2ts", "a.mts", "a.mp4", "A.MKV", "/p/a.Mp4"] {
+            assert!(is_stream_source(good), "{good} should be a stream source");
+        }
+        for bad in ["a.iso", "a.bin", "", "disc://", "/no/extension"] {
+            assert!(!is_stream_source(bad), "{bad} must not be a stream source");
+        }
+    }
+
+    /// The scheme half of the mux source URL. An extension we do not recognise
+    /// falls back to `m2ts`, which is the raw-transport-stream reader.
+    #[test]
+    fn the_source_scheme_follows_the_extension() {
+        assert_eq!(source_scheme("a.mkv"), "mkv");
+        assert_eq!(source_scheme("a.MKV"), "mkv");
+        assert_eq!(source_scheme("a.mp4"), "mp4");
+        assert_eq!(source_scheme("a.iso"), "iso");
+        assert_eq!(source_scheme("a.m2ts"), "m2ts");
+        assert_eq!(source_scheme("a.mts"), "m2ts");
+        assert_eq!(source_scheme(""), "m2ts");
+    }
+
+    /// Each of the nine picker strings resolves to its own sink. Six of them
+    /// used to fall through to a per-title MKV mux, so this table is the thing
+    /// that stops the user's chosen format quietly becoming a different one.
+    #[test]
+    fn every_picker_format_maps_to_its_own_sink() {
+        let cases: &[(&str, &str)] = &[
+            ("Whole disc → decrypted folder", "folder"),
+            ("Whole disc → ISO image", "iso"),
+            ("Each title → separate track files", "demux"),
+            ("Each title → MP4 file", "mp4"),
+            ("Each title → M2TS file", "m2ts"),
+            ("Chapters only (XML)", "chapters"),
+            ("Title index (JSON)", "json"),
+            ("Title index (.fvi)", "fvi"),
+            ("Each title → MKV file", "mkv"),
+            // Anything unrecognised is a container mux, not a whole-disc sink.
+            ("", "mkv"),
+        ];
+        for (format, want) in cases {
+            let got = match out_kind(format) {
+                OutKind::DecryptedFolder => "folder",
+                OutKind::IsoImage => "iso",
+                OutKind::Demux => "demux",
+                OutKind::File(s) => s,
+            };
+            assert_eq!(&got, want, "format {format:?} resolved to {got:?}");
+        }
+    }
+
+    /// The ticked tracks must survive into the mux. `Default::default()` here
+    /// is All/All, i.e. every track the user just deselected.
+    #[test]
+    fn explicit_track_ticks_survive_into_the_mux() {
+        let mut r = req();
+        r.explicit_streams = true;
+        r.audio_pids = vec![4352];
+        r.sub_pids = vec![];
+        let sel = stream_selection(&r);
+        assert_eq!(sel.audio, libfreemkv::PidFilter::Only(vec![4352]));
+        // Ticking nothing under subtitles means keep NONE, not keep all.
+        assert_eq!(sel.subtitle, libfreemkv::PidFilter::Only(vec![]));
+        assert!(!sel.is_all(), "an explicit selection is never All/All");
+
+        // No explicit choice: keep everything.
+        r.explicit_streams = false;
+        assert!(stream_selection(&r).is_all());
+    }
+
+    /// `mux_opts` carries the raw passthrough, the read batch and the send
+    /// deadline. Defaulted, `--raw` is ignored and the deadline that stops a
+    /// wedged sink hanging the rip disappears.
+    #[test]
+    fn mux_options_carry_raw_the_batch_size_and_the_send_deadline() {
+        let mut r = req();
+        r.raw = true;
+        let o = mux_opts(&r);
+        assert!(o.raw, "raw passthrough must reach the mux");
+        assert_eq!(o.batch_sectors, 64);
+        assert_eq!(o.send_deadline, Some(std::time::Duration::from_secs(60)));
+        assert!(!o.skip_errors);
+        // Selection is deliberately NOT here — the Url mux arm reads it off
+        // InputOptions, and setting it here silently keeps every track.
+        assert!(o.selection.is_all());
+
+        r.raw = false;
+        assert!(!mux_opts(&r).raw);
+    }
+
+    /// The three fields whose absence is invisible: the wrong title, a lost
+    /// key, or a discarded track selection, each under the right filename.
+    #[test]
+    fn per_title_input_options_carry_the_index_the_keys_and_the_selection() {
+        let mut disc = super::key_summary_tests::disc(true);
+        let keys = vec![(0u32, [7u8; 16]), (1u32, [9u8; 16])];
+        disc.aacs = Some(super::key_summary_tests::aacs(keys.clone()));
+
+        let mut r = req();
+        r.explicit_streams = true;
+        r.audio_pids = vec![4353];
+
+        for idx in [0usize, 3] {
+            let input = title_input_options(&disc, &r, idx);
+            assert_eq!(
+                input.title_index,
+                Some(idx),
+                "a missing title_index muxes title 0 under title {}'s name",
+                idx + 1
+            );
+            assert_eq!(
+                input.unit_keys, keys,
+                "the resolved AACS keys must be passed"
+            );
+            assert_eq!(input.selection, stream_selection(&r));
+        }
+
+        // An unencrypted disc contributes no keys — and no placeholder either.
+        let clear = super::key_summary_tests::disc(false);
+        assert!(title_input_options(&clear, &r, 0).unit_keys.is_empty());
+    }
+
+    /// One title fans out into the destination directory; two or more each get
+    /// their own subdirectory, because a demux sink names files by TRACK. Get
+    /// this wrong and every title after the first overwrites the one before.
+    #[test]
+    fn a_multi_title_demux_gives_each_title_its_own_directory() {
+        assert!(!demux_needs_subdirs(1));
+        assert!(demux_needs_subdirs(2));
+        assert!(demux_needs_subdirs(12));
+        // Zero titles never reaches the loop, but must not read as "multi".
+        assert!(!demux_needs_subdirs(0));
+    }
+
+    /// `--multipass` on a title output must still recover, and a whole-disc ISO
+    /// must recover even without it. As `&&` the first silently loses its
+    /// recovery passes; the second falls into the per-title loop and panics on
+    /// the `unreachable!()` in its destination match.
+    #[test]
+    fn multipass_and_iso_output_both_route_through_recovery() {
+        assert_eq!(
+            recovery_plan(OutKind::File("mkv"), true),
+            DiscPlan::Recover { deliver_iso: false }
+        );
+        assert_eq!(
+            recovery_plan(OutKind::IsoImage, false),
+            DiscPlan::Recover { deliver_iso: true }
+        );
+        assert_eq!(
+            recovery_plan(OutKind::IsoImage, true),
+            DiscPlan::Recover { deliver_iso: true }
+        );
+        assert_eq!(
+            recovery_plan(OutKind::File("mkv"), false),
+            DiscPlan::PerTitle
+        );
+        assert_eq!(recovery_plan(OutKind::Demux, false), DiscPlan::PerTitle);
+        // The folder extract is handled before this decision and must not be
+        // routed into recovery by it.
+        assert_eq!(
+            recovery_plan(OutKind::DecryptedFolder, false),
+            DiscPlan::PerTitle
+        );
+    }
+
+    /// A recovery that salvaged even one byte has something to mux; only zero
+    /// does not. Inverted, a good recovery deletes its own ISO and reports
+    /// "no readable data".
+    #[test]
+    fn only_a_zero_byte_recovery_has_nothing_to_mux() {
+        assert!(recovery_produced_no_data(0));
+        assert!(!recovery_produced_no_data(1));
+        assert!(!recovery_produced_no_data(50_000_000_000));
+    }
+
+    /// The staging ISO is removed unless the user asked to keep it. Inverted,
+    /// a multi-hour recovery is deleted against an explicit setting.
+    #[test]
+    fn the_staging_iso_is_kept_only_when_keep_iso_is_set() {
+        assert!(should_delete_staging_iso(false));
+        assert!(!should_delete_staging_iso(true));
+    }
+
+    /// The key strip names the source that unlocked the disc. It is read from
+    /// the trace, not passed in — so `None` here means a disc that WAS unlocked
+    /// reports no source, and a constant means every disc names the same one.
+    #[test]
+    fn the_winning_key_source_is_read_from_the_trace() {
+        use libfreemkv::aacs::trace::{KeyOutcome, KeyStep, ResolutionTrace};
+        let step = |who: &str, outcome| KeyStep {
+            who: who.to_string(),
+            path: vec![],
+            outcome,
+        };
+
+        let won = ResolutionTrace {
+            unlock: vec![],
+            keys: vec![
+                step("online", KeyOutcome::NoKey),
+                step("keydb", KeyOutcome::Resolved),
+            ],
+        };
+        assert_eq!(won_from_trace(&won).as_deref(), Some("keydb"));
+
+        let lost = ResolutionTrace {
+            unlock: vec![],
+            keys: vec![
+                step("keydb", KeyOutcome::NoKey),
+                step("online", KeyOutcome::MissingVid),
+            ],
+        };
+        assert_eq!(won_from_trace(&lost), None);
+        assert_eq!(won_from_trace(&ResolutionTrace::new()), None);
     }
 }

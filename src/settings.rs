@@ -370,3 +370,188 @@ pub fn check_for_update(current: &str) -> String {
         None => "Update check failed: no version in response".into(),
     }
 }
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::{Settings, default_keydb_path, dirs_movies, settings_path, support_dir};
+
+    /// `normalize()` is private, called only from `load()`, and `load()` had no
+    /// test — so the exact bug class its doc comment describes had ZERO
+    /// coverage, and the whole function could be replaced with `()`.
+    ///
+    /// Each snapped field is a value the popup must be able to select and the
+    /// engine must be able to match on. A stale string from an older build
+    /// leaves the control rendering blank and the setting silently inert.
+    #[test]
+    fn normalize_snaps_every_stale_enum_back_to_its_default() {
+        let d = Settings::default();
+        let mut s = Settings {
+            selection: "bogus".into(),
+            rip_mode: "bogus".into(),
+            key_source: "bogus".into(),
+            log_level: "bogus".into(),
+            container: "Matroska (.mkv)".into(), // a real pre-1.5 value
+            ..Settings::default()
+        };
+        s.normalize();
+        assert_eq!(s.selection, d.selection);
+        assert_eq!(s.rip_mode, d.rip_mode);
+        assert_eq!(s.key_source, d.key_source);
+        assert_eq!(s.log_level, d.log_level);
+        assert_eq!(s.container, d.container);
+    }
+
+    /// A valid value must survive normalization untouched — otherwise the snap
+    /// is not a repair, it is a reset of the user's choices on every load.
+    #[test]
+    fn normalize_leaves_every_recognized_value_alone() {
+        let mut s = Settings {
+            selection: "All titles".into(),
+            rip_mode: "Single pass".into(),
+            key_source: "keydb, then online".into(),
+            log_level: "Debug".into(),
+            ..Settings::default()
+        };
+        s.normalize();
+        assert_eq!(s.selection, "All titles");
+        assert_eq!(s.rip_mode, "Single pass");
+        assert_eq!(s.key_source, "keydb, then online");
+        assert_eq!(s.log_level, "Debug");
+    }
+
+    /// A relative destination cannot be written to and renders blank. This is
+    /// the fallback that catches an empty base directory — the exact shape of
+    /// the unset-`HOME` bug, where `default_dest_dir()` came back as `"Movies"`
+    /// and rips landed next to the process CWD.
+    #[test]
+    fn a_relative_destination_falls_back_and_an_absolute_one_does_not() {
+        let d = Settings::default();
+
+        for bad in ["", "   ", "Movies", "../out"] {
+            let mut s = Settings {
+                dest_dir: bad.into(),
+                ..Settings::default()
+            };
+            s.normalize();
+            assert_eq!(s.dest_dir, d.dest_dir, "{bad:?} should have fallen back");
+        }
+
+        let custom = if cfg!(windows) {
+            r"C:\custom\output"
+        } else {
+            "/custom/output"
+        };
+        let mut s = Settings {
+            dest_dir: custom.into(),
+            ..Settings::default()
+        };
+        s.normalize();
+        assert_eq!(s.dest_dir, custom, "an absolute folder must be preserved");
+    }
+
+    /// A blank keydb location is never left blank: the default is a real path
+    /// in the support directory, and an empty one means the Keys tab points at
+    /// nothing while still reporting a configured local source.
+    #[test]
+    fn a_blank_keydb_path_falls_back_to_the_default_location() {
+        let d = Settings::default();
+        for blank in ["", "  ", "\t"] {
+            let mut s = Settings {
+                keydb_path: blank.into(),
+                ..Settings::default()
+            };
+            s.normalize();
+            assert_eq!(s.keydb_path, d.keydb_path);
+        }
+        let mut kept = Settings {
+            keydb_path: "~/keys/keydb.cfg".into(),
+            ..Settings::default()
+        };
+        kept.normalize();
+        assert_eq!(kept.keydb_path, "~/keys/keydb.cfg");
+    }
+
+    /// The four `settings::*` path wrappers forward to `platform::*`. They are
+    /// separate functions from the ones `platform.rs`'s own tests exercise, so
+    /// each could be replaced with `Default::default()` independently — and an
+    /// empty `settings_path()` means the settings file is written to `""`.
+    #[test]
+    fn the_derived_paths_are_absolute_and_distinct() {
+        let support = support_dir();
+        assert!(support.is_absolute(), "support_dir: {support:?}");
+        assert!(support.ends_with("freemkv"), "support_dir: {support:?}");
+
+        let settings = settings_path();
+        assert!(settings.is_absolute(), "settings_path: {settings:?}");
+        assert!(settings.ends_with("gui-settings.json"));
+        assert!(settings.starts_with(&support));
+
+        let keydb = default_keydb_path();
+        assert!(std::path::Path::new(&keydb).is_absolute(), "keydb: {keydb}");
+        assert!(keydb.ends_with("keydb.cfg"));
+
+        let movies = dirs_movies();
+        assert!(
+            std::path::Path::new(&movies).is_absolute(),
+            "movies: {movies}"
+        );
+        assert!(!movies.is_empty());
+        // The output folder is not the app's own state directory.
+        assert_ne!(movies, support.to_string_lossy());
+    }
+
+    /// Every key `get`/`set` names must round-trip, including the ones the
+    /// external suite's key lists happened to omit — `log_level` for `get`,
+    /// `raw` and `force` for `get_bool`. Those three match arms were dead to
+    /// the whole test suite: `cli_parity_flags_persist` sets the fields but
+    /// reads them back through the struct, not through the accessor.
+    #[test]
+    fn every_accessor_key_round_trips_including_the_ones_the_suite_missed() {
+        let mut s = Settings::default();
+        for key in [
+            "dest_dir",
+            "container",
+            "filename_template",
+            "selection",
+            "min_title_secs",
+            "rip_mode",
+            "max_passes",
+            "abort_lost_secs",
+            "key_source",
+            "keydb_path",
+            "keydb_url",
+            "keyserver_url",
+            "keyserver_token",
+            "language",
+            "decrypt_threads",
+            "log_level",
+        ] {
+            s.set(key, format!("value-for-{key}"));
+            assert_eq!(
+                s.get(key),
+                format!("value-for-{key}"),
+                "{key} did not round-trip through get/set"
+            );
+        }
+        // An unknown key is inert in both directions, never a panic.
+        s.set("not_a_key", "x".into());
+        assert_eq!(s.get("not_a_key"), "");
+
+        for key in ["keep_iso", "auto_eject", "raw", "force"] {
+            s.set_bool(key, true);
+            assert!(s.get_bool(key), "{key} did not round-trip as true");
+            s.set_bool(key, false);
+            assert!(!s.get_bool(key), "{key} did not round-trip as false");
+        }
+        assert!(!s.get_bool("not_a_key"));
+
+        // The bool keys must be genuinely distinct fields — a match arm that
+        // reads the neighbouring field looks correct under a one-key test.
+        let mut t = Settings::default();
+        t.set_bool("raw", true);
+        assert!(t.raw && !t.force && !t.keep_iso);
+        let mut u = Settings::default();
+        u.set_bool("force", true);
+        assert!(u.force && !u.raw && !u.keep_iso);
+    }
+}

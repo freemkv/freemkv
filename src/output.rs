@@ -63,23 +63,34 @@ impl Output {
         self
     }
 
+    /// Whether a line tagged `level` prints at the configured verbosity.
+    ///
+    /// THE verbosity gate — `print`, `raw`, `raw_inline` and `blank` all
+    /// delegate here rather than each re-stating `self.level >= level`, so
+    /// there is one comparison to get right instead of four. `--quiet` is a
+    /// contract (a `stdio://` rip pipes the data on stdout and must not have
+    /// log lines interleaved), not a preference.
+    pub(crate) fn should_print(&self, level: Level) -> bool {
+        self.level >= level
+    }
+
     /// Print a string from the locale file.
     pub fn print(&self, level: Level, key: &str) {
-        if self.level >= level {
+        if self.should_print(level) {
             self.line(&strings::get(key));
         }
     }
 
     /// Print a raw string (not from locale — for computed values like hex, paths).
     pub fn raw(&self, level: Level, text: &str) {
-        if self.level >= level {
+        if self.should_print(level) {
             self.line(text);
         }
     }
 
     /// Print raw text without newline.
     pub fn raw_inline(&self, level: Level, text: &str) {
-        if self.level >= level {
+        if self.should_print(level) {
             if self.stderr {
                 eprint!("{}", text);
                 let _ = std::io::stderr().flush();
@@ -106,11 +117,79 @@ impl Output {
 
     /// Print a blank line.
     pub fn blank(&self, level: Level) {
-        if self.level >= level {
+        if self.should_print(level) {
             if self.stderr {
                 eprintln!();
             } else {
                 println!();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Level, Output};
+
+    /// `output.rs` is not formatting — it is the gate that decides whether a
+    /// line prints at all, which is the quiet/normal/verbose contract. It had
+    /// no tests of its own; the only external check exercised ONE point of the
+    /// 3×3 grid through a whole subprocess.
+    #[test]
+    fn the_verbosity_grid_is_exactly_configured_greater_or_equal_to_line() {
+        // (configured Output, line Level, prints?)
+        let quiet = Output::new(false, true);
+        let normal = Output::new(false, false);
+        let verbose = Output::new(true, false);
+
+        let grid: &[(&Output, Level, bool)] = &[
+            (&quiet, Level::Always, true),
+            (&quiet, Level::Normal, false),
+            (&quiet, Level::Verbose, false),
+            (&normal, Level::Always, true),
+            (&normal, Level::Normal, true),
+            (&normal, Level::Verbose, false),
+            (&verbose, Level::Always, true),
+            (&verbose, Level::Normal, true),
+            (&verbose, Level::Verbose, true),
+        ];
+        for (out, line, want) in grid {
+            assert_eq!(
+                out.should_print(*line),
+                *want,
+                "level {} / line {} should print = {want}",
+                out.is_quiet(),
+                matches!(line, Level::Always)
+            );
+        }
+    }
+
+    /// Quiet is exactly the Always-only level, and quiet WINS over verbose when
+    /// both flags are given — otherwise `--quiet --verbose` on a `stdio://`
+    /// rip interleaves log text into the piped byte stream.
+    #[test]
+    fn quiet_is_the_always_only_level_and_beats_verbose() {
+        assert!(Output::new(false, true).is_quiet());
+        assert!(
+            Output::new(true, true).is_quiet(),
+            "quiet must win over verbose"
+        );
+        assert!(!Output::new(false, false).is_quiet());
+        assert!(!Output::new(true, false).is_quiet());
+
+        // Quiet still emits Always lines — results and errors are never hidden.
+        assert!(Output::new(false, true).should_print(Level::Always));
+    }
+
+    /// Routing to stderr must not change WHAT prints, only where. A gate that
+    /// consulted `stderr` would silence a `stdio://` rip's error reporting.
+    #[test]
+    fn the_stderr_route_does_not_change_the_gate() {
+        for (v, q) in [(false, false), (true, false), (false, true)] {
+            let out = Output::new(v, q);
+            let piped = Output::new(v, q).to_stderr();
+            for line in [Level::Always, Level::Normal, Level::Verbose] {
+                assert_eq!(out.should_print(line), piped.should_print(line));
             }
         }
     }

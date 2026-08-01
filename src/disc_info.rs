@@ -993,6 +993,42 @@ mod tests {
         // Unencrypted → no line.
         uhd.encrypted = false;
         assert_eq!(encryption_label(&uhd), None);
+
+        // The case `is_aacs_format` exists for, and the only one that can tell
+        // it apart from `true`: encrypted, no CSS signal at all, no `aacs`
+        // struct, and a format that is NOT an AACS carrier. That is a generic
+        // unresolved encryption, not "AACS 1.0" — labelling it AACS tells the
+        // user a specific protection was detected when nothing was.
+        let mut unknown = synthetic_disc();
+        unknown.format = DiscFormat::Dvd;
+        unknown.encrypted = true;
+        unknown.css = None;
+        unknown.css_error = None;
+        unknown.aacs = None;
+        assert_eq!(encryption_label(&unknown), Some(EncLabel::GenericAacs));
+
+        // Same disc on a real AACS carrier IS an AACS label — so the
+        // distinction is the format, not the missing `aacs` struct.
+        unknown.format = DiscFormat::BluRay;
+        assert_eq!(
+            encryption_label(&unknown),
+            Some(EncLabel::Aacs("AACS 1.0".to_string()))
+        );
+
+        // And every carrier format is recognised as one.
+        for f in [
+            DiscFormat::BluRay,
+            DiscFormat::Uhd,
+            DiscFormat::Fmts,
+            DiscFormat::HdDvd,
+        ] {
+            let mut d = synthetic_disc();
+            d.format = f;
+            assert!(super::is_aacs_format(&d), "{f:?} is an AACS carrier");
+        }
+        let mut dvd = synthetic_disc();
+        dvd.format = DiscFormat::Dvd;
+        assert!(!super::is_aacs_format(&dvd), "a DVD is not an AACS carrier");
     }
 
     #[test]

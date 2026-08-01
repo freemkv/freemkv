@@ -164,7 +164,112 @@ mod tests {
                 .to_str()
                 .expect("temp dir is valid UTF-8"),
         );
-        assert!(n.is_some_and(|b| b > 0), "no free space reported: {n:?}");
+        // `> 0` was satisfied by a hard-coded `Some(1)`, which is exactly what
+        // a broken `df` parse would look like. Any real volume with room for a
+        // rip has far more than a mebibyte free.
+        assert!(
+            n.is_some_and(|b| b > 1_048_576),
+            "no plausible free space reported: {n:?}"
+        );
+    }
+
+    /// `is_absolute` had no test at all, direct or indirect — its only caller
+    /// is `Settings::normalize`, which was itself untested. It exists because
+    /// `starts_with('/')` called every valid Windows path relative and reset
+    /// the user's destination folder on every load; forced to a constant it
+    /// either resets a good folder or accepts a relative one, and a relative
+    /// destination is how a rip ends up written next to the process CWD.
+    #[test]
+    fn is_absolute_rejects_empty_blank_and_relative_paths() {
+        assert!(!super::is_absolute(""));
+        assert!(!super::is_absolute("   "));
+        assert!(!super::is_absolute("\t\n"));
+        assert!(!super::is_absolute("Movies"));
+        assert!(!super::is_absolute("../x"));
+        assert!(!super::is_absolute("./Movies"));
+        assert!(!super::is_absolute("Library/Application Support/freemkv"));
+    }
+
+    /// The positive side, in each OS's own native form. Both are asserted on
+    /// both platforms where the answer is unambiguous: a `C:\…` path is not
+    /// absolute on Unix, and a bare `/x` is not absolute on Windows (it is
+    /// drive-relative), so a single shared rule would be wrong somewhere.
+    #[test]
+    fn is_absolute_accepts_the_platform_native_absolute_form() {
+        #[cfg(unix)]
+        {
+            assert!(super::is_absolute("/Users/x/Movies"));
+            assert!(super::is_absolute("  /Users/x/Movies  "));
+            assert!(!super::is_absolute(r"C:\Users\x\Movies"));
+        }
+        #[cfg(windows)]
+        {
+            assert!(super::is_absolute(r"C:\Users\x\Movies"));
+            assert!(super::is_absolute(r"  C:\Users\x\Movies  "));
+            assert!(super::is_absolute(r"\\server\share\x"));
+            assert!(!super::is_absolute(r"\Movies"));
+        }
+    }
+
+    /// Every derived path stays ABSOLUTE with no home variable set.
+    ///
+    /// This is the regression test for the real bug the mutation runner found:
+    /// `unwrap_or_default()` produced an EMPTY base, so `support_dir()` became
+    /// `"Library/Application Support/freemkv"` and the settings file, the
+    /// downloaded keydb and the rip output all landed relative to the process
+    /// CWD. Unset `HOME` is not exotic — a container, a systemd unit or `env
+    /// -i` all produce it, and autorip ships in Docker.
+    ///
+    /// `tests/settings.rs` covers the Unix side by removing `HOME`; on Windows
+    /// the `imp` module reads `USERPROFILE` and `APPDATA` instead, so that test
+    /// compiles there but observes whatever the environment happens to hold.
+    /// This is the Windows counterpart. It cannot be run from a Mac, but it did
+    /// not exist at all, so there was nothing accidentally passing.
+    #[cfg(windows)]
+    #[test]
+    fn derived_paths_stay_absolute_without_userprofile_or_appdata() {
+        // Serialized against the other env-mutating tests in this binary.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let profile = std::env::var_os("USERPROFILE");
+        let appdata = std::env::var_os("APPDATA");
+        unsafe {
+            std::env::remove_var("USERPROFILE");
+            std::env::remove_var("APPDATA");
+        }
+
+        let home = super::home_dir();
+        let support = super::support_dir();
+        let dest = super::default_dest_dir();
+
+        unsafe {
+            if let Some(v) = profile {
+                std::env::set_var("USERPROFILE", v);
+            }
+            if let Some(v) = appdata {
+                std::env::set_var("APPDATA", v);
+            }
+        }
+
+        assert!(home.is_absolute(), "home_dir went relative: {home:?}");
+        assert!(
+            support.is_absolute(),
+            "support_dir went relative: {support:?}"
+        );
+        assert!(
+            dest.is_absolute(),
+            "default_dest_dir went relative: {dest:?}"
+        );
+        // An empty base is the specific shape of the bug: it makes the derived
+        // path a bare suffix rather than a rooted location.
+        assert!(support.ends_with("freemkv"));
+        assert_ne!(
+            support,
+            std::path::Path::new("AppData")
+                .join("Roaming")
+                .join("freemkv")
+        );
     }
 
     /// A destination that does not exist yet still resolves, via its nearest

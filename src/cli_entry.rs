@@ -43,35 +43,35 @@ const DEFAULT_LOG_FILE: &str = "log.txt";
 /// `tracing` events are dropped and the terminal stays pristine. The file
 /// destination defaults to `./log.txt`; ANSI is off and timestamps are on so
 /// the log is clean and copy-pasteable for a bug report.
-fn init_logging(args: &[String]) {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::{EnvFilter, fmt};
-
-    // Parse the two logging flags. `--log-level N` (1=warn..4=trace); the
-    // per-subcommand parsers read the same flag to widen stdout detail at >=2.
+/// The two logging flags, parsed out of the raw argv.
+///
+/// Split from `init_logging` because that function installs a PROCESS-GLOBAL
+/// `tracing_subscriber` — it can only run once per test binary, so nothing ever
+/// called it and every one of its parse decisions was unconstrained.
+///
+/// Returns `(level, file)`. An out-of-range or non-numeric `--log-level` is
+/// reported and IGNORED rather than silently clamped, so a typo does not
+/// quietly hand the user a different verbosity than they asked for. Strings are
+/// not loaded yet at this point in startup, so these diagnostics are plain
+/// English by necessity.
+fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>) {
     let mut level_num: Option<u8> = None;
     let mut log_file: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--log-level" => {
-                // VAL-1 / VAL-4: validate the value rather than silently
-                // swallowing bad input or silently clamping 0 → 1.
-                // Strings aren't loaded yet here, so plain English is fine.
-                match it.next() {
-                    Some(s) => match s.parse::<u8>() {
-                        Ok(0) => eprintln!("--log-level: value 0 is out of range (1–4), ignored"),
-                        Ok(n) => level_num = Some(n.clamp(1, 4)),
-                        Err(_) => {
-                            eprintln!("--log-level: expected a number 1–4, got '{s}', ignored")
-                        }
-                    },
-                    None => eprintln!(
-                        "--log-level: requires a value (1=warn, 2=info, 3=debug, 4=trace)"
-                    ),
+            "--log-level" => match it.next() {
+                Some(s) => match s.parse::<u8>() {
+                    Ok(0) => eprintln!("--log-level: value 0 is out of range (1–4), ignored"),
+                    Ok(n) => level_num = Some(n.clamp(1, 4)),
+                    Err(_) => {
+                        eprintln!("--log-level: expected a number 1–4, got '{s}', ignored")
+                    }
+                },
+                None => {
+                    eprintln!("--log-level: requires a value (1=warn, 2=info, 3=debug, 4=trace)")
                 }
-            }
+            },
             "--log-file" => {
                 if let Some(p) = it.next() {
                     log_file = Some(p.clone());
@@ -80,6 +80,29 @@ fn init_logging(args: &[String]) {
             _ => {}
         }
     }
+    (level_num, log_file)
+}
+
+/// Split a `--log-file` value into the `(directory, filename)` pair the rolling
+/// appender needs. A bare filename logs into the current directory; a path with
+/// no filename component at all (`""`, `"/"`) is invalid and returns `None`, so
+/// the caller reports it instead of writing somewhere unintended.
+fn split_log_path(path: &str) -> Option<(std::path::PathBuf, std::ffi::OsString)> {
+    let p = std::path::Path::new(path);
+    let name = p.file_name()?.to_os_string();
+    let dir = match p.parent().filter(|d| !d.as_os_str().is_empty()) {
+        Some(d) => d.to_path_buf(),
+        None => std::path::PathBuf::from("."),
+    };
+    Some((dir, name))
+}
+
+fn init_logging(args: &[String]) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let (level_num, log_file) = parse_logging_flags(args);
 
     let rust_log = std::env::var("RUST_LOG").is_ok();
 
@@ -108,12 +131,9 @@ fn init_logging(args: &[String]) {
     // File-only sink. NEVER stdout/stderr — the terminal is Channel 1 and must
     // stay free of tracing. Default to ./log.txt; ANSI off, timestamps on.
     let path = log_file.unwrap_or_else(|| DEFAULT_LOG_FILE.to_string());
-    let p = std::path::Path::new(&path);
-    let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
-    let file_appender = match (dir, p.file_name()) {
-        (Some(dir), Some(name)) => tracing_appender::rolling::never(dir, name),
-        (None, Some(name)) => tracing_appender::rolling::never(".", name),
-        _ => {
+    let file_appender = match split_log_path(&path) {
+        Some((dir, name)) => tracing_appender::rolling::never(dir, name),
+        None => {
             // An invalid `--log-file` path is a fatal misconfiguration of the
             // diagnostic channel — report it cleanly on the terminal (this is a
             // CLI diagnostic, not a tracing event) and continue without a file.
@@ -158,26 +178,10 @@ pub fn run(args: Vec<String>) {
     // the next token is a URL, a flag, or --language is the last token, the
     // value is missing: warn and leave the token as positional. Strings aren't
     // initialized yet, so this diagnostic is necessarily plain English.
-    let mut filtered = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--language" || args[i] == "--lang" {
-            match args.get(i + 1) {
-                Some(v) if !is_url(v) && !v.starts_with('-') => {
-                    crate::strings::set_language(v);
-                    i += 2;
-                }
-                _ => {
-                    eprintln!("{}: requires a language code (e.g. --language de)", args[i]);
-                    i += 1;
-                }
-            }
-        } else {
-            filtered.push(args[i].clone());
-            i += 1;
-        }
+    let (args, language) = strip_language_flag(&args);
+    if let Some(lang) = language {
+        crate::strings::set_language(&lang);
     }
-    let args = filtered;
     crate::strings::init();
 
     if args.len() < 2 {
@@ -252,6 +256,44 @@ pub fn run(args: Vec<String>) {
 /// True if `s` looks like a stream URL (`scheme://...`).
 fn is_url(s: &str) -> bool {
     s.contains("://")
+}
+
+/// Pull `--language`/`--lang` and its value out of the argument list.
+///
+/// Returns the remaining arguments and the requested language code. The value
+/// guard is the same one `collect_urls` applies, and for the same reason: a
+/// value-flag must not swallow a following positional stream URL.
+/// `freemkv --language disc:// mkv://out.mkv` would otherwise eat `disc://` as
+/// the "language", leaving a single URL that silently degrades into an
+/// info/usage no-op. A leading `-` means the value is missing too, not a
+/// language code.
+///
+/// Extracted from `run()`'s inline loop, which no `cargo test` invocation ever
+/// reached — this is exactly the "add a flag, forget the test" shape the
+/// `collect_urls` comments warn about, applied to the one flag that never got
+/// the same treatment.
+fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>) {
+    let mut filtered = Vec::new();
+    let mut language = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--language" || args[i] == "--lang" {
+            match args.get(i + 1) {
+                Some(v) if !is_url(v) && !v.starts_with('-') => {
+                    language = Some(v.clone());
+                    i += 2;
+                }
+                _ => {
+                    eprintln!("{}: requires a language code (e.g. --language de)", args[i]);
+                    i += 1;
+                }
+            }
+        } else {
+            filtered.push(args[i].clone());
+            i += 1;
+        }
+    }
+    (filtered, language)
 }
 
 /// Print the curated fatal-error block and exit non-zero.
@@ -924,5 +966,153 @@ mod tests {
             collect_urls(&v(&["--key-auth", "tok", "disc://", "mkv://out.mkv"])),
             v(&["disc://", "mkv://out.mkv"])
         );
+    }
+}
+
+/// The argv decisions `run()` and `init_logging()` make before anything else
+/// happens — each of them previously unreachable from `cargo test`, either
+/// because it was inline in a 400-line dispatcher or because installing a
+/// process-global subscriber can only be done once per binary.
+#[cfg(test)]
+mod arg_tests {
+    use super::{parse_logging_flags, split_log_path, strip_language_flag, wants_help};
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The common path: no logging flags means NO subscriber is installed and
+    /// the terminal stays clean. If either half of that reads as "requested",
+    /// every plain `freemkv` run starts writing ./log.txt.
+    #[test]
+    fn no_logging_flags_requests_nothing() {
+        assert_eq!(parse_logging_flags(&v([].as_slice())), (None, None));
+        assert_eq!(
+            parse_logging_flags(&v(&["freemkv", "iso://a.iso", "mkv://b.mkv", "-t", "2"])),
+            (None, None)
+        );
+    }
+
+    /// `--log-level` maps 1..4 and is CLAMPED, not wrapped.
+    #[test]
+    fn the_log_level_values_map_and_clamp() {
+        for n in 1..=4u8 {
+            assert_eq!(
+                parse_logging_flags(&v(&["--log-level", &n.to_string()])).0,
+                Some(n)
+            );
+        }
+        // Above the range clamps to trace rather than being dropped.
+        assert_eq!(parse_logging_flags(&v(&["--log-level", "9"])).0, Some(4));
+        assert_eq!(parse_logging_flags(&v(&["--log-level", "255"])).0, Some(4));
+    }
+
+    /// Bad input is reported and IGNORED — never silently clamped up to 1, and
+    /// never treated as "a log was requested". `0` is out of range and a typo
+    /// must not quietly give the user a different verbosity than they asked
+    /// for.
+    #[test]
+    fn a_bad_log_level_is_ignored_rather_than_guessed_at() {
+        assert_eq!(parse_logging_flags(&v(&["--log-level", "0"])).0, None);
+        assert_eq!(parse_logging_flags(&v(&["--log-level", "xyz"])).0, None);
+        assert_eq!(parse_logging_flags(&v(&["--log-level", "-1"])).0, None);
+        // Last token, no value: no panic, nothing requested.
+        assert_eq!(parse_logging_flags(&v(&["--log-level"])), (None, None));
+    }
+
+    /// `--log-file` takes the following token, in either flag order, and does
+    /// not need `--log-level` to be present.
+    #[test]
+    fn the_log_file_flag_takes_the_next_token_in_either_order() {
+        assert_eq!(
+            parse_logging_flags(&v(&["--log-file", "/tmp/x.log"])),
+            (None, Some("/tmp/x.log".to_string()))
+        );
+        assert_eq!(
+            parse_logging_flags(&v(&["--log-file", "a.log", "--log-level", "2"])),
+            (Some(2), Some("a.log".to_string()))
+        );
+        assert_eq!(
+            parse_logging_flags(&v(&["--log-level", "2", "--log-file", "a.log"])),
+            (Some(2), Some("a.log".to_string()))
+        );
+        // Trailing `--log-file` with no value: nothing requested, no panic.
+        assert_eq!(parse_logging_flags(&v(&["--log-file"])), (None, None));
+    }
+
+    /// A bare filename logs into the current directory; a directory-qualified
+    /// one logs there. A value with no filename component is invalid and the
+    /// caller must report it rather than write somewhere unintended.
+    #[test]
+    fn the_log_path_splits_into_a_directory_and_a_name() {
+        let (dir, name) = split_log_path("log.txt").expect("a bare name is valid");
+        assert_eq!(dir, std::path::Path::new("."));
+        assert_eq!(name, "log.txt");
+
+        let (dir, name) = split_log_path("/var/log/freemkv.log").expect("a full path is valid");
+        assert_eq!(dir, std::path::Path::new("/var/log"));
+        assert_eq!(name, "freemkv.log");
+
+        let (dir, name) = split_log_path("logs/a.log").expect("a relative dir is valid");
+        assert_eq!(dir, std::path::Path::new("logs"));
+        assert_eq!(name, "a.log");
+
+        assert!(
+            split_log_path("").is_none(),
+            "an empty path has no filename"
+        );
+        assert!(split_log_path("/").is_none(), "a root path has no filename");
+        assert!(split_log_path("..").is_none());
+    }
+
+    /// The value guard: `--language` must not swallow a following stream URL.
+    /// Without it `freemkv --language disc:// mkv://out.mkv` eats `disc://` as
+    /// the language and the rip degrades into a usage no-op with exit 0.
+    #[test]
+    fn the_language_flag_never_swallows_a_url_or_a_flag() {
+        let (args, lang) = strip_language_flag(&v(&["freemkv", "--language", "de", "disc://"]));
+        assert_eq!(lang.as_deref(), Some("de"));
+        assert_eq!(args, v(&["freemkv", "disc://"]));
+
+        // The short alias behaves identically.
+        let (args, lang) = strip_language_flag(&v(&["freemkv", "--lang", "de", "disc://"]));
+        assert_eq!(lang.as_deref(), Some("de"));
+        assert_eq!(args, v(&["freemkv", "disc://"]));
+
+        // A URL is not a language code — keep it positional.
+        let (args, lang) =
+            strip_language_flag(&v(&["freemkv", "--language", "disc://", "mkv://x.mkv"]));
+        assert_eq!(lang, None);
+        assert_eq!(args, v(&["freemkv", "disc://", "mkv://x.mkv"]));
+
+        // Nor is a flag.
+        let (args, lang) = strip_language_flag(&v(&["freemkv", "--language", "--verbose"]));
+        assert_eq!(lang, None);
+        assert_eq!(args, v(&["freemkv", "--verbose"]));
+
+        // Last token: no value, no panic.
+        let (args, lang) = strip_language_flag(&v(&["freemkv", "--language"]));
+        assert_eq!(lang, None);
+        assert_eq!(args, v(&["freemkv"]));
+
+        // Absent entirely: the argument list is untouched.
+        let original = v(&["freemkv", "iso://a.iso", "mkv://b.mkv"]);
+        let (args, lang) = strip_language_flag(&original);
+        assert_eq!(lang, None);
+        assert_eq!(args, original);
+    }
+
+    /// `freemkv <cmd> --help` routes to the per-command help before the
+    /// command's own parser runs. Forced `true`, `freemkv info disc://` prints
+    /// help instead of scanning the disc.
+    #[test]
+    fn help_is_requested_only_by_the_help_flags() {
+        assert!(!wants_help(&v([].as_slice())));
+        assert!(!wants_help(&v(&["disc://"])));
+        assert!(!wants_help(&v(&["--helpful", "-help", "h"])));
+        assert!(wants_help(&v(&["--help"])));
+        assert!(wants_help(&v(&["-h"])));
+        assert!(wants_help(&v(&["disc://", "-h"])));
+        assert!(wants_help(&v(&["--share", "--help", "-m"])));
     }
 }

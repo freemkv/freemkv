@@ -113,8 +113,50 @@ fn run_gui() {
 fn launched_windowed() -> bool {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.to_str().map(|s| s.contains(".app/Contents/MacOS/")))
+        .and_then(|p| p.to_str().map(is_app_bundle_path))
         .unwrap_or(false)
+}
+
+/// Whether an executable path sits inside a macOS `.app` bundle.
+///
+/// The whole launch decision reduces to this string test, so it is separated
+/// from `current_exe()` — which cannot be steered from a test — and asserted
+/// directly. Forced `true`, `freemkv --help` in a terminal opens a window
+/// instead of printing; forced `false`, a Finder double-click runs the CLI
+/// with no arguments and exits immediately.
+#[cfg(target_os = "macos")]
+fn is_app_bundle_path(p: &str) -> bool {
+    p.contains(".app/Contents/MacOS/")
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod launch_tests {
+    #[test]
+    fn only_a_path_inside_an_app_bundle_is_a_windowed_launch() {
+        assert!(super::is_app_bundle_path(
+            "/Applications/freemkv.app/Contents/MacOS/freemkv"
+        ));
+        assert!(super::is_app_bundle_path(
+            "/Users/me/Desktop/My Build.app/Contents/MacOS/freemkv-gui"
+        ));
+
+        // Every one of these is a terminal invocation and must print, not open
+        // a window.
+        for cli in [
+            "/usr/local/bin/freemkv",
+            "/Users/me/Developer/freemkv/target/debug/freemkv",
+            "./freemkv",
+            "",
+            // A bundle NAME in a path is not a bundle layout.
+            "/Users/me/freemkv.app.backup/freemkv",
+            "/Users/me/freemkv/Contents/MacOS/freemkv",
+        ] {
+            assert!(
+                !super::is_app_bundle_path(cli),
+                "{cli:?} is a command-line launch"
+            );
+        }
+    }
 }
 
 /// Windows: never. This image is console-subsystem, and an Explorer
