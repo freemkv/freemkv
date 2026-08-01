@@ -111,6 +111,27 @@ fn r(x: f64, y: f64, w: f64, h: f64) -> NSRect {
 
 // ── stub disc model (stands in for engine::scan) ──────────────────────────
 
+/// Identity + displayed state of a full row list, so `render` can tell "did
+/// the tree actually change?" without a full `reloadData`.
+///
+/// Mirrors `windows.rs`'s `rows_sig`, which the Windows shell already uses to
+/// skip `rebuild_tree` on an unchanged 200 ms tick; this shell had no such
+/// guard at all, so a running rip (which ticks the Progress page at 5 Hz)
+/// forced a full outline reload and re-expand of every root every 200 ms for
+/// the life of the rip, even though the titles tree is not the page on
+/// screen and its rows never move while a rip is in flight.
+fn rows_sig(rows: &[crate::ui::Row]) -> String {
+    rows.iter()
+        .map(|r| {
+            format!(
+                "{}|{}|{}|{}|{:?}",
+                r.index, r.depth, r.type_s, r.desc, r.check
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ── outline data source ───────────────────────────────────────────────────
 
 struct SrcIvars {
@@ -346,6 +367,11 @@ struct Ivars {
     /// it. AppKit objects are main-thread-only, so nothing else may cross.
     inbox: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     drain: RefCell<Option<Retained<NSTimer>>>,
+    /// Signature of the tree rows last painted, so a 200 ms progress tick does
+    /// not force a full `reloadData` + re-expand of the (usually hidden)
+    /// titles outline when nothing about the title list moved — the same
+    /// policy the Windows shell's `Memo::rows`/`rows_sig` already apply.
+    tree_sig: RefCell<String>,
     log_hidden: RefCell<bool>,
     page_result: RefCell<Option<Retained<NSView>>>,
     result_line: RefCell<Option<Retained<NSTextField>>>,
@@ -955,6 +981,21 @@ define_class!(
                 self.set_keydb_note(last);
             }
             self.set_keydb_updating(false);
+            // The keydb update is one-shot: once its result has been drained
+            // there is nothing left for this timer to ever observe again, so
+            // stop it here — matching the Windows shell's `drain()`, which
+            // kills `TIMER_DRAIN` at the same point. Without this the timer
+            // (armed the first time any Settings session clicks "Update
+            // keydb") never stops: it re-fires at 5 Hz, taking the inbox lock
+            // and finding it empty, for the rest of the process's life, even
+            // after Settings is closed. `start_drain`'s own guard
+            // (`if self.ivars().drain.borrow().is_some() { return; }`) means
+            // a later click reuses this same timer rather than adding a
+            // second one, so the bug is one eternal timer, not an
+            // accumulating pile of them — but eternal is still wrong.
+            if let Some(t) = self.ivars().drain.borrow_mut().take() {
+                t.invalidate();
+            }
         }
 
         #[unsafe(method(onOpenFolder:))]
@@ -1269,7 +1310,13 @@ impl Controller {
 
         // tree
         if let Some(src) = iv.src.borrow().as_ref() {
-            src.apply(&v.title_rows);
+            // Skip the full `reloadData` + re-expand when nothing about the
+            // title list moved — see `rows_sig`'s doc comment.
+            let sig = rows_sig(&v.title_rows);
+            if *iv.tree_sig.borrow() != sig {
+                src.apply(&v.title_rows);
+                *iv.tree_sig.borrow_mut() = sig;
+            }
             if let Some(tv) = src.ivars().info.borrow().as_ref() {
                 tv.setString(&NSString::from_str(&v.detail));
             }
@@ -4466,6 +4513,143 @@ mod tests {
             "keyserver_token is no longer built with field_secure — the \
              bearer token would render in a plain NSTextField again, fully \
              legible during screen-sharing or a recording"
+        );
+    }
+
+    // ── the tree redraw memo (round-2 concurrency/performance audit) ───────
+    //
+    // `render` used to call `TitlesSource::apply` — a full `reloadData` +
+    // re-expand of every root — unconditionally, on every call. Because
+    // `render` also runs from the 5 Hz progress tick (`onTick:` → `App::tick`
+    // → `app_mut` → `render`), a running rip forced that full outline rebuild
+    // every 200 ms for its entire duration, even though the titles tree is
+    // not the page on screen during a rip and its rows never move while one
+    // is in flight. The Windows shell already had this guard (`rows_sig` /
+    // `Memo::rows`, with a comment claiming macOS "does the same" for its
+    // format popup — true for `sync_formats`, but never true for the tree).
+    // `rows_sig` is a pure function, so — unlike most of this file — it is
+    // real, non-source-inspection coverage.
+    fn rows_sig_fixture() -> Vec<crate::ui::Row> {
+        vec![
+            crate::ui::Row {
+                index: 0,
+                depth: 0,
+                type_s: String::new(),
+                desc: "Disc".into(),
+                check: None,
+            },
+            crate::ui::Row {
+                index: 1,
+                depth: 1,
+                type_s: "Title".into(),
+                desc: "Main Feature".into(),
+                check: Some(crate::ui::Check::Off),
+            },
+            crate::ui::Row {
+                index: 2,
+                depth: 2,
+                type_s: "Audio".into(),
+                desc: "English 5.1".into(),
+                check: Some(crate::ui::Check::On),
+            },
+        ]
+    }
+
+    #[test]
+    fn the_row_signature_is_stable_for_unchanged_rows() {
+        let rows = rows_sig_fixture();
+        assert_eq!(
+            rows_sig(&rows),
+            rows_sig(&rows.clone()),
+            "an identical row list must produce an identical signature, or \
+             every 200 ms progress tick forces a full outline reload again"
+        );
+    }
+
+    #[test]
+    fn the_row_signature_notices_a_real_change() {
+        let rows = rows_sig_fixture();
+        let base = rows_sig(&rows);
+
+        let mut renamed = rows.clone();
+        renamed[1].desc.push_str(" (remastered)");
+        assert_ne!(base, rows_sig(&renamed), "a renamed row went unnoticed");
+
+        let mut retyped = rows.clone();
+        retyped[2].type_s = "Subtitle".into();
+        assert_ne!(base, rows_sig(&retyped), "a retyped row went unnoticed");
+
+        let mut reindented = rows.clone();
+        reindented[2].depth = 1;
+        assert_ne!(
+            base,
+            rows_sig(&reindented),
+            "a re-indented row went unnoticed"
+        );
+
+        let mut dropped = rows.clone();
+        dropped.pop();
+        assert_ne!(base, rows_sig(&dropped), "a removed row went unnoticed");
+
+        let mut ticked = rows.clone();
+        ticked[1].check = Some(crate::ui::Check::On);
+        assert_ne!(
+            base,
+            rows_sig(&ticked),
+            "a changed checkbox state went unnoticed — unlike the Windows \
+             shell, this shell has no separate tick-state-only apply path, \
+             so a real selection change must still force `apply`"
+        );
+    }
+
+    // STOPGAP, NOT COVERAGE: whether `render` actually consults `tree_sig`
+    // before calling `apply` needs a live `Controller` with a real
+    // `NSOutlineView` to observe call counts against — the same AppKit gap
+    // noted throughout this module. Source inspection only: fails if the
+    // guard is removed and `render` goes back to calling `apply`
+    // unconditionally.
+    #[test]
+    fn render_gates_the_tree_rebuild_on_the_row_signature_source_inspection_only() {
+        let src = include_str!("mac.rs");
+        let guard = format!(
+            "{}{}",
+            "let sig = rows_sig(&v.title_rows);\n            if *iv.tree_", "sig.borrow() != sig {"
+        );
+        assert!(
+            src.contains(&guard),
+            "render() no longer compares the tree's row signature before \
+             calling TitlesSource::apply — a running rip's 5 Hz tick would \
+             force a full outline reloadData + re-expand every 200 ms again"
+        );
+    }
+
+    // ── the keydb-update drain timer stops once drained ─────────────────────
+    //
+    // `onUpdateKeys:` arms a repeating 0.2 s `NSTimer` (`start_drain`) to poll
+    // the one-shot keydb-download result out of `inbox`. Nothing ever
+    // invalidated it: once armed by the first "Update keydb" click in any
+    // Settings session, it kept firing at 5 Hz — taking the inbox mutex and
+    // finding it empty — for the rest of the process's life, even after
+    // Settings closed. The Windows shell's equivalent (`drain()`) already
+    // calls `KillTimer(TIMER_DRAIN)` at the same point; this was exactly the
+    // "one policy implemented twice, only one copy hardened" shape.
+    //
+    // STOPGAP, NOT COVERAGE: `onDrain:` needs a live `Controller` and a real
+    // `NSTimer` firing on a run loop to exercise end-to-end. Source
+    // inspection only: fails if the `invalidate()` call is removed.
+    #[test]
+    fn the_drain_timer_stops_itself_once_drained_source_inspection_only() {
+        let src = include_str!("mac.rs");
+        let stop = format!(
+            "{}{}",
+            "if let Some(t) = self.ivars().drain.borrow_mut().take",
+            "() {\n                t.invalidate();"
+        );
+        assert!(
+            src.contains(&stop),
+            "onDrain: no longer invalidates and clears the drain timer once \
+             messages are processed — it would go back to polling an always- \
+             empty inbox at 5 Hz forever after the first keydb update"
         );
     }
 }
