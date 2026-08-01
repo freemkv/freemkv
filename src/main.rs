@@ -318,7 +318,10 @@ fn dev_harness() -> bool {
             },
             st.clone(),
         );
-        while !st.finished.load(std::sync::atomic::Ordering::Relaxed) {
+        // `Acquire`, pairing with `engine::start_rip`'s `Release` store — see
+        // `ui.rs`'s tick, which reads the same flag before the same
+        // `summary`/`outcome` for the same reason.
+        while !st.finished.load(std::sync::atomic::Ordering::Acquire) {
             std::thread::sleep(std::time::Duration::from_millis(300));
             for l in st.lines.lock().unwrap().drain(..) {
                 println!("  {l}");

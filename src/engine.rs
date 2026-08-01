@@ -839,6 +839,61 @@ pub fn summarize_outcome(
     }
 }
 
+/// Render a finished single-file/container mux (`run_stream`'s `mkv://` /
+/// `m2ts://` / `mp4://` source path) as the run summary.
+///
+/// The `mkv://`/`m2ts://` analogue of `summarize_outcome`'s `o.completed`
+/// check in the disc/ISO title loop: `completed` is `libfreemkv::MuxOutcome`'s
+/// own signal for "drained to a natural EOF and finalised cleanly" (`false`
+/// on an interrupt/halt). `run_stream` used to discard the whole
+/// `MuxOutcome` via a bare `?`, so a Cancel that landed mid-conversion left a
+/// truncated file on disk while still reporting "Written to <dir>" — the same
+/// silent-success-on-cancel shape the title loop was already hardened
+/// against via `o.completed`, just never applied to this path.
+///
+/// Pure so the mapping is unit-testable without driving a real mux.
+pub fn summarize_stream(completed: bool, target: &str, dest_dir: &str) -> String {
+    if completed {
+        format!("Written to {dest_dir}")
+    } else {
+        format!("Cancelled — partial output kept: {target}")
+    }
+}
+
+/// Render a finished decrypted-folder extraction (`run_extract_folder`) as the
+/// run summary — the `dir://` analogue of `summarize_outcome`.
+///
+/// `res.halted` is exactly the signal `pipe.rs`'s `extract_succeeded`
+/// (`!halted && complete`) already gates the CLI's exit code on for this same
+/// `libfreemkv::ExtractResult`; this GUI path never consulted it, so a Cancel
+/// mid-extraction (a real in-progress halt, not a partial-then-retried run)
+/// still reported "Decrypted file tree written to <dir> — N file(s)" as if
+/// the whole tree had landed.
+///
+/// Pure so the mapping is unit-testable without a real disc/extraction.
+pub fn summarize_extract(res: &libfreemkv::ExtractResult, dest: &std::path::Path) -> String {
+    let n = res.files.len();
+    if res.halted {
+        format!(
+            "Cancelled — {n} file(s) extracted to {} before stopping",
+            dest.display()
+        )
+    } else if res.bytes_unreadable > 0 {
+        format!(
+            "Decrypted file tree written to {} — {} file(s), {:.1} MB unreadable",
+            dest.display(),
+            n,
+            res.bytes_unreadable as f64 / 1_048_576.0
+        )
+    } else {
+        format!(
+            "Decrypted file tree written to {} — {} file(s)",
+            dest.display(),
+            n
+        )
+    }
+}
+
 /// Key configuration taken from the user's settings.
 #[derive(Clone, Default)]
 pub struct KeyConfig {
@@ -952,7 +1007,22 @@ pub fn start_rip(req: RipRequest, state: Arc<RunState>) {
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = RunOutcome::Failed;
             }
             drop(summary);
-            self.0.finished.store(true, Ordering::Relaxed);
+            // `Release`, not `Relaxed`: `finished` is the flag `ui::tick`
+            // polls before it will read `summary`/`outcome` at all (see
+            // `RunState`'s doc). `summary` and `outcome` are each behind
+            // their own `Mutex`, so a `tick` that itself takes those locks
+            // can never see a torn value — but a bare `Relaxed` store here
+            // gives the *worker* no obligation to keep this store ordered
+            // after the mutex-protected writes above it in the eyes of a
+            // reader that never takes the same locks in between (a future
+            // caller polling `finished` and then reading through a
+            // lock-free snapshot, or just for the reviewer who has to
+            // re-derive the guarantee from first principles every time).
+            // `Release` makes the guarantee explicit and free: everything
+            // sequenced-before this store (both mutex writes above) is
+            // guaranteed visible to any reader that `Acquire`-loads
+            // `finished` and observes `true` — matching `ui::tick`'s load.
+            self.0.finished.store(true, Ordering::Release);
         }
     }
 
@@ -1040,21 +1110,7 @@ fn run_extract_folder(
                     ));
                 }
             }
-            let n = res.files.len();
-            if res.bytes_unreadable > 0 {
-                Ok(format!(
-                    "Decrypted file tree written to {} — {} file(s), {:.1} MB unreadable",
-                    dest.display(),
-                    n,
-                    res.bytes_unreadable as f64 / 1_048_576.0
-                ))
-            } else {
-                Ok(format!(
-                    "Decrypted file tree written to {} — {} file(s)",
-                    dest.display(),
-                    n
-                ))
-            }
+            Ok(summarize_extract(&res, &dest))
         }
         Err(e) => Err(format!("Extraction failed: E{}", e.code())),
     }
@@ -1274,7 +1330,7 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
                 .to_string(),
         );
     }
-    fe::mux_title(
+    let o = fe::mux_title(
         &src_url,
         &dest_url,
         libfreemkv::InputOptions::default(),
@@ -1283,8 +1339,16 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
         sink,
     )
     .map_err(|e| format!("convert failed: {e}"))?;
-    state.lines.lock().unwrap().push(format!("wrote {target}"));
-    Ok(format!("Written to {}", req.dest_dir))
+    if !o.completed {
+        state
+            .lines
+            .lock()
+            .unwrap()
+            .push(format!("cancelled — partial output kept: {target}"));
+    } else {
+        state.lines.lock().unwrap().push(format!("wrote {target}"));
+    }
+    Ok(summarize_stream(o.completed, &target, &req.dest_dir))
 }
 
 /// Whether a demux rip must give each title its own subdirectory.
@@ -1890,7 +1954,7 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
 /// as "2 title(s) written".
 #[cfg(test)]
 mod outcome_summary_tests {
-    use super::{fe, summarize_outcome};
+    use super::{fe, summarize_extract, summarize_outcome, summarize_stream};
     use std::io::ErrorKind;
 
     /// A hard failure is never a success, even when earlier titles wrote.
@@ -1982,6 +2046,97 @@ mod outcome_summary_tests {
         let msg = summarize_outcome(&fe::RipOutcome::Halted, 1, 1, 3, "/out").unwrap();
         assert!(msg.contains("1 of 3 title(s) completed"), "{msg}");
         assert!(msg.contains("1 partial file(s) kept in /out"), "{msg}");
+    }
+
+    // ── round-2 concurrency audit: cancel vs. a completed worker ────────────
+    //
+    // `run_stream` used to discard `libfreemkv::MuxOutcome` entirely via a
+    // bare `?`, so a Cancel that landed mid-conversion (a real halt, not a
+    // subsequently retried run) still reported "Written to <dir>" for a
+    // truncated file — the same silent-success-on-cancel shape
+    // `summarize_outcome`/`mux_selected_titles` were already hardened
+    // against via `o.completed`, just never applied to the single-file path.
+
+    #[test]
+    fn a_completed_stream_conversion_reports_written() {
+        assert_eq!(
+            summarize_stream(true, "/out/movie.mkv", "/out"),
+            "Written to /out"
+        );
+    }
+
+    #[test]
+    fn a_stream_conversion_halted_by_cancel_says_so_not_written() {
+        let msg = summarize_stream(false, "/out/movie.mkv", "/out");
+        assert!(
+            msg.starts_with("Cancelled"),
+            "a Cancel mid-conversion must not read as a clean write: {msg}"
+        );
+        assert!(
+            !msg.contains("Written to"),
+            "the truncated file must never be reported as a completed write: {msg}"
+        );
+        assert!(msg.contains("/out/movie.mkv"), "{msg}");
+    }
+
+    // `run_extract_folder` had the identical gap for `res.halted` — the exact
+    // signal `pipe.rs`'s `extract_succeeded` (`!halted && complete`) already
+    // gates the CLI's exit code on for this same `libfreemkv::ExtractResult`.
+
+    fn extract_result(
+        halted: bool,
+        files: usize,
+        bytes_unreadable: u64,
+    ) -> libfreemkv::ExtractResult {
+        libfreemkv::ExtractResult {
+            files: vec![
+                libfreemkv::FileResult {
+                    path: "f".into(),
+                    bytes_good: 0,
+                    bytes_unreadable: 0,
+                    complete: true,
+                };
+                files
+            ],
+            bytes_good: 0,
+            bytes_unreadable,
+            complete: !halted && bytes_unreadable == 0,
+            halted,
+        }
+    }
+
+    #[test]
+    fn a_completed_extraction_reports_written() {
+        let res = extract_result(false, 3, 0);
+        let msg = summarize_extract(&res, std::path::Path::new("/out/Disc"));
+        assert_eq!(msg, "Decrypted file tree written to /out/Disc — 3 file(s)");
+    }
+
+    #[test]
+    fn an_extraction_halted_by_cancel_says_so_not_written() {
+        // Regression: this used to report "Decrypted file tree written to
+        // /out/Disc — 2 file(s)" — indistinguishable from a real, complete
+        // extraction — for a run the user actually cancelled partway through.
+        let res = extract_result(true, 2, 0);
+        let msg = summarize_extract(&res, std::path::Path::new("/out/Disc"));
+        assert!(
+            msg.starts_with("Cancelled"),
+            "a Cancel mid-extraction must not read as a clean write: {msg}"
+        );
+        assert!(
+            !msg.contains("written"),
+            "a halted extraction must not use the same wording as a completed one: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_halted_extraction_still_beats_unreadable_wording() {
+        // `halted` must win over the `bytes_unreadable > 0` branch too, or a
+        // cancelled-with-some-bad-sectors run reports the wrong one of two
+        // equally wrong messages instead of the right one.
+        let res = extract_result(true, 1, 1_048_576);
+        let msg = summarize_extract(&res, std::path::Path::new("/out/Disc"));
+        assert!(msg.starts_with("Cancelled"), "{msg}");
     }
 }
 
