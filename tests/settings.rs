@@ -148,6 +148,11 @@ fn cli_parity_flags_persist() {
     assert_eq!(back.log_level, "Verbose");
 }
 
+/// Guards the process-global `HOME`. Two tests here mutate it, and the test
+/// binary runs them in parallel, so without this they would race — the precise
+/// shared-global collision this suite was audited for.
+static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Every path this app derives from the user's home must be ABSOLUTE, even
 /// when the environment does not say where home is.
 ///
@@ -168,6 +173,7 @@ fn cli_parity_flags_persist() {
 /// that touches the variable.
 #[test]
 fn derived_paths_stay_absolute_without_a_home_variable() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let saved = std::env::var_os("HOME");
     // SAFETY: single-threaded within this test binary's use of HOME; restored
     // before returning on every path below.
@@ -190,4 +196,53 @@ fn derived_paths_stay_absolute_without_a_home_variable() {
     );
     assert!(support.is_absolute(), "support_dir relative: {support:?}");
     assert!(dest.is_absolute(), "default_dest_dir relative: {dest:?}");
+}
+
+/// `save()` must actually write, and `load()` must actually read it back.
+///
+/// The mutation run replaced `Settings::save` with `Ok(())` and
+/// `Settings::load` with `Default::default()`, and both survived: every test
+/// here either inspected a `Settings` in memory or went through `serde_json`
+/// directly, so nothing ever proved a value survives a trip to disk. A `save()`
+/// that silently does nothing loses the user's keyserver token and dest dir on
+/// every restart, reporting success each time.
+///
+/// Redirects `HOME` at a temp dir so it never touches the developer's real
+/// `gui-settings.json`.
+#[test]
+fn settings_round_trip_through_a_real_file() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let saved = std::env::var_os("HOME");
+    let dir = std::env::temp_dir().join(format!("fmkv-settings-rt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // SAFETY: serialised by HOME_LOCK; restored before every return below.
+    unsafe { std::env::set_var("HOME", &dir) };
+
+    let outcome = std::panic::catch_unwind(|| {
+        let mut s = freemkv::settings::Settings::load();
+        s.dest_dir = "/tmp/fmkv-round-trip".to_string();
+        s.keyserver_url = "https://keys.example/api".to_string();
+        s.save().expect("save should succeed into a writable HOME");
+
+        let again = freemkv::settings::Settings::load();
+        (again.dest_dir, again.keyserver_url)
+    });
+
+    if let Some(v) = saved {
+        unsafe { std::env::set_var("HOME", v) };
+    } else {
+        unsafe { std::env::remove_var("HOME") };
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let (dest, url) = outcome.expect("round trip panicked");
+    assert_eq!(
+        dest, "/tmp/fmkv-round-trip",
+        "dest_dir did not survive save+load — save() may be doing nothing"
+    );
+    assert_eq!(
+        url, "https://keys.example/api",
+        "keyserver_url did not survive save+load"
+    );
 }

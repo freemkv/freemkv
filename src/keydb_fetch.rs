@@ -47,13 +47,31 @@ pub fn fetch(url: &str) -> Result<Vec<u8>> {
     let pinned = resolve_and_guard(url).map_err(|_| Error::KeydbConnect { host: host_of(url) })?;
     let agent = hardened_agent(pinned);
     let resp = agent.get(url).call().map_err(|e| map_ureq_err(url, &e))?;
+    read_capped(resp.into_reader(), MAX_BODY_BYTES).map_err(|e| {
+        if matches!(e, Error::KeydbInvalid) {
+            e
+        } else {
+            Error::KeydbConnect { host: host_of(url) }
+        }
+    })
+}
+
+/// Read at most `cap` bytes, rejecting anything larger.
+///
+/// Split out of [`fetch`] because inside it this was untestable: `fetch` does
+/// real network I/O, and the module's own SSRF guard blocks every address a
+/// local test server could bind to (127.0.0.1, ::1), so no test could reach the
+/// cap end-to-end. The whole decompression-bomb defence was therefore
+/// unexercised — every mutant of the limit and its comparison survived. As a
+/// transport-free function it is directly testable with a `Cursor`.
+fn read_capped(r: impl std::io::Read, cap: u64) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
-    // Read one byte past the cap so an over-cap body is detectable and rejected.
-    resp.into_reader()
-        .take(MAX_BODY_BYTES + 1)
+    // One byte past the cap, so an over-cap body is DETECTABLE rather than
+    // silently truncated to exactly the limit.
+    r.take(cap + 1)
         .read_to_end(&mut buf)
-        .map_err(|_| Error::KeydbConnect { host: host_of(url) })?;
-    if buf.len() as u64 > MAX_BODY_BYTES {
+        .map_err(|_| Error::KeydbInvalid)?;
+    if buf.len() as u64 > cap {
         return Err(Error::KeydbInvalid);
     }
     Ok(buf)
@@ -253,6 +271,94 @@ mod tests {
     fn ssrf_guard_allows_public_ips() {
         assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
         assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+    }
+
+    /// Each disjunct of the SSRF guard, isolated.
+    ///
+    /// The existing cases all trip SEVERAL disjuncts at once (a private address
+    /// is also not-public, a metadata address is also link-local), so mutating
+    /// any single `||` to `&&` still read true and survived. These addresses are
+    /// each blocked by EXACTLY ONE clause, so a broken clause shows up.
+    #[test]
+    fn every_ssrf_disjunct_blocks_on_its_own() {
+        let cases: &[(&str, &str)] = &[
+            ("192.0.2.1", "documentation / TEST-NET-1"),
+            ("224.0.0.1", "multicast"),
+            ("245.0.0.1", "reserved (>= 240), not broadcast"),
+            ("100.64.0.1", "CGNAT"),
+            ("0.1.2.3", "leading zero octet"),
+            ("fe80::1", "IPv6 link-local"),
+            ("fc00::1", "IPv6 unique-local"),
+        ];
+        for (ip, why) in cases {
+            let parsed: IpAddr = ip.parse().expect("test address parses");
+            assert!(
+                is_blocked_ip(&parsed),
+                "{ip} ({why}) must be blocked on its own"
+            );
+        }
+    }
+
+    /// The body-size cap — the decompression-bomb defence.
+    ///
+    /// Untestable while it lived inside `fetch`, which needs the network and
+    /// whose own SSRF guard blocks any address a test server could bind to. So
+    /// every mutant of the limit and its comparison survived the run.
+    #[test]
+    fn read_capped_admits_up_to_the_cap_and_rejects_past_it() {
+        // Exactly at the cap is fine — an off-by-one here would reject valid
+        // keydbs at the boundary.
+        let body = vec![b'x'; 64];
+        let got = read_capped(std::io::Cursor::new(body.clone()), 64).expect("64 <= 64");
+        assert_eq!(
+            got.len(),
+            64,
+            "a body exactly at the cap must be returned whole"
+        );
+        assert_eq!(got, body);
+
+        // Under the cap.
+        assert_eq!(
+            read_capped(std::io::Cursor::new(vec![b'x'; 63]), 64)
+                .expect("63 < 64")
+                .len(),
+            63
+        );
+
+        // One byte over: rejected, NOT truncated. Truncation would hand a
+        // half-parsed keydb to the caller as if it were whole.
+        assert!(
+            read_capped(std::io::Cursor::new(vec![b'x'; 65]), 64).is_err(),
+            "a body past the cap must be rejected"
+        );
+        // Far over.
+        assert!(read_capped(std::io::Cursor::new(vec![b'x'; 100_000]), 64).is_err());
+        // Empty is fine at the read layer; emptiness is the caller's check.
+        assert_eq!(
+            read_capped(std::io::Cursor::new(Vec::new()), 64)
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    /// The CGNAT clause must not become over-broad.
+    ///
+    /// `octets[0] == 100 && (octets[1] & 0xc0) == 0x40` — mutating that `&&` to
+    /// `||` survived, because no test used a PUBLIC address whose second octet
+    /// happens to sit in the 64-127 range while the first octet is not 100.
+    /// Under `||` those ordinary addresses would silently start being refused.
+    #[test]
+    fn the_cgnat_clause_does_not_block_ordinary_public_addresses() {
+        for ip in ["8.65.0.1", "1.100.0.1", "203.0.100.7"] {
+            let parsed: IpAddr = ip.parse().expect("test address parses");
+            assert!(
+                !is_blocked_ip(&parsed),
+                "{ip} is public and must not be blocked by the CGNAT clause"
+            );
+        }
+        // And a real CGNAT address still is.
+        assert!(is_blocked_ip(&"100.127.255.254".parse::<IpAddr>().unwrap()));
     }
 
     #[test]
