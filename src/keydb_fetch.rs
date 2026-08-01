@@ -169,15 +169,39 @@ fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, String> 
         return Err("URL has no host".into());
     }
     // Bounded DNS: `to_socket_addrs` is a blocking lookup that can hang for the
-    // OS resolver timeout; run it on a thread and join with a deadline.
+    // OS resolver timeout, so it runs on its own thread and we stop WAITING
+    // after `DNS_TIMEOUT`.
+    //
+    // We do NOT join it. There is no way to cancel a thread parked inside the
+    // system resolver, so on timeout the thread is abandoned and exits whenever
+    // the resolver finally returns. (The comment here used to claim we "join
+    // with a deadline"; we never did, and could not.)
+    //
+    // Abandoning is fine once. It is not fine unbounded: the GUI spawns a fresh
+    // worker per "Update keydb" click, so a user clicking through a DNS outage
+    // parks one more thread each time, each holding a resolver slot. Cap the
+    // number in flight — beyond the cap the answer is the same timeout error
+    // the caller would have got anyway, just immediately.
+    static DNS_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    const MAX_DNS_IN_FLIGHT: usize = 4;
+
     let addrs: Vec<SocketAddr> = {
+        use std::sync::atomic::Ordering;
         use std::sync::mpsc;
+        if DNS_IN_FLIGHT.load(Ordering::Relaxed) >= MAX_DNS_IN_FLIGHT {
+            return Err("DNS resolution timed out".into());
+        }
         let host = host.clone();
         let (tx, rx) = mpsc::channel();
+        DNS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
         std::thread::spawn(move || {
             let res = (host.as_str(), port)
                 .to_socket_addrs()
                 .map(|it| it.collect::<Vec<SocketAddr>>());
+            // Decremented by the RESOLVER thread, not the waiter: the slot is
+            // occupied until the lookup actually returns, which is the whole
+            // resource being bounded.
+            DNS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
             let _ = tx.send(res);
         });
         match rx.recv_timeout(DNS_TIMEOUT) {
