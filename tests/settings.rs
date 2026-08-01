@@ -174,18 +174,25 @@ static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn derived_paths_stay_absolute_without_a_home_variable() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let saved = std::env::var_os("HOME");
-    // SAFETY: single-threaded within this test binary's use of HOME; restored
-    // before returning on every path below.
-    unsafe { std::env::remove_var("HOME") };
+    // Per-OS: Unix derives from HOME, Windows from USERPROFILE/APPDATA. Clearing
+    // only HOME would make this test vacuous on Windows.
+    let vars = ["HOME", "USERPROFILE", "APPDATA"];
+    let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+        vars.iter().map(|v| (*v, std::env::var_os(v))).collect();
+    // SAFETY: serialised by HOME_LOCK; every var restored before returning.
+    for v in vars {
+        unsafe { std::env::remove_var(v) };
+    }
 
     let expanded = freemkv::settings::shellexpand("~/x");
     let support = freemkv::platform::support_dir();
     let dest = freemkv::platform::default_dest_dir();
     let home = freemkv::platform::home_dir();
 
-    if let Some(v) = saved {
-        unsafe { std::env::set_var("HOME", v) };
+    for (v, val) in saved {
+        if let Some(x) = val {
+            unsafe { std::env::set_var(v, x) };
+        }
     }
 
     assert!(!home.as_os_str().is_empty(), "home_dir() was empty");
@@ -207,42 +214,59 @@ fn derived_paths_stay_absolute_without_a_home_variable() {
 /// that silently does nothing loses the user's keyserver token and dest dir on
 /// every restart, reporting success each time.
 ///
-/// Redirects `HOME` at a temp dir so it never touches the developer's real
-/// `gui-settings.json`.
+/// Redirects the home/appdata variables at a temp dir so it never touches the
+/// real `gui-settings.json`. It must redirect the RIGHT ones: `support_dir()`
+/// is per-OS (`$HOME/Library/...` on macOS, `%APPDATA%` on Windows), and a
+/// first version of this test set only `HOME` — so on Windows it read and WROTE
+/// the runner's actual settings and failed in CI. The dest dir is likewise
+/// built from the temp path rather than hardcoded, because `normalize()`
+/// replaces a dest that is not absolute ON THIS OS, and `/tmp/...` is not
+/// absolute on Windows.
 #[test]
 fn settings_round_trip_through_a_real_file() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let saved = std::env::var_os("HOME");
+    let vars = ["HOME", "USERPROFILE", "APPDATA"];
+    let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+        vars.iter().map(|v| (*v, std::env::var_os(v))).collect();
+
     let dir = std::env::temp_dir().join(format!("fmkv-settings-rt-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    // SAFETY: serialised by HOME_LOCK; restored before every return below.
-    unsafe { std::env::set_var("HOME", &dir) };
+    // SAFETY: serialised by HOME_LOCK; every var restored before returning.
+    for v in vars {
+        unsafe { std::env::set_var(v, &dir) };
+    }
 
-    let outcome = std::panic::catch_unwind(|| {
-        let mut s = freemkv::settings::Settings::load();
-        s.dest_dir = "/tmp/fmkv-round-trip".to_string();
-        s.keyserver_url = "https://keys.example/api".to_string();
-        s.save().expect("save should succeed into a writable HOME");
+    // Absolute on whichever OS is running, so `normalize()` keeps it.
+    let want_dest = dir.join("out").to_string_lossy().into_owned();
+    let want_url = "https://keys.example/api".to_string();
 
-        let again = freemkv::settings::Settings::load();
-        (again.dest_dir, again.keyserver_url)
+    let outcome = std::panic::catch_unwind({
+        let want_dest = want_dest.clone();
+        let want_url = want_url.clone();
+        move || {
+            let mut s = freemkv::settings::Settings::load();
+            s.dest_dir = want_dest;
+            s.keyserver_url = want_url;
+            s.save().expect("save should succeed into a writable home");
+
+            let again = freemkv::settings::Settings::load();
+            (again.dest_dir, again.keyserver_url)
+        }
     });
 
-    if let Some(v) = saved {
-        unsafe { std::env::set_var("HOME", v) };
-    } else {
-        unsafe { std::env::remove_var("HOME") };
+    for (v, val) in saved {
+        match val {
+            Some(x) => unsafe { std::env::set_var(v, x) },
+            None => unsafe { std::env::remove_var(v) },
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 
     let (dest, url) = outcome.expect("round trip panicked");
     assert_eq!(
-        dest, "/tmp/fmkv-round-trip",
+        dest, want_dest,
         "dest_dir did not survive save+load — save() may be doing nothing"
     );
-    assert_eq!(
-        url, "https://keys.example/api",
-        "keyserver_url did not survive save+load"
-    );
+    assert_eq!(url, want_url, "keyserver_url did not survive save+load");
 }
