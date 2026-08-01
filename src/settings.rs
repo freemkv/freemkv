@@ -301,14 +301,12 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
     if dest.trim().is_empty() {
         return Err("No keydb.cfg location set — add one in Settings ▸ Keys".into());
     }
-    let resp = ureq::get(url)
-        .timeout(std::time::Duration::from_secs(120))
-        .call()
-        .map_err(|e| format!("Download failed: {e}"))?;
-    let mut buf = Vec::new();
-    resp.into_reader()
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("Read failed: {e}"))?;
+    // Route through the SAME hardened fetch the CLI's `update-keys` uses:
+    // SSRF/private-IP guard on the resolved address, zero redirects, and a body
+    // cap. This used to be a bare `ureq::get`, so the GUI button downloaded an
+    // arbitrary user-supplied URL with redirects followed and no size limit —
+    // none of the guards the CLI applies to the very same untrusted resource.
+    let buf = crate::keydb_fetch::fetch(url).map_err(|e| format!("Download failed: {e}"))?;
     if buf.is_empty() {
         return Err("Download was empty".into());
     }
@@ -326,8 +324,6 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
         Err(e) => Err(format!("keydb rejected: E{}", e.code())),
     }
 }
-
-use std::io::Read;
 
 /// Ask GitHub for the newest published release tag.
 ///

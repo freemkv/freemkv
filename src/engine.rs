@@ -605,6 +605,25 @@ pub struct Prog {
     pub sectors_bad: u64,
 }
 
+/// What a finished run actually was.
+///
+/// The GUI used to decide this by substring-matching the engine's English
+/// summary (`starts_with("Cancelled")`, `contains("failed")`). Three separate
+/// messages already defeated it — an undecryptable disc and both
+/// abort-for-loss paths all rendered as SUCCESS — and any reworded message
+/// would have defeated it again. The verdict is now carried, not parsed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RunOutcome {
+    /// The run produced what it set out to produce.
+    #[default]
+    Completed,
+    /// The user stopped it. Resumable, not a failure.
+    Cancelled,
+    /// It did not produce the deliverable — no key, a hard title failure, or
+    /// recovery aborted because the loss exceeded tolerance.
+    Failed,
+}
+
 /// Shared state a running rip publishes to the UI.
 #[derive(Default)]
 pub struct RunState {
@@ -615,6 +634,9 @@ pub struct RunState {
     /// Titles fully written so far — drives the overall bar.
     pub titles_done: std::sync::atomic::AtomicUsize,
     pub summary: Mutex<String>,
+    /// The typed verdict for [`Self::summary`]. Written in the same place the
+    /// summary is, so the two can never disagree.
+    pub outcome: Mutex<RunOutcome>,
 }
 
 struct UiSink(Arc<RunState>);
@@ -901,17 +923,65 @@ pub struct RipRequest {
 /// Run the real rip on a worker thread: engine title loop + per-title mux.
 /// Returns immediately.
 pub fn start_rip(req: RipRequest, state: Arc<RunState>) {
+    /// Sets `finished` on EVERY exit from the worker — normal return, an early
+    /// `?` someone adds later, or a panic unwinding through it.
+    ///
+    /// It used to be the closure's last statement, so a panic anywhere in the
+    /// scan/mux/recovery chain (all of which run on disc-derived input) skipped
+    /// it, `ui::tick` polled `finished` forever, and the window showed a rip in
+    /// progress permanently with no error. Mirrors `freemkv-engine`'s
+    /// `SignalDone`, whose doc records that two hand-rolled copies of this
+    /// pattern both had the bug.
+    struct SignalDone(Arc<RunState>);
+    impl Drop for SignalDone {
+        fn drop(&mut self) {
+            // A panic may have poisoned any of these. Recover the guard instead
+            // of unwrapping: a second panic here would leave `finished` unset
+            // and reproduce the exact hang this guard exists to prevent.
+            let mut summary = self
+                .0
+                .summary
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if summary.is_empty() {
+                *summary = crate::strings::get("gui.result.nothing");
+                *self
+                    .0
+                    .outcome
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = RunOutcome::Failed;
+            }
+            drop(summary);
+            self.0.finished.store(true, Ordering::Relaxed);
+        }
+    }
+
     std::thread::spawn(move || {
+        let _done = SignalDone(state.clone());
         let sink = UiSink(state.clone());
         let res = run_blocking(&req, &sink, &state);
-        match res {
-            Ok(s) => *state.summary.lock().unwrap() = s,
+        let (text, verdict) = match res {
+            // A user stop is resumable, not a failure. `cancel` is the typed
+            // signal the sink already polls, so it beats reading the prose.
+            Ok(s) if state.cancel.load(Ordering::Relaxed) => (s, RunOutcome::Cancelled),
+            Ok(s) => (s, RunOutcome::Completed),
             Err(e) => {
-                state.lines.lock().unwrap().push(e.clone());
-                *state.summary.lock().unwrap() = e;
+                state
+                    .lines
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(e.clone());
+                (e, RunOutcome::Failed)
             }
-        }
-        state.finished.store(true, Ordering::Relaxed);
+        };
+        *state
+            .summary
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = text;
+        *state
+            .outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = verdict;
     });
 }
 
@@ -1067,19 +1137,72 @@ fn out_kind(format: &str) -> OutKind {
 /// the disc/volume label (or container name), `{n}` → the 1-based title number.
 /// An empty template falls back to the historical `<label>_t<n>`; a template
 /// with no `{n}` gets `_t<n>` appended so multi-title output can never collide.
+/// Make a disc-supplied label safe to use as ONE filename component.
+///
+/// The volume label is disc bytes — untrusted. It reached the destination path
+/// through `title_basename`, which stripped only `/`, so a label containing
+/// `..\\..\\` escaped the destination directory on Windows. The CLI has always
+/// defended against this (`pipe::sanitize_name`, whose own test spells out the
+/// escape), but the GUI never called it.
+///
+/// This is deliberately NARROWER than the CLI's helper. `sanitize_name` is an
+/// ASCII allow-list built for CLI filename cosmetics: it also drops apostrophes,
+/// colons and periods, and collapses any non-Latin label to `"disc"`. Reusing
+/// it here would rename every Japanese, Cyrillic or accented disc — which the
+/// GUI renders correctly today, on every platform — in order to close a Windows
+/// traversal. So: reject the path-y and the unrepresentable, keep the letters.
+pub fn sanitize_label(label: &str) -> String {
+    // Whole-name `.` / `..` are path navigation, not names.
+    if label == "." || label == ".." {
+        return "disc".to_string();
+    }
+    let cleaned: String = label
+        .chars()
+        .map(|c| match c {
+            // Separators, the Windows drive-letter colon, the reserved
+            // wildcard/redirect set, and any control character.
+            '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    // Windows rejects a trailing dot or space on a path component.
+    let trimmed = cleaned.trim().trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        return "disc".to_string();
+    }
+    // A reserved DOS device name is not usable as a file stem on Windows.
+    let stem = trimmed.split('.').next().unwrap_or(trimmed);
+    if is_windows_reserved(stem) {
+        return format!("_{trimmed}");
+    }
+    trimmed.to_string()
+}
+
+/// `CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9` — case-insensitive, still
+/// reserved on modern Windows.
+fn is_windows_reserved(stem: &str) -> bool {
+    let s = stem.to_ascii_uppercase();
+    matches!(s.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((s.starts_with("COM") || s.starts_with("LPT"))
+            && s.len() == 4
+            && s.as_bytes()[3].is_ascii_digit()
+            && s.as_bytes()[3] != b'0')
+}
+
 /// Path separators a user might type are neutralized to keep output in-folder.
-fn title_basename(template: &str, label: &str, n: usize) -> String {
+pub fn title_basename(template: &str, label: &str, n: usize) -> String {
     let t = template.trim();
     if t.is_empty() {
         return format!("{label}_t{n}");
     }
-    let mut name = t.replace("{title}", label);
+    let mut name = t.replace("{title}", &sanitize_label(label));
     if name.contains("{n}") {
         name = name.replace("{n}", &n.to_string());
     } else {
         name = format!("{name}_t{n}");
     }
-    name.replace('/', "_")
+    name
 }
 
 /// The audio/subtitle selection for this request. It goes on `InputOptions`,
@@ -1461,7 +1584,10 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             // missing footage, and reporting that as a written title is the
             // silent-loss failure the gate exists to prevent.
             return if want_iso {
-                Ok(format!(
+                // Err, not Ok: the partial ISO is worth keeping, but the run did
+                // not deliver what was asked for. Returning Ok here exited 0 and
+                // rendered the abort as a completed rip.
+                Err(format!(
                     "Recovery aborted — too much unreadable data; partial ISO kept: {iso_path}"
                 ))
             } else {

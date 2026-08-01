@@ -211,8 +211,9 @@ Labels are preserved in all output formats — MKV track names and M2TS metadata
 ## Flags
 
 ```
--t, --title N       Select title (1-based, repeatable). Default: all.
--k, --keydb PATH    KEYDB.cfg path (optional; only required for UHD / AACS 2.0+ discs)
+-t, --title N       Select title (1-based, repeatable). Default: the main
+                    title only; use `-t all` for every title.
+    --keydb PATH    KEYDB.cfg path (optional; only required for UHD / AACS 2.0+ discs)
     --log-level N   Log verbosity: 1 = warnings/errors only (default), 2 = info,
                     3 = debug, 4 = trace. At level ≥2 also widens human stdout detail.
     --log-file PATH Also write the full log to PATH (for bug reports)
