@@ -923,7 +923,12 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // any tiny CSS-locked nav title) must NOT abort the whole rip. We skip it
     // with a warning and keep muxing the rest. See `is_title_failure_fatal`.
     let multi_title = jobs.len() > 1;
-    let explicit_selection = !title_nums.is_empty();
+    // `-t all` asks for everything, which is NOT the same as naming titles: an
+    // uncrackable menu stub must still be skipped, exactly as it is for an ISO
+    // source (where `-t all` leaves `title_nums` empty). Without the
+    // `!all_titles` term, expanding `-t all` into a title list below would make
+    // the first stub abort the entire rip.
+    let explicit_selection = !title_nums.is_empty() && !all_titles;
 
     for (title_idx, dest_url) in &jobs {
         // The MAIN FEATURE is title index 0 (the disc's primary title — first in

@@ -14,6 +14,10 @@
 /// can be wrong without a window to look at, so it must be testable here.
 pub mod app_entry;
 pub mod engine;
+/// The hardened keydb downloader (SSRF guard, zero redirects, body cap).
+/// Declared here as well as in `main.rs` because `settings.rs` — the GUI's
+/// Update-keydb path — lives in this tree and could not otherwise reach it.
+pub mod keydb_fetch;
 pub mod platform;
 pub mod settings;
 // The i18n string facade — the core (`ui`) localizes through it, so the lib

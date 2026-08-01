@@ -767,6 +767,8 @@ pub struct App {
     pub run_started: Option<std::time::Instant>,
     pub info: Option<InfoRows>,
     pub result_summary: String,
+    /// Typed verdict for `result_summary` — never re-derive it from the text.
+    pub result_outcome: crate::engine::RunOutcome,
     pub selected_row: Option<usize>,
     /// Video codec per title, from the scan — used to warn when the chosen
     /// container cannot carry them. Public alongside the rest of the model so
@@ -802,6 +804,7 @@ impl App {
             run_started: None,
             info: None,
             result_summary: String::new(),
+            result_outcome: crate::engine::RunOutcome::default(),
             selected_row: None,
             video_codecs: Vec::new(),
             reported_bad: 0,
@@ -813,11 +816,29 @@ impl App {
         app
     }
 
+    /// Newest lines kept on screen. A multi-hour rip of a damaged disc emits a
+    /// line per bad-sector retry, and nothing bounded this during a run — the
+    /// two `log.clear()` sites are Clear-log and opening a new source, neither
+    /// of which fires mid-rip. Unbounded growth is not just memory: every tick
+    /// the shells join, re-read and re-set the WHOLE buffer, so the app got
+    /// slower the longer it ran, worst at the end of the longest jobs.
+    const LOG_MAX: usize = 5_000;
+    /// Dropped per trim, so a long rip pays the O(n) drain rarely instead of
+    /// once per line.
+    const LOG_TRIM: usize = 1_000;
+
     pub fn say(&mut self, kind: LogKind, text: &str) {
         self.log.push(LogLine {
             text: text.into(),
             kind,
         });
+        if self.log.len() > Self::LOG_MAX {
+            // Oldest first: the tail is where a failure surfaces. No notice
+            // line — `gui.log.elided` does not exist and freemkv-i18n is pinned
+            // to a release tag, so the only alternative would be the one
+            // untranslated string in the pane. Debt recorded.
+            self.log.drain(..Self::LOG_TRIM);
+        }
     }
 
     /// True when at least one title on this source could go in an MP4. With no
@@ -1167,6 +1188,7 @@ impl App {
             let sum = st.summary.lock().map(|s| s.clone()).unwrap_or_default();
             self.say(LogKind::Result, &sum);
             self.result_summary = sum;
+            self.result_outcome = st.outcome.lock().map(|o| *o).unwrap_or_default();
             self.run = None;
             self.page = Page::Result;
             return vec![Effect::Redraw, Effect::StopTicking];
@@ -1239,14 +1261,17 @@ impl App {
             result_summary: self.result_summary.clone(),
             // The summary text is engine-emitted English; classify on it, but
             // show a localized heading.
-            result_heading: if self.result_summary.starts_with("Cancelled") {
-                crate::strings::get("gui.result.cancelled")
-            } else if self.result_summary.starts_with("Nothing")
-                || self.result_summary.contains("failed")
-            {
-                crate::strings::get("gui.result.nothing")
-            } else {
-                crate::strings::get("gui.result.finished")
+            // Matched on the TYPED verdict. Substring-matching the summary
+            // sent an undecryptable disc and both abort-for-loss paths to the
+            // success heading, and sent a failed convert to "nothing written".
+            result_heading: match self.result_outcome {
+                crate::engine::RunOutcome::Cancelled => crate::strings::get("gui.result.cancelled"),
+                // Reuses the existing "nothing written" string rather than
+                // adding a key: `freemkv-i18n` is pinned to a release tag, so a
+                // new key means cutting a tag in another repo. Wording debt,
+                // recorded, not a behaviour gap.
+                crate::engine::RunOutcome::Failed => crate::strings::get("gui.result.nothing"),
+                crate::engine::RunOutcome::Completed => crate::strings::get("gui.result.finished"),
             },
             eject_visible: false,
         }
