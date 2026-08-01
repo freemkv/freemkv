@@ -50,7 +50,17 @@ mod imp {
     use std::path::PathBuf;
 
     pub fn home_dir() -> PathBuf {
-        std::env::var("HOME").map(PathBuf::from).unwrap_or_default()
+        // NEVER an empty path. `unwrap_or_default()` returned one, and every
+        // path built on it then came out RELATIVE: `shellexpand("~/x")` gave
+        // "x", `support_dir()` gave "Library/Application Support/freemkv",
+        // `default_dest_dir()` gave "Movies". Settings, the keydb and rips all
+        // landed relative to the process's CWD instead of the user's home.
+        // Unset HOME is not exotic — a container, a systemd unit, a cron job
+        // or `env -i` all produce it, and autorip ships in Docker.
+        std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
     }
 
     pub fn support_dir() -> PathBuf {
@@ -87,17 +97,21 @@ mod imp {
     use std::path::PathBuf;
 
     pub fn home_dir() -> PathBuf {
-        std::env::var("USERPROFILE")
+        // Never empty — see the Unix note above; an empty base makes every
+        // derived path relative to the CWD.
+        std::env::var_os("USERPROFILE")
+            .filter(|h| !h.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_default()
+            .unwrap_or_else(std::env::temp_dir)
     }
 
     /// `%APPDATA%` (roaming). Falls back to `%USERPROFILE%\AppData\Roaming` when
     /// the variable is missing, so the path is never relative.
     pub fn support_dir() -> PathBuf {
-        std::env::var("APPDATA")
+        std::env::var_os("APPDATA")
+            .filter(|v| !v.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|_| home_dir().join("AppData").join("Roaming"))
+            .unwrap_or_else(|| home_dir().join("AppData").join("Roaming"))
             .join("freemkv")
     }
 
