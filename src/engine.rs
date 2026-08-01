@@ -730,6 +730,93 @@ pub fn explain(code: u16) -> String {
     }
 }
 
+/// Explain why a title died, from the two halves of the cause
+/// [`fe::RipOutcome::Failed`] carries.
+///
+/// A typed library failure stringifies as `E<code>: …`, so it arrives with a
+/// code and [`explain`] handles it. A genuine OS error is passed through
+/// unwrapped by libfreemkv — the full disk has NO `E<code>` to parse, arrives
+/// as `code: None`, and keeps its whole meaning in `kind`. Reading only the
+/// code rendered "Mux failed (E0)." for it.
+fn describe_failure(code: Option<u16>, kind: std::io::ErrorKind) -> String {
+    if let Some(c) = code {
+        return explain(c);
+    }
+    match kind {
+        std::io::ErrorKind::StorageFull => {
+            "The destination drive is full. Free some space and run it again.".to_string()
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            "No permission to write to the destination folder.".to_string()
+        }
+        std::io::ErrorKind::NotFound => "The destination folder is no longer there.".to_string(),
+        k => format!("Write failed ({k:?})."),
+    }
+}
+
+/// Render a finished title loop as the run summary.
+///
+/// `Err` is not decoration: `start_rip` files an `Ok` string as the summary and
+/// nothing else, so an outcome returned as `Ok` reads to the user as a rip that
+/// worked. Only [`fe::RipOutcome::Ok`] and a cancel are successes; `NoKey` and
+/// `Failed` are not, and a `Failed` that arrives after some titles already
+/// wrote must still say it failed — reporting "2 title(s) written" for a rip
+/// the engine stopped on a full disk is the same silent-success bug the
+/// `code`/`kind` pair was added to make impossible.
+///
+/// Pure so the mapping is testable without a disc; both title-loop call sites
+/// (staged-ISO and single-pass) share it so they cannot drift apart.
+pub fn summarize_outcome(
+    outcome: &fe::RipOutcome,
+    written: usize,
+    partial: usize,
+    total: usize,
+    dest_dir: &str,
+) -> Result<String, String> {
+    // Never report "Nothing was written" while a partial file is on disk.
+    let with_partial = |lead: String| {
+        if partial > 0 {
+            format!("{lead} — {partial} partial file(s) kept in {dest_dir}")
+        } else {
+            lead
+        }
+    };
+    // A failure after N good titles has to keep the N; the user needs to know
+    // what survived as well as what stopped it.
+    let so_far = || {
+        if written > 0 {
+            format!("{written} of {total} title(s) written to {dest_dir}, then ")
+        } else {
+            String::new()
+        }
+    };
+    match outcome {
+        fe::RipOutcome::Halted => Ok(with_partial(format!(
+            "Cancelled — {written} of {total} title(s) completed"
+        ))),
+        fe::RipOutcome::NoKey => Err(with_partial(format!(
+            "{}the disc has no decryption key — every remaining title would \
+             fail the same way. Check the keydb or online key service in Settings.",
+            so_far()
+        ))),
+        fe::RipOutcome::Failed {
+            title_index,
+            code,
+            kind,
+        } => Err(with_partial(format!(
+            "{}title {} failed: {}",
+            so_far(),
+            title_index + 1,
+            describe_failure(*code, *kind)
+        ))),
+        fe::RipOutcome::Ok { .. } if written == 0 && partial > 0 => {
+            Ok(with_partial("Cancelled".to_string()))
+        }
+        fe::RipOutcome::Ok { .. } if written == 0 => Ok("Nothing was written".to_string()),
+        fe::RipOutcome::Ok { .. } => Ok(format!("{written} title(s) written to {dest_dir}")),
+    }
+}
+
 /// Key configuration taken from the user's settings.
 #[derive(Clone, Default)]
 pub struct KeyConfig {
@@ -1187,29 +1274,13 @@ fn mux_selected_titles(
         }
     });
 
-    // A "partial N kept" note whenever a cancel left one or more partial files,
-    // so the result never reads "Nothing was written" while a file is on disk.
-    let partial_note = |lead: &str| {
-        if partial.get() > 0 {
-            format!(
-                "{lead} — {} partial file(s) kept in {}",
-                partial.get(),
-                req.dest_dir
-            )
-        } else {
-            lead.to_string()
-        }
-    };
-    Ok(match outcome {
-        fe::RipOutcome::Halted => partial_note(&format!(
-            "Cancelled — {} of {} title(s) completed",
-            written.get(),
-            indices.len()
-        )),
-        _ if written.get() == 0 && partial.get() > 0 => partial_note("Cancelled"),
-        _ if written.get() == 0 => "Nothing was written".to_string(),
-        _ => format!("{} title(s) written to {}", written.get(), req.dest_dir),
-    })
+    summarize_outcome(
+        &outcome,
+        written.get(),
+        partial.get(),
+        indices.len(),
+        &req.dest_dir,
+    )
 }
 
 fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
@@ -1535,30 +1606,118 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         eject_disc(&device, sink);
     }
 
-    // A "partial N kept" note whenever a cancel left one or more partial
-    // files, so the result never reads "Nothing was written" while a file is
-    // on disk.
-    let partial_note = |lead: &str| {
-        if partial.get() > 0 {
-            format!(
-                "{lead} — {} partial file(s) kept in {}",
-                partial.get(),
-                req.dest_dir
-            )
-        } else {
-            lead.to_string()
+    summarize_outcome(
+        &outcome,
+        written.get(),
+        partial.get(),
+        indices.len(),
+        &req.dest_dir,
+    )
+}
+
+/// The engine→front-end outcome contract.
+///
+/// `run_titles` is in freemkv-engine and these renderings are here, so no
+/// single-repo test covers the seam: the engine proves it *emits* `NoKey` /
+/// `Failed`, and nothing proved this crate does anything with them. It didn't —
+/// every variant fell through to an `Ok` string, and `start_rip` files an `Ok`
+/// as the run summary, so a rip the engine stopped on a full disk was reported
+/// as "2 title(s) written".
+#[cfg(test)]
+mod outcome_summary_tests {
+    use super::{fe, summarize_outcome};
+    use std::io::ErrorKind;
+
+    /// A hard failure is never a success, even when earlier titles wrote.
+    /// This is the silent-success regression: `written > 0` used to take the
+    /// "N title(s) written" arm and lose the failure entirely.
+    #[test]
+    fn failure_after_good_titles_is_an_error_that_keeps_the_count() {
+        let out = fe::RipOutcome::Failed {
+            title_index: 2,
+            code: None,
+            kind: ErrorKind::StorageFull,
+        };
+        let r = summarize_outcome(&out, 2, 0, 3, "/out");
+        let msg = r.expect_err("a rip stopped by a full disk must not report success");
+        assert!(msg.contains("2 of 3 title(s) written"), "{msg}");
+        assert!(msg.contains("title 3 failed"), "{msg}");
+        assert!(msg.contains("full"), "{msg}");
+    }
+
+    /// The `kind` half of the cause. A passthrough OS error carries no
+    /// `E<code>`, so code-only rendering produced "Mux failed (E0)." — the
+    /// reason `RipOutcome::Failed` carries `kind` at all.
+    #[test]
+    fn passthrough_os_errors_are_explained_from_kind_not_code() {
+        let kinds = [
+            (ErrorKind::StorageFull, "full"),
+            (ErrorKind::PermissionDenied, "permission"),
+            (ErrorKind::NotFound, "no longer there"),
+        ];
+        for (kind, want) in kinds {
+            let out = fe::RipOutcome::Failed {
+                title_index: 0,
+                code: None,
+                kind,
+            };
+            let msg = summarize_outcome(&out, 0, 0, 1, "/out").unwrap_err();
+            assert!(
+                msg.to_lowercase().contains(want),
+                "{kind:?} rendered as {msg:?}, wanted {want:?}"
+            );
+            assert!(!msg.contains("E0"), "{kind:?} fell back to a code: {msg}");
         }
-    };
-    Ok(match outcome {
-        fe::RipOutcome::Halted => partial_note(&format!(
-            "Cancelled — {} of {} title(s) completed",
-            written.get(),
-            indices.len()
-        )),
-        _ if written.get() == 0 && partial.get() > 0 => partial_note("Cancelled"),
-        _ if written.get() == 0 => "Nothing was written".to_string(),
-        _ => format!("{} title(s) written to {}", written.get(), req.dest_dir),
-    })
+    }
+
+    /// The `code` half: a typed library failure still routes through `explain`.
+    #[test]
+    fn typed_failures_still_explain_the_code() {
+        let out = fe::RipOutcome::Failed {
+            title_index: 0,
+            code: Some(9048),
+            kind: ErrorKind::Other,
+        };
+        let msg = summarize_outcome(&out, 0, 0, 1, "/out").unwrap_err();
+        assert!(msg.contains("MP4"), "{msg}");
+    }
+
+    /// A disc-level key failure is a failed rip, not "Nothing was written".
+    #[test]
+    fn no_key_is_an_error() {
+        let msg = summarize_outcome(&fe::RipOutcome::NoKey, 0, 0, 3, "/out")
+            .expect_err("an undecryptable disc must not report success");
+        assert!(msg.contains("no decryption key"), "{msg}");
+    }
+
+    /// The successes and the cancel path keep their existing wording.
+    #[test]
+    fn success_and_cancel_are_unchanged() {
+        let ok = fe::RipOutcome::Ok { titles_written: 2 };
+        assert_eq!(
+            summarize_outcome(&ok, 2, 0, 2, "/out").unwrap(),
+            "2 title(s) written to /out"
+        );
+        assert_eq!(
+            summarize_outcome(&ok, 0, 0, 2, "/out").unwrap(),
+            "Nothing was written"
+        );
+        // Never "Nothing was written" while a partial file sits in the folder.
+        let cancelled = summarize_outcome(&ok, 0, 1, 2, "/out").unwrap();
+        assert!(cancelled.starts_with("Cancelled"), "{cancelled}");
+        assert!(cancelled.contains("1 partial file(s) kept"), "{cancelled}");
+
+        let halted = summarize_outcome(&fe::RipOutcome::Halted, 1, 0, 3, "/out").unwrap();
+        assert_eq!(halted, "Cancelled — 1 of 3 title(s) completed");
+    }
+
+    /// A halt that left a partial file keeps both facts.
+    #[test]
+    fn halt_with_partial_keeps_both() {
+        let msg = summarize_outcome(&fe::RipOutcome::Halted, 1, 1, 3, "/out").unwrap();
+        assert!(msg.contains("1 of 3 title(s) completed"), "{msg}");
+        assert!(msg.contains("1 partial file(s) kept in /out"), "{msg}");
+    }
 }
 
 #[cfg(test)]
