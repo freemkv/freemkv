@@ -137,19 +137,19 @@ mod launch_tests {
             "/Applications/freemkv.app/Contents/MacOS/freemkv"
         ));
         assert!(super::is_app_bundle_path(
-            "/Users/me/Desktop/My Build.app/Contents/MacOS/freemkv-gui"
+            "/opt/u/Desktop/My Build.app/Contents/MacOS/freemkv-gui"
         ));
 
         // Every one of these is a terminal invocation and must print, not open
         // a window.
         for cli in [
             "/usr/local/bin/freemkv",
-            "/Users/me/Developer/freemkv/target/debug/freemkv",
+            "/opt/u/Developer/freemkv/target/debug/freemkv",
             "./freemkv",
             "",
             // A bundle NAME in a path is not a bundle layout.
-            "/Users/me/freemkv.app.backup/freemkv",
-            "/Users/me/freemkv/Contents/MacOS/freemkv",
+            "/opt/u/freemkv.app.backup/freemkv",
+            "/opt/u/freemkv/Contents/MacOS/freemkv",
         ] {
             assert!(
                 !super::is_app_bundle_path(cli),
