@@ -863,9 +863,27 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     let is_dir_dest = dest_is_directory(dest, &parsed_dest);
 
     // Resolve the per-title indices we will rip. For a scanned source this comes
-    // from its title list; for a disc source it comes straight from `title_nums`
-    // (empty = single all-titles pass). Returns None after printing a directory-
-    // creation error, in which case we abort with a non-zero exit.
+    // from its title list; for a disc source it comes straight from `title_nums`.
+    // Returns None after printing a directory-creation error, in which case we
+    // abort with a non-zero exit.
+    //
+    // `-t all` on a DISC needs a title count, and the disc path deliberately
+    // skips the upfront `scan_iso`. So scan once here to learn it and expand
+    // into an explicit list, which drops straight into the existing
+    // multi-title disc arm. The extra open is not a new risk: `pipe_disc`
+    // already opens per title (so this is N+1 of a pattern that ships), and
+    // the desktop app has always scanned up front, dropped the session, and
+    // reopened per title.
+    let title_nums = if is_disc && all_titles {
+        match disc_title_count(source, &keys, &out) {
+            Some(found) => disc_title_nums(all_titles, &title_nums, found),
+            // The scan failed; let the normal per-title path report it rather
+            // than inventing a second error message here.
+            None => title_nums,
+        }
+    } else {
+        title_nums
+    };
     let jobs = match build_jobs(
         &titles,
         is_disc,
@@ -1395,6 +1413,54 @@ fn validate_file_dest(path: &std::path::Path) -> Result<(), String> {
 ///
 /// Returns `None` (after printing the error) if a needed output directory can't
 /// be created, so the caller can exit non-zero.
+/// How many titles this disc has, for expanding `-t all`.
+///
+/// One extra drive open+scan before the per-title loop. `None` on any failure:
+/// the caller falls through to the normal path, which opens the drive again and
+/// reports the real error in the usual place, rather than growing a second
+/// error-reporting path here.
+fn disc_title_count(source: &str, keys: &KeyConfig, out: &Output) -> Option<usize> {
+    let parsed = libfreemkv::parse_url(source);
+    let target = match &parsed {
+        libfreemkv::StreamUrl::Disc { device: Some(p) } => {
+            libfreemkv::DeviceTarget::Path(p.clone())
+        }
+        _ => libfreemkv::DeviceTarget::Autodetect,
+    };
+    let (session, _trace) = freemkv_engine::open_scan_resolve(
+        target,
+        drive_credentials(keys.keydb_path()),
+        key_source_factory(keys, out),
+    )
+    .ok()?;
+    let n = session.disc().map(|d| d.titles.len())?;
+    // Drop the session before the per-title loop reopens the drive — the same
+    // shape the desktop app already uses.
+    drop(session);
+    (n > 0).then_some(n)
+}
+
+/// The title list a DISC source should rip, given `-t all` / `-t N` and the
+/// number of titles the scan actually found.
+///
+/// `-t all` on a disc used to reach `build_jobs` with an EMPTY `title_nums`,
+/// which matches neither the scanned-source arm (a disc has no upfront title
+/// list) nor the multi-title disc arm (which requires `len() > 1`) — so it fell
+/// to the catch-all, produced ONE job, and `pipe_disc` ripped title 1 and
+/// exited 0. The same flag against an `iso://` of the identical disc rips
+/// everything, because there `titles` is `Some(..)`.
+///
+/// Expanding it here rather than inside `build_jobs` keeps this a pure decision
+/// the tests can apply directly — including
+/// `shipped_help_examples_parse_and_build_runnable_jobs`, which calls
+/// `build_jobs` itself and would otherwise never see the expansion.
+pub(crate) fn disc_title_nums(all_titles: bool, requested: &[usize], found: usize) -> Vec<usize> {
+    if !all_titles || !requested.is_empty() {
+        return requested.to_vec();
+    }
+    (1..=found).collect()
+}
+
 fn build_jobs(
     titles: &Option<Vec<libfreemkv::DiscTitle>>,
     is_disc: bool,
@@ -2974,11 +3040,11 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 mod tests {
     use super::{
         KeyConfig, PipeFail, build_jobs, build_key_sources_quiet, copy_should_continue,
-        dest_is_directory, dest_is_iso, disc_copy_recovered_data, fmt_disc_damage, fmt_err,
-        fmt_err_str, is_keyserver_url, is_metadata_sink, is_scheme_only_sink, is_url_token,
-        mp4_skip_reason_key, parse_error_code, parse_flags, parse_stream_spec, preflight_validate,
-        render_error, resolved_keydb_path, sanitize_name, title_in_range, validate_file_dest,
-        validate_iso_input,
+        dest_is_directory, dest_is_iso, disc_copy_recovered_data, disc_title_nums, fmt_disc_damage,
+        fmt_err, fmt_err_str, is_keyserver_url, is_metadata_sink, is_scheme_only_sink,
+        is_url_token, mp4_skip_reason_key, parse_error_code, parse_flags, parse_stream_spec,
+        preflight_validate, render_error, resolved_keydb_path, sanitize_name, title_in_range,
+        validate_file_dest, validate_iso_input,
     };
     use crate::output::Output;
     use crate::strings;
@@ -3157,6 +3223,60 @@ mod tests {
     /// ~200 GB of near-duplicate MKVs. The comment above used to claim the
     /// parse-layer tests covered it; they do not, and the mutation run
     /// confirmed both mutants of that line survive.
+    /// `-t all` on a DISC must expand to every title, exactly as it already
+    /// does for an `iso://` source.
+    ///
+    /// It used to reach `build_jobs` with an empty `title_nums`, matching
+    /// neither the scanned-source arm (a disc has no upfront title list) nor
+    /// the multi-title disc arm (`len() > 1`), so it fell to the catch-all,
+    /// built ONE job, and ripped title 1 while exiting 0. There was no reason
+    /// for the flag to mean different things on the two source kinds.
+    #[test]
+    fn t_all_on_a_disc_expands_to_every_title() {
+        // The whole disc.
+        assert_eq!(disc_title_nums(true, &[], 12), (1..=12).collect::<Vec<_>>());
+        assert_eq!(disc_title_nums(true, &[], 1), vec![1]);
+
+        // An explicit selection wins — `-t 2 -t 5 --title all` keeps the two.
+        assert_eq!(disc_title_nums(true, &[2, 5], 12), vec![2, 5]);
+        // Without `-t all` nothing is expanded, whatever the count.
+        assert_eq!(disc_title_nums(false, &[3], 12), vec![3]);
+        assert_eq!(disc_title_nums(false, &[], 12), Vec::<usize>::new());
+        // A scan that found nothing expands to nothing rather than [1..=0].
+        assert_eq!(disc_title_nums(true, &[], 0), Vec::<usize>::new());
+    }
+
+    /// The expansion must route into the multi-title DISC arm of `build_jobs`,
+    /// one job per title — not the single-job catch-all.
+    #[test]
+    fn an_expanded_disc_selection_builds_one_job_per_title() {
+        let out = Output::new(false, true);
+        let dest = "/tmp/fmkv-t-all-jobs/";
+        let parsed = libfreemkv::parse_url(dest);
+        let nums = disc_title_nums(true, &[], 4);
+        let jobs = build_jobs(&None, true, &nums, true, dest, &parsed, &out)
+            .expect("a directory dest accepts a multi-title disc rip");
+        assert_eq!(jobs.len(), 4, "expected one job per title, got {jobs:?}");
+        // 1-based flags map onto 0-based indices, in order.
+        let idx: Vec<Option<usize>> = jobs.iter().map(|(i, _)| *i).collect();
+        assert_eq!(idx, vec![Some(0), Some(1), Some(2), Some(3)]);
+        let _ = std::fs::remove_dir_all("/tmp/fmkv-t-all-jobs");
+    }
+
+    /// A single-title disc collapses to one job — same as `-t 1`, not a
+    /// directory of one.
+    #[test]
+    fn t_all_on_a_one_title_disc_is_a_single_job() {
+        let out = Output::new(false, true);
+        let dest = "/tmp/fmkv-t-all-one.mkv";
+        let parsed = libfreemkv::parse_url(dest);
+        let nums = disc_title_nums(true, &[], 1);
+        let jobs = build_jobs(&None, true, &nums, false, dest, &parsed, &out)
+            .expect("a single title may go to a single file");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].0, Some(0));
+    }
+
     #[test]
     fn the_t_default_normalizes_to_the_main_title_only() {
         // The rule as `run()` applies it, extracted so it can be asserted.
