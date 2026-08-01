@@ -20,26 +20,19 @@ use serde_json::Value;
 // test and the in-binary `strings.rs` test enumerate the identical variant set.
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/test_support.rs"));
 
-// ── The Level map, mirrored from `messaging.rs` ─────────────────────────────
+// ── The Level map ────────────────────────────────────────────────────────────
 //
-// `freemkv` is a binary crate, so this integration test cannot `use` the
-// binary-private `messaging` module. The map is locked by spec (every code is
-// `Error`) and pinned by the in-binary `messaging::tests`, so the contract test
-// asserts the same closed vocabulary independently: every code maps to one of
-// the three Levels, and for every libfreemkv code that Level is `Error`.
-// `Warn`/`Info` are never constructed here (every code is `Error`), but the
-// assertion checks the closed three-level vocabulary, so they must exist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-enum Level {
-    Warn,
-    Info,
-    Error,
-}
-
-fn level_for(_code: u16) -> Level {
-    Level::Error
-}
+// This used to be a LOCAL copy of `messaging.rs`'s map — a stub `level_for`
+// that always returned `Level::Error` regardless of its argument (the
+// parameter was unused), asserted below against the literal `Level::Error` it
+// had just returned. That assertion could not fail no matter what the REAL
+// `messaging::level_for` in `src/messaging.rs` did: a future change mapping
+// some code to `Warn`/`Info` — the exact regression the comment above this
+// used to claim it caught — would sail through. `messaging` is now declared
+// `pub` in `lib.rs` (the same "declared in both `main.rs` and `lib.rs`"
+// pattern already used for `keydb_fetch`) specifically so this test can call
+// the real function instead.
+use freemkv::messaging::{Level, level_for};
 
 // ── Locale loading (canonical JSON, from the bundled freemkv-i18n crate) ────
 //

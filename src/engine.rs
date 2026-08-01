@@ -1435,6 +1435,69 @@ fn mux_selected_titles(
     )
 }
 
+/// Human time for a lost-playback duration, e.g. `4m` or `12.4s`. A tiny local
+/// copy of the CLI's `pipe::fmt_damage_time` — that function lives in
+/// `pipe.rs`, which is CLI-only and not part of this crate's `lib` target (the
+/// GUI shells build against `freemkv::engine`, not `freemkv::pipe`), so it
+/// cannot be reused directly without restructuring which crate owns it.
+fn fmt_damage_time(secs: f64) -> String {
+    if secs >= 3600.0 {
+        format!("{:.1}h", secs / 3600.0)
+    } else if secs >= 60.0 {
+        format!("{:.0}m", secs / 60.0)
+    } else if secs >= 1.0 {
+        format!("{:.0}s", secs)
+    } else if secs >= 0.01 {
+        format!("{:.2}s", secs)
+    } else {
+        format!("{:.0}ms", secs * 1000.0)
+    }
+}
+
+/// A trailing note for a multipass result that finished (not halted, not
+/// aborted for loss) but still has residual damage under the configured
+/// tolerance — empty string when the recovery was clean.
+///
+/// Without this, a disc that recovers with real unreadable sectors UNDER
+/// `abort_lost_secs` reports a plain "ISO image written to …" / "N title(s)
+/// written to …", identical to a perfect rip: the CLI's own `disc_to_iso`
+/// prints exactly this figure (`rip.mapfile_summary` / `rip.damage_lost_movie`)
+/// for the same condition, so the GUI was hiding damage the CLI discloses.
+/// Reuses those two existing i18n keys rather than adding new ones.
+fn damage_note(result: &fe::MultipassResult) -> String {
+    if result.unreadable_bytes == 0 && result.pending_bytes == 0 {
+        return String::new();
+    }
+    let mut note = format!(
+        "\n{}",
+        crate::strings::fmt(
+            "rip.mapfile_summary",
+            &[
+                (
+                    "good",
+                    &format!("{:.2}", result.good_bytes as f64 / 1_073_741_824.0)
+                ),
+                (
+                    "unreadable",
+                    &format!("{:.1}", result.unreadable_bytes as f64 / 1_048_576.0)
+                ),
+                (
+                    "pending",
+                    &format!("{:.1}", result.pending_bytes as f64 / 1_048_576.0)
+                ),
+            ],
+        )
+    );
+    if result.main_lost_ms.is_finite() && result.main_lost_ms > 0.0 {
+        note.push('\n');
+        note.push_str(&crate::strings::fmt(
+            "rip.damage_lost_movie",
+            &[("time", &fmt_damage_time(result.main_lost_ms / 1000.0))],
+        ));
+    }
+    note
+}
+
 fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
     if is_disc_source(&req.source) {
         return run_disc(req, sink, state);
@@ -1670,7 +1733,10 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         }
 
         if want_iso {
-            return Ok(format!("ISO image written to {iso_path}"));
+            return Ok(format!(
+                "ISO image written to {iso_path}{}",
+                damage_note(&result)
+            ));
         }
 
         // Title output: mux the selected titles from the recovered ISO by
@@ -1689,7 +1755,10 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         if should_delete_staging_iso(req.keep_iso) {
             let _ = std::fs::remove_file(&iso_path);
         }
-        return mux;
+        // The recursive mux above reports its own success text (titles
+        // written); it has no way to know THIS stage's recovery left residual
+        // damage under tolerance, so the note is appended out here instead.
+        return mux.map(|s| format!("{s}{}", damage_note(&result)));
     }
 
     // Which titles to rip — same Selection/resolve_selection the ISO path
@@ -2086,10 +2155,10 @@ mod key_summary_tests {
 #[cfg(test)]
 mod routing_tests {
     use super::{
-        DiscPlan, KeyConfig, OutKind, RipRequest, demux_needs_subdirs, disc_device, is_disc_source,
-        is_stream_source, mux_opts, out_kind, recovery_plan, recovery_produced_no_data,
-        should_delete_staging_iso, source_scheme, stream_selection, title_input_options,
-        won_from_trace,
+        DiscPlan, KeyConfig, OutKind, RipRequest, damage_note, demux_needs_subdirs, disc_device,
+        fe, is_disc_source, is_stream_source, mux_opts, out_kind, recovery_plan,
+        recovery_produced_no_data, should_delete_staging_iso, source_scheme, stream_selection,
+        title_input_options, won_from_trace,
     };
 
     fn req() -> RipRequest {
@@ -2357,5 +2426,86 @@ mod routing_tests {
         };
         assert_eq!(won_from_trace(&lost), None);
         assert_eq!(won_from_trace(&ResolutionTrace::new()), None);
+    }
+
+    // ── damage under tolerance is still disclosed ───────────────────────────
+
+    fn clean_result() -> fe::MultipassResult {
+        fe::MultipassResult {
+            unreadable_bytes: 0,
+            pending_bytes: 0,
+            good_bytes: 50_000_000_000,
+            main_lost_ms: 0.0,
+            severity: fe::DamageSeverity::Clean,
+            passes: 1,
+            aborted_for_loss: false,
+            halted: false,
+            complete: true,
+        }
+    }
+
+    /// A perfect recovery adds nothing: the plain success message the caller
+    /// already builds must not grow a spurious trailing note.
+    #[test]
+    fn a_clean_recovery_has_no_damage_note() {
+        assert_eq!(damage_note(&clean_result()), "");
+    }
+
+    /// This is the regression `engine.rs`'s success path shipped: a disc that
+    /// recovers with real unreadable/pending bytes UNDER `abort_lost_secs`
+    /// (so neither `halted` nor `aborted_for_loss` fires) used to report a
+    /// plain "ISO image written to …" — identical to a perfect rip. The CLI's
+    /// own `disc_to_iso` prints this exact figure for the same condition
+    /// (`rip.mapfile_summary`); the GUI was hiding damage the CLI discloses.
+    #[test]
+    fn residual_damage_under_tolerance_is_named_in_the_note() {
+        let result = fe::MultipassResult {
+            unreadable_bytes: 10 * 1_048_576,
+            pending_bytes: 2 * 1_048_576,
+            good_bytes: 40_000_000_000,
+            main_lost_ms: 0.0,
+            severity: fe::DamageSeverity::Cosmetic,
+            passes: 2,
+            ..clean_result()
+        };
+        let note = damage_note(&result);
+        assert!(!note.is_empty(), "damage under tolerance produced no note");
+        assert!(note.contains("10.0"), "unreadable MB missing: {note}");
+        assert!(note.contains("2.0"), "pending MB missing: {note}");
+    }
+
+    /// `main_lost_ms` is the main-title playback time actually lost — the
+    /// figure an operator cares about (not just raw byte counts). It must
+    /// show up in the note, converted to seconds, whenever it is positive.
+    #[test]
+    fn lost_playback_time_is_named_when_quantifiable() {
+        let result = fe::MultipassResult {
+            unreadable_bytes: 1_048_576,
+            pending_bytes: 0,
+            main_lost_ms: 4_500.0,
+            severity: fe::DamageSeverity::Cosmetic,
+            ..clean_result()
+        };
+        let note = damage_note(&result);
+        assert!(
+            note.contains('s') || note.contains('m'),
+            "no lost-playback-time figure in: {note}"
+        );
+    }
+
+    /// `main_lost_ms` is documented as NaN when the loss cannot be quantified
+    /// (no title extents). A NaN must not corrupt the note (e.g. print
+    /// "NaNs") — it is simply omitted, leaving the byte-count line intact.
+    #[test]
+    fn unquantifiable_loss_does_not_corrupt_the_note() {
+        let result = fe::MultipassResult {
+            unreadable_bytes: 1_048_576,
+            pending_bytes: 0,
+            main_lost_ms: f64::NAN,
+            severity: fe::DamageSeverity::Moderate,
+            ..clean_result()
+        };
+        let note = damage_note(&result);
+        assert!(!note.to_lowercase().contains("nan"), "{note}");
     }
 }

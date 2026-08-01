@@ -67,7 +67,7 @@ objc2-app-kit = { version = "0.3", features = [
   "NSPasteboard", "NSDragging", "NSAlert", "NSApplication",
   "NSBitmapImageRep", "NSImageRep", "NSGraphicsContext", "NSSplitView",
   "NSTabView", "NSTabViewItem", "NSStepper", "NSSlider", "NSWorkspace",
-  "NSPasteboardItem", "NSFilePromiseReceiver",
+  "NSPasteboardItem", "NSFilePromiseReceiver", "NSSecureTextField",
 ] }
 objc2-foundation = { version = "0.3", features = [
   "NSString", "NSGeometry", "NSArray", "NSObjCRuntime", "NSNotification",

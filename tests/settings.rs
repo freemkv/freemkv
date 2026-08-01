@@ -270,3 +270,78 @@ fn settings_round_trip_through_a_real_file() {
     );
     assert_eq!(url, want_url, "keyserver_url did not survive save+load");
 }
+
+/// `gui-settings.json` holds `keyserver_token` in plaintext. `save()` used to
+/// be a bare `std::fs::write`: mode defaults to the process umask (typically
+/// 0644 on Unix — world/group readable) and it writes the final path
+/// directly, so a crash mid-write leaves a truncated file that `load()`
+/// silently discards via `.ok()`, losing the token with no warning.
+///
+/// This checks the on-disk artifact `save()` actually produces: no stray
+/// `.json.tmp.*` file left behind (the rename completed), and — on Unix,
+/// where the permission bits are meaningful — mode 0600 on the file that
+/// holds the secret.
+#[test]
+fn saved_settings_file_is_private_and_leaves_no_temp_file() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let vars = ["HOME", "USERPROFILE", "APPDATA"];
+    let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+        vars.iter().map(|v| (*v, std::env::var_os(v))).collect();
+
+    let dir = std::env::temp_dir().join(format!("fmkv-settings-perm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // SAFETY: serialised by HOME_LOCK; every var restored before returning.
+    for v in vars {
+        unsafe { std::env::set_var(v, &dir) };
+    }
+
+    let outcome = std::panic::catch_unwind(|| {
+        let mut s = freemkv::settings::Settings::load();
+        s.keyserver_token = "s3cr3t-token".into();
+        s.save().expect("save should succeed into a writable home");
+
+        let support = freemkv::settings::support_dir();
+        let settings_file = support.join("gui-settings.json");
+        assert!(settings_file.exists(), "save() did not create the file");
+
+        // No `.json.tmp.<pid>` (or any other stray file) left in the support
+        // dir — the rename must have completed, not left the temp copy
+        // sitting next to (or instead of) the real file.
+        let leftovers: Vec<String> = std::fs::read_dir(&support)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "gui-settings.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "save() left stray files behind: {leftovers:?}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&settings_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "gui-settings.json (holds keyserver_token in plaintext) is \
+                 mode {mode:#o}, not 0600 — readable by other local accounts"
+            );
+        }
+    });
+
+    for (v, val) in saved {
+        match val {
+            Some(x) => unsafe { std::env::set_var(v, x) },
+            None => unsafe { std::env::remove_var(v) },
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    outcome.expect("round trip panicked");
+}

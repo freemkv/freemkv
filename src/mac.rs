@@ -12,11 +12,12 @@ use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, define_class, msg_send
 use objc2_app_kit::{
     NSAlert, NSAppearance, NSAppearanceNameAqua, NSApplication, NSApplicationActivationPolicy,
     NSBackingStoreType, NSBezelStyle, NSBitmapImageFileType, NSBox, NSBoxType, NSButton,
-    NSButtonCell, NSButtonType, NSColor, NSComboBox, NSControlTextEditingDelegate, NSFont,
-    NSFontWeightRegular, NSMenu, NSMenuItem, NSOpenPanel, NSOutlineView, NSOutlineViewDataSource,
-    NSOutlineViewDelegate, NSPopUpButton, NSProgressIndicator, NSScrollView, NSTableColumn,
-    NSTableViewSelectionHighlightStyle, NSTextAlignment, NSTextField, NSTextView, NSView, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask,
+    NSButtonCell, NSButtonType, NSColor, NSComboBox, NSComboBoxDelegate,
+    NSControlTextEditingDelegate, NSFont, NSFontWeightRegular, NSMenu, NSMenuItem, NSOpenPanel,
+    NSOutlineView, NSOutlineViewDataSource, NSOutlineViewDelegate, NSPopUpButton,
+    NSProgressIndicator, NSScrollView, NSSecureTextField, NSTableColumn,
+    NSTableViewSelectionHighlightStyle, NSTextAlignment, NSTextField, NSTextFieldDelegate,
+    NSTextView, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDate, NSDictionary, NSLocale, NSNumber, NSPoint, NSRect, NSRunLoop, NSSize,
@@ -472,6 +473,38 @@ define_class!(
 
     unsafe impl NSWindowDelegate for Controller {}
 
+    unsafe impl NSControlTextEditingDelegate for Controller {
+        // Without this the output field is decoration: the operator types a
+        // path, the model never hears about it, and the next 5 Hz render()
+        // tick overwrites the field with the STALE `output_dir` it already
+        // had — mid-keystroke. Run then writes to wherever `output_dir` was
+        // last set some other way (Browse…, or nothing), not what the field
+        // says. Mirrors the Windows shell's `edit_out.on().en_change` guard.
+        #[unsafe(method(controlTextDidChange:))]
+        fn control_text_did_change(&self, n: Option<&objc2_foundation::NSNotification>) {
+            let Some(f) = self.ivars().out_field.borrow().clone() else {
+                return;
+            };
+            let text = { f.stringValue() }.to_string();
+            // Only this field uses this delegate today, but check the
+            // notification's object anyway so a future second user of the
+            // delegate can't have its edits attributed to the output dir.
+            if let Some(n) = n
+                && let Some(obj) = { n.object() }
+                && !std::ptr::eq(&*obj as *const AnyObject, &*f as *const NSComboBox as *const AnyObject)
+            {
+                return;
+            }
+            if self.ivars().app.borrow().output_dir != text {
+                self.app_mut(|a| a.output_dir = text);
+            }
+        }
+    }
+
+    unsafe impl NSTextFieldDelegate for Controller {}
+
+    unsafe impl NSComboBoxDelegate for Controller {}
+
     impl Controller {
         #[unsafe(method(onBrowseOutput:))]
         fn on_browse_output(&self, _s: Option<&AnyObject>) {
@@ -590,23 +623,7 @@ define_class!(
                     a.output_dir = new_dest.clone();
                 }
             });
-            match self.ivars().settings.borrow().save() {
-                Ok(()) => self.app_mut(|a| {
-                    a.say(
-                        crate::ui::LogKind::Result,
-                        &crate::strings::get("gui.log.settings_saved"),
-                    )
-                }),
-                Err(e) => self.app_mut(|a| {
-                    a.say(
-                        crate::ui::LogKind::Notice,
-                        &crate::strings::fmt(
-                            "gui.log.settings_save_error",
-                            &[("e", &e.to_string())],
-                        ),
-                    )
-                }),
-            }
+            self.save_settings_reporting_error();
             if let Some(w) = self.ivars().win_prefs.borrow().as_ref() {
                 w.close();
             }
@@ -639,7 +656,7 @@ define_class!(
             let mtm = MainThreadMarker::new().unwrap();
             // Commit every field first so switching language loses no edits.
             self.read_prefs_form();
-            let _ = self.ivars().settings.borrow().save();
+            self.save_settings_reporting_error();
             let code = self.ivars().settings.borrow().language.clone();
             // Remember the visible tab so we can restore it after the rebuild.
             let tab_idx = self.ivars().tabs.borrow().as_ref().and_then(|tv| {
@@ -1066,6 +1083,34 @@ impl Controller {
         let r = f(&mut self.ivars().app.borrow_mut());
         self.render();
         r
+    }
+
+    /// Save `Settings` to disk and tell the operator whether it worked.
+    ///
+    /// This crate's dominant defect this round was exactly this policy
+    /// implemented twice: OK (`onClosePrefs:`) reported a failed save
+    /// (`gui.log.settings_save_error`), and the language-dropdown path
+    /// (`onApplyLanguage:`) saved the SAME struct a few lines away with a bare
+    /// `let _ =` that dropped the error on the floor. A disk-full or
+    /// permissions failure there looked identical to success — the operator
+    /// picks a language, watches the UI relocalize, and has no way to know
+    /// the keydb path/keyserver token/dest dir edited in the same session
+    /// never reached gui-settings.json. One policy, one call site now.
+    fn save_settings_reporting_error(&self) {
+        match self.ivars().settings.borrow().save() {
+            Ok(()) => self.app_mut(|a| {
+                a.say(
+                    crate::ui::LogKind::Result,
+                    &crate::strings::get("gui.log.settings_saved"),
+                )
+            }),
+            Err(e) => self.app_mut(|a| {
+                a.say(
+                    crate::ui::LogKind::Notice,
+                    &crate::strings::fmt("gui.log.settings_save_error", &[("e", &e.to_string())]),
+                )
+            }),
+        };
     }
 
     /// The shell's entire job: hand the command to the core, perform the
@@ -2178,6 +2223,10 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
                 &saved,
             )));
         }
+        // Without a delegate, typing into this field is silent: nothing
+        // tells the model, and the next render() tick stomps the keystrokes
+        // right back with the model's stale `output_dir`.
+        fld.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(c)));
     }
     ofv.addSubview(&fld);
     mask(
@@ -2842,6 +2891,35 @@ impl Rows {
         self.fields.push((key.to_string(), f));
         self.y -= 30.0;
     }
+
+    /// Same contract as `field`, but for a secret (the keyserver bearer
+    /// token): an `NSSecureTextField` masks its contents with dots, like every
+    /// password field in the OS. Without this, `keyserver_token` sat in a
+    /// plain `NSTextField` — fully legible during screen-sharing, presenting,
+    /// or a screen recording. `NSSecureTextField` subclasses `NSTextField`, so
+    /// it slots into the same `self.fields` list `read_prefs_form` and the
+    /// populate loop already drive.
+    fn field_secure(&mut self, mtm: MainThreadMarker, key: &str, s: &str, val: &str, w: f64) {
+        self.label(mtm, s);
+        let f = {
+            NSSecureTextField::initWithFrame(
+                NSSecureTextField::alloc(mtm),
+                r(self.gutter, self.y - 2.0, w, 22.0),
+            )
+        };
+        {
+            f.setStringValue(&NSString::from_str(val));
+            f.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+            self.view.addSubview(&f);
+        }
+        // NSSecureTextField IS-A NSTextField at the Objective-C level, so this
+        // upcast is sound; it lets the secure field share `self.fields`'s
+        // storage type with every ordinary text row.
+        let f: Retained<NSTextField> = unsafe { Retained::cast_unchecked(f) };
+        self.fields.push((key.to_string(), f));
+        self.y -= 30.0;
+    }
+
     fn path(
         &mut self,
         mtm: MainThreadMarker,
@@ -3118,7 +3196,7 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         "",
         300.0,
     );
-    t.field(
+    t.field_secure(
         mtm,
         "keyserver_token",
         &crate::strings::get("gui.set.keyserver_token"),
@@ -4284,5 +4362,110 @@ mod tests {
         for key in ["dest_dir", "filename_template", "max_passes", ""] {
             assert!(enum_options(key).is_empty(), "{key} became an enum popup");
         }
+    }
+
+    // ── output field wiring ─────────────────────────────────────────────────
+    //
+    // STOPGAP, NOT COVERAGE: exercising the real bug (type into `out_field`,
+    // confirm `output_dir` updates and survives the next render tick) needs a
+    // live NSComboBox inside a real AppKit run loop. `windows.rs` has exactly
+    // that harness (`the_real_controls_show_what_the_core_decided`, driven
+    // through a real HWND + message pump); nothing equivalent exists for
+    // AppKit in this crate, and building one is out of scope here. This is a
+    // source-inspection check instead: it would have failed against the
+    // pre-fix source (no `setDelegate` call on `fld`, no
+    // `controlTextDidChange:` method), and it fails again if either is
+    // deleted, but it does NOT prove the delegate actually fires at runtime.
+    #[test]
+    fn the_output_field_has_a_delegate_wired_source_inspection_only() {
+        let src = include_str!("mac.rs");
+        // Built by concatenation rather than as one literal so this needle
+        // cannot match the assertion's OWN source text via `include_str!` —
+        // a source-inspection test that can only ever find itself is the
+        // exact tautological-test defect this crate already shipped once
+        // (`tests/messaging_contract.rs`'s stub `level_for`).
+        let wired = format!("{}{}", "fld.set", "Delegate(");
+        assert!(
+            src.contains(&wired),
+            "out_field (`fld`) is never given a delegate — typed edits have \
+             nothing to tell the model, so render()'s next tick overwrites \
+             them with the stale output_dir"
+        );
+        let handler = format!("{}{}", "fn control_text_did", "_change");
+        assert!(
+            src.contains(&handler),
+            "no controlTextDidChange: handler exists to push the typed path \
+             into App::output_dir"
+        );
+    }
+
+    // ── one settings-save policy, not two ───────────────────────────────────
+    //
+    // STOPGAP, NOT COVERAGE: `save_settings_reporting_error` needs a live
+    // `Controller` (an AppKit object) to call, and this crate has no harness
+    // that builds one outside a real run loop — see the identical caveat on
+    // `the_output_field_has_a_delegate_wired_source_inspection_only`. This
+    // only inspects source text: it fails if `onApplyLanguage:` goes back to
+    // calling `.settings.borrow().save` (…) directly (dropping the Err arm
+    // again) instead of routing through the shared helper.
+    #[test]
+    fn language_switch_reports_a_failed_save_source_inspection_only() {
+        let src = include_str!("mac.rs");
+        // `.settings.borrow().save` (…) should appear in exactly ONE place: the
+        // shared helper. A second occurrence means someone re-inlined the
+        // Ok/Err match (or a bare `let _ =`) at a second call site — the
+        // exact "one policy implemented twice" shape this crate already
+        // shipped once for this very code path.
+        let direct_save = format!("{}{}", ".settings.borrow().save", "()");
+        let occurrences = src.matches(&direct_save).count();
+        assert_eq!(
+            occurrences, 1,
+            "the direct settings-save call appears {occurrences} times \
+             outside this test — it must appear exactly once, inside \
+             save_settings_reporting_error, or the language-switch path (or \
+             some future path) has silently grown its own copy again"
+        );
+        let helper = format!("{}{}", "fn save_settings_reporting", "_error");
+        assert!(
+            src.contains(&helper),
+            "the shared save_settings_reporting_error helper is gone"
+        );
+        let language_call = format!(
+            "{}{}",
+            "self.read_prefs_form();\n            self.save_settings_reporting", "_error();"
+        );
+        assert!(
+            src.contains(&language_call),
+            "onApplyLanguage: no longer calls save_settings_reporting_error \
+             right after committing the form — a failed save on the \
+             language-switch path would go unreported again"
+        );
+    }
+
+    // ── the keyserver token is not shown in plaintext ───────────────────────
+    //
+    // STOPGAP, NOT COVERAGE: whether a live `NSSecureTextField` actually masks
+    // keystrokes on screen needs a real rendered window — the same gap noted
+    // on the other AppKit source-inspection tests above. Source inspection
+    // only: fails if the Keys tab goes back to building `keyserver_token`
+    // with the plain `field` constructor.
+    #[test]
+    fn the_keyserver_token_field_is_secure_source_inspection_only() {
+        let src = include_str!("mac.rs");
+        let secure_ctor = format!("{}{}", "fn field_", "secure");
+        assert!(
+            src.contains(&secure_ctor),
+            "the field_secure (NSSecureTextField) constructor is gone"
+        );
+        let call = format!(
+            "{}{}",
+            "t.field_secure(\n        mtm,\n        \"keyserver_", "token\","
+        );
+        assert!(
+            src.contains(&call),
+            "keyserver_token is no longer built with field_secure — the \
+             bearer token would render in a plain NSTextField again, fully \
+             legible during screen-sharing or a recording"
+        );
     }
 }

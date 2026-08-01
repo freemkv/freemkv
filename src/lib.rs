@@ -18,6 +18,14 @@ pub mod engine;
 /// Declared here as well as in `main.rs` because `settings.rs` — the GUI's
 /// Update-keydb path — lives in this tree and could not otherwise reach it.
 pub mod keydb_fetch;
+/// The Level↔code messaging standard. Declared here as well as in `main.rs`
+/// (same reason as `keydb_fetch` above) so `tests/messaging_contract.rs` can
+/// call the REAL `level_for` instead of keeping its own copy-pasted stub —
+/// which is exactly what it did before this: a local `fn level_for` that
+/// always returned `Level::Error` regardless of its argument, asserted
+/// against the literal it had just returned. That assertion could never fail,
+/// no matter what the real `messaging::level_for` did.
+pub mod messaging;
 pub mod platform;
 pub mod settings;
 // The i18n string facade — the core (`ui`) localizes through it, so the lib
