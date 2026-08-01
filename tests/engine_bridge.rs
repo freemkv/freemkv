@@ -1,6 +1,21 @@
-//! Engine-bridge tests. The scan/rip tests need a real disc image, so they
-//! are skipped unless FMKV_TEST_ISO points at one — that keeps CI green on a
-//! machine with no fixtures while still being a real end-to-end check locally.
+//! Engine-bridge tests. The scan/rip tests need a real disc image, so they are
+//! gated on FMKV_TEST_ISO / FMKV_TEST_MKV / FMKV_TEST_AACS_ISO pointing at one.
+//!
+//! They are `#[ignore]`, NOT early-returning. An early `return` makes an
+//! unrunnable test report as PASSED, which is indistinguishable from a test
+//! that ran and proved something — and three of these used to return with no
+//! message at all. A mutation run over this crate scored 55% largely because
+//! nine tests here were reporting green while executing nothing.
+//!
+//! `cargo test` now reports them as `ignored`, which is the truth. Run them
+//! with a fixture:
+//!
+//! ```sh
+//! FMKV_TEST_ISO=/path/to.iso cargo test --test engine_bridge -- --ignored
+//! ```
+//!
+//! Each still keeps its `else` guard so that running it WITHOUT the fixture
+//! fails loudly rather than silently passing.
 
 use freemkv::engine;
 
@@ -38,10 +53,10 @@ fn run_state_defaults_are_idle() {
 }
 
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn scan_maps_a_real_disc_into_rows() {
     let Some(iso) = test_iso() else {
-        eprintln!("skipping: set FMKV_TEST_ISO to run");
-        return;
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
     };
     let sc = engine::scan(&iso).expect("scan should succeed on a real image");
     assert!(!sc.label.is_empty(), "a disc must have a label");
@@ -118,10 +133,10 @@ fn stream_scan_rejects_a_bad_path_cleanly() {
 }
 
 #[test]
+#[ignore = "needs a real MKV fixture; run with --ignored"]
 fn stream_scan_exposes_real_tracks() {
     let Some(m) = test_mkv() else {
-        eprintln!("skipping: set FMKV_TEST_MKV to run");
-        return;
+        panic!("set FMKV_TEST_MKV to a real MKV to run this test");
     };
     let sc = engine::scan_stream(&m).expect("a container should open");
     assert_eq!(sc.title_count, 1, "a container is a single title");
@@ -248,9 +263,10 @@ fn decrypted_folder_extraction_guards_a_populated_subdir() {
 /// `resolve_keys` reports `resolved: true` / `"resolved-online"` for a disc
 /// that has no key and never touched the network. Gate on real material.
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn unkeyed_aacs_disc_is_not_reported_as_resolved() {
     let Ok(iso) = std::env::var("FMKV_TEST_AACS_ISO") else {
-        return;
+        panic!("set FMKV_TEST_AACS_ISO to an AACS disc image to run this test");
     };
     // No key sources at all: nothing can possibly resolve.
     let sc = freemkv::engine::scan(&iso).expect("scan");
@@ -273,9 +289,10 @@ fn unkeyed_aacs_disc_is_not_reported_as_resolved() {
 /// so it answers `Ready` for a disc whose mux then fails at E7022. We resolve
 /// keys first and gate on `resolve_keys`, which is the honest signal.
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn an_undecryptable_disc_blocks_the_run() {
     let Ok(iso) = std::env::var("FMKV_TEST_AACS_ISO") else {
-        return;
+        panic!("set FMKV_TEST_AACS_ISO to an AACS disc image to run this test");
     };
     // No key sources configured: nothing can resolve.
     let blocked = freemkv::engine::preflight(&iso, "/tmp", &[]).expect("preflight ran");
@@ -292,14 +309,19 @@ fn an_undecryptable_disc_blocks_the_run() {
 /// With the user's real key sources the same disc becomes runnable — proving
 /// the gate above tracks key state rather than just refusing every AACS disc.
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn the_same_disc_runs_once_a_key_source_is_configured() {
     let Ok(iso) = std::env::var("FMKV_TEST_AACS_ISO") else {
-        return;
+        panic!("set FMKV_TEST_AACS_ISO to an AACS disc image to run this test");
     };
     let keys = freemkv::engine::KeyConfig::from_settings(&freemkv::settings::Settings::load());
-    if keys.keydb_path.trim().is_empty() && keys.keyserver_url.trim().is_empty() {
-        return; // no sources configured on this machine; nothing to prove
-    }
+    // Was an early `return`, so on an unconfigured machine this reported PASS
+    // while proving nothing — and on a configured one it tested something
+    // different. If you are running it, the fixture must be complete.
+    assert!(
+        !(keys.keydb_path.trim().is_empty() && keys.keyserver_url.trim().is_empty()),
+        "configure a keydb path or keyserver URL in settings to run this test"
+    );
     let blocked =
         freemkv::engine::preflight_with_keys(&iso, "/tmp", &[], &keys).expect("preflight ran");
     assert!(blocked.is_empty(), "expected Ready, blocked by {blocked:?}");
