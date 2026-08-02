@@ -542,7 +542,17 @@ pub fn format_key(canonical: &str) -> Option<&'static str> {
 /// what the picker SHOWS is translated. An unknown format returns as-is.
 pub fn format_label(canonical: &str) -> String {
     match format_key(canonical) {
-        Some(key) => crate::strings::get(key),
+        // `strings::get` returns the dotted path when a key is absent from the
+        // active locale AND from English. That happens whenever this crate
+        // knows a key the pinned `freemkv-i18n` tag does not yet ship — the
+        // window between wiring a new picker row here and re-tagging i18n in
+        // the release cascade. Showing `gui.format.video_only` in a dropdown
+        // is worse than showing untranslated English, so treat the path
+        // echo as "no string" and fall back to the canonical text.
+        Some(key) => match crate::strings::get(key) {
+            s if s == key => canonical.to_string(),
+            s => s,
+        },
         None => canonical.to_string(),
     }
 }
@@ -552,6 +562,37 @@ pub fn format_label(canonical: &str) -> String {
 /// non-English selection reads back as translated text — `format_by_title`
 /// only matches the English canonical list, so it would fail in every other
 /// locale. Match on the localized display instead.
+#[cfg(test)]
+mod missing_key_fallback_tests {
+    /// A key this crate knows but the pinned i18n tag does not ship must render
+    /// as readable English, never as the dotted path. Without the guard in
+    /// `format_label` the picker would show `gui.format.video_only` to every
+    /// user of a CI build made between wiring a new row and re-tagging i18n.
+    #[test]
+    fn a_key_absent_from_the_pinned_catalog_falls_back_to_the_canonical_text() {
+        // `strings::get` echoes the path for an unknown key; that echo is the
+        // exact condition the guard keys on.
+        let unknown = "gui.format.__not_in_any_catalog__";
+        assert_eq!(crate::strings::get(unknown), unknown);
+    }
+
+    /// Every offered format renders as something a human can read: never empty,
+    /// and never the raw key path.
+    #[test]
+    fn every_offered_format_renders_readable_text() {
+        for group in super::output_formats(true, true) {
+            for canonical in group {
+                let shown = super::format_label(canonical);
+                assert!(!shown.is_empty(), "{canonical} rendered empty");
+                assert!(
+                    !shown.starts_with("gui."),
+                    "{canonical} rendered the raw key path {shown:?}"
+                );
+            }
+        }
+    }
+}
+
 pub fn format_from_label(label: &str, disc_source: bool, mp4_ok: bool) -> Option<&'static str> {
     // Canonical (English) fast path first — also covers callers that pass a
     // canonical string directly — then fall back to the localized display.
