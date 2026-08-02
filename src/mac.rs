@@ -2076,6 +2076,27 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
             sel!(onOpenFiles:),
         );
         page_empty.addSubview(&b);
+
+        // `relayout` resizes `page_empty` itself, but a subview keeps its
+        // build-time frame unless it is told to track the parent. Without
+        // these the two labels stay at the ORIGINAL window width, so their
+        // centred text centres inside a stale rect and drifts left as the
+        // window grows, and the button — pinned at `W/2 - 80` for the
+        // original `W` — simply stays put.
+        //
+        // Same masks the result page already uses: full-width labels stretch,
+        // the fixed-width button keeps equal margins on both sides.
+        for v in [&head, &sub] {
+            mask(
+                v,
+                objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable,
+            );
+        }
+        mask(
+            &b,
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewMaxXMargin,
+        );
     }
 
     // ── result page ──
