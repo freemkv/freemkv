@@ -7,6 +7,26 @@ follows semantic versioning.
 
 ## [1.6.0] — UNRELEASED
 
+### Fixed
+
+- **A UTF-8 BOM in `gui-settings.json` silently discarded every setting.** Any
+  parse failure fell back to defaults with no log line and no notice, and the
+  next save overwrote the file — so a user's key service, token, output folder
+  and keydb path vanished and the app looked freshly installed. Windows
+  PowerShell and Notepad both write UTF-8 with a BOM by default, so hand-editing
+  the file to paste a token was enough to trigger it. The BOM is now stripped,
+  an unparseable file is reported rather than swallowed, and the original is
+  preserved as `gui-settings.json.bad` before anything can overwrite it.
+- Key-service outages now surface as their own errors rather than as
+  "no decryption key for this disc" (`E7028`/`E7029`/`E7030`).
+
+### Added
+
+- **Per-track-kind export in the desktop picker.** "Selected titles → video /
+  audio / subtitle tracks only", matching the CLI's `video://`, `audio://` and
+  `sub://` sinks. The GUI is meant to mirror the CLI's output surface per
+  source kind; these three were the gap.
+
 ### Added
 
 - **One `freemkv` binary, two shells.** The CLI and the desktop app are now the
