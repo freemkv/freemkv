@@ -309,6 +309,12 @@ pub enum Page {
 /// DVD's MPEG-2, an HD DVD's VC-1). The option is then REMOVED rather than
 /// offered-and-refused: a choice that always fails is worse than no choice.
 /// Pass true when the codecs are unknown — never block on missing information.
+///
+/// `disc_source` is "not a container" — it is true for a physical disc AND for
+/// an ISO file, because both carry a whole disc to unpack. That is why
+/// "Whole disc → decrypted folder" (the CLI's `dir://`) is offered for an ISO:
+/// `freemkv iso://Disc.iso dir://out/` is a supported CLI pipeline and the
+/// engine's ISO path runs it (`engine::run_blocking` → `run_extract_folder`).
 pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>> {
     let mut titles = vec!["Selected titles → MKV"];
     if mp4_ok {
@@ -316,6 +322,14 @@ pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>>
     }
     titles.push("Selected titles → M2TS");
     titles.push("Selected titles → separate track files");
+    // The three narrowed forms of the demux sink — the CLI's `video://`,
+    // `audio://` and `sub://`, which are `demux://` with a track-kind filter
+    // (libfreemkv `mux::resolve`). They apply to any source the plain demux
+    // sink applies to, container included, so they live in the titles group
+    // and are never gated on the source kind.
+    titles.push("Selected titles → video tracks only");
+    titles.push("Selected titles → audio tracks only");
+    titles.push("Selected titles → subtitle tracks only");
     let whole = vec!["Whole disc → ISO image", "Whole disc → decrypted folder"];
     let meta = vec!["Chapters → file", "Title info → JSON", "Video index → .fvi"];
     if disc_source {
