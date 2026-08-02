@@ -3368,7 +3368,8 @@ mod tests {
     #[test]
     fn an_expanded_disc_selection_builds_one_job_per_title() {
         let out = Output::new(false, true);
-        let dest = "/tmp/fmkv-t-all-jobs/";
+        let dir = temp_path("t-all-jobs");
+        let dest = &format!("{}/", dir.display());
         let parsed = libfreemkv::parse_url(dest);
         let nums = disc_title_nums(true, &[], 4);
         let jobs = build_jobs(&None, true, &nums, true, dest, &parsed, &out)
@@ -3377,7 +3378,7 @@ mod tests {
         // 1-based flags map onto 0-based indices, in order.
         let idx: Vec<Option<usize>> = jobs.iter().map(|(i, _)| *i).collect();
         assert_eq!(idx, vec![Some(0), Some(1), Some(2), Some(3)]);
-        let _ = std::fs::remove_dir_all("/tmp/fmkv-t-all-jobs");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A single-title disc collapses to one job — same as `-t 1`, not a
@@ -3385,7 +3386,7 @@ mod tests {
     #[test]
     fn t_all_on_a_one_title_disc_is_a_single_job() {
         let out = Output::new(false, true);
-        let dest = "/tmp/fmkv-t-all-one.mkv";
+        let dest = &temp_path("t-all-one.mkv").display().to_string();
         let parsed = libfreemkv::parse_url(dest);
         let nums = disc_title_nums(true, &[], 1);
         let jobs = build_jobs(&None, true, &nums, false, dest, &parsed, &out)
@@ -4060,10 +4061,11 @@ mod tests {
         // returns None) when the dest is not directory-style, mirroring the
         // scanned-source guard.
         let out = Output::new(false, true);
-        // Under a temp path, not the process CWD: the negative assertion below
-        // is about a directory NOT existing, so a stray one left in the repo by
-        // anything else makes this test fail for the wrong reason.
-        let file = std::env::temp_dir().join("fmkv-multi-to-file/movie.mkv");
+        // Under a unique temp path, not the process CWD and not a name shared
+        // with another test process: the negative assertion below is about a
+        // directory NOT existing, so a stray one left by anything else makes
+        // this test fail for the wrong reason.
+        let file = temp_path("multi-to-file").join("movie.mkv");
         let _ = std::fs::remove_dir_all(&file);
         let dest = format!("mkv://{}", file.display());
         let parsed_dest = libfreemkv::parse_url(&dest);
@@ -4489,18 +4491,40 @@ mod tests {
         // shares the same is_disc_source() branch — see libfreemkv's
         // is_disc_source_only_for_disc_and_iso — but needs a real file to clear
         // the later reachability check, so it isn't asserted here.)
-        assert!(preflight_sel("disc://", "mkv://out.mkv").is_ok());
+        assert!(preflight_sel("disc://", &temp_dest("mkv", "sel_ok")).is_ok());
         // No selection flags: a plain file remux stays legal.
-        assert!(preflight("mkv://in.mkv", "mkv://out.mkv", false, false).is_ok());
+        assert!(
+            preflight(
+                "mkv://in.mkv",
+                &temp_dest("mkv", "sel_noflags"),
+                false,
+                false
+            )
+            .is_ok()
+        );
     }
 
     /// A unique temp path under the system temp dir (no tempfile dep). Caller
     /// is responsible for cleanup; non-existent by construction.
-    fn temp_path(tag: &str) -> std::path::PathBuf {
+    pub(super) fn temp_path(tag: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("freemkv_test_{}_{}_{}", tag, std::process::id(), n))
+    }
+
+    /// A destination URL whose path is unique and outside the source tree.
+    ///
+    /// Preflight's writability probe creates the destination with
+    /// `create_new` and removes it again, so a bare relative dest
+    /// (`iso://disc.iso`) probes the crate root. Two `cargo test` processes
+    /// running against the same checkout then race on that one filename: the
+    /// loser's `create_new` returns `AlreadyExists` and the probe reports the
+    /// destination as unwritable, failing an assertion about flag validation
+    /// for reasons that have nothing to do with flags. Unique absolute paths
+    /// keep the probe honest and leave the tree alone.
+    fn temp_dest(scheme: &str, tag: &str) -> String {
+        format!("{scheme}://{}", temp_path(tag).display())
     }
 
     // ── schemes ─────────────────────────────────────────────────────────────
@@ -4701,15 +4725,15 @@ mod tests {
     fn raw_and_multipass_accepted_on_iso_dest() {
         // The legit case: iso:// destination accepts both flags. (Source is the
         // live drive, not pre-checked for existence here — device None.)
-        assert!(preflight("disc://", "iso://disc.iso", true, false).is_ok());
-        assert!(preflight("disc://", "iso://disc.iso", false, true).is_ok());
-        assert!(preflight("disc://", "iso://disc.iso", true, true).is_ok());
+        assert!(preflight("disc://", &temp_dest("iso", "raw"), true, false).is_ok());
+        assert!(preflight("disc://", &temp_dest("iso", "multipass"), false, true).is_ok());
+        assert!(preflight("disc://", &temp_dest("iso", "both"), true, true).is_ok());
     }
 
     #[test]
     fn no_flags_accepted_on_non_iso_dest() {
         // Without the iso-only flags, a mux/sink dest is fine at preflight.
-        assert!(preflight("disc://", "mkv://o.mkv", false, false).is_ok());
+        assert!(preflight("disc://", &temp_dest("mkv", "noflags"), false, false).is_ok());
         assert!(preflight("disc://", "null://", false, false).is_ok());
     }
 
@@ -5813,7 +5837,7 @@ mod build_jobs_edge_tests {
     #[test]
     fn one_title_into_a_directory_is_still_named_per_title() {
         let out = Output::new(false, true);
-        let dir = std::env::temp_dir().join("fmkv-one-into-dir");
+        let dir = super::tests::temp_path("one-into-dir");
         let dest = format!("mkv://{}/", dir.display());
         let parsed = parse_url(&dest);
 

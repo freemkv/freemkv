@@ -1083,6 +1083,21 @@ mod share_safety_tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    /// A scratch directory unique to this process and call.
+    ///
+    /// These tests populate a directory, assert on exactly what is in it, and
+    /// `remove_dir_all` it at both ends. A fixed name is shared state: two
+    /// `cargo test` processes running against the same checkout delete each
+    /// other's fixtures mid-assertion, which reads as a share-safety failure —
+    /// the most alarming possible false alarm, since a red here means an
+    /// unrelated local file was published.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("fmkv-{}-{}-{}", tag, std::process::id(), n))
+    }
+
     fn entries(zip: &[u8]) -> Vec<String> {
         let mut a = zip::ZipArchive::new(std::io::Cursor::new(zip.to_vec())).expect("valid zip");
         (0..a.len())
@@ -1101,7 +1116,7 @@ mod share_safety_tests {
     /// issue body that can be posted to a public tracker.
     #[test]
     fn the_archive_carries_only_the_files_this_run_wrote() {
-        let dir = std::env::temp_dir().join("fmkv-zip-manifest-test");
+        let dir = scratch_dir("zip-manifest-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1143,7 +1158,7 @@ mod share_safety_tests {
     /// are all handled without failing the submission or corrupting the zip.
     #[test]
     fn a_missing_duplicate_or_self_referential_entry_does_not_break_the_archive() {
-        let dir = std::env::temp_dir().join("fmkv-zip-edge-test");
+        let dir = scratch_dir("zip-edge-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("inquiry.bin"), b"x").unwrap();
