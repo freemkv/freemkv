@@ -3699,6 +3699,62 @@ mod tests {
         assert!(s.contains("deadbeef"), "hash not substituted: {s}");
     }
 
+    /// What the operator actually reads. During a seven-hour key-service outage
+    /// the CLI printed
+    ///
+    /// ```text
+    /// Error: E7022 No key source has a decryption key for this disc (id: 422EB…)
+    /// ```
+    ///
+    /// which reads as "this disc is not in the key database" — so the operator
+    /// went hunting for a VUK when the correct action was to wait. The three
+    /// key-service codes must render as their OWN messages here: transient
+    /// (7028), credentials (7029), rate limit (7030) — none of them borrowing
+    /// E7022's wording, and each naming a different action.
+    #[test]
+    fn key_service_failures_do_not_render_as_a_missing_disc_key() {
+        let missing = fmt_err_str("E7022: 422eb0");
+        let unavailable = fmt_err_str("E7028");
+        let unauthorized = fmt_err_str("E7029");
+        let rate_limited = fmt_err_str("E7030");
+
+        for (code, s) in [
+            ("E7028", &unavailable),
+            ("E7029", &unauthorized),
+            ("E7030", &rate_limited),
+        ] {
+            assert!(s.starts_with(&format!("{code} ")), "code not prefixed: {s}");
+            // Not the generic wrapper — a real locale entry exists.
+            assert!(
+                !s.contains(&format!("error.{code}")),
+                "{code} fell through to the raw key path: {s}"
+            );
+            assert_ne!(*s, missing, "{code} must not reuse E7022's message");
+            // Never the sentence that sent the operator hunting for a VUK.
+            assert!(
+                !s.to_lowercase()
+                    .contains("no key source has a decryption key"),
+                "{code} must not claim the disc has no key: {s}"
+            );
+        }
+
+        // Each names its own action, and the three are distinct from each other.
+        assert!(
+            unavailable.to_lowercase().contains("try again"),
+            "E7028 must tell the operator to retry: {unavailable}"
+        );
+        assert!(
+            unauthorized.to_lowercase().contains("token"),
+            "E7029 must point at the credentials: {unauthorized}"
+        );
+        assert!(
+            rate_limited.to_lowercase().contains("rate-limiting"),
+            "E7030 must name the rate limit: {rate_limited}"
+        );
+        assert_ne!(unavailable, unauthorized);
+        assert_ne!(unauthorized, rate_limited);
+    }
+
     /// The full render-site output: `render_error` prefixes the `Error:` level
     /// word exactly once onto the `E<code> <message>` fragment (WS2 §2.1).
     #[test]
