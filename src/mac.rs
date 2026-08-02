@@ -1752,8 +1752,11 @@ fn popup_fmt_for(mtm: MainThreadMarker, fr: NSRect, disc: bool) -> Retained<NSPo
     // The whole-disc rows are what a separate "Backup" command used to do; the
     // extract/metadata rows expose sinks the library already supports.
     // The tree's checkboxes decide WHICH tracks; this decides what SHAPE the
-    // output takes. Keeping per-kind "video only / audio only" entries here
-    // would be a second, competing selector for the same intent.
+    // output takes. The per-kind "video / audio / subtitle tracks only" rows
+    // are not a competing selector: they are the CLI's `video://`, `audio://`
+    // and `sub://` sinks, which produce a DIFFERENT set of files than a demux
+    // of the same ticked tracks (no chapters sidecar, one track class only).
+    // Without them the GUI could not reach three sinks the CLI exposes.
     // Content comes from the core so the Mac popup, the Windows popup and the
     // tests can never drift apart. The shell decides only how it LOOKS.
     // Built empty; `render` fills it from the View, which knows the codecs.
