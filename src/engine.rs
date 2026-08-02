@@ -1143,9 +1143,10 @@ fn source_scheme(path: &str) -> &'static str {
     }
 }
 
-/// What real operation an output format maps to. The picker offers nine format
-/// strings; six of them used to fall through to a per-title MKV mux. Each now
-/// resolves to its true sink so the file the user gets matches what they chose.
+/// What real operation an output format maps to. The picker offers twelve
+/// format strings; six of them used to fall through to a per-title MKV mux.
+/// Each now resolves to its true sink so the file the user gets matches what
+/// they chose.
 #[derive(Clone, Copy)]
 enum OutKind {
     /// A per-title file produced through the mux pipeline. The `&str` is BOTH
@@ -1153,9 +1154,14 @@ enum OutKind {
     /// containers, or `chapters`/`json`/`fvi` for the metadata / index sinks the
     /// resolve layer dispatches on (same as the CLI's `dir_jobs`).
     File(&'static str),
-    /// Each title's tracks fanned out to elementary-stream files in a directory
-    /// (the CLI's `demux://` sink, which does its own per-track naming).
-    Demux,
+    /// Each title's tracks fanned out to elementary-stream files in a directory.
+    /// The `&str` is the dest-URL scheme and NOT a file extension: `demux` for
+    /// every track, or `video` / `audio` / `sub` for the CLI's narrowed forms,
+    /// which are the same `DemuxSink` with a `TrackKind` filter (libfreemkv
+    /// `mux::resolve`). All four name their own output files, so the dest URL
+    /// is a directory — that is why this cannot be an `OutKind::File`, whose
+    /// scheme doubles as the extension of a single per-title file.
+    Demux(&'static str),
     /// The whole disc's decrypted UDF file tree, extracted to a per-disc
     /// subdirectory (the CLI's `dir://` → `Disc::extract_tree`).
     DecryptedFolder,
@@ -1166,14 +1172,22 @@ enum OutKind {
 }
 
 /// Map a picker format string to its real output kind. Order matters only in
-/// that each branch's marker is unique across the nine format strings.
+/// that each branch's marker is unique across the twelve format strings — note
+/// `"video tracks"` is lower-case and two words, so it cannot be confused with
+/// `"Video index → .fvi"`.
 fn out_kind(format: &str) -> OutKind {
     if format.contains("decrypted folder") {
         OutKind::DecryptedFolder
     } else if format.contains("ISO image") {
         OutKind::IsoImage
     } else if format.contains("separate track") {
-        OutKind::Demux
+        OutKind::Demux("demux")
+    } else if format.contains("video tracks") {
+        OutKind::Demux("video")
+    } else if format.contains("audio tracks") {
+        OutKind::Demux("audio")
+    } else if format.contains("subtitle tracks") {
+        OutKind::Demux("sub")
     } else if format.contains("MP4") {
         OutKind::File("mp4")
     } else if format.contains("M2TS") {
@@ -1315,9 +1329,12 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
             let out = format!("{}/{}.{}", req.dest_dir, base, scheme);
             (format!("{scheme}://{out}"), out)
         }
-        OutKind::Demux => {
+        OutKind::Demux(scheme) => {
             let dir = format!("{}/", req.dest_dir);
-            (format!("demux://{dir}"), format!("{dir} (per-track files)"))
+            (
+                format!("{scheme}://{dir}"),
+                format!("{dir} (per-track files)"),
+            )
         }
         OutKind::DecryptedFolder | OutKind::IsoImage => {
             return Err("That output is for a disc source — open an ISO or disc to use it.".into());
@@ -1433,13 +1450,13 @@ fn mux_selected_titles(
                 let out = format!("{}/{}.{}", req.dest_dir, base, scheme);
                 (format!("{scheme}://{out}"), out)
             }
-            OutKind::Demux => {
+            OutKind::Demux(scheme) => {
                 let dir = if multi {
                     format!("{}/t{:02}/", req.dest_dir, idx + 1)
                 } else {
                     format!("{}/", req.dest_dir)
                 };
-                (format!("demux://{dir}"), dir)
+                (format!("{scheme}://{dir}"), dir)
             }
             // Whole-disc kinds handled by their own callers.
             OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
@@ -1857,13 +1874,13 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
                 let out = format!("{}/{}.{}", req.dest_dir, base, scheme);
                 (format!("{scheme}://{out}"), out)
             }
-            OutKind::Demux => {
+            OutKind::Demux(scheme) => {
                 let dir = if multi {
                     format!("{}/t{:02}/", req.dest_dir, idx + 1)
                 } else {
                     format!("{}/", req.dest_dir)
                 };
-                (format!("demux://{dir}"), dir)
+                (format!("{scheme}://{dir}"), dir)
             }
             OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
         };
@@ -2390,7 +2407,17 @@ mod routing_tests {
         assert_eq!(source_scheme(""), "m2ts");
     }
 
-    /// Each of the nine picker strings resolves to its own sink. Six of them
+    /// The marker each `OutKind` is identified by in the sink tables below.
+    fn sink_marker(k: OutKind) -> String {
+        match k {
+            OutKind::DecryptedFolder => "folder".to_string(),
+            OutKind::IsoImage => "iso".to_string(),
+            OutKind::Demux(scheme) => scheme.to_string(),
+            OutKind::File(s) => s.to_string(),
+        }
+    }
+
+    /// Each of the twelve picker strings resolves to its own sink. Six of them
     /// used to fall through to a per-title MKV mux, so this table is the thing
     /// that stops the user's chosen format quietly becoming a different one.
     #[test]
@@ -2409,13 +2436,142 @@ mod routing_tests {
             ("", "mkv"),
         ];
         for (format, want) in cases {
-            let got = match out_kind(format) {
-                OutKind::DecryptedFolder => "folder",
-                OutKind::IsoImage => "iso",
-                OutKind::Demux => "demux",
-                OutKind::File(s) => s,
-            };
+            let got = sink_marker(out_kind(format));
             assert_eq!(&got, want, "format {format:?} resolved to {got:?}");
+        }
+    }
+
+    /// The CANONICAL picker strings — the exact `&'static str`s the shells put
+    /// in the dropdown — each map to a distinct sink. The table above uses
+    /// paraphrases, so it could not have caught a picker entry whose wording
+    /// misses every `out_kind` branch and silently becomes an MKV mux. That is
+    /// precisely how the three per-track-kind sinks would have failed.
+    #[test]
+    fn the_real_picker_strings_each_reach_their_own_sink() {
+        let want: &[(&str, &str)] = &[
+            ("Selected titles → MKV", "mkv"),
+            ("Selected titles → MP4", "mp4"),
+            ("Selected titles → M2TS", "m2ts"),
+            ("Selected titles → separate track files", "demux"),
+            ("Selected titles → video tracks only", "video"),
+            ("Selected titles → audio tracks only", "audio"),
+            ("Selected titles → subtitle tracks only", "sub"),
+            ("Whole disc → ISO image", "iso"),
+            ("Whole disc → decrypted folder", "folder"),
+            ("Chapters → file", "chapters"),
+            ("Title info → JSON", "json"),
+            ("Video index → .fvi", "fvi"),
+        ];
+        let offered: Vec<&str> = crate::ui::output_formats(true, true)
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(
+            offered.len(),
+            want.len(),
+            "the picker gained or lost an entry without a sink mapping: {offered:?}"
+        );
+        for (format, marker) in want {
+            assert!(offered.contains(format), "{format:?} is no longer offered");
+            assert_eq!(
+                &sink_marker(out_kind(format)),
+                marker,
+                "{format:?} resolved to the wrong sink"
+            );
+        }
+        // Distinct sinks: no two picker entries may collapse onto one.
+        let mut markers: Vec<String> = offered.iter().map(|f| sink_marker(out_kind(f))).collect();
+        markers.sort();
+        let n = markers.len();
+        markers.dedup();
+        assert_eq!(n, markers.len(), "two picker entries share a sink");
+    }
+
+    /// The three per-track-kind entries must build a DIRECTORY dest URL under
+    /// their own scheme, never a `<scheme>` file extension. `video://out/x.video`
+    /// is not a thing; `video://out/` is.
+    #[test]
+    fn per_track_kind_sinks_are_directory_urls() {
+        for (format, scheme) in [
+            ("Selected titles → video tracks only", "video"),
+            ("Selected titles → audio tracks only", "audio"),
+            ("Selected titles → subtitle tracks only", "sub"),
+        ] {
+            match out_kind(format) {
+                OutKind::Demux(s) => assert_eq!(s, scheme),
+                other => panic!("{format:?} is {:?}, not a demux sink", sink_marker(other)),
+            }
+        }
+    }
+
+    /// The dest-URL SCHEME a picker string produces, as libfreemkv would parse
+    /// it. `sink_marker` is an internal label; this is the thing the CLI would
+    /// have been given on the command line, which is what parity is measured
+    /// against. Only `folder` differs: it is the CLI's `dir://`.
+    fn dest_scheme(format: &str) -> String {
+        match sink_marker(out_kind(format)).as_str() {
+            "folder" => "dir".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    /// PARITY: for each source kind, the picker offers exactly the sinks the
+    /// CLI supports for that source — no more, no fewer.
+    ///
+    /// This is the invariant, not the row count: the GUI mirrors the CLI per
+    /// source kind. It failed silently for three sinks (`video://`, `audio://`,
+    /// `sub://`) because nothing compared the two lists — the picker was only
+    /// ever checked against itself. Extending the CLI without extending the
+    /// picker now trips here rather than leaving a library sink with no GUI.
+    #[test]
+    fn the_picker_offers_exactly_the_cli_sinks_for_each_source_kind() {
+        use std::collections::BTreeSet;
+
+        // Title-level sinks: every one applies to any source that has titles,
+        // container included.
+        let per_title: &[&str] = &[
+            "mkv", "m2ts", "demux", "video", "audio", "sub", "chapters", "json", "fvi",
+        ];
+        // Whole-disc sinks: `iso://` as a dest needs a physical disc to read,
+        // `dir://` needs a disc file tree. Neither exists for a container.
+        let whole_disc: &[&str] = &["iso", "dir"];
+
+        for (disc_source, mp4_ok) in [(true, true), (true, false), (false, true), (false, false)] {
+            let mut want: BTreeSet<String> = per_title.iter().map(|s| s.to_string()).collect();
+            if mp4_ok {
+                want.insert("mp4".to_string());
+            }
+            if disc_source {
+                want.extend(whole_disc.iter().map(|s| s.to_string()));
+            }
+
+            let got: BTreeSet<String> = crate::ui::output_formats(disc_source, mp4_ok)
+                .into_iter()
+                .flatten()
+                .map(dest_scheme)
+                .collect();
+
+            assert_eq!(
+                got,
+                want,
+                "disc_source={disc_source} mp4_ok={mp4_ok}: picker sinks diverge from the CLI's\
+                 \n  picker-only: {:?}\n  cli-only: {:?}",
+                got.difference(&want).collect::<Vec<_>>(),
+                want.difference(&got).collect::<Vec<_>>(),
+            );
+
+            // Each scheme must be one libfreemkv actually recognizes — a typo'd
+            // row would otherwise agree with a typo'd expectation above.
+            for scheme in &got {
+                let url = format!("{scheme}://out/");
+                assert!(
+                    !matches!(
+                        libfreemkv::parse_url(&url),
+                        libfreemkv::StreamUrl::Unknown { .. }
+                    ),
+                    "{url} is not a scheme libfreemkv recognizes"
+                );
+            }
         }
     }
 
@@ -2524,7 +2680,10 @@ mod routing_tests {
             recovery_plan(OutKind::File("mkv"), false),
             DiscPlan::PerTitle
         );
-        assert_eq!(recovery_plan(OutKind::Demux, false), DiscPlan::PerTitle);
+        assert_eq!(
+            recovery_plan(OutKind::Demux("demux"), false),
+            DiscPlan::PerTitle
+        );
         // The folder extract is handled before this decision and must not be
         // routed into recovery by it.
         assert_eq!(

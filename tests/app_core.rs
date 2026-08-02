@@ -380,6 +380,82 @@ fn output_formats_depend_on_the_source_kind() {
     }
 }
 
+/// The three per-track-kind sinks the CLI exposes as `video://`, `audio://`
+/// and `sub://` must be reachable from the GUI too — they were the only sinks
+/// with no picker entry at all. They are narrowed forms of `demux://`, which
+/// applies to any source, so they are offered for a container as well as a
+/// disc/ISO.
+#[test]
+fn per_track_kind_exports_are_offered_for_every_source_kind() {
+    for disc_source in [true, false] {
+        let f = output_formats(disc_source, true).concat().join(" | ");
+        for want in [
+            "Selected titles → video tracks only",
+            "Selected titles → audio tracks only",
+            "Selected titles → subtitle tracks only",
+        ] {
+            assert!(
+                f.contains(want),
+                "{want:?} missing for disc_source={disc_source}: {f}"
+            );
+            assert!(
+                freemkv::ui::format_by_title(want, disc_source, true).is_some(),
+                "{want:?} does not resolve for disc_source={disc_source}"
+            );
+        }
+    }
+}
+
+/// The per-track-kind entries sit in the titles group, beside the plain
+/// "separate track files" they narrow — not in the whole-disc or metadata
+/// group, where a shell would draw them under the wrong separator.
+#[test]
+fn per_track_kind_exports_sit_with_the_other_title_sinks() {
+    let groups = output_formats(true, true);
+    let titles = &groups[0];
+    for want in [
+        "Selected titles → separate track files",
+        "Selected titles → video tracks only",
+        "Selected titles → audio tracks only",
+        "Selected titles → subtitle tracks only",
+    ] {
+        assert!(
+            titles.contains(&want),
+            "{want:?} is not in the titles group"
+        );
+    }
+}
+
+/// `dir://` works from an ISO source (`freemkv iso://Disc.iso dir://out/`), and
+/// the GUI's `disc_source` flag is "not a container", so an ISO gets the
+/// decrypted-folder row. This pins that, and — critically — pins that the ISO
+/// IMAGE row does NOT follow it into a container source: `iso://` as a
+/// destination needs a physical disc, so offering it where it always fails
+/// would be worse than not offering it.
+#[test]
+fn the_decrypted_folder_row_is_offered_for_a_disc_or_iso_but_never_a_container() {
+    // An ISO path is not a container, so this is the flag an ISO source sets.
+    assert!(!is_container("/movies/Disc.iso"));
+    let disc_or_iso = output_formats(true, true).concat().join(" | ");
+    assert!(
+        disc_or_iso.contains("Whole disc → decrypted folder"),
+        "{disc_or_iso}"
+    );
+    let container = output_formats(false, true).concat().join(" | ");
+    assert!(
+        !container.contains("Whole disc → decrypted folder"),
+        "a container has no disc tree to unpack: {container}"
+    );
+    assert!(
+        !container.contains("Whole disc → ISO image"),
+        "ISO image must stay off a non-disc source: {container}"
+    );
+    assert!(
+        freemkv::ui::format_by_title("Whole disc → ISO image", false, true).is_none(),
+        "ISO image must not resolve for a non-disc source"
+    );
+}
+
 /// Opening a source clears the previous one — no stale tree behind a new disc.
 #[test]
 fn opening_a_second_source_replaces_the_first() {

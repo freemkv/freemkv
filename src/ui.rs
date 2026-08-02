@@ -309,6 +309,12 @@ pub enum Page {
 /// DVD's MPEG-2, an HD DVD's VC-1). The option is then REMOVED rather than
 /// offered-and-refused: a choice that always fails is worse than no choice.
 /// Pass true when the codecs are unknown — never block on missing information.
+///
+/// `disc_source` is "not a container" — it is true for a physical disc AND for
+/// an ISO file, because both carry a whole disc to unpack. That is why
+/// "Whole disc → decrypted folder" (the CLI's `dir://`) is offered for an ISO:
+/// `freemkv iso://Disc.iso dir://out/` is a supported CLI pipeline and the
+/// engine's ISO path runs it (`engine::run_blocking` → `run_extract_folder`).
 pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>> {
     let mut titles = vec!["Selected titles → MKV"];
     if mp4_ok {
@@ -316,6 +322,14 @@ pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>>
     }
     titles.push("Selected titles → M2TS");
     titles.push("Selected titles → separate track files");
+    // The three narrowed forms of the demux sink — the CLI's `video://`,
+    // `audio://` and `sub://`, which are `demux://` with a track-kind filter
+    // (libfreemkv `mux::resolve`). They apply to any source the plain demux
+    // sink applies to, container included, so they live in the titles group
+    // and are never gated on the source kind.
+    titles.push("Selected titles → video tracks only");
+    titles.push("Selected titles → audio tracks only");
+    titles.push("Selected titles → subtitle tracks only");
     let whole = vec!["Whole disc → ISO image", "Whole disc → decrypted folder"];
     let meta = vec!["Chapters → file", "Title info → JSON", "Video index → .fvi"];
     if disc_source {
@@ -496,24 +510,51 @@ pub fn container_label(format: &str) -> &'static str {
     }
 }
 
-/// Localized display text for a canonical output-format string. The canonical
-/// string (returned by `output_formats`, stored in `App.format`, matched by
-/// `.contains(...)` in the engine) stays English so ripping keeps working; only
-/// what the picker SHOWS is translated. An unknown format returns as-is.
-pub fn format_label(canonical: &str) -> String {
-    let key = match canonical {
+/// The `gui.format.*` translation key for a canonical output-format string, or
+/// `None` for a string that is not one of the picker's formats.
+///
+/// Split out of [`format_label`] so the invariant "every string
+/// [`output_formats`] offers has a translation key" is directly testable. It
+/// was not, and three picker rows shipped with no key: `format_label` fell
+/// through to its catch-all and returned raw English in all 29 locales, which
+/// looks identical to a working translation under `en`.
+pub fn format_key(canonical: &str) -> Option<&'static str> {
+    Some(match canonical {
         "Selected titles → MKV" => "gui.format.mkv",
         "Selected titles → MP4" => "gui.format.mp4",
         "Selected titles → M2TS" => "gui.format.m2ts",
         "Selected titles → separate track files" => "gui.format.tracks",
+        "Selected titles → video tracks only" => "gui.format.video_only",
+        "Selected titles → audio tracks only" => "gui.format.audio_only",
+        "Selected titles → subtitle tracks only" => "gui.format.sub_only",
         "Whole disc → ISO image" => "gui.format.iso",
         "Whole disc → decrypted folder" => "gui.format.folder",
         "Chapters → file" => "gui.format.chapters",
         "Title info → JSON" => "gui.format.json",
         "Video index → .fvi" => "gui.format.fvi",
-        _ => return canonical.to_string(),
-    };
-    crate::strings::get(key)
+        _ => return None,
+    })
+}
+
+/// Localized display text for a canonical output-format string. The canonical
+/// string (returned by `output_formats`, stored in `App.format`, matched by
+/// `.contains(...)` in the engine) stays English so ripping keeps working; only
+/// what the picker SHOWS is translated. An unknown format returns as-is.
+pub fn format_label(canonical: &str) -> String {
+    match format_key(canonical) {
+        // `strings::get` returns the dotted path when a key is absent from the
+        // active locale AND from English. That happens whenever this crate
+        // knows a key the pinned `freemkv-i18n` tag does not yet ship — the
+        // window between wiring a new picker row here and re-tagging i18n in
+        // the release cascade. Showing `gui.format.video_only` in a dropdown
+        // is worse than showing untranslated English, so treat the path
+        // echo as "no string" and fall back to the canonical text.
+        Some(key) => match crate::strings::get(key) {
+            s if s == key => canonical.to_string(),
+            s => s,
+        },
+        None => canonical.to_string(),
+    }
 }
 
 /// Inverse of [`format_label`]: resolve a LOCALIZED popup label back to the
@@ -521,6 +562,37 @@ pub fn format_label(canonical: &str) -> String {
 /// non-English selection reads back as translated text — `format_by_title`
 /// only matches the English canonical list, so it would fail in every other
 /// locale. Match on the localized display instead.
+#[cfg(test)]
+mod missing_key_fallback_tests {
+    /// A key this crate knows but the pinned i18n tag does not ship must render
+    /// as readable English, never as the dotted path. Without the guard in
+    /// `format_label` the picker would show `gui.format.video_only` to every
+    /// user of a CI build made between wiring a new row and re-tagging i18n.
+    #[test]
+    fn a_key_absent_from_the_pinned_catalog_falls_back_to_the_canonical_text() {
+        // `strings::get` echoes the path for an unknown key; that echo is the
+        // exact condition the guard keys on.
+        let unknown = "gui.format.__not_in_any_catalog__";
+        assert_eq!(crate::strings::get(unknown), unknown);
+    }
+
+    /// Every offered format renders as something a human can read: never empty,
+    /// and never the raw key path.
+    #[test]
+    fn every_offered_format_renders_readable_text() {
+        for group in super::output_formats(true, true) {
+            for canonical in group {
+                let shown = super::format_label(canonical);
+                assert!(!shown.is_empty(), "{canonical} rendered empty");
+                assert!(
+                    !shown.starts_with("gui."),
+                    "{canonical} rendered the raw key path {shown:?}"
+                );
+            }
+        }
+    }
+}
+
 pub fn format_from_label(label: &str, disc_source: bool, mp4_ok: bool) -> Option<&'static str> {
     // Canonical (English) fast path first — also covers callers that pass a
     // canonical string directly — then fall back to the localized display.
@@ -1489,5 +1561,78 @@ mod tests {
         );
         assert!(t.roots.is_empty());
         assert!(t.arena.is_empty());
+    }
+
+    /// Every string the picker can offer must have a `gui.format.*` key, and
+    /// that key must exist in en.json carrying exactly the canonical text.
+    ///
+    /// `format_label`'s catch-all returns the canonical string unchanged, so a
+    /// row with no key renders correctly under `en` and is invisible in
+    /// testing — but it is untranslatable in the other 28 locales forever.
+    /// That is how the three per-track-kind rows shipped keyless. Asserting on
+    /// `format_key` (not on the rendered label) is what makes the gap visible:
+    /// the label is identical either way.
+    #[test]
+    fn every_offered_format_has_a_translation_key_present_in_english() {
+        let en: serde_json::Value =
+            serde_json::from_str(freemkv_i18n::bundled_locale_json("en").expect("en is bundled"))
+                .expect("en.json parses");
+
+        // Both source kinds, both MP4 states — the union is every string the
+        // picker can ever show.
+        let mut offered: Vec<&str> = [(true, true), (true, false), (false, true), (false, false)]
+            .into_iter()
+            .flat_map(|(disc, mp4)| output_formats(disc, mp4).into_iter().flatten())
+            .collect();
+        offered.sort_unstable();
+        offered.dedup();
+        assert!(!offered.is_empty(), "the picker offers nothing");
+
+        for canon in offered {
+            let key = format_key(canon).unwrap_or_else(|| {
+                panic!("{canon:?} has no gui.format key — it can never be translated")
+            });
+
+            // The key must resolve in en.json, not merely exist in the match.
+            let mut node = &en;
+            for part in key.split('.') {
+                node = node
+                    .get(part)
+                    .unwrap_or_else(|| panic!("{key} ({canon:?}) is missing from en.json"));
+            }
+            let text = node
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} is not a string in en.json"));
+
+            // English is the canonical text by definition: if they diverge, the
+            // engine matches one string while the user picked another.
+            assert_eq!(
+                text, canon,
+                "{key} in en.json does not match the canonical picker string"
+            );
+        }
+    }
+
+    /// A canonical format's localized label must resolve back to that exact
+    /// canonical string. The shells persist and the engine matches the
+    /// canonical form, so a one-way label is a setting that silently reverts.
+    ///
+    /// REGRESSION PIN, not a fix: this already passed before the keys were
+    /// added, because `format_label`'s catch-all round-trips a keyless row
+    /// through the `format_by_title` fast path. It is here so that WIRING a
+    /// key (which routes the row through `strings::get`) cannot break the
+    /// round-trip — the failure mode the key change introduces.
+    #[test]
+    fn every_offered_format_round_trips_through_its_label() {
+        for (disc, mp4) in [(true, true), (true, false), (false, true), (false, false)] {
+            for canon in output_formats(disc, mp4).into_iter().flatten() {
+                let label = format_label(canon);
+                assert_eq!(
+                    format_from_label(&label, disc, mp4),
+                    Some(canon),
+                    "label {label:?} does not resolve back to {canon:?}"
+                );
+            }
+        }
     }
 }
