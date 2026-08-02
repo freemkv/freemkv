@@ -48,7 +48,22 @@ echo
 
 # ── Scratch workspace (auto-cleaned) ──────────────────────────────────────────
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/freemkv-cli-test.XXXXXX")"
-cleanup() { rm -rf "$WORK"; }
+cleanup() { [ -n "${FMKV_KEEP:-}" ] || rm -rf "$WORK"; }
+
+# Cross-platform parity: every artifact this run produced, hashed. The suite
+# already proves each output is CORRECT on the host it ran on; hashing lets a
+# caller prove the three platforms produced the SAME bytes, which no
+# single-host run can show.
+emit_hashes() {
+  [ -n "${FMKV_HASHES:-}" ] || return 0
+  local h
+  for f in master.mkv out.mkv ctrl.mkv master.m2ts rt.mkv; do
+    [ -f "$WORK/$f" ] || continue
+    if command -v sha256sum >/dev/null 2>&1; then h=$(sha256sum "$WORK/$f" | cut -d\  -f1)
+    else h=$(shasum -a 256 "$WORK/$f" | cut -d\  -f1); fi
+    printf '%s  %s\n' "$h" "$f" >> "$FMKV_HASHES"
+  done
+}
 trap cleanup EXIT
 cd "$WORK"
 

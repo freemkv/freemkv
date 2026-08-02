@@ -41,9 +41,10 @@ it. A GUI test there would pass while asserting against nothing, which is
 worse than no test. macOS runners have the mirror problem: driving AppKit needs
 Accessibility permission that a hosted runner does not grant.
 
-So the GUI leg needs a self-hosted runner with a real logged-in desktop, or the
-EC2 approach in `freemkv-private/scripts/parity` (autologon + a Startup
-shortcut, which is what makes the session interactive).
+So the GUI leg needs a self-hosted runner with a real logged-in desktop, or an
+EC2 instance configured with autologon plus a Startup shortcut — that pairing
+is what makes the session interactive, and it is what our conformance harness
+uses.
 
 ## What parity does NOT cover
 
