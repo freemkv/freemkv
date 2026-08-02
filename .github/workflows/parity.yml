@@ -1,0 +1,118 @@
+name: parity
+
+# Cross-platform OUTPUT parity: linux, macOS and Windows must produce a
+# byte-identical MKV from one shared input.
+#
+# Runs on `qa` (the release-candidate branch) and on demand. Not on every dev
+# push — it is a gate, not a linter.
+on:
+  push:
+    branches: [qa]
+  workflow_dispatch:
+
+jobs:
+  # The input is generated ONCE and shared. Generating it per-platform would
+  # bake each runner's ffmpeg build into the media, so the outputs would differ
+  # for a reason that has nothing to do with freemkv.
+  media:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate the shared master.mkv
+        run: |
+          # Same invocation as tests/cli-integration.sh, so the media matches
+          # what the CLI suite already exercises.
+          ffmpeg -v error -f lavfi -i testsrc=duration=6:size=640x480:rate=24 \
+            -f lavfi -i sine=frequency=440:duration=6 \
+            -f lavfi -i sine=frequency=880:duration=6 \
+            -map 0:v -map 1:a -map 2:a -c:v libx264 -pix_fmt yuv420p -c:a ac3 -b:a 192k \
+            -metadata:s:a:0 language=eng -metadata:s:a:1 language=spa master.mkv
+          sha256sum master.mkv | tee master.sha256
+      - uses: actions/upload-artifact@v4
+        with: { name: master-media, path: "master.mkv" }
+
+  remux:
+    needs: media
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: freemkv }
+      # Siblings are relative path deps and must sit BESIDE freemkv. The
+      # committed Cargo.toml patches them to git tags, and the local
+      # .cargo/config.toml that redirects to paths is gitignored — so a bare
+      # checkout cannot resolve them at all.
+      - uses: actions/checkout@v4
+        with: { repository: freemkv/libfreemkv, ref: dev, path: libfreemkv }
+      - uses: actions/checkout@v4
+        with: { repository: freemkv/freemkv-engine, ref: dev, path: freemkv-engine }
+      - uses: actions/checkout@v4
+        with: { repository: freemkv/freemkv-keysources, ref: dev, path: freemkv-keysources }
+      - uses: actions/checkout@v4
+        with: { repository: freemkv/freemkv-i18n, ref: dev, path: freemkv-i18n }
+      - uses: actions/checkout@v4
+        with: { repository: freemkv/freemkv-unlock, ref: dev, path: freemkv-unlock }
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - name: Point the patches at the sibling checkouts
+        shell: bash
+        run: |
+          mkdir -p freemkv/.cargo
+          cat > freemkv/.cargo/config.toml <<'CFG'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+
+          [patch."https://github.com/freemkv/freemkv-unlock"]
+          freemkv-unlock = { path = "../freemkv-unlock" }
+          CFG
+      - name: Record the libfreemkv sha
+        shell: bash
+        run: |
+          # MUX_APP is written into every MKV (mux/mkv.rs MuxingApp/WritingApp)
+          # and carries libfreemkv's short sha (libfreemkv/build.rs). Two runs
+          # from different libfreemkv commits differ in the output BYTES while
+          # being functionally identical, so the shas must match across the
+          # matrix or the comparison is meaningless.
+          echo "LF_SHA=$(git -C libfreemkv rev-parse --short HEAD)" >> "$GITHUB_ENV"
+      - run: cargo build --release --bin freemkv
+        working-directory: freemkv
+      - uses: actions/download-artifact@v4
+        with: { name: master-media }
+      - name: Remux and hash
+        shell: bash
+        run: |
+          BIN=freemkv/target/release/freemkv
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          IN="$PWD/master.mkv"; OUT="$PWD/out.mkv"
+          "$BIN" "mkv://$IN" "mkv://$OUT"
+          if command -v sha256sum >/dev/null; then H=$(sha256sum "$OUT" | cut -d' ' -f1)
+          else H=$(shasum -a 256 "$OUT" | cut -d' ' -f1); fi
+          echo "$H  ${{ matrix.os }}  libfreemkv=$LF_SHA" | tee "hash-${{ matrix.os }}.txt"
+      - uses: actions/upload-artifact@v4
+        with: { name: "hash-${{ matrix.os }}", path: "hash-${{ matrix.os }}.txt" }
+
+  compare:
+    needs: remux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: "hash-*", merge-multiple: true, path: hashes }
+      - name: All platforms must agree
+        run: |
+          cat hashes/*.txt
+          n=$(awk '{print $1}' hashes/*.txt | sort -u | wc -l)
+          s=$(awk '{print $3}' hashes/*.txt | sort -u | wc -l)
+          if [ "$s" -ne 1 ]; then
+            echo "::error::libfreemkv shas differ across the matrix — the MUX_APP stamp differs, so a hash mismatch would be meaningless. Pin the sibling refs."
+            exit 1
+          fi
+          if [ "$n" -ne 1 ]; then
+            echo "::error::platforms produced DIFFERENT bytes from identical input — a real divergence"
+            exit 1
+          fi
+          echo "all platforms byte-identical"
