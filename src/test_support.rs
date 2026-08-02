@@ -74,6 +74,13 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::MkvUnencodable,
         Error::MkvLacingInvalid,
         Error::CssNoDiscKey,
+        // E7028/E7029/E7030 split the key-SOURCE failures out of E7022 for the
+        // same reason: one code was carrying two conditions, and "the key
+        // service could not answer" was being reported as "this disc has no
+        // key" — a seven-hour HTTP 502 outage read as a missing VUK.
+        Error::KeyServiceUnavailable,
+        Error::KeyServiceUnauthorized,
+        Error::KeyServiceRateLimited,
         Error::MuxHeaderBufferExceeded { bytes: 0 },
         Error::NoStreams,
         // `pid` is rendered into the message as `{detail}` (`E6014: 0x1011`), so

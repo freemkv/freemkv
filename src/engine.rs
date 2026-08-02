@@ -747,6 +747,20 @@ pub fn explain(code: u16) -> String {
         7022 | 8005 => "No decryption key for this disc. Check the keydb or \
                         online key service in Settings."
             .to_string(),
+        // 7028/7029/7030 are NOT 7022. The online key service failed to ANSWER —
+        // nothing is known about this disc's key — and each failure is a
+        // different thing for a person to do. Folding them into the 7022 message
+        // above is the bug: a seven-hour run of HTTP 502s told operators the disc
+        // was not in the key database and sent them hunting for a VUK.
+        7028 => "The online key service could not be reached, so it never said \
+                 whether this disc has a key. Wait a few minutes and try again."
+            .to_string(),
+        7029 => "The online key service rejected the access token. Fix the key \
+                 service token in Settings and try again."
+            .to_string(),
+        7030 => "The online key service is rate-limiting requests. Wait a few \
+                 minutes and try again, or rip fewer discs at once."
+            .to_string(),
         6013 => "This file is not a disc image.".to_string(),
         c => format!("Mux failed (E{c})."),
     }
