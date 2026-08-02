@@ -510,24 +510,41 @@ pub fn container_label(format: &str) -> &'static str {
     }
 }
 
-/// Localized display text for a canonical output-format string. The canonical
-/// string (returned by `output_formats`, stored in `App.format`, matched by
-/// `.contains(...)` in the engine) stays English so ripping keeps working; only
-/// what the picker SHOWS is translated. An unknown format returns as-is.
-pub fn format_label(canonical: &str) -> String {
-    let key = match canonical {
+/// The `gui.format.*` translation key for a canonical output-format string, or
+/// `None` for a string that is not one of the picker's formats.
+///
+/// Split out of [`format_label`] so the invariant "every string
+/// [`output_formats`] offers has a translation key" is directly testable. It
+/// was not, and three picker rows shipped with no key: `format_label` fell
+/// through to its catch-all and returned raw English in all 29 locales, which
+/// looks identical to a working translation under `en`.
+pub fn format_key(canonical: &str) -> Option<&'static str> {
+    Some(match canonical {
         "Selected titles → MKV" => "gui.format.mkv",
         "Selected titles → MP4" => "gui.format.mp4",
         "Selected titles → M2TS" => "gui.format.m2ts",
         "Selected titles → separate track files" => "gui.format.tracks",
+        "Selected titles → video tracks only" => "gui.format.video_only",
+        "Selected titles → audio tracks only" => "gui.format.audio_only",
+        "Selected titles → subtitle tracks only" => "gui.format.sub_only",
         "Whole disc → ISO image" => "gui.format.iso",
         "Whole disc → decrypted folder" => "gui.format.folder",
         "Chapters → file" => "gui.format.chapters",
         "Title info → JSON" => "gui.format.json",
         "Video index → .fvi" => "gui.format.fvi",
-        _ => return canonical.to_string(),
-    };
-    crate::strings::get(key)
+        _ => return None,
+    })
+}
+
+/// Localized display text for a canonical output-format string. The canonical
+/// string (returned by `output_formats`, stored in `App.format`, matched by
+/// `.contains(...)` in the engine) stays English so ripping keeps working; only
+/// what the picker SHOWS is translated. An unknown format returns as-is.
+pub fn format_label(canonical: &str) -> String {
+    match format_key(canonical) {
+        Some(key) => crate::strings::get(key),
+        None => canonical.to_string(),
+    }
 }
 
 /// Inverse of [`format_label`]: resolve a LOCALIZED popup label back to the
@@ -1503,5 +1520,78 @@ mod tests {
         );
         assert!(t.roots.is_empty());
         assert!(t.arena.is_empty());
+    }
+
+    /// Every string the picker can offer must have a `gui.format.*` key, and
+    /// that key must exist in en.json carrying exactly the canonical text.
+    ///
+    /// `format_label`'s catch-all returns the canonical string unchanged, so a
+    /// row with no key renders correctly under `en` and is invisible in
+    /// testing — but it is untranslatable in the other 28 locales forever.
+    /// That is how the three per-track-kind rows shipped keyless. Asserting on
+    /// `format_key` (not on the rendered label) is what makes the gap visible:
+    /// the label is identical either way.
+    #[test]
+    fn every_offered_format_has_a_translation_key_present_in_english() {
+        let en: serde_json::Value =
+            serde_json::from_str(freemkv_i18n::bundled_locale_json("en").expect("en is bundled"))
+                .expect("en.json parses");
+
+        // Both source kinds, both MP4 states — the union is every string the
+        // picker can ever show.
+        let mut offered: Vec<&str> = [(true, true), (true, false), (false, true), (false, false)]
+            .into_iter()
+            .flat_map(|(disc, mp4)| output_formats(disc, mp4).into_iter().flatten())
+            .collect();
+        offered.sort_unstable();
+        offered.dedup();
+        assert!(!offered.is_empty(), "the picker offers nothing");
+
+        for canon in offered {
+            let key = format_key(canon).unwrap_or_else(|| {
+                panic!("{canon:?} has no gui.format key — it can never be translated")
+            });
+
+            // The key must resolve in en.json, not merely exist in the match.
+            let mut node = &en;
+            for part in key.split('.') {
+                node = node
+                    .get(part)
+                    .unwrap_or_else(|| panic!("{key} ({canon:?}) is missing from en.json"));
+            }
+            let text = node
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} is not a string in en.json"));
+
+            // English is the canonical text by definition: if they diverge, the
+            // engine matches one string while the user picked another.
+            assert_eq!(
+                text, canon,
+                "{key} in en.json does not match the canonical picker string"
+            );
+        }
+    }
+
+    /// A canonical format's localized label must resolve back to that exact
+    /// canonical string. The shells persist and the engine matches the
+    /// canonical form, so a one-way label is a setting that silently reverts.
+    ///
+    /// REGRESSION PIN, not a fix: this already passed before the keys were
+    /// added, because `format_label`'s catch-all round-trips a keyless row
+    /// through the `format_by_title` fast path. It is here so that WIRING a
+    /// key (which routes the row through `strings::get`) cannot break the
+    /// round-trip — the failure mode the key change introduces.
+    #[test]
+    fn every_offered_format_round_trips_through_its_label() {
+        for (disc, mp4) in [(true, true), (true, false), (false, true), (false, false)] {
+            for canon in output_formats(disc, mp4).into_iter().flatten() {
+                let label = format_label(canon);
+                assert_eq!(
+                    format_from_label(&label, disc, mp4),
+                    Some(canon),
+                    "label {label:?} does not resolve back to {canon:?}"
+                );
+            }
+        }
     }
 }

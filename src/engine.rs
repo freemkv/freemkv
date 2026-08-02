@@ -2504,6 +2504,77 @@ mod routing_tests {
         }
     }
 
+    /// The dest-URL SCHEME a picker string produces, as libfreemkv would parse
+    /// it. `sink_marker` is an internal label; this is the thing the CLI would
+    /// have been given on the command line, which is what parity is measured
+    /// against. Only `folder` differs: it is the CLI's `dir://`.
+    fn dest_scheme(format: &str) -> String {
+        match sink_marker(out_kind(format)).as_str() {
+            "folder" => "dir".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    /// PARITY: for each source kind, the picker offers exactly the sinks the
+    /// CLI supports for that source — no more, no fewer.
+    ///
+    /// This is the invariant, not the row count: the GUI mirrors the CLI per
+    /// source kind. It failed silently for three sinks (`video://`, `audio://`,
+    /// `sub://`) because nothing compared the two lists — the picker was only
+    /// ever checked against itself. Extending the CLI without extending the
+    /// picker now trips here rather than leaving a library sink with no GUI.
+    #[test]
+    fn the_picker_offers_exactly_the_cli_sinks_for_each_source_kind() {
+        use std::collections::BTreeSet;
+
+        // Title-level sinks: every one applies to any source that has titles,
+        // container included.
+        let per_title: &[&str] = &[
+            "mkv", "m2ts", "demux", "video", "audio", "sub", "chapters", "json", "fvi",
+        ];
+        // Whole-disc sinks: `iso://` as a dest needs a physical disc to read,
+        // `dir://` needs a disc file tree. Neither exists for a container.
+        let whole_disc: &[&str] = &["iso", "dir"];
+
+        for (disc_source, mp4_ok) in [(true, true), (true, false), (false, true), (false, false)] {
+            let mut want: BTreeSet<String> = per_title.iter().map(|s| s.to_string()).collect();
+            if mp4_ok {
+                want.insert("mp4".to_string());
+            }
+            if disc_source {
+                want.extend(whole_disc.iter().map(|s| s.to_string()));
+            }
+
+            let got: BTreeSet<String> = crate::ui::output_formats(disc_source, mp4_ok)
+                .into_iter()
+                .flatten()
+                .map(dest_scheme)
+                .collect();
+
+            assert_eq!(
+                got,
+                want,
+                "disc_source={disc_source} mp4_ok={mp4_ok}: picker sinks diverge from the CLI's\
+                 \n  picker-only: {:?}\n  cli-only: {:?}",
+                got.difference(&want).collect::<Vec<_>>(),
+                want.difference(&got).collect::<Vec<_>>(),
+            );
+
+            // Each scheme must be one libfreemkv actually recognizes — a typo'd
+            // row would otherwise agree with a typo'd expectation above.
+            for scheme in &got {
+                let url = format!("{scheme}://out/");
+                assert!(
+                    !matches!(
+                        libfreemkv::parse_url(&url),
+                        libfreemkv::StreamUrl::Unknown { .. }
+                    ),
+                    "{url} is not a scheme libfreemkv recognizes"
+                );
+            }
+        }
+    }
+
     /// The ticked tracks must survive into the mux. `Default::default()` here
     /// is All/All, i.e. every track the user just deselected.
     #[test]
