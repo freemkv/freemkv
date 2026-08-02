@@ -125,6 +125,77 @@ fn write_new_file_0600(path: &std::path::Path, data: &[u8]) -> std::io::Result<(
     f.sync_all()
 }
 
+/// What `Settings::load` found on disk.
+///
+/// The distinction that matters: `Missing` is a normal first run, `Unreadable`
+/// means the user HAD settings and this launch is not using them. Collapsing
+/// the two into `unwrap_or_default()` is what made the data loss invisible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadOutcome {
+    /// No settings file yet — first run. Defaults are correct here.
+    Missing,
+    /// The file was read and parsed.
+    Loaded,
+    /// A settings file exists but could not be used, so this session is
+    /// running on defaults. `preserved` is where the original was moved to,
+    /// or `None` when it could not be moved (or could not be read at all).
+    Unreadable {
+        path: PathBuf,
+        error: String,
+        preserved: Option<PathBuf>,
+    },
+}
+
+impl LoadOutcome {
+    /// Say so in the diagnostic log. Idempotent and cheap, so the startup path
+    /// can call it again after the tracing subscriber is installed.
+    ///
+    /// Not routed to the GUI log pane: every line there goes through
+    /// `freemkv-i18n`, which is a separate crate pinned to a release tag, so a
+    /// new key cannot ship with this fix — it would resolve to nothing on the
+    /// pinned build. The evidence the user can see is the preserved
+    /// `gui-settings.json.bad` file sitting next to the settings file.
+    pub fn warn(&self) {
+        if let LoadOutcome::Unreadable {
+            path,
+            error,
+            preserved,
+        } = self
+        {
+            match preserved {
+                Some(kept) => tracing::warn!(
+                    "settings file {} could not be read ({error}) — running on \
+                     DEFAULTS for this session; your previous settings were \
+                     kept at {}",
+                    path.display(),
+                    kept.display()
+                ),
+                None => tracing::warn!(
+                    "settings file {} could not be read ({error}) — running on \
+                     DEFAULTS for this session; the file was left in place",
+                    path.display()
+                ),
+            }
+        }
+    }
+}
+
+/// Move an unusable settings file aside, returning where it went.
+///
+/// Never clobbers an earlier preserved copy: the first `.bad` is the one most
+/// likely to hold real values (a later corruption may only be corrupting the
+/// defaults this fallback just wrote), so it is the one that must survive.
+fn preserve_unreadable(path: &std::path::Path) -> Option<PathBuf> {
+    let candidates = std::iter::once(path.with_extension("json.bad"))
+        .chain((2..10).map(|n| path.with_extension(format!("json.bad.{n}"))));
+    for cand in candidates {
+        if !cand.exists() {
+            return std::fs::rename(path, &cand).ok().map(|()| cand);
+        }
+    }
+    None
+}
+
 impl Settings {
     /// Read one keyed value as a display string.
     pub fn get(&self, key: &str) -> String {
@@ -191,13 +262,72 @@ impl Settings {
         }
     }
 
+    /// The user's settings, or the defaults when there are none to load.
+    ///
+    /// Never fails, but never fails *silently* either — see [`LoadOutcome`]
+    /// and [`Settings::load_reporting`] for the caller that wants to know.
     pub fn load() -> Self {
-        let mut s: Settings = std::fs::read_to_string(settings_path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        Self::load_reporting().0
+    }
+
+    /// `load()`, plus what actually happened on disk.
+    ///
+    /// The startup path uses this so the "your settings did not parse" warning
+    /// can be repeated once the tracing subscriber exists: `init_gui_logging`
+    /// is configured FROM the settings, so it is necessarily installed after
+    /// this call and the warning emitted here reaches no log file.
+    pub fn load_reporting() -> (Self, LoadOutcome) {
+        let (mut s, outcome) = Self::load_from(&settings_path());
         s.normalize();
-        s
+        (s, outcome)
+    }
+
+    /// Read and parse one settings file. Split out from `load()` so the
+    /// behaviour can be tested against a temp path instead of the real
+    /// per-user support directory.
+    fn load_from(path: &std::path::Path) -> (Self, LoadOutcome) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            // No file yet is the normal first run, not a problem to report.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return (Settings::default(), LoadOutcome::Missing);
+            }
+            // A file that exists but cannot be READ (permissions, a directory
+            // in its place) is a problem — but there is nothing to preserve
+            // and a rename would likely fail the same way, so leave it be.
+            Err(e) => {
+                let outcome = LoadOutcome::Unreadable {
+                    path: path.to_path_buf(),
+                    error: format!("{e}"),
+                    preserved: None,
+                };
+                outcome.warn();
+                return (Settings::default(), outcome);
+            }
+        };
+        // A leading UTF-8 BOM is not whitespace to serde_json — it rejects the
+        // document outright. PowerShell's `Out-File -Encoding utf8` writes one
+        // and Notepad has historically saved UTF-8 with a BOM by default, so a
+        // Windows user hand-editing this file to paste a keyserver token would
+        // otherwise lose every setting they have.
+        let body = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        match serde_json::from_str::<Settings>(body) {
+            Ok(s) => (s, LoadOutcome::Loaded),
+            Err(e) => {
+                // The file still holds the user's key service token, output
+                // folder and keydb path. Move it aside NOW: `load()` runs at
+                // startup and the next `save()` — settings popup, window
+                // resize — would write defaults straight over it.
+                let preserved = preserve_unreadable(path);
+                let outcome = LoadOutcome::Unreadable {
+                    path: path.to_path_buf(),
+                    error: format!("{e}"),
+                    preserved,
+                };
+                outcome.warn();
+                (Settings::default(), outcome)
+            }
+        }
     }
 
     /// Every setting must carry a value the popup can select and the engine can
@@ -406,7 +536,111 @@ pub fn check_for_update(current: &str) -> String {
 
 #[cfg(test)]
 mod normalize_tests {
-    use super::{Settings, default_keydb_path, dirs_movies, settings_path, support_dir};
+    use super::{
+        LoadOutcome, Settings, default_keydb_path, dirs_movies, settings_path, support_dir,
+    };
+
+    /// A scratch directory of this test's own, so nothing here touches the
+    /// real per-user support dir (and no `HOME` juggling is needed —
+    /// `load_from` takes the path).
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fmkv-load-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The three cases `load()` must tell apart. Before this fix all three
+    /// were the same code path — `unwrap_or_default()` — so a user whose
+    /// settings had just been discarded got exactly what a first-run user
+    /// gets, with nothing anywhere saying otherwise.
+    #[test]
+    fn load_distinguishes_no_file_from_a_good_file_from_an_unreadable_one() {
+        let dir = scratch("outcome");
+
+        // 1. No file: the normal first run. Defaults, and NOT reported.
+        let missing = dir.join("gui-settings.json");
+        let (s, outcome) = Settings::load_from(&missing);
+        assert_eq!(outcome, LoadOutcome::Missing);
+        assert_eq!(s.keyserver_url, Settings::default().keyserver_url);
+        assert!(
+            !missing.with_extension("json.bad").exists(),
+            "a first run must not leave a .bad file"
+        );
+
+        // 2. A good file: parsed, values kept.
+        let good = dir.join("good.json");
+        std::fs::write(&good, r#"{"keyserver_token":"tok"}"#).unwrap();
+        let (s, outcome) = Settings::load_from(&good);
+        assert_eq!(outcome, LoadOutcome::Loaded);
+        assert_eq!(s.keyserver_token, "tok");
+        assert!(
+            good.exists(),
+            "a good file must be left exactly where it is"
+        );
+
+        // 3. Present but unparseable: reported, with the error and the path
+        // the original was preserved at.
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, "{ not json").unwrap();
+        let (s, outcome) = Settings::load_from(&bad);
+        assert_eq!(s.keyserver_token, "", "must fall back to defaults");
+        match outcome {
+            LoadOutcome::Unreadable {
+                path,
+                error,
+                preserved,
+            } => {
+                assert_eq!(path, bad);
+                assert!(!error.is_empty(), "the parse error must be reported");
+                let kept = preserved.expect("the original must be preserved");
+                assert_eq!(std::fs::read_to_string(kept).unwrap(), "{ not json");
+                assert!(!bad.exists(), "the unusable file must be moved aside");
+            }
+            other => panic!("expected Unreadable, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Preserving must never overwrite an already-preserved copy. The first
+    /// `.bad` is the one likely to hold the real keyserver token; a second
+    /// corruption is probably a corruption of the defaults written after the
+    /// first, and must not be allowed to replace it.
+    #[test]
+    fn a_second_corruption_does_not_clobber_the_first_preserved_copy() {
+        let dir = scratch("twice");
+        let path = dir.join("gui-settings.json");
+
+        std::fs::write(&path, "first — holds the real token").unwrap();
+        let (_, first) = Settings::load_from(&path);
+        std::fs::write(&path, "second — only defaults were in here").unwrap();
+        let (_, second) = Settings::load_from(&path);
+
+        let (
+            LoadOutcome::Unreadable {
+                preserved: Some(a), ..
+            },
+            LoadOutcome::Unreadable {
+                preserved: Some(b), ..
+            },
+        ) = (first, second)
+        else {
+            panic!("both loads should have preserved the file")
+        };
+        assert_ne!(a, b, "the second corruption reused the first .bad name");
+        assert_eq!(
+            std::fs::read_to_string(&a).unwrap(),
+            "first — holds the real token",
+            "the first preserved copy was overwritten"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// `normalize()` is private, called only from `load()`, and `load()` had no
     /// test — so the exact bug class its doc comment describes had ZERO

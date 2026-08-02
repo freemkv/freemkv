@@ -79,7 +79,7 @@ fn main() {
 /// `freemkv-gui.exe` can open the very same window.
 #[cfg(target_os = "macos")]
 fn run_gui() {
-    let cfg = settings::Settings::load();
+    let (cfg, loaded) = settings::Settings::load_reporting();
 
     // "Auto" follows the OS language. A Finder-launched `.app` inherits no
     // LANG, so the i18n crate's env detection would fall back to English —
@@ -90,6 +90,10 @@ fn run_gui() {
     // when the user asks for detail; otherwise the library's tracing events are
     // dropped and no log file is written.
     freemkv::app_entry::init_gui_logging(&cfg.log_level);
+    // Again, now that there is somewhere for it to go: the subscriber is
+    // configured from `cfg.log_level`, so the warning `load_reporting` already
+    // emitted had no subscriber to receive it.
+    loaded.warn();
 
     // Development harness (scan / rip / screenshot hooks). Debug builds only —
     // the shipped release binary has no environment switches.

@@ -345,3 +345,129 @@ fn saved_settings_file_is_private_and_leaves_no_temp_file() {
 
     outcome.expect("round trip panicked");
 }
+
+/// Helper for the two tests below: point the per-OS support dir at a fresh
+/// temp directory, run `f`, restore the environment, delete the directory.
+///
+/// Same shape as the round-trip test above (same `HOME_LOCK`, same three
+/// variables, same `catch_unwind` so a failed assertion still restores the
+/// environment) — `support_dir()` is `$HOME/Library/...` on macOS and
+/// `%APPDATA%` on Windows, so redirecting only `HOME` would make these read
+/// and WRITE the runner's real `gui-settings.json`.
+fn in_a_temp_support_dir<T>(tag: &str, f: impl FnOnce(&std::path::Path) -> T) -> T {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let vars = ["HOME", "USERPROFILE", "APPDATA"];
+    let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+        vars.iter().map(|v| (*v, std::env::var_os(v))).collect();
+
+    let dir = std::env::temp_dir().join(format!("fmkv-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // On macOS the support dir is `$HOME/Library/Application Support/freemkv`;
+    // create the whole chain so the settings file can be planted before load.
+    std::fs::create_dir_all(&dir).unwrap();
+    // SAFETY: serialised by HOME_LOCK; every var restored before returning.
+    for v in vars {
+        unsafe { std::env::set_var(v, &dir) };
+    }
+    let support = freemkv::settings::support_dir();
+    let outcome = std::fs::create_dir_all(&support)
+        .map_err(|e| format!("{e}"))
+        .and_then(|()| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&support)))
+                .map_err(|_| "closure panicked".to_string())
+        });
+
+    for (v, val) in saved {
+        match val {
+            Some(x) => unsafe { std::env::set_var(v, x) },
+            None => unsafe { std::env::remove_var(v) },
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.unwrap()
+}
+
+/// A leading UTF-8 BOM must not cost the user their whole configuration.
+///
+/// `load()` parsed the file with `serde_json::from_str(...).ok()` and fell
+/// back to `unwrap_or_default()` on ANY failure, so a single invisible
+/// `\u{FEFF}` at the start of `gui-settings.json` reset every setting —
+/// key service URL, token, output folder, keydb path — with no log line and
+/// nothing in the UI. The next save then overwrote the file with the
+/// defaults, so the originals were gone for good.
+///
+/// The BOM is not exotic on the platform that hits it: PowerShell's
+/// `Out-File -Encoding utf8` writes one, and Notepad has historically saved
+/// UTF-8 with a BOM by default — so a Windows user hand-editing the file to
+/// paste a keyserver token silently loses everything.
+#[test]
+fn a_settings_file_with_a_utf8_bom_still_loads_the_users_values() {
+    in_a_temp_support_dir("settings-bom", |support| {
+        let want_url = "https://keys.example/api";
+        let want_token = "s3cr3t-token";
+        let body = serde_json::json!({
+            "keyserver_url": want_url,
+            "keyserver_token": want_token,
+            "filename_template": "{title}-bom",
+        })
+        .to_string();
+        std::fs::write(
+            support.join("gui-settings.json"),
+            format!("\u{feff}{body}").as_bytes(),
+        )
+        .unwrap();
+
+        let s = Settings::load();
+        assert_eq!(
+            s.keyserver_url, want_url,
+            "a BOM discarded the whole settings file"
+        );
+        assert_eq!(s.keyserver_token, want_token, "the token was lost to a BOM");
+        assert_eq!(s.filename_template, "{title}-bom");
+    });
+}
+
+/// A settings file that cannot be parsed must be PRESERVED, not overwritten.
+///
+/// Whatever the cause (a truncated write, a hand-edit with a stray comma),
+/// the file still holds the user's key service token and output folder. The
+/// old `load()` returned defaults and left the unreadable file in place, so
+/// the very next `save()` — settings popup, window resize, anything —
+/// replaced it with defaults and the values were unrecoverable.
+///
+/// So: rename it aside before the app can write over it, and prove the
+/// preserved copy still has the original bytes AFTER a save has happened.
+#[test]
+fn an_unparseable_settings_file_is_preserved_before_a_save_can_overwrite_it() {
+    in_a_temp_support_dir("settings-bad", |support| {
+        // Truncated mid-write — the crash-during-save shape.
+        let original = r#"{"keyserver_token":"s3cr3t-token","keyserver_url":"https://keys.exa"#;
+        let path = support.join("gui-settings.json");
+        std::fs::write(&path, original).unwrap();
+
+        let s = Settings::load();
+        let bad = support.join("gui-settings.json.bad");
+        assert!(
+            bad.exists(),
+            "the unreadable settings file was not preserved; support dir now: {:?}",
+            std::fs::read_dir(support)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>()
+        );
+
+        // The app carries on with defaults — and then writes them out.
+        s.save().expect("save should succeed into a writable home");
+
+        assert_eq!(
+            std::fs::read_to_string(&bad).unwrap(),
+            original,
+            "the preserved copy no longer holds the user's original bytes"
+        );
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("s3cr3t"),
+            "test setup wrong: the live file should be the freshly saved defaults"
+        );
+    });
+}
