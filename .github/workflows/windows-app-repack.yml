@@ -23,11 +23,26 @@ name: windows-app-repack
 # The permanent fix is in `release.yml`, so no future tag needs this.
 
 on:
+  # `workflow_dispatch` is the intended way in, but GitHub only offers it for
+  # workflows present on the DEFAULT branch — which here is `main`, the release
+  # pointer that sits exactly on the newest tag. Pushing a workflow there to
+  # make a button appear would move `main` off the tag and break that
+  # invariant, so dispatch only becomes available once this file reaches `main`
+  # through a normal release.
+  #
+  # Until then, pushing the branch below runs it. `REPACK_TAG` says which
+  # release to repack, so the branch carries the argument the dispatch input
+  # would have.
+  push:
+    branches: [ci/windows-app-repack]
   workflow_dispatch:
     inputs:
       tag:
         description: 'Release tag to repack (e.g. v1.6.0)'
         required: true
+
+env:
+  REPACK_TAG: v1.6.0
 
 permissions:
   contents: write
@@ -38,14 +53,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.tag || env.REPACK_TAG }}
           path: freemkv
       # The tag's manifest path-deps its sibling, exactly as the release build
       # did; check out the matching tag so this is the same code that shipped.
       - uses: actions/checkout@v5
         with:
           repository: freemkv/freemkv-unlock
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.tag || env.REPACK_TAG }}
           path: freemkv-unlock
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
@@ -56,7 +71,7 @@ jobs:
         working-directory: freemkv
         run: |
           if (-not (Test-Path "src/bin/freemkv-gui.rs")) {
-            Write-Output "::error::${{ inputs.tag }} has no freemkv-gui.rs — this is not a packaging omission, it needs a release"
+            Write-Output "::error::${{ inputs.tag || env.REPACK_TAG }} has no freemkv-gui.rs — this is not a packaging omission, it needs a release"
             exit 1
           }
 
@@ -72,7 +87,7 @@ jobs:
           if (-not (Test-Path $gui)) { throw "freemkv-gui.exe was not built" }
           $a = "freemkv-x86_64-windows"
           Compress-Archive -Path $gui -DestinationPath "$a.zip" -Force
-          Compress-Archive -Path $gui -DestinationPath "freemkv-${{ inputs.tag }}-x86_64-pc-windows-msvc.zip" -Force
+          Compress-Archive -Path $gui -DestinationPath "freemkv-${{ inputs.tag || env.REPACK_TAG }}-x86_64-pc-windows-msvc.zip" -Force
           $h = Get-FileHash -Algorithm SHA256 "$a.zip"
           "$($h.Hash.ToLower())  $a.zip" | Out-File -Encoding ascii "$a.zip.sha256"
           $names = [IO.Compression.ZipFile]::OpenRead((Resolve-Path "$a.zip").Path).Entries.FullName
@@ -87,8 +102,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # --clobber replaces the asset in place. The tag is not touched.
-          gh release upload "${{ inputs.tag }}" `
+          gh release upload "${{ inputs.tag || env.REPACK_TAG }}" `
             "freemkv-x86_64-windows.zip" `
             "freemkv-x86_64-windows.zip.sha256" `
-            "freemkv-${{ inputs.tag }}-x86_64-pc-windows-msvc.zip" `
+            "freemkv-${{ inputs.tag || env.REPACK_TAG }}-x86_64-pc-windows-msvc.zip" `
             --clobber --repo ${{ github.repository }}
