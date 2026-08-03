@@ -1,0 +1,94 @@
+name: windows-app-repack
+
+# Replace a published release's Windows desktop-app .zip, without moving the tag
+# and without a version bump.
+#
+# WHY THIS IS LEGITIMATE, AND NOT A REWRITE OF HISTORY
+#   A release's assets are mutable GitHub artifacts; the tag is an immutable git
+#   object. v1.6.0 shipped a .zip built from `freemkv.exe` — the console image —
+#   so a user who extracted and double-clicked it got a console that printed
+#   usage and closed. The desktop image, `freemkv-gui.exe`, is built from source
+#   that IS in that tag; only the packaging step (a workflow file, which is not
+#   shipped content) left it out.
+#
+#   So this rebuilds from the tag, untouched, and replaces one asset. The bytes
+#   still correspond exactly to the tagged source. Retagging would achieve the
+#   same thing while invalidating a tag other people may already have fetched,
+#   and a version bump would announce a release whose code is identical.
+#
+# WHEN NOT TO USE IT
+#   Only for a packaging omission, where the tagged SOURCE already contains what
+#   should have shipped. If the fix needs a code change, it needs a release.
+#
+# The permanent fix is in `release.yml`, so no future tag needs this.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to repack (e.g. v1.6.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  repack:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+          path: freemkv
+      # The tag's manifest path-deps its sibling, exactly as the release build
+      # did; check out the matching tag so this is the same code that shipped.
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: ${{ inputs.tag }}
+          path: freemkv-unlock
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Confirm the tag really does contain the desktop app
+        shell: pwsh
+        working-directory: freemkv
+        run: |
+          if (-not (Test-Path "src/bin/freemkv-gui.rs")) {
+            Write-Output "::error::${{ inputs.tag }} has no freemkv-gui.rs — this is not a packaging omission, it needs a release"
+            exit 1
+          }
+
+      - name: Build
+        working-directory: freemkv
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Repack the desktop app
+        shell: pwsh
+        working-directory: freemkv
+        run: |
+          $gui = "target/x86_64-pc-windows-msvc/release/freemkv-gui.exe"
+          if (-not (Test-Path $gui)) { throw "freemkv-gui.exe was not built" }
+          $a = "freemkv-x86_64-windows"
+          Compress-Archive -Path $gui -DestinationPath "$a.zip" -Force
+          Compress-Archive -Path $gui -DestinationPath "freemkv-${{ inputs.tag }}-x86_64-pc-windows-msvc.zip" -Force
+          $h = Get-FileHash -Algorithm SHA256 "$a.zip"
+          "$($h.Hash.ToLower())  $a.zip" | Out-File -Encoding ascii "$a.zip.sha256"
+          $names = [IO.Compression.ZipFile]::OpenRead((Resolve-Path "$a.zip").Path).Entries.FullName
+          Write-Output "zip contents: $($names -join ', ')"
+          if ($names -notcontains 'freemkv-gui.exe') { throw "the repacked zip is missing the desktop app" }
+          if ($names -contains 'freemkv.exe') { throw "the repacked zip still carries the console CLI" }
+
+      - name: Replace the assets on the existing release
+        shell: pwsh
+        working-directory: freemkv
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # --clobber replaces the asset in place. The tag is not touched.
+          gh release upload "${{ inputs.tag }}" `
+            "freemkv-x86_64-windows.zip" `
+            "freemkv-x86_64-windows.zip.sha256" `
+            "freemkv-${{ inputs.tag }}-x86_64-pc-windows-msvc.zip" `
+            --clobber --repo ${{ github.repository }}
