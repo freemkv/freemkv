@@ -173,11 +173,30 @@ jobs:
           $ver = "${{ github.ref_name }}"
           $a   = "${{ matrix.asset }}"
           $bin = "target/${{ matrix.target }}/release/freemkv.exe"
+          # The .zip is the DESKTOP APP, mirroring macOS where the .dmg carries
+          # the app and the bare binary is the CLI. Here the app is
+          # `freemkv-gui.exe` and the CLI ships as its own `freemkv.exe` asset.
+          #
+          # Windows has no .app bundle, so "this is the desktop app" cannot be a
+          # property of how an image was started — an Explorer double-click and a
+          # `cmd` invocation look identical to the process. It has to be which
+          # image was started. `freemkv.exe` is linked console-subsystem, so
+          # double-clicking it opens a console, prints usage and exits; and the
+          # subsystem is a PE header field fixed at link time, not something a
+          # runtime branch can change. `freemkv-gui.exe` is the windows-subsystem
+          # image built from the same crate and the same shell code.
+          #
+          # `cargo build --release` already produced it; only this step decided
+          # whether a user could ever get it. Shipping the console binary as the
+          # "app" is why the download page's Windows card said "in development"
+          # while a working shell sat unshipped.
+          $gui = "target/${{ matrix.target }}/release/freemkv-gui.exe"
+          if (-not (Test-Path $gui)) { throw "freemkv-gui.exe missing — the .zip would ship the console CLI as the desktop app" }
           # Unversioned .zip is the stable URL the download page links via
           # `releases/latest/download/<asset>`; the versioned copy mirrors the
           # macOS leg so a specific release can be pinned.
-          Compress-Archive -Path $bin -DestinationPath "$a.zip" -Force
-          Compress-Archive -Path $bin -DestinationPath "freemkv-$ver-${{ matrix.target }}.zip" -Force
+          Compress-Archive -Path $gui -DestinationPath "$a.zip" -Force
+          Compress-Archive -Path $gui -DestinationPath "freemkv-$ver-${{ matrix.target }}.zip" -Force
           $h = Get-FileHash -Algorithm SHA256 "$a.zip"
           "$($h.Hash.ToLower())  $a.zip" | Out-File -Encoding ascii "$a.zip.sha256"
 
@@ -198,13 +217,20 @@ jobs:
             exit 1
           }
           Write-Output "freemkv.exe --version => $out"
-          # The .zip must contain exactly the one program, at the archive root
-          # (the Windows docs tell users to extract and run `freemkv.exe`).
+          # The .zip is the DESKTOP APP, so it must contain the windowed image
+          # and NOT the console one. Shipping freemkv.exe here is the specific
+          # regression this guards: it extracts and double-clicks to a console
+          # that prints usage and closes, which reads to a user as a broken
+          # download rather than as "you got the CLI by mistake".
           $zip = (Resolve-Path "${{ matrix.asset }}.zip").Path
           $names = [IO.Compression.ZipFile]::OpenRead($zip).Entries.FullName
           Write-Output "zip contents: $($names -join ', ')"
-          if ($names -notcontains 'freemkv.exe') {
-            Write-Output "::error::freemkv.exe missing from ${{ matrix.asset }}.zip"
+          if ($names -notcontains 'freemkv-gui.exe') {
+            Write-Output "::error::freemkv-gui.exe missing from ${{ matrix.asset }}.zip — that archive is the desktop app"
+            exit 1
+          }
+          if ($names -contains 'freemkv.exe') {
+            Write-Output "::error::${{ matrix.asset }}.zip contains the console freemkv.exe; the CLI ships as its own .exe asset"
             exit 1
           }
 
