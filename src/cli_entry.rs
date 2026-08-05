@@ -429,10 +429,7 @@ fn info_cmd(args: &[String]) {
                 crate::disc_info::run(dev.as_deref(), flags);
             }
         }
-        // `iso://` and `dir://` both list titles from an IMAGE. A folder gets a
-        // synthesized UDF volume (`libfreemkv::scan_dir`) and is otherwise
-        // identical from here on — same keyless scan, same title printer.
-        libfreemkv::StreamUrl::Iso { path } | libfreemkv::StreamUrl::Dir { path } => {
+        libfreemkv::StreamUrl::Iso { path } => {
             // Listing titles needs NO AACS key — only clear UDF navigation.
             // Scan the ISO keylessly and reuse disc_info's full title list
             // (duration, size, clip count, video/audio/subtitle streams).
@@ -455,18 +452,10 @@ fn info_cmd(args: &[String]) {
                     crate::disc_info::reject_unknown_option(&opt)
                 }
             };
-            let scan = if matches!(parsed, libfreemkv::StreamUrl::Dir { .. }) {
-                libfreemkv::scan_dir(
-                    std::path::Path::new(path),
-                    libfreemkv::ScanOptions::default(),
-                )
-            } else {
-                libfreemkv::scan_iso(
-                    std::path::Path::new(path),
-                    libfreemkv::ScanOptions::default(),
-                )
-            };
-            let (disc, _reader) = match scan {
+            let (disc, _reader) = match libfreemkv::scan_iso(
+                std::path::Path::new(path),
+                libfreemkv::ScanOptions::default(),
+            ) {
                 Ok(pair) => pair,
                 Err(e) => fatal("error.op_info", &crate::pipe::fmt_err(&e)),
             };
