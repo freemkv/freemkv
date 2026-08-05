@@ -7,6 +7,15 @@ follows semantic versioning.
 
 ## [1.6.1]
 
+### Added
+
+- **`iso://` is now a destination for any image source, not just a drive.**
+  `freemkv iso://In.iso iso://Out.iso` decrypts an existing image in place of
+  needing the disc. `--raw` and `--multipass` are drive operations and now say so:
+  they require a `disc://` source as well as an `iso://` destination, so a
+  meaningless combination fails with a message naming the reason instead of being
+  quietly accepted.
+
 ### Fixed
 
 - **The Windows `.zip` contained the console CLI instead of the desktop

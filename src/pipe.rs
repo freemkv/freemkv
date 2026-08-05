@@ -833,6 +833,13 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         return disc_to_iso(source, dest, &keys, raw, multipass, &out);
     }
 
+    // Any OTHER image source → iso://: the generic image sink. `iso:// → iso://`
+    // decrypts an existing image; `dir://` joins this arm when it becomes a
+    // source. Not the recovery path — see `image_to_iso`.
+    if matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. }) && parsed_source.is_disc_source() {
+        return image_to_iso(source, dest, &keys, &out);
+    }
+
     // Disc / ISO → dir://: decrypted file-tree extraction (Disc::extract_tree,
     // not a stream). Placed BEFORE the generic mux path: a `dir://` dest with a
     // disc-source input never flows through the PES/mux highway. Byte-stream
@@ -1093,15 +1100,6 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
 
 // ── Pre-flight invocation validation (fail loud and EARLY) ──────────────────
 
-/// Whether a parsed destination URL targets an `iso://` image. `--raw` and
-/// `--multipass` only apply to a raw disc-image output (they write/recover a
-/// sector image with a mapfile); every other destination is a decode+mux and
-/// must reject those flags. Centralized so the flag gate and any future caller
-/// agree on the predicate.
-fn dest_is_iso(parsed_dest: &libfreemkv::StreamUrl) -> bool {
-    matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. })
-}
-
 /// Whether a destination is a scheme-only sink with no filesystem path —
 /// `null://` (discard) or `stdio://` (stdout). Such a sink consumes every
 /// selected title through the SAME URL: it can't be given per-title file names,
@@ -1171,16 +1169,40 @@ fn preflight_validate(
         ));
     }
 
-    // 2. `--raw` and `--multipass` are iso://-output-only (deliberate design).
-    // A non-ISO destination + either flag is a hard, early error with guidance —
-    // never a silent ignore. Check raw first, then multipass, so the message
-    // names the actual offending flag.
-    if !dest_is_iso(parsed_dest) {
+    // 2. `--raw` and `--multipass` need BOTH a drive source and an image
+    // destination, and the two halves fail for different reasons.
+    //
+    // Destination: both flags write or recover a raw sector image, which only an
+    // `iso://` destination can receive.
+    //
+    // Source: both are DRIVE semantics — `--multipass` is sweep-then-retry
+    // against a drive's read errors, `--raw` says don't decrypt the sectors
+    // coming off the disc. Neither means anything without a drive.
+    //
+    // The source half used to be implied by the destination half, because an
+    // `iso://` destination was reachable only from `disc://`. Now that any image
+    // source can write an `iso://`, that coincidence is gone and the source must
+    // be checked on its own — otherwise `iso://in.iso iso://out.iso --multipass`
+    // reaches a path with no drive and no bad sectors to retry.
+    //
+    // Check raw before multipass in each half, so the message names the actual
+    // offending flag.
+    if !matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. }) {
         if raw {
             return Err(strings::fmt("error.raw_iso_only", &[("dest", dest)]));
         }
         if multipass {
             return Err(strings::fmt("error.multipass_iso_only", &[("dest", dest)]));
+        }
+    } else if !matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. }) {
+        if raw {
+            return Err(strings::fmt("error.raw_disc_only", &[("source", source)]));
+        }
+        if multipass {
+            return Err(strings::fmt(
+                "error.multipass_disc_only",
+                &[("source", source)],
+            ));
         }
     }
 
@@ -2233,6 +2255,92 @@ fn pipe(
 /// Returns true on success, false on any failure (no drive, scan error,
 /// `Disc::copy` error). The caller propagates this to `main`'s exit code so a
 /// scripted `$?` check sees the failure.
+/// `<image source> → iso://` — write a decrypted sector image from a source that
+/// is NOT a physical drive.
+///
+/// This is the generic `iso://` sink. It is deliberately not
+/// [`disc_to_iso`]: that one is the recovery path (mapfile, `--multipass`,
+/// damage-jump, auto-resume), all of which exists because an optical drive
+/// returns read errors on marginal media. A file-backed source has no marginal
+/// media, so it gets a plain sequential write instead — see
+/// `libfreemkv::io::image_writer` for the full reasoning, including why sharing
+/// the recovery path would let a mapfile resume over a DIFFERENT source.
+///
+/// `--raw` and `--multipass` cannot reach here: they are drive flags and
+/// `preflight_validate` rejects them for a non-drive source.
+fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
+    let iso_path = match libfreemkv::parse_url(dest) {
+        libfreemkv::StreamUrl::Iso { path } => path,
+        _ => return false,
+    };
+
+    let (mut disc, reader) = match scan_iso(source) {
+        Some(pair) => pair,
+        None => {
+            out.raw(
+                Normal,
+                &strings::fmt("error.iso_unreadable", &[("path", source)]),
+            );
+            return false;
+        }
+    };
+
+    let mut reader = reader;
+    // Resolve keys against the source before copying: an `iso://` destination is
+    // a DECRYPTED image, so an encrypted source that yields no key must fail
+    // here rather than write ciphertext under a name that promises plaintext.
+    resolve_disc_keys(&mut disc, reader.as_mut(), keys, out);
+    if let Err(e) = disc.ensure_decryptable(false) {
+        out.raw(Normal, &render_error(&e));
+        return false;
+    }
+
+    let total_sectors = disc.capacity_sectors;
+    let start = std::time::Instant::now();
+    let halt = libfreemkv::halt::Halt::new();
+    let mut src = libfreemkv::DecryptingSectorSource::new(reader, disc.decrypt_keys());
+
+    let result = libfreemkv::write_image(&mut src, &iso_path, total_sectors, &halt, |_| {
+        // `write_image` checks `halt` once per batch and this runs at the end of
+        // each batch, so a Ctrl-C is honored on the next one. Same first-Ctrl-C
+        // semantics as the disc path, without a second signal being needed.
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            halt.cancel();
+        }
+    });
+
+    match result {
+        Ok(bytes) => {
+            let elapsed = start.elapsed().as_secs_f64();
+            let mb = bytes as f64 / (1024.0 * 1024.0);
+            let speed = if elapsed > 0.0 { mb / elapsed } else { 0.0 };
+            out.raw(
+                Normal,
+                &strings::fmt(
+                    "rip.complete",
+                    &[
+                        ("size", &format!("{:.1}", mb / 1024.0)),
+                        ("unit", "GB"),
+                        ("time", &format!("{elapsed:.0}")),
+                        ("speed", &format!("{speed:.0}")),
+                    ],
+                ),
+            );
+            true
+        }
+        Err(libfreemkv::Error::Halted) => {
+            // Don't print "Complete" over a partial image, and return failure so
+            // a scripted caller's `$?` sees the interruption.
+            out.raw(Normal, &strings::get("rip.interrupted"));
+            false
+        }
+        Err(e) => {
+            out.raw(Normal, &render_error(&e));
+            false
+        }
+    }
+}
+
 fn disc_to_iso(
     source: &str,
     dest: &str,
@@ -3157,11 +3265,11 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 mod tests {
     use super::{
         KeyConfig, PipeFail, build_jobs, build_key_sources_quiet, copy_should_continue,
-        dest_is_directory, dest_is_iso, disc_copy_recovered_data, disc_title_nums, fmt_disc_damage,
-        fmt_err, fmt_err_str, is_keyserver_url, is_metadata_sink, is_scheme_only_sink,
-        is_url_token, mp4_skip_reason_key, parse_error_code, parse_flags, parse_stream_spec,
-        preflight_validate, render_error, resolved_keydb_path, sanitize_name, title_in_range,
-        validate_file_dest, validate_iso_input,
+        dest_is_directory, disc_copy_recovered_data, disc_title_nums, fmt_disc_damage, fmt_err,
+        fmt_err_str, is_keyserver_url, is_metadata_sink, is_scheme_only_sink, is_url_token,
+        mp4_skip_reason_key, parse_error_code, parse_flags, parse_stream_spec, preflight_validate,
+        render_error, resolved_keydb_path, sanitize_name, title_in_range, validate_file_dest,
+        validate_iso_input,
     };
     use crate::output::Output;
     use crate::strings;
@@ -4865,11 +4973,24 @@ mod tests {
 
     // ── predicates ───────────────────────────────────────────────────────────
 
+    /// `--raw` / `--multipass` are DRIVE flags, gated on the source being
+    /// `disc://` — not on the destination being `iso://`.
+    ///
+    /// The old gate was `dest_is_iso`, which picked the same runs only because
+    /// an ISO destination implied a drive source. Now that any image source can
+    /// write an `iso://`, that coincidence is gone, and the first assertion here
+    /// is the one that would have silently passed under the old predicate:
+    /// there is no drive in an `iso:// → iso://` run, so there are no bad
+    /// sectors to sweep and nothing to leave encrypted.
     #[test]
-    fn dest_is_iso_predicate() {
-        assert!(dest_is_iso(&parse_url("iso://x.iso")));
-        assert!(!dest_is_iso(&parse_url("mkv://x.mkv")));
-        assert!(!dest_is_iso(&parse_url("null://")));
+    fn raw_and_multipass_require_a_drive_source() {
+        assert!(preflight("iso://in.iso", "iso://out.iso", false, true).is_err());
+        assert!(preflight("iso://in.iso", "iso://out.iso", true, false).is_err());
+        // A drive source still accepts both.
+        assert!(preflight("disc://", "iso://out.iso", true, false).is_ok());
+        assert!(preflight("disc://", "iso://out.iso", false, true).is_ok());
+        // And they remain rejected for a mux destination, as before.
+        assert!(preflight("disc://", "mkv://out.mkv", false, true).is_err());
     }
 
     #[test]
