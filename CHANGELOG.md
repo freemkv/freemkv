@@ -9,10 +9,6 @@ follows semantic versioning.
 
 ### Added
 
-- **`dir://` is now a source as well as a destination.** An extracted
-  `VIDEO_TS` or `BDMV` folder works anywhere an image does — `freemkv
-  dir://Movie/ mkv://Movie.mkv`, `freemkv info dir://Movie/`, or any other
-  destination including `iso://`.
 - **`iso://` is now a destination for any image source, not just a drive.**
   `freemkv iso://In.iso iso://Out.iso` decrypts an existing image in place of
   needing the disc. `--raw` and `--multipass` are drive operations and now say so:
