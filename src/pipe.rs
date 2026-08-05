@@ -1207,11 +1207,10 @@ fn preflight_validate(
     }
 
     // 2b. `dir://` (decrypted file-tree extraction) gates. A `dir://` output
-    // needs a filesystem source (disc://, iso:// or — since 1.6.1 — dir://) —
-    // a byte-stream source (mkv://, m2ts://, network://, stdio://) has no UDF
-    // tree, so reject it up front. (`--raw` / `--multipass` are already
-    // rejected by step 2, since `dir://` is not `iso://`.) Writability and
-    // non-empty are checked in step 4.
+    // needs a filesystem source (disc:// or iso://) — a byte-stream source
+    // (mkv://, m2ts://, network://, stdio://) has no UDF tree, so reject it up
+    // front. (`--raw` / `--multipass` are already rejected by step 2, since
+    // `dir://` is not `iso://`.) Writability/non-empty are checked in step 4.
     if matches!(parsed_dest, libfreemkv::StreamUrl::Dir { .. }) && !parsed_source.is_disc_source() {
         return Err(strings::fmt(
             "error.dir_source_unsupported",
@@ -1234,12 +1233,6 @@ fn preflight_validate(
         libfreemkv::StreamUrl::Iso { path } => {
             validate_iso_input(path)?;
         }
-        // A `dir://` SOURCE is deliberately NOT pre-checked here. Every way it
-        // can be wrong — missing, unreadable, no `BDMV`/`VIDEO_TS`, a 3D SSIF
-        // tree, an unsatisfiable VIDEO_TS placement, still-encrypted content —
-        // is already a typed error from the image planner naming the offending
-        // path, and `render_error` shows it. A second, shallower check here
-        // could only duplicate the easy cases and disagree on the rest.
         _ => {}
     }
 
@@ -1713,25 +1706,17 @@ pub(crate) fn resolve_info_keys(
     resolve_disc_keys(disc, drive, &keys, out);
 }
 
-/// Scan an IMAGE source's structure ONCE (keyless). The resulting `Disc` is
-/// shared by title enumeration and unit-key resolution so the source is not
+/// Scan an `iso://` source's structure ONCE (keyless). The resulting `Disc` is
+/// shared by title enumeration and unit-key resolution so the ISO is not
 /// re-parsed per step; the returned reader is reused for ciphertext sampling
-/// in `resolve_iso_unit_keys`. `None` for a non-image source or an unreadable
-/// one.
-///
-/// `dir://` goes through `libfreemkv::scan_dir`, NOT `scan_iso`: a folder gets
-/// a synthesized UDF image plus the folder-specific encryption verdict (an
-/// `AACS/` directory over already-clear content is decrypted, not encrypted).
+/// in `resolve_iso_unit_keys`. `None` for a non-iso source or an unreadable
+/// image.
 fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>)> {
-    match libfreemkv::parse_url(source) {
-        libfreemkv::StreamUrl::Iso { path } => {
-            libfreemkv::scan_iso(std::path::Path::new(&path), keyless_scan_opts()).ok()
-        }
-        libfreemkv::StreamUrl::Dir { path } => {
-            libfreemkv::scan_dir(std::path::Path::new(&path), keyless_scan_opts()).ok()
-        }
-        _ => None,
-    }
+    let path = match libfreemkv::parse_url(source) {
+        libfreemkv::StreamUrl::Iso { path } => path,
+        _ => return None,
+    };
+    libfreemkv::scan_iso(std::path::Path::new(&path), keyless_scan_opts()).ok()
 }
 
 /// Resolve an ISO's AACS unit keys from an already-scanned `Disc`: sample its
@@ -2605,22 +2590,6 @@ fn disc_to_iso(
 /// media is the `disc→iso --multipass` then `iso→dir` workflow. Returns true on
 /// success (a fully-clean tree); a lossy extraction prints the per-file summary
 /// and returns false (→ non-zero exit) so a script can re-run via the ISO path.
-/// Scan an image source for the `dir://` extraction path. Split out so the
-/// shared `iso://` / `dir://` arm has one expression to match on.
-fn scan_image_for_extract(
-    parsed_source: &libfreemkv::StreamUrl,
-) -> libfreemkv::Result<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>)> {
-    match parsed_source {
-        libfreemkv::StreamUrl::Dir { path } => {
-            libfreemkv::scan_dir(std::path::Path::new(path), keyless_scan_opts())
-        }
-        libfreemkv::StreamUrl::Iso { path } => {
-            libfreemkv::scan_iso(std::path::Path::new(path), keyless_scan_opts())
-        }
-        _ => Err(libfreemkv::Error::DirSourceUnsupported),
-    }
-}
-
 fn dir_to_extract(
     source: &str,
     dest: &str,
@@ -2684,20 +2653,18 @@ fn dir_to_extract(
             drive.unlock_tray();
             ok
         }
-        // `iso://` and `dir://` are both image sources by this point: one opens a
-        // file, the other synthesizes a UDF volume over a folder. The extraction
-        // below is identical, so they share an arm.
-        libfreemkv::StreamUrl::Iso { .. } | libfreemkv::StreamUrl::Dir { .. } => {
-            let (mut disc, mut reader) = match scan_image_for_extract(parsed_source) {
-                Ok(pair) => pair,
-                Err(e) => {
-                    out.raw(
-                        Normal,
-                        &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
-                    );
-                    return false;
-                }
-            };
+        libfreemkv::StreamUrl::Iso { path } => {
+            let (mut disc, mut reader) =
+                match libfreemkv::scan_iso(std::path::Path::new(path), keyless_scan_opts()) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        out.raw(
+                            Normal,
+                            &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
+                        );
+                        return false;
+                    }
+                };
             resolve_disc_keys(&mut disc, reader.as_mut(), keys, out);
             if let Err(e) = disc.ensure_decryptable(false) {
                 out.raw(Normal, &render_error(&e));
