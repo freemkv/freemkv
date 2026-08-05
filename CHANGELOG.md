@@ -5,6 +5,23 @@ two shells over `freemkv-engine`) are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the project
 follows semantic versioning.
 
+## [1.6.1]
+
+### Fixed
+
+- **The Windows `.zip` contained the console CLI instead of the desktop
+  app.** The download page offers that zip as the Windows desktop app —
+  mirroring macOS, where the `.dmg` carries the app and the bare binary is
+  the CLI — but it was packaged from the console-subsystem executable, so
+  extracting it and double-clicking opened a console window that printed
+  usage and closed. The windowed build was there all along; only the
+  packaging step left it out. The zip now carries the desktop app, and the
+  release verification fails if the console binary turns up in it instead.
+- Chapter marks and title durations on NTSC DVDs were roughly 0.1% short —
+  about 3.6 seconds per hour of running time — so a mark near the end of a
+  long feature could land several seconds before the scene it names. Fixed
+  in `libfreemkv`; see its changelog for the detail.
+
 ## [1.6.0] — 2026-08-03
 
 ### Fixed
