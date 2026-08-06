@@ -1712,11 +1712,25 @@ pub(crate) fn resolve_info_keys(
 /// in `resolve_iso_unit_keys`. `None` for a non-iso source or an unreadable
 /// image.
 fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>)> {
-    let path = match libfreemkv::parse_url(source) {
-        libfreemkv::StreamUrl::Iso { path } => path,
-        _ => return None,
-    };
-    libfreemkv::scan_iso(std::path::Path::new(&path), keyless_scan_opts()).ok()
+    // `dir://` is an image-level source too: libfreemkv::scan_dir synthesizes a
+    // UDF volume over the folder and returns the same (Disc, SectorSource) pair
+    // scan_iso does. Without this arm every caller that opens a source "as an
+    // image" silently rejected folders — `dir://` -> `iso://` reported
+    // error.iso_unreadable, and `dir://` -> `dir://` could not re-extract,
+    // while `dir://` -> `mkv://` worked. A sink is a sink: any input has to
+    // work with any output, and this helper was where that broke.
+    //
+    // scan_dir additionally decides the encryption verdict from CONTENT rather
+    // than from whether an AACS/ directory survived the copy.
+    match libfreemkv::parse_url(source) {
+        libfreemkv::StreamUrl::Iso { path } => {
+            libfreemkv::scan_iso(std::path::Path::new(&path), keyless_scan_opts()).ok()
+        }
+        libfreemkv::StreamUrl::Dir { path } => {
+            libfreemkv::scan_dir(std::path::Path::new(&path), keyless_scan_opts()).ok()
+        }
+        _ => None,
+    }
 }
 
 /// Resolve an ISO's AACS unit keys from an already-scanned `Disc`: sample its
