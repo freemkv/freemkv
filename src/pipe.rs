@@ -2667,18 +2667,31 @@ fn dir_to_extract(
             drive.unlock_tray();
             ok
         }
-        libfreemkv::StreamUrl::Iso { path } => {
-            let (mut disc, mut reader) =
-                match libfreemkv::scan_iso(std::path::Path::new(path), keyless_scan_opts()) {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        out.raw(
-                            Normal,
-                            &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
-                        );
-                        return false;
-                    }
-                };
+        // Iso AND Dir. A folder is an image-level source: scan_dir synthesizes
+        // a UDF volume over it and returns the same (Disc, SectorSource) pair.
+        //
+        // Dir used to fall to the `_` arm below, which is commented
+        // "unreachable: preflight rejects non-disc sources for dir://". That
+        // stopped being true the moment Dir joined is_disc_source(): preflight
+        // let it through, this match had no arm for it, and the supposedly
+        // unreachable branch told the user their folder "has no file tree".
+        libfreemkv::StreamUrl::Iso { path } | libfreemkv::StreamUrl::Dir { path } => {
+            let scan = if matches!(parsed_source, libfreemkv::StreamUrl::Dir { .. }) {
+                libfreemkv::scan_dir
+            } else {
+                libfreemkv::scan_iso
+            };
+            let (mut disc, mut reader) = match scan(std::path::Path::new(path), keyless_scan_opts())
+            {
+                Ok(pair) => pair,
+                Err(e) => {
+                    out.raw(
+                        Normal,
+                        &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
+                    );
+                    return false;
+                }
+            };
             resolve_disc_keys(&mut disc, reader.as_mut(), keys, out);
             if let Err(e) = disc.ensure_decryptable(false) {
                 out.raw(Normal, &render_error(&e));
