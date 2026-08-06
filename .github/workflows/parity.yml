@@ -95,7 +95,12 @@ jobs:
         run: |
           BIN=freemkv/target/release/freemkv
           [ -f "$BIN.exe" ] && BIN="$BIN.exe"
-          IN="$PWD/master.mkv"; OUT="$PWD/out.mkv"
+          # Bare filenames, NOT $PWD. Under Git-bash on the Windows runner $PWD
+          # is an MSYS path (/d/a/freemkv/freemkv), which the binary is a native
+          # Win32 program and cannot resolve — it reported "output directory
+          # does not exist: '/d/a/freemkv/freemkv'". Both files are already in
+          # the working directory, so no path needs translating at all.
+          IN="master.mkv"; OUT="out.mkv"
           "$BIN" "mkv://$IN" "mkv://$OUT"
           if command -v sha256sum >/dev/null; then H=$(sha256sum "$OUT" | cut -d' ' -f1)
           else H=$(shasum -a 256 "$OUT" | cut -d' ' -f1); fi
