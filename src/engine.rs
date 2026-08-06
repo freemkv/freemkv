@@ -602,7 +602,11 @@ pub fn preflight_with_keys(
     } else {
         fe::Selection::Titles(titles.to_vec())
     };
-    let job = fe::Job::new(format!("iso://{path}"), dest).with_selection(sel);
+    // Folder OR image — the scan above already dispatches on it, and a
+    // preflight run against `iso://<folder>` answers about a source that does
+    // not exist in that form.
+    let job =
+        fe::Job::new(format!("{}://{path}", image_or_dir_scheme(path)), dest).with_selection(sel);
     // No decrypt gate of our own: the engine's `preflight` delegates that to
     // `resolve_keys`, so a second check here could only drift from it.
     match fe::preflight(&disc, &job) {
@@ -1159,12 +1163,26 @@ fn is_stream_source(path: &str) -> bool {
     )
 }
 
-fn source_scheme(path: &str) -> &'static str {
-    // A folder is `dir://`. Without this it fell to the `_` arm and became
-    // `m2ts://<folder>`, which is not a thing.
-    if std::path::Path::new(path).is_dir() {
-        return "dir";
+/// The URL scheme for a source that has already been established as neither a
+/// drive nor a stream container: a FOLDER is `dir://`, anything else is an
+/// image (`iso://`).
+///
+/// Deliberately NOT `source_scheme`. That function classifies by file
+/// extension and falls through to `m2ts` for anything it does not recognise,
+/// which is right for its own caller (`convert_container`, guarded by
+/// `is_stream_source`) and wrong here: a disc image saved as `Disc.img`,
+/// `Disc.bin` or with no extension would be handed to the mux as
+/// `m2ts://Disc.img` and re-opened as a single elementary stream. Reusing it
+/// here regressed every image not named `.iso`.
+fn image_or_dir_scheme(source: &str) -> &'static str {
+    if std::path::Path::new(source).is_dir() {
+        "dir"
+    } else {
+        "iso"
     }
+}
+
+fn source_scheme(path: &str) -> &'static str {
     match std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -1677,10 +1695,10 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     if indices.is_empty() {
         return Err("Nothing selected to rip.".into());
     }
-    // `source_scheme` knows a directory is `dir://`; hardcoding `iso://` here
-    // meant the mux re-opened a folder as an image file and failed after a
-    // successful scan and key resolution.
-    let src_url = format!("{}://{}", source_scheme(&req.source), req.source);
+    // A folder is `dir://`, an image `iso://`. Hardcoding `iso://` here meant
+    // the mux re-opened a folder as an image file and failed after a successful
+    // scan and key resolution.
+    let src_url = format!("{}://{}", image_or_dir_scheme(&req.source), req.source);
     mux_selected_titles(&disc, &src_url, req, &indices, sink, state)
 }
 
@@ -2374,9 +2392,9 @@ mod key_summary_tests {
 mod routing_tests {
     use super::{
         DiscPlan, KeyConfig, OutKind, RipRequest, damage_note, demux_needs_subdirs, disc_device,
-        fe, is_disc_source, is_stream_source, mux_opts, out_kind, recovery_plan,
-        recovery_produced_no_data, should_delete_staging_iso, source_scheme, stream_selection,
-        title_input_options, won_from_trace,
+        fe, image_or_dir_scheme, is_disc_source, is_stream_source, mux_opts, out_kind,
+        recovery_plan, recovery_produced_no_data, should_delete_staging_iso, source_scheme,
+        stream_selection, title_input_options, won_from_trace,
     };
 
     fn req() -> RipRequest {
@@ -2451,6 +2469,34 @@ mod routing_tests {
         assert_eq!(source_scheme("a.m2ts"), "m2ts");
         assert_eq!(source_scheme("a.mts"), "m2ts");
         assert_eq!(source_scheme(""), "m2ts");
+    }
+
+    /// `source_scheme` and `image_or_dir_scheme` answer DIFFERENT questions and
+    /// were conflated twice while fixing folder support.
+    ///
+    /// `source_scheme` classifies a STREAM container by extension and falls
+    /// through to m2ts, which is right only because its caller is guarded by
+    /// `is_stream_source`. Using it for a disc image sent `Disc.img` to the mux
+    /// as `m2ts://Disc.img`; using `image_or_dir_scheme` for a container would
+    /// call an `.mkv` an ISO.
+    #[test]
+    fn image_or_dir_scheme_is_not_source_scheme() {
+        // An image whose extension is not `.iso` must still be an image.
+        for p in ["Disc.img", "Disc.bin", "Disc.udf", "Disc"] {
+            assert_eq!(
+                image_or_dir_scheme(p),
+                "iso",
+                "{p} is a disc image, not an elementary stream"
+            );
+            assert_eq!(
+                source_scheme(p),
+                "m2ts",
+                "source_scheme falls through for {p} — which is why it must not be used here"
+            );
+        }
+        // A real directory is dir://.
+        let d = std::env::temp_dir();
+        assert_eq!(image_or_dir_scheme(d.to_str().unwrap()), "dir");
     }
 
     /// The marker each `OutKind` is identified by in the sink tables below.
