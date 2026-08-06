@@ -40,7 +40,7 @@
 # commit and proves nothing — a ledger that is red every run is the same as no
 # ledger.
 #
-# Instead: ffmpeg's framecrc of the copied elementary streams. That is a
+# Instead: the framecrc muxer over the copied elementary streams. That is a
 # per-packet CRC with presentation and decode timestamps, so it covers stream
 # CONTENT and TIMING while ignoring container metadata. Timing is not incidental
 # — the other defect fixed in 1.6.1 was multi-clip A/V drift, where the streams
