@@ -18,6 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # ubuntu-latest stopped shipping ffmpeg preinstalled. This job assumed it
+      # was there and died at `ffmpeg: command not found` — a break that went
+      # unseen because parity only fires on `qa`, and `qa` did not exist until
+      # now. The first real run of this workflow was also the first time anyone
+      # learned it could not run.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Generate the shared master.mkv
         run: |
           # Same invocation as tests/cli-integration.sh, so the media matches
@@ -46,15 +53,15 @@ jobs:
       # .cargo/config.toml that redirects to paths is gitignored — so a bare
       # checkout cannot resolve them at all.
       - uses: actions/checkout@v4
-        with: { repository: freemkv/libfreemkv, ref: dev, path: libfreemkv }
+        with: { repository: freemkv/libfreemkv, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
       - uses: actions/checkout@v4
-        with: { repository: freemkv/freemkv-engine, ref: dev, path: freemkv-engine }
+        with: { repository: freemkv/freemkv-engine, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-engine }
       - uses: actions/checkout@v4
-        with: { repository: freemkv/freemkv-keysources, ref: dev, path: freemkv-keysources }
+        with: { repository: freemkv/freemkv-keysources, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-keysources }
       - uses: actions/checkout@v4
-        with: { repository: freemkv/freemkv-i18n, ref: dev, path: freemkv-i18n }
+        with: { repository: freemkv/freemkv-i18n, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
       - uses: actions/checkout@v4
-        with: { repository: freemkv/freemkv-unlock, ref: dev, path: freemkv-unlock }
+        with: { repository: freemkv/freemkv-unlock, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
       - uses: dtolnay/rust-toolchain@1.97.0
       - name: Point the patches at the sibling checkouts
         shell: bash
