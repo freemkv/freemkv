@@ -1774,13 +1774,24 @@ fn build_iso_key_fetch(source: &str, keys: &KeyConfig) -> Option<libfreemkv::sec
         return None;
     }
     let auth = keys.key_auth.clone().unwrap_or_default();
-    let path = match libfreemkv::parse_url(source) {
-        libfreemkv::StreamUrl::Iso { path } => path,
+    // Iso AND Dir. A folder is an image-level source, so its AACS inputs come
+    // off exactly the same reader path. Matching only `Iso` here meant the
+    // online key fetch was silently unavailable for `dir://`: the same disc
+    // that fetched its key fine as an ISO failed as an extracted folder, on a
+    // key it could have retrieved. A sink is a sink — that has to include the
+    // key path, not just the data path.
+    let (path, from_dir) = match libfreemkv::parse_url(source) {
+        libfreemkv::StreamUrl::Iso { path } => (path, false),
+        libfreemkv::StreamUrl::Dir { path } => (path, true),
         _ => return None,
     };
-    // Capture the disc's inf + MKB ONCE; a non-AACS ISO yields an error → None.
-    let (inf, mkb, version) =
-        libfreemkv::Disc::read_aacs_inputs(std::path::Path::new(&path)).ok()?;
+    // Capture the disc's inf + MKB ONCE; a non-AACS source yields an error → None.
+    let p = std::path::Path::new(&path);
+    let (inf, mkb, version) = if from_dir {
+        libfreemkv::Disc::read_aacs_inputs_from_dir(p).ok()?
+    } else {
+        libfreemkv::Disc::read_aacs_inputs(p).ok()?
+    };
     if inf.is_empty() {
         return None;
     }
