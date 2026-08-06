@@ -261,11 +261,22 @@ pub fn scan(path: &str) -> Result<Scanned, String> {
 /// resolution rather than the scan-time placeholder. `verbose` mirrors the
 /// CLI's `info -v`: the logged detail block gains the resolved keys.
 pub fn scan_with_keys(path: &str, keys: &KeyConfig, verbose: bool) -> Result<Scanned, String> {
-    let (mut disc, mut reader) = libfreemkv::scan_iso(
-        std::path::Path::new(path),
-        libfreemkv::ScanOptions::default(),
-    )
-    .map_err(|e| format!("E{} scan failed", e.code()))?;
+    // A FOLDER is an image-level source too — `scan_dir` synthesizes a UDF
+    // volume over an extracted disc tree and returns the same (Disc, reader)
+    // pair `scan_iso` does, so everything downstream is identical.
+    //
+    // Without this the desktop shells could not open a folder at all: the
+    // macOS "Open Folder" command showed a picker and then reported the result
+    // unsupported, and dragging a folder onto either window was refused. That
+    // is 1.6.1 shipping a headline feature the GUI declines.
+    let p = std::path::Path::new(path);
+    let scan = if p.is_dir() {
+        libfreemkv::scan_dir
+    } else {
+        libfreemkv::scan_iso
+    };
+    let (mut disc, mut reader) = scan(p, libfreemkv::ScanOptions::default())
+        .map_err(|e| format!("E{} scan failed", e.code()))?;
 
     let won = resolve_disc_keys(&mut disc, reader.as_mut(), keys);
     let summary = key_summary(&disc, won.as_deref());
@@ -1143,6 +1154,11 @@ fn is_stream_source(path: &str) -> bool {
 }
 
 fn source_scheme(path: &str) -> &'static str {
+    // A folder is `dir://`. Without this it fell to the `_` arm and became
+    // `m2ts://<folder>`, which is not a thing.
+    if std::path::Path::new(path).is_dir() {
+        return "dir";
+    }
     match std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())

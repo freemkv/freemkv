@@ -439,15 +439,20 @@ define_class!(
             let Some(p) = paths.into_iter().next() else {
                 return objc2::runtime::Bool::NO;
             };
-            let ok = matches!(
-                std::path::Path::new(&p)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_ascii_lowercase()
-                    .as_str(),
-                "iso" | "mkv" | "m2ts" | "mts" | "mp4"
-            );
+            // A DIRECTORY is a valid source: an extracted disc tree opens as
+            // `dir://`. Gating purely on file extension rejected every folder,
+            // so dragging a backup folder onto the window was refused for a
+            // source kind the engine accepts.
+            let ok = std::path::Path::new(&p).is_dir()
+                || matches!(
+                    std::path::Path::new(&p)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "iso" | "mkv" | "m2ts" | "mts" | "mp4"
+                );
             if let Some(c) = self.ivars().borrow().as_ref() {
                 if ok {
                     let fx = c.app_mut(|a| a.open(&p));
@@ -1015,15 +1020,11 @@ define_class!(
             if { panel.runModal() } == 1
                 && let Some(url) = { panel.URL() }
                     && let Some(p) = { url.path() } {
-                        self.app_mut(|a| {
-                            a.say(
-                                crate::ui::LogKind::Result,
-                                &crate::strings::fmt(
-                                    "gui.log.folder_unsupported",
-                                    &[("p", &p.to_string())],
-                                ),
-                            )
-                        });
+                        // Open it. This used to show a picker, let the user
+                        // choose a folder, and then report folders unsupported
+                        // — refusing a source that works, after asking for it.
+                        let fx = self.app_mut(|a| a.open(&p.to_string()));
+                        self.perform(fx);
                     }
         }
 
