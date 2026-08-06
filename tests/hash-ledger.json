@@ -1,44 +1,44 @@
 {
   "entries": {
     "Darwin-arm64/ctrl.mkv": {
-      "commit": "b01e439",
-      "hash": "3997be4c88d1da5d72ba9f7937e164aeb7fec8d0f4aa702619b8c0d449277613",
+      "commit": "fc2e2c7",
+      "hash": "db31387bbed8d9b87d4cfb65e4c95e0b2cf4c83be9791de1fda826858c96bd75",
       "history": [],
       "reason": "first recording \u2014 no prior value to compare against",
-      "recorded": "2026-08-06T04:33:29Z",
-      "version": "1.6.0 (gc875df4)"
+      "recorded": "2026-08-06T19:26:55Z",
+      "version": "1.6.0 (g6b67c52)"
     },
     "Darwin-arm64/master.m2ts": {
-      "commit": "b01e439",
-      "hash": "bfac2ef1264ed44f24510e50d5116f8a3fc0420e94ddb8543c38a820cd7815c3",
+      "commit": "fc2e2c7",
+      "hash": "abd24961645fe1ffc4ed7b8f968956601da68898c7a3b8dfe2a7a53b43e1b44e",
       "history": [],
       "reason": "first recording \u2014 no prior value to compare against",
-      "recorded": "2026-08-06T04:33:29Z",
-      "version": "1.6.0 (gc875df4)"
+      "recorded": "2026-08-06T19:26:55Z",
+      "version": "1.6.0 (g6b67c52)"
     },
     "Darwin-arm64/master.mkv": {
-      "commit": "b01e439",
-      "hash": "a835d810b30af0bc629a2a5ad11817f9bc0a1734767619da8ee4cb6fdbea563d",
+      "commit": "fc2e2c7",
+      "hash": "eeefbabd433e2db4ecf06cd529ab78ec1dfc67666d5588ff8e7737a38b2d39b3",
       "history": [],
       "reason": "first recording \u2014 no prior value to compare against",
-      "recorded": "2026-08-06T04:33:29Z",
-      "version": "1.6.0 (gc875df4)"
+      "recorded": "2026-08-06T19:26:55Z",
+      "version": "1.6.0 (g6b67c52)"
     },
     "Darwin-arm64/out.mkv": {
-      "commit": "b01e439",
-      "hash": "3997be4c88d1da5d72ba9f7937e164aeb7fec8d0f4aa702619b8c0d449277613",
+      "commit": "fc2e2c7",
+      "hash": "db31387bbed8d9b87d4cfb65e4c95e0b2cf4c83be9791de1fda826858c96bd75",
       "history": [],
       "reason": "first recording \u2014 no prior value to compare against",
-      "recorded": "2026-08-06T04:33:29Z",
-      "version": "1.6.0 (gc875df4)"
+      "recorded": "2026-08-06T19:26:55Z",
+      "version": "1.6.0 (g6b67c52)"
     },
     "Darwin-arm64/rt.mkv": {
-      "commit": "b01e439",
-      "hash": "3997be4c88d1da5d72ba9f7937e164aeb7fec8d0f4aa702619b8c0d449277613",
+      "commit": "fc2e2c7",
+      "hash": "db31387bbed8d9b87d4cfb65e4c95e0b2cf4c83be9791de1fda826858c96bd75",
       "history": [],
       "reason": "first recording \u2014 no prior value to compare against",
-      "recorded": "2026-08-06T04:33:29Z",
-      "version": "1.6.0 (gc875df4)"
+      "recorded": "2026-08-06T19:26:55Z",
+      "version": "1.6.0 (g6b67c52)"
     }
   }
 }
