@@ -1,0 +1,44 @@
+{
+  "entries": {
+    "ctrl.mkv": {
+      "commit": "2f66f38",
+      "hash": "3997be4c88d1da5d72ba9f7937e164aeb7fec8d0f4aa702619b8c0d449277613",
+      "history": [],
+      "reason": "first recording \u2014 no prior value to compare against",
+      "recorded": "2026-08-06T04:06:40Z",
+      "version": "1.6.0 (g1d35dcf)"
+    },
+    "master.m2ts": {
+      "commit": "2f66f38",
+      "hash": "bfac2ef1264ed44f24510e50d5116f8a3fc0420e94ddb8543c38a820cd7815c3",
+      "history": [],
+      "reason": "first recording \u2014 no prior value to compare against",
+      "recorded": "2026-08-06T04:06:40Z",
+      "version": "1.6.0 (g1d35dcf)"
+    },
+    "master.mkv": {
+      "commit": "2f66f38",
+      "hash": "a835d810b30af0bc629a2a5ad11817f9bc0a1734767619da8ee4cb6fdbea563d",
+      "history": [],
+      "reason": "first recording \u2014 no prior value to compare against",
+      "recorded": "2026-08-06T04:06:40Z",
+      "version": "1.6.0 (g1d35dcf)"
+    },
+    "out.mkv": {
+      "commit": "2f66f38",
+      "hash": "3997be4c88d1da5d72ba9f7937e164aeb7fec8d0f4aa702619b8c0d449277613",
+      "history": [],
+      "reason": "first recording \u2014 no prior value to compare against",
+      "recorded": "2026-08-06T04:06:40Z",
+      "version": "1.6.0 (g1d35dcf)"
+    },
+    "rt.mkv": {
+      "commit": "2f66f38",
+      "hash": "3997be4c88d1da5d72ba9f7937e164aeb7fec8d0f4aa702619b8c0d449277613",
+      "history": [],
+      "reason": "first recording \u2014 no prior value to compare against",
+      "recorded": "2026-08-06T04:06:40Z",
+      "version": "1.6.0 (g1d35dcf)"
+    }
+  }
+}

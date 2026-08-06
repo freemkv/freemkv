@@ -206,6 +206,46 @@ else
   skip "FMKV_ISO_DIR not set — disc/iso selection & multipass need hardware (see release checklist)"
 fi
 
+# ── Does this build still produce what it produced last time? ────────────────
+#
+# Everything above proves each output is CORRECT on the host that made it.
+# None of it remembers what the LAST release produced, so an output that
+# quietly changes between versions is invisible here.
+#
+# hash-ledger.sh records a content hash per artifact — ffmpeg framecrc over the
+# copied streams, so it covers stream content and packet timing while ignoring
+# the version stamp libfreemkv writes into every MKV header. A changed hash
+# fails, because it is ambiguous: it means either a regression or a fix
+# landing, and which one it is has to be decided by a human rather than
+# absorbed by a re-run. See the header of hash-ledger.sh.
+#
+# The media here is generated deterministically by ffmpeg, so these hashes are
+# reproducible on any runner — which is what makes this the right place to
+# prove the mechanism before the real-media suite depends on it.
+group "hash ledger"
+LEDGER_SH="$SCRIPT_DIR/hash-ledger.sh"
+if [ -x "$LEDGER_SH" ] && command -v python3 >/dev/null 2>&1; then
+  FMKV_VERSION="$("$BIN" version 2>/dev/null | head -1)" \
+  FMKV_COMMIT="$(git -C "$CRATE_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+  FMKV_STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    bash -c '
+      set -u
+      "$1" reset
+      rc=0
+      # Key on the full filename, extension included: master.mkv and
+      # master.m2ts are different artifacts and stripping the extension
+      # silently collapsed them onto one ledger entry.
+      for f in master.mkv out.mkv ctrl.mkv rt.mkv master.m2ts; do
+        "$1" check "$f" "$2/$f" || rc=1
+      done
+      "$1" report || rc=1
+      exit $rc
+    ' _ "$LEDGER_SH" "$WORK"
+  if [ $? = 0 ]; then ok "hash ledger"; else bad "hash ledger" "output changed — decide regression vs fix, then accept with a reason"; fi
+else
+  skip "hash-ledger.sh or python3 unavailable"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 printf "\n%s========================================%s\n" "$Y" "$Z"
 printf "  %sPASS: %d%s   %sFAIL: %d%s\n" "$G" "$PASS" "$Z" "$R" "$FAIL" "$Z"
