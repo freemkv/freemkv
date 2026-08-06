@@ -1851,12 +1851,17 @@ impl Shell {
             let hdrop = p.hdrop;
             if let Some(path) = hdrop.DragQueryFile()?.next() {
                 let path = path?;
-                if crate::ui::SOURCE_EXTS.iter().any(|e| {
-                    std::path::Path::new(&path)
-                        .extension()
-                        .and_then(|x| x.to_str())
-                        .is_some_and(|x| x.eq_ignore_ascii_case(e))
-                }) {
+                // A DIRECTORY is a valid source (an extracted disc tree opens
+                // as `dir://`), and an extension-only allow-list rejects every
+                // one of them — the same gap the macOS shell had.
+                if std::path::Path::new(&path).is_dir()
+                    || crate::ui::SOURCE_EXTS.iter().any(|e| {
+                        std::path::Path::new(&path)
+                            .extension()
+                            .and_then(|x| x.to_str())
+                            .is_some_and(|x| x.eq_ignore_ascii_case(e))
+                    })
+                {
                     let fx = me.app_mut(|a| a.open(&path));
                     me.perform(fx);
                 } else {
