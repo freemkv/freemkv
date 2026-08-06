@@ -1,0 +1,5 @@
+EXIT=1
+--- STDOUT ---
+
+--- STDERR ---
+'floppy://x' is not a valid URL — use scheme://path (e.g. disc://, mkv://movie.mkv).

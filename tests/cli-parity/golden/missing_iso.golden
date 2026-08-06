@@ -1,0 +1,6 @@
+EXIT=1
+--- STDOUT ---
+freemkv <VER>
+
+Error: ISO input not found: '/no_such_file.iso'.
+--- STDERR ---

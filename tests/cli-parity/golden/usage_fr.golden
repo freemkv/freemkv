@@ -1,0 +1,65 @@
+EXIT=0
+--- STDOUT ---
+freemkv <VER>
+
+Utilisation : freemkv <source> <dest> [options]
+              freemkv info <url> [options]
+       freemkv <command> [args]
+
+Subcommands:
+  info <url>               Inspect a disc, image, or file (titles, streams, sizes)
+  update-keys --url URL    Download and install the AACS keydb
+  version                  Show version (also --version, -V)
+  help [command]           Show this help, or help for one command
+
+  Run 'freemkv <command> --help' (or 'freemkv help <command>') for command-specific help.
+
+URLs de flux :
+  disc://                  Lecteur optique (détection automatique)
+  disc:///dev/sg4          Lecteur optique (Linux)
+  disc://D:                Lecteur optique (Windows)
+  mkv://chemin.mkv         Fichier Matroska
+  m2ts://chemin.m2ts       Fichier de flux de transport BD
+  network://hote:port      Flux TCP
+  stdio://                 Tube stdin/stdout
+  iso://image.iso          Image ISO Blu-ray
+  null://                  Ignorer (benchmarking)
+
+  Toutes les URLs nécessitent un préfixe scheme://.
+  Les chemins suivent le schéma : mkv://./Film.mkv, m2ts://./Film.m2ts
+
+Exemples :
+  freemkv disc:// mkv://Film.mkv                     Extraire le disque en MKV
+  freemkv disc:// m2ts://Film.m2ts                   Extraire le disque en m2ts
+  freemkv disc:///dev/sg4 mkv://Film.mkv             Extraire un lecteur spécifique
+  freemkv disc:// mkv://Film.mkv -t 1               Extraire uniquement le film principal
+  freemkv disc:// mkv://Film/ -t 1 -t 3             Extraire les titres 1 et 3
+  freemkv disc:// iso://Disque.iso                  Disque complet en ISO (reprise automatique)
+  freemkv disc:// iso://Disque.iso --raw            Disque complet, sans déchiffrement (reprise automatique)
+  freemkv disc:// iso://Disque.iso --multipass      Balayage avec mapfile pour récupération multipasse
+  freemkv iso://Disque.iso mkv://Film.mkv          ISO en MKV
+  freemkv disc:// network://192.0.2.10:9000         Diffuser vers le réseau
+  freemkv network://0.0.0.0:9000 mkv://Film.mkv   Recevoir depuis le réseau
+  freemkv disc:// stdio://                          Rediriger vers stdout
+  freemkv disc:// null://                           Mesurer la vitesse de lecture
+  freemkv info disc://                              Afficher les infos du disque
+
+Options :
+  -t, --title N       Sélectionner le titre (base 1, répétable). Défaut : le titre principal (titre 1) ; -t all pour tous.
+  -a, --audio LANGUES Ne garder que ces langues audio (noms ou codes ISO, séparés par des virgules, insensible à la casse), ou all/none. Défaut : tout garder.
+  -s, --subtitles LANGUES  Ne garder que ces langues de sous-titres (noms ou codes ISO, séparés par des virgules, insensible à la casse), ou all/none. Défaut : tout garder.
+      --keydb CHEMIN  Chemin vers KEYDB.cfg (source de clés locale)
+      --key-url URL   URL de base du service de clés en ligne (https uniquement).
+                      Avec --keydb, le keydb est essayé en premier (local
+                      d'abord) ; seul, c'est l'unique source de clés.
+      --key-auth TOKEN Token bearer pour le service de clés (optionnel).
+      --log-level N   1=avert 2=info 3=debug 4=trace. Désactivé par défaut —
+                      le terminal reste propre. Écrit un journal de
+                      diagnostic dans ./log.txt (utiliser 3 pour les rapports de bugs).
+      --log-file CHEM  Écrire le journal de diagnostic dans CHEM plutôt que ./log.txt.
+  -q, --quiet         Supprimer la sortie
+      --raw           Ignorer le déchiffrement (sortie chiffrée brute)
+      --multipass    Écrire/mettre à jour le mapfile pour la récupération multipasse
+      --share         Soumettre le profil du lecteur (info disc:// uniquement ; lors d'un rip, -s signifie --subtitles)
+  -m, --mask          Masquer les numéros de série (avec --share)
+--- STDERR ---

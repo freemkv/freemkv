@@ -1,0 +1,8 @@
+EXIT=1
+--- STDOUT ---
+
+--- STDERR ---
+--language: requires a language code (e.g. --language de)
+
+x Error: Disc info failed: No such file or directory (os error 2).
+  For a diagnostic log, re-run with --log-level 3 (writes ./log.txt).

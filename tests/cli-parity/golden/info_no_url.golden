@@ -1,0 +1,5 @@
+EXIT=1
+--- STDOUT ---
+
+--- STDERR ---
+Usage: freemkv info <url>

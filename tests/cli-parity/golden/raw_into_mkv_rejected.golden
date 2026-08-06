@@ -1,0 +1,6 @@
+EXIT=1
+--- STDOUT ---
+freemkv <VER>
+
+Error: --raw only applies to an iso:// output (it writes a raw, still-encrypted disc image). 'mkv://out.mkv' is not an iso:// destination. Rip to iso:// for a raw image, or drop --raw to decrypt + mux.
+--- STDERR ---

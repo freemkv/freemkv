@@ -1,0 +1,6 @@
+EXIT=1
+--- STDOUT ---
+freemkv <VER>
+
+Error: --multipass only applies to an iso:// output (multi-pass recovery writes a disc image with a mapfile). 'mkv://out.mkv' is not an iso:// destination. Rip to iso:// first (e.g. iso://disc.iso), then mux that ISO to mkv://.
+--- STDERR ---

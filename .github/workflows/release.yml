@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+      # NOT the release-candidate tags. Every push to `qa` stamps a
+      # v<version>-rc<N> so a run can be named, and 'v*' matches those too —
+      # which would have this workflow build and PUBLISH a GitHub release for
+      # every candidate, including the red ones.
+      - '!v*-rc*'
 
 permissions:
   contents: write

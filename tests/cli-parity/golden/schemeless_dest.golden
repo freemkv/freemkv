@@ -1,0 +1,6 @@
+EXIT=1
+--- STDOUT ---
+freemkv <VER>
+
+Error: '/path/out.mkv' has no URL scheme. Use a scheme:// prefix (e.g. mkv:///path/out.mkv for a single file), or pass an existing directory for multiple titles.
+--- STDERR ---

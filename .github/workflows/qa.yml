@@ -24,6 +24,42 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ── Name the candidate ────────────────────────────────────────────────
+  #
+  # Every push to `qa` is a release candidate, so every push gets a tag:
+  # v<version>-rc<N>, N incrementing. That is the answer to "which build is on
+  # qa right now, and is it the one I tested?" — a question that otherwise gets
+  # answered from memory.
+  #
+  # This runs FIRST and does not depend on the gates, deliberately. A red
+  # candidate needs a name more than a green one does: "rc3 failed
+  # release-tests on windows" is a sentence you can act on; "qa is red" is not.
+  # Red on qa is a working gate, not an incident — it is the branch saying this
+  # is not production worth yet. Fix on dev, get dev green, push qa again.
+  #
+  # release.yml excludes v*-rc* so a candidate never publishes a release.
+  rc-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Stamp the next rc
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ -n "$v" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
+          # Numeric sort on the rc ordinal: -rc10 must beat -rc9, and a plain
+          # lexical sort gets that backwards from the tenth candidate on.
+          n=$(git tag -l "v$v-rc*" | sed "s|^v$v-rc||" | sort -n | tail -1)
+          tag="v$v-rc$(( ${n:-0} + 1 ))"
+          git tag "$tag"
+          git push origin "$tag"
+          echo "### Candidate \`$tag\`" >> "$GITHUB_STEP_SUMMARY"
+
   # The debug suite runs on every dev push. Release is a DIFFERENT build:
   # overflow checks are off, debug_assert! is compiled out, and inlining
   # changes what the optimiser can prove. A test that only passes in debug is
@@ -206,5 +242,19 @@ jobs:
           else
             brew install ffmpeg
           fi
+      # Two legs, both hardware-free, both previously manual pre-release steps
+      # — the kind that get skipped precisely when a release is being rushed.
+      #
+      # cli-parity is a golden-master characterization: a matrix of invocations
+      # whose exit code, stdout and stderr are captured, normalized to strip the
+      # version stamp and paths, and diffed against a recorded golden. It
+      # catches the CLI contract changing by accident.
+      #
+      # cli-integration generates its own Blu-ray-legal media with ffmpeg and
+      # verifies the output with ffprobe rather than trusting an exit code. It
+      # is the check that catches a sink writing the wrong thing while
+      # returning 0 — which is exactly how a defect reached a release.
+      - run: tests/cli-parity.sh check
+        working-directory: freemkv
       - run: tests/cli-integration.sh
         working-directory: freemkv

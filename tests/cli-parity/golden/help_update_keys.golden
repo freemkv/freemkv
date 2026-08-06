@@ -1,0 +1,14 @@
+EXIT=0
+--- STDOUT ---
+freemkv <VER>
+
+Usage: freemkv update-keys --url <url>
+
+Download, verify, and install an AACS keydb (.txt / .zip / .gz). Only Blu-ray and UHD (AACS) discs need a keydb; DVDs (CSS) need none. --url is required.
+
+Examples:
+  freemkv update-keys --url http://example.org/keydb_eng.zip
+
+Flags:
+  -u, --url URL    Source URL for the keydb archive (required).
+--- STDERR ---

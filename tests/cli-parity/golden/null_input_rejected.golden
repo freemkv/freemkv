@@ -1,0 +1,7 @@
+EXIT=1
+--- STDOUT ---
+freemkv <VER>
+
+Opening null://...OK
+Error: E9001 Stream is write-only.
+--- STDERR ---
