@@ -1,0 +1,18 @@
+EXIT=0
+--- STDOUT ---
+freemkv <VER>
+
+Usage: freemkv info <url> [flags]
+
+Inspect a disc, image, or file: lists titles, durations, sizes, and per-stream detail. Needs no decryption key, even on AACS discs. A lone URL with no destination is the same as 'freemkv info <url>'.
+
+Examples:
+  freemkv info disc://             Inspect the optical drive
+  freemkv info iso://Disc.iso      Inspect an ISO image
+
+Flags:
+  -f, --full       List every title (default: the first five, with a '+N more' footer).
+  -b, --basic      Title rows only — omit per-stream (video/audio/subtitle) detail.
+  -v, --verbose    Add technical detail (AACS/MKB version, per-stream PIDs, audio sample rates).
+  -s, --share      Capture the drive profile and offer to submit it to the drive-compatibility database (disc:// only). --mask redacts serials first.
+--- STDERR ---

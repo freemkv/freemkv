@@ -1,0 +1,65 @@
+EXIT=0
+--- STDOUT ---
+freemkv <VER>
+
+Verwendung: freemkv <quelle> <ziel> [optionen]
+           freemkv info <url> [optionen]
+       freemkv <command> [args]
+
+Subcommands:
+  info <url>               Inspect a disc, image, or file (titles, streams, sizes)
+  update-keys --url URL    Download and install the AACS keydb
+  version                  Show version (also --version, -V)
+  help [command]           Show this help, or help for one command
+
+  Run 'freemkv <command> --help' (or 'freemkv help <command>') for command-specific help.
+
+Stream-URLs:
+  disc://                  Optisches Laufwerk (automatische Erkennung)
+  disc:///dev/sg4          Optisches Laufwerk (Linux)
+  disc://D:                Optisches Laufwerk (Windows)
+  mkv://pfad.mkv          Matroska-Datei
+  m2ts://pfad.m2ts        BD-Transportstrom-Datei
+  network://host:port      TCP-Stream
+  stdio://                 Stdin/Stdout-Pipe
+  iso://abbild.iso         Blu-ray-ISO-Abbild
+  null://                  Verwerfen (Benchmark)
+
+  Alle URLs benötigen ein scheme://-Präfix.
+  Dateipfade folgen dem Schema: mkv://./Film.mkv, m2ts://./Film.m2ts
+
+Beispiele:
+  freemkv disc:// mkv://Film.mkv                     Disc auf MKV rippen
+  freemkv disc:// m2ts://Film.m2ts                   Disc auf m2ts rippen
+  freemkv disc:///dev/sg4 mkv://Film.mkv             Bestimmtes Laufwerk rippen
+  freemkv disc:// mkv://Film.mkv -t 1               Nur Hauptfilm rippen
+  freemkv disc:// mkv://Film/ -t 1 -t 3              Titel 1 und 3 rippen
+  freemkv disc:// iso://Disc.iso                     Komplette Disc als ISO (auto-fortgesetzt)
+  freemkv disc:// iso://Disc.iso --raw               Komplette Disc, ohne Entschlüsselung (auto-fortgesetzt)
+  freemkv disc:// iso://Disc.iso --multipass         Sweep mit Mapfile für Mehrpass-Wiederherstellung
+  freemkv iso://Disc.iso mkv://Film.mkv             ISO zu MKV
+  freemkv disc:// network://192.0.2.10:9000           In Netzwerk streamen
+  freemkv network://0.0.0.0:9000 mkv://Film.mkv    Vom Netzwerk empfangen
+  freemkv disc:// stdio://                           An stdout weiterleiten
+  freemkv disc:// null://                            Lesegeschwindigkeit messen
+  freemkv info disc://                               Disc-Info anzeigen
+
+Optionen:
+  -t, --title N       Titel auswählen (1-basiert, wiederholbar). Standard: der Hauptfilm (Titel 1); -t all für alle Titel.
+  -a, --audio SPR     Nur diese Audiosprachen behalten (Namen oder ISO-Codes, kommagetrennt, Groß-/Kleinschreibung egal), oder all/none. Standard: alle behalten.
+  -s, --subtitles SPR    Nur diese Untertitelsprachen behalten (Namen oder ISO-Codes, kommagetrennt, Groß-/Kleinschreibung egal), oder all/none. Standard: alle behalten.
+      --keydb PFAD    KEYDB.cfg-Pfad (lokale Schlüsselquelle)
+      --key-url URL   Basis-URL des Online-Schlüsseldienstes (nur https).
+                      Mit --keydb wird keydb zuerst versucht (lokal-
+                      zuerst); allein ist es die einzige Schlüsselquelle.
+      --key-auth TOKEN Träger-Token für den Schlüsseldienst (optional).
+      --log-level N   1=Warnung 2=Info 3=Debug 4=Trace. Standard: aus —
+                      das Terminal bleibt sauber. Schreibt ein
+                      Diagnoseprotokoll in ./log.txt (3 für Fehlerberichte).
+      --log-file PFAD  Diagnoseprotokoll in PFAD statt ./log.txt schreiben.
+  -q, --quiet         Ausgabe unterdrücken
+      --raw           Entschlüsselung überspringen (raw verschlüsselte Ausgabe)
+      --multipass    Mapfile für Mehrpass-Wiederherstellung schreiben/aktualisieren
+      --share         Laufwerkprofil einreichen (nur info disc://; bei einem Rip bedeutet -s --subtitles)
+  -m, --mask          Seriennummern maskieren (mit --share)
+--- STDERR ---

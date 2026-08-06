@@ -18,6 +18,43 @@ When `qa` fails: fix on `dev`, get `dev` green, push to `qa` again. Never patch
 `qa` directly — a fix that never passed the fast gate has skipped a step, and
 `dev` stops being the branch that reflects what is being released.
 
+## Release candidates
+
+Every push to `qa` stamps `v<version>-rc<N>`, N incrementing, before the gates
+run. That answers "which build is on qa, and is it the one I tested?" without
+anyone having to remember. When `main` advances, the plain `v<version>` tag is
+what ships, and the rc history says how many candidates it took.
+
+The tag is stamped whether the run goes green or red, deliberately — a red
+candidate needs a name more than a green one does. `release.yml` excludes
+`v*-rc*`, so a candidate never publishes a release.
+
+## Every script that used to be run by hand
+
+The point of this gate is that "did I remember to run that?" stops being a
+question. Current state of each:
+
+| script | what it proves | now runs |
+|---|---|---|
+| `scan-secrets.sh` | no leaks in public repos | `leak-guard.yml`, every push |
+| `precommit.sh` — fmt, clippy | style + lint on the CI toolchain | `ci.yml`, every push |
+| `precommit.sh` — `cargo test` | the unit suite | `ci.yml`, every push |
+| `precommit.sh` — `test --release` | release-profile behaviour | `qa.yml`, push to `qa` |
+| `precommit.sh` — Linux cross-clippy | cfg-gated code lints on its own target | `qa.yml`, push to `qa` |
+| `tests/cli-integration.sh` | the whole CLI file surface, ffprobe-verified | `qa.yml`, push to `qa` |
+| `prerelease.sh` phase 1 (static) | secret scan across public repos | `leak-guard.yml` |
+| `prerelease.sh` phase 2 (gate) | per-crate fmt/clippy/test | `ci.yml` + `qa.yml` |
+| `prerelease.sh` phase 3 (contract) | CLI contract + exit codes | **still manual** |
+| `prerelease.sh` phase 4 (media) | real-media rips end to end | **still manual — needs hardware** |
+| `cli-acceptance.sh` | real-ISO acceptance, ~96 checks | **still manual — needs hardware** |
+
+`precommit.sh` stays useful as the *local* fast loop — it is the same gate, run
+before you push rather than after. It is no longer the thing standing between a
+mistake and a release.
+
+The three still-manual rows are the honest remainder. Two of them need physical
+media and are covered under "the one leg that still needs hardware" below.
+
 ## What runs where, and why
 
 | check | where | trigger |

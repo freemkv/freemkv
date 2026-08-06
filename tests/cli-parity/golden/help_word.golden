@@ -1,0 +1,65 @@
+EXIT=0
+--- STDOUT ---
+freemkv <VER>
+
+Usage: freemkv <source> <dest> [flags]
+       freemkv info <url> [flags]
+       freemkv <command> [args]
+
+Subcommands:
+  info <url>               Inspect a disc, image, or file (titles, streams, sizes)
+  update-keys --url URL    Download and install the AACS keydb
+  version                  Show version (also --version, -V)
+  help [command]           Show this help, or help for one command
+
+  Run 'freemkv <command> --help' (or 'freemkv help <command>') for command-specific help.
+
+Stream URLs:
+  disc://                  Optical drive (auto-detect)
+  disc:///dev/sg4          Optical drive (Linux)
+  disc://D:                Optical drive (Windows)
+  mkv://path.mkv           Matroska file
+  m2ts://path.m2ts         BD transport stream file
+  network://host:port      TCP stream
+  stdio://                 Stdin/stdout pipe
+  iso://image.iso          Blu-ray ISO image
+  null://                  Discard (benchmarking)
+
+  All URLs require a scheme:// prefix.
+  File paths follow the scheme: mkv://./Movie.mkv, m2ts://./Movie.m2ts
+
+Examples:
+  freemkv disc:// mkv://Movie.mkv                     Rip disc to MKV
+  freemkv disc:// m2ts://Movie.m2ts                   Rip disc to m2ts
+  freemkv disc:///dev/sg4 mkv://Movie.mkv             Rip specific drive
+  freemkv disc:// mkv://Movie.mkv -t 1               Rip main feature only
+  freemkv disc:// mkv://Movie/ -t 1 -t 3             Rip titles 1 and 3 into a folder
+  freemkv disc:// iso://Disc.iso                     Full disc to ISO (auto-resumes)
+  freemkv disc:// iso://Disc.iso --raw               Full disc, no decryption (auto-resumes)
+  freemkv disc:// iso://Disc.iso --multipass         Sweep with a mapfile; re-run to patch bad sectors
+  freemkv iso://Disc.iso mkv://Movie.mkv             ISO to MKV
+  freemkv disc:// network://192.0.2.10:9000           Stream to network
+  freemkv network://0.0.0.0:9000 mkv://Movie.mkv    Receive from network
+  freemkv disc:// stdio://                           Pipe to stdout
+  freemkv disc:// null://                            Benchmark read speed
+  freemkv info disc://                               Show disc info
+
+Flags:
+  -t, --title N       Select title (1-based, repeatable). Default: the main title (title 1); use -t all for every title.
+  -a, --audio LANGS   Keep only these audio languages (names or ISO codes, comma-separated, case-insensitive), or all/none. Default: keep all.
+  -s, --subtitles LANGS  Keep only these subtitle languages (names or ISO codes, comma-separated, case-insensitive), or all/none. Default: keep all.
+      --keydb PATH    KEYDB.cfg path (local key source)
+      --key-url URL   Online key-service base URL (https only).
+                      With --keydb the keydb is tried first (local-
+                      first); alone it is the only key source.
+      --key-auth TOKEN Bearer token sent to the key service (optional).
+      --log-level N   1=warn 2=info 3=debug 4=trace. Off by default —
+                      the terminal stays clean. Set it to write a
+                      diagnostic log to ./log.txt (use 3 for bug reports).
+      --log-file PATH Write the diagnostic log to PATH instead of ./log.txt.
+  -q, --quiet         Suppress output
+      --raw           Skip decryption (raw encrypted output)
+      --multipass    Write/update mapfile for multipass recovery
+      --share         Submit drive profile (info disc:// only; on a rip, -s means --subtitles)
+  -m, --mask          Mask serial numbers (with --share)
+--- STDERR ---

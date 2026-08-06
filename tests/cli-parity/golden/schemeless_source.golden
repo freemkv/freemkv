@@ -1,0 +1,6 @@
+EXIT=1
+--- STDOUT ---
+freemkv <VER>
+
+Error: 'notaurl' is not a usable source URL — use a recognized scheme:// prefix (e.g. iso://notaurl for an ISO image, or disc:// for the optical drive).
+--- STDERR ---

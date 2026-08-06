@@ -1,0 +1,4 @@
+EXIT=1
+--- STDOUT ---
+Error: unknown flag '--bogus'. Try 'freemkv help' for a list of options.
+--- STDERR ---

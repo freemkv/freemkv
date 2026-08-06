@@ -1,0 +1,6 @@
+EXIT=1
+--- STDOUT ---
+freemkv <VER>
+
+Error: drive device not found: '/dev/sg999'.
+--- STDERR ---
