@@ -1,0 +1,210 @@
+name: qa
+
+# ── The qa gate: "is this production worth?" ────────────────────────────────
+#
+# dev -> qa -> main.
+#
+# `dev` is for committing often. ci.yml answers "is it green" in minutes with
+# fmt, clippy and the unit suite, so a mistake surfaces while it is still cheap
+# to fix. `qa` is the release-candidate branch, and THIS workflow is the claim
+# that a commit is production worth: everything expensive that can run without
+# physical media. `main` only ever receives a qa that went green here.
+#
+# Sibling repos are checked out at `qa`, NOT `dev`. A qa run that resolved its
+# dependencies from dev tips would be validating a combination that is not the
+# one being released, which is the exact failure this branch exists to prevent.
+#
+# What this gate CANNOT cover: `disc://` and real `iso://` need physical media,
+# and no hosted runner has an optical drive or the image hoard. Those run on a
+# self-hosted runner (see the media job at the end) and are the one leg that
+# stays on hardware.
+on:
+  push:
+    branches: [qa]
+  workflow_dispatch:
+
+jobs:
+  # The debug suite runs on every dev push. Release is a DIFFERENT build:
+  # overflow checks are off, debug_assert! is compiled out, and inlining
+  # changes what the optimiser can prove. A test that only passes in debug is
+  # a test that never guarded the binary anyone actually ships.
+  release-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/libfreemkv
+          ref: qa
+          path: libfreemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: qa
+          path: freemkv-keysources
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-engine
+          ref: qa
+          path: freemkv-engine
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: qa
+          path: freemkv-i18n
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: qa
+          path: freemkv-unlock
+      - name: Resolve siblings from their qa tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: freemkv
+      - run: cargo test --release --tests
+        working-directory: freemkv
+
+  # clippy's output is target-dependent: cfg-gated code only gets linted on
+  # the target it compiles for. Linting solely on the dev machine's host
+  # target is how a lint that CI rejects reaches a push.
+  cross-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/libfreemkv
+          ref: qa
+          path: libfreemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: qa
+          path: freemkv-keysources
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-engine
+          ref: qa
+          path: freemkv-engine
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: qa
+          path: freemkv-i18n
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: qa
+          path: freemkv-unlock
+      - name: Resolve siblings from their qa tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: freemkv
+      - run: rustup target add x86_64-unknown-linux-gnu
+      - run: cargo clippy --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+        working-directory: freemkv
+
+  # ── The CLI surface, end to end ───────────────────────────────────────
+  #
+  # tests/cli-integration.sh generates its own Blu-ray-legal media with ffmpeg
+  # and then drives every file-reachable CLI function, verifying output with
+  # ffprobe rather than trusting an exit code. This is the check that would
+  # have caught a sink silently writing the wrong thing while returning 0.
+  #
+  # It needs no hardware, so it belongs here rather than on the hardware
+  # checklist where it previously sat as a manual step.
+  cli-integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/libfreemkv
+          ref: qa
+          path: libfreemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: qa
+          path: freemkv-keysources
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-engine
+          ref: qa
+          path: freemkv-engine
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: qa
+          path: freemkv-i18n
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: qa
+          path: freemkv-unlock
+      - name: Resolve siblings from their qa tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: freemkv
+      - name: Install ffmpeg
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          else
+            brew install ffmpeg
+          fi
+      - run: tests/cli-integration.sh
+        working-directory: freemkv
