@@ -49,7 +49,13 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LEDGER="${FMKV_LEDGER:-$SCRIPT_DIR/hash-ledger.json}"
+# NOT FMKV_LEDGER. That name is the on/off switch in cli-integration.sh, so
+# the documented `FMKV_LEDGER=1 tests/cli-integration.sh` also reached here and
+# set the ledger PATH to the string "1" — a file that never exists, so every
+# key took the "not yet recorded" branch, printed RECORD, and exited 0. The
+# committed baselines were never read and the gate passed having compared
+# nothing, on every run. A separate name cannot collide.
+LEDGER="${FMKV_LEDGER_FILE:-$SCRIPT_DIR/hash-ledger.json}"
 STATE="${FMKV_LEDGER_STATE:-${TMPDIR:-/tmp}/fmkv-ledger-state.json}"
 
 command -v ffmpeg >/dev/null 2>&1 || { echo "hash-ledger: ffmpeg not found" >&2; exit 2; }
@@ -57,8 +63,14 @@ command -v python3 >/dev/null 2>&1 || { echo "hash-ledger: python3 not found" >&
 
 # Content hash: per-packet CRCs of the streams, container metadata excluded.
 content_hash() {
-  local f="$1"
-  ffmpeg -v error -i "$f" -map 0 -c copy -f framecrc - 2>/dev/null \
+  local f="$1" crc
+  # Capture rather than pipe: piping discards the encoder exit status, so a file it
+  # cannot parse at all yields NO output and hashes to sha256 of the empty
+  # string — which then gets recorded as that key's legitimate baseline and
+  # MATCHES forever after. A structurally invalid MKV would sail through.
+  crc=$(ffmpeg -v error -i "$f" -map 0 -c copy -f framecrc - 2>/dev/null) || return 1
+  [ -n "$crc" ] || return 1
+  printf '%s' "$crc" \
     | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } \
     | cut -d' ' -f1
 }
@@ -83,7 +95,17 @@ print(f"  ABSENT  {key} — fixture not produced, so nothing was compared")
 EOF
     exit 0
   fi
-  h="$(content_hash "$file")"
+  if ! h="$(content_hash "$file")" || [ -z "$h" ]; then
+    echo "  UNREADABLE $key — ffmpeg could not parse it; not recording a baseline"
+    py unreadable "$key" <<'EOF'
+import json,sys,os
+ledger,state,_,key=sys.argv[1:5]
+s=json.load(open(state)) if os.path.exists(state) else {"new":[],"same":[],"changed":[],"absent":[]}
+s["changed"].append({"key":key,"was":"(recorded)","now":"UNREADABLE","since_version":"-","since":"-"})
+json.dump(s,open(state,"w"),indent=2)
+EOF
+    exit 1
+  fi
   py cmp "$key" "$h" "$VERSION" "$COMMIT" "$STAMP" <<'EOF'
 import json,sys,os
 ledger,state,_,key,h,version,commit,stamp=sys.argv[1:9]
@@ -155,7 +177,10 @@ for k in S["absent"]:
     print(f"   absent: {k} (coverage gap, not a pass)")
 for x in S["changed"]:
     print(f"   changed: {x['key']}  since {x['since_version']}")
-sys.exit(1 if c else 0)
+# ABSENT fails too. It used to print "coverage gap, not a pass" and then exit
+# 0, which is precisely a pass — an artifact the run never produced would leave
+# the gate green.
+sys.exit(1 if (c or a) else 0)
 EOF
   ;;
 
