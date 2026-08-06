@@ -429,7 +429,14 @@ fn info_cmd(args: &[String]) {
                 crate::disc_info::run(dev.as_deref(), flags);
             }
         }
-        libfreemkv::StreamUrl::Iso { path } => {
+        // `dir://` — an extracted disc FOLDER — enumerates exactly like an
+        // image, because `libfreemkv::scan_dir` synthesizes a real UDF volume
+        // over the folder and hands back the same `(Disc, SectorSource)` pair
+        // `scan_iso` does. The mux path already routed `dir://` through that
+        // machinery; `info` was the one place that never learned, so a folder
+        // fell through to the catch-all and reported "cannot get info" while
+        // ripping from the same folder worked.
+        libfreemkv::StreamUrl::Dir { path } | libfreemkv::StreamUrl::Iso { path } => {
             // Listing titles needs NO AACS key — only clear UDF navigation.
             // Scan the ISO keylessly and reuse disc_info's full title list
             // (duration, size, clip count, video/audio/subtitle streams).
@@ -452,7 +459,15 @@ fn info_cmd(args: &[String]) {
                     crate::disc_info::reject_unknown_option(&opt)
                 }
             };
-            let (disc, _reader) = match libfreemkv::scan_iso(
+            // A folder needs scan_dir (which additionally decides the
+            // encryption verdict from CONTENT rather than from whether an
+            // AACS/ directory survived the copy); an image needs scan_iso.
+            let scan = if matches!(parsed, libfreemkv::StreamUrl::Dir { .. }) {
+                libfreemkv::scan_dir
+            } else {
+                libfreemkv::scan_iso
+            };
+            let (disc, _reader) = match scan(
                 std::path::Path::new(path),
                 libfreemkv::ScanOptions::default(),
             ) {
