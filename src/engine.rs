@@ -584,11 +584,17 @@ pub fn preflight_with_keys(
     titles: &[usize],
     keys: &KeyConfig,
 ) -> Result<Vec<String>, String> {
-    let (mut disc, mut reader) = libfreemkv::scan_iso(
-        std::path::Path::new(path),
-        libfreemkv::ScanOptions::default(),
-    )
-    .map_err(|e| format!("E{}", e.code()))?;
+    // Folder OR image — the third place this dispatch was needed. A preflight
+    // that cannot open a folder reports a spurious failure for a source the
+    // rip itself handles.
+    let p = std::path::Path::new(path);
+    let scan = if p.is_dir() {
+        libfreemkv::scan_dir
+    } else {
+        libfreemkv::scan_iso
+    };
+    let (mut disc, mut reader) =
+        scan(p, libfreemkv::ScanOptions::default()).map_err(|e| format!("E{}", e.code()))?;
     resolve_disc_keys(&mut disc, reader.as_mut(), keys);
     let disc = disc;
     let sel = if titles.is_empty() {
@@ -1621,11 +1627,18 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     if req.decrypt_threads > 0 {
         libfreemkv::set_decrypt_threads(req.decrypt_threads);
     }
-    let (mut disc, mut reader) = libfreemkv::scan_iso(
-        std::path::Path::new(&req.source),
-        libfreemkv::ScanOptions::default(),
-    )
-    .map_err(|e| format!("E{} scan failed", e.code()))?;
+    // Folder OR image. `Ui::open` already scans a folder through `scan_dir`,
+    // so without this the GUI listed a folder's titles and then failed the
+    // moment the user pressed Rip — the same "ask for a folder then decline
+    // it" defect as the picker, moved to a later button.
+    let src_path = std::path::Path::new(&req.source);
+    let scan = if src_path.is_dir() {
+        libfreemkv::scan_dir
+    } else {
+        libfreemkv::scan_iso
+    };
+    let (mut disc, mut reader) = scan(src_path, libfreemkv::ScanOptions::default())
+        .map_err(|e| format!("E{} scan failed", e.code()))?;
     // Resolve decryption keys onto the disc BEFORE muxing.
     resolve_disc_keys(&mut disc, reader.as_mut(), &req.keys);
 
@@ -1664,7 +1677,10 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     if indices.is_empty() {
         return Err("Nothing selected to rip.".into());
     }
-    let src_url = format!("iso://{}", req.source);
+    // `source_scheme` knows a directory is `dir://`; hardcoding `iso://` here
+    // meant the mux re-opened a folder as an image file and failed after a
+    // successful scan and key resolution.
+    let src_url = format!("{}://{}", source_scheme(&req.source), req.source);
     mux_selected_titles(&disc, &src_url, req, &indices, sink, state)
 }
 
