@@ -122,6 +122,38 @@ EC2 instance configured with autologon plus a Startup shortcut — that pairing
 is what makes the session interactive, and it is what our conformance harness
 uses.
 
+## Registering the `freemkv-media` runner
+
+The real-media job runs on a self-hosted runner labelled `freemkv-media`, on a
+host with the ISO hoard mounted. The recipe below is the one that was proven by
+hand before the job was written — a container with the toolchain, ffmpeg, the
+hoard read-only, and the sibling crates patched to their local checkouts.
+
+Two things that are easy to get wrong and were both hit while proving it:
+
+1. **The sibling patch is not optional.** Without a `.cargo/config.toml`
+   redirecting the git-tag deps at the checked-out siblings, the build resolves
+   the RELEASED libfreemkv and tests code that is not under test. It fails
+   loudly (`cannot find value scan_dir`), but a future version might not.
+2. **The suite must be able to run on Linux.** It could not: `stat -f %z` (BSD)
+   and `stat -c %s` (GNU) are not two spellings of one thing — on Linux
+   `stat -f` is *filesystem* status and SUCCEEDS, so a `||` fallback never
+   fires. That produced a phantom "size mismatch" on the first Linux run.
+
+The runner needs, in addition to the hoard:
+
+- **`keydb.cfg`**, or every AACS family skips. Set `FMKV_KEYDB` (repo variable).
+- **`FMKV_KEY_URL` / `FMKV_KEY_AUTH`** (repo secrets) for the online key
+  service. Without them the UHD family skips even WITH a keydb, because a
+  keydb holds VUKs only for discs it has already seen — verified: a 62 MB
+  keydb had no entry for the UHD fixture.
+- **`GITEA_TOKEN`** (repo secret) so the job can clone the private suite.
+
+An existing runner on another host is registered to a different org with the
+hoard not mounted, so it cannot be reused — register a new one scoped to the
+`freemkv` org, and do not enable it for forked-PR triggers, since a self-hosted
+runner executes repo workflow code on that host.
+
 ## The one leg that still needs hardware
 
 `disc://` and real `iso://` need physical media: an optical drive for the

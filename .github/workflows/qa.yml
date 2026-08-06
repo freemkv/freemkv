@@ -228,6 +228,90 @@ jobs:
       - run: cargo build --release --tests
         working-directory: freemkv
 
+  # ── The real-media gate ───────────────────────────────────────────────
+  #
+  # Everything above runs on hosted runners and cannot touch a disc image.
+  # This job runs the ~70-check acceptance suite against the actual ISO hoard,
+  # which is the only thing that has ever caught this project's worst defects:
+  # a CSS false positive that silently destroyed a DVD's title table, and
+  # multi-clip A/V drift. Both were invisible to every hardware-free check.
+  #
+  # It needs a self-hosted runner labelled `freemkv-media` on a host that has
+  # the hoard mounted. See .github/QA.md for the registration command; the
+  # runner also needs a keydb and, for the UHD family, the online key service
+  # credentials — without those that family SKIPS, which the suite reports as a
+  # named gap rather than a pass.
+  #
+  # The suite itself lives in the private repo (it needs the hoard and key
+  # material), and the runner can reach Gitea, so it is cloned rather than
+  # vendored.
+  real-media:
+    runs-on: [self-hosted, freemkv-media]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/libfreemkv
+          ref: qa
+          path: libfreemkv
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: qa
+          path: freemkv-keysources
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-engine
+          ref: qa
+          path: freemkv-engine
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: qa
+          path: freemkv-i18n
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: qa
+          path: freemkv-unlock
+      - name: Resolve siblings from their qa tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - name: Fetch the acceptance suite
+        shell: bash
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          rm -rf freemkv-private
+          git clone -q --depth 1             "https://$GITEA_TOKEN@git.docker.pq.io/pq/freemkv-private.git" freemkv-private
+      - run: cargo build --release --bin freemkv
+        working-directory: freemkv
+      # FMKV_ISO_ROOT points at the hoard; FMKV_KEYDB and the key-service
+      # variables come from the runner. A family with no key source SKIPS and
+      # the summary names it — the suite exits non-zero if NOTHING ran, so an
+      # unmounted hoard can no longer look like a pass.
+      - name: Real-media acceptance
+        shell: bash
+        env:
+          FMKV_ISO_ROOT: ${{ vars.FMKV_ISO_ROOT }}
+          FMKV_KEYDB: ${{ vars.FMKV_KEYDB }}
+          FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
+          FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
+        run: |
+          FMKV_BIN="$PWD/freemkv/target/release/freemkv"             bash freemkv-private/scripts/cli-acceptance.sh
+
   # ── The CLI surface, end to end ───────────────────────────────────────
   #
   # tests/cli-integration.sh generates its own Blu-ray-legal media with ffmpeg
