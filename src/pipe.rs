@@ -1233,6 +1233,14 @@ fn preflight_validate(
         libfreemkv::StreamUrl::Iso { path } => {
             validate_iso_input(path)?;
         }
+        // A dir:// SOURCE is checked here for the same reason an iso:// one is.
+        // Without it a bad folder path reached the open, which printed
+        // "Opening dir://...OK" and only then failed with a bare OS error — the
+        // line said OK about something that had not opened. The exit code was
+        // right; the message was not.
+        libfreemkv::StreamUrl::Dir { path } => {
+            validate_dir_input(path)?;
+        }
         _ => {}
     }
 
@@ -1307,6 +1315,40 @@ fn validate_dir_dest(path: &std::path::Path, dest: &str, force: bool) -> Result<
 /// directory), and be non-empty. A deeper "is it a real disc image?" probe is
 /// the scan's job; this catches the instant mistakes (typo'd path, a directory,
 /// a 0-byte stub) before any scan work.
+/// Validate a `dir://` SOURCE: it must exist, be readable, and be a directory.
+///
+/// The mirror of [`validate_iso_input`]. `dir://` became a first-class input in
+/// 1.6.1 and this check did not arrive with it, so a typo'd folder produced an
+/// "Opening ...OK" line followed by a raw OS error instead of the specific,
+/// localized message an `iso://` typo gets.
+fn validate_dir_input(path: &std::path::Path) -> Result<(), String> {
+    let md = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(strings::fmt(
+                "error.dir_not_found",
+                &[("path", &path.display().to_string())],
+            ));
+        }
+        Err(e) => {
+            return Err(strings::fmt(
+                "error.dir_not_readable",
+                &[
+                    ("path", &path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
+        }
+    };
+    if !md.is_dir() {
+        return Err(strings::fmt(
+            "error.dir_is_file",
+            &[("path", &path.display().to_string())],
+        ));
+    }
+    Ok(())
+}
+
 fn validate_iso_input(path: &std::path::Path) -> Result<(), String> {
     let md = match std::fs::metadata(path) {
         Ok(m) => m,
