@@ -147,7 +147,11 @@ The runner needs, in addition to the hoard:
   service. Without them the UHD family skips even WITH a keydb, because a
   keydb holds VUKs only for discs it has already seen — verified: a 62 MB
   keydb had no entry for the UHD fixture.
-- **`GITEA_TOKEN`** (repo secret) so the job can clone the private suite.
+- **The acceptance suite itself**, provisioned on the runner out of band, with
+  its path in the `FMKV_ACCEPTANCE` repo variable. The workflow does NOT clone
+  it: this file is public, and naming the repository or host it lives on would
+  put internal infrastructure into a public workflow. The leak guard refuses
+  that, correctly — it caught exactly this on the first attempt.
 
 An existing runner on another host is registered to a different org with the
 hoard not mounted, so it cannot be reused — register a new one scoped to the
