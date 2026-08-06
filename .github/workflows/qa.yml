@@ -289,19 +289,6 @@ jobs:
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
       - uses: dtolnay/rust-toolchain@1.97.0
-      - name: Fetch the acceptance suite
-        shell: bash
-        env:
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
-        run: |
-          rm -rf freemkv-private
-          git clone -q --depth 1             "https://$GITEA_TOKEN@git.docker.pq.io/pq/freemkv-private.git" freemkv-private
-      - run: cargo build --release --bin freemkv
-        working-directory: freemkv
-      # FMKV_ISO_ROOT points at the hoard; FMKV_KEYDB and the key-service
-      # variables come from the runner. A family with no key source SKIPS and
-      # the summary names it — the suite exits non-zero if NOTHING ran, so an
-      # unmounted hoard can no longer look like a pass.
       - name: Real-media acceptance
         shell: bash
         env:
@@ -309,8 +296,18 @@ jobs:
           FMKV_KEYDB: ${{ vars.FMKV_KEYDB }}
           FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
           FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
+          ACCEPTANCE: ${{ vars.FMKV_ACCEPTANCE }}
         run: |
-          FMKV_BIN="$PWD/freemkv/target/release/freemkv"             bash freemkv-private/scripts/cli-acceptance.sh
+          # The suite lives ON THE RUNNER, provisioned out of band, and is
+          # named by a repo variable. It is deliberately NOT cloned here: this
+          # file is public, and naming the repository or host it comes from
+          # would put internal infrastructure into a public workflow, which the
+          # leak guard correctly refuses.
+          test -x "$ACCEPTANCE" || {
+            echo "::error::acceptance suite not found at '$ACCEPTANCE' - set the FMKV_ACCEPTANCE repo variable to its path on the runner"
+            exit 2
+          }
+          FMKV_BIN="$PWD/freemkv/target/release/freemkv" bash "$ACCEPTANCE"
 
   # ── The CLI surface, end to end ───────────────────────────────────────
   #
