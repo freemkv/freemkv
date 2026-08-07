@@ -65,11 +65,18 @@ Every operation is `freemkv <source> <dest>`. Sources and destinations are strea
 |--------|-------|--------|-----|
 | Disc | Yes | -- | `disc://` or `disc:///dev/sg4` |
 | ISO | Yes | Yes | `iso://path.iso` |
+| Folder | Yes | Yes | `dir://path/` — decrypted file tree (`VIDEO_TS` / `BDMV`) |
 | MKV | Yes | Yes | `mkv://path` |
 | M2TS | Yes | Yes | `m2ts://path` |
+| MP4 | Yes | Yes | `mp4://path` |
 | Network | Yes (listen) | Yes (connect) | `network://host:port` |
 | Stdio | Yes (stdin) | Yes (stdout) | `stdio://` |
 | Null | -- | Yes | `null://` |
+
+Extraction sinks write parts of a title rather than a container: `demux://`
+(every track as elementary streams), `video://`, `audio://`, `sub://`,
+`chapters://` (Matroska XML), `json://` (title structure) and `fvi://` (a
+per-picture video index).
 
 All URLs use the `scheme://path` format. No bare paths — always include the scheme prefix.
 
