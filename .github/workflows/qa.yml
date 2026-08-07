@@ -247,6 +247,11 @@ jobs:
   # vendored.
   real-media:
     runs-on: [self-hosted, freemkv-media]
+    # A job with no runner QUEUES FOREVER, and a queued job makes the whole
+    # workflow read "queued" rather than failing — so a gate that cannot run
+    # looks pending indefinitely instead of broken. This job has never once
+    # executed for exactly that reason. Fail visibly instead.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
         with:
