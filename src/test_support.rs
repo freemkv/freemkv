@@ -164,6 +164,31 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         },
         Error::DirNameCollision { host: p() },
         Error::DirWriteFailed { errno: Some(28) },
+        // 1.6.1: everything a `dir://` SOURCE can raise, plus the image writer
+        // and the seam gates. These were missing, so the contract test below
+        // passed while E9059-E9070 had no locale entry at all and a user hit
+        // by one saw a bare "Error: E9061" — an untranslated code with no
+        // explanation, on the headline feature of the release. A fixture that
+        // lists the variants is only a gate if it lists ALL of them.
+        Error::ShortImageRead {
+            lba: 0,
+            expected: 0,
+            got: 0,
+        },
+        Error::EmptyImage,
+        Error::DirImageSsifUnsupported,
+        Error::DirImagePlacement { path: p() },
+        Error::DirImageEncrypted,
+        Error::DirImageUnsupportedTree,
+        Error::DirImageFileChanged { path: p() },
+        Error::DirImageTooLarge,
+        Error::DirNameTooLong { path: p() },
+        Error::DirImageFanout { path: p() },
+        Error::SeamPlanDroppedMost {
+            dropped: 0,
+            written: 0,
+        },
+        Error::SinkWroteNothing,
     ]
 }
 
