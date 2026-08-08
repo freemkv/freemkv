@@ -379,6 +379,22 @@ pub fn is_container(path: &str) -> bool {
 
 /// Commands that must be unavailable while a rip is in flight. Cancel is
 /// deliberately absent — it must always be reachable.
+/// The View ▸ log menu item's label, which follows STATE rather than naming
+/// one fixed action: "Show log" only while the log is hidden, "Hide log" while
+/// it is on screen. It is one toggle, so a label that always said "Show log"
+/// was wrong half the time.
+///
+/// Lives here, not in a shell, because both menus are built from it — that is
+/// the only way macOS and Windows can be guaranteed to say the same thing.
+#[must_use]
+pub fn log_menu_label(log_hidden: bool) -> String {
+    crate::strings::get(if log_hidden {
+        "gui.menu.show_log"
+    } else {
+        "gui.menu.hide_log"
+    })
+}
+
 pub fn blocked_while_running(cmd: Cmd) -> bool {
     !matches!(cmd, Cmd::Cancel | Cmd::About | Cmd::Docs | Cmd::Quit)
 }
@@ -1131,6 +1147,60 @@ impl App {
         }
     }
 
+    /// Decide which `disc://` source "open the disc in the drive" should open,
+    /// and log what was found. `None` means there is nothing to open.
+    ///
+    /// This is the WHOLE decision behind File ▸ Open disc, the empty state's
+    /// "Open disc" button and the launch probe — one copy, so the two shells
+    /// cannot drift (they had drifted already: the AppKit shell logged three
+    /// hardcoded English sentences where the Win32 one used `gui.log.*`).
+    ///
+    /// Deliberately split from [`App::open`] rather than doing both: `open`
+    /// scans the drive and BLOCKS the calling thread for as long as that takes.
+    /// Returning here lets the shell repaint first, so the "Opening …" line is
+    /// on screen before the window goes quiet, instead of appearing with the
+    /// finished title list.
+    ///
+    /// `announce_missing` controls the one message that is only appropriate
+    /// when a human asked: "no optical drive found". True for the menu item and
+    /// the button; false for the launch probe, where nobody asked and a machine
+    /// with no drive must simply see nothing.
+    pub fn disc_source(&mut self, announce_missing: bool) -> Option<String> {
+        let drives = crate::engine::list_optical_drives();
+        if drives.is_empty() {
+            if announce_missing {
+                self.say(LogKind::Notice, &crate::strings::get("gui.log.no_drive"));
+            }
+            return None;
+        }
+        // One drive → that device; several → autodetect the one with media,
+        // and log what was found so the user knows which drives are present.
+        if drives.len() == 1 {
+            self.say(
+                LogKind::Detail,
+                &crate::strings::fmt(
+                    "gui.log.opening_drive",
+                    &[("label", &drives[0].label), ("device", &drives[0].device)],
+                ),
+            );
+            Some(format!("disc://{}", drives[0].device))
+        } else {
+            let list = drives
+                .iter()
+                .map(|d| format!("{} ({})", d.label, d.device))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.say(
+                LogKind::Detail,
+                &crate::strings::fmt(
+                    "gui.log.drives_found",
+                    &[("n", &drives.len().to_string()), ("list", &list)],
+                ),
+            );
+            Some("disc://".to_string())
+        }
+    }
+
     /// Open a source: scan it, rebuild the tree, report honestly on failure.
     pub fn open(&mut self, path: &str) -> Vec<Effect> {
         let container = is_container(path);
@@ -1433,6 +1503,7 @@ impl App {
             can_run: !self.running() && !self.source.is_empty(),
             log: self.log.clone(),
             log_hidden: self.log_hidden,
+            log_menu_label: log_menu_label(self.log_hidden),
             detail: self
                 .selected_row
                 .and_then(|i| self.tree.arena.get(i))
@@ -1522,6 +1593,10 @@ pub struct View {
     pub can_run: bool,
     pub log: Vec<LogLine>,
     pub log_hidden: bool,
+    /// The View ▸ log menu item's label for the CURRENT state — see
+    /// [`log_menu_label`]. Carried on the `View` so a shell only assigns it,
+    /// exactly like every other piece of text on screen.
+    pub log_menu_label: String,
     pub detail: String,
     pub result_summary: String,
     /// Heading for the result page — never "Finished" after a cancel.
@@ -1541,6 +1616,32 @@ mod tests {
         // The bug this pins: a 6 GB output once read "6103.5 M".
         assert_eq!(fmt_bytes(6 * 1024 * 1024 * 1024), "6.00 GB");
         assert_eq!(fmt_bytes(64_424_509_440), "60.00 GB");
+    }
+
+    #[test]
+    fn the_log_menu_label_follows_the_state_not_one_fixed_action() {
+        // The bug this pins: both shells built "Show log" once, at menu-build
+        // time, so the item still read "Show log" while the log was on screen.
+        assert_eq!(
+            log_menu_label(true),
+            crate::strings::get("gui.menu.show_log")
+        );
+        assert_eq!(
+            log_menu_label(false),
+            crate::strings::get("gui.menu.hide_log")
+        );
+        assert_ne!(log_menu_label(true), log_menu_label(false));
+    }
+
+    #[test]
+    fn toggling_the_log_flips_the_menu_label_in_the_view() {
+        let mut a = App::new();
+        // The log starts visible, so the item offers to hide it.
+        assert!(!a.view().log_hidden);
+        assert_eq!(a.view().log_menu_label, log_menu_label(false));
+        a.dispatch(Cmd::ToggleLog);
+        assert!(a.view().log_hidden);
+        assert_eq!(a.view().log_menu_label, log_menu_label(true));
     }
 
     #[test]

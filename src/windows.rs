@@ -67,6 +67,12 @@ const TICK_MS: u32 = 200;
 const TIMER_TICK: usize = 1;
 /// Drain interval for worker-thread messages (the keydb update).
 const TIMER_DRAIN: usize = 2;
+/// One-shot: the launch probe for a disc already in the drive. See
+/// `Shell::open_disc` and the `wm_create` handler.
+const TIMER_LAUNCH_PROBE: usize = 4;
+/// How long after the window exists the launch probe fires. Long enough for
+/// the empty page to be on screen first, short enough to feel like launch.
+const LAUNCH_PROBE_MS: u32 = 200;
 
 /// Resource id of the application icon group embedded by `build.rs`. Must stay
 /// in step with `IDI_APP` there — there is no shared header between a build
@@ -86,6 +92,9 @@ const ID_CANCEL: u16 = 1007;
 const ID_REVEAL: u16 = 1008;
 const ID_DONE: u16 = 1009;
 const ID_OPEN_EMPTY: u16 = 1010;
+/// "Open disc" on the empty page — the second half of the pair, wired to the
+/// same handler as File ▸ Open disc.
+const ID_OPEN_DISC_EMPTY: u16 = 1014;
 const ID_BAR_CUR: u16 = 1011;
 const ID_BAR_ALL: u16 = 1012;
 const ID_EJECT: u16 = 1013;
@@ -189,6 +198,27 @@ fn dev_env(key: &str) -> Result<String, std::env::VarError> {
     } else {
         Err(std::env::VarError::NotPresent)
     }
+}
+
+/// Whether the launch probe (a disc already in the drive at startup) should
+/// run at all.
+///
+/// Off under `cargo test`: the in-process harness window builds the real shell,
+/// and a unit test must never enumerate — let alone spin up — real hardware.
+/// Off in every debug harness mode too: those already load a fixture or are
+/// mid-screenshot, and a probe would fight them for the page.
+fn launch_probe_enabled() -> bool {
+    !cfg!(test)
+        && [
+            "FMKV_OPEN",
+            "FMKV_SELFTEST",
+            "FMKV_SHOT",
+            "FMKV_WIN",
+            "FMKV_DUMP_MENUS",
+            "FMKV_PAGE",
+        ]
+        .iter()
+        .all(|k| dev_env(k).is_err())
 }
 
 // ── Win32 entry points winsafe does not wrap ──────────────────────────────
@@ -586,6 +616,9 @@ struct Shell {
     // empty page
     lbl_empty_head: gui::Label,
     lbl_empty_sub: gui::Label,
+    /// "Open disc" — so the empty state offers the source its own headline is
+    /// about, not only "Open file or ISO…".
+    btn_open_disc: gui::Button,
     btn_open: gui::Button,
 
     // titles page
@@ -683,6 +716,16 @@ impl Shell {
                 text: &crate::strings::get("gui.page.empty_subtitle"),
                 size: (s.px(lay::W - lay::PAD * 2), s.px(20)),
                 control_style: co::SS::CENTER,
+                ..Default::default()
+            },
+        );
+        let btn_open_disc = gui::Button::new(
+            &wnd,
+            gui::ButtonOpts {
+                text: &crate::strings::get("gui.btn.open_disc"),
+                width: s.px(180),
+                height: s.px(30),
+                ctrl_id: ID_OPEN_DISC_EMPTY,
                 ..Default::default()
             },
         );
@@ -942,6 +985,7 @@ impl Shell {
             settings: Rc::new(RefCell::new(settings)),
             lbl_empty_head,
             lbl_empty_sub,
+            btn_open_disc,
             btn_open,
             tree,
             grp_out,
@@ -976,6 +1020,14 @@ impl Shell {
 }
 
 // ── menus ─────────────────────────────────────────────────────────────────
+
+/// The View ▸ log item's full menu text — the core's state-dependent label
+/// (`ui::log_menu_label`) plus this shell's accelerator hint. One function so
+/// the build and the live re-title cannot produce different strings, which is
+/// what makes the "already right, skip the redraw" comparison reliable.
+fn log_menu_text(label: &str) -> String {
+    format!("{label}\tCtrl+L")
+}
 
 /// Build the in-window menu bar.
 ///
@@ -1060,7 +1112,10 @@ fn build_menu() -> w::SysResult<w::HMENU> {
     view.append_item(&[
         w::MenuItem::Entry {
             cmd_id: IDM_TOGGLE_LOG,
-            text: &format!("{}\tCtrl+L", g("gui.menu.show_log")),
+            // State-dependent, and re-applied on every `render` — the log
+            // starts visible, so the item starts as "Hide log". See
+            // `Shell::sync_log_menu_title`.
+            text: &log_menu_text(&crate::ui::log_menu_label(false)),
         },
         w::MenuItem::Entry {
             cmd_id: IDM_CLEAR_LOG,
@@ -1214,6 +1269,7 @@ impl Shell {
         // ── empty page ──
         put(&self.lbl_empty_head, l.empty_head);
         put(&self.lbl_empty_sub, l.empty_sub);
+        put(&self.btn_open_disc, l.btn_open_disc);
         put(&self.btn_open, l.btn_open);
 
         // ── titles page ──
@@ -1435,7 +1491,9 @@ impl Shell {
         for c in [&self.lbl_empty_head, &self.lbl_empty_sub] {
             show(c, p == Page::Empty);
         }
-        show(&self.btn_open, p == Page::Empty);
+        for c in [&self.btn_open_disc, &self.btn_open] {
+            show(c, p == Page::Empty);
+        }
 
         show(&self.tree, p == Page::Titles);
         for c in [&self.grp_out, &self.grp_info] {
@@ -1524,6 +1582,10 @@ impl Shell {
             self.memo.borrow_mut().log_len = v.log.len();
         }
 
+        // The View ▸ log item names the action it will PERFORM, so it has to be
+        // re-titled whenever the log's visibility changes — it is a toggle, and
+        // a toggle that always says "Show log" is wrong half the time.
+        self.sync_log_menu_title(&v.log_menu_label);
         self.sync_menu_enabled();
         self.relayout_now();
     }
@@ -1731,7 +1793,7 @@ impl Shell {
             let me = self.clone();
             self.wnd.on().wm_command_acc_menu(id, move || {
                 match id {
-                    IDM_OPEN_DISC => me.open_disc(),
+                    IDM_OPEN_DISC => me.open_disc(true),
                     _ => {
                         if let Some(cmd) = cmd_for(id) {
                             me.act(cmd);
@@ -1780,7 +1842,41 @@ impl Shell {
             // Nothing is open at launch: show the empty state rather than a
             // tree of invented rows.
             me.render();
+            // ── the launch probe ──
+            //
+            // A disc already in the drive was never detected at launch. Not
+            // because detection was deferred or its result was dropped:
+            // NOTHING ran it. The shell built the window, rendered the empty
+            // page and handed control to the message loop, and `App::new`
+            // opens no source — so the only thing that ever enumerated the
+            // drive was File ▸ Open disc, on click. Hence "the menu finds it
+            // immediately": the code works; it was simply never called.
+            //
+            // Fixed by CALLING it, off a one-shot timer rather than inline
+            // here. The probe ends in `App::open`, which scans the disc and
+            // resolves its keys synchronously — seconds, sometimes more, on
+            // the UI thread. Inline in `WM_CREATE` that is a launch with no
+            // window on screen until the drive has spun up, which reads as a
+            // hang. On the timer, the empty page is already painted before
+            // anything touches the drive.
+            if launch_probe_enabled() {
+                let _ = me
+                    .wnd
+                    .hwnd()
+                    .SetTimer(TIMER_LAUNCH_PROBE, LAUNCH_PROBE_MS, None);
+            }
             Ok(0)
+        });
+
+        // The probe itself: one shot, killed before it runs so a slow scan can
+        // never queue a second one. `false` = no "no optical drive found"
+        // notice; nobody asked for this probe, so a machine with no drive must
+        // see nothing at all.
+        let me = self.clone();
+        self.wnd.on().wm_timer(TIMER_LAUNCH_PROBE, move || {
+            let _ = me.wnd.hwnd().KillTimer(TIMER_LAUNCH_PROBE);
+            me.open_disc(false);
+            Ok(())
         });
 
         let me = self.clone();
@@ -1917,6 +2013,13 @@ impl Shell {
             me.act(Cmd::Open);
             Ok(())
         });
+        // The empty page's "Open disc" — the SAME method File ▸ Open disc
+        // runs, so the two entry points cannot behave differently.
+        let me = self.clone();
+        self.btn_open_disc.on().bn_clicked(move || {
+            me.open_disc(true);
+            Ok(())
+        });
         let me = self.clone();
         self.btn_browse.on().bn_clicked(move || {
             me.act(Cmd::SetOutput);
@@ -2016,42 +2119,66 @@ impl Shell {
         }
     }
 
-    /// Open a live optical drive. Enumerates drives (registry only, no exclusive
-    /// access); opens the one drive directly, or autodetects the drive with media
-    /// when several are attached.
-    fn open_disc(&self) {
-        let drives = crate::engine::list_optical_drives();
-        if drives.is_empty() {
-            self.app_mut(|a| a.say(LogKind::Notice, &crate::strings::get("gui.log.no_drive")));
+    /// Re-title the View ▸ log menu item to whatever the `View` says it should
+    /// read now (`ui::log_menu_label` + this shell's accelerator hint).
+    ///
+    /// The item is located by walking the bar's submenus and matching the
+    /// COMMAND ID, then set by position within the submenu it was found in —
+    /// not by `IdPos::Id` on the bar (whose by-command recursion into submenus
+    /// is not documented for `SetMenuItemInfo`) and not by a hardcoded
+    /// position (the menu is rebuilt on a live language change).
+    fn sync_log_menu_title(&self, label: &str) {
+        let Some(bar) = self.wnd.hwnd().GetMenu() else {
             return;
+        };
+        let text = log_menu_text(label);
+        let Ok(tops) = bar.GetMenuItemCount() else {
+            return;
+        };
+        for i in 0..tops {
+            let Some(sub) = bar.GetSubMenu(i) else {
+                continue;
+            };
+            let Ok(n) = sub.GetMenuItemCount() else {
+                continue;
+            };
+            for j in 0..n {
+                if !matches!(
+                    sub.item_info(w::IdPos::Pos(j)),
+                    Ok(w::MenuItemInfo::Entry { cmd_id, .. }) if cmd_id == IDM_TOGGLE_LOG
+                ) {
+                    continue;
+                }
+                // Already right: skip the churn (and the menu-bar redraw).
+                if matches!(sub.GetMenuString(w::IdPos::Pos(j)), Ok(cur) if cur == text) {
+                    return;
+                }
+                // `force_heap` so the buffer cannot live inside `wstr` itself
+                // (SSO) and be invalidated by a move before the call.
+                let mut wstr = w::WString::from_str_force_heap(&text);
+                let mut mii = w::MENUITEMINFO::default();
+                mii.fMask = co::MIIM::STRING;
+                mii.dwTypeData = unsafe { wstr.as_mut_ptr() };
+                let _ = sub.SetMenuItemInfo(w::IdPos::Pos(j), &mii);
+                let _ = self.wnd.hwnd().DrawMenuBar();
+                return;
+            }
         }
-        let url = if drives.len() == 1 {
-            self.app_mut(|a| {
-                a.say(
-                    LogKind::Detail,
-                    &crate::strings::fmt(
-                        "gui.log.opening_drive",
-                        &[("label", &drives[0].label), ("device", &drives[0].device)],
-                    ),
-                )
-            });
-            format!("disc://{}", drives[0].device)
-        } else {
-            let list = drives
-                .iter()
-                .map(|d| format!("{} ({})", d.label, d.device))
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.app_mut(|a| {
-                a.say(
-                    LogKind::Detail,
-                    &crate::strings::fmt(
-                        "gui.log.drives_found",
-                        &[("n", &drives.len().to_string()), ("list", &list)],
-                    ),
-                )
-            });
-            "disc://".to_string()
+    }
+
+    /// Open the disc in the drive. The decision (which drive, what to log) is
+    /// the core's — see `ui::App::disc_source`; this is only the two-step
+    /// sequencing the scan needs.
+    ///
+    /// Two `app_mut` calls, not one, ON PURPOSE: `app_mut` repaints, so the
+    /// "Opening …" line reaches the log pane BEFORE `open` starts the scan,
+    /// which blocks the UI thread for as long as the drive takes to spin up
+    /// and the keys take to resolve.
+    ///
+    /// `announce_missing` is false for the launch probe — see `wm_create`.
+    fn open_disc(&self, announce_missing: bool) {
+        let Some(url) = self.app_mut(|a| a.disc_source(announce_missing)) else {
+            return;
         };
         let fx = self.app_mut(|a| a.open(&url));
         self.perform(fx);
@@ -3058,6 +3185,10 @@ impl Shell {
             .lbl_empty_sub
             .hwnd()
             .SetWindowText(&g("gui.page.empty_subtitle"));
+        let _ = self
+            .btn_open_disc
+            .hwnd()
+            .SetWindowText(&g("gui.btn.open_disc"));
         let _ = self.btn_open.hwnd().SetWindowText(&g("gui.btn.open_file"));
         let _ = self.grp_out.hwnd().SetWindowText(&g("gui.group.output"));
         let _ = self.grp_info.hwnd().SetWindowText(&g("gui.group.info"));

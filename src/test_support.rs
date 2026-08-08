@@ -87,6 +87,14 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         // pick a realistic non-zero PID rather than 0.
         Error::SelectionPidUnknown { pid: 0x1011 },
         Error::MapfileInvalid { kind: "hex" },
+        // E6015: a resume against an image shorter than the recovery data
+        // describes. Listed here so its locale string is contract-checked like
+        // every other variant's — the codes that were NOT listed (E6013/E6014
+        // above) are exactly the ones that shipped as a bare number.
+        Error::ImageTruncated {
+            have: 1_024,
+            want: 4_096,
+        },
         Error::AacsNoKeys,
         Error::AacsCertShort,
         Error::AacsAgidAlloc,

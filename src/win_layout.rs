@@ -158,6 +158,9 @@ pub struct MainLayout {
     // empty page
     pub empty_head: Rect,
     pub empty_sub: Rect,
+    /// "Open disc" — the left half of the empty state's button pair.
+    pub btn_open_disc: Rect,
+    /// "Open file or ISO…" — the right half.
     pub btn_open: Rect,
 
     // titles page
@@ -247,11 +250,19 @@ pub fn main_layout(dpi: u32, cw: i32, ch: i32, st: MainState) -> MainLayout {
     let cy = top_y + top_h / 2;
     let empty_head = Rect::new(pad, cy - s.px(50), cw - pad * 2, s.px(26));
     let empty_sub = Rect::new(pad, cy - s.px(22), cw - pad * 2, s.px(20));
-    // Centred as `(cw - w) / 2`, not `cw / 2 - w / 2`: the latter is a pixel
-    // off centre whenever the scaled width rounds to an odd number, which it
-    // does at 125%.
+    // TWO buttons: the empty page offers "Open disc" as well as "Open file or
+    // ISO…", so the one source its own headline is about is reachable without
+    // hunting through the menu bar.
+    //
+    // The pair straddles the centre with a fixed gap — the result page's
+    // pattern — so they stay symmetric at any DPI instead of each rounding
+    // away from centre on its own.
     let open_w = s.px(180);
-    let btn_open = Rect::new((cw - open_w) / 2, cy + s.px(16), open_w, s.px(30));
+    let open_gap = s.px(16);
+    let open_y = cy + s.px(16);
+    let open_h = s.px(30);
+    let btn_open_disc = Rect::new(cw / 2 - open_gap / 2 - open_w, open_y, open_w, open_h);
+    let btn_open = Rect::new(cw / 2 + open_gap / 2, open_y, open_w, open_h);
 
     // ── titles page ──
     let tree_w = ((cw - pad * 2) as f64 * TREE_FRAC) as i32;
@@ -322,6 +333,7 @@ pub fn main_layout(dpi: u32, cw: i32, ch: i32, st: MainState) -> MainLayout {
         log,
         empty_head,
         empty_sub,
+        btn_open_disc,
         btn_open,
         tree,
         grp_out,
@@ -659,9 +671,22 @@ mod tests {
                     info_rows: 0,
                 },
             );
-            // The headline and the button share the window's horizontal centre.
+            // The headline shares the window's horizontal centre, and the
+            // button PAIR straddles it symmetrically: equal gaps either side,
+            // so their midpoint is the centre.
             assert_eq!(l.empty_head.x + l.empty_head.w / 2, w / 2, "dpi {dpi}");
-            assert_eq!(l.btn_open.x + l.btn_open.w / 2, w / 2, "dpi {dpi}");
+            assert_eq!(l.btn_open_disc.w, l.btn_open.w, "dpi {dpi}");
+            assert_eq!(
+                l.btn_open_disc.x + (l.btn_open.x + l.btn_open.w - l.btn_open_disc.x) / 2,
+                w / 2,
+                "dpi {dpi}"
+            );
+            // Same row, and they never overlap.
+            assert_eq!(l.btn_open_disc.y, l.btn_open.y, "dpi {dpi}");
+            assert!(
+                l.btn_open_disc.x + l.btn_open_disc.w <= l.btn_open.x,
+                "dpi {dpi}"
+            );
         }
         let l = main_layout(
             192,
@@ -677,7 +702,9 @@ mod tests {
         // cy = 24 + 978/2 = 513.
         assert_eq!(l.empty_head, Rect::new(16, 413, 2328, 52));
         assert_eq!(l.empty_sub, Rect::new(16, 469, 2328, 40));
-        assert_eq!(l.btn_open, Rect::new(1000, 545, 360, 60));
+        // cw/2 = 1180, gap = 32 → 1180 - 16 - 360 = 804, and 1180 + 16 = 1196.
+        assert_eq!(l.btn_open_disc, Rect::new(804, 545, 360, 60));
+        assert_eq!(l.btn_open, Rect::new(1196, 545, 360, 60));
     }
 
     #[test]
