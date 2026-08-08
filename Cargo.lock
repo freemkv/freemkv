@@ -99,9 +99,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.4.0"
+version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9"
+checksum = "5d262e149917187838d5b42777c8253bcb64500067342904e7d429499a6f277e"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -268,9 +268,9 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+checksum = "26b73573e6edcd2af0cdf47bd6cb58f0b3839491263c314eaad1ccf24430e1de"
 
 [[package]]
 name = "flate2"
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "block2",
  "freemkv-engine",
@@ -318,8 +318,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.6.0"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.0#a9facd927bb8c6081a6cf3d7bb5703a90e16451c"
+version = "1.6.1"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.1#db4e1c1059440d9d60d110ffa102eb84c70bfafe"
 dependencies = [
  "freemkv-keysources",
  "isolang",
@@ -330,16 +330,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.6.0"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.0#b89de4e1f175e4f19cc37305f3f13635acb96e91"
+version = "1.6.1"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.1#6938fd142f4d229d704d26e11bb537b7d8ca86ce"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.6.0"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.0#f8124e7d24f363c3595fe86a01131501072df3e9"
+version = "1.6.1"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.1#ea7284361d8a67a6ccd53d4add340cf48ed6baa2"
 dependencies = [
  "base64",
  "flate2",
@@ -352,8 +352,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.6.0"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.0#6cc23cf09b94f20c0e96345f90514c74ff80574b"
+version = "1.6.1"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.1#7636f6a0b7d79b5da2807749254489f1f98ce383"
 dependencies = [
  "aes",
  "base64",
@@ -546,8 +546,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.6.0"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.0#bab566da40e53cdc9905ec952961b23924b1202c"
+version = "1.6.1"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.1#b3887be90f04b8ca2b1ce4b657bd5bef0e6fb9ff"
 dependencies = [
  "aes",
  "base64",
@@ -951,9 +951,9 @@ dependencies = [
 
 [[package]]
 name = "regex-automata"
-version = "0.4.16"
+version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fcfdb36bda0c880c5931cdc7a2bcdc8ba4556847b9d912bca70bc94708711ad"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -1528,18 +1528,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.55"
+version = "0.8.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5a105cd7b140f6eeec8acff2ea38135d3cab283ada58540f629fe51e46696eb"
+checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.55"
+version = "0.8.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fe976fb70c78cd64cccfe3a6fc142244e8a77b70959b30faf9d0ac37ee228eb"
+checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
 dependencies = [
  "proc-macro2",
  "quote",
