@@ -246,11 +246,20 @@ jobs:
   # material), and the runner can reach Gitea, so it is cloned rather than
   # vendored.
   real-media:
+    # Run only when the runner is actually configured.
+    #
+    # A job with no runner does not fail — it QUEUES, for up to 24 hours, and a
+    # queued job keeps the whole workflow "in progress". release.sh's CI gate
+    # reads every run for the commit and refuses while any is queued, so an
+    # unregistered runner does not just skip this check: it blocks every
+    # release, indefinitely, with no error anywhere. That is what it did.
+    #
+    # `timeout-minutes` does NOT fix this — it bounds execution, not queue time.
+    # Gating on the repo variable does: unconfigured, the job is skipped and the
+    # workflow completes; configured, it runs exactly as before. The variable is
+    # the one this job cannot work without, so it is the honest condition.
+    if: vars.FMKV_ACCEPTANCE != ''
     runs-on: [self-hosted, freemkv-media]
-    # A job with no runner QUEUES FOREVER, and a queued job makes the whole
-    # workflow read "queued" rather than failing — so a gate that cannot run
-    # looks pending indefinitely instead of broken. This job has never once
-    # executed for exactly that reason. Fail visibly instead.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
