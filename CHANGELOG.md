@@ -5,7 +5,7 @@ two shells over `freemkv-engine`) are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and the project
 follows semantic versioning.
 
-## [1.6.1] — UNRELEASED
+## [1.6.1] — 2026-08-07
 
 ### Added
 
