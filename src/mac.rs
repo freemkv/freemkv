@@ -547,48 +547,18 @@ define_class!(
             self.act(crate::ui::Cmd::Open);
         }
 
-        /// Open a live optical drive. Enumerates drives (registry only, no
-        /// exclusive access); opens the one drive directly, or autodetects the
-        /// drive with media when several are attached.
+        /// File ▸ Open disc, and the empty state's "Open disc" button — the
+        /// SAME method, so the two entry points cannot behave differently.
         #[unsafe(method(onOpenDisc:))]
         fn on_open_disc(&self, _s: Option<&AnyObject>) {
-            let drives = crate::engine::list_optical_drives();
-            if drives.is_empty() {
-                self.app_mut(|a| {
-                    a.say(
-                        crate::ui::LogKind::Notice,
-                        "No optical drive found. Connect a Blu-ray/DVD drive with a disc.",
-                    )
-                });
-                self.render();
-                return;
-            }
-            // One drive → that device; several → autodetect the one with media,
-            // and log what was found so the user knows which drives are present.
-            let url = if drives.len() == 1 {
-                self.app_mut(|a| {
-                    a.say(
-                        crate::ui::LogKind::Detail,
-                        &format!("Opening {} ({})", drives[0].label, drives[0].device),
-                    )
-                });
-                format!("disc://{}", drives[0].device)
-            } else {
-                let list = drives
-                    .iter()
-                    .map(|d| format!("{} ({})", d.label, d.device))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.app_mut(|a| {
-                    a.say(
-                        crate::ui::LogKind::Detail,
-                        &format!("{} drives found: {list} — using the one with a disc", drives.len()),
-                    )
-                });
-                "disc://".to_string()
-            };
-            let fx = self.app_mut(|a| a.open(&url));
-            self.perform(fx);
+            self.open_disc(true);
+        }
+
+        /// The launch probe, fired once off a one-shot timer after the window
+        /// is on screen. See `Controller::open_disc`.
+        #[unsafe(method(onLaunchProbe:))]
+        fn on_launch_probe(&self, _s: Option<&AnyObject>) {
+            self.open_disc(false);
         }
 
         #[unsafe(method(onNoop:))]
@@ -1162,6 +1132,24 @@ impl Controller {
         self.perform(effects);
     }
 
+    /// Open the disc in the drive. The decision (which drive, what to log) is
+    /// the core's — see `ui::App::disc_source`; this is only the two-step
+    /// sequencing the scan needs.
+    ///
+    /// Two `app_mut` calls, not one, ON PURPOSE: `app_mut` repaints, so the
+    /// "Opening …" line reaches the log pane BEFORE `open` starts the scan,
+    /// which blocks the main thread for as long as the drive takes to spin up
+    /// and the keys take to resolve.
+    ///
+    /// `announce_missing` is false for the launch probe — see `run`.
+    fn open_disc(&self, announce_missing: bool) {
+        let Some(url) = self.app_mut(|a| a.disc_source(announce_missing)) else {
+            return;
+        };
+        let fx = self.app_mut(|a| a.open(&url));
+        self.perform(fx);
+    }
+
     fn perform(&self, effects: Vec<crate::ui::Effect>) {
         use crate::ui::Effect as E;
         let mtm = MainThreadMarker::new().unwrap();
@@ -1396,6 +1384,10 @@ impl Controller {
         if let Some(sv) = iv.log_scroll.borrow().as_ref() {
             sv.setHidden(v.log_hidden);
         }
+        // The View ▸ log item names the action it will PERFORM, so it has to be
+        // re-titled whenever the log's visibility changes — it is a toggle, and
+        // a toggle that always says "Show log" is wrong half the time.
+        self.sync_log_menu_title(&v.log_menu_label);
         *iv.two_bars.borrow_mut() = v.show_overall_bar;
         *iv.on_prog.borrow_mut() = v.page == Page::Progress;
         *iv.on_empty.borrow_mut() = v.page == Page::Empty;
@@ -1601,6 +1593,39 @@ impl Controller {
             )
         };
         *self.ivars().drain.borrow_mut() = Some(t);
+    }
+
+    /// Re-title the View ▸ log menu item to whatever the `View` says it should
+    /// read now.
+    ///
+    /// Found by SELECTOR, not by position or by its current title: the menu is
+    /// rebuilt on a live language change, and matching on the English text
+    /// would silently stop working in every other locale.
+    fn sync_log_menu_title(&self, title: &str) {
+        let mtm = MainThreadMarker::new().unwrap();
+        let app = NSApplication::sharedApplication(mtm);
+        let Some(main) = app.mainMenu() else {
+            return;
+        };
+        for i in 0..main.numberOfItems() {
+            let Some(top) = main.itemAtIndex(i) else {
+                continue;
+            };
+            let Some(sub) = ({ top.submenu() }) else {
+                continue;
+            };
+            for j in 0..sub.numberOfItems() {
+                let Some(mi) = sub.itemAtIndex(j) else {
+                    continue;
+                };
+                if { mi.action() } == Some(sel!(onToggleLog:)) {
+                    if { mi.title() }.to_string() != title {
+                        mi.setTitle(&NSString::from_str(title));
+                    }
+                    return;
+                }
+            }
+        }
     }
 
     /// Apply the core's format list to the popup, preserving the current pick
@@ -1962,7 +1987,10 @@ fn build_menus(mtm: MainThreadMarker, app: &NSApplication, c: &Controller) {
         &crate::strings::get("gui.menu.view"),
         vec![
             (
-                crate::strings::get("gui.menu.show_log"),
+                // State-dependent: "Show log" only while it is hidden. Built
+                // from the live state (a language rebuild can happen with the
+                // log already hidden) and re-applied on every `render`.
+                crate::ui::log_menu_label(c.ivars().app.borrow().log_hidden),
                 "l",
                 sel!(onToggleLog:),
             ),
@@ -2072,13 +2100,31 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
             page_empty.addSubview(&head);
             page_empty.addSubview(&sub);
         }
+        // BOTH ways in, side by side. The empty page used to offer only "Open
+        // file or ISO…", so the one thing its own headline is about — a disc —
+        // could only be reached from the menu bar.
+        //
+        // Straddling the centre with a fixed gap (the result page's pattern)
+        // rather than centring each one, so the pair stays symmetric.
+        const EB_W: f64 = 160.0;
+        const EB_GAP: f64 = 16.0;
+        let eb_y = eh * 0.55 - 70.0;
+        let b_disc = btn(
+            mtm,
+            &crate::strings::get("gui.btn.open_disc"),
+            r(W / 2.0 - EB_GAP / 2.0 - EB_W, eb_y, EB_W, 30.0),
+            c,
+            // The SAME selector File ▸ Open disc uses — one code path.
+            sel!(onOpenDisc:),
+        );
         let b = btn(
             mtm,
             &crate::strings::get("gui.btn.open_file"),
-            r(W / 2.0 - 80.0, eh * 0.55 - 70.0, 160.0, 30.0),
+            r(W / 2.0 + EB_GAP / 2.0, eb_y, EB_W, 30.0),
             c,
             sel!(onOpenFiles:),
         );
+        page_empty.addSubview(&b_disc);
         page_empty.addSubview(&b);
 
         // `relayout` resizes `page_empty` itself, but a subview keeps its
@@ -2089,18 +2135,21 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         // original `W` — simply stays put.
         //
         // Same masks the result page already uses: full-width labels stretch,
-        // the fixed-width button keeps equal margins on both sides.
+        // the fixed-width buttons keep equal margins on both sides — which is
+        // also what keeps the PAIR straddling the centre as the window grows.
         for v in [&head, &sub] {
             mask(
                 v,
                 objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable,
             );
         }
-        mask(
-            &b,
-            objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin
-                | objc2_app_kit::NSAutoresizingMaskOptions::ViewMaxXMargin,
-        );
+        for v in [&b_disc, &b] {
+            mask(
+                v,
+                objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin
+                    | objc2_app_kit::NSAutoresizingMaskOptions::ViewMaxXMargin,
+            );
+        }
     }
 
     // ── result page ──
@@ -2838,6 +2887,45 @@ pub fn run() {
         snapshot(&content, &path);
         println!("wrote {path}");
         return;
+    }
+
+    // ── the launch probe ──
+    //
+    // A disc already in the drive was never detected at launch. Not because
+    // detection was deferred or its result was dropped: NOTHING ran it. The
+    // shell built the window, set `Page::Empty` and handed control to the run
+    // loop, and `App::new` opens no source — so the only thing that ever
+    // enumerated the drive was File ▸ Open disc, on click. Hence "the menu
+    // finds it immediately": the code works; it was simply never called.
+    //
+    // Fixed by CALLING it, off a one-shot timer rather than inline here. The
+    // probe ends in `App::open`, which scans the disc and resolves its keys
+    // synchronously — seconds, sometimes more, on the main thread. Inline that
+    // is a launch that shows no window at all until the drive has spun up,
+    // which reads as a hang. On the timer, the window is already up and
+    // painted (`makeKeyAndOrderFront` + `activate` above) and the empty state
+    // is on screen before anything touches the drive; the "Opening …" line
+    // then appears before the scan, because `open_disc` repaints between the
+    // two steps.
+    //
+    // `false`: no "no optical drive found" notice. Nobody asked for this probe,
+    // so a machine with no drive must see nothing at all.
+    //
+    // Not in the dev harness: `FMKV_OPEN` has already opened a fixture, and a
+    // probe would fight the screenshot for the page.
+    if ["FMKV_OPEN", "FMKV_DEMO", "FMKV_PAGE"]
+        .iter()
+        .all(|k| dev_env(k).is_err())
+    {
+        let _ = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                0.2,
+                &c,
+                sel!(onLaunchProbe:),
+                None,
+                false,
+            )
+        };
     }
 
     std::mem::forget(c);
@@ -3917,12 +4005,19 @@ impl Controller {
             self.drive_menu("View", "Clear log") && view().log.is_empty(),
             "View ▸ Clear log emptied it",
         );
+        // The item is a toggle and its title follows the state, so drive it by
+        // the title it CURRENTLY carries: "Hide log" while the log is on
+        // screen, "Show log" once it is not.
+        check(
+            "menu-hide-log",
+            self.drive_menu("View", &crate::ui::log_menu_label(false)) && view().log_hidden,
+            "View ▸ Hide log hid it",
+        );
         check(
             "menu-show-log",
-            self.drive_menu("View", "Show log") && view().log_hidden,
-            "View ▸ Show log hid it",
+            self.drive_menu("View", &crate::ui::log_menu_label(true)) && !view().log_hidden,
+            "View ▸ Show log brought it back",
         );
-        self.drive_menu("View", "Show log");
         check(
             "menu-close",
             self.drive_menu("File", "Close") && view().page == Page::Empty,
