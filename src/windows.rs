@@ -1393,6 +1393,21 @@ impl Shell {
         }
         // The macOS outline opens everything on load; match it so both shells
         // show the same thing without a click.
+        // Expanding scrolls the newly-revealed children into view, and the LAST
+        // expand is the LAST title — so a freshly-scanned disc left the list
+        // sitting at the bottom, away from what was actually selected. The
+        // list sitting at the bottom, away from whatever is actually selected.
+        //
+        // A user reported this; the diagnosis above is read from the code, NOT
+        // observed, and the reporter has not yet confirmed whether they meant
+        // this tree or the log pane below it, which is deliberately pinned to
+        // its newest line. The fix, when it is confirmed: put the first CHECKED
+        // row at the top afterwards — NOT simply "scroll to top", because the
+        // selected title is only first under the default "Main film only";
+        // under "Longest title" it can be anywhere, and under "All titles"
+        // everything is checked. `ensure_visible` alone is not enough either —
+        // it scrolls the minimum distance and lands the row at the bottom edge,
+        // which is the same place this loop already left it.
         for root in self.tree.items().iter_root() {
             let _ = root.expand(true);
             for child in root.iter_children() {
