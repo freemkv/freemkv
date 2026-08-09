@@ -3268,6 +3268,32 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         80.0,
     );
     t.note(mtm, &crate::strings::get("gui.set.min_length_note"), tw);
+    t.gap();
+    // Three INDEPENDENT language sets — see `ui::LangPrefs`. They decide which
+    // stream rows start ticked; nothing here bypasses the tick boxes, so the
+    // user still sees and can change every choice.
+    t.field(
+        mtm,
+        "audio_langs",
+        &crate::strings::get("gui.set.audio_langs"),
+        "",
+        220.0,
+    );
+    t.field(
+        mtm,
+        "sub_langs",
+        &crate::strings::get("gui.set.sub_langs"),
+        "",
+        220.0,
+    );
+    t.field(
+        mtm,
+        "forced_sub_langs",
+        &crate::strings::get("gui.set.forced_sub_langs"),
+        "",
+        220.0,
+    );
+    t.note(mtm, &crate::strings::get("gui.set.lang_prefs_note"), tw);
     add_tab(&crate::strings::get("gui.tab.selection"), t);
 
     // ── Recovery ── engine Job.mode / abort_on_lost_secs / raw

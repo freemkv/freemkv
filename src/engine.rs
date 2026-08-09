@@ -22,6 +22,18 @@ pub struct Row {
     /// can honor "Longest title" default selection and the minimum-length
     /// filter. `0.0` for non-title rows (File/disc header, stream rows).
     pub duration_secs: f64,
+    /// The stream's language tag exactly as the disc carries it (`"deu"`,
+    /// `"eng"`, `""` when untagged). Empty for every non-stream row.
+    ///
+    /// Carried as DATA rather than left to be scraped back out of `desc`: the
+    /// preferred-language defaults hand these to the engine's own language
+    /// matcher, and a display string is a formatting decision that must stay
+    /// free to change.
+    pub lang: String,
+    /// Whether a subtitle row is flagged FORCED. Read straight from the flag
+    /// libfreemkv put on the stream (including its PGS forced probe) — never
+    /// re-derived here. Always `false` for audio and non-stream rows.
+    pub forced: bool,
 }
 
 /// What the shell needs after a scan. Pure data — no engine types.
@@ -156,6 +168,15 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                     )
                 }
             };
+            // Language / forcedness as DATA, read from the same stream the
+            // display strings above were formatted from. The preferred-language
+            // defaults feed these to the engine's matcher, so they must be the
+            // disc's own tags, not a re-parse of `desc`.
+            let (lang, forced) = match st {
+                libfreemkv::Stream::Video(_) => (String::new(), false),
+                libfreemkv::Stream::Audio(a) => (a.language.clone(), false),
+                libfreemkv::Stream::Subtitle(s) => (s.language.clone(), s.forced),
+            };
             Row {
                 type_s: ty.into(),
                 desc,
@@ -165,6 +186,8 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                 info,
                 pid,
                 duration_secs: 0.0,
+                lang,
+                forced,
             }
         })
         .collect()
@@ -210,6 +233,8 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
         ),
         pid: None,
         duration_secs: 0.0,
+        lang: String::new(),
+        forced: false,
     }];
     rows.push(Row {
         type_s: "Title".into(),
@@ -229,6 +254,8 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
         ),
         pid: None,
         duration_secs: t.duration_secs,
+        lang: String::new(),
+        forced: false,
     });
     rows.extend(stream_rows(t, 0));
 
@@ -366,6 +393,8 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String, verbose: bool) ->
         ),
         pid: None,
         duration_secs: 0.0,
+        lang: String::new(),
+        forced: false,
     });
 
     for (ti, t) in disc.titles.iter().enumerate() {
@@ -401,6 +430,8 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String, verbose: bool) ->
             ),
             pid: None,
             duration_secs: t.duration_secs,
+            lang: String::new(),
+            forced: false,
         });
         rows.extend(stream_rows(t, ti));
     }

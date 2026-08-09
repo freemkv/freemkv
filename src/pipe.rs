@@ -637,7 +637,7 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                 match args.get(i + 1) {
                     Some(v) if !is_url_token(v) => {
                         i += 1;
-                        f.streams.subtitles = parse_stream_spec(v);
+                        f.streams.subtitles = parse_stream_spec(v).into();
                     }
                     _ => {
                         return Err(strings::fmt(
@@ -3651,13 +3651,13 @@ mod tests {
     }
 
     // ── `-a`/`-s` stream selection ─────────────────────────────────────────────
-    use freemkv_engine::StreamFilter;
+    use freemkv_engine::{StreamFilter, SubtitleFilter};
 
     #[test]
     fn absent_a_s_flags_default_to_all() {
         let f = parse_flags(&["--raw".into()]).unwrap();
         assert_eq!(f.streams.audio, StreamFilter::All);
-        assert_eq!(f.streams.subtitles, StreamFilter::All);
+        assert_eq!(f.streams.subtitles, StreamFilter::All.into());
         assert!(f.streams.is_all());
     }
 
@@ -3669,7 +3669,7 @@ mod tests {
             StreamFilter::Langs(vec!["eng".into(), "spa".into()])
         );
         // subtitles untouched.
-        assert_eq!(f.streams.subtitles, StreamFilter::All);
+        assert_eq!(f.streams.subtitles, StreamFilter::All.into());
     }
 
     #[test]
@@ -3677,7 +3677,7 @@ mod tests {
         let f = parse_flags(&["-s".into(), "English".into()]).unwrap();
         assert_eq!(
             f.streams.subtitles,
-            StreamFilter::Langs(vec!["English".into()])
+            SubtitleFilter::from(StreamFilter::Langs(vec!["English".into()]))
         );
         assert_eq!(f.streams.audio, StreamFilter::All);
     }
@@ -5831,7 +5831,7 @@ mod verdict_tests {
         title.streams = vec![audio(0x1100, "eng")];
         let streams = freemkv_engine::StreamChoice {
             audio: freemkv_engine::StreamFilter::Langs(vec!["jpn".into()]),
-            subtitles: freemkv_engine::StreamFilter::All,
+            subtitles: freemkv_engine::StreamFilter::All.into(),
         };
 
         let err = check_selection_coverage(&streams, &title, 1, false, &quiet())
@@ -5850,7 +5850,7 @@ mod verdict_tests {
         // A language the title DOES carry is not an error in either mode.
         let matched = freemkv_engine::StreamChoice {
             audio: freemkv_engine::StreamFilter::Langs(vec!["eng".into()]),
-            subtitles: freemkv_engine::StreamFilter::All,
+            subtitles: freemkv_engine::StreamFilter::All.into(),
         };
         assert!(check_selection_coverage(&matched, &title, 1, false, &quiet()).is_ok());
     }

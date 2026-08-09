@@ -30,6 +30,8 @@ fn row(type_s: &str, desc: &str, depth: u8, checkable: bool, title: usize) -> Sc
         info: format!("{type_s} — {desc}"),
         pid: None,
         duration_secs: 0.0,
+        lang: String::new(),
+        forced: false,
     }
 }
 
@@ -69,7 +71,12 @@ fn two_title_disc() -> Scanned {
 }
 
 fn tree(sc: &Scanned, sel_mode: &str, min_secs: f64) -> Tree {
-    Tree::from_scan(sc, sel_mode, min_secs)
+    Tree::from_scan(sc, sel_mode, min_secs, &LangPrefs::default())
+}
+
+/// The same tree, built with preferred-language defaults.
+fn tree_prefs(sc: &Scanned, sel_mode: &str, prefs: &LangPrefs) -> Tree {
+    Tree::from_scan(sc, sel_mode, 0.0, prefs)
 }
 
 /// Arena position of the `n`th row of a given type.
@@ -1312,4 +1319,203 @@ fn a_format_the_source_cannot_offer_is_never_left_selected() {
     assert!(ok.mp4_possible());
     assert_eq!(ok.view().format, "Selected titles → MP4");
     assert_eq!(ok.effective_format(), "Selected titles → MP4");
+}
+
+// ══ preferred languages ════════════════════════════════════════════════════
+//
+// The user's request, verbatim: "German & Spanish audio, only German subtitles,
+// and forced only if in English." That is THREE independent sets, and each of
+// the tests below pins one property of that reading which a plausible
+// simplification would break.
+
+/// A one-title disc whose streams carry language tags. `(type, lang, forced)`,
+/// in stream order; PIDs are assigned from 0x1100 in that order so a test can
+/// name the stream it expects by position.
+fn tagged_disc(streams: &[(&str, &str, bool)]) -> Scanned {
+    let mut t = row("Title", "1.  playlist", 1, true, 0);
+    t.duration_secs = 5400.0;
+    let mut rows = vec![
+        row("Bluray disc", "TEST_DISC", 0, false, usize::MAX),
+        t,
+        row("Video", "H.264  1080p", 2, false, 0),
+    ];
+    for (i, (ty, lang, forced)) in streams.iter().enumerate() {
+        let mut r = row(ty, &format!("{ty}  {lang}"), 2, true, 0);
+        r.pid = Some(0x1100 + i as u16);
+        r.lang = (*lang).into();
+        r.forced = *forced;
+        rows.push(r);
+    }
+    Scanned {
+        label: "TEST_DISC".into(),
+        rows,
+        key_summary: "keys: none needed".into(),
+        title_count: 1,
+        video_codecs: vec!["H.264".into()],
+        details: vec![],
+    }
+}
+
+/// PID of the `i`th stream of `tagged_disc`.
+fn spid(i: u16) -> u16 {
+    0x1100 + i
+}
+
+/// The audio set keeps EVERY listed language at once — it is a set, not a
+/// first-match chain and not a single preferred language. "German & Spanish
+/// audio" must tick both German and Spanish and leave English alone.
+#[test]
+fn the_audio_preference_keeps_several_languages_at_once() {
+    let sc = tagged_disc(&[
+        ("Audio", "deu", false),
+        ("Audio", "spa", false),
+        ("Audio", "eng", false),
+    ]);
+    let prefs = LangPrefs::parse("German, Spanish", "", "");
+    let t = tree_prefs(&sc, "Main film only", &prefs);
+
+    let (mut audio, subs, explicit) = t.ticked_streams();
+    audio.sort_unstable();
+    assert_eq!(
+        audio,
+        vec![spid(0), spid(1)],
+        "both German AND Spanish audio must start ticked, and English must not"
+    );
+    assert!(subs.is_empty(), "the fixture has no subtitles");
+    assert!(
+        explicit,
+        "narrowing the tracks must reach the rip request as an explicit selection"
+    );
+
+    // The title itself stays selected — the preference narrows STREAMS, it
+    // never unselects the title the user asked to rip.
+    assert_eq!(t.ticked_titles(), vec![0]);
+    // ...and it reads as a partial selection in the UI, so the user can SEE
+    // that a choice was made for them and undo it.
+    assert_eq!(t.check_state(nth(&t, "Title", 0)), Check::Mixed);
+}
+
+/// The forced-subtitle set is its OWN set, not a filter applied on top of the
+/// subtitle set. "Only German subtitles, and forced only if in English" keeps
+/// the German non-forced subtitle and the ENGLISH forced one — a German forced
+/// subtitle is not wanted, and an English full subtitle is not either.
+#[test]
+fn the_forced_subtitle_set_is_honoured_independently_of_the_subtitle_set() {
+    let sc = tagged_disc(&[
+        ("Subtitles", "deu", false), // wanted: German, not forced
+        ("Subtitles", "eng", false), // unwanted: English full subtitles
+        ("Subtitles", "deu", true),  // unwanted: forced, but not English
+        ("Subtitles", "eng", true),  // wanted: forced English
+    ]);
+    let prefs = LangPrefs::parse("", "German", "English");
+    let t = tree_prefs(&sc, "Main film only", &prefs);
+
+    let (audio, mut subs, _) = t.ticked_streams();
+    subs.sort_unstable();
+    assert!(audio.is_empty(), "the fixture has no audio");
+    assert_eq!(
+        subs,
+        vec![spid(0), spid(3)],
+        "expected the German non-forced subtitle and the English FORCED one"
+    );
+
+    // The two sides are genuinely independent: swapping them swaps the result.
+    let swapped = tree_prefs(
+        &sc,
+        "Main film only",
+        &LangPrefs::parse("", "English", "German"),
+    );
+    let (_, mut sw, _) = swapped.ticked_streams();
+    sw.sort_unstable();
+    assert_eq!(sw, vec![spid(1), spid(2)]);
+}
+
+/// A disc that simply does not carry the preferred language falls back to
+/// today's behaviour FOR THAT CATEGORY — never to an empty class. A rip that
+/// silently ships without audio because the disc is Japanese-only is the worst
+/// possible outcome of a convenience default.
+#[test]
+fn a_language_the_disc_lacks_falls_back_to_keeping_that_whole_class() {
+    let sc = tagged_disc(&[
+        ("Audio", "jpn", false),
+        ("Audio", "kor", false),
+        ("Subtitles", "deu", false),
+        ("Subtitles", "eng", false),
+        ("Subtitles", "eng", true),
+    ]);
+    // German/Spanish audio is not on this disc; German subtitles are.
+    let prefs = LangPrefs::parse("German, Spanish", "German", "English");
+    let t = tree_prefs(&sc, "Main film only", &prefs);
+
+    let (mut audio, mut subs, _) = t.ticked_streams();
+    audio.sort_unstable();
+    subs.sort_unstable();
+    assert_eq!(
+        audio,
+        vec![spid(0), spid(1)],
+        "no preferred audio on the disc: keep EVERY audio track, as before"
+    );
+    // The fallback is per category, not disc-wide: the subtitle sets matched,
+    // so they are still honoured.
+    assert_eq!(
+        subs,
+        vec![spid(2), spid(4)],
+        "the subtitle categories matched and must NOT have fallen back"
+    );
+
+    // An unresolvable tag (a typo) is treated the same way — it cannot strip a
+    // class either.
+    let typo = tree_prefs(
+        &sc,
+        "Main film only",
+        &LangPrefs::parse("Klingonish", "", ""),
+    );
+    let (mut ta, _, _) = typo.ticked_streams();
+    ta.sort_unstable();
+    assert_eq!(ta, vec![spid(0), spid(1)]);
+}
+
+/// No preference set is EXACTLY today's behaviour: every stream of a checked
+/// title checked, every stream of an unchecked title clear.
+#[test]
+fn an_empty_preference_behaves_exactly_as_before() {
+    let sc = tagged_disc(&[
+        ("Audio", "deu", false),
+        ("Audio", "eng", false),
+        ("Subtitles", "eng", true),
+    ]);
+    let before = tree(&sc, "Main film only", 0.0);
+    let after = tree_prefs(&sc, "Main film only", &LangPrefs::parse("", "  ", ",;"));
+
+    for t in [&before, &after] {
+        let (mut audio, subs, explicit) = t.ticked_streams();
+        audio.sort_unstable();
+        assert_eq!(audio, vec![spid(0), spid(1)]);
+        assert_eq!(subs, vec![spid(2)]);
+        assert!(
+            !explicit,
+            "with no preference the selection must still be the implicit 'everything'"
+        );
+        assert_eq!(t.check_state(nth(t, "Title", 0)), Check::On);
+    }
+
+    // And a title that does NOT start checked keeps every stream clear, whether
+    // or not a preference is set — the preference narrows a selection, it never
+    // creates one.
+    let two = disc(&[(5400.0, 2), (600.0, 1)]);
+    let t = tree_prefs(&two, "Main film only", &LangPrefs::parse("German", "", ""));
+    assert_eq!(t.check_state(nth(&t, "Title", 1)), Check::Off);
+}
+
+/// The three boxes are parsed as comma/semicolon lists, because a language may
+/// be given by NAME and names contain spaces. Splitting on whitespace would
+/// turn "Modern Greek" into two tags that resolve to nothing.
+#[test]
+fn language_lists_split_on_commas_not_on_spaces() {
+    let p = LangPrefs::parse("German, Spanish", " Modern Greek ;de ", "en,,");
+    assert_eq!(p.audio, vec!["German", "Spanish"]);
+    assert_eq!(p.subtitles, vec!["Modern Greek", "de"]);
+    assert_eq!(p.forced, vec!["en"]);
+    assert!(!p.is_empty());
+    assert!(LangPrefs::parse("", " ", " , ; ").is_empty());
 }
