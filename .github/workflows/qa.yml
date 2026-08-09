@@ -309,6 +309,14 @@ jobs:
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
       - uses: dtolnay/rust-toolchain@1.97.0
+      # The step below hands the suite an explicit FMKV_BIN, which suppresses
+      # the build the suite would otherwise do for itself -- so without this,
+      # it is handed a path nothing ever produced and dies on "binary not
+      # executable" before running a single case.
+      - name: Build the CLI the suite will drive
+        shell: bash
+        working-directory: freemkv
+        run: cargo build --release --bin freemkv
       - name: Real-media acceptance
         shell: bash
         env:

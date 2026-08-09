@@ -1,0 +1,118 @@
+name: release-cascade
+
+# ── "Bump the version, push to main, and it ships" ──────────────────────────
+#
+# The cascade itself stays in release.sh. That script is the only place that
+# knows the dependency order, the path->git-tag dep swaps, the lockfile
+# invariant and the changelog dating, and every one of those rules was learned
+# from a release that went wrong. Re-expressing them as workflow steps would
+# fork that knowledge into a second copy that drifts -- which is exactly the
+# bug class this workflow exists to end. So CI RUNS the script; it does not
+# reimplement it.
+#
+# WHY SELF-HOSTED: release.sh lives in the private repo, which is reachable
+# only from inside the network. It is named by a repo variable rather than
+# cloned here, for the same reason the acceptance suite is: this file is
+# public, and naming the host it comes from would put internal infrastructure
+# into a public workflow, which the leak guard correctly refuses.
+#
+# SAFETY -- why an ordinary push to main cannot publish anything:
+#   * the job derives the version from Cargo.toml and does NOTHING if a tag
+#     for it already exists. Releasing is therefore "bump the version", not
+#     "push"; every other push to main is a no-op that logs why.
+#   * concurrency is serialised, so two pushes cannot cascade at once.
+#   * release.sh's own preflight still runs in full -- clean trees, CI green
+#     on all eight repos, fresh real-media evidence, changelog readiness. CI
+#     is a new way to START the release, not a way to skip its gates.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (blank = read it from Cargo.toml)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Preview only -- run every gate, tag nothing'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: release-cascade
+  cancel-in-progress: false
+
+jobs:
+  cascade:
+    runs-on: [self-hosted, freemkv-media]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      # Decide whether this push is a release at all, before touching anything.
+      - name: Is this version already released?
+        id: decide
+        shell: bash
+        run: |
+          set -euo pipefail
+          want='${{ inputs.version }}'
+          if [ -z "$want" ]; then
+            want=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+          fi
+          [ -n "$want" ] || { echo "::error::no version in Cargo.toml"; exit 1; }
+          echo "version=$want" >> "$GITHUB_OUTPUT"
+
+          if git ls-remote --exit-code --tags origin "v$want" >/dev/null 2>&1; then
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "v$want is already tagged - nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            echo "To release, bump the version in Cargo.toml and push again." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+            echo "Releasing **v$want**." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+        if: steps.decide.outputs.go == 'true'
+
+      - name: Run the cascade
+        if: steps.decide.outputs.go == 'true'
+        shell: bash
+        env:
+          RELEASE_SH: ${{ vars.FMKV_RELEASE_SH }}
+          # A token that may push to every crate repo and the docs site. The
+          # default GITHUB_TOKEN is scoped to this repository alone, so it
+          # cannot tag the other seven -- it would fail partway through a
+          # cascade that is not safely resumable at that point.
+          GH_TOKEN: ${{ secrets.FMKV_RELEASE_TOKEN }}
+          DRY: ${{ inputs.dry_run }}
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -x "$RELEASE_SH" || {
+            echo "::error::release script not found at '$RELEASE_SH' - set the FMKV_RELEASE_SH repo variable to its path on the runner"
+            exit 2
+          }
+          [ -n "$GH_TOKEN" ] || {
+            echo "::error::FMKV_RELEASE_TOKEN is not set - the cascade cannot push to the other repositories without it"
+            exit 2
+          }
+
+          git config --global user.name  "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          git config --global credential.helper store
+          printf 'https://x-access-token:%s@github.com\n' "$GH_TOKEN" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+
+          # A workflow_dispatch defaults to a preview; a push to main with a
+          # new version is the real thing. The default is the safe direction:
+          # someone clicking Run workflow to see what would happen gets a
+          # preview, not a published release.
+          args=()
+          [ "${DRY:-}" = "true" ] && args+=(--dry-run)
+          "$RELEASE_SH" "${args[@]}" "$VERSION"
+
+      - name: Scrub credentials
+        if: always()
+        shell: bash
+        run: rm -f ~/.git-credentials
