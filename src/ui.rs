@@ -1379,10 +1379,17 @@ impl App {
     /// on screen before the window goes quiet, instead of appearing with the
     /// finished title list.
     ///
-    /// `announce_missing` controls the one message that is only appropriate
-    /// when a human asked: "no optical drive found". True for the menu item and
-    /// the button; false for the launch probe, where nobody asked and a machine
-    /// with no drive must simply see nothing.
+    /// `announce_missing` separates the two callers. True for the menu item and
+    /// the button, where a human asked and deserves an answer either way. False
+    /// for the launch probe, where NOBODY asked: it must open a disc that
+    /// happens to be there and otherwise leave no trace.
+    ///
+    /// "No trace" covers more than an absent drive. A drive with an empty tray
+    /// is the ordinary case on a machine that has one, and enumerating drives
+    /// says nothing about whether media is loaded — so the probe used to pick
+    /// that drive, announce it, fail to scan it, and put an error on screen at
+    /// every launch. That is worse than the silence it replaced. When nobody
+    /// asked, a drive is only worth opening if it actually holds something.
     pub fn disc_source(&mut self, announce_missing: bool) -> Option<String> {
         let drives = crate::engine::list_optical_drives();
         if drives.is_empty() {
@@ -1391,16 +1398,27 @@ impl App {
             }
             return None;
         }
+        // A probe nobody asked for must not GUESS a drive. Bare `disc://`
+        // means autodetect — the resolver tries every drive and takes the one
+        // that actually holds media — which is the right answer at launch
+        // whether the machine has one drive or four. Naming drives[0] because
+        // it happened to be the only one enumerated picked a drive with an
+        // empty tray and then reported a scan failure the user never asked for.
+        if !announce_missing {
+            return Some("disc://".to_string());
+        }
         // One drive → that device; several → autodetect the one with media,
         // and log what was found so the user knows which drives are present.
         if drives.len() == 1 {
-            self.say(
-                LogKind::Detail,
-                &crate::strings::fmt(
-                    "gui.log.opening_drive",
-                    &[("label", &drives[0].label), ("device", &drives[0].device)],
-                ),
-            );
+            if announce_missing {
+                self.say(
+                    LogKind::Detail,
+                    &crate::strings::fmt(
+                        "gui.log.opening_drive",
+                        &[("label", &drives[0].label), ("device", &drives[0].device)],
+                    ),
+                );
+            }
             Some(format!("disc://{}", drives[0].device))
         } else {
             let list = drives
@@ -1421,6 +1439,18 @@ impl App {
 
     /// Open a source: scan it, rebuild the tree, report honestly on failure.
     pub fn open(&mut self, path: &str) -> Vec<Effect> {
+        self.open_inner(path, false)
+    }
+
+    /// Open something NOBODY asked to open, leaving no trace if it is not
+    /// there. Used by the launch probe: a disc already in the drive should just
+    /// appear, and an empty tray should look exactly like the app did before
+    /// the probe existed.
+    pub fn open_probe(&mut self, path: &str) -> Vec<Effect> {
+        self.open_inner(path, true)
+    }
+
+    fn open_inner(&mut self, path: &str, quiet: bool) -> Vec<Effect> {
         let container = is_container(path);
         let disc = crate::engine::is_disc_source(path);
         // "Log detail: Verbose" (or Debug) reveals the resolved keys in the
@@ -1511,7 +1541,16 @@ impl App {
                 }
             }
             Err(e) => {
-                self.say(LogKind::Notice, &e);
+                // The launch probe opens a drive NOBODY asked it to open. A
+                // drive with an empty tray is the ordinary state of a machine
+                // that has one, and enumerating drives says nothing about
+                // whether media is loaded — so this arm is the common case at
+                // launch, not the rare one. Announcing it put an error on
+                // screen every time the app started, which is worse than the
+                // silence the probe replaced.
+                if !quiet {
+                    self.say(LogKind::Notice, &e);
+                }
                 self.page = Page::Empty;
             }
         }
@@ -1839,6 +1878,34 @@ mod tests {
         // The bug this pins: a 6 GB output once read "6103.5 M".
         assert_eq!(fmt_bytes(6 * 1024 * 1024 * 1024), "6.00 GB");
         assert_eq!(fmt_bytes(64_424_509_440), "60.00 GB");
+    }
+
+    /// The launch probe opens a drive nobody asked it to open. A drive with an
+    /// empty tray is the ORDINARY state of a machine that has one, and
+    /// enumerating drives says nothing about whether media is loaded — so a
+    /// failed probe is the common case at startup, not the rare one.
+    ///
+    /// It must look exactly like the app did before the probe existed: no
+    /// notice, no log line, and the empty page still showing. A prompted open
+    /// of the same bad source must still report, because a human asked.
+    #[test]
+    fn a_failed_probe_says_nothing_but_a_failed_open_still_reports() {
+        let mut app = App::new();
+        let before = app.log.len();
+        app.open_probe("iso:///nonexistent/definitely-not-here.iso");
+        assert_eq!(
+            app.log.len(),
+            before,
+            "an unprompted probe that finds nothing must leave no trace, got: {:?}",
+            &app.log[before..]
+        );
+        assert!(matches!(app.page, Page::Empty));
+
+        app.open("iso:///nonexistent/definitely-not-here.iso");
+        assert!(
+            app.log.len() > before,
+            "a human who asked must be told the source could not be opened"
+        );
     }
 
     #[test]
