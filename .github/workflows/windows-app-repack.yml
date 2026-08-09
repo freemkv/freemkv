@@ -51,13 +51,13 @@ jobs:
   repack:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || env.REPACK_TAG }}
           path: freemkv
       # The tag's manifest path-deps its sibling, exactly as the release build
       # did; check out the matching tag so this is the same code that shipped.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-unlock
           ref: ${{ inputs.tag || env.REPACK_TAG }}
