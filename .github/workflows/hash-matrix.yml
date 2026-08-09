@@ -175,9 +175,16 @@ jobs:
                     "meaningless. Pin the sibling refs.")
               fail = True
 
-          if len(plats) < 2:
-              print("::error::fewer than two platforms reported hashes -- "
-                    "nothing was actually compared")
+          # Name the platforms that MUST report, rather than accepting whatever
+          # turned up. A run where one leg died before writing its hashes would
+          # otherwise compare the surviving two, agree, and go green -- reporting
+          # three-way parity having tested two, with the missing platform being
+          # the one that failed and so the one most worth comparing.
+          EXPECTED = {"ubuntu-latest", "macos-latest", "windows-latest"}
+          absent = sorted(EXPECTED - set(plats))
+          if absent:
+              print(f"::error::no hashes from {', '.join(absent)} -- that platform "
+                    "was never compared, so this run cannot claim parity across all three")
               fail = True
 
           for name in sorted(arts):

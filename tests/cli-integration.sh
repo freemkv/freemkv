@@ -98,10 +98,17 @@ out_has() {
 }
 
 # ffprobe helpers
-nstreams() { ffprobe -v error -show_entries stream=index -of csv=p=0 "$1" 2>/dev/null | grep -c .; }
-codec_types() { ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "$1" 2>/dev/null | sort | tr '\n' ',' ; }
-audio_langs() { ffprobe -v error -select_streams a -show_entries stream_tags=language -of csv=p=0 "$1" 2>/dev/null | sort | tr '\n' ',' ; }
-duration_i()  { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" 2>/dev/null | cut -d. -f1; }
+#
+# Every one strips CR. ffprobe on Windows ends its lines with CRLF, so folding
+# them with `tr '\n' ','` leaves the CR embedded and "audio,audio,video," is
+# compared against "audio\r,audio\r,video\r," -- three failures that say the
+# codecs and languages are wrong when they are identical. The outputs were
+# byte-for-byte equal to linux and macOS the whole time; only the assertions
+# disagreed. Harmless on platforms that never emit a CR.
+nstreams() { ffprobe -v error -show_entries stream=index -of csv=p=0 "$1" 2>/dev/null | tr -d '\r' | grep -c .; }
+codec_types() { ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "$1" 2>/dev/null | tr -d '\r' | sort | tr '\n' ',' ; }
+audio_langs() { ffprobe -v error -select_streams a -show_entries stream_tags=language -of csv=p=0 "$1" 2>/dev/null | tr -d '\r' | sort | tr '\n' ',' ; }
+duration_i()  { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" 2>/dev/null | tr -d '\r' | cut -d. -f1; }
 
 # ── Generate test media (Blu-ray-legal codecs: H.264 + AC-3) ──────────────────
 group "Generate test media"
