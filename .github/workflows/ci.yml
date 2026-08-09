@@ -494,3 +494,41 @@ jobs:
           workspaces: freemkv
       - run: cargo check --lib
         working-directory: freemkv
+
+  # The macOS bundle carries its own version, and the release build refuses to
+  # run when it disagrees with the tag. That check is correct but it fires
+  # AFTER the tag is public, so its verdict can only burn a version number:
+  # v1.6.1 and v1.6.2 were both tagged, pushed, and then failed at the first
+  # job of the release build on a bundle version nobody had bumped.
+  #
+  # Checking it here, on every push, means the two files cannot drift in the
+  # first place -- so by the time a release reads them they already agree, and
+  # the release-time check becomes a formality rather than a gate anyone can
+  # arrive at too late.
+  version-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Cargo.toml and Info.plist must agree
+        shell: bash
+        run: |
+          set -euo pipefail
+          crate=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+          short=$(sed -n 's/.*<key>CFBundleShortVersionString<\/key><string>\(.*\)<\/string>.*/\1/p' macos/Info.plist)
+          bundle=$(sed -n 's/.*<key>CFBundleVersion<\/key><string>\(.*\)<\/string>.*/\1/p' macos/Info.plist)
+
+          echo "Cargo.toml                  $crate"
+          echo "CFBundleShortVersionString  $short"
+          echo "CFBundleVersion             $bundle"
+
+          rc=0
+          [ -n "$crate" ] || { echo "::error::could not read version from Cargo.toml"; rc=1; }
+          [ "$short" = "$crate" ] || {
+            echo "::error file=macos/Info.plist::CFBundleShortVersionString is '$short' but Cargo.toml says '$crate'"
+            rc=1
+          }
+          [ "$bundle" = "$crate" ] || {
+            echo "::error file=macos/Info.plist::CFBundleVersion is '$bundle' but Cargo.toml says '$crate'"
+            rc=1
+          }
+          exit $rc
