@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "block2",
  "freemkv-engine",
@@ -318,7 +318,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.6.1"
+version = "1.6.2"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.2#cf47ddc29f5666c81dab399e75c47b46bfa123c4"
 dependencies = [
  "freemkv-keysources",
  "isolang",
@@ -329,14 +330,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.6.1"
+version = "1.6.2"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.2#003de394abe50bcb72da996c9f044d91a7195a96"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.6.1"
+version = "1.6.2"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.2#1438aac052ccde4d846fd3271af0439395030ce4"
 dependencies = [
  "base64",
  "flate2",
@@ -349,7 +352,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.6.1"
+version = "1.6.2"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.2#b906fd9a117ffaa0cf56f52a79d5e0dbdffd5955"
 dependencies = [
  "aes",
  "base64",
@@ -542,7 +546,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.6.1"
+version = "1.6.2"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.2#50dfe877b9c2ec28f7bb7c2156a8f0215563a5ef"
 dependencies = [
  "aes",
  "base64",
@@ -1167,18 +1172,18 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.19"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.19"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
