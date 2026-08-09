@@ -1,0 +1,205 @@
+name: hash-matrix
+
+# Cross-platform output parity for the WHOLE CLI suite.
+#
+# parity.yml already proves linux/macOS/Windows agree on one remux
+# (mkv://->mkv://). This runs the entire cli-integration suite on all three and
+# compares every artifact it produces, so the claim covers the container
+# conversions and the stdio round-trip as well as the plain remux.
+#
+# THE INPUT IS GENERATED ONCE AND SHARED. Encoder output differs between ffmpeg
+# builds, so three runners each generating their own master produce three
+# different inputs -- and comparing the outputs would then be measuring the
+# runners' ffmpeg rather than this program. That is exactly why the ledger in
+# cli-integration.sh keys per platform and explicitly leaves cross-platform
+# equality to a workflow like this one.
+#
+# Runs on `qa` and on demand: it is a release gate, not a linter.
+on:
+  push:
+    branches: [qa]
+  workflow_dispatch:
+
+jobs:
+  media:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # ubuntu-latest does not ship ffmpeg preinstalled.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Generate the shared master.mkv
+        run: |
+          # Byte-for-byte the invocation in tests/cli-integration.sh, so the
+          # shared media is the media that suite was written against.
+          ffmpeg -v error -f lavfi -i testsrc=duration=6:size=640x480:rate=24 \
+            -f lavfi -i sine=frequency=440:duration=6 \
+            -f lavfi -i sine=frequency=880:duration=6 \
+            -map 0:v -map 1:a -map 2:a -c:v libx264 -pix_fmt yuv420p -c:a ac3 -b:a 192k \
+            -metadata:s:a:0 language=eng -metadata:s:a:1 language=spa master.mkv
+          sha256sum master.mkv
+      - uses: actions/upload-artifact@v4
+        with: { name: matrix-master-media, path: master.mkv }
+
+  suite:
+    needs: media
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { path: freemkv }
+      # Siblings are path deps and must sit BESIDE freemkv: the committed
+      # Cargo.toml patches them to git tags and the .cargo/config.toml that
+      # redirects to paths is gitignored, so a bare checkout cannot resolve them.
+      - uses: actions/checkout@v5
+        with: { repository: freemkv/libfreemkv, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
+      - uses: actions/checkout@v5
+        with: { repository: freemkv/freemkv-engine, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-engine }
+      - uses: actions/checkout@v5
+        with: { repository: freemkv/freemkv-keysources, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-keysources }
+      - uses: actions/checkout@v5
+        with: { repository: freemkv/freemkv-i18n, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
+      - uses: actions/checkout@v5
+        with: { repository: freemkv/freemkv-unlock, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
+      - name: Point the patches at the sibling checkouts
+        shell: bash
+        run: |
+          mkdir -p freemkv/.cargo
+          cat > freemkv/.cargo/config.toml <<'CFG'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+
+          [patch."https://github.com/freemkv/freemkv-unlock"]
+          freemkv-unlock = { path = "../freemkv-unlock" }
+          CFG
+      - name: Record the libfreemkv sha
+        shell: bash
+        run: |
+          # MUX_APP (mux/mkv.rs MuxingApp/WritingApp) carries libfreemkv's short
+          # sha, so two runs built from different libfreemkv commits differ in
+          # output BYTES while being functionally identical. The compare job
+          # refuses to read anything into a mismatch unless these agree.
+          echo "LF_SHA=$(git -C libfreemkv rev-parse --short HEAD)" >> "$GITHUB_ENV"
+      - name: Install ffmpeg
+        shell: bash
+        run: |
+          # The suite verifies its outputs with ffprobe throughout, so ffmpeg is
+          # needed even though the media itself now arrives pre-made.
+          case "${{ matrix.os }}" in
+            ubuntu-*)  sudo apt-get update && sudo apt-get install -y ffmpeg ;;
+            macos-*)   brew install ffmpeg ;;
+            windows-*) choco install ffmpeg -y --no-progress ;;
+          esac
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: freemkv }
+      - run: cargo build --release --bin freemkv
+        working-directory: freemkv
+      - uses: actions/download-artifact@v4
+        with: { name: matrix-master-media, path: shared }
+      - name: Run the CLI suite against the shared media
+        shell: bash
+        run: |
+          set -uo pipefail
+          BIN="$PWD/freemkv/target/release/freemkv"
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          FMKV_BIN="$BIN" \
+          FMKV_MASTER="$PWD/shared/master.mkv" \
+          FMKV_HASHES="$PWD/hashes-${{ matrix.os }}.txt" \
+            bash freemkv/tests/cli-integration.sh
+          rc=$?
+          echo "libfreemkv=$LF_SHA" >> "hashes-${{ matrix.os }}.txt"
+          echo "--- hashes recorded on ${{ matrix.os }} ---"
+          cat "hashes-${{ matrix.os }}.txt"
+          exit $rc
+      # if: always() -- a suite that FAILED still produced artifacts, and those
+      # are the ones worth comparing: "windows diverged" is the more useful
+      # sentence when the windows run is also the one that went red.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: "matrix-hashes-${{ matrix.os }}"
+          path: "hashes-${{ matrix.os }}.txt"
+
+  compare:
+    needs: suite
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: "matrix-hashes-*", merge-multiple: true, path: hashes }
+      - name: Every platform must produce the same bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -1 hashes/ || { echo "::error::no hash files were produced"; exit 1; }
+          python3 - <<'PY'
+          import glob, os, sys, collections
+
+          # artifact -> {platform: hash}; and platform -> libfreemkv sha
+          arts = collections.defaultdict(dict)
+          shas = {}
+          files = sorted(glob.glob("hashes/*.txt"))
+          if not files:
+              print("::error::no hash files to compare"); sys.exit(1)
+
+          for path in files:
+              plat = os.path.basename(path)[len("hashes-"):-len(".txt")]
+              for line in open(path):
+                  line = line.strip()
+                  if not line:
+                      continue
+                  if line.startswith("libfreemkv="):
+                      shas[plat] = line.split("=", 1)[1]
+                      continue
+                  h, _, name = line.partition("  ")
+                  arts[name.strip()][plat] = h
+
+          plats = sorted({p for v in arts.values() for p in v})
+          print("platforms:", ", ".join(plats) or "(none)")
+
+          fail = False
+
+          # A differing libfreemkv sha changes MUX_APP, so the output bytes
+          # differ for a reason that is not a divergence. Refuse to judge in
+          # that case rather than report a mismatch that means nothing.
+          if len(set(shas.values())) > 1:
+              print("::error::libfreemkv shas differ across the matrix "
+                    f"({shas}) -- MUX_APP differs, so a byte comparison would be "
+                    "meaningless. Pin the sibling refs.")
+              fail = True
+
+          if len(plats) < 2:
+              print("::error::fewer than two platforms reported hashes -- "
+                    "nothing was actually compared")
+              fail = True
+
+          for name in sorted(arts):
+              by = arts[name]
+              missing = [p for p in plats if p not in by]
+              uniq = set(by.values())
+              if len(uniq) == 1 and not missing:
+                  print(f"  OK    {name}: identical on all {len(by)} platforms")
+              elif len(uniq) == 1:
+                  # Agreeing where produced is NOT the claim this gate makes.
+                  # A platform that never produced the artifact was never
+                  # compared, and passing here would report parity across three
+                  # platforms while having checked two -- coverage that only
+                  # looks like coverage.
+                  fail = True
+                  print(f"::error::{name} was NOT produced on {', '.join(missing)} "
+                        "-- it agrees where it exists, but that platform is unproven")
+              else:
+                  fail = True
+                  print(f"::error::{name} DIFFERS across platforms:")
+                  for p in sorted(by):
+                      print(f"      {p:16} {by[p]}")
+
+          sys.exit(1 if fail else 0)
+          PY

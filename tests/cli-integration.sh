@@ -64,7 +64,11 @@ emit_hashes() {
     printf '%s  %s\n' "$h" "$f" >> "$FMKV_HASHES"
   done
 }
-trap cleanup EXIT
+# emit_hashes BEFORE cleanup, and on every exit path including a fatal one:
+# cleanup deletes $WORK, so hashing afterwards would find nothing. Ordering
+# them in one trap is what makes the hashes survive a run that failed partway,
+# which is exactly the run whose artifacts are worth comparing.
+trap 'emit_hashes; cleanup' EXIT
 cd "$WORK"
 
 # ── Test harness ──────────────────────────────────────────────────────────────
@@ -101,7 +105,20 @@ duration_i()  { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" 
 
 # ── Generate test media (Blu-ray-legal codecs: H.264 + AC-3) ──────────────────
 group "Generate test media"
-if ffmpeg -v error -f lavfi -i testsrc=duration=6:size=640x480:rate=24 \
+# FMKV_MASTER supplies the media instead of generating it. This exists for the
+# cross-platform hash matrix: encoder output differs between ffmpeg builds, so
+# three runners each generating their own master produce three different inputs,
+# and comparing their outputs then measures the runners' ffmpeg rather than
+# freemkv. One master, generated once and shared, is what makes "all three
+# platforms produced the same bytes" a statement about this program.
+if [ -n "${FMKV_MASTER:-}" ]; then
+  if [ -f "$FMKV_MASTER" ] && cp "$FMKV_MASTER" master.mkv; then
+    ok "using the supplied master.mkv ($(nstreams master.mkv) streams)"
+  else
+    bad "FMKV_MASTER set to '$FMKV_MASTER' but it is not a readable file"
+    echo "cannot continue without media" >&2; exit 2
+  fi
+elif ffmpeg -v error -f lavfi -i testsrc=duration=6:size=640x480:rate=24 \
      -f lavfi -i sine=frequency=440:duration=6 \
      -f lavfi -i sine=frequency=880:duration=6 \
      -map 0:v -map 1:a -map 2:a -c:v libx264 -pix_fmt yuv420p -c:a ac3 -b:a 192k \
