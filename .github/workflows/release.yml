@@ -117,7 +117,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 target/freemkv.app
 
       - name: Upload
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ matrix.asset }}.dmg
@@ -240,7 +240,7 @@ jobs:
           }
 
       - name: Upload
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ matrix.asset }}.zip
@@ -324,7 +324,7 @@ jobs:
           cp "$BIN" "$A-$VER$E"
           sha256sum "$A$E" "$A-$VER$E" > "$A$E.sha256"
       - name: Upload
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ matrix.asset }}${{ matrix.ext }}
