@@ -258,7 +258,13 @@ jobs:
     # Gating on the repo variable does: unconfigured, the job is skipped and the
     # workflow completes; configured, it runs exactly as before. The variable is
     # the one this job cannot work without, so it is the honest condition.
-    if: vars.FMKV_ACCEPTANCE != ''
+    #
+    # AND only on a PUSH. These repos are public and this runner holds the key
+    # database, so a job a fork could trigger is a job that can walk away with
+    # AACS key material. A fork cannot push to this branch, so keying on the
+    # event — not on approval settings someone can relax later — is what makes
+    # that unreachable.
+    if: vars.FMKV_ACCEPTANCE != '' && github.event_name == 'push'
     runs-on: [self-hosted, freemkv-media]
     timeout-minutes: 90
     steps:
