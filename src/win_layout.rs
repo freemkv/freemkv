@@ -845,6 +845,32 @@ mod tests {
     /// 2 gaps, 2 checkboxes).
     #[test]
     fn the_tallest_settings_pages_still_fit_the_settings_window() {
+        // COUNT THE REAL PAGE, do not restate it. The previous version carried
+        // hand-written row counts ("5 * row_step"), so adding a control to the
+        // actual Settings page in windows.rs left this green while the page it
+        // claims to measure grew past the window. Nothing tied the two
+        // together, and they live in different files.
+        //
+        // The page builders mark their sections with `// ── Name ──` and add
+        // rows through `r.field` / `r.note` / `r.check`, so the composition can
+        // be read straight out of the shell. Add a row there and this test
+        // measures it, whether or not anyone remembers to come here.
+        let shell = include_str!("windows.rs");
+        let section = |name: &str| -> (usize, usize, usize) {
+            let head = format!("// ── {name} ──");
+            let from = shell
+                .find(&head)
+                .unwrap_or_else(|| panic!("no {name} section in windows.rs"));
+            let rest = &shell[from + head.len()..];
+            let to = rest.find("// ── ").unwrap_or(rest.len());
+            let body = &rest[..to];
+            (
+                body.matches("r.field(").count(),
+                body.matches("r.note(").count(),
+                body.matches("r.check(").count(),
+            )
+        };
+
         for dpi in DPIS {
             let f = form_metrics(dpi);
             let s = Scale::new(dpi);
@@ -853,17 +879,25 @@ mod tests {
             // first row can be drawn.
             let page = s.px(PREFS_H) - s.px(66) - s.px(28);
 
-            let selection = f.top + 5 * f.row_step + 2 * f.note_step + f.gap;
-            assert!(
-                selection <= page,
-                "Selection page needs {selection}px of {page}px at {dpi} dpi"
-            );
-
-            let recovery = f.top + 3 * f.row_step + 3 * f.note_step + 2 * f.gap + 2 * f.check_step;
-            assert!(
-                recovery <= page,
-                "Recovery page needs {recovery}px of {page}px at {dpi} dpi"
-            );
+            for name in ["Selection", "Recovery"] {
+                let (fields, notes, checks) = section(name);
+                assert!(
+                    fields + notes + checks > 0,
+                    "{name} section parsed as empty — the marker or the row \
+                     helpers were renamed, so this test stopped measuring \
+                     anything"
+                );
+                let needed = f.top
+                    + fields as i32 * f.row_step
+                    + notes as i32 * f.note_step
+                    + checks as i32 * f.check_step
+                    + f.gap;
+                assert!(
+                    needed <= page,
+                    "{name} page needs {needed}px of {page}px at {dpi} dpi \
+                     ({fields} fields, {notes} notes, {checks} checks)"
+                );
+            }
         }
     }
 }
