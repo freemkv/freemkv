@@ -43,7 +43,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Stamp the next rc
@@ -71,30 +71,30 @@ jobs:
         os: ['ubuntu-latest', 'macos-latest']
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           path: freemkv
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/libfreemkv
           ref: qa
           path: libfreemkv
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-keysources
           ref: qa
           path: freemkv-keysources
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-engine
           ref: qa
           path: freemkv-engine
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-i18n
           ref: qa
           path: freemkv-i18n
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-unlock
           ref: qa
@@ -124,30 +124,30 @@ jobs:
   cross-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           path: freemkv
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/libfreemkv
           ref: qa
           path: libfreemkv
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-keysources
           ref: qa
           path: freemkv-keysources
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-engine
           ref: qa
           path: freemkv-engine
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-i18n
           ref: qa
           path: freemkv-i18n
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-unlock
           ref: qa
@@ -181,30 +181,30 @@ jobs:
   windows-build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           path: freemkv
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/libfreemkv
           ref: qa
           path: libfreemkv
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-keysources
           ref: qa
           path: freemkv-keysources
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-engine
           ref: qa
           path: freemkv-engine
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-i18n
           ref: qa
           path: freemkv-i18n
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-unlock
           ref: qa
@@ -268,30 +268,30 @@ jobs:
     runs-on: [self-hosted, freemkv-media]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           path: freemkv
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/libfreemkv
           ref: qa
           path: libfreemkv
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-keysources
           ref: qa
           path: freemkv-keysources
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-engine
           ref: qa
           path: freemkv-engine
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-i18n
           ref: qa
           path: freemkv-i18n
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-unlock
           ref: qa
@@ -353,30 +353,30 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           path: freemkv
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/libfreemkv
           ref: qa
           path: libfreemkv
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-keysources
           ref: qa
           path: freemkv-keysources
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-engine
           ref: qa
           path: freemkv-engine
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-i18n
           ref: qa
           path: freemkv-i18n
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: freemkv/freemkv-unlock
           ref: qa

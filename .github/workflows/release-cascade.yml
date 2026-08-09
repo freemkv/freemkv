@@ -48,7 +48,7 @@ jobs:
     runs-on: [self-hosted, freemkv-media]
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Decide whether this push is a release at all, before touching anything.
       - name: Is this version already released?
