@@ -24,7 +24,7 @@ jobs:
   media:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # ubuntu-latest does not ship ffmpeg preinstalled.
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -49,20 +49,20 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { path: freemkv }
       # Siblings are path deps and must sit BESIDE freemkv: the committed
       # Cargo.toml patches them to git tags and the .cargo/config.toml that
       # redirects to paths is gitignored, so a bare checkout cannot resolve them.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { repository: freemkv/libfreemkv, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { repository: freemkv/freemkv-engine, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-engine }
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { repository: freemkv/freemkv-keysources, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-keysources }
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { repository: freemkv/freemkv-i18n, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { repository: freemkv/freemkv-unlock, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
       - name: Point the patches at the sibling checkouts
         shell: bash
@@ -238,17 +238,17 @@ jobs:
       id-token: write   # OIDC; nothing else is needed
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { path: freemkv }
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { repository: freemkv/libfreemkv, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { repository: freemkv/freemkv-engine, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-engine }
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { repository: freemkv/freemkv-keysources, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-keysources }
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { repository: freemkv/freemkv-i18n, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { repository: freemkv/freemkv-unlock, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
       - name: Point the patches at the sibling checkouts
         shell: bash
