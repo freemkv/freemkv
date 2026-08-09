@@ -1,0 +1,48 @@
+version: 2
+
+# Dependency updates land on `dev`, never on `main`.
+#
+# `main` here is a RELEASE POINTER that release.sh moves to each tag. A bot
+# commit on it would put work there that no tag contains, which is exactly the
+# state that aborted the 1.6.2 cascade at the last step -- so pointing
+# Dependabot at main would recreate that failure on a schedule.
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # One PR per week for the routine bumps instead of one per crate. Eight
+    # repos times a handful of crates is a volume nobody reads, and an
+    # unread PR queue is indistinguishable from no updates at all.
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # The freemkv crates depend on each other by GIT TAG, re-pinned by
+      # release.sh as part of the release commit. Dependabot cannot see that
+      # cascade, so a PR bumping one of these would fight the release process
+      # and could pin a version whose tag does not exist yet.
+      - dependency-name: freemkv-unlock
+      - dependency-name: libfreemkv
+      - dependency-name: freemkv-keysources
+      - dependency-name: freemkv-i18n
+      - dependency-name: freemkv-engine
+
+  # The workflows are now real infrastructure -- the release cascade, the
+  # cross-platform hash matrix, the disc gate -- so their actions need the same
+  # attention as the crates.
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        update-types:
+          - minor
+          - patch
