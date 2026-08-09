@@ -1146,7 +1146,13 @@ impl Controller {
         let Some(url) = self.app_mut(|a| a.disc_source(announce_missing)) else {
             return;
         };
-        let fx = self.app_mut(|a| a.open(&url));
+        let fx = self.app_mut(|a| {
+            if announce_missing {
+                a.open(&url)
+            } else {
+                a.open_probe(&url)
+            }
+        });
         self.perform(fx);
     }
 

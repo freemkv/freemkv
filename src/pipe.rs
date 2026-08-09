@@ -3348,9 +3348,44 @@ mod tests {
         dest_is_directory, disc_copy_recovered_data, disc_title_nums, fmt_disc_damage, fmt_err,
         fmt_err_str, is_keyserver_url, is_metadata_sink, is_scheme_only_sink, is_url_token,
         mp4_skip_reason_key, parse_error_code, parse_flags, parse_stream_spec, preflight_validate,
-        render_error, resolved_keydb_path, sanitize_name, title_in_range, validate_file_dest,
-        validate_iso_input,
+        render_error, resolved_keydb_path, sanitize_name, title_in_range, validate_dir_input,
+        validate_file_dest, validate_iso_input,
     };
+
+    /// `dir://` source validation, which had no test at all.
+    ///
+    /// It exists to stop a mistyped folder from printing "Opening ... OK"
+    /// followed by a bare OS error further down. Without a test, deleting the
+    /// call in `preflight_validate` restores that behaviour silently — the
+    /// three sibling checks around it are covered, this one was not.
+    #[test]
+    fn a_dir_source_must_exist_and_be_a_directory() {
+        let base = std::env::temp_dir().join(format!("fmkv-dirval-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // A real directory passes.
+        assert!(validate_dir_input(&base).is_ok());
+
+        // A path that is not there is refused, and names itself.
+        let missing = base.join("no-such-folder");
+        let err = validate_dir_input(&missing).expect_err("a missing folder must be refused");
+        assert!(
+            err.contains(&missing.display().to_string()),
+            "the message must name the path the user typed, got: {err}"
+        );
+
+        // A FILE where a folder was meant is refused — the mistake a user
+        // actually makes is pointing dir:// at the .iso next to the folder.
+        let file = base.join("VIDEO_TS.iso");
+        std::fs::write(&file, b"not a folder").unwrap();
+        assert!(
+            validate_dir_input(&file).is_err(),
+            "a file is not a folder and must not reach open"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
     use crate::output::Output;
     use crate::strings;
     use libfreemkv::parse_url;
