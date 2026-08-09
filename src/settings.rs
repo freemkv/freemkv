@@ -18,6 +18,18 @@ pub struct Settings {
     // Selection
     pub selection: String,
     pub min_title_secs: String,
+    /// Preferred AUDIO languages, comma-separated ("German, Spanish" / "de,
+    /// es"). A SET, not a priority chain: every audio track matching ANY of
+    /// them starts ticked. Empty (the default) = today's behaviour, every
+    /// track ticked.
+    pub audio_langs: String,
+    /// Preferred NON-FORCED subtitle languages, same shape as `audio_langs`.
+    pub sub_langs: String,
+    /// Preferred FORCED-subtitle languages — its own independent set, NOT a
+    /// filter applied on top of `sub_langs`. "German subtitles, and forced
+    /// only if in English" is a single coherent request that one list cannot
+    /// express, which is why this is a third field and not a flag.
+    pub forced_sub_langs: String,
     // Drive & I/O
     pub rip_mode: String,
     pub max_passes: String,
@@ -57,6 +69,11 @@ impl Default for Settings {
             auto_eject: true,
             selection: "Main film only".into(),
             min_title_secs: "120".into(),
+            // Empty = no preference = exactly the pre-1.6.2 behaviour: a
+            // ticked title ticks every one of its streams.
+            audio_langs: String::new(),
+            sub_langs: String::new(),
+            forced_sub_langs: String::new(),
             rip_mode: "Multi-pass".into(),
             max_passes: "5".into(),
             abort_lost_secs: "0".into(),
@@ -205,6 +222,9 @@ impl Settings {
             "filename_template" => self.filename_template.clone(),
             "selection" => self.selection.clone(),
             "min_title_secs" => self.min_title_secs.clone(),
+            "audio_langs" => self.audio_langs.clone(),
+            "sub_langs" => self.sub_langs.clone(),
+            "forced_sub_langs" => self.forced_sub_langs.clone(),
             "rip_mode" => self.rip_mode.clone(),
             "max_passes" => self.max_passes.clone(),
             "abort_lost_secs" => self.abort_lost_secs.clone(),
@@ -237,6 +257,9 @@ impl Settings {
             "filename_template" => self.filename_template = v,
             "selection" => self.selection = v,
             "min_title_secs" => self.min_title_secs = v,
+            "audio_langs" => self.audio_langs = v,
+            "sub_langs" => self.sub_langs = v,
+            "forced_sub_langs" => self.forced_sub_langs = v,
             "rip_mode" => self.rip_mode = v,
             "max_passes" => self.max_passes = v,
             "abort_lost_secs" => self.abort_lost_secs = v,
@@ -781,6 +804,9 @@ mod normalize_tests {
             "filename_template",
             "selection",
             "min_title_secs",
+            "audio_langs",
+            "sub_langs",
+            "forced_sub_langs",
             "rip_mode",
             "max_passes",
             "abort_lost_secs",

@@ -41,6 +41,182 @@ impl Node {
     }
 }
 
+// ── preferred languages ───────────────────────────────────────────────────
+
+/// The user's default language sets, from Settings ▸ Selection.
+///
+/// THREE independent sets, not one list with modifiers. "German & Spanish
+/// audio, only German subtitles, and forced only if in English" is one request,
+/// and it needs all three to be separate: forced subtitles translate signs and
+/// foreign dialogue for someone listening in the dub, so the language you want
+/// them in is not the language you want full subtitles in.
+///
+/// Each set is a SET, not a priority chain — every track matching ANY listed
+/// language is kept, so "German & Spanish audio" keeps both.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LangPrefs {
+    pub audio: Vec<String>,
+    pub subtitles: Vec<String>,
+    /// Independent of `subtitles`, never a narrowing of it.
+    pub forced: Vec<String>,
+}
+
+impl LangPrefs {
+    /// Parse the three persisted strings.
+    ///
+    /// Separators are `,` and `;` only — NOT whitespace: a language may be
+    /// given by name and plenty of names have a space in them ("Modern Greek",
+    /// "Simplified Chinese"). Blank entries are dropped, so "de,,es" and
+    /// trailing commas are harmless. Tags are kept verbatim — resolving a name
+    /// or a 639-1/2T/2B/3 code is the engine's job, not ours.
+    pub fn parse(audio: &str, subtitles: &str, forced: &str) -> Self {
+        LangPrefs {
+            audio: split_langs(audio),
+            subtitles: split_langs(subtitles),
+            forced: split_langs(forced),
+        }
+    }
+
+    /// The preferences as persisted in Settings.
+    pub fn from_settings(s: &crate::settings::Settings) -> Self {
+        Self::parse(&s.audio_langs, &s.sub_langs, &s.forced_sub_langs)
+    }
+
+    /// No preference expressed at all — the tree is built exactly as before.
+    pub fn is_empty(&self) -> bool {
+        self.audio.is_empty() && self.subtitles.is_empty() && self.forced.is_empty()
+    }
+}
+
+fn split_langs(s: &str) -> Vec<String> {
+    s.split([',', ';'])
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// An empty list means "no preference", which the engine spells `All`.
+fn lang_filter(tags: &[String]) -> freemkv_engine::StreamFilter {
+    if tags.is_empty() {
+        freemkv_engine::StreamFilter::All
+    } else {
+        freemkv_engine::StreamFilter::Langs(tags.to_vec())
+    }
+}
+
+/// Resolve one class's PIDs, falling back to "keep everything in this class"
+/// when the preference matched nothing that IS there.
+///
+/// `all` is every PID of the class present on the title. `Only([])` from the
+/// engine means the requested languages are not on this disc for this class —
+/// the user's chosen rule is to fall back to today's behaviour for that
+/// category rather than ship a file missing the whole track class.
+fn class_or_fallback(f: freemkv_engine::PidFilter, all: &[u16]) -> Vec<u16> {
+    match f {
+        freemkv_engine::PidFilter::All => all.to_vec(),
+        freemkv_engine::PidFilter::Only(p) if p.is_empty() => all.to_vec(),
+        freemkv_engine::PidFilter::Only(p) => p,
+    }
+}
+
+/// Which of ONE title's stream PIDs the preferences keep.
+///
+/// The language matching is `freemkv-engine`'s: the rows are folded back into a
+/// synthetic `DiscTitle` and handed to `resolve_stream_selection_forced`, so the
+/// GUI has no second language matcher to drift from the one the rip uses — name
+/// and 639-1/2T/2B/3 forms all resolve exactly as `-a`/`-s` do on the CLI.
+///
+/// The three classes are resolved in three calls, one per set, so each falls
+/// back independently: German audio missing must not drag the subtitle choice
+/// down with it, and an unparseable tag in one box cannot disturb the other two.
+fn preferred_pids(
+    rows: &[&crate::engine::Row],
+    prefs: &LangPrefs,
+) -> std::collections::HashSet<u16> {
+    use freemkv_engine::{StreamFilter, SubtitleFilter, resolve_stream_selection_forced};
+
+    let mut title = libfreemkv::DiscTitle::empty();
+    let (mut all_audio, mut all_normal, mut all_forced) = (Vec::new(), Vec::new(), Vec::new());
+    for r in rows {
+        let Some(pid) = r.pid else { continue };
+        match r.type_s.as_str() {
+            "Audio" => {
+                all_audio.push(pid);
+                title
+                    .streams
+                    .push(libfreemkv::Stream::Audio(libfreemkv::AudioStream {
+                        pid,
+                        codec: libfreemkv::Codec::Unknown(0),
+                        channels: libfreemkv::AudioChannels::Unknown,
+                        language: r.lang.clone(),
+                        sample_rate: libfreemkv::SampleRate::Unknown,
+                        secondary: false,
+                        purpose: libfreemkv::LabelPurpose::Normal,
+                        label: String::new(),
+                    }));
+            }
+            // Everything else that carries a PID is a subtitle: the scan gives
+            // audio and subtitle rows PIDs and nothing else, and video (always
+            // kept) has none.
+            _ => {
+                if r.forced {
+                    all_forced.push(pid);
+                } else {
+                    all_normal.push(pid);
+                }
+                title
+                    .streams
+                    .push(libfreemkv::Stream::Subtitle(libfreemkv::SubtitleStream {
+                        pid,
+                        codec: libfreemkv::Codec::Unknown(0),
+                        language: r.lang.clone(),
+                        forced: r.forced,
+                        qualifier: libfreemkv::LabelQualifier::None,
+                        codec_data: None,
+                    }));
+            }
+        }
+    }
+
+    let none = || SubtitleFilter::split(StreamFilter::None, StreamFilter::None);
+    let mut out: std::collections::HashSet<u16> = std::collections::HashSet::new();
+
+    // Audio. An unresolvable tag (a typo) is not a reason to strip the audio:
+    // fall back to keeping the class, like a language that simply isn't there.
+    let audio = match resolve_stream_selection_forced(&title, &lang_filter(&prefs.audio), &none()) {
+        Ok(sel) => class_or_fallback(sel.audio, &all_audio),
+        Err(_) => all_audio.clone(),
+    };
+    out.extend(audio);
+
+    // Non-forced subtitles, matched only against the `subtitles` set.
+    let normal = resolve_stream_selection_forced(
+        &title,
+        &StreamFilter::None,
+        &SubtitleFilter::split(lang_filter(&prefs.subtitles), StreamFilter::None),
+    );
+    out.extend(match normal {
+        Ok(sel) => class_or_fallback(sel.subtitle, &all_normal),
+        Err(_) => all_normal.clone(),
+    });
+
+    // Forced subtitles, matched only against the `forced` set — its own class
+    // with its own fallback, so "only German subtitles, forced only if in
+    // English" resolves both halves on their own terms.
+    let forced = resolve_stream_selection_forced(
+        &title,
+        &StreamFilter::None,
+        &SubtitleFilter::split(StreamFilter::None, lang_filter(&prefs.forced)),
+    );
+    out.extend(match forced {
+        Ok(sel) => class_or_fallback(sel.subtitle, &all_forced),
+        Err(_) => all_forced.clone(),
+    });
+
+    out
+}
+
 /// Tri-state for a title row: some streams on, none, or all.
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum Check {
@@ -67,7 +243,19 @@ impl Tree {
     /// are almost always menus and stings — but never so aggressively that the
     /// list would be empty. Canonical `title_idx` values are preserved on the
     /// rows that survive; the engine selects by those, not by tree position.
-    pub fn from_scan(sc: &Scanned, sel_mode: &str, min_secs: f64) -> Self {
+    ///
+    /// `prefs` are the user's preferred-language defaults: `sel_mode` decides
+    /// which TITLES start checked, and `prefs` then narrows which of a checked
+    /// title's STREAM rows start checked. Nothing else changes — the rip request
+    /// is still built from the checkboxes, so every choice made here is visible
+    /// in the tree and can be overridden by hand.
+    ///
+    /// An empty `prefs` ([`LangPrefs::default`]) is exactly the pre-preference
+    /// behaviour (every stream of a checked title checked), and so is a category
+    /// whose languages match nothing on this title — see [`preferred_pids`]. A
+    /// disc must never rip silently without audio because the preferred language
+    /// is not on it.
+    pub fn from_scan(sc: &Scanned, sel_mode: &str, min_secs: f64, prefs: &LangPrefs) -> Self {
         // Titles present in the scan, with durations, for the filter + defaults.
         let titles: Vec<(usize, f64)> = sc
             .rows
@@ -98,6 +286,27 @@ impl Tree {
             // "Main film only" (default): the first disc title.
             _ => std::iter::once(0usize).collect(),
         };
+
+        // Which stream PIDs the language preferences keep, per canonical title
+        // index. Computed only for the titles that start checked — an unchecked
+        // title has no ticked streams to narrow — and only when there is a
+        // preference at all, so the default build does no extra work.
+        let keep: std::collections::HashMap<usize, std::collections::HashSet<u16>> =
+            if prefs.is_empty() {
+                Default::default()
+            } else {
+                selected
+                    .iter()
+                    .map(|&ti| {
+                        let rows: Vec<&crate::engine::Row> = sc
+                            .rows
+                            .iter()
+                            .filter(|r| r.depth >= 2 && r.title == ti)
+                            .collect();
+                        (ti, preferred_pids(&rows, prefs))
+                    })
+                    .collect()
+            };
 
         let mut arena: Vec<Node> = Vec::new();
         let mut roots = Vec::new();
@@ -142,7 +351,16 @@ impl Tree {
                 _ => {
                     if let Some(t) = last_title {
                         arena[t].children.push(idx);
-                        let on = *arena[t].checked.borrow();
+                        // A stream row starts checked when its TITLE does — and,
+                        // when the user has language preferences, only if this
+                        // PID is one the preferences keep. A row with no PID
+                        // (video) is never narrowed: it is not selectable and is
+                        // always retained.
+                        let on = *arena[t].checked.borrow()
+                            && match (r.pid, keep.get(&r.title)) {
+                                (Some(pid), Some(set)) => set.contains(&pid),
+                                _ => true,
+                            };
                         *arena[idx].checked.borrow_mut() = on;
                     }
                 }
@@ -1253,7 +1471,12 @@ impl App {
                     .trim()
                     .parse::<f64>()
                     .unwrap_or(0.0);
-                self.tree = Tree::from_scan(&sc, &self.settings.selection, min_secs);
+                self.tree = Tree::from_scan(
+                    &sc,
+                    &self.settings.selection,
+                    min_secs,
+                    &LangPrefs::from_settings(&self.settings),
+                );
                 self.source = path.to_string();
                 self.page = Page::Titles;
                 self.selected_row = None;
@@ -1659,6 +1882,7 @@ mod tests {
             },
             "Main film only",
             0.0,
+            &LangPrefs::default(),
         );
         assert!(t.roots.is_empty());
         assert!(t.arena.is_empty());

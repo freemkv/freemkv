@@ -833,4 +833,37 @@ mod tests {
         assert_eq!((f.top, f.gutter, f.width, f.field_h), (32, 500, 1240, 44));
         assert_eq!((f.row_step, f.check_step, f.note_step), (60, 56, 76));
     }
+
+    /// The Settings pages stack downwards from `top` with no scrolling, so a
+    /// page that grows past the tab's page area silently puts controls off the
+    /// bottom of the window — where they are unreachable, at every DPI at once
+    /// (each metric scales, so the overflow scales with it).
+    ///
+    /// The Selection page is the one that just grew: default selection,
+    /// minimum length + its note, then the three preferred-language boxes and
+    /// their note. Recovery is the other tall one (2 fields + 1 combo, 3 notes,
+    /// 2 gaps, 2 checkboxes).
+    #[test]
+    fn the_tallest_settings_pages_still_fit_the_settings_window() {
+        for dpi in DPIS {
+            let f = form_metrics(dpi);
+            let s = Scale::new(dpi);
+            // `Prefs::new` gives the tab control `PREFS_H - 66` of height; the
+            // tab strip and the page's own border take ~28 more before the
+            // first row can be drawn.
+            let page = s.px(PREFS_H) - s.px(66) - s.px(28);
+
+            let selection = f.top + 5 * f.row_step + 2 * f.note_step + f.gap;
+            assert!(
+                selection <= page,
+                "Selection page needs {selection}px of {page}px at {dpi} dpi"
+            );
+
+            let recovery = f.top + 3 * f.row_step + 3 * f.note_step + 2 * f.gap + 2 * f.check_step;
+            assert!(
+                recovery <= page,
+                "Recovery page needs {recovery}px of {page}px at {dpi} dpi"
+            );
+        }
+    }
 }

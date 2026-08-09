@@ -2514,6 +2514,23 @@ impl Prefs {
             r.field(&g("gui.set.min_length"), &st.min_title_secs, 90),
         ));
         r.note(&g("gui.set.min_length_note"));
+        r.gap();
+        // Three INDEPENDENT language sets — see `ui::LangPrefs`. They decide
+        // which stream rows start ticked; nothing here bypasses the tick boxes,
+        // so the user still sees and can change every choice.
+        fields.push((
+            "audio_langs",
+            r.field(&g("gui.set.audio_langs"), &st.audio_langs, 240),
+        ));
+        fields.push((
+            "sub_langs",
+            r.field(&g("gui.set.sub_langs"), &st.sub_langs, 240),
+        ));
+        fields.push((
+            "forced_sub_langs",
+            r.field(&g("gui.set.forced_sub_langs"), &st.forced_sub_langs, 240),
+        ));
+        r.note(&g("gui.set.lang_prefs_note"));
 
         // ── Recovery ── engine Job.mode / abort_on_lost_secs / raw
         let mut r = Rows::new(&pages[2], dpi);
@@ -4225,6 +4242,8 @@ mod tests {
                 info: format!("{type_s} info"),
                 pid: None,
                 duration_secs: 0.0,
+                lang: String::new(),
+                forced: false,
             }
         }
         let mut rows = vec![row("Bluray disc", "TEST_DISC", 0, false, usize::MAX)];
@@ -4254,7 +4273,12 @@ mod tests {
 
     fn view_rows() -> Vec<Row> {
         let mut app = App::new();
-        app.tree = crate::ui::Tree::from_scan(&synthetic_disc(), "All titles", 0.0);
+        app.tree = crate::ui::Tree::from_scan(
+            &synthetic_disc(),
+            "All titles",
+            0.0,
+            &crate::ui::LangPrefs::default(),
+        );
         app.page = Page::Titles;
         app.view().title_rows
     }
@@ -4599,7 +4623,12 @@ mod tests {
             // A scan the shell has never seen, with a partial stream selection
             // so a Mixed glyph is actually on screen.
             me.app_mut(|a| {
-                a.tree = crate::ui::Tree::from_scan(&synthetic_disc(), "All titles", 0.0);
+                a.tree = crate::ui::Tree::from_scan(
+                    &synthetic_disc(),
+                    "All titles",
+                    0.0,
+                    &crate::ui::LangPrefs::default(),
+                );
                 a.source = "Z:\\synthetic.iso".into();
                 a.page = Page::Titles;
             });
