@@ -2,6 +2,17 @@
 
 ## [1.6.2] — 2026-08-08
 
+### Added
+
+- **Track languages can be chosen once instead of on every disc.** Settings now
+  takes preferred audio languages, preferred subtitle languages, and — separately
+  — the languages to keep forced subtitles for, so "German and Spanish audio,
+  German subtitles, forced only if English" is a thing you set once. Each is a
+  set, not an order: asking for two languages keeps both. A disc that has none of
+  them falls back to what it selected before, so it never rips silent. The
+  preference decides what starts ticked and nothing more — every choice is still
+  visible and can be changed per disc.
+
 ### Fixed
 
 - **A stray moment of sound at the end of an HD-DVD title, and a click at every
