@@ -210,3 +210,174 @@ jobs:
 
           sys.exit(1 if fail else 0)
           PY
+
+  # ── Real disc media, same three platforms ──────────────────────────────────
+  #
+  # The suite above proves parity on ffmpeg-generated media. That exercises the
+  # mux, but nothing above it: no UDF/ISO9660 parse, no title enumeration, no
+  # VOB/clip walk. This runs the same three platforms against a REAL disc image
+  # so those paths are compared too.
+  #
+  # The fixture is a small DVD-Video image (~35 MB) held privately, named by
+  # secrets so a public workflow file does not carry the account or bucket. It
+  # is fetched with a short-lived OIDC token assumed into a role that can read
+  # nothing but the fixture prefix, and whose trust policy names the two
+  # branches -- so a fork's pull request cannot assume it at all.
+  #
+  # Encrypted BD/UHD parity is deliberately NOT here: it would put AACS key
+  # material on hosted runners for a public repository. Decryption is proven on
+  # the self-hosted runner that already holds the key database; what needs
+  # proving across platforms is the mux, and that needs no keys.
+  real-media:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      id-token: write   # OIDC; nothing else is needed
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with: { path: freemkv }
+      - uses: actions/checkout@v5
+        with: { repository: freemkv/libfreemkv, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
+      - uses: actions/checkout@v5
+        with: { repository: freemkv/freemkv-engine, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-engine }
+      - uses: actions/checkout@v5
+        with: { repository: freemkv/freemkv-keysources, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-keysources }
+      - uses: actions/checkout@v5
+        with: { repository: freemkv/freemkv-i18n, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
+      - uses: actions/checkout@v5
+        with: { repository: freemkv/freemkv-unlock, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
+      - name: Point the patches at the sibling checkouts
+        shell: bash
+        run: |
+          mkdir -p freemkv/.cargo
+          cat > freemkv/.cargo/config.toml <<'CFG'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+
+          [patch."https://github.com/freemkv/freemkv-unlock"]
+          freemkv-unlock = { path = "../freemkv-unlock" }
+          CFG
+      - name: Record the libfreemkv sha
+        shell: bash
+        run: echo "LF_SHA=$(git -C libfreemkv rev-parse --short HEAD)" >> "$GITHUB_ENV"
+      # A fork, or this repo before the secrets exist, has no credentials. Say
+      # so once and skip the rest -- a job that dies on a missing secret reads
+      # like a broken pipeline rather than an absent one.
+      - name: Are the fixture credentials available?
+        id: creds
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.FMKV_FIXTURES_ROLE }}" ] && [ -n "${{ secrets.FMKV_FIXTURES_S3 }}" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "No fixture credentials -- real-media parity skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.creds.outputs.have == 'true'
+        with:
+          role-to-assume: ${{ secrets.FMKV_FIXTURES_ROLE }}
+          aws-region: ${{ vars.FMKV_FIXTURES_REGION }}
+      - name: Fetch the disc fixture
+        if: steps.creds.outputs.have == 'true'
+        shell: bash
+        run: aws s3 cp "${{ secrets.FMKV_FIXTURES_S3 }}/dvd.iso" dvd.iso --quiet && ls -l dvd.iso
+      - uses: dtolnay/rust-toolchain@1.97.0
+        if: steps.creds.outputs.have == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.creds.outputs.have == 'true'
+        with: { workspaces: freemkv }
+      - run: cargo build --release --bin freemkv
+        if: steps.creds.outputs.have == 'true'
+        working-directory: freemkv
+      - name: Rip the fixture and hash the result
+        if: steps.creds.outputs.have == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="$PWD/freemkv/target/release/freemkv"
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          # Bare filenames: under Git-bash on Windows an absolute $PWD is an
+          # MSYS path the native binary cannot resolve. Both files are here.
+          "$BIN" iso://dvd.iso mkv://dvd-out.mkv
+          if command -v sha256sum >/dev/null; then H=$(sha256sum dvd-out.mkv | cut -d' ' -f1)
+          else H=$(shasum -a 256 dvd-out.mkv | cut -d' ' -f1); fi
+          printf '%s  dvd-out.mkv\nlibfreemkv=%s\n' "$H" "$LF_SHA" > "real-${{ matrix.os }}.txt"
+          cat "real-${{ matrix.os }}.txt"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.creds.outputs.have == 'true'
+        with:
+          name: "matrix-real-${{ matrix.os }}"
+          path: "real-${{ matrix.os }}.txt"
+
+  compare-real:
+    needs: real-media
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: "matrix-real-*", merge-multiple: true, path: real }
+        continue-on-error: true
+      - name: Every platform must rip the disc identically
+        shell: bash
+        run: |
+          set -euo pipefail
+          # No artifacts at all means the fixture credentials were absent and
+          # every leg skipped. That is a stated, visible skip -- not a silent
+          # pass and not a failure.
+          if ! ls real/*.txt >/dev/null 2>&1; then
+            echo "real-media parity skipped: no fixture credentials on this repo/branch." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import glob, os, sys, collections
+          arts, shas = collections.defaultdict(dict), {}
+          for path in sorted(glob.glob("real/*.txt")):
+              plat = os.path.basename(path)[len("real-"):-len(".txt")]
+              for line in open(path):
+                  line = line.strip()
+                  if not line:
+                      continue
+                  if line.startswith("libfreemkv="):
+                      shas[plat] = line.split("=", 1)[1]; continue
+                  h, _, name = line.partition("  ")
+                  arts[name.strip()][plat] = h
+
+          plats = sorted({p for v in arts.values() for p in v})
+          print("platforms:", ", ".join(plats) or "(none)")
+          fail = False
+
+          if len(set(shas.values())) > 1:
+              print(f"::error::libfreemkv shas differ across the matrix ({shas}) -- "
+                    "MUX_APP differs, so a byte comparison would be meaningless.")
+              fail = True
+
+          # Same rule as the synthetic compare: if a platform ran at all, all
+          # three must report, or this cannot claim three-way parity.
+          EXPECTED = {"ubuntu-latest", "macos-latest", "windows-latest"}
+          absent = sorted(EXPECTED - set(plats))
+          if absent:
+              print(f"::error::no real-media hashes from {', '.join(absent)} -- "
+                    "that platform was never compared")
+              fail = True
+
+          for name in sorted(arts):
+              by = arts[name]
+              if len(set(by.values())) == 1 and not (EXPECTED - set(by)):
+                  print(f"  OK    {name}: identical on all {len(by)} platforms")
+              else:
+                  fail = True
+                  print(f"::error::{name} DIFFERS or is missing:")
+                  for p in sorted(by):
+                      print(f"      {p:16} {by[p]}")
+
+          sys.exit(1 if fail else 0)
+          PY
