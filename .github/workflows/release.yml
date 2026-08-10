@@ -456,6 +456,47 @@ jobs:
             ${{ matrix.asset }}-*${{ matrix.ext }}
             ${{ matrix.asset }}${{ matrix.ext }}.sha256
 
+  # ── Homebrew tap ────────────────────────────────────────────────────────
+  #
+  # brew is the install path with no friction on macOS: Homebrew fetches with
+  # curl, which never sets com.apple.quarantine, so nothing has to be allowed
+  # through System Settings the way a browser download does. That only holds if
+  # the tap actually points at this release, so it is updated here rather than
+  # by hand -- a tap left behind is a tap that installs the previous version
+  # while the download page advertises this one.
+  #
+  # Runs after every artifact job: update.sh reads the checksums from the
+  # published assets, so they all have to exist first.
+  update-homebrew-tap:
+    needs: [build, build-windows, cli-binaries]
+    if: always() && needs.build.result == 'success' && needs['cli-binaries'].result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update the tap to this release
+        env:
+          GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          VER: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [ -n "${GH_TOKEN:-}" ] || {
+            echo "::warning::ORG_DISPATCH_TOKEN is not set — the Homebrew tap was NOT updated"
+            echo "::warning::brew install will keep serving the previous release until it is"
+            exit 0
+          }
+          git clone --depth 1 \
+            "https://x-access-token:$GH_TOKEN@github.com/freemkv/homebrew-tap.git" tap
+          cd tap
+          ./update.sh "${VER#v}"
+          if git diff --quiet; then
+            echo "tap already at ${VER#v} — nothing to do"
+            exit 0
+          fi
+          git config user.name  "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git commit -aqm "freemkv ${VER#v}"
+          git push
+          echo "tap updated to ${VER#v}" >> "$GITHUB_STEP_SUMMARY"
+
   update-homepage:
     needs: [build, build-windows, cli-binaries]
     # Gated on the desktop apps only (macOS + Windows): the org README advertises
