@@ -1193,6 +1193,23 @@ pub fn row_parents(rows: &[Row]) -> Vec<Option<usize>> {
     out
 }
 
+/// Which row a freshly-rebuilt tree should leave sitting at the top.
+///
+/// A shell that opens every title to match the other shell scrolls the list as
+/// it goes, so the last row expanded — the last title on the disc — is where
+/// the user is left standing. That is never what they came to see.
+///
+/// The answer is not simply "row 0": under the default "Main film only" the
+/// single ticked title can be anywhere in the disc's order, and that title is
+/// the point of the screen. So it is the first TICKED row, which under "All
+/// titles" is row 0 anyway. Nothing ticked (an empty disc, or a preset that
+/// selected nothing) falls back to the first row.
+pub fn first_visible_row(rows: &[Row]) -> Option<usize> {
+    rows.iter()
+        .position(|r| matches!(r.check, Some(Check::On) | Some(Check::Mixed)))
+        .or(if rows.is_empty() { None } else { Some(0) })
+}
+
 // ── output naming ─────────────────────────────────────────────────────────
 
 /// The path the Information panel shows as "Output file".

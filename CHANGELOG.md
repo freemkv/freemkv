@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Opening a disc left the title list scrolled to the bottom.** On Windows,
+  a freshly scanned disc opened every title so the tracks were visible
+  without a click — and each one scrolled its newly revealed tracks into
+  view, so the list finished parked on the last title of the disc. On a
+  97-title Blu-ray that meant the first thing you saw was the tail end of
+  the extras, with the film you came for somewhere far above. The list now
+  opens on the title that is actually ticked, which under the default "Main
+  film only" is the film, and under "All titles" is the top of the list.
+
 ## [1.6.3] — 2026-08-10
 
 ### Added

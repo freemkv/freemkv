@@ -336,6 +336,17 @@ impl TitlesSource {
                         Retained::cast_unchecked(NSNumber::new_usize(root));
                     ov.expandItem_expandChildren(Some(&obj), true);
                 }
+                // `reloadData` keeps the OLD scroll offset, so opening a second
+                // disc while scrolled down leaves the user mid-list looking at
+                // titles they never asked for. Which row to show is the core's
+                // call, shared with the Windows tree.
+                //
+                // Every row is expanded above, so the outline's display row IS
+                // the position in the flat row list.
+                if let Some(at) = crate::ui::first_visible_row(rows) {
+                    let origin = ov.rectOfRow(at as isize).origin;
+                    ov.scrollPoint(origin);
+                }
             }
         }
     }
