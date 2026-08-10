@@ -454,7 +454,7 @@ mod tests {
     /// precisely how a rebind gets back in, with no visible symptom.
     ///
     /// Pin the agent at a loopback listener this test owns, then ask for a host
-    /// that cannot resolve (`.invalid`, reserved by RFC 2606). Only a consulted
+    /// that cannot resolve (`.test`, reserved by RFC 6761). Only a consulted
     /// resolver can turn that name into a connection. Touches no network, and
     /// bypasses `fetch` (whose guard blocks loopback by design).
     #[test]
@@ -485,7 +485,7 @@ mod tests {
         });
 
         let sent = hardened_agent(vec![pinned])
-            .get("http://keydb-mirror.invalid/keydb.zip")
+            .get("http://keydb-mirror.test/keydb.zip")
             .call();
 
         rx.recv_timeout(Duration::from_secs(10)).expect(
@@ -498,7 +498,7 @@ mod tests {
         let head = server.join().expect("stub server panicked");
         let head = String::from_utf8_lossy(&head);
         assert!(
-            head.contains("keydb-mirror.invalid"),
+            head.contains("keydb-mirror.test"),
             "the pinned agent must still address the original host; got: {head}"
         );
     }
