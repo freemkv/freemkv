@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.6.3] — 2026-08-10
+
+### Changed
+
+- **Housekeeping only — ripping, reading and writing are untouched.** The HTTP
+  client used to download a key database moved to its current release, an
+  archive-handling crate followed, and a macOS dependency that was named but
+  never used directly was removed. Duplicated crates in the application's build
+  dropped from sixteen to six, so a single copy of each is compiled where two
+  were before.
+- **Every release is now checked on Linux, macOS and Windows before it is
+  published.** The full command-line suite and a real disc rip run on all three,
+  and the resulting files are compared byte for byte between them.
+
+### Security
+
+- **The key-database download pins its connection to addresses it has already
+  checked, and a test now proves it.** That protection was already in place and
+  is unchanged; what was missing was anything that would notice if it stopped
+  working, since the existing checks never opened a connection.
+
 ## [1.6.2] — 2026-08-08
 
 ### Added
