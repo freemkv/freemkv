@@ -423,6 +423,43 @@ pub fn form_metrics(dpi: u32) -> FormMetrics {
     }
 }
 
+/// How many entries go in one column of a long popup menu.
+///
+/// The language checklists are a popup menu of ~38 entries. A Win32 popup that
+/// is taller than the screen does not stay put and does not shrink: Windows
+/// grows scroll arrows at top and bottom, and a checklist you have to scroll to
+/// find "Swedish" in is a worse control than the text box it replaced. So the
+/// menu is broken into columns instead, with `MF::MENUBARBREAK`.
+///
+/// The budget is deliberately four fifths of the screen height, not all of it:
+/// the menu is anchored under a button partway down a dialog, and the taskbar
+/// takes a slice off the bottom. Leaving headroom means the menu drops downward
+/// from the button in the normal case rather than being flipped up over it.
+///
+/// Columns are BALANCED — three columns of 13 rather than two of 18 and one of
+/// 2 — because a stub final column reads as a rendering fault.
+///
+/// `item_h` is the caller's estimate of one menu row's height in physical
+/// pixels (`SM::CYMENU`); zero or negative is treated as one so a bad system
+/// metric cannot divide by zero or ask for an infinitely tall menu.
+#[must_use]
+pub fn menu_column_rows(items: usize, item_h: i32, screen_h: i32) -> usize {
+    if items == 0 {
+        return 1;
+    }
+    let item_h = item_h.max(1);
+    let usable = (screen_h.max(0) * 4 / 5).max(0);
+    // At least one row per column: a screen too short for even one entry still
+    // has to produce a menu, and Windows' own scroll arrows can cope with that
+    // degenerate case.
+    let budget = ((usable / item_h) as usize).max(1);
+    if items <= budget {
+        return items;
+    }
+    let cols = items.div_ceil(budget);
+    items.div_ceil(cols)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,6 +871,64 @@ mod tests {
         assert_eq!((f.row_step, f.check_step, f.note_step), (60, 56, 76));
     }
 
+    /// The real list the language pickers show. Kept as a number rather than
+    /// reading `ui::PICKER_LANGUAGES` so this file stays pure arithmetic.
+    const LANGS: usize = 38;
+
+    #[test]
+    fn a_short_menu_is_one_column() {
+        // 38 rows of 19px is 722px; four fifths of a 1080p screen is 864px, so
+        // the whole list fits and must NOT be broken into columns.
+        assert_eq!(menu_column_rows(LANGS, 19, 1080), LANGS);
+        assert_eq!(menu_column_rows(1, 19, 1080), 1);
+    }
+
+    #[test]
+    fn a_long_menu_is_split_into_balanced_columns() {
+        // A 768px netbook at 150%: 4/5 of 768 is 614px, 26px rows, so 23 fit.
+        // 38 entries therefore need two columns — and they come out even (19
+        // and 19), not 23 and a stub of 15.
+        assert_eq!(menu_column_rows(LANGS, 26, 768), 19);
+
+        // Squeezed harder: 4/5 of 600 is 480, 40px rows, 12 per column. 38
+        // needs four columns, balanced at 10 each (10+10+10+8).
+        assert_eq!(menu_column_rows(LANGS, 40, 600), 10);
+    }
+
+    #[test]
+    fn every_entry_is_reachable_at_every_screen_size() {
+        // The property that actually matters: the columns must between them
+        // hold the whole list, and no column may overflow the budget. Checked
+        // across a sweep of plausible screens and DPI-scaled row heights.
+        for screen_h in [480, 600, 720, 768, 800, 900, 1080, 1440, 2160] {
+            for item_h in [15, 19, 24, 26, 32, 40, 48] {
+                let rows = menu_column_rows(LANGS, item_h, screen_h);
+                assert!(rows >= 1, "{screen_h}x{item_h} produced an empty column");
+                let cols = LANGS.div_ceil(rows);
+                assert!(
+                    rows * cols >= LANGS,
+                    "{screen_h}x{item_h}: {cols} columns of {rows} cannot hold {LANGS} entries"
+                );
+                let budget = ((screen_h * 4 / 5) / item_h) as usize;
+                assert!(
+                    rows <= budget.max(1),
+                    "{screen_h}x{item_h}: column of {rows} exceeds the {budget}-row budget"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn degenerate_metrics_do_not_divide_by_zero() {
+        // GetSystemMetrics can answer 0 for a metric it does not know, and a
+        // 0-height screen is what a disconnected monitor reports mid-hotplug.
+        // Neither may panic, and neither may return a 0-row column.
+        assert_eq!(menu_column_rows(LANGS, 0, 1080), LANGS);
+        assert_eq!(menu_column_rows(LANGS, 19, 0), 1);
+        assert_eq!(menu_column_rows(LANGS, -5, -5), 1);
+        assert_eq!(menu_column_rows(0, 19, 1080), 1);
+    }
+
     /// The Settings pages stack downwards from `top` with no scrolling, so a
     /// page that grows past the tab's page area silently puts controls off the
     /// bottom of the window — where they are unreachable, at every DPI at once
@@ -852,9 +947,11 @@ mod tests {
         // together, and they live in different files.
         //
         // The page builders mark their sections with `// ── Name ──` and add
-        // rows through `r.field` / `r.note` / `r.check`, so the composition can
-        // be read straight out of the shell. Add a row there and this test
-        // measures it, whether or not anyone remembers to come here.
+        // rows through `r.field` / `r.lang` / `r.note` / `r.check`, so the
+        // composition can be read straight out of the shell. Add a row there
+        // and this test measures it, whether or not anyone remembers to come
+        // here. `r.lang` is counted with the fields because a language picker
+        // is a `row_step`-tall row like any other.
         let shell = include_str!("windows.rs");
         let section = |name: &str| -> (usize, usize, usize) {
             let head = format!("// ── {name} ──");
@@ -865,7 +962,7 @@ mod tests {
             let to = rest.find("// ── ").unwrap_or(rest.len());
             let body = &rest[..to];
             (
-                body.matches("r.field(").count(),
+                body.matches("r.field(").count() + body.matches("r.lang(").count(),
                 body.matches("r.note(").count(),
                 body.matches("r.check(").count(),
             )
