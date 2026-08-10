@@ -2,6 +2,28 @@
 
 ## [1.6.3] — 2026-08-10
 
+### Added
+
+- **freemkv installs with Homebrew on macOS and Linux.**
+
+  ```sh
+  brew install --cask freemkv/tap/freemkv   # desktop app
+  brew install freemkv/tap/freemkv          # command line
+  ```
+
+  This is now the easiest way in on a Mac, and it sidesteps the security
+  prompt entirely. Anything downloaded in a browser is marked by macOS as
+  quarantined, and because freemkv is not notarized by Apple, the first
+  launch is refused with "Apple could not verify freemkv is free of
+  malware". macOS 15 removed the old right-click → Open shortcut, so the
+  only way through is System Settings → Privacy & Security → Open Anyway —
+  once per download. Homebrew fetches differently and is never marked that
+  way, so there is nothing to click through.
+
+  The `.dmg` is still there for anyone who prefers it, and the download page
+  now explains the prompt properly instead of giving instructions that no
+  longer work.
+
 ### Changed
 
 - **Housekeeping only — ripping, reading and writing are untouched.** The HTTP
