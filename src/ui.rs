@@ -2168,6 +2168,59 @@ mod tests {
         assert!(!keep.contains(&1301) && !keep.contains(&1302));
     }
 
+    /// Neither About box may hard-code what it reports.
+    ///
+    /// The macOS one did, for all three derived rows, and nothing noticed for
+    /// three releases: it read "1.6.0 (macOS)" while the log line beside it
+    /// read 1.6.2, and it told every user "keydb ✓ 3 971 entries" — a real
+    /// count belonging to whichever machine it was copied from, shown even
+    /// with no keydb present. Windows derived all three correctly the whole
+    /// time, so this is exactly the kind of drift a shared test catches and
+    /// two separately-maintained shells do not.
+    ///
+    /// Source inspection rather than a UI test: neither shell can be
+    /// instantiated off its own platform, but both files can be read from
+    /// anywhere — which is the point, since this must fail on whichever
+    /// machine runs the suite.
+    #[test]
+    fn neither_about_box_hard_codes_its_version_or_key_count() {
+        // CRLF-normalized: Windows CI checks the tree out with CRLF.
+        let shells = [
+            ("mac.rs", include_str!("mac.rs").replace("\r\n", "\n")),
+            (
+                "windows.rs",
+                include_str!("windows.rs").replace("\r\n", "\n"),
+            ),
+        ];
+        for (name, src) in &shells {
+            for (key, must_contain) in [
+                ("gui.about.version", "CARGO_PKG_VERSION"),
+                ("gui.about.engine", "CARGO_PKG_VERSION"),
+                ("gui.about.keys", "keydb_status"),
+            ] {
+                let at = src.find(key).unwrap_or_else(|| {
+                    panic!("{name}: no About row for {key} — did the box move?")
+                });
+                // Bound the window at the NEXT About row, so each row is
+                // judged on its own text. A fixed-size window silently bled
+                // into the following row — and since the row after "version"
+                // is "engine", which legitimately contains CARGO_PKG_VERSION,
+                // the check passed even with the version hard-coded. A test
+                // that cannot fail is worse than no test, so this is measured
+                // against the real boundary rather than a guess.
+                let rest = &src[at + key.len()..];
+                let end = rest.find("gui.about.").unwrap_or(rest.len());
+                let window = &rest[..end];
+                assert!(
+                    window.contains(must_contain),
+                    "{name}: the {key} row does not derive from {must_contain} — \
+                     a literal here goes stale silently and is wrong for every \
+                     user, not just at release time"
+                );
+            }
+        }
+    }
+
     #[test]
     fn sizes_roll_over_instead_of_staying_in_megabytes() {
         assert_eq!(fmt_bytes(0), "0 B");
