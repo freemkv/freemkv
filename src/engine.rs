@@ -1706,7 +1706,56 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             return run_extract_folder(req, &disc, reader.as_mut(), &label, sink, state);
         }
         OutKind::IsoImage => {
-            return Err("ISO-image output needs a physical disc (disc://). This source is already an ISO — choose “decrypted folder” to unpack its files.".into());
+            // Decrypt an image without the disc: `iso://In.iso iso://Out.iso`.
+            // The CLI has shipped this since 1.6.1 and the GUI refused it
+            // outright, telling the user to pick "decrypted folder" instead —
+            // a different deliverable, so the picker offered a choice that
+            // could only ever fail.
+            //
+            // Single-pass, always. Multipass is a DRIVE strategy: it sweeps and
+            // re-reads sectors an optical drive returned errors for. A file has
+            // no unreadable sectors to retry, and `recover_to_iso` refuses
+            // multipass unless `raw` is set, so passing the user's multipass
+            // preference through would fail a request that makes sense.
+            let dest = std::path::Path::new(&req.dest_dir).join(format!("{label}.iso"));
+            // Never write over the source. The scan holds it open and the
+            // decrypt reads from it while writing, so this would destroy the
+            // input mid-rip and leave neither file intact. Compared by
+            // canonical path so `./Disc.iso` and an absolute path to the same
+            // file are recognised as one file.
+            let same = std::fs::canonicalize(&req.source)
+                .ok()
+                .zip(std::fs::canonicalize(&dest).ok())
+                .map(|(a, b)| a == b)
+                .unwrap_or(false);
+            if same {
+                return Err("The output image would overwrite the source. \
+                     Choose a different output folder."
+                    .into());
+            }
+            std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
+            state
+                .lines
+                .lock()
+                .unwrap()
+                .push(format!("decrypting image → {}", dest.display()));
+            let mut job = fe::Job::new(
+                format!("{}://{}", source_scheme(&req.source), req.source),
+                dest.display().to_string(),
+            );
+            job.raw = req.raw;
+            job.mode = fe::RipMode::Single;
+            let result = fe::recover_to_iso(&disc, reader.as_mut(), &dest, &job, sink)
+                .map_err(|e| format!("image decrypt failed: {e}"))?;
+            if recovery_produced_no_data(result.bytes_good) {
+                let _ = std::fs::remove_file(&dest);
+                return Err("No readable data — no image was written.".into());
+            }
+            return Ok(format!(
+                "Decrypted image written: {} ({:.2} GB)",
+                dest.display(),
+                result.bytes_good as f64 / 1_073_741_824.0
+            ));
         }
         _ => {}
     }
