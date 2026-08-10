@@ -21,6 +21,10 @@ use libfreemkv::{Error, Result};
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
+use ureq::config::Config;
+use ureq::http::Uri;
+use ureq::unversioned::resolver::{ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
 /// Connect timeout — a dead mirror must fail fast, not hang the CLI.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -47,7 +51,7 @@ pub fn fetch(url: &str) -> Result<Vec<u8>> {
     let pinned = resolve_and_guard(url).map_err(|_| Error::KeydbConnect { host: host_of(url) })?;
     let agent = hardened_agent(pinned);
     let resp = agent.get(url).call().map_err(|e| map_ureq_err(url, &e))?;
-    read_capped(resp.into_reader(), MAX_BODY_BYTES).map_err(|e| {
+    read_capped(resp.into_body().into_reader(), MAX_BODY_BYTES).map_err(|e| {
         if matches!(e, Error::KeydbInvalid) {
             e
         } else {
@@ -82,9 +86,13 @@ fn read_capped(r: impl std::io::Read, cap: u64) -> Result<Vec<u8>> {
 fn map_ureq_err(url: &str, e: &ureq::Error) -> Error {
     match e {
         // A non-2xx HTTP status (the server answered, but not 200-ish).
-        ureq::Error::Status(code, _) => Error::KeydbHttp { status: *code },
-        // Transport-level failure (DNS, connect, TLS, timeout, dropped conn).
-        ureq::Error::Transport(_) => Error::KeydbConnect { host: host_of(url) },
+        ureq::Error::StatusCode(code) => Error::KeydbHttp { status: *code },
+        // Everything else is transport-level (DNS, connect, TLS, timeout,
+        // dropped conn). ureq 3 splits these across several variants and the
+        // enum is non_exhaustive, so a catch-all is what stays correct — and
+        // the distinction the CLI renders is only "answered" vs "never got
+        // there", which the status arm above already draws.
+        _ => Error::KeydbConnect { host: host_of(url) },
     }
 }
 
@@ -102,13 +110,51 @@ fn host_of(url: &str) -> String {
 /// Build a ureq agent that follows zero redirects (so a public URL can't
 /// 30x-redirect to an internal host) and pins DNS resolution to `pinned`
 /// (the addresses already validated by [`resolve_and_guard`]).
+/// ureq's `ResolvedSocketAddrs` is a fixed 16-slot array whose `push` writes
+/// straight into it, so a 17th address is an out-of-bounds panic. Keep the
+/// first 16 — all of them were validated by [`resolve_and_guard`].
+const MAX_PINNED_ADDRS: usize = 16;
+
+/// The pinned-address resolver behind [`hardened_agent`], mirroring the one in
+/// `freemkv-keysources::online` (as this module's SSRF guard already mirrors
+/// that module's).
+///
+/// The agent MUST be built with `Agent::with_parts`: `Agent::new_with_config`
+/// compiles just as happily and then silently uses the DEFAULT resolver, which
+/// sends the request to live DNS and reopens the rebinding window. That fault
+/// has no symptom short of an actual attack, so it is pinned by
+/// `hardened_agent_connects_to_the_pinned_address_not_dns` below.
+#[derive(Debug)]
+struct PinnedResolver(Vec<SocketAddr>);
+
+impl Resolver for PinnedResolver {
+    fn resolve(
+        &self,
+        _uri: &Uri,
+        _config: &Config,
+        _timeout: NextTimeout,
+    ) -> std::result::Result<ResolvedSocketAddrs, ureq::Error> {
+        // NOT this module's `Result` alias (which is libfreemkv's, and fixes
+        // the error type) — the trait's signature is the std two-parameter one.
+        let mut out = self.empty();
+        for addr in self.0.iter().take(MAX_PINNED_ADDRS) {
+            out.push(*addr);
+        }
+        if out.is_empty() {
+            return Err(ureq::Error::HostNotFound);
+        }
+        Ok(out)
+    }
+}
+
 fn hardened_agent(pinned: Vec<SocketAddr>) -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout_connect(CONNECT_TIMEOUT)
-        .timeout_read(READ_TIMEOUT)
-        .resolver(move |_netloc: &str| Ok(pinned.clone()))
-        .build()
+    let config = Config::builder()
+        .max_redirects(0)
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_recv_response(Some(READ_TIMEOUT))
+        .build();
+    // `with_parts`, never `new_with_config` — see [`PinnedResolver`].
+    ureq::Agent::with_parts(config, DefaultConnector::new(), PinnedResolver(pinned))
 }
 
 // ── SSRF guard (mirrors freemkv-keysources::online) ─────────────────────────
@@ -400,5 +446,60 @@ mod tests {
         assert_eq!(host_of("https://example.org/export/k.zip"), "example.org");
         assert_eq!(host_of("http://example.org:8080/k"), "example.org:8080");
         assert_eq!(host_of("https://user@example.org/k"), "example.org");
+    }
+
+    /// The guard tests above prove which addresses are REJECTED. None of them
+    /// makes a connection, so all of them pass even if `hardened_agent` ignores
+    /// the pinned addresses entirely and resolves through live DNS — which is
+    /// precisely how a rebind gets back in, with no visible symptom.
+    ///
+    /// Pin the agent at a loopback listener this test owns, then ask for a host
+    /// that cannot resolve (`.invalid`, reserved by RFC 2606). Only a consulted
+    /// resolver can turn that name into a connection. Touches no network, and
+    /// bypasses `fetch` (whose guard blocks loopback by design).
+    #[test]
+    fn hardened_agent_connects_to_the_pinned_address_not_dns() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind stub listener");
+        let pinned = listener.local_addr().expect("stub listener address");
+        let (tx, rx) = mpsc::channel();
+
+        let server = std::thread::spawn(move || {
+            let (mut sock, _peer) = listener.accept().expect("stub listener accept failed");
+            let _ = tx.send(());
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                match sock.read(&mut byte) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => head.push(byte[0]),
+                }
+            }
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi");
+            let _ = sock.flush();
+            head
+        });
+
+        let sent = hardened_agent(vec![pinned])
+            .get("http://keydb-mirror.invalid/keydb.zip")
+            .call();
+
+        rx.recv_timeout(Duration::from_secs(10)).expect(
+            "hardened_agent never connected to the pinned address — the custom \
+             resolver is not being consulted, so a DNS rebind between the guard \
+             and the fetch can still redirect the request",
+        );
+        let resp = sent.expect("the pinned round-trip must complete");
+        assert_eq!(resp.status(), 200, "the stub server's reply must come back");
+        let head = server.join().expect("stub server panicked");
+        let head = String::from_utf8_lossy(&head);
+        assert!(
+            head.contains("keydb-mirror.invalid"),
+            "the pinned agent must still address the original host; got: {head}"
+        );
     }
 }

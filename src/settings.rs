@@ -518,21 +518,26 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
 /// no check at all. Blocking — call off the UI thread.
 pub fn check_for_update(current: &str) -> String {
     const URL: &str = "https://api.github.com/repos/freemkv/freemkv-gui/releases/latest";
-    let resp = ureq::get(URL)
-        .set("User-Agent", "freemkv-gui")
-        .set("Accept", "application/vnd.github+json")
-        .timeout(std::time::Duration::from_secs(10))
+    // ureq 3 moved the per-request timeout onto the agent config, so this
+    // one-shot call gets its own configured agent rather than a bare `get`.
+    let config = ureq::config::Config::builder()
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .build();
+    let resp = ureq::Agent::new_with_config(config)
+        .get(URL)
+        .header("User-Agent", "freemkv-gui")
+        .header("Accept", "application/vnd.github+json")
         .call();
 
     let body = match resp {
-        Ok(r) => match r.into_string() {
+        Ok(r) => match r.into_body().read_to_string() {
             Ok(b) => b,
             Err(e) => return format!("Update check failed: {e}"),
         },
-        Err(ureq::Error::Status(404, _)) => {
+        Err(ureq::Error::StatusCode(404)) => {
             return "Update check: no releases published yet.".into();
         }
-        Err(ureq::Error::Status(code, _)) => {
+        Err(ureq::Error::StatusCode(code)) => {
             return format!("Update check failed: server returned {code}");
         }
         Err(e) => return format!("Update check failed: {e}"),
