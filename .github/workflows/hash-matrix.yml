@@ -101,7 +101,7 @@ jobs:
         with: { workspaces: freemkv }
       - run: cargo build --release --bin freemkv
         working-directory: freemkv
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: matrix-master-media, path: shared }
       - name: Run the CLI suite against the shared media
         shell: bash
@@ -132,7 +132,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { pattern: "matrix-hashes-*", merge-multiple: true, path: hashes }
       - name: Every platform must produce the same bytes
         shell: bash
@@ -322,7 +322,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { pattern: "matrix-real-*", merge-multiple: true, path: real }
         continue-on-error: true
       - name: Every platform must rip the disc identically
