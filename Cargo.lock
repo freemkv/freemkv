@@ -342,7 +342,6 @@ dependencies = [
 name = "freemkv"
 version = "1.6.2"
 dependencies = [
- "block2",
  "freemkv-engine",
  "freemkv-i18n",
  "freemkv-keysources",
