@@ -53,6 +53,19 @@ jobs:
   # ── macOS: the whole crate, GUI shell included ─────────────────────────────
   # --all-targets so the tests and the AppKit shell are linted too.
   lint-macos:
+    # dev is the FAST lane: this job still runs, but on the release-candidate
+    # branches rather than on every push to dev. Nothing is deleted and no
+    # platform stops being checked before a release -- qa.yml independently
+    # covers macOS and Windows, and the jobs unique to this file (the Intel
+    # macOS build, the Windows release build) run here on qa and main. A push
+    # to dev is meant to be cheap and frequent; waiting on three runner pools
+    # to agree is what a release candidate is for.
+    #
+    # `if` SKIPS the job (it does not queue). A queued job would be far worse
+    # than a slow one: release.sh's CI gate refuses while any run for the
+    # commit is still in progress, so a never-scheduled job blocks releases
+    # silently -- see the note on real-media in qa.yml.
+    if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -109,6 +122,19 @@ jobs:
   # The disc-backed tests skip themselves when FMKV_TEST_ISO is unset, so
   # this runs the platform-neutral suite without needing media on the runner.
   test-macos:
+    # dev is the FAST lane: this job still runs, but on the release-candidate
+    # branches rather than on every push to dev. Nothing is deleted and no
+    # platform stops being checked before a release -- qa.yml independently
+    # covers macOS and Windows, and the jobs unique to this file (the Intel
+    # macOS build, the Windows release build) run here on qa and main. A push
+    # to dev is meant to be cheap and frequent; waiting on three runner pools
+    # to agree is what a release candidate is for.
+    #
+    # `if` SKIPS the job (it does not queue). A queued job would be far worse
+    # than a slow one: release.sh's CI gate refuses while any run for the
+    # commit is still in progress, so a never-scheduled job blocks releases
+    # silently -- see the note on real-media in qa.yml.
+    if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -165,6 +191,19 @@ jobs:
   # `platform.rs` in particular has a `#[cfg(windows)]` `GetDiskFreeSpaceExW`
   # arm that no other job compiles, so nothing else can catch a regression.
   lint-windows:
+    # dev is the FAST lane: this job still runs, but on the release-candidate
+    # branches rather than on every push to dev. Nothing is deleted and no
+    # platform stops being checked before a release -- qa.yml independently
+    # covers macOS and Windows, and the jobs unique to this file (the Intel
+    # macOS build, the Windows release build) run here on qa and main. A push
+    # to dev is meant to be cheap and frequent; waiting on three runner pools
+    # to agree is what a release candidate is for.
+    #
+    # `if` SKIPS the job (it does not queue). A queued job would be far worse
+    # than a slow one: release.sh's CI gate refuses while any run for the
+    # commit is still in progress, so a never-scheduled job blocks releases
+    # silently -- see the note on real-media in qa.yml.
+    if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -222,6 +261,19 @@ jobs:
   # themselves when FMKV_TEST_ISO is unset). If a test needs editing to pass
   # on Windows, the Windows port has broken something — that is the signal.
   test-windows:
+    # dev is the FAST lane: this job still runs, but on the release-candidate
+    # branches rather than on every push to dev. Nothing is deleted and no
+    # platform stops being checked before a release -- qa.yml independently
+    # covers macOS and Windows, and the jobs unique to this file (the Intel
+    # macOS build, the Windows release build) run here on qa and main. A push
+    # to dev is meant to be cheap and frequent; waiting on three runner pools
+    # to agree is what a release candidate is for.
+    #
+    # `if` SKIPS the job (it does not queue). A queued job would be far worse
+    # than a slow one: release.sh's CI gate refuses while any run for the
+    # commit is still in progress, so a never-scheduled job blocks releases
+    # silently -- see the note on real-media in qa.yml.
+    if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -276,6 +328,19 @@ jobs:
   # release-only failures are real (LTO, codegen-units, opt-level). Cheap
   # insurance that the artifact the release workflow zips actually links.
   release-build-windows:
+    # dev is the FAST lane: this job still runs, but on the release-candidate
+    # branches rather than on every push to dev. Nothing is deleted and no
+    # platform stops being checked before a release -- qa.yml independently
+    # covers macOS and Windows, and the jobs unique to this file (the Intel
+    # macOS build, the Windows release build) run here on qa and main. A push
+    # to dev is meant to be cheap and frequent; waiting on three runner pools
+    # to agree is what a release candidate is for.
+    #
+    # `if` SKIPS the job (it does not queue). A queued job would be far worse
+    # than a slow one: release.sh's CI gate refuses while any run for the
+    # commit is still in progress, so a never-scheduled job blocks releases
+    # silently -- see the note on real-media in qa.yml.
+    if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -331,6 +396,19 @@ jobs:
   # runners are arm64, so a break would have surfaced at tag time, in the
   # release workflow, after the version bump and the tag push.
   build-macos-intel:
+    # dev is the FAST lane: this job still runs, but on the release-candidate
+    # branches rather than on every push to dev. Nothing is deleted and no
+    # platform stops being checked before a release -- qa.yml independently
+    # covers macOS and Windows, and the jobs unique to this file (the Intel
+    # macOS build, the Windows release build) run here on qa and main. A push
+    # to dev is meant to be cheap and frequent; waiting on three runner pools
+    # to agree is what a release candidate is for.
+    #
+    # `if` SKIPS the job (it does not queue). A queued job would be far worse
+    # than a slow one: release.sh's CI gate refuses while any run for the
+    # commit is still in progress, so a never-scheduled job blocks releases
+    # silently -- see the note on real-media in qa.yml.
+    if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
