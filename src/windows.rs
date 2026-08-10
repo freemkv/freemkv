@@ -1401,21 +1401,6 @@ impl Shell {
         }
         // The macOS outline opens everything on load; match it so both shells
         // show the same thing without a click.
-        // Expanding scrolls the newly-revealed children into view, and the LAST
-        // expand is the LAST title — so a freshly-scanned disc left the list
-        // sitting at the bottom, away from what was actually selected. The
-        // list sitting at the bottom, away from whatever is actually selected.
-        //
-        // A user reported this; the diagnosis above is read from the code, NOT
-        // observed, and the reporter has not yet confirmed whether they meant
-        // this tree or the log pane below it, which is deliberately pinned to
-        // its newest line. The fix, when it is confirmed: put the first CHECKED
-        // row at the top afterwards — NOT simply "scroll to top", because the
-        // selected title is only first under the default "Main film only";
-        // under "Longest title" it can be anywhere, and under "All titles"
-        // everything is checked. `ensure_visible` alone is not enough either —
-        // it scrolls the minimum distance and lands the row at the bottom edge,
-        // which is the same place this loop already left it.
         for root in self.tree.items().iter_root() {
             let _ = root.expand(true);
             for child in root.iter_children() {
@@ -1423,6 +1408,25 @@ impl Shell {
             }
         }
         self.set_tree_redraw(true);
+        // Each expand above scrolled its newly-revealed children into view, so
+        // the loop ends parked on the LAST title of the disc — a user opening a
+        // 97-title Blu-ray was handed the bottom of the list. Put the row the
+        // core nominates (the first ticked one) back at the top.
+        //
+        // `ensure_visible` will not do: it scrolls the minimum distance, which
+        // lands the row at the BOTTOM edge — exactly where the expand loop
+        // already left things. `TVM_SELECTITEM`/`TVGN_FIRSTVISIBLE` is the one
+        // that means "this row goes at the top"; it scrolls as far as the
+        // content allows and no further, which is the right behaviour for a
+        // target near the end.
+        if let Some(h) = crate::ui::first_visible_row(rows).and_then(|i| handles[i].as_ref()) {
+            let _ = unsafe {
+                self.tree.hwnd().SendMessage(msg::TvmSelectItem {
+                    action: co::TVGN::FIRSTVISIBLE,
+                    hitem: h,
+                })
+            };
+        }
         let _ = self.tree.hwnd().InvalidateRect(None, true);
     }
 

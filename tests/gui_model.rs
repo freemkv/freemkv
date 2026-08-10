@@ -447,6 +447,63 @@ fn a_parent_always_precedes_its_children() {
     }
 }
 
+// ══ where a freshly-built tree is left standing ════════════════════════════
+
+#[test]
+fn a_rebuilt_tree_opens_on_the_ticked_title_not_the_last_one() {
+    // The bug: the Windows shell opens every title to match the macOS outline,
+    // and each expand scrolls its children into view, so a 97-title Blu-ray
+    // left the user parked at the bottom of the list. The row to show is the
+    // ticked one — which under "Longest title" is NOT row 0.
+    let sc = disc(&[(600.0, 1), (300.0, 1), (5400.0, 1)]);
+    let mut app = App::new();
+    app.tree = tree(&sc, "Longest title", 0.0);
+    app.page = Page::Titles;
+    let rows = app.view().title_rows;
+
+    let at = first_visible_row(&rows).expect("a populated tree must nominate a row");
+    assert_eq!(
+        rows[at].depth, 1,
+        "expected a Title row, got {:?}",
+        rows[at]
+    );
+    assert!(
+        at > 0 && at < rows.len() - 1,
+        "fixture must tick a title that is neither first nor last"
+    );
+    assert_eq!(
+        rows[at].desc, "3.  playlist",
+        "opened on a title other than the ticked one"
+    );
+}
+
+#[test]
+fn every_title_ticked_opens_at_the_top() {
+    // Under "All titles" the first ticked row IS the first title, so the list
+    // starts where it reads: at the top.
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.page = Page::Titles;
+    let rows = app.view().title_rows;
+    assert_eq!(first_visible_row(&rows), Some(1), "{rows:?}");
+}
+
+#[test]
+fn nothing_ticked_falls_back_to_the_first_row() {
+    // A preset can leave everything unticked (min-duration filters the lot).
+    // "No answer" must not mean "leave it wherever the expand loop ended".
+    let mut app = App::new();
+    app.tree = tree(&two_title_disc(), "All titles", 0.0);
+    app.page = Page::Titles;
+    for n in app.tree.arena.iter() {
+        *n.checked.borrow_mut() = false;
+    }
+    let rows = app.view().title_rows;
+    assert_eq!(first_visible_row(&rows), Some(0));
+
+    assert_eq!(first_visible_row(&[]), None, "an empty tree has no row");
+}
+
 // ══ which titles are ticked ════════════════════════════════════════════════
 
 #[test]
