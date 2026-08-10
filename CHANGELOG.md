@@ -24,8 +24,35 @@
   now explains the prompt properly instead of giving instructions that no
   longer work.
 
+### Fixed
+
+- **Asking for forced subtitles in one language could tick several others.**
+  On a disc carrying forced subtitles in French, German, Spanish and
+  Portuguese but none in English, asking for English forced subtitles ticked
+  all four. Forced subtitles appear on screen by themselves during playback,
+  so this put unwanted text over the picture. A forced-subtitle preference
+  that matches nothing on the disc now keeps nothing — a film with no forced
+  subtitles is normal, four unasked-for languages are not. Leaving the box
+  empty still keeps every forced track, as before.
+- **The log can be shown and hidden while a rip is running.** It was locked
+  for the duration, so the only moments you could change your mind were
+  before starting and after finishing — never while there was anything to
+  watch.
+- **Hiding the log no longer leaves a blank band across the window.** The
+  space it occupied was still reserved, so the title list and the info panel
+  stayed short instead of filling the window. (macOS.)
+- **"Whole disc → ISO image" works on a disc image.** Decrypting an image to
+  an image is something the command line has done since 1.6.1, but the app
+  refused it and suggested a different output. It now runs, and refuses only
+  if the result would overwrite the file being read.
+
 ### Changed
 
+- **The preferred-language settings are now pick-lists.** Audio, subtitle and
+  forced-subtitle preferences were free text, which meant knowing that a
+  German track is tagged `deu` — not `ger` or `de` — and a typo looked
+  exactly like a disc with no German on it. Choose languages by name from a
+  list instead. Existing settings keep working.
 - **Housekeeping only — ripping, reading and writing are untouched.** The HTTP
   client used to download a key database moved to its current release, an
   archive-handling crate followed, and a macOS dependency that was named but
