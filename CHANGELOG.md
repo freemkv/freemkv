@@ -7,8 +7,8 @@
 - **freemkv installs with Homebrew on macOS and Linux.**
 
   ```sh
-  brew install --cask freemkv/tap/freemkv   # desktop app
-  brew install freemkv/tap/freemkv          # command line
+  brew install freemkv/tap/freemkv             # command line
+  brew install --cask freemkv/tap/freemkv-app  # desktop app
   ```
 
   This is now the easiest way in on a Mac, and it sidesteps the security
