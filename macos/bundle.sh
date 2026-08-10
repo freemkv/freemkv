@@ -41,8 +41,30 @@ fi
 [ -f "$BIN" ] || { echo "missing $BIN — build failed?" >&2; exit 1; }
 cp "$BIN" "$APP/Contents/MacOS/freemkv"
 
-# Ad-hoc signature. Not notarized, so first launch still needs right-click →
-# Open (the download page says so); with no signature at all Gatekeeper reports
-# the vaguer "app is damaged" instead.
-codesign --force --deep --sign - "$APP" 2>/dev/null || true
+# Sign with a Developer ID when one is available, ad-hoc when it is not.
+#
+# MACOS_SIGN_IDENTITY is set by the release workflow after it imports the
+# Developer ID certificate; a local build (and any fork's CI, which cannot read
+# secrets) leaves it empty and gets the ad-hoc signature this always did. An
+# ad-hoc signature is what stops Gatekeeper reporting the vaguer "app is
+# damaged" on arm64, where an unsigned binary will not load at all — but it is
+# NOT a distributable signature, and only a Developer ID one can be notarized.
+#
+# Signed inner-out and WITHOUT --deep: --deep is deprecated, and it re-signs
+# nested code with the outer options rather than the ones each part needs, so
+# it is the standard way to end up with a bundle that notarization rejects.
+# --options runtime (the hardened runtime) and --timestamp are both mandatory
+# for notarization; a signature missing either is refused with no useful error.
+if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
+  codesign --force --options runtime --timestamp \
+    --sign "$MACOS_SIGN_IDENTITY" "$APP/Contents/MacOS/freemkv"
+  codesign --force --options runtime --timestamp \
+    --sign "$MACOS_SIGN_IDENTITY" "$APP"
+  codesign --verify --strict --verbose=2 "$APP"
+  echo "signed with Developer ID: $MACOS_SIGN_IDENTITY"
+else
+  codesign --force --sign - "$APP/Contents/MacOS/freemkv" 2>/dev/null || true
+  codesign --force --sign - "$APP" 2>/dev/null || true
+  echo "ad-hoc signed (no MACOS_SIGN_IDENTITY) — not distributable"
+fi
 echo "built $APP ($(lipo -archs "$APP/Contents/MacOS/freemkv"))"

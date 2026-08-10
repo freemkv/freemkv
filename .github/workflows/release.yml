@@ -79,17 +79,78 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      # ── Developer ID signing ──────────────────────────────────────────────
+      #
+      # Absent the secrets this is a no-op and the build stays ad-hoc signed,
+      # exactly as before. That is the required behaviour, not a convenience:
+      # a fork's CI cannot read secrets, so a hard failure here would mean
+      # nobody but this repo could build the app at all.
+      - name: Import the Developer ID certificate
+        id: signing
+        uses: ./.github/actions/import-developer-id
+        with:
+          certificate-p12: ${{ secrets.MACOS_CERT_P12 }}
+          certificate-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          keychain-password: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+
       - name: Bundle freemkv.app
+        env:
+          MACOS_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
         run: bash macos/bundle.sh release ${{ matrix.target }}
 
-      - name: Package
+      # The .dmg only. The .zip and the checksums are built AFTER stapling —
+      # a zip made here would carry an un-stapled .app, and its hash would not
+      # match the file that actually ships.
+      - name: Package the disk image
         run: |
+          hdiutil create -volname "freemkv" -srcfolder target/freemkv.app \
+            -ov -format UDZO "${{ matrix.asset }}.dmg"
+
+      # ── Notarization ──────────────────────────────────────────────────────
+      #
+      # Apple scans the upload and issues a ticket; stapling attaches that
+      # ticket to the file so Gatekeeper accepts it with NO network. Skipping
+      # the staple is the subtle failure: it passes every test on a connected
+      # machine and refuses to launch on an offline one.
+      - name: Notarize and staple
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          NOTARY_KEY_P8: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          A="${{ matrix.asset }}"
+          # --wait blocks until Apple returns a verdict; without it the job
+          # would "succeed" having only queued the submission.
+          if ! xcrun notarytool submit "$A.dmg" \
+                 --key "$RUNNER_TEMP/notary.p8" \
+                 --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+                 --wait --timeout 30m; then
+            echo "::error::notarization was rejected — fetching the log"
+            xcrun notarytool log "$(xcrun notarytool history \
+              --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" \
+              --issuer "$NOTARY_ISSUER_ID" --output-format json \
+              | python3 -c 'import json,sys;print(json.load(sys.stdin)["history"][0]["id"])')" \
+              --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" \
+              --issuer "$NOTARY_ISSUER_ID" || true
+            rm -f "$RUNNER_TEMP/notary.p8"
+            exit 1
+          fi
+          rm -f "$RUNNER_TEMP/notary.p8"
+          xcrun stapler staple "$A.dmg"
+          # Staple the .app as well, so the .zip built next carries the ticket
+          # too. A ticket cannot be attached to a bare binary or to a .zip.
+          xcrun stapler staple target/freemkv.app
+
+      - name: Finalize artifacts
+        run: |
+          set -euo pipefail
           VER="${{ github.ref_name }}"
           A="${{ matrix.asset }}"
-          # .dmg is what a Mac user expects to double-click; the .zip is for
-          # scripted installs (brew casks, MDM) that would rather not mount.
-          hdiutil create -volname "freemkv" -srcfolder target/freemkv.app \
-            -ov -format UDZO "$A.dmg"
+          # Built from the (now stapled) .app. The .zip is for scripted
+          # installs — brew casks, MDM — that would rather not mount a .dmg.
           ditto -c -k --keepParent target/freemkv.app "$A.zip"
           # Versioned copies, mirroring the CLI's versioned/unversioned pair.
           cp "$A.dmg" "freemkv-$VER-${{ matrix.target }}.dmg"
@@ -115,6 +176,22 @@ jobs:
           # An .app that fails signature validation is one Gatekeeper refuses
           # to open, which users report as "the app is damaged".
           codesign --verify --deep --strict --verbose=2 target/freemkv.app
+
+          # When signed for real, prove the thing users actually download would
+          # pass Gatekeeper. codesign only says the signature is well-formed --
+          # it says nothing about WHO signed it or whether Apple has seen it,
+          # so an ad-hoc bundle passes the check above and is still refused on
+          # every other Mac. These two are the checks that would have caught
+          # that: spctl evaluates the policy, stapler proves the ticket is
+          # attached and therefore works offline.
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            spctl -a -vvv -t install "${{ matrix.asset }}.dmg"
+            xcrun stapler validate "${{ matrix.asset }}.dmg"
+            codesign -dv --verbose=4 target/freemkv.app 2>&1 | grep -q "Authority=Developer ID Application" \
+              || { echo "::error::bundle is not signed by a Developer ID authority"; exit 1; }
+          else
+            echo "ad-hoc build — skipping Gatekeeper checks (they would fail by design)"
+          fi
 
       - name: Upload
         uses: softprops/action-gh-release@v3
@@ -313,6 +390,48 @@ jobs:
       - name: Build CLI (cross)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: cross build --release --target ${{ matrix.target }}
+      # The bare macOS CLI binaries need signing and notarizing too. They are
+      # downloaded directly, so they are quarantined exactly like the .app --
+      # and unsigned, they produce the same "Apple could not verify" refusal
+      # that the .dmg was fixed for. Shipping a signed app beside an unsigned
+      # CLI just moves the complaint.
+      - name: Import the Developer ID certificate
+        id: signing
+        if: runner.os == 'macOS'
+        uses: ./.github/actions/import-developer-id
+        with:
+          certificate-p12: ${{ secrets.MACOS_CERT_P12 }}
+          certificate-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          keychain-password: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+
+      - name: Sign and notarize the macOS CLI
+        if: runner.os == 'macOS' && steps.signing.outputs.signed == 'true'
+        env:
+          IDENTITY: ${{ steps.signing.outputs.identity }}
+          NOTARY_KEY_P8: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/freemkv"
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" "$BIN"
+          codesign --verify --strict --verbose=2 "$BIN"
+          # notarytool only accepts .zip, .dmg and .pkg -- never a bare Mach-O.
+          # Zip it, notarize that, and the binary inside is what gets the
+          # verdict. The ticket CANNOT be stapled to a bare binary, so first
+          # run still needs Apple to be reachable; the .dmg from the build job
+          # is the fully offline-verifiable artifact. Documented on the
+          # download page rather than left for a user to discover.
+          ditto -c -k "$BIN" "$RUNNER_TEMP/notarize-cli.zip"
+          printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize-cli.zip" \
+            --key "$RUNNER_TEMP/notary.p8" \
+            --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+            --wait --timeout 30m
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/notarize-cli.zip"
+          codesign -dv --verbose=4 "$BIN" 2>&1 | grep -q "Authority=Developer ID Application" \
+            || { echo "::error::CLI is not signed by a Developer ID authority"; exit 1; }
+
       - name: Package
         shell: bash
         run: |
@@ -322,7 +441,13 @@ jobs:
           BIN="target/${{ matrix.target }}/release/freemkv$E"
           cp "$BIN" "$A$E"
           cp "$BIN" "$A-$VER$E"
-          sha256sum "$A$E" "$A-$VER$E" > "$A$E.sha256"
+          # Hash AFTER signing: a signature rewrites the binary, so a checksum
+          # taken before it would not match what ships.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            shasum -a 256 "$A$E" "$A-$VER$E" > "$A$E.sha256"
+          else
+            sha256sum "$A$E" "$A-$VER$E" > "$A$E.sha256"
+          fi
       - name: Upload
         uses: softprops/action-gh-release@v3
         with:
