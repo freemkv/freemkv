@@ -3725,17 +3725,29 @@ fn build_about(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         title.setFont(Some(&NSFont::boldSystemFontOfSize(18.0)));
         bd.addSubview(&title);
     }
-    let rows: [(String, &str); 5] = [
-        (crate::strings::get("gui.about.version"), "1.6.0 (macOS)"),
-        (crate::strings::get("gui.about.engine"), "libfreemkv 1.6.0"),
-        (crate::strings::get("gui.about.licence"), "MIT"),
+    // Every value here is DERIVED. All three used to be string literals, and
+    // all three were wrong: the box still said 1.6.0 three releases later, and
+    // the key line reported "keydb ✓ 3 971 entries" to everyone — a real-
+    // looking count belonging to whoever's machine it was copied from, shown
+    // even to someone with no keydb at all. The Windows About box already
+    // derived all three; this is the one that had drifted.
+    let rows: [(String, String); 5] = [
+        (
+            crate::strings::get("gui.about.version"),
+            format!("{} (macOS)", env!("CARGO_PKG_VERSION")),
+        ),
+        (
+            crate::strings::get("gui.about.engine"),
+            format!("libfreemkv {}", env!("CARGO_PKG_VERSION")),
+        ),
+        (crate::strings::get("gui.about.licence"), "MIT".to_string()),
         (
             crate::strings::get("gui.about.keys"),
-            "keydb ✓ 3 971 entries",
+            crate::settings::Settings::load().keydb_status(),
         ),
         (
             crate::strings::get("gui.about.website"),
-            "https://freemkv.org",
+            "https://freemkv.org".to_string(),
         ),
     ];
     let mut y = h - 96.0;
@@ -3759,14 +3771,14 @@ fn build_about(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
                     [&*Retained::cast_unchecked::<AnyObject>(NSColor::linkColor())];
                 let attrs = NSDictionary::from_slices(&keys, &vals);
                 let title = objc2_foundation::NSAttributedString::new_with_attributes(
-                    &NSString::from_str(v),
+                    &NSString::from_str(&v),
                     &Retained::cast_unchecked(attrs),
                 );
                 lb.setAttributedTitle(&title);
             }
             bd.addSubview(&lb);
         } else {
-            bd.addSubview(&text(mtm, v, r(160.0, y, w - 175.0, 18.0), false, false));
+            bd.addSubview(&text(mtm, &v, r(160.0, y, w - 175.0, 18.0), false, false));
         }
         y -= 24.0;
     }
