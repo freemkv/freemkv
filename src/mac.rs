@@ -393,6 +393,12 @@ struct Ivars {
     keydb_btn: RefCell<Option<Retained<NSButton>>>,
     pf_checks: RefCell<Vec<(String, Retained<NSButton>)>>,
     pf_popups: RefCell<Vec<(String, Retained<NSPopUpButton>)>>,
+    /// The multi-select language pickers, kept separate from `pf_popups`
+    /// because they are read back by an entirely different rule: a plain popup
+    /// stores the ONE selected row, a language picker stores the whole ticked
+    /// set. Sharing the list would make `read_prefs_form` persist a single
+    /// language name over the user's comma-separated codes.
+    pf_langs: RefCell<Vec<(String, Retained<NSPopUpButton>)>>,
     /// True only when the open source is a physical drive; Eject is
     /// meaningless for an image file, so the button hides.
     eject_btn: RefCell<Option<Retained<NSButton>>>,
@@ -627,6 +633,35 @@ define_class!(
             self.save_settings_reporting_error();
             if let Some(w) = self.ivars().win_prefs.borrow().as_ref() {
                 w.close();
+            }
+        }
+
+        /// One language ticked or unticked in a preferred-languages picker.
+        ///
+        /// The whole set mutation is `ui::lang_toggle`, so a click means the
+        /// same thing here as on Windows and neither shell owns the rule. The
+        /// picker is not committed to `settings` yet — Cancel must still be
+        /// able to throw the edit away.
+        #[unsafe(method(onToggleLang:))]
+        fn on_toggle_lang(&self, s: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::new().unwrap();
+            let Some(item) = s.and_then(|s| s.downcast_ref::<NSMenuItem>()) else {
+                return;
+            };
+            let (Some(code), Some(menu)) = (lang_item_code(item), unsafe { item.menu() }) else {
+                return;
+            };
+            // Which of the three pickers was clicked: the one owning this menu.
+            let picker = self
+                .ivars()
+                .pf_langs
+                .borrow()
+                .iter()
+                .find(|(_, p)| p.menu().is_some_and(|m| m == menu))
+                .map(|(_, p)| p.clone());
+            if let Some(p) = picker {
+                let next = crate::ui::lang_toggle(&lang_picker_value(&p), &code);
+                set_lang_picker(mtm, &p, &next, self);
             }
         }
 
@@ -1394,6 +1429,14 @@ impl Controller {
         // re-titled whenever the log's visibility changes — it is a toggle, and
         // a toggle that always says "Show log" is wrong half the time.
         self.sync_log_menu_title(&v.log_menu_label);
+        // Mirror the view state the layout reads. `log_hidden` belongs in this
+        // group and was the one missing from it: `relayout` reads the ivar, so
+        // without this the layout always reserved the log's strip of height,
+        // whatever the log was actually doing. Hiding the log then removed the
+        // view but not the space it occupied, leaving a dead band across the
+        // bottom of the window and the tree and Info panel short of the
+        // content they could have filled.
+        *iv.log_hidden.borrow_mut() = v.log_hidden;
         *iv.two_bars.borrow_mut() = v.show_overall_bar;
         *iv.on_prog.borrow_mut() = v.page == Page::Progress;
         *iv.on_empty.borrow_mut() = v.page == Page::Empty;
@@ -1516,6 +1559,11 @@ impl Controller {
         }
         for (k, b) in self.ivars().pf_checks.borrow().iter() {
             st.set_bool(k, { b.state() } != 0);
+        }
+        // Language pickers carry their whole stored string on the control (see
+        // `lang_picker_value`), already canonical — the toggles wrote it.
+        for (k, p) in self.ivars().pf_langs.borrow().iter() {
+            st.set(k, lang_picker_value(p));
         }
         for (k, p) in self.ivars().pf_popups.borrow().iter() {
             let opts = enum_options(k);
@@ -2947,6 +2995,87 @@ pub fn run() {
 /// which carries separator rows and so maps by title rather than by index).
 use crate::ui::enum_options;
 
+/// One tickable language row. `representedObject` carries the ISO code, so the
+/// click handler never has to map a (localized, or fallback-to-code) title back
+/// to a code — the title is for the user, the represented object is for us.
+fn lang_menu_item(mtm: MainThreadMarker, code: &str, c: &Controller) -> Retained<NSMenuItem> {
+    let mi = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(&crate::ui::lang_display_name(code)),
+            Some(sel!(onToggleLang:)),
+            &NSString::from_str(""),
+        )
+    };
+    unsafe {
+        mi.setTarget(Some(c));
+        mi.setRepresentedObject(Some(&NSString::from_str(code)));
+    }
+    mi
+}
+
+/// The stored preference a picker currently holds, kept on its title item.
+///
+/// The control IS the state, exactly as a text field was: nothing shadows it in
+/// Rust, so there is no second copy to fall out of step, and Cancel discards
+/// the edits for free because nothing outside the window was ever touched.
+fn lang_picker_value(p: &NSPopUpButton) -> String {
+    p.menu()
+        .and_then(|m| m.itemAtIndex(0))
+        .and_then(|it| it.representedObject())
+        .and_then(|o| o.downcast::<NSString>().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_default()
+}
+
+/// Show `stored` in a picker: button title, checkmarks, and the value the next
+/// toggle (and OK) will read back.
+///
+/// Codes that are not on the offered list get a row appended — a language the
+/// user already had stored must stay visible AND removable, not become a value
+/// they can see in the title but never untick.
+fn set_lang_picker(mtm: MainThreadMarker, p: &NSPopUpButton, stored: &str, c: &Controller) {
+    let Some(menu) = p.menu() else { return };
+    let selection = crate::ui::lang_selection(stored);
+    for code in &selection {
+        if lang_item_index(&menu, code).is_none() {
+            menu.addItem(&lang_menu_item(mtm, code, c));
+        }
+    }
+    // Item 0 is the pull-down's title; never blank, because `lang_summary`
+    // answers "Any" for an empty selection.
+    if let Some(title) = menu.itemAtIndex(0) {
+        title.setTitle(&NSString::from_str(&crate::ui::lang_summary(stored)));
+        unsafe { title.setRepresentedObject(Some(&NSString::from_str(stored))) };
+    }
+    for i in 1..menu.numberOfItems() {
+        let Some(it) = menu.itemAtIndex(i) else {
+            continue;
+        };
+        let on = lang_item_code(&it)
+            .map(|code| crate::ui::lang_is_selected(stored, &code))
+            .unwrap_or(false);
+        it.setState(if on { 1 } else { 0 });
+    }
+    // The button paints its title from item 0, which we just rewrote.
+    NSView::setNeedsDisplay(p, true);
+}
+
+/// The ISO code a language row stands for, or None for the title item.
+fn lang_item_code(it: &NSMenuItem) -> Option<String> {
+    it.representedObject()
+        .and_then(|o| o.downcast::<NSString>().ok())
+        .map(|s| s.to_string())
+}
+
+fn lang_item_index(menu: &NSMenu, code: &str) -> Option<isize> {
+    (1..menu.numberOfItems()).find(|i| {
+        menu.itemAtIndex(*i)
+            .and_then(|it| lang_item_code(&it))
+            .is_some_and(|c| c.eq_ignore_ascii_case(code))
+    })
+}
+
 /// One labelled row inside a preferences tab. Right-aligned label at a fixed
 /// gutter, control to its right — the layout the reference uses throughout.
 struct Rows {
@@ -2957,6 +3086,7 @@ struct Rows {
     fields: Vec<(String, Retained<NSTextField>)>,
     checks: Vec<(String, Retained<NSButton>)>,
     popups: Vec<(String, Retained<NSPopUpButton>)>,
+    langs: Vec<(String, Retained<NSPopUpButton>)>,
 }
 
 impl Rows {
@@ -2969,6 +3099,7 @@ impl Rows {
             fields: vec![],
             checks: vec![],
             popups: vec![],
+            langs: vec![],
         }
     }
     fn label(&mut self, mtm: MainThreadMarker, s: &str) {
@@ -3027,6 +3158,47 @@ impl Rows {
         }
         self.view.addSubview(&p);
         self.popups.push((key.to_string(), p));
+        self.y -= 30.0;
+    }
+
+    /// A multi-select language row: one pull-down listing every offered
+    /// language with a checkmark against the chosen ones.
+    ///
+    /// Registered in `self.langs`, NOT `self.popups` — see the `pf_langs`
+    /// comment on `Ivars`. It carries the whole stored preference string, not
+    /// a single selected row, so `read_prefs_form` must treat it differently.
+    ///
+    /// It replaced a free-text box that asked the user to know ISO codes; the
+    /// list is the only place the codes are spelled, so a typo can no longer
+    /// silently disable a language preference.
+    fn langs(&mut self, mtm: MainThreadMarker, key: &str, s: &str, w: f64, c: &Controller) {
+        self.label(mtm, s);
+        // Pull-down, not pop-up: a pop-up's title is whichever row is
+        // selected, which is wrong here — the button must show the whole SET.
+        // A pull-down takes its title from item 0, which is ours to write, and
+        // that item is the picker's memory (see `lang_picker_value`).
+        let p = {
+            NSPopUpButton::initWithFrame_pullsDown(
+                NSPopUpButton::alloc(mtm),
+                r(self.gutter, self.y - 3.0, w, 24.0),
+                true,
+            )
+        };
+        let menu = NSMenu::new(mtm);
+        // Auto-enabling would ask the responder chain about every row and hide
+        // any it could not resolve; these rows are always usable.
+        menu.setAutoenablesItems(false);
+        let title = NSMenuItem::new(mtm);
+        menu.addItem(&title);
+        for (code, _name) in crate::ui::PICKER_LANGUAGES {
+            menu.addItem(&lang_menu_item(mtm, code, c));
+        }
+        p.setMenu(Some(&menu));
+        self.view.addSubview(&p);
+        // Empty until the populate loop fills it from disk; going through the
+        // same setter keeps the "never a blank button" rule in one place.
+        set_lang_picker(mtm, &p, "", c);
+        self.langs.push((key.to_string(), p));
         self.y -= 30.0;
     }
     /// A plain text row.
@@ -3196,10 +3368,12 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     let mut all_fields: Vec<(String, Retained<NSTextField>)> = Vec::new();
     let mut all_checks: Vec<(String, Retained<NSButton>)> = Vec::new();
     let mut all_popups: Vec<(String, Retained<NSPopUpButton>)> = Vec::new();
+    let mut all_langs: Vec<(String, Retained<NSPopUpButton>)> = Vec::new();
     let mut add_tab = |label: &str, rows: Rows| {
         all_fields.extend(rows.fields.iter().cloned());
         all_checks.extend(rows.checks.iter().cloned());
         all_popups.extend(rows.popups.iter().cloned());
+        all_langs.extend(rows.langs.iter().cloned());
         let ident: Retained<AnyObject> =
             unsafe { Retained::cast_unchecked(NSString::from_str(label)) };
         let item = unsafe {
@@ -3278,26 +3452,26 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     // Three INDEPENDENT language sets — see `ui::LangPrefs`. They decide which
     // stream rows start ticked; nothing here bypasses the tick boxes, so the
     // user still sees and can change every choice.
-    t.field(
+    t.langs(
         mtm,
         "audio_langs",
         &crate::strings::get("gui.set.audio_langs"),
-        "",
         220.0,
+        c,
     );
-    t.field(
+    t.langs(
         mtm,
         "sub_langs",
         &crate::strings::get("gui.set.sub_langs"),
-        "",
         220.0,
+        c,
     );
-    t.field(
+    t.langs(
         mtm,
         "forced_sub_langs",
         &crate::strings::get("gui.set.forced_sub_langs"),
-        "",
         220.0,
+        c,
     );
     t.note(mtm, &crate::strings::get("gui.set.lang_prefs_note"), tw);
     add_tab(&crate::strings::get("gui.tab.selection"), t);
@@ -3481,10 +3655,17 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
                 }
             }
         }
+        // Language pickers hold a SET, so they are populated by their own
+        // setter rather than by matching a title: the stored string may name
+        // several languages, or one this build does not list.
+        for (k, p) in &all_langs {
+            set_lang_picker(mtm, p, &st.get(k), c);
+        }
     }
     *c.ivars().pf_fields.borrow_mut() = all_fields;
     *c.ivars().pf_checks.borrow_mut() = all_checks;
     *c.ivars().pf_popups.borrow_mut() = all_popups;
+    *c.ivars().pf_langs.borrow_mut() = all_langs;
     let ok = btn(
         mtm,
         &crate::strings::get("gui.btn.ok"),

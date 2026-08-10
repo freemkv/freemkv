@@ -121,6 +121,14 @@ const IDM_DOCS: u16 = 2016;
 const IDM_CHECK_UPDATES: u16 = 2017;
 const IDM_ABOUT: u16 = 2018;
 
+/// First command id of a language checklist popup; entry *i* is `+ i`.
+///
+/// Well clear of the `IDM_*` block even though it cannot collide with it: the
+/// checklist is tracked with `TPM::RETURNCMD`, which hands the chosen id back
+/// as the call's return value and posts no `WM_COMMAND` at all. A reader
+/// checking "does 3000 mean two things?" should not have to work that out.
+const IDM_LANG_BASE: u16 = 3000;
+
 /// Every menu id that maps to a core command, in menu order — so the
 /// enable/disable pass and the test harness can walk them without a second,
 /// drifting list.
@@ -2257,6 +2265,129 @@ fn enum_options(key: &str) -> Vec<(&'static str, String)> {
     }
 }
 
+/// A multi-select language picker: a button that shows the chosen languages,
+/// and a checkable popup menu behind it.
+///
+/// **Why a button-plus-menu and not a dropdown.** Win32 has no checked-list
+/// combo box. `CBS_DROPDOWNLIST` is single-select, and a listbox with
+/// `LBS_MULTIPLESEL` is not a dropdown at all — it would need permanent
+/// vertical space for a 38-row list, three times over, on a Settings page that
+/// already has none. A button opening a `TrackPopupMenu` of `MF::CHECKED`
+/// entries is the native Windows idiom for "tick several from a long list" —
+/// it is what the Explorer and Task Manager column choosers do — it costs one
+/// row of height like the text box it replaces, and it draws the ticks with
+/// the system's own check bitmaps rather than an imitation of them.
+///
+/// **Why the string is held here.** The button's title is a SUMMARY
+/// ("English, German"); recovering codes from it would mean a second parser in
+/// this file, and the whole point of `ui::lang_*` is that both shells share one
+/// rule. So the stored preference lives alongside the control and the title is
+/// only ever written *from* it: the shell renders, `ui` decides.
+#[derive(Clone)]
+struct LangPicker {
+    btn: gui::Button,
+    stored: Rc<RefCell<String>>,
+}
+
+impl LangPicker {
+    /// Adopt a stored preference and re-title the button from it.
+    fn set(&self, stored: &str) {
+        *self.stored.borrow_mut() = stored.to_string();
+        // `lang_summary` never answers with an empty string — a blank button
+        // reads as a control that failed to load, not as "no preference".
+        let title = crate::ui::lang_summary(&self.stored.borrow());
+        let _ = self.btn.hwnd().SetWindowText(&title);
+    }
+
+    fn value(&self) -> String {
+        self.stored.borrow().clone()
+    }
+
+    /// Show the checklist under the button and apply each tick.
+    ///
+    /// The menu is re-opened after every tick instead of closing on the first.
+    /// A Win32 menu normally closes when an item is chosen, but this one is a
+    /// multi-select list: closing after one language would make a typical
+    /// two-or-three-language preference three separate trips through a 38-entry
+    /// menu. Escape or a click outside returns no command and ends the loop, so
+    /// it is no harder to dismiss than any other menu.
+    fn popup(&self, owner: &w::HWND) {
+        // Anchored to the button's own rectangle, not the cursor: the menu then
+        // lines up under the control it belongs to however it was invoked
+        // (mouse, Space, or the keyboard accelerator on the label).
+        let Ok(anchor) = self.btn.hwnd().GetWindowRect() else {
+            return;
+        };
+        while let Some(code) = self.track_once(owner, anchor) {
+            // The ONLY mutation. `ui::lang_toggle` owns what a tick means, so a
+            // click here and a click on macOS cannot come to differ.
+            let next = crate::ui::lang_toggle(&self.value(), &code);
+            self.set(&next);
+        }
+    }
+
+    /// One pass of the menu: build it from the current selection, track it, and
+    /// return the code the user ticked. `None` means dismissed.
+    fn track_once(&self, owner: &w::HWND, anchor: w::RECT) -> Option<String> {
+        let mut menu = w::HMENU::CreatePopupMenu().ok()?;
+        let langs = crate::ui::PICKER_LANGUAGES;
+        // `SM::CYMENU` is the menu-bar height, which is what a popup row is
+        // sized from, and `SM::CYSCREEN` the display height. Feeding both to
+        // the layout module turns a list taller than the screen into columns
+        // rather than Windows' scroll arrows — see `menu_column_rows`.
+        let rows = lay::menu_column_rows(
+            langs.len(),
+            w::GetSystemMetrics(co::SM::CYMENU),
+            w::GetSystemMetrics(co::SM::CYSCREEN),
+        );
+        let cur = self.value();
+        for (i, (code, name)) in langs.iter().enumerate() {
+            let mut flags = co::MF::STRING;
+            if crate::ui::lang_is_selected(&cur, code) {
+                flags |= co::MF::CHECKED;
+            }
+            if i > 0 && i % rows == 0 {
+                // MENUBARBREAK, not MENUBREAK: it draws the vertical rule
+                // between columns, without which two columns read as one wide
+                // one with a stray gap.
+                flags |= co::MF::MENUBARBREAK;
+            }
+            if menu
+                .AppendMenu(
+                    flags,
+                    w::IdMenu::Id(IDM_LANG_BASE + i as u16),
+                    w::BmpPtrStr::from_str(name),
+                )
+                .is_err()
+            {
+                // A menu that is half-built is still usable; showing what was
+                // added beats showing nothing at all.
+                break;
+            }
+        }
+
+        // RETURNCMD hands the chosen id back from the call rather than posting
+        // WM_COMMAND, so this popup needs no command routing and cannot collide
+        // with the main window's menu ids.
+        owner.SetForegroundWindow();
+        let picked = menu.TrackPopupMenu(
+            co::TPM::LEFTBUTTON | co::TPM::RETURNCMD,
+            w::POINT::with(anchor.left, anchor.bottom),
+            owner,
+        );
+        // Both required, and in this order. The null post is the documented
+        // workaround for TrackPopupMenu leaving the owner unable to see the
+        // click that dismissed the menu; the menu is not attached to a window,
+        // so nothing else will ever destroy it.
+        let _ = unsafe { owner.PostMessage(msg::WmNull {}) };
+        let _ = menu.DestroyMenu();
+
+        let id = picked.ok()??;
+        let idx = u16::try_from(id).ok()?.checked_sub(IDM_LANG_BASE)? as usize;
+        langs.get(idx).map(|(code, _)| (*code).to_string())
+    }
+}
+
 /// Builds one labelled row per call, walking a y-cursor down a tab page — the
 /// right-aligned label / control-to-its-right layout the macOS Settings uses.
 ///
@@ -2337,6 +2468,41 @@ impl<'a> Rows<'a> {
         );
         self.y += self.m.row_step;
         e
+    }
+
+    /// A language checklist row — see [`LangPicker`].
+    ///
+    /// Deliberately the same `row_step` and `field_h` as `field`: this replaced
+    /// three text boxes, and a taller control would have pushed the Selection
+    /// page past the bottom of the Settings window (which is what
+    /// `win_layout`'s page-height test measures).
+    ///
+    /// The title is set here rather than left to `populate`, because winsafe
+    /// creates its controls with the parent window and `hwnd()` is still null
+    /// at this point — a `SetWindowText` now would be silently dropped.
+    fn lang(&mut self, text: &str, val: &str, wd: i32) -> LangPicker {
+        self.label(text);
+        let title = crate::ui::lang_summary(val);
+        let btn = gui::Button::new(
+            self.page,
+            gui::ButtonOpts {
+                text: &title,
+                position: (self.gutter, self.y),
+                width: self.s.px(wd),
+                height: self.m.field_h,
+                // Left-aligned, not the button default of centred: this sits in
+                // the column of text boxes and combos, and a centred summary
+                // that re-centres itself every time a language is ticked reads
+                // as the whole control jumping about.
+                control_style: co::BS::PUSHBUTTON | co::BS::LEFT,
+                ..Default::default()
+            },
+        );
+        self.y += self.m.row_step;
+        LangPicker {
+            btn,
+            stored: Rc::new(RefCell::new(val.to_string())),
+        }
     }
 
     /// A path row: field plus a browse button that fills it.
@@ -2450,6 +2616,10 @@ struct Prefs {
     fields: Vec<(&'static str, gui::Edit)>,
     checks: Vec<(&'static str, gui::CheckBox)>,
     combos: Vec<(&'static str, gui::ComboBox)>,
+    /// The language checklists, in the same registry shape as the rest — a
+    /// control that is built but not listed here is silently write-only: it
+    /// shows the stored value and OK never reads it back.
+    langs: Vec<(&'static str, LangPicker)>,
     lbl_keydb: gui::Label,
     btn_keydb: gui::Button,
     btn_test: gui::Button,
@@ -2507,6 +2677,7 @@ impl Prefs {
         let mut fields: Vec<(&'static str, gui::Edit)> = Vec::new();
         let mut checks: Vec<(&'static str, gui::CheckBox)> = Vec::new();
         let mut combos: Vec<(&'static str, gui::ComboBox)> = Vec::new();
+        let mut langs: Vec<(&'static str, LangPicker)> = Vec::new();
 
         // ── Output ── engine Job.dest + the GUI's own naming
         let mut r = Rows::new(&pages[0], dpi);
@@ -2539,17 +2710,22 @@ impl Prefs {
         // Three INDEPENDENT language sets — see `ui::LangPrefs`. They decide
         // which stream rows start ticked; nothing here bypasses the tick boxes,
         // so the user still sees and can change every choice.
-        fields.push((
+        //
+        // Checklists, not text boxes. Typed free text could not be validated
+        // without guessing what the user meant, and "German" silently failing
+        // to match a stream tagged `deu` looked exactly like the feature not
+        // working. A list of names that stores codes cannot be mistyped.
+        langs.push((
             "audio_langs",
-            r.field(&g("gui.set.audio_langs"), &st.audio_langs, 240),
+            r.lang(&g("gui.set.audio_langs"), &st.audio_langs, 240),
         ));
-        fields.push((
+        langs.push((
             "sub_langs",
-            r.field(&g("gui.set.sub_langs"), &st.sub_langs, 240),
+            r.lang(&g("gui.set.sub_langs"), &st.sub_langs, 240),
         ));
-        fields.push((
+        langs.push((
             "forced_sub_langs",
-            r.field(&g("gui.set.forced_sub_langs"), &st.forced_sub_langs, 240),
+            r.lang(&g("gui.set.forced_sub_langs"), &st.forced_sub_langs, 240),
         ));
         r.note(&g("gui.set.lang_prefs_note"));
 
@@ -2663,6 +2839,7 @@ impl Prefs {
             fields,
             checks,
             combos,
+            langs,
             lbl_keydb,
             btn_keydb,
             btn_test,
@@ -2718,6 +2895,11 @@ impl Prefs {
                 .unwrap_or(0);
             c.items().select(Some(idx as u32));
         }
+        // Re-titled from the stored string every time, which is also what makes
+        // a language change re-render "Any" in the new interface language.
+        for (k, p) in &self.langs {
+            p.set(&st.get(k));
+        }
         let _ = self.lbl_keydb.hwnd().SetWindowText(&st.keydb_status());
     }
 
@@ -2739,6 +2921,12 @@ impl Prefs {
                 // never the localized label.
                 st.set(k, (*canon).to_string());
             }
+        }
+        // The picker's own string, never its button title: the title is a
+        // summary of language NAMES and re-parsing it would mean a second copy
+        // of `ui::lang_selection` living in this file.
+        for (k, p) in &self.langs {
+            st.set(k, p.value());
         }
     }
 
@@ -3125,6 +3313,20 @@ impl Prefs {
             sh.start_drain();
             Ok(())
         });
+
+        // Each language button opens its own checklist. Nothing is committed
+        // here — the picker holds the edit and OK reads it back with the rest
+        // of the form, so Cancel discards it like any other change.
+        for (_, picker) in &self.langs {
+            let picker = picker.clone();
+            let me = self.clone();
+            let btn = picker.btn.clone();
+            #[allow(clippy::redundant_clone)]
+            btn.on().bn_clicked(move || {
+                picker.popup(me.wnd.hwnd());
+                Ok(())
+            });
+        }
 
         // The interface-language dropdown applies the moment a language is
         // picked: commit the form, swap the catalog, and re-text every window.
@@ -4820,6 +5022,59 @@ mod tests {
              — a failed save on the language-switch path would go \
              unreported again"
         );
+    }
+
+    // ── the language pickers use the shared rules, not a local parser ───────
+    //
+    // Source inspection only, for the same reason as the tests above: proving
+    // the menu really ticks needs a real HWND. What CAN be checked here is the
+    // thing most likely to go wrong — the set logic being reimplemented in this
+    // file. Two shells with two parsers is exactly the drift `ui::lang_*` was
+    // written to prevent, and it would not show up as a compile error.
+    #[test]
+    fn the_language_pickers_own_no_parsing_source_inspection_only() {
+        let src = own_source();
+        for key in ["audio_langs", "sub_langs", "forced_sub_langs"] {
+            assert!(
+                src.contains(&format!("r.lang(&g(\"gui.set.{key}\")")),
+                "{key} is no longer built with the r.lang checklist row"
+            );
+            assert!(
+                src.contains(&format!("langs.push((\n            \"{key}\",")),
+                "{key} is missing from the `langs` registry — it would render \
+                 the stored value and OK would never read it back"
+            );
+        }
+        // Every rule must be a call INTO ui, not a copy of one.
+        for f in [
+            "lang_summary",
+            "lang_toggle",
+            "lang_is_selected",
+            "PICKER_LANGUAGES",
+        ] {
+            assert!(
+                src.contains(&format!("crate::ui::{f}")),
+                "the picker no longer goes through ui::{f}"
+            );
+        }
+        // The tells of a hand-rolled second parser: splitting the stored string
+        // on commas, or joining codes back up, anywhere in this file. Built
+        // from concatenated literals so these needles cannot match this test's
+        // own text through `include_str!` of this same file.
+        let tells = [
+            format!("{}{}", "split(", "',')"),
+            format!("{}{}", "split([", "','"),
+            format!("{}{}", ".join(", "\",\")"),
+        ];
+        for needle in &tells {
+            assert!(
+                !src.contains(needle),
+                "windows.rs contains `{needle}` — the comma-separated language \
+                 string is being parsed or rebuilt here instead of in \
+                 ui::lang_selection / ui::lang_selection_to_string, which is \
+                 how the two shells drift apart"
+            );
+        }
     }
 
     // ── the keyserver token is not shown in plaintext ───────────────────────

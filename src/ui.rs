@@ -201,17 +201,44 @@ fn preferred_pids(
         Err(_) => all_normal.clone(),
     });
 
-    // Forced subtitles, matched only against the `forced` set — its own class
-    // with its own fallback, so "only German subtitles, forced only if in
-    // English" resolves both halves on their own terms.
+    // Forced subtitles, matched only against the `forced` set — its own class,
+    // so "only German subtitles, forced only if in English" resolves both
+    // halves on their own terms.
+    //
+    // This class does NOT fall back to keeping everything, unlike the two
+    // above, and the difference is deliberate. The fallback exists so a
+    // language that isn't on the disc cannot produce a file missing a whole
+    // track class — a rip with no audio is broken. Neither half of that
+    // reasoning holds here:
+    //
+    //   * A title with no forced subtitles is perfectly normal. They are an
+    //     optional overlay for foreign dialogue, not a class every file needs.
+    //   * Forced subtitles DISPLAY BY THEMSELVES during playback. Ticking ones
+    //     the user did not ask for is not a harmless superset — it burns
+    //     wrong-language text onto the screen. Asking for forced-only-in-
+    //     English on a disc that has none, and being handed French, German,
+    //     Spanish and Portuguese forced tracks that all auto-display, is worse
+    //     than being handed nothing.
+    //
+    // So an unmatched preference keeps NONE here. An empty preference is
+    // unaffected: it means "no preference", arrives as `PidFilter::All`, and
+    // still keeps every forced track.
     let forced = resolve_stream_selection_forced(
         &title,
         &StreamFilter::None,
         &SubtitleFilter::split(StreamFilter::None, lang_filter(&prefs.forced)),
     );
     out.extend(match forced {
-        Ok(sel) => class_or_fallback(sel.subtitle, &all_forced),
-        Err(_) => all_forced.clone(),
+        Ok(sel) => match sel.subtitle {
+            // No preference expressed — keep the class, as before.
+            freemkv_engine::PidFilter::All => all_forced.clone(),
+            // A preference that matched nothing keeps nothing. See above.
+            freemkv_engine::PidFilter::Only(p) => p,
+        },
+        // An unresolvable tag lands here. Keeping none is the safe direction
+        // for the same reason: no forced subtitles is a normal file, whereas
+        // five unwanted ones auto-display over the picture.
+        Err(_) => Vec::new(),
     });
 
     out
@@ -521,6 +548,168 @@ pub enum Page {
     Result,
 }
 
+// ── preferred-language pickers ──────────────────────────────────────────────
+//
+// The three preference boxes used to be free text: the user typed codes or
+// names and hoped. That asked people to know that a German audio track is
+// tagged `deu` and not `ger` or `de` — and a typo was indistinguishable from
+// "this disc has no German", because both simply matched nothing.
+//
+// The shells now show a checklist of language NAMES and store ISO codes. This
+// module owns the list and both directions of the conversion so macOS and
+// Windows cannot drift; a shell only renders what it is given.
+
+/// The languages offered in the pickers, as (stored code, English name).
+///
+/// ISO 639-2/T, which is what disc streams actually carry (`deu`, not `ger`;
+/// `fra`, not `fre`) — so a stored value can be compared to a stream tag
+/// without translating first.
+///
+/// Deliberately a CURATED list, not every code isolang knows. The full set is
+/// several thousand entries, which is not a menu anyone can use; these are the
+/// languages that appear on commercial discs. A code outside this list is
+/// still honoured if it is already stored — see [`lang_selection`].
+pub const PICKER_LANGUAGES: &[(&str, &str)] = &[
+    ("eng", "English"),
+    ("spa", "Spanish"),
+    ("fra", "French"),
+    ("deu", "German"),
+    ("ita", "Italian"),
+    ("por", "Portuguese"),
+    ("nld", "Dutch"),
+    ("swe", "Swedish"),
+    ("nor", "Norwegian"),
+    ("dan", "Danish"),
+    ("fin", "Finnish"),
+    ("isl", "Icelandic"),
+    ("pol", "Polish"),
+    ("ces", "Czech"),
+    ("slk", "Slovak"),
+    ("hun", "Hungarian"),
+    ("ron", "Romanian"),
+    ("bul", "Bulgarian"),
+    ("ell", "Greek"),
+    ("rus", "Russian"),
+    ("ukr", "Ukrainian"),
+    ("tur", "Turkish"),
+    ("heb", "Hebrew"),
+    ("ara", "Arabic"),
+    ("hin", "Hindi"),
+    ("tha", "Thai"),
+    ("vie", "Vietnamese"),
+    ("ind", "Indonesian"),
+    ("zho", "Chinese"),
+    ("jpn", "Japanese"),
+    ("kor", "Korean"),
+    ("cat", "Catalan"),
+    ("hrv", "Croatian"),
+    ("srp", "Serbian"),
+    ("slv", "Slovenian"),
+    ("est", "Estonian"),
+    ("lav", "Latvian"),
+    ("lit", "Lithuanian"),
+];
+
+/// Normalize one user-supplied tag to the code this module stores.
+///
+/// Accepts what the free-text boxes accepted — a 639-1 code (`en`), either
+/// 639-2 form (`ger`/`deu`), 639-3, or an English name (`German`) — because
+/// settings written before the pickers existed contain exactly those, and a
+/// stored preference that silently stopped matching would look like the
+/// feature had been dropped.
+pub fn canonical_lang_code(tag: &str) -> Option<String> {
+    let t = tag.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let lower = t.to_ascii_lowercase();
+    // A name we already offer, matched case-insensitively.
+    if let Some((code, _)) = PICKER_LANGUAGES
+        .iter()
+        .find(|(_, name)| name.to_ascii_lowercase() == lower)
+    {
+        return Some((*code).to_string());
+    }
+    isolang::Language::from_639_1(&lower)
+        .or_else(|| isolang::Language::from_639_3(&lower))
+        .or_else(|| isolang::Language::from_name(t))
+        .map(|l| l.to_639_3().to_string())
+}
+
+/// The stored preference string parsed into canonical codes, order preserved
+/// and duplicates dropped. Anything unrecognisable is kept VERBATIM rather
+/// than discarded: it may be a valid tag this build does not know, and
+/// silently deleting a user's setting is worse than carrying it along.
+pub fn lang_selection(stored: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tag in stored
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        let code = canonical_lang_code(tag).unwrap_or_else(|| tag.to_string());
+        if !out.iter().any(|c| c.eq_ignore_ascii_case(&code)) {
+            out.push(code);
+        }
+    }
+    out
+}
+
+/// Codes back to the stored form. One spelling, so a round trip through the
+/// picker cannot rewrite a setting into a different-looking equivalent.
+pub fn lang_selection_to_string(codes: &[String]) -> String {
+    codes.join(",")
+}
+
+/// The picker button's title: the chosen languages in English, or a word
+/// meaning "no preference" — never an empty button, which reads as broken.
+pub fn lang_summary(stored: &str) -> String {
+    let codes = lang_selection(stored);
+    if codes.is_empty() {
+        return crate::strings::get("gui.set.lang_any");
+    }
+    codes
+        .iter()
+        .map(|c| lang_display_name(c))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The English name for a stored code, falling back to the code itself so an
+/// unknown tag is still visible rather than blank.
+pub fn lang_display_name(code: &str) -> String {
+    PICKER_LANGUAGES
+        .iter()
+        .find(|(c, _)| c.eq_ignore_ascii_case(code))
+        .map(|(_, name)| (*name).to_string())
+        .or_else(|| {
+            isolang::Language::from_639_3(&code.to_ascii_lowercase())
+                .map(|l| l.to_name().to_string())
+        })
+        .unwrap_or_else(|| code.to_string())
+}
+
+/// Toggle one code in a stored preference and return the new stored string.
+/// The single mutation both shells call, so a click means the same thing on
+/// each and neither reimplements the set logic.
+pub fn lang_toggle(stored: &str, code: &str) -> String {
+    let mut codes = lang_selection(stored);
+    match codes.iter().position(|c| c.eq_ignore_ascii_case(code)) {
+        Some(i) => {
+            codes.remove(i);
+        }
+        None => codes.push(code.to_string()),
+    }
+    lang_selection_to_string(&codes)
+}
+
+/// True when `code` is currently chosen — what draws each checkmark.
+pub fn lang_is_selected(stored: &str, code: &str) -> bool {
+    lang_selection(stored)
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(code))
+}
+
 /// The output sinks offered for a given source kind. Whole-disc sinks make no
 /// sense for a container, so they are omitted rather than offered and failed.
 /// `mp4_ok` is false when the source's video cannot go in an MP4 at all (a
@@ -614,7 +803,22 @@ pub fn log_menu_label(log_hidden: bool) -> String {
 }
 
 pub fn blocked_while_running(cmd: Cmd) -> bool {
-    !matches!(cmd, Cmd::Cancel | Cmd::About | Cmd::Docs | Cmd::Quit)
+    !matches!(
+        cmd,
+        Cmd::Cancel
+            | Cmd::About
+            | Cmd::Docs
+            | Cmd::Quit
+            // Showing and clearing the log are VIEW state. They touch nothing
+            // the rip reads, so blocking them bought no safety and cost the
+            // thing the log is for: a rip is exactly when someone wants to
+            // watch it, or to get it out of the way and watch the progress
+            // block instead. Leaving them disabled meant the only moment you
+            // could change your mind was before starting or after finishing —
+            // never while there was anything to see.
+            | Cmd::ToggleLog
+            | Cmd::ClearLog
+    )
 }
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -1869,6 +2073,100 @@ pub struct View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build one stream row for the preference tests.
+    fn row(type_s: &str, pid: u16, lang: &str, forced: bool) -> crate::engine::Row {
+        crate::engine::Row {
+            type_s: type_s.to_string(),
+            desc: String::new(),
+            depth: 2,
+            checkable: true,
+            title: 0,
+            info: String::new(),
+            pid: Some(pid),
+            duration_secs: 0.0,
+            lang: lang.to_string(),
+            forced,
+        }
+    }
+
+    /// A forced-subtitle preference that matches nothing must keep NOTHING.
+    ///
+    /// The real case: a UHD of Dunkirk carrying forced subtitles in French,
+    /// German, Spanish and Portuguese, but none in English. Asking for forced
+    /// subtitles in English ticked ALL FIVE of them, because this class fell
+    /// back to "keep everything" the way audio does when a language is absent.
+    ///
+    /// For audio that fallback is right — a rip with no audio is broken. For
+    /// forced subtitles it is actively harmful: they display by themselves
+    /// during playback, so the user who asked for English forced subs and has
+    /// none gets four languages of unwanted text burned over the picture. A
+    /// file with no forced subtitles is, by contrast, entirely normal.
+    #[test]
+    fn a_forced_preference_matching_nothing_keeps_nothing() {
+        let rows = [
+            row("Audio", 1100, "eng", false),
+            row("Audio", 1101, "fra", false),
+            row("Subtitles", 1200, "eng", false),
+            row("Subtitles", 1201, "fra", false),
+            // Forced tracks — note there is no English one, as on the disc.
+            row("Subtitles", 1300, "fra", true),
+            row("Subtitles", 1301, "deu", true),
+            row("Subtitles", 1302, "spa", true),
+            row("Subtitles", 1303, "por", true),
+        ];
+        let refs: Vec<&crate::engine::Row> = rows.iter().collect();
+
+        let prefs = LangPrefs::parse("en", "en", "en");
+        let keep = preferred_pids(&refs, &prefs);
+
+        for (pid, lang) in [(1300, "fra"), (1301, "deu"), (1302, "spa"), (1303, "por")] {
+            assert!(
+                !keep.contains(&pid),
+                "forced {lang} was ticked, but only English forced subtitles were asked for \
+                 — forced subtitles display by themselves, so this puts unwanted text on screen"
+            );
+        }
+        // The other two classes are unaffected: both have an English track, and
+        // each class resolves on its own terms.
+        assert!(keep.contains(&1100), "English audio must still be kept");
+        assert!(keep.contains(&1200), "English subtitles must still be kept");
+        assert!(!keep.contains(&1101), "French audio was not asked for");
+    }
+
+    /// The other half of the same rule: no preference is NOT an unmatched
+    /// preference. An empty box means "no opinion", and must go on keeping
+    /// every forced track — otherwise this fix would silently strip forced
+    /// subtitles from every rip that never expressed a preference at all.
+    #[test]
+    fn an_empty_forced_preference_still_keeps_every_forced_track() {
+        let rows = [
+            row("Subtitles", 1300, "fra", true),
+            row("Subtitles", 1301, "deu", true),
+        ];
+        let refs: Vec<&crate::engine::Row> = rows.iter().collect();
+
+        let keep = preferred_pids(&refs, &LangPrefs::parse("en", "en", ""));
+        assert!(keep.contains(&1300) && keep.contains(&1301));
+    }
+
+    /// And when the requested forced language IS present, it alone is kept.
+    #[test]
+    fn a_forced_preference_that_matches_keeps_only_that_language() {
+        let rows = [
+            row("Subtitles", 1300, "eng", true),
+            row("Subtitles", 1301, "deu", true),
+            row("Subtitles", 1302, "fra", true),
+        ];
+        let refs: Vec<&crate::engine::Row> = rows.iter().collect();
+
+        let keep = preferred_pids(&refs, &LangPrefs::parse("", "", "en"));
+        assert!(
+            keep.contains(&1300),
+            "the English forced track was asked for"
+        );
+        assert!(!keep.contains(&1301) && !keep.contains(&1302));
+    }
 
     #[test]
     fn sizes_roll_over_instead_of_staying_in_megabytes() {
