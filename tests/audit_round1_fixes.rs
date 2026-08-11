@@ -120,6 +120,37 @@ fn the_extract_destination_cannot_escape_the_chosen_folder() {
     }
 }
 
+/// Every seam that turns a disc label into a path, enumerated.
+///
+/// Round 1 fixed three and missed the fourth -- the ordinary drive->ISO rip --
+/// because the fix was driven from the findings rather than from the list of
+/// places the label lands. This states the invariant once, over the exported
+/// helpers, so the next seam added is measured against it: whatever the label
+/// contains, what reaches the filesystem is a single component.
+#[test]
+fn every_label_derived_name_stays_one_component() {
+    let evil = r"..\..\..\Users\victim\AppData\Roaming\evil";
+    let names = [
+        title_basename("", evil, 1),
+        title_basename("{title}", evil, 1),
+        sanitize_label(evil),
+        extract_target("/tmp/out", evil)
+            .strip_prefix("/tmp/out")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    for n in names {
+        assert_eq!(
+            std::path::Path::new(&n).components().count(),
+            1,
+            "not one component: {n}"
+        );
+        assert!(!n.contains('/'), "forward slash survived: {n}");
+        assert!(!n.contains('\\'), "backslash survived: {n}");
+    }
+}
+
 /// The Windows traversal. `title_basename` stripped only `/`, so a crafted
 /// label escaped the destination directory on Windows.
 #[test]

@@ -1961,7 +1961,16 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
     // double-decrypting.
     let want_iso = matches!(kind, OutKind::IsoImage);
     if recovery_plan(kind, req.multipass) != DiscPlan::PerTitle {
-        let iso_path = format!("{}/{}.iso", req.dest_dir, label);
+        // The FOURTH label-into-a-path seam, and the most-travelled one: this
+        // is the ordinary drive -> ISO rip. Round 1 sanitised the other three
+        // (title_basename's default branch, extract_target, and the
+        // image-decrypt destination) and missed this, so the traversal stayed
+        // open on the path most users take. Built through `Path::join` rather
+        // than string interpolation so the type system carries the boundary.
+        let iso_path = std::path::Path::new(&req.dest_dir)
+            .join(format!("{}.iso", sanitize_label(&label)))
+            .to_string_lossy()
+            .into_owned();
         session.stage_drive_as_reader();
         let mut reader = session
             .take_reader()
