@@ -20,7 +20,7 @@ pub(crate) fn sanitize(s: &str) -> String {
     // `main.rs`, so the desktop shells (built from the lib target) could not
     // call it — the GUI went unsanitised for exactly that reason. The helper
     // now lives in `engine`, which both targets share.
-    crate::engine::sanitize_display(s)
+    crate::strings::sanitize_display(s)
 }
 
 /// Flags accepted by `freemkv info <url>`, for every URL scheme.
