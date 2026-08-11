@@ -114,6 +114,10 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                     )
                 }
                 libfreemkv::Stream::Audio(a) => {
+                    // The language code is disc bytes too — an MPLS/IFO field,
+                    // not a validated ISO 639-2 code — so it gets the same
+                    // treatment as the label two lines below it.
+                    let language = sanitize_display(&a.language);
                     let mut tags: Vec<String> = Vec::new();
                     if let Some(p) = purpose_label(a.purpose) {
                         tags.push(p.to_string());
@@ -132,12 +136,12 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                     (
                         "Audio",
                         Some(a.pid),
-                        format!("{}  {}  {}{}", a.codec, a.channels, a.language, suffix),
+                        format!("{}  {}  {}{}", a.codec, a.channels, language, suffix),
                         format!(
                             "Audio track\n\nCodec: {}\nChannels: {}\nLanguage: {}\nSample rate: {}{}{}",
                             a.codec,
                             a.channels,
-                            a.language,
+                            language,
                             a.sample_rate,
                             if a.secondary { "\nSecondary: yes" } else { "" },
                             if tags.is_empty() {
@@ -149,6 +153,8 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                     )
                 }
                 libfreemkv::Stream::Subtitle(s) => {
+                    // Disc bytes, same as the audio language above.
+                    let language = sanitize_display(&s.language);
                     let mut tags: Vec<String> = Vec::new();
                     if s.forced {
                         tags.push("Forced".into());
@@ -161,10 +167,10 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                     (
                         "Subtitles",
                         Some(s.pid),
-                        format!("{}  {}{}", s.codec, s.language, suffix),
+                        format!("{}  {}{}", s.codec, language, suffix),
                         format!(
                             "Subtitle track\n\nCodec: {}\nLanguage: {}\nForced: {}",
-                            s.codec, s.language, s.forced
+                            s.codec, language, s.forced
                         ),
                     )
                 }
@@ -423,7 +429,10 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String, verbose: bool) ->
                 if t.playlist.is_empty() {
                     String::new()
                 } else {
-                    format!("{}   ", t.playlist)
+                    // The playlist name is a filename read off the disc, so it
+                    // is untrusted display bytes like the volume id and the
+                    // stream labels.
+                    format!("{}   ", sanitize_display(&t.playlist))
                 },
                 t.chapters.len(),
                 fmt_dur(t.duration_secs),
@@ -950,35 +959,59 @@ pub fn summarize_stream(completed: bool, target: &str, dest_dir: &str) -> String
 /// see its doc, which names "reporting a lossy or cancelled rip as complete"
 /// as the bug it exists to prevent.
 ///
-/// Branches on `halted` FIRST, like `summarize_extract`: `complete` is derived
-/// as "nothing pending AND nothing lost AND not interrupted", so testing it
-/// alone would collapse "you cancelled" and "the disc is damaged" into one
-/// message. The partial image is KEPT in every case, matching the disc->ISO
-/// path's stated policy that an abort never throws away the read.
+/// Branches on `halted` FIRST, like `summarize_extract`, and then on
+/// `complete` — never on a re-derivation of it. `complete` is "nothing pending
+/// AND nothing lost AND not interrupted", so `halted` has to be taken off the
+/// table before it is asked, or "you cancelled" and "the disc is damaged"
+/// collapse into one message; but with `halted` already handled, `complete` is
+/// exactly the question left. Reading `bytes_unreadable > 0` in its place was
+/// the re-derivation this type exists to prevent, and it dropped the third
+/// term: a decrypt that ends with bytes still PENDING (attempted-and-skipped
+/// sectors, `recovery::copy`'s terminal-result paths) is not complete, and
+/// reported as a clean write. Both shortfalls are now named in the message.
+/// The partial image is KEPT in every case, matching the disc->ISO path's
+/// stated policy that an abort never throws away the read.
 ///
 /// Pure so the mapping is unit-testable without running a decrypt.
 pub fn summarize_image_decrypt(result: &fe::CopyResult, dest: &std::path::Path) -> String {
     let gib = result.bytes_good as f64 / 1_073_741_824.0;
+    let mib = |b: u64| b as f64 / 1_048_576.0;
     if result.halted {
-        format!(
+        return format!(
             "Cancelled — partial image kept: {} ({:.2} GiB recovered)",
             dest.display(),
             gib
-        )
-    } else if result.bytes_unreadable > 0 {
-        format!(
-            "Decrypted image written: {} ({:.2} GiB, {:.1} MiB unreadable)",
-            dest.display(),
-            gib,
-            result.bytes_unreadable as f64 / 1_048_576.0
-        )
-    } else {
-        format!(
+        );
+    }
+    if result.complete {
+        return format!(
             "Decrypted image written: {} ({:.2} GiB)",
             dest.display(),
             gib
-        )
+        );
     }
+    let mut shortfall: Vec<String> = Vec::new();
+    if result.bytes_unreadable > 0 {
+        shortfall.push(format!(
+            "{:.1} MiB unreadable",
+            mib(result.bytes_unreadable)
+        ));
+    }
+    if result.bytes_pending > 0 {
+        shortfall.push(format!("{:.1} MiB not read", mib(result.bytes_pending)));
+    }
+    // `complete` was false with neither byte count set — the flag is the
+    // authority, so say the image is incomplete rather than print a clean
+    // success line we cannot justify.
+    if shortfall.is_empty() {
+        shortfall.push("incomplete".to_string());
+    }
+    format!(
+        "Decrypted image written: {} ({:.2} GiB, {})",
+        dest.display(),
+        gib,
+        shortfall.join(", ")
+    )
 }
 
 /// Render a finished decrypted-folder extraction (`run_extract_folder`) as the
@@ -2354,14 +2387,27 @@ mod outcome_summary_tests {
     /// its two siblings already had. It shipped with a doc claiming "Pure so
     /// the mapping is unit-testable" and no test — the exact gap that let the
     /// arm it replaced report a cancelled decrypt as a clean write.
+    ///
+    /// `complete` is derived here exactly as `CopyResult::new` derives it —
+    /// pending included — so a fixture cannot present a combination the engine
+    /// never produces and make the summariser look right on it.
     fn copy_result(halted: bool, good: u64, unreadable: u64) -> fe::CopyResult {
+        copy_result_pending(halted, good, unreadable, 0)
+    }
+
+    fn copy_result_pending(
+        halted: bool,
+        good: u64,
+        unreadable: u64,
+        pending: u64,
+    ) -> fe::CopyResult {
         fe::CopyResult {
-            bytes_total: good + unreadable,
+            bytes_total: good + unreadable + pending,
             bytes_good: good,
             bytes_unreadable: unreadable,
-            bytes_pending: 0,
+            bytes_pending: pending,
             recovered_this_pass: good,
-            complete: !halted && unreadable == 0,
+            complete: !halted && unreadable == 0 && pending == 0,
             halted,
         }
     }
@@ -2408,6 +2454,36 @@ mod outcome_summary_tests {
             msg.contains("2.0 MiB unreadable"),
             "damage must be reported, not silently dropped: {msg}"
         );
+    }
+
+    /// The term the old `bytes_unreadable > 0` test dropped. `recovery::copy`
+    /// returns pending bytes with `halted` false and nothing permanently lost
+    /// (its terminal-result paths), and that read as a clean write.
+    #[test]
+    fn an_image_decrypt_with_bytes_still_pending_is_not_a_clean_write() {
+        let msg = summarize_image_decrypt(
+            &copy_result_pending(false, 1_073_741_824, 0, 4 * 1_048_576),
+            std::path::Path::new("/out/Disc.iso"),
+        );
+        assert!(
+            msg.contains("4.0 MiB not read"),
+            "unread bytes must be reported, not silently dropped: {msg}"
+        );
+        assert_ne!(
+            msg, "Decrypted image written: /out/Disc.iso (1.00 GiB)",
+            "an incomplete image must not render as the clean-success line"
+        );
+    }
+
+    /// Both shortfalls at once — neither term may mask the other.
+    #[test]
+    fn an_image_decrypt_reports_lost_and_unread_bytes_together() {
+        let msg = summarize_image_decrypt(
+            &copy_result_pending(false, 1_073_741_824, 2 * 1_048_576, 4 * 1_048_576),
+            std::path::Path::new("/out/Disc.iso"),
+        );
+        assert!(msg.contains("2.0 MiB unreadable"), "{msg}");
+        assert!(msg.contains("4.0 MiB not read"), "{msg}");
     }
 
     #[test]
@@ -3137,5 +3213,183 @@ mod routing_tests {
         };
         let note = damage_note(&result);
         assert!(!note.to_lowercase().contains("nan"), "{note}");
+    }
+}
+
+// ── Every disc-derived string that reaches a GUI row is display-sanitised. ──
+//
+// Round 1 fixed this per finding — `volume_id`, then the video/audio `label`
+// fields — and round 2 found the two it missed (`playlist`, `language`)
+// sitting two lines from a call that was already there. This test is driven
+// from an ENUMERATION of the untrusted fields instead, so a new one has to be
+// added here to pass.
+#[cfg(test)]
+mod display_sanitisation_tests {
+    use super::{Row, scanned_from_disc, stream_rows};
+    use crate::strings::is_unsafe_display_char;
+    use libfreemkv::disc::{BdRegion, DiscRegion};
+    use libfreemkv::{
+        AudioChannels, AudioStream, Codec, ColorSpace, ContentFormat, Disc, DiscFormat, DiscTitle,
+        FrameRate, HdrFormat, LabelPurpose, LabelQualifier, Resolution, SampleRate, Stream,
+        SubtitleStream, VideoStream,
+    };
+
+    /// A payload that carries one member of every class `is_unsafe_display_char`
+    /// rejects: a C0 control, an ESC-introduced OSC, a newline (log forging), a
+    /// bidi override and a zero-width joiner.
+    const HOSTILE: &str = "a\u{7}b\u{1b}]0;pwned\u{7}c\nLabel: forged\u{202e}e\u{200b}f";
+
+    /// The control payload for the tooltip-shape comparison: same field, no
+    /// character the display rule objects to.
+    const BENIGN: &str = "abcdef";
+
+    fn hostile_disc() -> Disc {
+        let video = Stream::Video(VideoStream {
+            pid: 0x1011,
+            codec: Codec::Hevc,
+            resolution: Resolution::Unknown,
+            frame_rate: FrameRate::Unknown,
+            hdr: HdrFormat::Sdr,
+            color_space: ColorSpace::Bt709,
+            display_aspect: None,
+            secondary: true,
+            label: HOSTILE.to_string(),
+            measured_cicp: None,
+        });
+        let audio = Stream::Audio(AudioStream {
+            pid: 0x1100,
+            codec: Codec::TrueHd,
+            channels: AudioChannels::Unknown,
+            language: HOSTILE.to_string(),
+            sample_rate: SampleRate::Unknown,
+            secondary: true,
+            purpose: LabelPurpose::Commentary,
+            label: HOSTILE.to_string(),
+        });
+        let subtitle = Stream::Subtitle(SubtitleStream {
+            pid: 0x1200,
+            codec: Codec::Pgs,
+            language: HOSTILE.to_string(),
+            forced: true,
+            qualifier: LabelQualifier::None,
+            codec_data: None,
+        });
+
+        Disc {
+            volume_id: HOSTILE.to_string(),
+            meta_title: None,
+            format: DiscFormat::Uhd,
+            capacity_sectors: 0,
+            capacity_bytes: 0,
+            layers: 1,
+            titles: vec![DiscTitle {
+                playlist: HOSTILE.to_string(),
+                playlist_id: 800,
+                duration_secs: 60.0,
+                size_bytes: 1 << 30,
+                clips: Vec::new(),
+                streams: vec![video, audio, subtitle],
+                chapters: Vec::new(),
+                extents: Vec::new(),
+                content_format: ContentFormat::BdTs,
+                codec_privates: Vec::new(),
+            }],
+            region: DiscRegion::BluRay(vec![BdRegion::A]),
+            aacs: None,
+            css: None,
+            encrypted: true,
+            aacs_error: None,
+            css_error: None,
+            content_format: ContentFormat::BdTs,
+        }
+    }
+
+    /// Row text carrying a character that must never reach the screen.
+    ///
+    /// `info` is the multi-line tooltip, so its own template newlines are
+    /// legitimate and are not counted here — newline INJECTION into it is
+    /// caught by the line-count check in `tooltips_keep_their_own_shape`
+    /// instead, which is the assertion that can actually tell the two apart.
+    /// The same disc with a harmless payload, as the control for the
+    /// line-count comparison above.
+    fn benign_disc() -> Disc {
+        let mut d = hostile_disc();
+        d.volume_id = BENIGN.to_string();
+        for t in &mut d.titles {
+            t.playlist = BENIGN.to_string();
+            for st in &mut t.streams {
+                match st {
+                    Stream::Video(v) => v.label = BENIGN.to_string(),
+                    Stream::Audio(a) => {
+                        a.label = BENIGN.to_string();
+                        a.language = BENIGN.to_string();
+                    }
+                    Stream::Subtitle(s) => s.language = BENIGN.to_string(),
+                }
+            }
+        }
+        d
+    }
+
+    fn offenders(rows: &[Row]) -> Vec<String> {
+        let mut bad: Vec<String> = Vec::new();
+        for r in rows {
+            for s in [&r.desc, &r.type_s] {
+                if s.chars().any(is_unsafe_display_char) {
+                    bad.push(s.clone());
+                }
+            }
+            if r.info
+                .chars()
+                .any(|c| c != '\n' && is_unsafe_display_char(c))
+            {
+                bad.push(r.info.clone());
+            }
+        }
+        bad
+    }
+
+    /// The rows the GUI renders for a whole disc — the title line (playlist)
+    /// and the disc line (volume id) included.
+    #[test]
+    fn no_disc_derived_row_text_carries_an_unsafe_display_char() {
+        let disc = hostile_disc();
+        let scanned = scanned_from_disc(&disc, "none".into(), false);
+        let bad = offenders(&scanned.rows);
+        assert!(bad.is_empty(), "unsanitised row text: {bad:?}");
+    }
+
+    /// The stream rows on their own, so a regression in `stream_rows` cannot
+    /// hide behind a passing disc-level assertion.
+    #[test]
+    fn no_stream_row_text_carries_an_unsafe_display_char() {
+        let disc = hostile_disc();
+        let bad = offenders(&stream_rows(&disc.titles[0], 0));
+        assert!(bad.is_empty(), "unsanitised stream row text: {bad:?}");
+    }
+
+    /// A crafted field must not be able to add a LINE to a tooltip — the one
+    /// unsafe character `offenders` cannot judge inside `info`. Same disc,
+    /// same shape, only the payload differs, so any extra line came from it.
+    #[test]
+    fn tooltips_keep_their_own_shape() {
+        let hostile = scanned_from_disc(&hostile_disc(), "none".into(), false);
+        let benign = scanned_from_disc(&benign_disc(), "none".into(), false);
+        assert_eq!(hostile.rows.len(), benign.rows.len(), "row count differs");
+        for (h, b) in hostile.rows.iter().zip(&benign.rows) {
+            assert_eq!(
+                h.info.lines().count(),
+                b.info.lines().count(),
+                "tooltip gained a line from the payload:\n{}",
+                h.info
+            );
+        }
+    }
+
+    /// The payload has to be able to fail the assertion — a filter that
+    /// silently passed everything would make both tests above vacuous.
+    #[test]
+    fn the_hostile_payload_is_actually_unsafe() {
+        assert!(HOSTILE.chars().any(is_unsafe_display_char));
     }
 }
