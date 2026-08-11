@@ -88,10 +88,11 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
         .map(|st| {
             let (ty, pid, desc, info) = match st {
                 libfreemkv::Stream::Video(v) => {
+                    // Stream labels are disc bytes, same as the volume id.
                     let label = if v.label.is_empty() {
                         String::new()
                     } else {
-                        format!("  —  {}", v.label)
+                        format!("  —  {}", sanitize_display(&v.label))
                     };
                     (
                         "Video",
@@ -107,7 +108,7 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                             if v.label.is_empty() {
                                 String::new()
                             } else {
-                                format!("\nLabel: {}", v.label)
+                                format!("\nLabel: {}", sanitize_display(&v.label))
                             }
                         ),
                     )
@@ -121,7 +122,7 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                         tags.push("Secondary".into());
                     }
                     if !a.label.is_empty() {
-                        tags.push(a.label.clone());
+                        tags.push(sanitize_display(&a.label));
                     }
                     let suffix = if tags.is_empty() {
                         String::new()
@@ -372,10 +373,21 @@ fn disc_details(disc: &libfreemkv::Disc, key_summary: &str, verbose: bool) -> Ve
 
 fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String, verbose: bool) -> Scanned {
     let mut rows = Vec::new();
-    let label = if disc.volume_id.is_empty() {
-        "(no label)".to_string()
-    } else {
-        disc.volume_id.clone()
+    // The volume id is disc bytes — untrusted. It becomes `Scanned.label`,
+    // which the GUI pushes into the log pane, and the disc row's text. Left
+    // raw, a label carrying newlines forges log lines ("[Result] Rip finished
+    // successfully") and one carrying bidi overrides scrambles the pane. The
+    // CLI has always sanitised this (`disc_info` prints it through the same
+    // helper); the GUI never did. Sanitise ONCE here, at the boundary where
+    // disc bytes become UI text, rather than at each of `say()`'s ~15 call
+    // sites.
+    let label = {
+        let cleaned = sanitize_display(&disc.volume_id);
+        if cleaned.trim().is_empty() {
+            "(no label)".to_string()
+        } else {
+            cleaned
+        }
     };
 
     rows.push(Row {
@@ -926,6 +938,49 @@ pub fn summarize_stream(completed: bool, target: &str, dest_dir: &str) -> String
     }
 }
 
+/// Render a finished image decrypt (`iso://` -> `iso://`, the drive-free
+/// `OutKind::IsoImage` path) as the run summary — the third sibling of
+/// [`summarize_stream`] and [`summarize_extract`].
+///
+/// This path reported "Decrypted image written" whenever ANY bytes were
+/// recovered, consulting neither `halted` nor `bytes_unreadable`. Cancel a
+/// decrypt halfway and it claimed success; decrypt an image with unreadable
+/// sectors and it said nothing about them. `CopyResult` carries both signals
+/// precisely so a call site cannot re-derive completion and get it wrong —
+/// see its doc, which names "reporting a lossy or cancelled rip as complete"
+/// as the bug it exists to prevent.
+///
+/// Branches on `halted` FIRST, like `summarize_extract`: `complete` is derived
+/// as "nothing pending AND nothing lost AND not interrupted", so testing it
+/// alone would collapse "you cancelled" and "the disc is damaged" into one
+/// message. The partial image is KEPT in every case, matching the disc->ISO
+/// path's stated policy that an abort never throws away the read.
+///
+/// Pure so the mapping is unit-testable without running a decrypt.
+pub fn summarize_image_decrypt(result: &fe::CopyResult, dest: &std::path::Path) -> String {
+    let gib = result.bytes_good as f64 / 1_073_741_824.0;
+    if result.halted {
+        format!(
+            "Cancelled — partial image kept: {} ({:.2} GiB recovered)",
+            dest.display(),
+            gib
+        )
+    } else if result.bytes_unreadable > 0 {
+        format!(
+            "Decrypted image written: {} ({:.2} GiB, {:.1} MiB unreadable)",
+            dest.display(),
+            gib,
+            result.bytes_unreadable as f64 / 1_048_576.0
+        )
+    } else {
+        format!(
+            "Decrypted image written: {} ({:.2} GiB)",
+            dest.display(),
+            gib
+        )
+    }
+}
+
 /// Render a finished decrypted-folder extraction (`run_extract_folder`) as the
 /// run summary — the `dir://` analogue of `summarize_outcome`.
 ///
@@ -1125,7 +1180,10 @@ pub fn start_rip(req: RipRequest, state: Arc<RunState>) {
 /// destination, named by the disc's volume label. Exposed so the writability
 /// gate is testable without a real disc.
 pub fn extract_target(dest_dir: &str, label: &str) -> std::path::PathBuf {
-    std::path::Path::new(dest_dir).join(label)
+    // Sanitised HERE, not at the call site: the label is disc bytes, and
+    // `join` on a label of `..\..\Startup` walks straight out of the chosen
+    // destination. Doing it in the seam means a future caller cannot forget.
+    std::path::Path::new(dest_dir).join(sanitize_label(label))
 }
 
 /// Whether a decrypted-folder extraction may proceed into `dest`: a fresh or
@@ -1292,6 +1350,40 @@ fn out_kind(format: &str) -> OutKind {
 /// the disc/volume label (or container name), `{n}` → the 1-based title number.
 /// An empty template falls back to the historical `<label>_t<n>`; a template
 /// with no `{n}` gets `_t<n>` appended so multi-title output can never collide.
+/// Strip control/escape characters from untrusted on-disc metadata (volume
+/// label, title name, stream labels) before it is DISPLAYED.
+///
+/// Lives here, not in `disc_info`, because `disc_info` is declared only by
+/// `main.rs` — it is not part of the lib target that the desktop shells
+/// (`windows.rs`, `mac.rs`, `ui.rs`) are built from, so the GUI could not
+/// reach it. `disc_info::sanitize` now delegates here: one implementation,
+/// both targets.
+///
+/// Distinct from [`sanitize_label`], which makes a label safe as a FILENAME
+/// component and is lossier on purpose (it maps separators to `_`). This one
+/// only removes what cannot be safely rendered, so a Japanese or Cyrillic
+/// label survives intact.
+pub fn sanitize_display(s: &str) -> String {
+    s.chars().filter(|&c| !is_unsafe_display_char(c)).collect()
+}
+
+/// Characters to strip from untrusted on-disc strings before display: C0/C1
+/// controls (including ESC and the newlines that would let a crafted disc
+/// forge a whole log line) AND the Unicode format (Cf) characters that
+/// `char::is_control()` misses — bidirectional overrides/isolates
+/// (U+202A-202E, U+2066-2069), zero-width spaces/joiners (U+200B-200F,
+/// U+2060-2064) and the BOM (U+FEFF), which can reorder or hide how the rest
+/// of a line renders.
+pub fn is_unsafe_display_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}')
+}
+
 /// Make a disc-supplied label safe to use as ONE filename component.
 ///
 /// The volume label is disc bytes — untrusted. It reached the destination path
@@ -1347,11 +1439,17 @@ fn is_windows_reserved(stem: &str) -> bool {
 
 /// Path separators a user might type are neutralized to keep output in-folder.
 pub fn title_basename(template: &str, label: &str, n: usize) -> String {
+    // Sanitise ONCE, up front, for every branch. The `{title}` substitution
+    // below used to be the only sanitised path, which left the DEFAULT
+    // (empty-template) case — the one most users are on — joining the raw
+    // disc label into the output path. See `sanitize_label`'s own doc: that
+    // is the escape it was added to close, closed on one branch only.
+    let label = sanitize_label(label);
     let t = template.trim();
     if t.is_empty() {
         return format!("{label}_t{n}");
     }
-    let mut name = t.replace("{title}", &sanitize_label(label));
+    let mut name = t.replace("{title}", &label);
     if name.contains("{n}") {
         name = name.replace("{n}", &n.to_string());
     } else {
@@ -1717,7 +1815,9 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             // no unreadable sectors to retry, and `recover_to_iso` refuses
             // multipass unless `raw` is set, so passing the user's multipass
             // preference through would fail a request that makes sense.
-            let dest = std::path::Path::new(&req.dest_dir).join(format!("{label}.iso"));
+            // Same disc-label-into-a-path hazard as `extract_target`.
+            let dest =
+                std::path::Path::new(&req.dest_dir).join(format!("{}.iso", sanitize_label(&label)));
             // Never write over the source. The scan holds it open and the
             // decrypt reads from it while writing, so this would destroy the
             // input mid-rip and leave neither file intact. Compared by
@@ -1739,8 +1839,14 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
                 .lock()
                 .unwrap()
                 .push(format!("decrypting image → {}", dest.display()));
+            // `image_or_dir_scheme`, not `source_scheme` — see the former's
+            // doc. `recover_to_iso` happens to read only `job.mode`/`job.raw`
+            // today, so the URL is inert and this is not a live regression;
+            // but the sibling arm 40 lines below builds the same field from
+            // the same source with the other helper, and a `Job`-consuming
+            // callee would resurrect the bug the moment one appeared.
             let mut job = fe::Job::new(
-                format!("{}://{}", source_scheme(&req.source), req.source),
+                format!("{}://{}", image_or_dir_scheme(&req.source), req.source),
                 dest.display().to_string(),
             );
             job.raw = req.raw;
@@ -1751,11 +1857,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
                 let _ = std::fs::remove_file(&dest);
                 return Err("No readable data — no image was written.".into());
             }
-            return Ok(format!(
-                "Decrypted image written: {} ({:.2} GB)",
-                dest.display(),
-                result.bytes_good as f64 / 1_073_741_824.0
-            ));
+            return Ok(summarize_image_decrypt(&result, &dest));
         }
         _ => {}
     }

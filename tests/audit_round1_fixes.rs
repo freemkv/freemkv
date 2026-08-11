@@ -3,7 +3,7 @@
 //! Each pins a defect that shipped, and each was watched failing against the
 //! unfixed code before being kept.
 
-use freemkv::engine::{RunOutcome, sanitize_label, title_basename};
+use freemkv::engine::{RunOutcome, extract_target, sanitize_label, title_basename};
 
 // ── The GUI classified a run by substring-matching the engine's English. ────
 //
@@ -45,6 +45,70 @@ fn outcome_is_typed_not_parsed_from_prose() {
 }
 
 // ── A disc volume label reached the output path almost unsanitised. ─────────
+
+/// The DEFAULT output template is the empty one, and it was the branch the
+/// original fix missed.
+///
+/// `title_basename` sanitised only inside its `{title}` substitution, so the
+/// test below (which passes a `"{title}"` template) proved the traversal
+/// closed while the branch most users are actually on --
+/// `format!("{label}_t{n}")` with the raw label -- was still open. A class of
+/// bug is not closed by covering one of its branches.
+#[test]
+fn the_default_template_sanitises_the_label_too() {
+    for evil in [
+        r"..\..\..\Users\victim\AppData\Roaming\evil",
+        "../../../etc/cron.d/evil",
+        r"C:\Windows\System32\evil",
+    ] {
+        let out = title_basename("", evil, 1);
+        assert!(!out.contains('/'), "forward slash survived: {out}");
+        assert!(!out.contains('\\'), "backslash survived: {out}");
+        assert!(!out.contains(':'), "drive colon survived: {out}");
+        assert_eq!(
+            std::path::Path::new(&out).components().count(),
+            1,
+            "must stay ONE path component: {out}"
+        );
+    }
+}
+
+/// The whole-disc sinks join the label into a path too, and neither went
+/// through the sanitiser: `extract_target` (the decrypted-folder
+/// destination) built `dest_dir.join(label)` raw, so a crafted label walked
+/// straight out of the folder the user chose.
+#[test]
+fn the_extract_destination_cannot_escape_the_chosen_folder() {
+    for evil in [
+        r"..\..\..\Users\victim\AppData\Roaming\evil",
+        "../../../etc/cron.d/evil",
+    ] {
+        let out = extract_target("/tmp/out", evil);
+        let tail: Vec<_> = out
+            .strip_prefix("/tmp/out")
+            .expect("must stay under the destination")
+            .components()
+            .collect();
+        assert_eq!(
+            tail.len(),
+            1,
+            "the disc label became {} components, not one: {}",
+            tail.len(),
+            out.display()
+        );
+        // As in the sibling test: `..` surviving as TEXT inside one component
+        // is harmless and deliberate — `.._.._..Users` navigates nowhere, and
+        // stripping dots would mangle a legitimate "Vol.. 2". What must never
+        // survive is a component BOUNDARY, asserted above.
+        assert!(
+            !std::path::Path::new(&out)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir)),
+            "a real parent-dir component survived: {}",
+            out.display()
+        );
+    }
+}
 
 /// The Windows traversal. `title_basename` stripped only `/`, so a crafted
 /// label escaped the destination directory on Windows.

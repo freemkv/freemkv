@@ -16,23 +16,11 @@ use libfreemkv::{
 /// terminal, so a crafted or corrupt disc cannot inject terminal escape
 /// sequences (color/cursor/OSC) via those fields.
 pub(crate) fn sanitize(s: &str) -> String {
-    s.chars().filter(|&c| !is_unsafe_display_char(c)).collect()
-}
-
-/// Terminal-spoofing characters to strip from untrusted on-disc strings:
-/// C0/C1 controls (incl. ESC) AND the Unicode format (Cf) characters that
-/// `char::is_control()` does NOT catch — bidirectional overrides/isolates
-/// (U+202A-202E, U+2066-2069), zero-width spaces/joiners (U+200B-200F,
-/// U+2060-2064), and the BOM (U+FEFF) — which can reorder or hide how the rest
-/// of a line renders in a terminal.
-fn is_unsafe_display_char(c: char) -> bool {
-    c.is_control()
-        || matches!(c,
-            '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{FEFF}')
+    // One implementation, two targets. This module is declared only by
+    // `main.rs`, so the desktop shells (built from the lib target) could not
+    // call it — the GUI went unsanitised for exactly that reason. The helper
+    // now lives in `engine`, which both targets share.
+    crate::engine::sanitize_display(s)
 }
 
 /// Flags accepted by `freemkv info <url>`, for every URL scheme.
