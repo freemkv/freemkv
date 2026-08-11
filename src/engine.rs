@@ -1350,39 +1350,10 @@ fn out_kind(format: &str) -> OutKind {
 /// the disc/volume label (or container name), `{n}` → the 1-based title number.
 /// An empty template falls back to the historical `<label>_t<n>`; a template
 /// with no `{n}` gets `_t<n>` appended so multi-title output can never collide.
-/// Strip control/escape characters from untrusted on-disc metadata (volume
-/// label, title name, stream labels) before it is DISPLAYED.
-///
-/// Lives here, not in `disc_info`, because `disc_info` is declared only by
-/// `main.rs` — it is not part of the lib target that the desktop shells
-/// (`windows.rs`, `mac.rs`, `ui.rs`) are built from, so the GUI could not
-/// reach it. `disc_info::sanitize` now delegates here: one implementation,
-/// both targets.
-///
-/// Distinct from [`sanitize_label`], which makes a label safe as a FILENAME
-/// component and is lossier on purpose (it maps separators to `_`). This one
-/// only removes what cannot be safely rendered, so a Japanese or Cyrillic
-/// label survives intact.
-pub fn sanitize_display(s: &str) -> String {
-    s.chars().filter(|&c| !is_unsafe_display_char(c)).collect()
-}
-
-/// Characters to strip from untrusted on-disc strings before display: C0/C1
-/// controls (including ESC and the newlines that would let a crafted disc
-/// forge a whole log line) AND the Unicode format (Cf) characters that
-/// `char::is_control()` misses — bidirectional overrides/isolates
-/// (U+202A-202E, U+2066-2069), zero-width spaces/joiners (U+200B-200F,
-/// U+2060-2064) and the BOM (U+FEFF), which can reorder or hide how the rest
-/// of a line renders.
-pub fn is_unsafe_display_char(c: char) -> bool {
-    c.is_control()
-        || matches!(c,
-            '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{FEFF}')
-}
+/// Re-export of the shared display sanitiser (see
+/// [`crate::strings::sanitize_display`]). Named here because this is where the
+/// disc-bytes-to-UI boundary lives.
+pub use crate::strings::sanitize_display;
 
 /// Make a disc-supplied label safe to use as ONE filename component.
 ///
