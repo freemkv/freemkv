@@ -107,6 +107,16 @@ fn the_extract_destination_cannot_escape_the_chosen_folder() {
             "a real parent-dir component survived: {}",
             out.display()
         );
+        // Assert the SEPARATORS are gone, not just that this platform does
+        // not treat them as such. CI runs on Linux, where a backslash is an
+        // ordinary character: without this, the Windows vector above passes
+        // on CI even with the fix reverted, and the traversal it represents
+        // would only be caught on a machine nobody runs the suite on.
+        let tail_str = out.to_string_lossy();
+        assert!(
+            !tail_str.trim_start_matches("/tmp/out").contains('\\'),
+            "a backslash survived into the component: {tail_str}"
+        );
     }
 }
 

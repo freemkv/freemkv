@@ -2188,7 +2188,9 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
 /// as "2 title(s) written".
 #[cfg(test)]
 mod outcome_summary_tests {
-    use super::{fe, summarize_extract, summarize_outcome, summarize_stream};
+    use super::{
+        fe, summarize_extract, summarize_image_decrypt, summarize_outcome, summarize_stream,
+    };
     use std::io::ErrorKind;
 
     /// A hard failure is never a success, even when earlier titles wrote.
@@ -2337,6 +2339,66 @@ mod outcome_summary_tests {
             complete: !halted && bytes_unreadable == 0,
             halted,
         }
+    }
+
+    /// The image-decrypt summariser's three branches, matching the coverage
+    /// its two siblings already had. It shipped with a doc claiming "Pure so
+    /// the mapping is unit-testable" and no test — the exact gap that let the
+    /// arm it replaced report a cancelled decrypt as a clean write.
+    fn copy_result(halted: bool, good: u64, unreadable: u64) -> fe::CopyResult {
+        fe::CopyResult {
+            bytes_total: good + unreadable,
+            bytes_good: good,
+            bytes_unreadable: unreadable,
+            bytes_pending: 0,
+            recovered_this_pass: good,
+            complete: !halted && unreadable == 0,
+            halted,
+        }
+    }
+
+    #[test]
+    fn a_completed_image_decrypt_reports_written() {
+        let msg = summarize_image_decrypt(
+            &copy_result(false, 2 * 1_073_741_824, 0),
+            std::path::Path::new("/out/Disc.iso"),
+        );
+        assert_eq!(msg, "Decrypted image written: /out/Disc.iso (2.00 GiB)");
+    }
+
+    #[test]
+    fn an_image_decrypt_halted_by_cancel_says_so_not_written() {
+        // The defect this summariser exists to close: the arm reported
+        // "Decrypted image written" for any non-zero byte count, so a Cancel
+        // partway through read as a clean result.
+        let msg = summarize_image_decrypt(
+            &copy_result(true, 1_073_741_824, 0),
+            std::path::Path::new("/out/Disc.iso"),
+        );
+        assert!(
+            msg.starts_with("Cancelled"),
+            "a cancelled decrypt must not read as a clean write: {msg}"
+        );
+        assert!(
+            msg.contains("kept"),
+            "the partial image is kept, and the user must be told: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_lossy_image_decrypt_reports_the_unreadable_bytes() {
+        // Distinct from cancelled: `complete` is derived as "nothing pending
+        // AND nothing lost AND not interrupted", so branching on it alone
+        // would collapse these two into one message.
+        let msg = summarize_image_decrypt(
+            &copy_result(false, 1_073_741_824, 2 * 1_048_576),
+            std::path::Path::new("/out/Disc.iso"),
+        );
+        assert!(msg.starts_with("Decrypted image written"), "{msg}");
+        assert!(
+            msg.contains("2.0 MiB unreadable"),
+            "damage must be reported, not silently dropped: {msg}"
+        );
     }
 
     #[test]
