@@ -1315,6 +1315,8 @@ pub fn output_file_name(
 use crate::engine::{KeyConfig, RipRequest, RunState};
 use crate::settings::Settings;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A platform action the core cannot perform itself. The shell executes it and
 /// usually feeds the answer back in as a `Cmd`.
@@ -1355,6 +1357,26 @@ pub enum LogKind {
     Result,
 }
 
+/// Scan a source by its kind. The ONE dispatch from a URL to a scan, shared
+/// by the synchronous open and the launch probe's worker thread — so the probe
+/// cannot end up scanning a source differently from the way opening it would.
+/// Free-standing rather than a method because the worker holds no `App`.
+fn scan_source(path: &str, keys: &KeyConfig, verbose: bool) -> Result<Scanned, String> {
+    if is_container(path) {
+        crate::engine::scan_stream(path)
+    } else if crate::engine::is_disc_source(path) {
+        crate::engine::scan_disc_with_keys(path, keys, verbose)
+    } else {
+        crate::engine::scan_with_keys(path, keys, verbose)
+    }
+}
+
+/// The autodetect disc URL: try every drive, take the one holding media.
+/// Named because the launch probe passes it through three places (the source
+/// resolver, the worker, and the tick that applies the result) and a typo in
+/// any of them would scan the wrong thing.
+const PROBE_SOURCE: &str = "disc://";
+
 /// Everything the app knows. No widgets, no platform types.
 pub struct App {
     pub tree: Tree,
@@ -1379,9 +1401,36 @@ pub struct App {
     /// input to `mp4_possible`/`container_mismatch`, and gating those tests
     /// behind a fixture is why they did not run in CI.
     pub video_codecs: Vec<String>,
+    /// The launch probe's in-flight scan, if one is running.
+    ///
+    /// Its OWN slot, deliberately not `run`. `run` means "a rip is in
+    /// progress" and `view`/`tick` read it as exactly that — putting the probe
+    /// there would show `Page::Progress` for a rip that is not happening, and
+    /// a Cancel button wired to nothing.
+    probe: Option<Arc<ProbeState>>,
     /// Highest unreadable-sector count already announced, so the notice is
     /// not repeated on every 100 ms tick.
     reported_bad: u64,
+}
+
+/// The launch probe's handoff: a worker thread writes the scan result once,
+/// and `App::tick` picks it up on the UI thread.
+///
+/// The worker produces a `Result<Scanned, String>` and NOTHING else. Every
+/// `App` mutation the result implies — the tree, the log, the page — happens
+/// on the tick, because `App` is the UI thread's and is not `Sync`. A worker
+/// that could touch it would make the probe a second writer to the model the
+/// shell is drawing from.
+pub struct ProbeState {
+    /// The source the worker scanned. Carried rather than re-derived on the
+    /// tick, so the result is classified (container / disc / image) against
+    /// exactly the path it came from.
+    path: String,
+    result: Mutex<Option<Result<crate::engine::Scanned, String>>>,
+    /// `Release` on the store, `Acquire` on the load, so seeing `true`
+    /// guarantees the `result` write is visible — the same pairing
+    /// `RunState::finished` uses.
+    done: AtomicBool,
 }
 
 impl App {
@@ -1410,6 +1459,7 @@ impl App {
             result_outcome: crate::engine::RunOutcome::default(),
             selected_row: None,
             video_codecs: Vec::new(),
+            probe: None,
             reported_bad: 0,
         };
         app.say(
@@ -1612,21 +1662,25 @@ impl App {
     /// every launch. That is worse than the silence it replaced. When nobody
     /// asked, a drive is only worth opening if it actually holds something.
     pub fn disc_source(&mut self, announce_missing: bool) -> Option<String> {
-        let drives = crate::engine::list_optical_drives();
-        if drives.is_empty() {
-            if announce_missing {
-                self.say(LogKind::Notice, &crate::strings::get("gui.log.no_drive"));
-            }
-            return None;
-        }
         // A probe nobody asked for must not GUESS a drive. Bare `disc://`
         // means autodetect — the resolver tries every drive and takes the one
         // that actually holds media — which is the right answer at launch
         // whether the machine has one drive or four. Naming drives[0] because
         // it happened to be the only one enumerated picked a drive with an
         // empty tray and then reported a scan failure the user never asked for.
+        //
+        // Returned WITHOUT enumerating: `list_optical_drives` is a SCSI walk,
+        // and this runs on the UI thread before the first paint. The probe's
+        // worker does the enumeration instead, and a machine with no drive
+        // still sees nothing at all — that outcome is now produced by the
+        // quiet failure path rather than by this early return.
         if !announce_missing {
-            return Some("disc://".to_string());
+            return Some(PROBE_SOURCE.to_string());
+        }
+        let drives = crate::engine::list_optical_drives();
+        if drives.is_empty() {
+            self.say(LogKind::Notice, &crate::strings::get("gui.log.no_drive"));
+            return None;
         }
         // One drive → that device; several → autodetect the one with media,
         // and log what was found so the user knows which drives are present.
@@ -1654,7 +1708,7 @@ impl App {
                     &[("n", &drives.len().to_string()), ("list", &list)],
                 ),
             );
-            Some("disc://".to_string())
+            Some(PROBE_SOURCE.to_string())
         }
     }
 
@@ -1667,27 +1721,93 @@ impl App {
     /// there. Used by the launch probe: a disc already in the drive should just
     /// appear, and an empty tray should look exactly like the app did before
     /// the probe existed.
+    ///
+    /// OFF THE UI THREAD, unlike [`App::open`]. The work behind it is a drive
+    /// enumeration, a SCSI scan and an AACS key resolution; on the UI thread
+    /// that froze the window at every launch for as long as the drive took to
+    /// answer — seconds on a spun-down drive, and the whole timeout on a drive
+    /// that never does. `open` is a direct answer to something the user just
+    /// clicked and keeps its synchronous shape; the probe is not, and had no
+    /// business blocking the first paint.
+    ///
+    /// Returns immediately with `StartTicking`, the seam BOTH shells already
+    /// implement for a running job, so this change lands entirely in the
+    /// portable model: `mac.rs` and `windows.rs` are untouched, and
+    /// `windows.rs` compiles on no machine available here.
+    /// [`App::tick`] applies the result.
     pub fn open_probe(&mut self, path: &str) -> Vec<Effect> {
-        self.open_inner(path, true)
+        // A second probe cannot help and could clobber the first one's result.
+        if self.probe.is_some() {
+            return vec![Effect::Redraw];
+        }
+        let state = Arc::new(ProbeState {
+            path: path.to_string(),
+            result: Mutex::new(None),
+            done: AtomicBool::new(false),
+        });
+        // Everything the scan needs is copied out HERE, on the UI thread. The
+        // worker gets no reference to `App`.
+        let keys = KeyConfig::from_settings(&self.settings);
+        let verbose = self.verbose_log();
+        let path = path.to_string();
+        let worker = state.clone();
+        let spawned = std::thread::Builder::new()
+            .name("launch-probe".into())
+            .spawn(move || {
+                // The enumeration the probe used to do before deciding
+                // whether to scan at all — for a drive source only, since that
+                // is the only thing it tells you anything about. No drive at
+                // all is not an error worth reporting (nobody asked for this),
+                // so it becomes the same quiet failure an empty tray already
+                // produces.
+                let no_drive = crate::engine::is_disc_source(&path)
+                    && crate::engine::list_optical_drives().is_empty();
+                let scanned = if no_drive {
+                    Err(String::new())
+                } else {
+                    scan_source(&path, &keys, verbose)
+                };
+                if let Ok(mut slot) = worker.result.lock() {
+                    *slot = Some(scanned);
+                }
+                worker.done.store(true, Ordering::Release);
+            });
+        if spawned.is_err() {
+            // Out of threads: the probe is optional, so drop it silently
+            // rather than falling back to blocking the UI thread with it.
+            return vec![Effect::Redraw];
+        }
+        self.probe = Some(state);
+        vec![Effect::Redraw, Effect::StartTicking]
+    }
+
+    /// "Log detail: Verbose" (or Debug) reveals the resolved keys in the
+    /// on-open detail block, mirroring the CLI's `info -v`.
+    fn verbose_log(&self) -> bool {
+        self.settings.log_level == "Verbose" || self.settings.log_level == "Debug"
     }
 
     fn open_inner(&mut self, path: &str, quiet: bool) -> Vec<Effect> {
+        let scanned = scan_source(
+            path,
+            &KeyConfig::from_settings(&self.settings),
+            self.verbose_log(),
+        );
+        self.apply_scan(path, scanned, quiet)
+    }
+
+    /// Turn a finished scan into model state. Split out of [`App::open_inner`]
+    /// so the launch probe's asynchronous result lands through EXACTLY the
+    /// same code as a synchronous open — a second copy of this would be two
+    /// definitions of what opening a disc means, and they would drift.
+    fn apply_scan(
+        &mut self,
+        path: &str,
+        scanned: Result<Scanned, String>,
+        quiet: bool,
+    ) -> Vec<Effect> {
         let container = is_container(path);
         let disc = crate::engine::is_disc_source(path);
-        // "Log detail: Verbose" (or Debug) reveals the resolved keys in the
-        // on-open detail block, mirroring the CLI's `info -v`.
-        let verbose = self.settings.log_level == "Verbose" || self.settings.log_level == "Debug";
-        let scanned = if container {
-            crate::engine::scan_stream(path)
-        } else if disc {
-            crate::engine::scan_disc_with_keys(
-                path,
-                &KeyConfig::from_settings(&self.settings),
-                verbose,
-            )
-        } else {
-            crate::engine::scan_with_keys(path, &KeyConfig::from_settings(&self.settings), verbose)
-        };
         match scanned {
             Ok(sc) => {
                 self.log.clear();
@@ -1883,11 +2003,49 @@ impl App {
         vec![Effect::Redraw, Effect::StartTicking]
     }
 
+    /// Collect the launch probe's result if it has finished.
+    ///
+    /// Runs on the UI thread, from [`App::tick`], and is where every model
+    /// mutation the probe implies happens — see [`ProbeState`].
+    fn poll_probe(&mut self) -> Vec<Effect> {
+        let Some(p) = self.probe.clone() else {
+            return Vec::new();
+        };
+        // `Acquire`, pairing with the worker's `Release` store: seeing `true`
+        // guarantees the `result` write is visible.
+        if !p.done.load(Ordering::Acquire) {
+            return Vec::new();
+        }
+        self.probe = None;
+        let Some(scanned) = p.result.lock().ok().and_then(|mut r| r.take()) else {
+            // The worker set `done` without leaving a result, which means it
+            // panicked or the mutex was poisoned. The probe is optional; drop
+            // it, and above all do not announce anything.
+            return Vec::new();
+        };
+        // The user did not wait for us. Anything they opened, or a rip they
+        // started, outranks a probe nobody asked for — applying the result now
+        // would replace the tree under them.
+        if !self.source.is_empty() || self.run.is_some() {
+            return Vec::new();
+        }
+        self.apply_scan(&p.path.clone(), scanned, true)
+    }
+
     /// Poll a running job. Called on the shell's timer; returns the effects to
     /// apply. All progress arithmetic is the engine's — never recomputed here.
     pub fn tick(&mut self) -> Vec<Effect> {
+        let probe_fx = self.poll_probe();
         let Some(st) = self.run.clone() else {
-            return vec![Effect::StopTicking];
+            // Keep the timer alive while the probe is still out; stopping it
+            // here would strand the result with nothing left to collect it.
+            let mut fx = probe_fx;
+            if self.probe.is_none() {
+                fx.push(Effect::StopTicking);
+            } else if fx.is_empty() {
+                fx.push(Effect::Redraw);
+            }
+            return fx;
         };
         let lines: Vec<String> = st
             .lines
@@ -2258,9 +2416,15 @@ mod tests {
     /// of the same bad source must still report, because a human asked.
     #[test]
     fn a_failed_probe_says_nothing_but_a_failed_open_still_reports() {
+        const BAD: &str = "iso:///nonexistent/definitely-not-here.iso";
         let mut app = App::new();
         let before = app.log.len();
-        app.open_probe("iso:///nonexistent/definitely-not-here.iso");
+        // Driven to COMPLETION, not just started. The probe is asynchronous
+        // now, so asserting straight after `open_probe` would assert about a
+        // scan that had not run — a test that passes because nothing has
+        // happened yet is the same test deleted.
+        app.open_probe(BAD);
+        drain_probe(&mut app);
         assert_eq!(
             app.log.len(),
             before,
@@ -2269,11 +2433,166 @@ mod tests {
         );
         assert!(matches!(app.page, Page::Empty));
 
-        app.open("iso:///nonexistent/definitely-not-here.iso");
+        app.open(BAD);
         assert!(
             app.log.len() > before,
             "a human who asked must be told the source could not be opened"
         );
+    }
+
+    /// Tick until the probe has been collected, with a bound so a probe that
+    /// never finishes fails the test instead of hanging the suite.
+    fn drain_probe(app: &mut App) -> Vec<Effect> {
+        for _ in 0..2_000 {
+            let fx = app.tick();
+            if app.probe.is_none() {
+                return fx;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the launch probe never finished");
+    }
+
+    // ── The launch probe is off the UI thread ──────────────────────────────
+    //
+    // It ran a drive enumeration, a SCSI scan and an AACS key resolution
+    // synchronously at every start, so the window was frozen until the drive
+    // answered. It now goes through the SAME `StartTicking` + `tick` seam a
+    // running rip uses, which is why neither shell needed a line changed.
+
+    /// `open_probe` must hand the work off and RETURN, asking for the tick
+    /// that will collect it.
+    #[test]
+    fn the_launch_probe_hands_off_instead_of_scanning_inline() {
+        let mut app = App::new();
+        let fx = app.open_probe(PROBE_SOURCE);
+        assert!(
+            fx.contains(&Effect::StartTicking),
+            "the probe must ask for the tick that collects its result, got {fx:?}"
+        );
+        assert!(
+            app.probe.is_some(),
+            "the scan must be outstanding when open_probe returns — if it is \
+             already collected, the work happened on this thread"
+        );
+        drain_probe(&mut app);
+    }
+
+    /// The probe gets its OWN slot. Reusing `run` would put the app on
+    /// `Page::Progress`, showing a rip that is not happening.
+    #[test]
+    fn the_probe_does_not_occupy_the_rip_slot() {
+        let mut app = App::new();
+        app.open_probe(PROBE_SOURCE);
+        assert!(app.run.is_none(), "the probe must not look like a rip");
+        assert!(
+            !matches!(app.page, Page::Progress),
+            "the probe must not put the app on the progress page"
+        );
+        drain_probe(&mut app);
+    }
+
+    /// A tick with a probe outstanding and no rip must NOT stop the timer —
+    /// that would strand the result with nothing left to collect it.
+    #[test]
+    fn ticking_continues_while_the_probe_is_outstanding() {
+        let mut app = App::new();
+        app.probe = Some(Arc::new(ProbeState {
+            path: PROBE_SOURCE.to_string(),
+            result: Mutex::new(None),
+            done: AtomicBool::new(false),
+        }));
+        let fx = app.tick();
+        assert!(
+            !fx.contains(&Effect::StopTicking),
+            "the tick that collects the probe was cancelled before it ran: {fx:?}"
+        );
+        app.probe = None;
+        assert!(
+            app.tick().contains(&Effect::StopTicking),
+            "with nothing outstanding the timer must stop"
+        );
+    }
+
+    /// A finished probe is applied on the tick, on the UI thread.
+    #[test]
+    fn a_probe_result_is_applied_by_the_tick() {
+        let mut app = App::new();
+        app.probe = Some(Arc::new(ProbeState {
+            path: PROBE_SOURCE.to_string(),
+            result: Mutex::new(Some(Ok(probe_scan()))),
+            done: AtomicBool::new(true),
+        }));
+        let fx = app.tick();
+        assert!(app.probe.is_none(), "a collected probe must clear its slot");
+        assert_eq!(app.source, PROBE_SOURCE, "the scanned source must be set");
+        assert!(matches!(app.page, Page::Titles));
+        assert_eq!(app.tree.title_count(), 1);
+        assert!(fx.contains(&Effect::StopTicking), "nothing left to poll");
+    }
+
+    /// The user did not wait. A probe landing after they opened something
+    /// else must not replace the tree under them.
+    #[test]
+    fn a_late_probe_result_does_not_clobber_what_the_user_opened() {
+        let mut app = App::new();
+        app.source = "iso:///the/one/they/chose.iso".to_string();
+        app.page = Page::Titles;
+        app.probe = Some(Arc::new(ProbeState {
+            path: PROBE_SOURCE.to_string(),
+            result: Mutex::new(Some(Ok(probe_scan()))),
+            done: AtomicBool::new(true),
+        }));
+        app.tick();
+        assert_eq!(
+            app.source, "iso:///the/one/they/chose.iso",
+            "the probe overwrote the source the user chose"
+        );
+        assert_eq!(
+            app.tree.title_count(),
+            0,
+            "the probe replaced the user's tree"
+        );
+    }
+
+    /// A worker that panicked sets `done` with no result. The probe is
+    /// optional: drop it silently rather than panicking the UI thread.
+    #[test]
+    fn a_probe_that_left_no_result_is_dropped_silently() {
+        let mut app = App::new();
+        let before = app.log.len();
+        app.probe = Some(Arc::new(ProbeState {
+            path: PROBE_SOURCE.to_string(),
+            result: Mutex::new(None),
+            done: AtomicBool::new(true),
+        }));
+        app.tick();
+        assert!(app.probe.is_none());
+        assert_eq!(app.log.len(), before, "a dead probe must say nothing");
+    }
+
+    /// A minimal scan result: one title, one row, enough for the tree to
+    /// count it.
+    fn probe_scan() -> Scanned {
+        Scanned {
+            label: "PROBE_DISC".to_string(),
+            rows: vec![crate::engine::Row {
+                type_s: "Title".to_string(),
+                desc: "1.  0 chapter(s)".to_string(),
+                depth: 1,
+                checkable: true,
+                title: 0,
+                info: String::new(),
+                pid: None,
+                duration_secs: 600.0,
+                lang: String::new(),
+                forced: false,
+            }],
+            key_summary: "none".to_string(),
+            title_count: 1,
+            video_codecs: vec!["HEVC".to_string()],
+            details: Vec::new(),
+        }
     }
 
     #[test]
