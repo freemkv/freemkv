@@ -2335,6 +2335,30 @@ fn pipe(
 ///
 /// `--raw` and `--multipass` cannot reach here: they are drive flags and
 /// `preflight_validate` rejects them for a non-drive source.
+/// The filesystem path behind an `iso://` or `dir://` source, if it has one.
+///
+/// Split out so the same-file guard is unit-testable without a real image.
+fn source_path_of(source: &str) -> Option<std::path::PathBuf> {
+    match libfreemkv::parse_url(source) {
+        libfreemkv::StreamUrl::Iso { path } | libfreemkv::StreamUrl::Dir { path } => Some(path),
+        _ => None,
+    }
+}
+
+/// Whether two paths name the same existing file.
+///
+/// Canonicalised, so `./Disc.iso`, `Disc.iso` and an absolute path to it are
+/// one file. A destination that does not exist yet cannot be the source, so a
+/// failed canonicalize on either side is "not the same file" — the guard must
+/// never refuse an ordinary rip because a path could not be resolved.
+fn same_file(source: Option<&std::path::Path>, dest: &std::path::Path) -> bool {
+    let Some(source) = source else { return false };
+    match (std::fs::canonicalize(source), std::fs::canonicalize(dest)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
     let iso_path = match libfreemkv::parse_url(dest) {
         libfreemkv::StreamUrl::Iso { path } => path,
@@ -2362,10 +2386,50 @@ fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> boo
         return false;
     }
 
+    // Never write over the source. `write_image` opens the destination with
+    // `File::create` BEFORE the first read, so this truncates the still-open
+    // input to zero and leaves neither file intact — and `freemkv
+    // iso://Disc.iso iso://Disc.iso` is the natural way to ask for an in-place
+    // decrypt, as well as an easy paste. Compared by canonical path, so a
+    // relative and an absolute spelling of one file are recognised as one file.
+    // The GUI has had this guard since round 1 (`engine.rs`); the CLI, which
+    // has no confirmation prompt at all, did not.
+    if same_file(
+        source_path_of(source).as_deref(),
+        std::path::Path::new(&iso_path),
+    ) {
+        out.raw(Normal, &strings::get("error.dest_is_source"));
+        return false;
+    }
+
     let total_sectors = disc.capacity_sectors;
     let start = std::time::Instant::now();
     let halt = libfreemkv::halt::Halt::new();
-    let mut src = libfreemkv::DecryptingSectorSource::new(reader, disc.decrypt_keys());
+    // AACS decryption is MAP-ONLY: `decrypt_span` refuses outright when no key
+    // map is installed, whatever unit keys the `DecryptKeys` carries. Building
+    // a bare decorator here meant every AACS image decrypt aborted on its first
+    // batch with `DecryptFailed`, seconds after the trace reported the key
+    // RESOLVED. Mirrors `freemkv-engine`'s own construction: a map for AACS, a
+    // content gate for CSS, nothing for a clear image.
+    let mut keys = disc.decrypt_keys();
+    let key_map = if matches!(keys, libfreemkv::decrypt::DecryptKeys::Aacs { .. }) {
+        match disc.resolve_content_key_map(reader.as_mut(), &mut keys, None, None) {
+            Ok(map) => Some(std::sync::Arc::new(map)),
+            Err(e) => {
+                out.raw(Normal, &render_error(&e));
+                return false;
+            }
+        }
+    } else {
+        None
+    };
+    let content_ranges = disc.encrypted_content_ranges();
+    let mut src = libfreemkv::DecryptingSectorSource::new(reader, keys);
+    if let Some(map) = key_map {
+        src = src.with_key_map(map);
+    } else if !content_ranges.is_empty() {
+        src = src.with_content_ranges(std::sync::Arc::from(content_ranges));
+    }
 
     let result = libfreemkv::write_image(&mut src, &iso_path, total_sectors, &halt, |_| {
         // `write_image` checks `halt` once per batch and this runs at the end of
@@ -6118,6 +6182,135 @@ mod build_jobs_edge_tests {
         assert!(
             build_jobs(&None, true, &nums, false, dest, &parsed, &out).is_none(),
             "twelve titles were accepted into one file"
+        );
+    }
+}
+
+// ── The image-decrypt destination must not be the source ─────────────────────
+//
+// `write_image` opens the destination with `File::create` BEFORE the first
+// read, so `freemkv iso://Disc.iso iso://Disc.iso` — the natural way to ask
+// for an in-place decrypt, and an easy paste — truncated the still-open input
+// to zero and left neither file intact. The GUI has had this guard since round
+// 1; the CLI, which has no confirmation prompt at all, did not.
+#[cfg(test)]
+mod dest_is_source_tests {
+    use super::{same_file, source_path_of};
+
+    struct Tmp(std::path::PathBuf);
+    impl Tmp {
+        fn new(name: &str) -> Self {
+            let d = std::env::temp_dir().join(format!(
+                "freemkv_same_file_{}_{}",
+                name,
+                std::process::id()
+            ));
+            let _ = std::fs::create_dir_all(&d);
+            Tmp(d)
+        }
+        fn file(&self, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+            let p = self.0.join(name);
+            std::fs::write(&p, bytes).expect("write fixture");
+            p
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The same file under two spellings is one file. This is the case the
+    /// guard exists for, and the one a path comparison misses.
+    ///
+    /// The detour goes through `..`, deliberately. `Path`'s own `==` normalises
+    /// a `.` component away, so a `./Disc.iso` fixture would pass even with the
+    /// canonicalize deleted — a test that proves nothing. `..` is NOT
+    /// normalised away (it cannot be, without knowing the filesystem), so only
+    /// a real canonicalize resolves it.
+    #[test]
+    fn the_same_file_under_two_spellings_is_recognised() {
+        let t = Tmp::new("spellings");
+        let abs = t.file("Disc.iso", b"not really an iso");
+        std::fs::create_dir_all(t.0.join("sub")).expect("subdir");
+        let detoured = t.0.join("sub").join("..").join("Disc.iso");
+        assert_ne!(
+            detoured.as_path(),
+            abs.as_path(),
+            "the fixture must not be equal as PATHS, or it proves nothing"
+        );
+        assert!(same_file(Some(&abs), &abs), "a path is itself");
+        assert!(
+            same_file(Some(&detoured), &abs),
+            "sub/../Disc.iso and Disc.iso are one file"
+        );
+    }
+
+    /// A different file is not refused — the guard must not break ordinary
+    /// rips, which are the overwhelming majority.
+    #[test]
+    fn two_different_files_are_not_the_same_file() {
+        let t = Tmp::new("distinct");
+        let a = t.file("In.iso", b"a");
+        let b = t.file("Out.iso", b"b");
+        assert!(!same_file(Some(&a), &b));
+    }
+
+    /// The ordinary case: the destination does not exist yet. It cannot be the
+    /// source, and a failed canonicalize must never refuse the rip.
+    #[test]
+    fn a_destination_that_does_not_exist_yet_is_never_the_source() {
+        let t = Tmp::new("missing_dest");
+        let a = t.file("In.iso", b"a");
+        let dest = t.0.join("does-not-exist.iso");
+        assert!(!same_file(Some(&a), &dest));
+        // And a source with no filesystem path at all (disc://) is never it.
+        assert!(!same_file(None, &dest));
+    }
+
+    /// The guard is actually WIRED, not merely correct.
+    ///
+    /// `image_to_iso` needs a real image and a real destination to run, so no
+    /// test can reach the call site — the same gap that let the GUI's four
+    /// label seams ship one at a time. Both anchors are `expect`ed rather than
+    /// defaulted: an anchor that stopped matching would otherwise silently
+    /// widen the slice into a neighbouring function and pass on its text.
+    #[test]
+    fn the_image_decrypt_path_actually_calls_the_guard() {
+        let src = include_str!("pipe.rs").replace("\r\n", "\n");
+        let start = src
+            .find("\nfn image_to_iso(source: &str")
+            .expect("image_to_iso definition present");
+        let end = start
+            + src[start..]
+                .find("\n    let result = libfreemkv::write_image(")
+                .expect("the write call still ends the setup section");
+        let body = &src[start..end];
+        // Matched as two independent tokens, not one call expression:
+        // `cargo fmt` is free to split the arguments across lines (and did),
+        // so a pin on the joined text fails for a formatting change rather
+        // than a behavioural one — a guard that cries wolf gets deleted.
+        assert!(
+            body.contains("same_file(") && body.contains("source_path_of(source)"),
+            "image_to_iso must refuse a destination that IS the source before \
+             write_image truncates it"
+        );
+        assert!(
+            body.contains("resolve_content_key_map"),
+            "AACS decryption is map-only; without a key map every encrypted \
+             image decrypt aborts on its first batch"
+        );
+    }
+
+    /// Both `iso://` and `dir://` carry a path the guard has to see; anything
+    /// else (a live drive) has none.
+    #[test]
+    fn the_guard_sees_the_path_behind_every_file_backed_scheme() {
+        assert!(source_path_of("iso:///media/Disc.iso").is_some());
+        assert!(source_path_of("dir:///media/BDMV").is_some());
+        assert!(
+            source_path_of("disc://").is_none(),
+            "a live drive has no path to compare"
         );
     }
 }
