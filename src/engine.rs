@@ -1916,6 +1916,47 @@ fn recovery_plan(kind: OutKind, multipass: bool) -> DiscPlan {
     }
 }
 
+/// The `raw` flag a recovery job must carry, or the reason it cannot run.
+///
+/// `multipass_rip` REFUSES a real sweep-plus-patch plan with `raw = false`
+/// ("multipass implies raw"): a whole-disc image recovery reads sectors it
+/// cannot attribute to a title, so it cannot decrypt them. The GUI was handing
+/// it `req.raw`, which `ui::raw_applies` forces to false for any title output —
+/// so with the SHIPPED DEFAULTS (rip mode "Multi-pass", 5 passes, raw off) every
+/// live-drive rip died before reading a sector, with the engine's own refusal as
+/// the error text. The ISO-output path failed the same way whenever the user had
+/// not ticked "keep encrypted".
+///
+/// The staged image for a title mux is therefore RAW, and the decrypt happens
+/// where it always could: the mux re-opens the staged ISO on the ordinary
+/// `iso://` path, with the same `KeyConfig`, and resolves keys from it.
+///
+/// The one case with no answer is "whole disc → ISO image", multipass, raw off:
+/// the user asked for a decrypted image and a multipass recovery cannot produce
+/// one. That is refused HERE, before the drive is staged, with something the
+/// user can act on — rather than after, in the engine's vocabulary.
+fn recovery_raw(multipass: bool, want_iso: bool, user_raw: bool) -> Result<bool, String> {
+    if !multipass {
+        // Single-pass: an ordinary decrypting copy, and `raw` means what the
+        // user set it to.
+        return Ok(user_raw);
+    }
+    if !want_iso {
+        // Staging image for a mux. Encrypted on disk, decrypted on the way
+        // into the container.
+        return Ok(true);
+    }
+    if user_raw {
+        return Ok(true);
+    }
+    Err(
+        "A multi-pass recovery reads the whole disc, so the image it writes is \
+         encrypted. For a decrypted ISO, set Rip mode to 'Single pass'; to keep \
+         the multi-pass recovery, tick 'Keep encrypted (raw)'."
+            .into(),
+    )
+}
+
 /// A recovery that read nothing has nothing to mux. Separate from the caller so
 /// the boundary is assertable: as `!=` a perfectly good recovery deletes its own
 /// ISO and reports "no readable data".
@@ -1923,10 +1964,24 @@ fn recovery_produced_no_data(good_bytes: u64) -> bool {
     good_bytes == 0
 }
 
-/// Whether the staging ISO is removed after the title mux. Inverted, this
-/// deletes a multi-hour recovery the user explicitly asked to keep.
-fn should_delete_staging_iso(keep_iso: bool) -> bool {
-    !keep_iso
+/// Whether the staging ISO is removed after the title mux.
+///
+/// Three conditions, not one. `keep_iso` alone deleted the image on paths the
+/// same function's own policy says never throw away the read: the mux reports a
+/// CANCEL as `Ok("Cancelled — …")`, so a user who stopped the mux lost the
+/// multi-hour recovery behind it and could only get it back by re-reading the
+/// disc; a mux that failed outright (no space, a missing key, the destination
+/// removed) deleted the one artefact that would have let the user retry the mux
+/// alone.
+///
+/// Cancellation is read as a FLAG, never from the summary text — the same rule
+/// `RunOutcome` exists to enforce. Deleting a recovered image on a wording
+/// change would be the worst possible version of that defect.
+///
+/// Inverted, this deletes a multi-hour recovery the user explicitly asked to
+/// keep — which is why it is a named function with its own tests.
+fn should_delete_staging_iso(keep_iso: bool, mux_succeeded: bool, cancelled: bool) -> bool {
+    !keep_iso && mux_succeeded && !cancelled
 }
 
 /// Rip from a live optical drive (`disc://`). Scans once to resolve titles and
@@ -1989,9 +2044,12 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
     // autorip uses (sweep + patch passes to convergence, abort-on-lost). For
     // "Whole disc → ISO image" the recovered ISO IS the deliverable; for a title
     // output with multipass enabled, we then mux the selected titles from the
-    // recovered ISO. multipass_rip writes a DECRYPTED ISO, so the mux runs the
-    // ordinary iso:// path over it (fresh scan → clear, no keys) — never
-    // double-decrypting.
+    // recovered ISO. A multipass image is ENCRYPTED — the recovery reads
+    // sectors it cannot attribute to a title, so it cannot decrypt them, which
+    // is why `multipass_rip` refuses a non-raw plan outright. The mux therefore
+    // runs the ordinary iso:// path over the staged image WITH the same keys,
+    // and the decrypt happens once, on the way into the container. See
+    // `recovery_raw`.
     let want_iso = matches!(kind, OutKind::IsoImage);
     if recovery_plan(kind, req.multipass) != DiscPlan::PerTitle {
         // The FOURTH label-into-a-path seam, and the most-travelled one: this
@@ -2010,7 +2068,7 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             .ok_or("could not stage the drive for recovery")?;
         let disc = session.disc().ok_or("scan produced no disc")?;
         let mut job = fe::Job::new(format!("disc://{}", req.source), iso_path.clone());
-        job.raw = req.raw;
+        job.raw = recovery_raw(req.multipass, want_iso, req.raw)?;
         let opts = fe::MultipassOpts {
             max_passes: req.max_passes,
             abort_on_lost_secs: req.abort_lost_secs,
@@ -2080,9 +2138,11 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         }
 
         // Title output: mux the selected titles from the recovered ISO by
-        // running the ordinary ISO-source path on it (it's decrypted, so the
-        // fresh scan finds no keys to apply). Delete the staging ISO after,
-        // unless the user asked to keep it.
+        // running the ordinary ISO-source path on it. The staged image is
+        // encrypted (see `recovery_raw`), so the fresh scan resolves keys from
+        // it exactly as it would for any `iso://` source — `iso_req` inherits
+        // this request's `KeyConfig`, and its `raw` is the user's setting,
+        // which for a title output is always false.
         if recovery_produced_no_data(result.good_bytes) {
             let _ = std::fs::remove_file(&iso_path);
             return Err("Recovery produced no readable data — nothing to mux.".into());
@@ -2092,8 +2152,20 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             ..req.clone()
         };
         let mux = run_blocking(&iso_req, sink, state);
-        if should_delete_staging_iso(req.keep_iso) {
+        // The staged image is only disposable once the titles it was staged
+        // for actually landed. `state.cancel` is the flag the Stop button
+        // sets, read directly rather than inferred from the mux's summary.
+        let cancelled = state.cancel.load(std::sync::atomic::Ordering::SeqCst);
+        if should_delete_staging_iso(req.keep_iso, mux.is_ok(), cancelled) {
             let _ = std::fs::remove_file(&iso_path);
+        }
+        if let Err(e) = &mux {
+            return Err(format!("{e} — the recovered image is kept: {iso_path}"));
+        }
+        if cancelled {
+            return Ok(format!(
+                "Cancelled — the recovered image is kept: {iso_path}"
+            ));
         }
         // The recursive mux above reports its own success text (titles
         // written); it has no way to know THIS stage's recovery left residual
@@ -2693,9 +2765,119 @@ mod routing_tests {
     use super::{
         DiscPlan, KeyConfig, OutKind, RipRequest, damage_note, demux_needs_subdirs, disc_device,
         fe, image_or_dir_scheme, is_disc_source, is_stream_source, mux_opts, out_kind,
-        recovery_plan, recovery_produced_no_data, should_delete_staging_iso, source_scheme,
-        stream_selection, title_input_options, won_from_trace,
+        recovery_plan, recovery_produced_no_data, recovery_raw, should_delete_staging_iso,
+        source_scheme, stream_selection, title_input_options, won_from_trace,
     };
+
+    // ── The recovery job's `raw` flag ──────────────────────────────────────
+    //
+    // `multipass_rip` refuses a real sweep-plus-patch plan with `raw = false`.
+    // The GUI passed `req.raw`, which `ui::raw_applies` forces to false for any
+    // title output, so the SHIPPED DEFAULTS could not rip from a drive at all.
+
+    /// The exact combination a fresh install produces: rip mode "Multi-pass",
+    /// 5 passes, raw off, output "Selected titles → MKV". This is the test
+    /// that would have caught it.
+    #[test]
+    fn the_shipped_defaults_produce_a_recovery_the_engine_accepts() {
+        let multipass = crate::ui::wants_multipass("Multi-pass", 5);
+        let want_iso = matches!(out_kind("Selected titles → MKV"), OutKind::IsoImage);
+        let user_raw = crate::ui::raw_applies(false, want_iso);
+        assert!(multipass, "the default rip mode is a multipass plan");
+        assert!(!user_raw, "raw does not apply to a title output");
+
+        let raw = recovery_raw(multipass, want_iso, user_raw)
+            .expect("the default settings must produce a runnable recovery");
+        assert!(
+            raw,
+            "a multipass recovery must be raw — the engine refuses it otherwise,              and the refusal is what every default live-drive rip hit"
+        );
+        // The engine's own gate, applied to what we just produced.
+        assert!(
+            !(fe::plan_passes(5).multipass && !raw),
+            "this is the exact condition multipass_rip returns              multipass_requires_raw for"
+        );
+    }
+
+    /// The three seams inside `run_disc` / `run_blocking` that no test can
+    /// reach: both need a live drive or a real disc image, and they are
+    /// private. Round 1 fixed the label-into-a-path defect at four seams and
+    /// pinned only the three exported helpers, so reverting either of the two
+    /// destination lines below left `cargo test --tests` fully green — and the
+    /// same was true of the `raw` flag whose absence broke every default rip.
+    ///
+    /// Source pins, in the shape `autorip`'s handler pin uses. Each anchor is
+    /// `expect`ed, never defaulted: an anchor that stopped matching would
+    /// otherwise silently widen the slice and start reading a neighbouring
+    /// function.
+    #[test]
+    fn the_private_disc_seams_still_go_through_their_guards() {
+        let src = include_str!("engine.rs").replace("\r\n", "\n");
+        let slice = |from: &str, to: &str| -> String {
+            let a = src
+                .find(from)
+                .unwrap_or_else(|| panic!("anchor missing: {from}"));
+            let b = src[a..]
+                .find(to)
+                .unwrap_or_else(|| panic!("closing anchor missing: {to}"));
+            src[a..a + b].to_string()
+        };
+
+        // 1. The recovery job's raw flag — the defect that made every rip on
+        //    the shipped defaults fail before reading a sector.
+        let recover = slice(
+            "        let mut job = fe::Job::new(format!(\"disc://",
+            "        let result = fe::multipass_rip(",
+        );
+        assert!(
+            recover.contains("recovery_raw(req.multipass, want_iso, req.raw)"),
+            "the recovery job must take its raw flag from recovery_raw; \
+             passing req.raw straight through is what multipass_rip refuses"
+        );
+
+        // 2. The drive -> ISO destination (the most-travelled label seam).
+        let dest = slice(
+            "        let iso_path = std::path::Path::new(&req.dest_dir)",
+            "        session.stage_drive_as_reader();",
+        );
+        assert!(
+            dest.contains("sanitize_label(&label)"),
+            "the drive -> ISO destination must sanitise the disc label"
+        );
+
+        // 3. The image-decrypt destination.
+        let img = slice(
+            "            let dest =\n                std::path::Path::new(&req.dest_dir)",
+            "            // Never write over the source.",
+        );
+        assert!(
+            img.contains("sanitize_label(&label)"),
+            "the image-decrypt destination must sanitise the disc label"
+        );
+    }
+
+    /// A single-pass recovery is an ordinary decrypting copy, so the user's
+    /// setting stands — forcing raw there would hand back an encrypted image
+    /// nobody asked for.
+    #[test]
+    fn a_single_pass_recovery_keeps_the_users_raw_setting() {
+        assert_eq!(recovery_raw(false, true, false), Ok(false));
+        assert_eq!(recovery_raw(false, true, true), Ok(true));
+    }
+
+    /// Whole disc → ISO, multipass, raw off: the user asked for a decrypted
+    /// image and a multipass recovery cannot produce one. Refused up front,
+    /// in words the user can act on, rather than after the drive is staged.
+    #[test]
+    fn a_decrypted_iso_from_a_multipass_recovery_is_refused_before_the_drive() {
+        let e = recovery_raw(true, true, false).expect_err("this cannot be honoured");
+        assert!(
+            e.contains("Single pass") && e.contains("raw"),
+            "the refusal must name both ways out, got: {e}"
+        );
+        // And the same request with raw ticked is allowed.
+        assert_eq!(recovery_raw(true, true, true), Ok(true));
+    }
 
     fn req() -> RipRequest {
         RipRequest {
@@ -3098,8 +3280,24 @@ mod routing_tests {
     /// a multi-hour recovery is deleted against an explicit setting.
     #[test]
     fn the_staging_iso_is_kept_only_when_keep_iso_is_set() {
-        assert!(should_delete_staging_iso(false));
-        assert!(!should_delete_staging_iso(true));
+        assert!(should_delete_staging_iso(false, true, false));
+        assert!(!should_delete_staging_iso(true, true, false));
+    }
+
+    /// A cancelled mux must not take the recovery down with it. The mux
+    /// reports a cancel as `Ok`, so `keep_iso` alone deleted a multi-hour read
+    /// the user could then only recover by re-reading the disc.
+    #[test]
+    fn a_cancelled_mux_keeps_the_staging_iso() {
+        assert!(!should_delete_staging_iso(false, true, true));
+    }
+
+    /// Same for a mux that failed: the staged image is exactly what lets the
+    /// user retry the mux without touching the drive again.
+    #[test]
+    fn a_failed_mux_keeps_the_staging_iso() {
+        assert!(!should_delete_staging_iso(false, false, false));
+        assert!(!should_delete_staging_iso(false, false, true));
     }
 
     /// The key strip names the source that unlocked the disc. It is read from
