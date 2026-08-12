@@ -48,6 +48,26 @@ fn title_block(ti: usize, secs: f64, audio: usize) -> Vec<ScanRow> {
     out
 }
 
+/// A title with a video track and NOTHING checkable under it — what a
+/// video-only source (or a video-only disc title) actually produces, since
+/// `stream_rows` marks video rows uncheckable.
+fn video_only_disc() -> Scanned {
+    let mut t = row("Title", "1.  playlist", 1, true, 0);
+    t.duration_secs = 5400.0;
+    Scanned {
+        label: "VIDEO_ONLY".into(),
+        rows: vec![
+            row("Bluray disc", "VIDEO_ONLY", 0, false, usize::MAX),
+            t,
+            row("Video", "H.264  1080p", 2, false, 0),
+        ],
+        key_summary: "keys: none needed".into(),
+        title_count: 1,
+        video_codecs: vec!["H.264".into()],
+        details: vec![],
+    }
+}
+
 /// A disc whose titles have the given `(duration_secs, audio_track_count)`.
 fn disc(titles: &[(f64, usize)]) -> Scanned {
     let mut rows = vec![row("Bluray disc", "TEST_DISC", 0, false, usize::MAX)];
@@ -1575,4 +1595,87 @@ fn language_lists_split_on_commas_not_on_spaces() {
     assert_eq!(p.forced, vec!["en"]);
     assert!(!p.is_empty());
     assert!(LangPrefs::parse("", " ", " , ; ").is_empty());
+}
+
+// ── A video-only title's checkbox ────────────────────────────────────────────
+//
+// `check_state` folds a title's CHECKABLE children into a tri-state, and video
+// rows are not checkable. A title whose only child is video therefore had an
+// EMPTY fold set, fell into the "none ticked" arm, and drew unticked — while
+// `ticked_titles`, which reads the node's own flag rather than the fold, ripped
+// it anyway. `toggle` could not move it either: Off -> set true -> still Off.
+// The box was dead, and it showed the opposite of what would happen.
+
+/// The box must say what the rip will do.
+#[test]
+fn a_video_only_titles_checkbox_matches_what_will_be_ripped() {
+    let sc = video_only_disc();
+    let t = tree(&sc, "All titles", 0.0);
+    let title = t
+        .arena
+        .iter()
+        .position(|n| n.type_s == "Title")
+        .expect("the fixture has a title row");
+
+    assert!(
+        t.ticked_titles().contains(&0),
+        "'All titles' must schedule this title, or the assertion below is \
+         vacuous"
+    );
+    assert_eq!(
+        t.check_state(title),
+        Check::On,
+        "the title WILL be ripped, so its box must not draw empty"
+    );
+}
+
+/// And the box must be usable: unticking it has to take effect.
+#[test]
+fn a_video_only_titles_checkbox_can_actually_be_cleared() {
+    let sc = video_only_disc();
+    let t = tree(&sc, "All titles", 0.0);
+    let title = t
+        .arena
+        .iter()
+        .position(|n| n.type_s == "Title")
+        .expect("the fixture has a title row");
+
+    t.toggle(title);
+    assert_eq!(
+        t.check_state(title),
+        Check::Off,
+        "one click must clear it; the old fold reported Off either way, so \
+         toggle read Off and set it back to ticked"
+    );
+    assert!(
+        t.ticked_titles().is_empty(),
+        "and clearing the box must actually cancel the title"
+    );
+}
+
+/// The ordinary case is untouched: a title WITH checkable children still folds
+/// to a tri-state.
+#[test]
+fn a_title_with_checkable_children_still_folds_to_a_tri_state() {
+    let sc = two_title_disc();
+    let t = tree(&sc, "All titles", 0.0);
+    let title = t
+        .arena
+        .iter()
+        .position(|n| n.type_s == "Title")
+        .expect("title row");
+    assert_eq!(t.check_state(title), Check::On);
+
+    let first_audio = t.arena[title]
+        .children
+        .iter()
+        .copied()
+        .find(|&c| t.arena[c].type_s == "Audio")
+        .expect("the main feature has audio tracks");
+    t.toggle(first_audio);
+    assert_eq!(
+        t.check_state(title),
+        Check::Mixed,
+        "some but not all children ticked is still Mixed"
+    );
 }

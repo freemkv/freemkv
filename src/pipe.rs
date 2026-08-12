@@ -386,10 +386,19 @@ fn check_selection_coverage(
         // Polish/Russian need case agreement, so a shared "no {class} track"
         // template forces every translator into broken grammar. `u.class` is
         // "audio" or "subtitle", giving `..._audio` / `..._subtitle`.
+        // `available` is disc-derived language tags; `requested` is the
+        // user's own `-a`/`-s` text. Both are sanitised for the same reason
+        // the sibling renderer below is: this goes to a real terminal.
+        let sanitize_all = |v: &[String]| -> String {
+            v.iter()
+                .map(|s| crate::disc_info::sanitize(s))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let args = [
             ("num", title_num.to_string()),
-            ("requested", u.requested.join(", ")),
-            ("available", u.available.join(", ")),
+            ("requested", sanitize_all(&u.requested)),
+            ("available", sanitize_all(&u.available)),
         ];
         let args: Vec<(&str, &str)> = args.iter().map(|(k, v)| (*k, v.as_str())).collect();
         if multi_title {
@@ -423,12 +432,17 @@ fn render_stream_sel_error(
             let mut langs: Vec<String> = title
                 .streams
                 .iter()
+                // Sanitised: a language tag is three raw MPLS/IFO bytes, and
+                // this string goes to the real terminal. `print_stream_info`
+                // already treats the same field this way; this path did not,
+                // so a crafted disc plus a mistyped `-a` printed disc bytes
+                // straight through. Three bytes is enough for `ESC c`.
                 .filter_map(|s| match s {
                     libfreemkv::Stream::Audio(a) if !a.language.is_empty() => {
-                        Some(a.language.clone())
+                        Some(crate::disc_info::sanitize(&a.language))
                     }
                     libfreemkv::Stream::Subtitle(s) if !s.language.is_empty() => {
-                        Some(s.language.clone())
+                        Some(crate::disc_info::sanitize(&s.language))
                     }
                     _ => None,
                 })
@@ -6312,5 +6326,72 @@ mod dest_is_source_tests {
             source_path_of("disc://").is_none(),
             "a live drive has no path to compare"
         );
+    }
+}
+
+// ── Disc language tags reach a real terminal ─────────────────────────────────
+//
+// A language tag is three raw MPLS/IFO bytes through `from_utf8_lossy`, with
+// no charset validation anywhere between the parser and here. `print_stream_info`
+// already sanitises the same field; these two error renderers did not, so a
+// crafted disc plus a mistyped `-a`/`-s` printed disc bytes straight to the
+// terminal. Three bytes is enough for `ESC c` — a full terminal reset.
+#[cfg(test)]
+mod language_escape_tests {
+    use super::render_stream_sel_error;
+
+    fn title_with_language(lang: &str) -> libfreemkv::DiscTitle {
+        libfreemkv::DiscTitle {
+            playlist: "00800.mpls".into(),
+            playlist_id: 800,
+            duration_secs: 60.0,
+            size_bytes: 1 << 30,
+            clips: Vec::new(),
+            streams: vec![libfreemkv::Stream::Audio(libfreemkv::AudioStream {
+                pid: 0x1100,
+                codec: libfreemkv::Codec::TrueHd,
+                channels: libfreemkv::AudioChannels::Unknown,
+                language: lang.to_string(),
+                sample_rate: libfreemkv::SampleRate::Unknown,
+                secondary: false,
+                purpose: libfreemkv::LabelPurpose::Normal,
+                label: String::new(),
+            })],
+            chapters: Vec::new(),
+            extents: Vec::new(),
+            content_format: libfreemkv::ContentFormat::BdTs,
+            codec_privates: Vec::new(),
+        }
+    }
+
+    /// The "languages available on this title" list is disc bytes.
+    #[test]
+    fn a_crafted_language_tag_cannot_reach_the_terminal_raw() {
+        // ESC c is RIS: a full terminal reset, and it fits in three bytes.
+        let hostile = "\u{1b}c\n";
+        let title = title_with_language(hostile);
+        let msg = render_stream_sel_error(
+            &freemkv_engine::StreamSelError::UnknownLanguage { tag: "zz".into() },
+            &title,
+        );
+        assert!(
+            !msg.chars().any(|c| c.is_control() && c != '\n'),
+            "an escape sequence survived into terminal output: {msg:?}"
+        );
+        assert!(
+            !msg.contains('\u{1b}'),
+            "ESC survived into terminal output: {msg:?}"
+        );
+    }
+
+    /// An ordinary tag still names the language it was there to name.
+    #[test]
+    fn an_ordinary_language_tag_is_still_shown() {
+        let title = title_with_language("eng");
+        let msg = render_stream_sel_error(
+            &freemkv_engine::StreamSelError::UnknownLanguage { tag: "zz".into() },
+            &title,
+        );
+        assert!(msg.contains("eng"), "got {msg:?}");
     }
 }

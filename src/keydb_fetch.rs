@@ -152,6 +152,14 @@ fn hardened_agent(pinned: Vec<SocketAddr>) -> ureq::Agent {
         .max_redirects(0)
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_recv_response(Some(READ_TIMEOUT))
+        // ureq 3's `timeout_recv_response` bounds the response HEADERS only.
+        // Without this the keydb BODY had no deadline at all, so a mirror that
+        // answered 200 and then trickled bytes parked the caller forever: the
+        // CLI's `update-keys` hung with no output, and the GUI left "Update
+        // keydb now" disabled for the life of the process, since the button is
+        // only re-enabled when the worker posts a result it never posts.
+        // ROLLING, so a slow-but-progressing link still completes.
+        .timeout_recv_body(Some(READ_TIMEOUT))
         .build();
     // `with_parts`, never `new_with_config` — see [`PinnedResolver`].
     ureq::Agent::with_parts(config, DefaultConnector::new(), PinnedResolver(pinned))
@@ -292,6 +300,32 @@ fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, String> 
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    /// The keydb BODY is bounded, not just its headers.
+    ///
+    /// The ureq 2 -> 3 port replaced `timeout_read` — which bounded every
+    /// socket read — with `timeout_recv_response`, which in ureq 3 bounds the
+    /// response HEADERS only. Nothing bounded the body, so a mirror that
+    /// answered 200 and then trickled bytes parked the caller forever: the
+    /// CLI's `update-keys` hung silently, and the GUI left "Update keydb now"
+    /// disabled for the life of the process, because the button is re-enabled
+    /// only when the worker posts a result it never posts.
+    ///
+    /// Read off the built config rather than pinned to source text, so it
+    /// asserts the value ureq will actually use.
+    #[test]
+    fn the_keydb_body_read_is_bounded_not_only_the_headers() {
+        let agent = hardened_agent(Vec::new());
+        let t = agent.config().timeouts();
+        assert_eq!(
+            t.recv_body,
+            Some(READ_TIMEOUT),
+            "ureq 3's recv_response covers headers only; without recv_body the \
+             body read has no deadline at all"
+        );
+        assert_eq!(t.recv_response, Some(READ_TIMEOUT));
+        assert_eq!(t.connect, Some(CONNECT_TIMEOUT));
+    }
 
     #[test]
     fn ssrf_guard_blocks_loopback_private_and_metadata() {
