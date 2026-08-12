@@ -1957,6 +1957,94 @@ fn recovery_raw(multipass: bool, want_iso: bool, user_raw: bool) -> Result<bool,
     )
 }
 
+/// What a title NUMBER actually referred to, so a selection survives a rescan.
+///
+/// The playlist name and the duration together: the name is the disc's own
+/// identifier for the title and is what `freemkv info` lists, and the duration
+/// disambiguates the duplicate playlists discs legitimately carry. Rounded to
+/// whole seconds because a rescan of a recovered image recomputes it from the
+/// same clips and must not miss by a float epsilon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TitleId {
+    playlist: String,
+    duration_secs: u64,
+}
+
+impl TitleId {
+    pub fn of(t: &libfreemkv::DiscTitle) -> Self {
+        TitleId {
+            playlist: t.playlist.clone(),
+            duration_secs: t.duration_secs.max(0.0) as u64,
+        }
+    }
+}
+
+/// Translate a selection made against the DRIVE scan into indices valid for a
+/// scan of the staged image.
+///
+/// A multipass recovery can leave a playlist unreadable, and the rescan then
+/// yields a SHORTER title list — at which point every number past the gap
+/// addresses a different title, and the mux writes the wrong one under the
+/// name the user asked for, reporting "1 title(s) written". Positions are not
+/// identity; this is the same lesson the audit's identity lens keeps finding.
+///
+/// Falls back to the original numbers when identities were not captured (an
+/// empty `ids`, which is what an empty selection produces), since there is
+/// nothing to remap and `Selection::MainMovie` handles that case downstream.
+/// A title that CANNOT be found is a hard error: muxing the remaining ones
+/// silently would deliver a subset under the same summary.
+fn remap_titles_by_identity(
+    iso_path: &str,
+    titles: &[usize],
+    ids: &[TitleId],
+) -> Result<Vec<usize>, String> {
+    if titles.is_empty() || ids.len() != titles.len() {
+        return Ok(titles.to_vec());
+    }
+    remap_against(titles, ids, &scan_titles(iso_path)?)
+}
+
+/// The decision half of [`remap_titles_by_identity`], without the scan.
+///
+/// Separate so it is TESTABLE: reaching the real call site needs a live drive
+/// and a completed multipass recovery, and a test that re-implemented this
+/// logic beside it would pass whatever the code did — which is the failure
+/// mode this audit keeps finding in its own tests.
+fn remap_against(
+    titles: &[usize],
+    ids: &[TitleId],
+    staged: &[TitleId],
+) -> Result<Vec<usize>, String> {
+    if titles.is_empty() || ids.len() != titles.len() {
+        return Ok(titles.to_vec());
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for (id, &was) in ids.iter().zip(titles) {
+        match staged.iter().position(|s| s == id) {
+            Some(now) => out.push(now),
+            None => {
+                return Err(format!(
+                    "Title {} ({}) is not in the recovered image — the damage \
+                     destroyed its playlist, so it cannot be muxed.",
+                    was + 1,
+                    id.playlist
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The staged image's title identities, in order.
+fn scan_titles(iso_path: &str) -> Result<Vec<TitleId>, String> {
+    let (disc, _reader) = libfreemkv::scan_iso(
+        std::path::Path::new(iso_path),
+        libfreemkv::ScanOptions::default(),
+    )
+    .map_err(|e| format!("could not re-scan the recovered image (E{}).", e.code()))?;
+    Ok(disc.titles.iter().map(TitleId::of).collect())
+}
+
 /// A recovery that read nothing has nothing to mux. Separate from the caller so
 /// the boundary is assertable: as `!=` a perfectly good recovery deletes its own
 /// ISO and reports "no readable data".
@@ -2067,6 +2155,17 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             .take_reader()
             .ok_or("could not stage the drive for recovery")?;
         let disc = session.disc().ok_or("scan produced no disc")?;
+        // The user picked title NUMBERS against THIS scan. The mux below runs
+        // over the staged image, which is scanned again — and if damage
+        // destroyed a playlist, the second list is shorter and every number
+        // after the gap means a different title. Capture what the numbers
+        // currently REFER to, so the selection can be re-resolved by identity
+        // rather than by position. See `remap_titles_by_identity`.
+        let selected_ids: Vec<TitleId> = req
+            .titles
+            .iter()
+            .filter_map(|&t| disc.titles.get(t).map(TitleId::of))
+            .collect();
         let mut job = fe::Job::new(format!("disc://{}", req.source), iso_path.clone());
         job.raw = recovery_raw(req.multipass, want_iso, req.raw)?;
         let opts = fe::MultipassOpts {
@@ -2147,8 +2246,16 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             let _ = std::fs::remove_file(&iso_path);
             return Err("Recovery produced no readable data — nothing to mux.".into());
         }
+        // Re-resolve the selection against the staged image before muxing.
+        let titles = match remap_titles_by_identity(&iso_path, &req.titles, &selected_ids) {
+            Ok(t) => t,
+            Err(e) => {
+                return Err(format!("{e} The recovered image is kept: {iso_path}"));
+            }
+        };
         let iso_req = RipRequest {
             source: iso_path.clone(),
+            titles,
             ..req.clone()
         };
         let mux = run_blocking(&iso_req, sink, state);
@@ -2763,10 +2870,11 @@ mod key_summary_tests {
 #[cfg(test)]
 mod routing_tests {
     use super::{
-        DiscPlan, KeyConfig, OutKind, RipRequest, damage_note, demux_needs_subdirs, disc_device,
-        fe, image_or_dir_scheme, is_disc_source, is_stream_source, mux_opts, out_kind,
-        recovery_plan, recovery_produced_no_data, recovery_raw, should_delete_staging_iso,
-        source_scheme, stream_selection, title_input_options, won_from_trace,
+        DiscPlan, KeyConfig, OutKind, RipRequest, TitleId, damage_note, demux_needs_subdirs,
+        disc_device, fe, image_or_dir_scheme, is_disc_source, is_stream_source, mux_opts, out_kind,
+        recovery_plan, recovery_produced_no_data, recovery_raw, remap_against,
+        should_delete_staging_iso, source_scheme, stream_selection, title_input_options,
+        won_from_trace,
     };
 
     // ── The recovery job's `raw` flag ──────────────────────────────────────
@@ -2835,6 +2943,20 @@ mod routing_tests {
              passing req.raw straight through is what multipass_rip refuses"
         );
 
+        // 1b. The selection is re-resolved by identity before the staging mux.
+        //     Reached only after a completed recovery, so nothing else can
+        //     see it.
+        let mux = slice(
+            "        // Re-resolve the selection against the staged image",
+            "        let mux = run_blocking(&iso_req, sink, state);",
+        );
+        assert!(
+            mux.contains("remap_titles_by_identity(&iso_path, &req.titles"),
+            "the staging mux must re-resolve the user's titles against the \
+             recovered image; positions alone address a different title once \
+             damage has removed a playlist"
+        );
+
         // 2. The drive -> ISO destination (the most-travelled label seam).
         let dest = slice(
             "        let iso_path = std::path::Path::new(&req.dest_dir)",
@@ -2854,6 +2976,70 @@ mod routing_tests {
             img.contains("sanitize_label(&label)"),
             "the image-decrypt destination must sanitise the disc label"
         );
+    }
+
+    // ── A selection is titles, not numbers ────────────────────────────────
+    //
+    // The multipass path muxes from a RECOVERED image, which is scanned again.
+    // If damage destroyed a playlist the second list is shorter, and every
+    // number past the gap addresses a different title — so the wrong film was
+    // written under the name the user asked for, reported as "1 title(s)
+    // written". `remap_titles_by_identity` re-resolves by what the numbers
+    // referred to; these tests drive it directly, since reaching it needs a
+    // live drive and a two-hour recovery.
+
+    fn id(playlist: &str, secs: u64) -> TitleId {
+        TitleId {
+            playlist: playlist.to_string(),
+            duration_secs: secs,
+        }
+    }
+
+    /// The whole point: a title that MOVED is followed to its new index.
+    #[test]
+    fn a_selection_follows_its_titles_when_the_rescan_renumbers_them() {
+        // Drive scan: [feature, extra, trailer]; the user picked 0 and 2.
+        let picked = vec![0usize, 2];
+        let ids = vec![id("00800.mpls", 7530), id("00003.mpls", 120)];
+        // The recovered image lost 00001.mpls, so everything after it shifts.
+        let staged = vec![id("00800.mpls", 7530), id("00003.mpls", 120)];
+        assert_eq!(
+            remap_against(&picked, &ids, &staged),
+            Ok(vec![0, 1]),
+            "the trailer moved from index 2 to 1 and must be followed"
+        );
+    }
+
+    /// Duplicate playlist names are legitimate on real discs, so identity is
+    /// the name AND the duration — matching on the name alone would pick the
+    /// first of a duplicate pair.
+    #[test]
+    fn duplicate_playlist_names_are_told_apart_by_duration() {
+        let picked = vec![1usize];
+        let ids = vec![id("00800.mpls", 600)];
+        let staged = vec![id("00800.mpls", 7530), id("00800.mpls", 600)];
+        assert_eq!(remap_against(&picked, &ids, &staged), Ok(vec![1]));
+    }
+
+    /// A title that is GONE is a hard error. Muxing the survivors quietly
+    /// would deliver a subset under the same success summary.
+    #[test]
+    fn a_title_destroyed_by_the_damage_is_refused_not_skipped() {
+        let picked = vec![0usize, 1];
+        let ids = vec![id("00800.mpls", 7530), id("00001.mpls", 300)];
+        let staged = vec![id("00800.mpls", 7530)];
+        let e = remap_against(&picked, &ids, &staged).expect_err("must refuse");
+        assert!(
+            e.contains("00001.mpls") && e.contains("2"),
+            "the message must name the title the user asked for: {e}"
+        );
+    }
+
+    /// Nothing selected means `Selection::MainMovie` downstream — there is
+    /// nothing to remap and the empty list must pass through untouched.
+    #[test]
+    fn an_empty_selection_is_left_alone() {
+        assert_eq!(remap_against(&[], &[], &[]), Ok(vec![]));
     }
 
     /// A single-pass recovery is an ordinary decrypting copy, so the user's
