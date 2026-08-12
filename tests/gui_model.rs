@@ -1259,6 +1259,7 @@ fn a_failed_run_always_finishes_and_is_reported_as_failed() {
             format: "Selected titles → MKV".into(),
             audio_pids: vec![],
             sub_pids: vec![],
+            title_pids: vec![],
             explicit_streams: false,
             raw: false,
             force: false,
