@@ -294,6 +294,9 @@ fn dev_harness() -> bool {
                             .collect()
                     })
                     .unwrap_or_default(),
+                // No per-title breakdown from this harness: the union above
+                // applies to every title, which is what it always did.
+                title_pids: Vec::new(),
                 explicit_streams: std::env::var("FMKV_APIDS").is_ok(),
                 raw: std::env::var("FMKV_RAW").is_ok(),
                 force: true,

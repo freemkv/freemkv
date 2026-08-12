@@ -514,6 +514,42 @@ impl Tree {
         }
         (a, s, total > 0 && on != total)
     }
+
+    /// The ticked PIDs of each title, keyed by CANONICAL title index.
+    ///
+    /// [`Tree::ticked_streams`] unions every title's PIDs into one list, and
+    /// the engine applied that one list to every title. Blu-ray playlists of
+    /// the same feature routinely share PIDs — a feature and its extended cut,
+    /// say — so unticking a commentary under title 1 did nothing whenever the
+    /// same PID stayed ticked under title 2: the track was written to BOTH
+    /// outputs, and the tree said otherwise. The model could always express the
+    /// per-title decision; only the request could not carry it.
+    ///
+    /// The union is still what decides `explicit_streams` (did the user narrow
+    /// anything at all), and remains the fallback for a source with no title
+    /// rows at all.
+    pub fn ticked_streams_by_title(&self) -> Vec<(usize, Vec<u16>, Vec<u16>)> {
+        let mut out: Vec<(usize, Vec<u16>, Vec<u16>)> = Vec::new();
+        for n in &self.arena {
+            let Some(pid) = n.pid else { continue };
+            if !*n.checked.borrow() {
+                continue;
+            }
+            let slot = match out.iter_mut().find(|(t, _, _)| *t == n.title_idx) {
+                Some(slot) => slot,
+                None => {
+                    out.push((n.title_idx, Vec::new(), Vec::new()));
+                    out.last_mut().expect("just pushed")
+                }
+            };
+            if n.type_s == "Audio" {
+                slot.1.push(pid);
+            } else {
+                slot.2.push(pid);
+            }
+        }
+        out
+    }
 }
 
 // ── formatting ────────────────────────────────────────────────────────────
@@ -1940,6 +1976,7 @@ impl App {
             return vec![Effect::Redraw];
         }
         let (audio_pids, sub_pids, explicit_streams) = self.tree.ticked_streams();
+        let title_pids = self.tree.ticked_streams_by_title();
         // The user narrowed the tracks down to nothing (every audio AND subtitle
         // unchecked): allowed — some want a video-only extract — but never
         // silently. Surface it so an accidental result is caught before the rip.
@@ -1995,6 +2032,7 @@ impl App {
                 format: self.effective_format(),
                 audio_pids,
                 sub_pids,
+                title_pids,
                 explicit_streams,
                 raw,
                 force: self.settings.force,

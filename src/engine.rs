@@ -1093,6 +1093,15 @@ pub struct RipRequest {
     pub audio_pids: Vec<u16>,
     /// PIDs of the ticked subtitle tracks. Empty = keep every subtitle track.
     pub sub_pids: Vec<u16>,
+    /// The ticked PIDs of each title, keyed by CANONICAL title index.
+    ///
+    /// `audio_pids`/`sub_pids` are the UNION across every title, and applying
+    /// that union to each title in turn wrote a track the user had unticked
+    /// whenever a sibling title shared its PID — which Blu-ray playlists of one
+    /// feature routinely do. Empty means "no per-title breakdown available"
+    /// (the CLI, a container source), and the union is used, which is what
+    /// every caller did before.
+    pub title_pids: Vec<(usize, Vec<u16>, Vec<u16>)>,
     /// True when the user actually made a per-track choice; distinguishes
     /// "keep everything" from "keep nothing".
     pub explicit_streams: bool,
@@ -1467,15 +1476,30 @@ pub fn title_basename(template: &str, label: &str, n: usize) -> String {
 /// Url arm prunes via `InputOptions.selection` — `MuxOptions.selection` is only
 /// consulted on the File/Session (live-drive) arms. Putting it on MuxOptions
 /// silently kept every track. Empty PID lists = keep none of that class.
-fn stream_selection(req: &RipRequest) -> libfreemkv::StreamSelection {
-    if req.explicit_streams {
-        libfreemkv::StreamSelection {
-            audio: libfreemkv::PidFilter::Only(req.audio_pids.clone()),
-            subtitle: libfreemkv::PidFilter::Only(req.sub_pids.clone()),
-        }
-    } else {
-        libfreemkv::StreamSelection::default()
+/// The stream filter for one title, or for the whole request when no title is
+/// in play.
+///
+/// `title` is the CANONICAL disc title index. When the request carries a
+/// per-title breakdown, that title's own ticked PIDs are used; otherwise the
+/// union in `audio_pids`/`sub_pids` is, which is the CLI's shape and the
+/// behaviour every caller had before.
+fn stream_selection_for(req: &RipRequest, title: Option<usize>) -> libfreemkv::StreamSelection {
+    if !req.explicit_streams {
+        return libfreemkv::StreamSelection::default();
     }
+    let per_title = title.and_then(|t| req.title_pids.iter().find(|(ti, _, _)| *ti == t));
+    let (audio, subtitle) = match per_title {
+        Some((_, a, s)) => (a.clone(), s.clone()),
+        None => (req.audio_pids.clone(), req.sub_pids.clone()),
+    };
+    libfreemkv::StreamSelection {
+        audio: libfreemkv::PidFilter::Only(audio),
+        subtitle: libfreemkv::PidFilter::Only(subtitle),
+    }
+}
+
+fn stream_selection(req: &RipRequest) -> libfreemkv::StreamSelection {
+    stream_selection_for(req, None)
 }
 
 fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
@@ -1592,7 +1616,7 @@ fn title_input_options(
             .as_ref()
             .map(|a| a.unit_keys.clone())
             .unwrap_or_default(),
-        selection: stream_selection(req),
+        selection: stream_selection_for(req, Some(idx)),
         ..Default::default()
     }
 }
@@ -2873,8 +2897,8 @@ mod routing_tests {
         DiscPlan, KeyConfig, OutKind, RipRequest, TitleId, damage_note, demux_needs_subdirs,
         disc_device, fe, image_or_dir_scheme, is_disc_source, is_stream_source, mux_opts, out_kind,
         recovery_plan, recovery_produced_no_data, recovery_raw, remap_against,
-        should_delete_staging_iso, source_scheme, stream_selection, title_input_options,
-        won_from_trace,
+        should_delete_staging_iso, source_scheme, stream_selection, stream_selection_for,
+        title_input_options, won_from_trace,
     };
 
     // ── The recovery job's `raw` flag ──────────────────────────────────────
@@ -2978,6 +3002,87 @@ mod routing_tests {
         );
     }
 
+    // ── A stream selection is PER TITLE ───────────────────────────────────
+    //
+    // `ticked_streams` unions every title's ticked PIDs, and that one union
+    // was applied to every title in the mux loop. Blu-ray playlists of one
+    // feature routinely share PIDs, so unticking a commentary under title 1
+    // did nothing while the same PID stayed ticked under title 2 — the track
+    // was written to BOTH outputs, and the tree showed otherwise.
+
+    fn req_with_title_pids(pids: Vec<(usize, Vec<u16>, Vec<u16>)>) -> RipRequest {
+        RipRequest {
+            explicit_streams: true,
+            audio_pids: vec![0x1100, 0x1101],
+            sub_pids: vec![0x1200],
+            title_pids: pids,
+            ..req()
+        }
+    }
+
+    /// The defect: one PID ticked under one title and not the other.
+    #[test]
+    fn a_pid_unticked_under_one_title_is_not_written_for_that_title() {
+        let r = req_with_title_pids(vec![
+            // Title 0 keeps both audio tracks.
+            (0, vec![0x1100, 0x1101], vec![0x1200]),
+            // Title 1 has the commentary unticked.
+            (1, vec![0x1100], vec![0x1200]),
+        ]);
+        let only = |sel: &libfreemkv::StreamSelection| match &sel.audio {
+            libfreemkv::PidFilter::Only(v) => v.clone(),
+            _ => panic!("an explicit selection must be a PidFilter::Only"),
+        };
+        assert_eq!(
+            only(&stream_selection_for(&r, Some(0))),
+            vec![0x1100, 0x1101]
+        );
+        assert_eq!(
+            only(&stream_selection_for(&r, Some(1))),
+            vec![0x1100],
+            "the commentary was unticked for title 1; the union would have \
+             written it anyway because title 0 still has it"
+        );
+    }
+
+    /// A request with no per-title breakdown (the CLI, a container source)
+    /// falls back to the union — unchanged behaviour for every caller that
+    /// cannot supply one.
+    #[test]
+    fn without_a_per_title_breakdown_the_union_still_applies() {
+        let r = req_with_title_pids(Vec::new());
+        for t in [None, Some(0), Some(7)] {
+            match &stream_selection_for(&r, t).audio {
+                libfreemkv::PidFilter::Only(v) => assert_eq!(v, &[0x1100, 0x1101]),
+                _ => panic!("explicit selection expected"),
+            }
+        }
+    }
+
+    /// A title absent from the breakdown — the user unticked every stream
+    /// under it — falls back to the union rather than silently keeping
+    /// nothing. Selecting no streams at all is a separate, explicit path.
+    #[test]
+    fn a_title_missing_from_the_breakdown_falls_back_to_the_union() {
+        let r = req_with_title_pids(vec![(0, vec![0x1100], vec![])]);
+        match &stream_selection_for(&r, Some(9)).audio {
+            libfreemkv::PidFilter::Only(v) => assert_eq!(v, &[0x1100, 0x1101]),
+            _ => panic!("explicit selection expected"),
+        }
+    }
+
+    /// And "made no choice at all" still means keep everything, per title.
+    #[test]
+    fn an_untouched_selection_keeps_every_stream_for_every_title() {
+        let r = RipRequest {
+            explicit_streams: false,
+            title_pids: vec![(0, vec![0x1100], vec![])],
+            ..req()
+        };
+        assert!(stream_selection_for(&r, Some(0)).is_all());
+        assert!(stream_selection_for(&r, None).is_all());
+    }
+
     // ── A selection is titles, not numbers ────────────────────────────────
     //
     // The multipass path muxes from a RECOVERED image, which is scanned again.
@@ -3073,6 +3178,7 @@ mod routing_tests {
             format: "MKV".into(),
             audio_pids: vec![],
             sub_pids: vec![],
+            title_pids: vec![],
             explicit_streams: false,
             raw: false,
             force: false,
@@ -3384,7 +3490,12 @@ mod routing_tests {
 
         let mut r = req();
         r.explicit_streams = true;
-        r.audio_pids = vec![4353];
+        r.audio_pids = vec![4353, 4354];
+        // The two titles disagree, which is the whole point: title 3 has 4354
+        // unticked while title 0 keeps it. With one filter for the whole rip
+        // the union wins and 4354 is written for BOTH — so this fixture is
+        // what makes the per-title assertion below able to fail.
+        r.title_pids = vec![(0, vec![4353, 4354], vec![]), (3, vec![4353], vec![])];
 
         for idx in [0usize, 3] {
             let input = title_input_options(&disc, &r, idx);
@@ -3398,7 +3509,11 @@ mod routing_tests {
                 input.unit_keys, keys,
                 "the resolved AACS keys must be passed"
             );
-            assert_eq!(input.selection, stream_selection(&r));
+            // PER TITLE, not the union. Asserting against `stream_selection(&r)`
+            // encoded the defect: one filter applied to every title, so a PID
+            // unticked under one title was still written for it whenever a
+            // sibling title kept it ticked.
+            assert_eq!(input.selection, stream_selection_for(&r, Some(idx)));
         }
 
         // An unencrypted disc contributes no keys — and no placeholder either.
