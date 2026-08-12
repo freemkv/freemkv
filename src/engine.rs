@@ -3344,6 +3344,7 @@ mod routing_tests {
             passes: 1,
             aborted_for_loss: false,
             halted: false,
+            wedged: false,
             complete: true,
         }
     }

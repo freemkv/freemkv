@@ -412,6 +412,20 @@ impl Tree {
             .filter(|&&c| self.arena[c].checkable())
             .map(|&c| *self.arena[c].checked.borrow())
             .collect();
+        // A title with NO checkable children — a video-only title, since
+        // `stream_rows` marks video rows uncheckable — has no child state to
+        // fold, so its own flag IS its state. Falling into the `on == 0` arm
+        // below drew it unticked while `ticked_titles` (which reads the flag)
+        // ripped it, and `toggle` could not move it: Off -> set_checked(true)
+        // -> still Off. The displayed state was the inverse of the behaviour,
+        // and the box was dead.
+        if sel.is_empty() {
+            return if *n.checked.borrow() {
+                Check::On
+            } else {
+                Check::Off
+            };
+        }
         let on = sel.iter().filter(|x| **x).count();
         if on == 0 {
             Check::Off
