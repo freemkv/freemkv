@@ -1,8 +1,17 @@
 # Changelog
 
-## [Unreleased]
+## [1.6.4] — UNRELEASED
 
 ### Fixed
+
+- **On a few Blu-ray/UHD titles the sound ran on for about half a minute after
+  the picture had ended.** For single-clip titles freemkv trimmed the picture
+  to the playlist's end mark but not the sound, so a fade authored past the last
+  frame was copied through — the file declared one running time but carried up
+  to ~36 seconds more sound than picture (measured on `The Bourne Supremacy`:
+  picture ends at 1:48:26, sound ran to 1:49:02). Single-clip titles are now
+  trimmed to their marks like multi-clip titles already were; a title with no
+  extra material past its marks is unchanged.
 
 - **Opening a disc left the title list scrolled to the bottom.** On Windows,
   a freshly scanned disc opened every title so the tracks were visible
@@ -12,6 +21,53 @@
   the extras, with the film you came for somewhere far above. The list now
   opens on the title that is actually ticked, which under the default "Main
   film only" is the film, and under "All titles" is the top of the list.
+
+- **Unticking a track under one title could leave it ripping under another.**
+  Blu-ray playlists of the same feature routinely share track IDs, and the
+  stream selection was applied as one union across every title — so unticking a
+  commentary under one title still wrote it to another that shared the ID.
+  Selection is now applied per title.
+
+- **A damaged-disc recovery could write the wrong film under the right name.**
+  The multi-pass path recovers the disc to an image and re-scans it; the
+  selected titles were re-addressed by position, so if the damage dropped a
+  playlist every later title number pointed at a different film. Titles are now
+  re-resolved by identity (playlist name and duration); a title that is
+  genuinely gone is a named error, not a silent substitution reported as
+  success.
+
+- **`freemkv iso://Disc.iso iso://Disc.iso` destroyed the source.** The natural
+  way to ask for an in-place decrypt truncated the only copy before reading it.
+  Source and destination are now compared by canonical path and refused if they
+  are the same file — the guard the GUI already had. The same path also aborted
+  every AACS image decrypt for lack of a key map; it now builds the resolved key
+  map the way the engine does.
+
+- **A video-only title's checkbox showed, and toggled, backwards**, and the
+  key-database download could hang forever on a mirror that answered and then
+  trickled bytes (the ureq 2→3 port had dropped the body-read timeout, and the
+  GUI's "Update keydb now" stayed disabled for the life of the process). Both
+  are fixed; the download bound is now rolling, so a slow-but-progressing link
+  still finishes.
+
+- **A fresh install could not rip from a drive or an ISO at all.** The shipped
+  Multi-pass default collided with the engine's "multipass implies raw"
+  refusal, so a first rip failed before reading a sector. The staged recovery
+  image is now raw (which it always was physically) and decrypted at mux time;
+  the one impossible combination is refused up front, naming both ways out. A
+  cancelled or failed mux no longer deletes the multi-hour recovery behind it.
+
+- **The launch probe no longer freezes the window.** Drive enumeration, the
+  SCSI scan and key resolution ran synchronously at every startup, freezing the
+  first paint until the drive answered — or for the full timeout on a drive that
+  never does. The probe now runs off the UI thread through the same seam a
+  running rip uses.
+
+- **The last disc-derived strings printed to the terminal and GUI are now
+  sanitised.** Playlist names and language codes are raw disc bytes — enough for
+  a terminal-reset escape — and had been missed in both the CLI error renderers
+  and the GUI rows. A decrypt ending with bytes still pending is also no longer
+  reported as a clean write.
 
 ## [1.6.3] — 2026-08-10
 

@@ -4,8 +4,8 @@
   <key>CFBundleName</key><string>freemkv</string>
   <key>CFBundleDisplayName</key><string>freemkv</string>
   <key>CFBundleIdentifier</key><string>org.freemkv.gui</string>
-  <key>CFBundleVersion</key><string>1.6.3</string>
-  <key>CFBundleShortVersionString</key><string>1.6.3</string>
+  <key>CFBundleVersion</key><string>1.6.4</string>
+  <key>CFBundleShortVersionString</key><string>1.6.4</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>freemkv</string>
   <key>CFBundleIconFile</key><string>freemkv</string>
