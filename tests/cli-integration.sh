@@ -22,7 +22,12 @@
 # version/help, info, remux, format detection, null/stdio, the flag/exit-code
 # contract, and — if FMKV_ISO_DIR is set — read-only info on real ISOs.
 
-set -u
+# `pipefail` matters here, not just hygiene: the stdio:// round-trip test below
+# pipes one freemkv into another and gates on the pipeline's status. Without it
+# the shell reports only the LAST command, so a producing rip that failed
+# outright still read as PASS as long as the consumer exited 0. The sibling
+# `cli-parity.sh` has had `set -uo pipefail` all along.
+set -uo pipefail
 
 # ── Locate tools ──────────────────────────────────────────────────────────────
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -154,10 +159,18 @@ run     "info -f (full)"         0 -- "$BIN" info mkv://master.mkv -f
 run     "info -b (basic)"        0 -- "$BIN" info mkv://master.mkv -b
 
 # freemkv makes an m2ts, then reads it back (exercises the TS reader).
-if "$BIN" mkv://master.mkv m2ts://master.m2ts >/dev/null 2>&1; then
+#
+# The failure branch is `bad`, not `skip`. The master is generated a few lines
+# above with exactly the codecs the m2ts muxer supports (H.264 + AC-3), so
+# "m2ts mux unavailable for synthetic MKV" was never a real condition — it was
+# a total regression of the mkv://→m2ts:// leg reporting itself as a skip,
+# which does not touch FAIL and let the suite exit 0 with the TS writer AND the
+# TS reader both unexercised.
+if "$BIN" mkv://master.mkv m2ts://master.m2ts >"$WORK/.out" 2>"$WORK/.err"; then
+  ok "rip mkv:// → m2ts://"
   out_has "info m2ts:// (own output)" 'Streams: 3' -- "$BIN" info m2ts://master.m2ts
 else
-  skip "info m2ts:// (m2ts mux unavailable for synthetic MKV)"
+  bad "rip mkv:// → m2ts://" "$(tail -1 "$WORK/.err" 2>/dev/null)"
 fi
 
 # ── info — error contract ─────────────────────────────────────────────────────

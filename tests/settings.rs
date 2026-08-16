@@ -471,3 +471,48 @@ fn an_unparseable_settings_file_is_preserved_before_a_save_can_overwrite_it() {
         );
     });
 }
+
+/// A failed save must not leave the token lying around — nor poison every save
+/// that follows it.
+///
+/// `save()` writes to `gui-settings.json.tmp.<pid>` and renames. Only the
+/// RENAME branch cleaned that temp file up: a failure inside the write (a full
+/// disk, an I/O error part-way through `write_all`/`sync_all`) returned
+/// immediately, leaving a file that holds `keyserver_token` in plaintext. And
+/// because the name is per-PROCESS, not per-attempt, every later `save()` in
+/// the same process then hit `create_new` → `AlreadyExists` and failed
+/// forever: the user changes a setting, the app says it saved nothing, and the
+/// orphan with the secret in it stays on disk.
+///
+/// The debris is simulated directly — the temp path is deterministic — because
+/// no test can force `write_all` to fail part-way on a real filesystem.
+#[test]
+fn a_leftover_temp_file_neither_blocks_the_next_save_nor_keeps_the_token() {
+    in_a_temp_support_dir("settings-orphan", |support| {
+        let orphan = support.join(format!("gui-settings.json.tmp.{}", std::process::id()));
+        std::fs::write(&orphan, r#"{"keyserver_token":"s3cr3t-token"}"#).unwrap();
+
+        let mut s = Settings::load();
+        s.keyserver_url = "https://keys.example/".into();
+        s.save()
+            .expect("a save must not be blocked forever by its own debris");
+
+        assert!(
+            !orphan.exists(),
+            "the orphaned temp file still holds the token in plaintext"
+        );
+        let leftovers: Vec<String> = std::fs::read_dir(support)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "gui-settings.json")
+            .collect();
+        assert!(leftovers.is_empty(), "stray files left: {leftovers:?}");
+        assert!(
+            std::fs::read_to_string(support.join("gui-settings.json"))
+                .unwrap()
+                .contains("keys.example"),
+            "the save that was supposed to happen did not land"
+        );
+    });
+}

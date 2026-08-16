@@ -60,6 +60,7 @@ Optionen:
   -q, --quiet         Ausgabe unterdrücken
       --raw           Entschlüsselung überspringen (raw verschlüsselte Ausgabe)
       --multipass    Mapfile für Mehrpass-Wiederherstellung schreiben/aktualisieren
+      --force        Extract into a non-empty dir:// target (overwrite)
       --share         Laufwerkprofil einreichen (nur info disc://; bei einem Rip bedeutet -s --subtitles)
   -m, --mask          Seriennummern maskieren (mit --share)
 --- STDERR ---

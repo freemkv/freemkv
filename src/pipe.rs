@@ -259,7 +259,8 @@ impl MuxEvents for CliMuxEvents {
 /// Render the outcome of a `mux_stream` run into the CLI's exit contract, shared
 /// by `pipe` and `pipe_disc`:
 /// - `Ok(completed)` → clear the progress line, print the completion summary
-///   (unless a metadata sink, which prints none), succeed;
+///   (unless a metadata sink, which prints none), report any stream the sink
+///   could not deliver, succeed;
 /// - `Ok(!completed)` → an operator interrupt (SIGINT flipped the halt) or a
 ///   finalize wedge — print the "incomplete" notice and fail (non-zero exit),
 ///   NEVER report a truncated file as success;
@@ -275,12 +276,42 @@ fn finalize_mux(
                 let start = events.start().unwrap_or_else(Instant::now);
                 print_completion_summary(out, outcome.bytes_written, start);
             }
+            // AFTER the summary, never before: `print_completion_summary` is what
+            // clears the unterminated progress line, so anything printed ahead of
+            // it lands on the tail of that line.
+            print_lossy_outcome(out, &outcome, &events.dest);
             Ok(())
         }
         // mux completed == false → a mid-run halt (Ctrl-C). Classify as Halted
         // so the multi-title loop FULL-STOPS instead of cancelling each title.
         Ok(_) => Err(PipeFail::halted(interrupted_error(out))),
         Err(e) => Err(PipeFail::from_mux(e)),
+    }
+}
+
+/// Print everything a COMPLETED mux still has to say about what it lost.
+///
+/// The rendering itself is [`crate::lossy::lossy_lines`], shared with the GUI
+/// so the two shells cannot answer this differently again — they already had:
+/// this function reported `undelivered_streams` and the GUI reported the same
+/// field, while `MuxOutcome::errors` / `lost_bytes` (bytes the library read and
+/// could not carry — a Blu-ray 3D dependent view, in the case that produces
+/// them today) were read by NEITHER, so a re-mux that dropped one eye of the
+/// film printed "Complete" and exited 0.
+///
+/// `Level::Always`: a lossy outcome is never silent, so `--quiet` must not hide
+/// it — the same rule the unmatched-language warning follows. On a `stdio://`
+/// rip `Output` is routed to stderr, so this cannot corrupt the piped bytes.
+///
+/// Not a `PipeFail`: the file is finalised, structurally valid and playable, it
+/// is missing content rather than truncated, and truncation is the only thing
+/// the exit contract promises about. Every `PipeFail` from here reaches
+/// `freemkv_engine::decide_title`, where `Failed` abandons the title and
+/// `Halted` full-stops the batch — too blunt for a loss the user can act on
+/// themselves by re-running to `mkv://`.
+fn print_lossy_outcome(out: &Output, outcome: &libfreemkv::MuxOutcome, dest: &str) {
+    for line in crate::lossy::lossy_lines(outcome, dest) {
+        out.raw(crate::output::Level::Always, &line);
     }
 }
 
@@ -577,7 +608,10 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
             // silently ignoring it and leaving the user without a log file.
             "--log-level" => {
                 match args.get(i + 1) {
-                    Some(s) if !is_url_token(s) => {
+                    // `is_flag_token` lets `-1` through, so an out-of-range
+                    // negative still reaches the range error below rather than
+                    // being re-reported as a missing value.
+                    Some(s) if !is_url_token(s) && !crate::cli_entry::is_flag_token(s) => {
                         i += 1;
                         match s.parse::<u8>() {
                             Ok(n) if n >= 1 => f.verbose = n >= 2,
@@ -598,7 +632,18 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
             // `--log-file PATH` is consumed by logging init; swallow its value
             // here so the path isn't mistaken for a positional / unknown flag.
             "--log-file" => {
-                if args.get(i + 1).is_some_and(|p| !is_url_token(p)) {
+                // Not a positional URL, and not another flag. Guarding on
+                // `is_url_token` alone meant `--log-file --raw` consumed the
+                // `--raw` here, so the rip silently ran WITHOUT it and wrote a
+                // decrypted image; `--log-file --multipass` likewise lost
+                // multipass and single-passed a damaged disc while reporting
+                // success. `cli_entry::parse_logging_flags` guards its own copy
+                // of these two arms — this is the second parser, and a fix
+                // applied to only one of them is why the hole survived twice.
+                if args
+                    .get(i + 1)
+                    .is_some_and(|p| !is_url_token(p) && !crate::cli_entry::is_flag_token(p))
+                {
                     i += 1;
                 }
             }
@@ -614,7 +659,13 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                         i += 1;
                         f.all_titles = true;
                     }
-                    Some(v) if !is_url_token(v) => {
+                    // Not a positional URL, and not another flag: `-t --raw`
+                    // used to consume the `--raw` and then reject it as an
+                    // invalid title, which at least errored — but `-t --force`
+                    // would swallow a flag the parser needed. See
+                    // `cli_entry::is_flag_token`, which lets `-1` through so a
+                    // negative number still reaches the range check below.
+                    Some(v) if !is_url_token(v) && !crate::cli_entry::is_flag_token(v) => {
                         i += 1;
                         match v.parse::<usize>() {
                             Ok(n) if n >= 1 => f.title_nums.push(n),
@@ -634,7 +685,10 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
             "-a" | "--audio" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
-                    Some(v) if !is_url_token(v) => {
+                    // Not a positional URL, and not another flag: `-a --raw`
+                    // used to set the audio spec to "--raw" and swallow the
+                    // `--raw`. See `cli_entry::is_flag_token`.
+                    Some(v) if !is_url_token(v) && !crate::cli_entry::is_flag_token(v) => {
                         i += 1;
                         f.streams.audio = parse_stream_spec(v);
                     }
@@ -649,7 +703,10 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
             "-s" | "--subtitles" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
-                    Some(v) if !is_url_token(v) => {
+                    // Not a positional URL, and not another flag: `-s --raw`
+                    // used to set the subtitle spec to "--raw" and swallow the
+                    // `--raw`. See `cli_entry::is_flag_token`.
+                    Some(v) if !is_url_token(v) && !crate::cli_entry::is_flag_token(v) => {
                         i += 1;
                         f.streams.subtitles = parse_stream_spec(v).into();
                     }
@@ -664,7 +721,10 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
             "--keydb" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
-                    Some(p) if !is_url_token(p) => {
+                    // Not a positional URL, and not another flag: `--keydb
+                    // --raw` used to set the path to "--raw" and swallow the
+                    // `--raw`. See `cli_entry::is_flag_token`.
+                    Some(p) if !is_url_token(p) && !crate::cli_entry::is_flag_token(p) => {
                         i += 1;
                         f.keydb_path = Some(p.clone());
                     }
@@ -893,15 +953,23 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // already opens per title (so this is N+1 of a pattern that ships), and
     // the desktop app has always scanned up front, dropped the session, and
     // reopened per title.
-    let title_nums = if is_disc && all_titles {
-        match disc_title_count(source, &keys, &out) {
-            Some(found) => disc_title_nums(all_titles, &title_nums, found),
+    //
+    // That upfront scan is also the ONLY record of what each expanded index
+    // meant. `pipe_disc` re-scans the drive per title, and an index carries no
+    // proof that the second scan lists the same titles in the same order — so
+    // keep each selected title's IDENTITY here and hand it to `pipe_disc`,
+    // which fails loudly if the title at that index is no longer the one this
+    // job was built for. Empty when there was no upfront scan (an explicit
+    // `-t N` scans exactly once, so there is nothing to disagree with).
+    let (title_nums, disc_identities) = if is_disc && all_titles {
+        match disc_title_identities(source, &keys, &out) {
+            Some(ids) => (disc_title_nums(all_titles, &title_nums, ids.len()), ids),
             // The scan failed; let the normal per-title path report it rather
             // than inventing a second error message here.
-            None => title_nums,
+            None => (title_nums, Vec::new()),
         }
     } else {
-        title_nums
+        (title_nums, Vec::new())
     };
     let jobs = match build_jobs(
         &titles,
@@ -1011,6 +1079,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                 source,
                 dest_url,
                 title_idx.unwrap_or(0),
+                job_identity(&disc_identities, *title_idx),
                 &keys,
                 raw,
                 multipass,
@@ -1137,7 +1206,10 @@ fn is_scheme_only_sink(parsed_dest: &libfreemkv::StreamUrl) -> bool {
 /// 2. `--raw` / `--multipass` are used only with an `iso://` destination.
 /// 3. Source is reachable: a `disc://` device path that is given must exist; an
 ///    `iso://` input must exist, be a file (not a dir), and be non-empty.
-/// 4. Destination is writable: for a single-file `mkv://`/`m2ts://`/`iso://`
+/// 4. The destination is not the SOURCE. Every sink opens its file with
+///    `File::create`, which truncates the still-open input — the one mistake
+///    that costs the user their only copy.
+/// 5. Destination is writable: for a single-file `mkv://`/`m2ts://`/`iso://`
 ///    output the parent directory must exist and be writable, and the path must
 ///    not already be a directory.
 ///
@@ -1258,7 +1330,36 @@ fn preflight_validate(
         _ => {}
     }
 
-    // 4. Destination writability for a single-file output. Directory dests and
+    // 4. The destination must not BE the source.
+    //
+    // Every sink opens its file with `File::create`, which TRUNCATES —
+    // `mux_stream` → `drive_mux` → `output()` → `WritebackFile::
+    // create_with_size_hint` for the container sinks, `write_image` for
+    // `iso://`. The source is still open and still being read when that
+    // happens, so `freemkv mkv://Movie.mkv mkv://Movie.mkv` wrote a partial
+    // re-mux over the user's only copy: measured pre-fix, a 7.9 MB MKV came
+    // back 4.2 MB with the CLI blaming the file ("malformed or truncated"), a
+    // 50 MB M2TS came back 21 MB while reporting "Complete", and an MP4 was
+    // replaced by 12 MB of preallocated zeroes.
+    //
+    // Round 3 fixed exactly this for `iso://X iso://X` inside `image_to_iso`,
+    // but that is one path out of many and its `source_path_of` saw only
+    // `Iso`/`Dir`. The check belongs HERE: this gate is the one place that runs
+    // before any drive open, scan or file creation, so the refusal lands before
+    // anything is opened for writing, and it covers every scheme pairing at
+    // once — same-scheme (`mkv://X mkv://X`) and cross-scheme
+    // (`iso://X.iso json://X.iso`) alike. `image_to_iso` keeps its own copy of
+    // the guard as a second line of defence.
+    //
+    // Compared by filesystem identity, not by string: `./Movie.mkv`,
+    // `Movie.mkv`, `sub/../Movie.mkv`, a symlink and a hardlink are one file.
+    if let Some(dest_path) = url_path_of(parsed_dest)
+        && same_file(url_path_of(parsed_source).as_deref(), &dest_path)
+    {
+        return Err(strings::get("error.dest_is_source"));
+    }
+
+    // 5. Destination writability for a single-file output. Directory dests and
     // scheme-only sinks (null://, stdio://, network://) are not pre-checked here:
     // a directory dest is created on demand by `dir_jobs` (which reports its own
     // error), and the sinks have no filesystem path to validate.
@@ -1488,13 +1589,19 @@ fn validate_file_dest(path: &std::path::Path) -> Result<(), String> {
 ///
 /// Returns `None` (after printing the error) if a needed output directory can't
 /// be created, so the caller can exit non-zero.
-/// How many titles this disc has, for expanding `-t all`.
+/// The titles this disc has, for expanding `-t all` — one [`TitleIdentity`] per
+/// title, in scan order, so the count is `len()` and index `i` carries the
+/// identity of the title `-t {i+1}` was expanded from.
 ///
 /// One extra drive open+scan before the per-title loop. `None` on any failure:
 /// the caller falls through to the normal path, which opens the drive again and
 /// reports the real error in the usual place, rather than growing a second
 /// error-reporting path here.
-fn disc_title_count(source: &str, keys: &KeyConfig, out: &Output) -> Option<usize> {
+fn disc_title_identities(
+    source: &str,
+    keys: &KeyConfig,
+    out: &Output,
+) -> Option<Vec<TitleIdentity>> {
     let parsed = libfreemkv::parse_url(source);
     let target = match &parsed {
         libfreemkv::StreamUrl::Disc { device: Some(p) } => {
@@ -1508,11 +1615,13 @@ fn disc_title_count(source: &str, keys: &KeyConfig, out: &Output) -> Option<usiz
         key_source_factory(keys, out),
     )
     .ok()?;
-    let n = session.disc().map(|d| d.titles.len())?;
+    let ids: Vec<TitleIdentity> = session
+        .disc()
+        .map(|d| d.titles.iter().map(TitleIdentity::of).collect())?;
     // Drop the session before the per-title loop reopens the drive — the same
     // shape the desktop app already uses.
     drop(session);
-    (n > 0).then_some(n)
+    (!ids.is_empty()).then_some(ids)
 }
 
 /// The title list a DISC source should rip, given `-t all` / `-t N` and the
@@ -2054,6 +2163,7 @@ fn pipe_disc(
     source: &str,
     dest: &str,
     title_idx: usize,
+    expected: Option<&TitleIdentity>,
     keys: &KeyConfig,
     raw: bool,
     _multipass: bool,
@@ -2109,25 +2219,21 @@ fn pipe_disc(
     let mut selection = libfreemkv::StreamSelection::default();
     {
         let disc = session.disc().expect("scan populated the disc");
-        // The SAME range rule the scanned-source path in `run()` applies —
-        // `title_in_range`, not a second hand-rolled copy of it. This one used
-        // to be spelled out inline, and inverted it does not merely reject a
-        // good title: `disc.titles[title_idx]` is indexed a few lines below, so
-        // an out-of-range index panics the rip on a live drive.
-        if !title_in_range(title_idx, disc.titles.len()) {
-            return Err(PipeFail::fatal(strings::fmt(
-                "error.title_out_of_range",
-                &[
-                    ("num", &(title_idx + 1).to_string()),
-                    ("count", &disc.titles.len().to_string()),
-                ],
-            )));
-        }
+        // The SAME range rule the scanned-source path in `run()` applies, plus
+        // the identity rule — both live in `resolve_scanned_title`, not in a
+        // second hand-rolled copy here. The range rule used to be spelled out
+        // inline, and inverted it does not merely reject a good title:
+        // `disc.titles[title_idx]` is indexed below, so an out-of-range index
+        // panics the rip on a live drive. The identity rule covers what range
+        // alone cannot: THIS scan is a fresh one, independent of the scan the
+        // job list was built from, so the index alone does not prove we are
+        // about to rip the title the user asked for.
+        let title =
+            resolve_scanned_title(&disc.titles, title_idx, expected).map_err(PipeFail::fatal)?;
 
         // Translate the -a/-s language policy into PIDs against this scanned
         // title. A bad tag is a hard error (typo). Default All/All is a no-op.
         if !streams.is_all() {
-            let title = &disc.titles[title_idx];
             selection = streams
                 .resolve(title)
                 .map_err(|e| PipeFail::fatal(render_stream_sel_error(&e, title)))?;
@@ -2230,8 +2336,24 @@ enum CopyVerdict {
     /// The sweep ran to the end and recovered ZERO readable bytes — the ISO is
     /// all zeroes.
     NoData,
-    /// A usable image.
+    /// The sweep finished and produced a usable image that is NOT the whole
+    /// disc: sectors were unreadable, or were skipped and left pending. The
+    /// image is worth keeping and worth retrying with `--multipass`; what it
+    /// is not is complete, and it must not be reported as if it were.
+    Lossy,
+    /// A usable image, and all of it.
     Complete,
+}
+
+/// Whether a graded copy is a SUCCESS for the exit code.
+///
+/// Only one verdict is. A lossy image joins the two failures here rather than
+/// the success: `$?` is the only thing a script can see, and "24.9 of 25 GB"
+/// is not the disc the user asked for. This mirrors the `dir://` extraction
+/// path, which already prints its per-file loss and then returns failure "so
+/// scripts can detect 'extracted but holed'". The image is kept in every case.
+fn disc_copy_succeeded(verdict: CopyVerdict) -> bool {
+    matches!(verdict, CopyVerdict::Complete)
 }
 
 /// Grade a `CopyResult`. Two of the three verdicts are failures, and BOTH of
@@ -2248,6 +2370,11 @@ fn copy_verdict(r: &freemkv_engine::CopyResult) -> CopyVerdict {
         CopyVerdict::Interrupted
     } else if !disc_copy_recovered_data(r.bytes_good) {
         CopyVerdict::NoData
+    } else if r.bytes_unreadable > 0 || r.bytes_pending > 0 {
+        // Bytes the drive never delivered. `bytes_pending` counts as loss for
+        // the same reason `bytes_unreadable` does: they were attempted and
+        // skipped, and a single-pass sweep has no later pass to fetch them.
+        CopyVerdict::Lossy
     } else {
         CopyVerdict::Complete
     }
@@ -2349,29 +2476,49 @@ fn pipe(
 ///
 /// `--raw` and `--multipass` cannot reach here: they are drive flags and
 /// `preflight_validate` rejects them for a non-drive source.
-/// The filesystem path behind an `iso://` or `dir://` source, if it has one.
+/// The filesystem path behind a URL — for EVERY scheme that names one.
 ///
-/// Split out so the same-file guard is unit-testable without a real image.
-fn source_path_of(source: &str) -> Option<std::path::PathBuf> {
-    match libfreemkv::parse_url(source) {
-        libfreemkv::StreamUrl::Iso { path } | libfreemkv::StreamUrl::Dir { path } => Some(path),
-        _ => None,
+/// The same-file guard needs this on both sides of the invocation, so the
+/// match is exhaustive on purpose: no `_` arm. A scheme added to
+/// `libfreemkv::StreamUrl` fails to compile here rather than silently arriving
+/// unguarded, which is exactly how the round-3 fix — matching `Iso` and `Dir`
+/// alone — left every other pairing able to write over its own source.
+///
+/// The path is returned even for a write-only sink (`fvi://`, `chapters://`,
+/// `json://`, the per-track directories): those are precisely the destinations
+/// that truncate, and one of them aimed at the source's own path is the same
+/// data loss as `mkv://X mkv://X`.
+fn url_path_of(url: &libfreemkv::StreamUrl) -> Option<std::path::PathBuf> {
+    use libfreemkv::StreamUrl as U;
+    match url {
+        U::Mkv { path }
+        | U::M2ts { path }
+        | U::Mp4 { path }
+        | U::Iso { path }
+        | U::Dir { path }
+        | U::Fvi { path }
+        | U::Chapters { path }
+        | U::Json { path } => Some(path.clone()),
+        U::Demux { dir } | U::Video { dir } | U::Audio { dir } | U::Sub { dir } => {
+            Some(dir.clone())
+        }
+        // No filesystem path to compare: a live drive, a socket, stdio, the
+        // bit bucket, and a URL we could not parse at all (rejected earlier).
+        U::Disc { .. } | U::Network { .. } | U::Stdio | U::Null | U::Unknown { .. } => None,
     }
 }
 
-/// Whether two paths name the same existing file.
+/// The filesystem path behind a source URL, if it has one.
 ///
-/// Canonicalised, so `./Disc.iso`, `Disc.iso` and an absolute path to it are
-/// one file. A destination that does not exist yet cannot be the source, so a
-/// failed canonicalize on either side is "not the same file" — the guard must
-/// never refuse an ordinary rip because a path could not be resolved.
-fn same_file(source: Option<&std::path::Path>, dest: &std::path::Path) -> bool {
-    let Some(source) = source else { return false };
-    match (std::fs::canonicalize(source), std::fs::canonicalize(dest)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
+/// Split out so the same-file guard is unit-testable without a real image.
+fn source_path_of(source: &str) -> Option<std::path::PathBuf> {
+    url_path_of(&libfreemkv::parse_url(source))
 }
+
+/// Whether two paths name the same existing file — [`crate::file_identity`]
+/// owns the answer, and owns it for both shells. It lived here, and the GUI
+/// grew a narrower copy of it that a hardlink walks straight through.
+use crate::file_identity::same_file;
 
 fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
     let iso_path = match libfreemkv::parse_url(dest) {
@@ -2659,6 +2806,7 @@ fn disc_to_iso(
             if !out.is_quiet() {
                 eprint!("\r\x1b[K");
             }
+            let verdict = copy_verdict(&r);
             let elapsed = start.elapsed().as_secs_f64();
             let mb = r.bytes_total as f64 / (1024.0 * 1024.0);
             let speed = if elapsed > 0.0 { mb / elapsed } else { 0.0 };
@@ -2674,7 +2822,13 @@ fn disc_to_iso(
                     ],
                 ),
             );
-            if multipass {
+            // Report the LOSS whenever there is any, not only when the user
+            // asked for recovery. Gated on `multipass`, a plain single-pass rip
+            // of a scratched disc printed the completion line and nothing else
+            // — the "Complete, exit 0, bytes missing" shape this crate must
+            // never produce. `--multipass` is a strategy, not a reporting
+            // preference.
+            if !disc_copy_succeeded(verdict) {
                 let gb_good = r.bytes_good as f64 / 1_073_741_824.0;
                 let mb_bad = r.bytes_unreadable as f64 / 1_048_576.0;
                 let mb_pending = r.bytes_pending as f64 / 1_048_576.0;
@@ -2715,7 +2869,9 @@ fn disc_to_iso(
                     );
                 }
             }
-            true
+            // The verdict IS the exit code. Returning a bare `true` here is
+            // what let a holed image exit 0.
+            disc_copy_succeeded(verdict)
         }
         Err(e) => {
             out.raw(Normal, &render_error(&e));
@@ -3338,6 +3494,102 @@ fn copy_should_continue(interrupted: bool) -> bool {
 /// ripping nothing.
 fn title_in_range(idx: usize, count: usize) -> bool {
     idx < count
+}
+
+/// What identifies a scanned title ACROSS an independent re-scan of the same
+/// disc.
+///
+/// A disc rip carries only an integer between scans: the upfront scan that
+/// expands `-t all` produces a title count, `build_jobs` turns that into
+/// positional indices, and every `pipe_disc` call then re-scans the drive and
+/// indexes `disc.titles[idx]`. Position is not identity — if the second scan
+/// returns the titles in a different order, or drops one BEFORE the requested
+/// index, the index still resolves and a DIFFERENT title is muxed under the
+/// requested number, silently. `title_in_range` only catches the case where the
+/// list got short enough for the index to fall off the end.
+///
+/// The type itself lives in [`crate::title_identity`] and is SHARED with the
+/// GUI's `engine`, which asks the identical question one scan later. It was
+/// defined twice — once here and once beside `engine::verify_title_identity` —
+/// and the two definitions disagreed about what a title IS. One definition,
+/// in one place, is the fix; a second one beside a call site is the bug.
+use crate::title_identity::TitleIdentity;
+
+/// The message shown when a re-scan's title no longer matches the one the job
+/// list was built against.
+///
+/// `error.title_changed` is not in the pinned `freemkv-i18n` tag yet, and
+/// `strings::get` echoes the dotted path for a key the catalog does not ship.
+/// Same guard `ui::format_label` uses: treat the echo as "no string" and print
+/// readable English rather than `error.title_changed`.
+fn title_changed_message(num: usize, expected: &TitleIdentity, found: &TitleIdentity) -> String {
+    const KEY: &str = "error.title_changed";
+    let args = [
+        ("num", num.to_string()),
+        ("expected", expected.describe()),
+        ("found", found.describe()),
+    ];
+    match crate::strings::get(KEY) {
+        s if s == KEY => format!(
+            "Title {} changed between scans: expected {}, the drive now reports {}. \
+             The disc list moved under the rip; nothing was written for this title.",
+            num,
+            expected.describe(),
+            found.describe()
+        ),
+        _ => crate::strings::fmt(
+            KEY,
+            &args
+                .iter()
+                .map(|(k, v)| (*k, v.as_str()))
+                .collect::<Vec<_>>(),
+        ),
+    }
+}
+
+/// The identity recorded for one job, out of the upfront scan's list.
+///
+/// `identities` is indexed exactly as the jobs are — entry `i` is the title
+/// `-t {i+1}` expanded to — and is EMPTY when no upfront scan happened. `None`
+/// then means "nothing to verify against", which is the pre-existing behaviour
+/// for an explicit `-t N`. A job with no title index (`None`) is the whole-disc
+/// / single-title case that `pipe_disc` treats as index 0.
+fn job_identity(identities: &[TitleIdentity], title_idx: Option<usize>) -> Option<&TitleIdentity> {
+    identities.get(title_idx.unwrap_or(0))
+}
+
+/// Pick the title a job refers to out of a FRESHLY scanned title list.
+///
+/// The one place an index from an earlier scan meets a later scan's titles.
+/// Returns the error message to fail the rip with, so both the range rule and
+/// the identity rule are stated once.
+///
+/// `expected` is the identity recorded when the job list was built. `None`
+/// means there was no earlier scan to disagree with (an explicit `-t N` on a
+/// disc source scans exactly once), in which case the index IS the only
+/// reference and only the range rule applies.
+fn resolve_scanned_title<'a>(
+    titles: &'a [libfreemkv::DiscTitle],
+    title_idx: usize,
+    expected: Option<&TitleIdentity>,
+) -> Result<&'a libfreemkv::DiscTitle, String> {
+    if !title_in_range(title_idx, titles.len()) {
+        return Err(strings::fmt(
+            "error.title_out_of_range",
+            &[
+                ("num", &(title_idx + 1).to_string()),
+                ("count", &titles.len().to_string()),
+            ],
+        ));
+    }
+    let title = &titles[title_idx];
+    if let Some(expected) = expected {
+        let found = TitleIdentity::of(title);
+        if found != *expected {
+            return Err(title_changed_message(title_idx + 1, expected, &found));
+        }
+    }
+    Ok(title)
 }
 
 /// Whether a disc format needs its per-title key checked BEFORE the mux runs.
@@ -4718,6 +4970,79 @@ mod tests {
         assert!(!parse_flags(&v(&[])).unwrap().force);
     }
 
+    /// `--keydb` must not accept the next FLAG as its path.
+    ///
+    /// The guard here only refused a positional URL token (`scheme://`), so
+    /// `freemkv --keydb --raw disc:// mkv://out.mkv` set the keydb path to
+    /// "--raw" AND dropped the `--raw` the user asked for — a rip that quietly
+    /// decrypts when it was told not to, with no message about either. A
+    /// missing value is a missing value: say so.
+    #[test]
+    fn keydb_does_not_take_the_following_flag_as_its_path() {
+        let e = parse_flags(&v(&["--keydb", "--raw"]))
+            .expect_err("a flag is not a keydb path — the value is missing");
+        assert!(
+            e.contains("--keydb"),
+            "the error must name the flag whose value is missing: {e}"
+        );
+        // The real thing still parses, and still wins over nothing.
+        let f = parse_flags(&v(&["--keydb", "/tmp/k.cfg", "--raw"])).unwrap();
+        assert_eq!(f.keydb_path.as_deref(), Some("/tmp/k.cfg"));
+        assert!(f.raw, "--raw must survive a well-formed --keydb");
+    }
+
+    /// EVERY value-taking flag must refuse the next FLAG as its value, not
+    /// just the one that was reported.
+    ///
+    /// `--keydb` was fixed above and its commit message claimed the rule was
+    /// applied to both parsers. It was not: `-t`, `-a` and `-s` here kept the
+    /// URL-only guard, and `cli_entry::parse_logging_flags` — in the file that
+    /// DEFINES `is_flag_token` — had no guard at all. Fixing these one at a
+    /// time is how the hole stayed open, so this asserts the class.
+    ///
+    /// `--key-auth` is deliberately exempt (a bearer token may legitimately
+    /// begin with `-`, which `is_flag_token`'s own doc records), and
+    /// `--key-url` carries its own http(s) scheme check.
+    #[test]
+    fn no_value_flag_takes_the_following_flag_as_its_value() {
+        // Derived from VALUE_FLAGS, NOT hand-listed. The first version of this
+        // test spelled out seven flags and omitted --log-file and --log-level,
+        // which are in VALUE_FLAGS — so the very hole it was written to close
+        // stayed open in this parser for another round. A list you maintain by
+        // hand cannot assert a class.
+        //
+        // Two exemptions, both with a reason in `is_flag_token`'s own doc:
+        // --key-auth takes a bearer token that may legitimately begin with '-',
+        // and --key-url carries its own http(s) scheme check.
+        for flag in crate::cli_entry::VALUE_FLAGS
+            .iter()
+            .copied()
+            .filter(|f| !matches!(*f, "--key-auth" | "--key-url"))
+        {
+            // The property is that the FOLLOWING FLAG SURVIVES, not that a
+            // particular error is produced: a value-flag whose value is
+            // missing may legitimately either reject (-t/-a/-s/--keydb) or
+            // simply decline to consume it (--log-file, whose value is read by
+            // logging init, not here). Both are correct; swallowing `--raw` is
+            // not, because the rip then decrypts when told not to.
+            match parse_flags(&v(&[flag, "--raw"])) {
+                Err(e) => assert!(
+                    e.contains(flag),
+                    "{flag} rejected, but the error does not name it: {e}"
+                ),
+                Ok(f) => assert!(
+                    f.raw,
+                    "{flag} silently ate the following --raw, so the rip runs \
+                     without it and writes a decrypted image"
+                ),
+            }
+        }
+
+        // ...and a well-formed value still parses, with the later flag intact.
+        let f = parse_flags(&v(&["-a", "eng", "--raw"])).expect("a real value parses");
+        assert!(f.raw, "--raw must survive a well-formed -a");
+    }
+
     #[test]
     fn log_level_sets_verbose_at_or_above_two() {
         // Level 1 = quiet prose; 2/3/4 widen it. The numeric value must also be
@@ -5459,6 +5784,120 @@ mod tests {
         }
     }
 
+    /// The guard `cli_entry::VALUE_FLAGS`' doc comment names, and which did not
+    /// exist: the arity table `collect_urls` splits URLs with, and the parser
+    /// that actually consumes those values, are two halves of ONE contract and
+    /// nothing checked they agreed. They did not — `-k` was listed as
+    /// value-taking long after `parse_flags` dropped it (WS3 above), so the CLI
+    /// swallowed the token after a flag it then rejected as unknown.
+    ///
+    /// Three properties, none of them derived by calling either side:
+    ///  1. the table IS the literal list written here, so adding an entry
+    ///     without teaching the parser is a diff a reviewer sees;
+    ///  2. every listed flag is one `parse_flags` KNOWS (a bare occurrence is
+    ///     never "unknown flag") and one that CONSUMES the following token (the
+    ///     token is never reported as an unknown flag of its own);
+    ///  3. every boolean flag is absent from the table AND leaves the following
+    ///     token to be parsed on its own merits.
+    #[test]
+    fn value_flag_set_matches_parser() {
+        // The arity table, written out rather than read back from the code
+        // under test. `-k` is deliberately NOT here: it is a retired flag, and
+        // `dropped_short_k_flag_is_unknown` (above) pins the rejection.
+        const EXPECTED: &[&str] = &[
+            "-t",
+            "--title",
+            "-a",
+            "--audio",
+            "-s",
+            "--subtitles",
+            "--keydb",
+            "--key-url",
+            "--key-auth",
+            "--log-file",
+            "--log-level",
+        ];
+        assert_eq!(
+            crate::cli_entry::VALUE_FLAGS,
+            EXPECTED,
+            "VALUE_FLAGS drifted from the parser's value-taking flags; teach \
+             `parse_flags` the new flag (or drop it here) before editing this list"
+        );
+
+        // A token no parser arm names, so it can only ever be swallowed as some
+        // flag's value or rejected as unknown — never both.
+        const SENTINEL: &str = "--freemkv-no-such-flag";
+        // The English text of `error.unknown_flag`; the tests run under the
+        // default (en) locale, as `dropped_short_k_flag_is_unknown` does.
+        const UNKNOWN: &str = "unknown flag";
+
+        for flag in crate::cli_entry::VALUE_FLAGS {
+            if let Err(e) = parse_flags(&v(&[flag])) {
+                assert!(
+                    !e.contains(UNKNOWN),
+                    "`{flag}` is in VALUE_FLAGS but `parse_flags` does not know it: {e}"
+                );
+            }
+            // The sentinel is FLAG-SHAPED, so this probe now measures the
+            // flag-guard rather than arity for any flag that refuses a
+            // flag-shaped value — which every value flag should, and the
+            // logging pair demonstrably do. Their arity is still covered: they
+            // are asserted present above, and
+            // `no_value_flag_takes_the_following_flag_as_its_value` pins that
+            // they do not swallow a following flag. Probing them here would
+            // assert the opposite of that, which is how a real defect
+            // (`--log-file --raw` writing a decrypted image) survived a round
+            // with a green suite.
+            if matches!(*flag, "--log-file" | "--log-level") {
+                continue;
+            }
+            if let Err(e) = parse_flags(&v(&[flag, SENTINEL])) {
+                assert!(
+                    !e.contains(UNKNOWN),
+                    "`{flag}` must consume `{SENTINEL}` as its value, not leave \
+                     it to be parsed as a flag: {e}"
+                );
+            }
+        }
+
+        // The other side of the contract: a boolean flag must NOT be listed,
+        // and must leave the next token alone.
+        for flag in ["-q", "--quiet", "--raw", "--multipass", "--force"] {
+            assert!(
+                !crate::cli_entry::VALUE_FLAGS.contains(&flag),
+                "`{flag}` takes no value; listing it makes `collect_urls` eat \
+                 the next token"
+            );
+            let e = parse_flags(&v(&[flag, SENTINEL]))
+                .expect_err("the sentinel must reach the unknown-flag arm");
+            assert!(
+                e.contains(UNKNOWN) && e.contains(SENTINEL),
+                "`{flag}` swallowed the following token: {e}"
+            );
+        }
+    }
+
+    /// The other half of the arity contract: `cli_entry::RETIRED_VALUE_FLAGS`
+    /// exists so a removed flag's VALUE is stepped over rather than counted as
+    /// a positional, and that is only correct while the parser still REJECTS
+    /// the flag. An entry the parser quietly accepted would be a flag whose
+    /// value is discarded before it ever gets there.
+    #[test]
+    fn retired_value_flags_are_rejected_by_the_parser() {
+        for flag in crate::cli_entry::RETIRED_VALUE_FLAGS {
+            assert!(
+                !crate::cli_entry::VALUE_FLAGS.contains(flag),
+                "`{flag}` cannot be both live and retired"
+            );
+            let err = parse_flags(&v(&[flag, "value"]))
+                .expect_err("a retired flag must be rejected, not parsed");
+            assert!(
+                err.contains("unknown flag") && err.contains(flag),
+                "the rejection of `{flag}` must name it: {err}"
+            );
+        }
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // WS3 — device comes from the source URL (`disc:///dev/sgN`).
     //
@@ -5724,7 +6163,7 @@ mod tests {
 mod verdict_tests {
     use super::{
         CopyVerdict, PipeFail, check_selection_coverage, copy_verdict, disc_copy_options,
-        extract_succeeded, finalize_mux, is_feature_title, title_policy,
+        disc_copy_succeeded, extract_succeeded, finalize_mux, is_feature_title, title_policy,
     };
     use crate::output::Output;
 
@@ -5742,6 +6181,104 @@ mod verdict_tests {
 
     fn quiet() -> Output {
         Output::new(false, true)
+    }
+
+    /// A mux that `completed` can still be LOSSY. `MuxOutcome::undelivered_streams`
+    /// names `title.streams` indices the sink accepted frames for but could not put
+    /// in the finished container — today the `mp4://` sink dropping an audio track
+    /// no frame of which yielded a parseable sample entry. libfreemkv's contract on
+    /// the field is explicit: non-empty means the file does NOT match the pre-mux
+    /// plan even with `completed = true`, and "a caller that reports a successful
+    /// export must report these too — a lossy outcome is never silent."
+    ///
+    /// Unreported, freemkv prints "Complete", exits 0, and the user finds a missing
+    /// audio track months later with nothing in the output that ever mentioned it.
+    #[test]
+    fn a_completed_but_lossy_mux_names_the_undelivered_stream() {
+        // Pin the catalog so the assertion reads the English wording regardless of
+        // the machine's LANG.
+        crate::strings::set_locale("en");
+
+        let mut lossy = outcome(true, 1_000_000);
+        lossy.undelivered_streams = vec![1];
+        let events = super::CliMuxEvents::new(loud(), "mp4:///out/x.mp4".into(), false);
+
+        let (res, printed) = crate::output::capture(|| finalize_mux(Ok(lossy), &loud(), &events));
+
+        // Still a success: the file is finalized and playable, just missing a track.
+        assert!(
+            res.is_ok(),
+            "a completed mux missing one track is not a truncated file"
+        );
+        assert!(
+            printed.contains("Track 2"),
+            "the undelivered stream must be NAMED in the output the user sees; got:\n{printed}"
+        );
+        assert!(
+            printed.contains("left out"),
+            "the user must be told the file is missing tracks; got:\n{printed}"
+        );
+
+        // The clean case must stay clean — no phantom warning on a lossless rip.
+        let events = super::CliMuxEvents::new(loud(), "mp4:///out/x.mp4".into(), false);
+        let (ok, clean) =
+            crate::output::capture(|| finalize_mux(Ok(outcome(true, 1_000_000)), &loud(), &events));
+        assert!(ok.is_ok());
+        assert!(
+            !clean.contains("left out"),
+            "a lossless mux must not warn; got:\n{clean}"
+        );
+    }
+
+    /// A mux that dropped PAYLOAD BYTES is lossy too, and nothing said so.
+    ///
+    /// `MuxOutcome::lost_bytes`/`errors` are the library's count of bytes it
+    /// read and could not carry into the output: an `mkv://` → `mkv://` re-mux
+    /// of a Blu-ray 3D rip drops the entire dependent-view (right-eye) payload
+    /// into them, and `undelivered_streams` stays EMPTY because no whole stream
+    /// was lost. `completed` is true, so `finalize_mux` printed the completion
+    /// summary, returned Ok, and the process exited 0 over a file missing one
+    /// eye of the film. Both counters were read nowhere outside test fixtures.
+    #[test]
+    fn a_completed_mux_that_dropped_payload_bytes_says_how_much_it_lost() {
+        crate::strings::set_locale("en");
+
+        let mut holed = outcome(true, 1_000_000);
+        holed.errors = 2;
+        holed.lost_bytes = 3 << 20;
+        let events = super::CliMuxEvents::new(loud(), "mkv:///out/movie.mkv".into(), false);
+
+        let (res, printed) = crate::output::capture(|| finalize_mux(Ok(holed), &loud(), &events));
+
+        // Still a success for the exit code: the file is finalised and
+        // playable, and the per-title loop must not abandon a batch over it —
+        // the same call the sibling `undelivered_streams` warning makes.
+        assert!(res.is_ok());
+        assert!(
+            printed.contains("lost"),
+            "the loss must be in the output the user sees; got:\n{printed}"
+        );
+        assert!(
+            printed.contains('3'),
+            "and it must say HOW MUCH was lost; got:\n{printed}"
+        );
+
+        // A lossless mux stays silent: an unconditional warning is worse than
+        // none at all.
+        let events = super::CliMuxEvents::new(loud(), "mkv:///out/movie.mkv".into(), false);
+        let (ok, clean) =
+            crate::output::capture(|| finalize_mux(Ok(outcome(true, 1_000_000)), &loud(), &events));
+        assert!(ok.is_ok());
+        assert!(
+            !clean.contains("lost"),
+            "a lossless mux must not warn; got:\n{clean}"
+        );
+    }
+
+    /// Normal verbosity — the level a user gets by default, and the only one at
+    /// which `Level::Normal` lines are observable.
+    fn loud() -> Output {
+        Output::new(false, false)
     }
 
     /// EVERY CLI mux funnels its result through `finalize_mux` — every
@@ -5808,15 +6345,92 @@ mod verdict_tests {
             copy_verdict(&copy_result(false, 1, 0)),
             CopyVerdict::Complete
         );
+        // 4 KiB of the disc never arrived. The image is usable and worth
+        // keeping — it is not the disc, and the exit code has to say so.
         assert_eq!(
             copy_verdict(&copy_result(false, 25_000_000_000, 4096)),
-            CopyVerdict::Complete
+            CopyVerdict::Lossy
         );
         // A halt that also recovered nothing reads as the halt — it is
         // resumable, and telling the user they stopped it is more useful.
         assert_eq!(
             copy_verdict(&copy_result(true, 0, 0)),
             CopyVerdict::Interrupted
+        );
+    }
+
+    /// A sweep that LOST sectors is not a clean image, whatever it recovered.
+    ///
+    /// `--multipass` was the only thing that made a `disc:// → iso://` rip
+    /// mention its damage: the loss lines sat inside `if multipass`, so an
+    /// ordinary single-pass rip of a scratched disc printed "Complete: 24.9 GB"
+    /// and exited 0 over an image with holes in it. The verdict is where this
+    /// belongs — the same function whose own doc says a misgrade "prints
+    /// rip.complete over an unusable image and exits 0, which is the single
+    /// failure this crate must never commit".
+    #[test]
+    fn a_partial_recovery_is_never_graded_as_a_clean_image() {
+        // 4 KiB unreadable out of 25 GB: two sectors of the user's film, gone.
+        assert_ne!(
+            copy_verdict(&copy_result(false, 25_000_000_000, 4096)),
+            CopyVerdict::Complete,
+            "an image with unreadable sectors must not grade as a clean one"
+        );
+        // Sectors still PENDING are loss too — they were attempted and skipped,
+        // and nothing later in a single-pass run will pick them up.
+        let mut pending = copy_result(false, 25_000_000_000, 0);
+        pending.bytes_pending = 8192;
+        assert_ne!(
+            copy_verdict(&pending),
+            CopyVerdict::Complete,
+            "pending sectors are unread bytes; the image is short of them"
+        );
+        // The clean sweep is untouched: this must not fail every ordinary rip.
+        assert_eq!(
+            copy_verdict(&copy_result(false, 25_000_000_000, 0)),
+            CopyVerdict::Complete
+        );
+    }
+
+    /// Only a whole image is a success, and the loss lines are not a
+    /// `--multipass` feature.
+    ///
+    /// Both halves of the same defect: the report was gated on the recovery
+    /// STRATEGY the user picked, and the return value was the literal `true`,
+    /// so a single-pass rip that lost sectors printed "Complete" and exited 0.
+    #[test]
+    fn a_lossy_copy_reports_its_loss_and_fails_the_exit_code() {
+        assert!(disc_copy_succeeded(CopyVerdict::Complete));
+        for v in [
+            CopyVerdict::Lossy,
+            CopyVerdict::NoData,
+            CopyVerdict::Interrupted,
+        ] {
+            assert!(
+                !disc_copy_succeeded(v),
+                "{v:?} must not exit 0 — the image is not what was asked for"
+            );
+        }
+
+        // The reporting half. `pipe_disc` needs a real drive, so the wiring is
+        // pinned in the source: the loss block must be reached by the VERDICT,
+        // never by `if multipass`.
+        let src = include_str!("pipe.rs").replace("\r\n", "\n");
+        let start = src
+            .find("            let verdict = copy_verdict(&r);")
+            .expect("the success arm still grades its result");
+        let end = start
+            + src[start..]
+                .find("\n        Err(e) => {")
+                .expect("the error arm still ends the success arm");
+        let arm = &src[start..end];
+        assert!(
+            !arm.contains("if multipass {"),
+            "the loss report must not depend on the recovery strategy"
+        );
+        assert!(
+            arm.contains("rip.mapfile_summary") && arm.contains("disc_copy_succeeded(verdict)"),
+            "a lossy sweep must print what it lost and return the verdict"
         );
     }
 
@@ -6209,7 +6823,7 @@ mod build_jobs_edge_tests {
 // 1; the CLI, which has no confirmation prompt at all, did not.
 #[cfg(test)]
 mod dest_is_source_tests {
-    use super::{same_file, source_path_of};
+    use super::{preflight_validate, same_file, source_path_of, url_path_of};
 
     struct Tmp(std::path::PathBuf);
     impl Tmp {
@@ -6219,12 +6833,18 @@ mod dest_is_source_tests {
                 name,
                 std::process::id()
             ));
+            let _ = std::fs::remove_dir_all(&d);
             let _ = std::fs::create_dir_all(&d);
             Tmp(d)
         }
         fn file(&self, name: &str, bytes: &[u8]) -> std::path::PathBuf {
             let p = self.0.join(name);
             std::fs::write(&p, bytes).expect("write fixture");
+            p
+        }
+        fn dir(&self, name: &str) -> std::path::PathBuf {
+            let p = self.0.join(name);
+            std::fs::create_dir_all(&p).expect("create fixture dir");
             p
         }
     }
@@ -6327,6 +6947,241 @@ mod dest_is_source_tests {
             "a live drive has no path to compare"
         );
     }
+
+    // ── Every file-backed scheme, not just iso:// ────────────────────────────
+    //
+    // The round-3 guard was wired into `image_to_iso` ALONE and
+    // `source_path_of` matched `Iso` and `Dir` ALONE, so every other pairing
+    // was unguarded. `freemkv mkv://Movie.mkv mkv://Movie.mkv` reached
+    // `mux_stream` → `drive_mux` → `output()` → `WritebackFile::
+    // create_with_size_hint` → `File::create`, which truncates the still-open
+    // input: a 7.9 MB MKV came back 4.2 MB and the CLI blamed the file
+    // ("malformed or truncated"); a 50 MB M2TS came back 21 MB and the CLI
+    // said "Complete"; an MP4 was replaced outright by 12 MB of preallocated
+    // zeroes. The guard now lives in `preflight_validate`, which runs before
+    // any drive open, scan or file creation.
+
+    /// The path behind a URL, for EVERY scheme that names one — the source
+    /// side and the destination side both.
+    #[test]
+    fn every_scheme_that_names_a_file_yields_its_path() {
+        for url in [
+            "mkv:///m/Movie.mkv",
+            "m2ts:///m/Movie.m2ts",
+            "mp4:///m/Movie.mp4",
+            "iso:///m/Disc.iso",
+            "dir:///m/BDMV",
+            "demux:///m/tracks",
+            "video:///m/tracks",
+            "audio:///m/tracks",
+            "sub:///m/tracks",
+            "fvi:///m/Movie.fvi",
+            "chapters:///m/Movie.xml",
+            "json:///m/Movie.json",
+        ] {
+            assert!(
+                url_path_of(&libfreemkv::parse_url(url)).is_some(),
+                "{url} names a file on disk; the guard must be able to see it"
+            );
+        }
+        // The schemes with no filesystem path at all.
+        for url in [
+            "disc://",
+            "disc:///dev/sg0",
+            "network://1.2.3.4:9000",
+            "stdio://",
+            "null://",
+        ] {
+            assert!(
+                url_path_of(&libfreemkv::parse_url(url)).is_none(),
+                "{url} has no path to compare"
+            );
+        }
+    }
+
+    /// Run the preflight gate the way `run` does.
+    fn preflight(source: &str, dest: &str) -> Result<(), String> {
+        let ps = libfreemkv::parse_url(source);
+        let pd = libfreemkv::parse_url(dest);
+        // `force = true` so a `dir://` destination is not refused for merely
+        // being non-empty — the same-file refusal must not depend on which
+        // other check happens to fire first.
+        preflight_validate(source, dest, &ps, &pd, false, false, true, false)
+    }
+
+    fn refused(source: &str, dest: &str) -> String {
+        match preflight(source, dest) {
+            Err(m) => m,
+            Ok(()) => panic!("{source} → {dest} was ACCEPTED; it destroys the source"),
+        }
+    }
+
+    /// THE defect. For each file-backed scheme, `X` as both source and
+    /// destination is refused — and the source still holds its original bytes
+    /// afterwards. Contents, not existence: a truncated file still exists.
+    #[test]
+    fn a_file_backed_scheme_never_writes_over_its_own_source() {
+        let t = Tmp::new("self_dest");
+        const BODY: &[u8] = b"the user's only copy of the movie";
+        for (scheme, name) in [
+            ("mkv", "Movie.mkv"),
+            ("m2ts", "Movie.m2ts"),
+            ("mp4", "Movie.mp4"),
+            ("iso", "Disc.iso"),
+        ] {
+            let p = t.file(name, BODY);
+            let url = format!("{scheme}://{}", p.display());
+            let msg = refused(&url, &url);
+            assert!(
+                msg.contains("overwrite the source"),
+                "{scheme}:// self-destination must be refused by name, got: {msg}"
+            );
+            assert_eq!(
+                std::fs::read(&p).expect("source still readable"),
+                BODY,
+                "{scheme}:// self-destination truncated the source"
+            );
+        }
+        // `dir://` is a source AND a sink; extracting a tree over itself is the
+        // same defect with a directory instead of a file.
+        let d = t.dir("BDMV");
+        std::fs::write(d.join("index.bdmv"), BODY).expect("write tree file");
+        let url = format!("dir://{}", d.display());
+        refused(&url, &url);
+        assert_eq!(
+            std::fs::read(d.join("index.bdmv")).expect("tree file survives"),
+            BODY,
+            "dir:// self-destination clobbered the source tree"
+        );
+    }
+
+    /// The pairing does not have to share a scheme. Every WRITE-ONLY sink
+    /// aimed at the source's own path is the same truncation.
+    #[test]
+    fn a_write_only_sink_never_aims_at_the_source_path() {
+        let t = Tmp::new("cross_scheme");
+        const BODY: &[u8] = b"the user's only copy of the disc image";
+        let p = t.file("Disc.iso", BODY);
+        let source = format!("iso://{}", p.display());
+        for dest_scheme in ["mkv", "m2ts", "mp4", "fvi", "chapters", "json"] {
+            let dest = format!("{dest_scheme}://{}", p.display());
+            let msg = refused(&source, &dest);
+            assert!(
+                msg.contains("overwrite the source"),
+                "iso:// → {dest_scheme}:// onto the same path must be refused, got: {msg}"
+            );
+            assert_eq!(
+                std::fs::read(&p).expect("source still readable"),
+                BODY,
+                "iso:// → {dest_scheme}:// truncated the source"
+            );
+        }
+        // The per-track directory sinks, pointed at the source TREE.
+        let d = t.dir("BDMV");
+        std::fs::write(d.join("index.bdmv"), BODY).expect("write tree file");
+        let source = format!("dir://{}", d.display());
+        for dest_scheme in ["demux", "video", "audio", "sub", "dir"] {
+            let dest = format!("{dest_scheme}://{}", d.display());
+            refused(&source, &dest);
+        }
+        assert_eq!(
+            std::fs::read(d.join("index.bdmv")).expect("tree file survives"),
+            BODY
+        );
+    }
+
+    /// The case a string compare misses. `./Movie.mkv` and `Movie.mkv` are one
+    /// file; so is a symlink to it, and so is a hardlink — which canonicalize
+    /// alone does NOT resolve, because both names are already canonical.
+    #[test]
+    fn a_second_spelling_of_the_source_is_still_the_source() {
+        let t = Tmp::new("spelling_dest");
+        const BODY: &[u8] = b"one file, several names";
+        let p = t.file("Movie.mkv", BODY);
+        let source = format!("mkv://{}", p.display());
+
+        // `sub/../Movie.mkv` — `Path`'s `==` cannot normalise `..` away, so
+        // only a real canonicalize resolves this.
+        let detour = t.dir("sub").join("..").join("Movie.mkv");
+        assert_ne!(detour.as_path(), p.as_path(), "the fixture proves nothing");
+        refused(&source, &format!("mkv://{}", detour.display()));
+
+        // A symlink pointing at the source.
+        #[cfg(unix)]
+        {
+            let link = t.0.join("Link.mkv");
+            std::os::unix::fs::symlink(&p, &link).expect("symlink");
+            refused(&source, &format!("mkv://{}", link.display()));
+
+            // A HARDLINK. Both names canonicalize to themselves, so a
+            // canonical-path compare says "different file" and the write
+            // destroys the source anyway. Only dev+inode catches it.
+            let hard = t.0.join("Hard.mkv");
+            std::fs::hard_link(&p, &hard).expect("hard link");
+            assert_ne!(
+                std::fs::canonicalize(&p).expect("canon src"),
+                std::fs::canonicalize(&hard).expect("canon hard"),
+                "a hardlink must NOT be equal by canonical path, or it proves nothing"
+            );
+            refused(&source, &format!("mkv://{}", hard.display()));
+        }
+
+        assert_eq!(
+            std::fs::read(&p).expect("source still readable"),
+            BODY,
+            "an aliased destination truncated the source"
+        );
+    }
+
+    /// Different files still rip. The guard must not cost the ordinary case,
+    /// which is every real invocation.
+    #[test]
+    fn two_different_files_are_still_accepted() {
+        let t = Tmp::new("distinct_dest");
+        let a = t.file("a.mkv", b"aaa");
+        let b = t.file("b.mkv", b"bbb");
+        for (src_scheme, dest_scheme) in [("mkv", "mkv"), ("iso", "mkv"), ("m2ts", "mp4")] {
+            let source = format!("{src_scheme}://{}", a.display());
+            let dest = format!("{dest_scheme}://{}", b.display());
+            assert!(
+                preflight(&source, &dest).is_ok(),
+                "{source} → {dest} is two different files and must be allowed"
+            );
+        }
+        // And the overwhelmingly common shape: a destination that does not
+        // exist yet.
+        let fresh = t.0.join("new.mkv");
+        assert!(
+            preflight(
+                &format!("iso://{}", a.display()),
+                &format!("mkv://{}", fresh.display()),
+            )
+            .is_ok(),
+            "a destination that does not exist yet can never be the source"
+        );
+    }
+
+    /// The guard is WIRED into the gate that runs before anything opens.
+    /// `preflight_validate` is the only place in `run` that precedes every
+    /// drive open, scan and file creation, so a guard anywhere else is a
+    /// guard that fires too late.
+    #[test]
+    fn the_preflight_gate_actually_calls_the_guard() {
+        let src = include_str!("pipe.rs").replace("\r\n", "\n");
+        let start = src
+            .find("\nfn preflight_validate(")
+            .expect("preflight_validate definition present");
+        let end = start
+            + src[start..]
+                .find("\n/// Validate a `dir://` destination")
+                .expect("the next item still ends preflight_validate");
+        let body = &src[start..end];
+        assert!(
+            body.contains("same_file(") && body.contains("url_path_of("),
+            "preflight_validate must refuse a destination that IS the source, \
+             before any sink is opened for writing"
+        );
+    }
 }
 
 // ── Disc language tags reach a real terminal ─────────────────────────────────
@@ -6393,5 +7248,229 @@ mod language_escape_tests {
             &title,
         );
         assert!(msg.contains("eng"), "got {msg:?}");
+    }
+}
+
+// ── A title's POSITION is not its identity across an independent re-scan ──────
+//
+// An `-t all` disc rip performs N+1 INDEPENDENT scans: one to learn the title
+// count (`disc_title_identities`), then one inside every `pipe_disc` call. There
+// is no scan cache, so all that travels between them is an integer. If the
+// second scan lists the titles in a different order, or drops one BEFORE the
+// requested index, that integer still resolves — and the wrong title gets muxed
+// under the requested number, silently. The old `title_in_range` guard only
+// catches the narrow case where the list got short enough for the index to fall
+// off the end.
+//
+// These exercise `resolve_scanned_title`, the single point where an index from
+// the earlier scan meets a later scan's title list — the exact line `pipe_disc`
+// runs before it indexes `disc.titles[title_idx]`. Driving the whole rip would
+// need a live drive (`open_scan_resolve` does real SCSI I/O and the crate has no
+// fake for it), so the divergent re-scan is simulated by handing the resolver
+// the second scan's list directly. That is the same list `pipe_disc` would hand
+// it.
+#[cfg(test)]
+mod title_identity_tests {
+    use super::{
+        TitleIdentity, disc_title_nums, job_identity, resolve_scanned_title, title_changed_message,
+    };
+
+    /// A title with a distinct playlist and distinct sectors — the shape a real
+    /// scan produces. `duration_secs`/`size_bytes` are deliberately IDENTICAL
+    /// across every fixture: titles legitimately carry duplicate playlists with
+    /// identical duration and size, so neither may be part of the identity.
+    fn title(playlist_id: u16, start_lba: u32) -> libfreemkv::DiscTitle {
+        libfreemkv::DiscTitle {
+            playlist: format!("{:05}.mpls", playlist_id),
+            playlist_id,
+            duration_secs: 3600.0,
+            size_bytes: 20 << 30,
+            clips: Vec::new(),
+            streams: Vec::new(),
+            chapters: Vec::new(),
+            extents: vec![libfreemkv::Extent {
+                start_lba,
+                sector_count: 1000,
+            }],
+            content_format: libfreemkv::ContentFormat::BdTs,
+            codec_privates: Vec::new(),
+        }
+    }
+
+    /// The first scan: what the job list was built against.
+    fn first_scan() -> Vec<libfreemkv::DiscTitle> {
+        vec![
+            title(800, 1000),
+            title(801, 5000),
+            title(802, 9000),
+            title(803, 13000),
+        ]
+    }
+
+    /// THE DEFECT. The re-scan returns the same titles in a different order —
+    /// a re-read of a marginal disc, a drive that enumerates playlists in a
+    /// different order after a retry. Index 1 still resolves, to title 802.
+    /// Ripping that under the name the user asked for (`_t2.mkv`) is the silent
+    /// wrong-title mux this check exists to prevent.
+    #[test]
+    fn a_reordered_rescan_fails_loudly_instead_of_muxing_the_wrong_title() {
+        let expected = TitleIdentity::of(&first_scan()[1]);
+        let rescan = vec![
+            title(800, 1000),
+            title(802, 9000), // ← swapped with 801
+            title(801, 5000),
+            title(803, 13000),
+        ];
+        let err = resolve_scanned_title(&rescan, 1, Some(&expected))
+            .err()
+            .unwrap_or_else(|| {
+                panic!(
+                    "a reordered re-scan resolved index 1 to {}, and the rip would have muxed \
+                     it as title 2",
+                    rescan[1].playlist
+                )
+            });
+        assert!(
+            err.contains("00801.mpls") && err.contains("00802.mpls"),
+            "the error must name the title that was expected and the one found: {err:?}"
+        );
+    }
+
+    /// The other half of what `title_in_range` misses: the list SHRANK, but not
+    /// enough for the index to fall off the end. Dropping 801 slides 803 into
+    /// index 2, so the old range check passes and the wrong title is muxed.
+    #[test]
+    fn a_rescan_that_drops_an_earlier_title_fails_rather_than_shifting() {
+        let expected = TitleIdentity::of(&first_scan()[2]);
+        let rescan = vec![title(800, 1000), title(802, 9000), title(803, 13000)];
+        assert!(
+            resolve_scanned_title(&rescan, 2, Some(&expected)).is_err(),
+            "index 2 is in range but now names 00803.mpls, not the requested 00802.mpls"
+        );
+    }
+
+    /// The identity must not be defined in terms of the OTHER titles, or a disc
+    /// whose re-scan simply misses one trailing title would fail every job. The
+    /// requested title is still at its index and still itself: rip it.
+    #[test]
+    fn dropping_an_unrelated_later_title_still_rips_the_requested_one() {
+        let expected = TitleIdentity::of(&first_scan()[1]);
+        let rescan = vec![title(800, 1000), title(801, 5000), title(802, 9000)];
+        let got = resolve_scanned_title(&rescan, 1, Some(&expected))
+            .expect("the requested title is unchanged; dropping 00803.mpls is irrelevant to it");
+        assert_eq!(got.playlist, "00801.mpls");
+    }
+
+    /// THE NORMAL PATH. A stable disc re-scans identically, and every title
+    /// resolves to exactly the one its job was built for.
+    #[test]
+    fn a_stable_disc_resolves_every_title_exactly_as_before() {
+        let scan = first_scan();
+        for (idx, want) in scan.iter().enumerate() {
+            let expected = TitleIdentity::of(want);
+            let got = resolve_scanned_title(&scan, idx, Some(&expected))
+                .expect("an unchanged re-scan must resolve every title");
+            assert_eq!(got.playlist, want.playlist, "at index {idx}");
+        }
+    }
+
+    /// An explicit `-t N` on a disc scans exactly once, so there is no earlier
+    /// list to disagree with and the index is the only reference there is. That
+    /// path must keep working — but the range rule still applies.
+    #[test]
+    fn with_no_earlier_scan_the_index_is_still_range_checked() {
+        let scan = first_scan();
+        assert_eq!(
+            resolve_scanned_title(&scan, 3, None)
+                .expect("no expectation recorded → rip what the index names")
+                .playlist,
+            "00803.mpls"
+        );
+        assert!(
+            resolve_scanned_title(&scan, 4, None).is_err(),
+            "one past the end is still out of range"
+        );
+        let expected = TitleIdentity::of(&scan[3]);
+        assert!(
+            resolve_scanned_title(&scan[..2], 3, Some(&expected)).is_err(),
+            "a shortened list that drops the index off the end still fails"
+        );
+    }
+
+    /// The constraint that shapes the identity: duplicate playlists with
+    /// identical duration and size are LEGITIMATE, so neither field can tell
+    /// two titles apart. Identity has to come from the playlist and the sectors.
+    #[test]
+    fn identity_is_not_duration_or_size() {
+        let a = title(800, 1000);
+        let b = title(801, 5000);
+        assert_eq!(a.duration_secs, b.duration_secs);
+        assert_eq!(a.size_bytes, b.size_bytes);
+        assert_ne!(
+            TitleIdentity::of(&a),
+            TitleIdentity::of(&b),
+            "two titles that differ only by playlist and sectors must not share an identity"
+        );
+    }
+
+    /// Even same-named playlists are separated, as long as they read different
+    /// sectors — and if they read the same sectors from the same playlist, the
+    /// two rips are byte-identical, so there is nothing to confuse.
+    #[test]
+    fn same_playlist_name_over_different_sectors_is_a_different_title() {
+        let mut a = title(800, 1000);
+        let mut b = title(800, 9000);
+        a.playlist = "FEATURE".into();
+        b.playlist = "FEATURE".into();
+        assert_ne!(TitleIdentity::of(&a), TitleIdentity::of(&b));
+    }
+
+    /// The `-t all` expansion and the identity list have to be indexed the same
+    /// way, or every job would verify against the WRONG title's identity — a
+    /// check that fails on a perfectly stable disc. `-t all` expands to 1-based
+    /// title numbers; `build_jobs` stores them 0-based; the identity list is in
+    /// scan order.
+    #[test]
+    fn every_expanded_job_looks_up_the_identity_of_its_own_title() {
+        let scan = first_scan();
+        let identities: Vec<TitleIdentity> = scan.iter().map(TitleIdentity::of).collect();
+        let nums = disc_title_nums(true, &[], identities.len());
+        assert_eq!(nums, vec![1, 2, 3, 4]);
+        for num in nums {
+            let idx = num - 1; // what `build_jobs` stores
+            let got = job_identity(&identities, Some(idx)).expect("every job has an identity");
+            assert_eq!(*got, TitleIdentity::of(&scan[idx]), "job for -t {num}");
+            // And it is the identity that lets THAT title through its own re-scan.
+            resolve_scanned_title(&scan, idx, Some(got)).expect("stable disc");
+        }
+        assert!(
+            job_identity(&[], Some(0)).is_none(),
+            "no upfront scan → nothing to verify against"
+        );
+    }
+
+    /// The mismatch message is the whole user-visible surface of this fix: it
+    /// must read as a sentence, never as the raw `error.title_changed` key that
+    /// the pinned i18n tag does not ship yet.
+    #[test]
+    fn the_mismatch_message_is_readable_and_carries_no_terminal_escapes() {
+        let mut hostile = title(801, 5000);
+        // The playlist name is on-disc metadata: three bytes are enough for
+        // ESC c, a full terminal reset.
+        hostile.playlist = "\u{1b}c\n801".into();
+        let msg = title_changed_message(
+            2,
+            &TitleIdentity::of(&hostile),
+            &TitleIdentity::of(&title(802, 9000)),
+        );
+        assert!(
+            !msg.starts_with("error."),
+            "the raw key path reached the user: {msg:?}"
+        );
+        assert!(
+            !msg.contains('\u{1b}'),
+            "ESC survived into terminal output: {msg:?}"
+        );
+        assert!(msg.contains("00802.mpls"), "got {msg:?}");
     }
 }
