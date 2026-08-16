@@ -13,9 +13,9 @@ name: release-orchestrate
 # So this workflow's whole job is to BE that workspace: check out all eight
 # repos plus the scripts, then hand over.
 #
-# `release.sh` lives in `freemkv-ci` (private, GitHub) rather than
-# `freemkv-private` (Gitea, LAN) for the one reason that hosted runners cannot
-# reach a LAN host. Nothing else moved.
+# `release.sh` lives in the `freemkv-ci` repo (private, on GitHub) for one
+# reason: hosted runners cannot reach a self-hosted git host on a LAN, and the
+# scripts previously lived on one. Nothing else moved.
 
 on:
   workflow_dispatch:
