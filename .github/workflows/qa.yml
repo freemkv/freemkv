@@ -466,7 +466,9 @@ jobs:
       - name: Mint a single-use registration token
         id: reg
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITHUB_TOKEN cannot mint runner registration tokens: that needs
+          # repo-admin, which it is never granted. Uses the PAT.
+          GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
         run: |
           set -euo pipefail
           tok=$(gh api -X POST "repos/${{ github.repository }}/actions/runners/registration-token" -q .token)
