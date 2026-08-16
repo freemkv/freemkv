@@ -1,0 +1,92 @@
+name: ci-runner-launch
+
+# Launch one ephemeral EC2 runner per OS, on demand.
+#
+# WHY THIS EXISTS
+# GitHub-hosted runners already carry the whole matrix for free — lint, test,
+# the synthetic CLI suite, and a real-media rip of the 35 MB DVD fixture, on
+# ubuntu + macOS + windows, hash-compared across all three. None of that needs
+# this workflow.
+#
+# What hosted runners cannot do is FULL-SIZE media: they ship ~14 GB of disk
+# against a 37 GB Blu-ray and a 57 GB UHD. That is the entire reason for the
+# EC2 legs, and it is worth being precise about, because it decides what these
+# runners must be sized for and nothing else.
+#
+# SHAPE
+# `workflow_dispatch` only, deliberately: these cost real money per run, and a
+# push trigger is how a busy afternoon turns into a surprise bill. The qa gate
+# calls this when it wants full-size coverage; otherwise nothing here runs.
+#
+# TEARDOWN — three independent mechanisms, because each can fail alone:
+#   1. `--ephemeral`  GitHub de-registers the runner after exactly one job.
+#   2. `shutdown` + `InstanceInitiatedShutdownBehavior=terminate` in the launch
+#      template, so the box deletes itself and its EBS volume with it.
+#   3. `ci-runner-sweeper.yml`, hourly, from OUTSIDE the instance — the only
+#      one that survives user-data dying before it arms the other two.
+#
+# The registration token is minted here, per run, and passed as an instance
+# TAG. It is single-use and expires in 60 minutes, so it never sits in an AMI,
+# in SSM, or in a repo secret.
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: Which runner to launch
+        type: choice
+        options: [linux, windows, all]
+        default: linux
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-west-2
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: ${{ github.event.inputs.os == 'all' && fromJSON('["linux","windows"]') || fromJSON(format('["{0}"]', github.event.inputs.os)) }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::457667483187:role/freemkv-ci-runners
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Mint a single-use runner registration token
+        id: reg
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tok=$(gh api -X POST "repos/${{ github.repository }}/actions/runners/registration-token" -q .token)
+          echo "::add-mask::$tok"
+          echo "token=$tok" >> "$GITHUB_OUTPUT"
+
+      - name: Launch the ephemeral runner
+        run: |
+          set -euo pipefail
+          # The subnet is resolved at run time rather than pinned: an AZ can be
+          # capacity-constrained for a given instance type, and a hardcoded
+          # subnet turns that into an outage instead of a retry.
+          subnet=$(aws ec2 describe-subnets \
+            --filters "Name=vpc-id,Values=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)" \
+            --query 'Subnets[0].SubnetId' --output text)
+
+          id=$(aws ec2 run-instances \
+            --launch-template LaunchTemplateName=freemkv-runner-${{ matrix.os }} \
+            --subnet-id "$subnet" \
+            --tag-specifications "ResourceType=instance,Tags=[
+                {Key=freemkv-ci,Value=runner},
+                {Key=runner-token,Value=${{ steps.reg.outputs.token }}},
+                {Key=runner-repo,Value=${{ github.repository }}},
+                {Key=launched-by,Value=${{ github.run_id }}}]" \
+            --query 'Instances[0].InstanceId' --output text)
+
+          echo "launched $id (${{ matrix.os }})"
+          echo "It registers itself, takes ONE job, then terminates. If it never"
+          echo "registers, the hourly sweeper removes it within 5h."

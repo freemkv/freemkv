@@ -1,0 +1,106 @@
+name: release-orchestrate
+
+# qa → tags → main, as one action.
+#
+# This is the last hand-run step. It does NOT reimplement `release.sh`: that
+# script is ~1900 lines of version bumping, git-tag re-pin cascade across eight
+# repos, tag ordering, artifact waits and main advancement, and rewriting it as
+# YAML would trade a proven implementation for an unproven one at exactly the
+# moment mistakes are most expensive. It was already built to run here —
+# `FMKV_ROOT` exists so CI can point it at a provisioned workspace instead of a
+# developer's laptop.
+#
+# So this workflow's whole job is to BE that workspace: check out all eight
+# repos plus the scripts, then hand over.
+#
+# `release.sh` lives in `freemkv-ci` (private, GitHub) rather than
+# `freemkv-private` (Gitea, LAN) for the one reason that hosted runners cannot
+# reach a LAN host. Nothing else moved.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, without the leading v (e.g. 1.6.5)
+        required: true
+        type: string
+      dry_run:
+        description: Run every check and print the plan, change nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Refuse unless qa is green on all eight
+        env:
+          GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          NON_GATING: '^(Dependabot Updates|CodeQL|pages-build-deployment)$'
+        run: |
+          set -uo pipefail
+          fail=0
+          for r in freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n \
+                   freemkv-engine bdemu freemkv autorip; do
+            sha=$(gh api "repos/freemkv/$r/git/ref/heads/qa" -q .object.sha 2>/dev/null || echo "")
+            [ -n "$sha" ] || { echo "::error::$r has no qa branch"; fail=1; continue; }
+            runs=$(gh api "repos/freemkv/$r/actions/runs?head_sha=$sha&per_page=100" \
+                     -q '[.workflow_runs[] | {name, status, conclusion}]')
+            gating=$(echo "$runs" | jq --arg re "$NON_GATING" '[.[] | select(.name | test($re) | not)]')
+            [ "$(echo "$gating" | jq 'length')" != "0" ] || { echo "::error::$r: no qa run for ${sha:0:7}"; fail=1; continue; }
+            [ "$(echo "$gating" | jq '[.[]|select(.status!="completed")]|length')" = "0" ] \
+              || { echo "::error::$r: qa still running for ${sha:0:7}"; fail=1; continue; }
+            bad=$(echo "$gating" | jq -r '[.[]|select(.conclusion!="success" and .conclusion!="skipped")|.name]|unique|join(", ")')
+            [ -z "$bad" ] || { echo "::error::$r: qa ${sha:0:7} not green ($bad)"; fail=1; continue; }
+            echo "  ✓ $r: qa ${sha:0:7} green"
+          done
+          [ "$fail" = "0" ] || { echo "::error::refusing to release — qa is not green across the set"; exit 1; }
+
+      # release.sh expects the eight repos side by side under one root, the way
+      # an operator checkout looks. Provision exactly that.
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/freemkv-ci, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ci }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/freemkv-unlock,     ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-unlock,     fetch-depth: 0 }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/libfreemkv,         ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/libfreemkv,         fetch-depth: 0 }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/freemkv-keysources, ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-keysources, fetch-depth: 0 }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/freemkv-i18n,       ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-i18n,       fetch-depth: 0 }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/freemkv-engine,     ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-engine,     fetch-depth: 0 }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/bdemu,              ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/bdemu,              fetch-depth: 0 }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/freemkv,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv,            fetch-depth: 0 }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/autorip,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/autorip,            fetch-depth: 0 }
+
+      - uses: dtolnay/rust-toolchain@1.97.0
+
+      - name: Identify as the release bot
+        run: |
+          git config --global user.name  "freemkv release"
+          git config --global user.email "dev@getbusbar.com"
+          git config --global url."https://x-access-token:${{ secrets.ORG_DISPATCH_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: release.sh
+        env:
+          FMKV_ROOT: ${{ github.workspace }}/ws
+          GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          # The script's own branch model: it operates on WORK_BRANCH and moves
+          # `main` only at the end, so `main` always equals the newest tag.
+          WORK_BRANCH: qa
+        run: |
+          set -euo pipefail
+          chmod +x ci/scripts/*.sh
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ci/scripts/release.sh --dry-run "${{ inputs.version }}"
+          else
+            ci/scripts/release.sh "${{ inputs.version }}"
+          fi

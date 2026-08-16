@@ -1,0 +1,76 @@
+name: ci-runner-sweeper
+
+# The third teardown mechanism, and the only one that survives the others
+# failing.
+#
+# An ephemeral runner tears itself down twice over: `--ephemeral` makes GitHub
+# de-register it after one job, and `shutdown -h now` against a launch template
+# with `InstanceInitiatedShutdownBehavior=terminate` deletes the instance. Both
+# live INSIDE the instance, so both are lost the moment user-data dies early, a
+# job wedges the box, or the runner never manages to register at all — and a
+# c7i.4xlarge left running is real money per day, silently.
+#
+# So this sweeps from outside. Anything tagged `freemkv-ci=runner` that has
+# been alive longer than MAX_AGE_MIN is terminated, no questions asked. The tag
+# is applied at RunInstances by the launch template, and the IAM policy on
+# `freemkv-ci-runners` only permits terminating instances carrying it — so this
+# cannot reach anything else in the account even if the filter were wrong.
+#
+# MAX_AGE_MIN is deliberately longer than the in-instance 4h self-destruct
+# timer: this is the backstop for that timer failing, not a second copy of it.
+
+on:
+  schedule:
+    - cron: '17 * * * *'   # hourly, off the hour to avoid the stampede
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-west-2
+  MAX_AGE_MIN: 300         # 5h
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::457667483187:role/freemkv-ci-runners
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terminate CI runners older than MAX_AGE_MIN
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff=$(python3 -c "
+          import datetime,os
+          m=int(os.environ['MAX_AGE_MIN'])
+          print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=m)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+          echo "cutoff: $cutoff"
+
+          # `running` AND `pending`: a box stuck in pending never reaches its
+          # own user-data, so the in-instance timers never arm — exactly the
+          # case this job exists for.
+          stale=$(aws ec2 describe-instances \
+            --filters "Name=tag:freemkv-ci,Values=runner" \
+                      "Name=instance-state-name,Values=running,pending" \
+            --query "Reservations[].Instances[?LaunchTime<='$cutoff'].InstanceId" \
+            --output text | tr '\t' '\n' | sed '/^$/d')
+
+          if [ -z "$stale" ]; then
+            echo "nothing stale — all runners are within MAX_AGE_MIN or already gone"
+            exit 0
+          fi
+
+          echo "terminating:"; echo "$stale"
+          # shellcheck disable=SC2086
+          aws ec2 terminate-instances --instance-ids $stale \
+            --query 'TerminatingInstances[].[InstanceId,CurrentState.Name]' --output text
+
+          # Loud, because a sweep that actually fired means a teardown path
+          # broke and someone should find out why rather than let this quietly
+          # become the normal way runners die.
+          echo "::warning::Swept $(echo "$stale" | wc -l | tr -d ' ') stale CI runner(s). The in-instance teardown did not fire — investigate before this becomes routine."
