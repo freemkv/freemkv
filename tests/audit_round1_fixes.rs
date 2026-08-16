@@ -108,14 +108,21 @@ fn the_extract_destination_cannot_escape_the_chosen_folder() {
             out.display()
         );
         // Assert the SEPARATORS are gone, not just that this platform does
-        // not treat them as such. CI runs on Linux, where a backslash is an
-        // ordinary character: without this, the Windows vector above passes
-        // on CI even with the fix reverted, and the traversal it represents
-        // would only be caught on a machine nobody runs the suite on.
-        let tail_str = out.to_string_lossy();
+        // not treat them as such. On Linux a backslash is an ordinary
+        // character, so without this the Windows vector above would pass even
+        // with the fix reverted.
+        //
+        // Checked against the single COMPONENT, not a string-trim of the whole
+        // path: `join` uses the platform separator, so on Windows
+        // `/tmp/out`.join(..) yields `/tmp/out\component` and trimming only
+        // the prefix leaves that separator behind. The first Windows run of
+        // this test failed on exactly that — the backslash it caught was
+        // `join`'s own, not one that survived sanitising. `tail` is asserted
+        // to be exactly one component just above, so this is that component.
+        let component = tail[0].as_os_str().to_string_lossy();
         assert!(
-            !tail_str.trim_start_matches("/tmp/out").contains('\\'),
-            "a backslash survived into the component: {tail_str}"
+            !component.contains('\\'),
+            "a backslash survived into the component: {component}"
         );
     }
 }
