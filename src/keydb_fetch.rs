@@ -51,13 +51,37 @@ pub fn fetch(url: &str) -> Result<Vec<u8>> {
     let pinned = resolve_and_guard(url).map_err(|_| Error::KeydbConnect { host: host_of(url) })?;
     let agent = hardened_agent(pinned);
     let resp = agent.get(url).call().map_err(|e| map_ureq_err(url, &e))?;
-    read_capped(resp.into_body().into_reader(), MAX_BODY_BYTES).map_err(|e| {
-        if matches!(e, Error::KeydbInvalid) {
-            e
-        } else {
-            Error::KeydbConnect { host: host_of(url) }
-        }
-    })
+    read_capped(resp.into_body().into_reader(), MAX_BODY_BYTES).map_err(|e| cap_error(&e, url))
+}
+
+/// Which keydb error a capped read's failure is.
+///
+/// The two cases are not the same story: an over-large body is a statement
+/// about what the server sent (E8002 "empty or invalid — re-download it"),
+/// while a dead socket is a statement about the network (E8000 "cannot
+/// connect", i.e. retry). `read_capped` used to return the same value for
+/// both, and `fetch` forwarded it, so every mid-download drop was reported as
+/// corrupt content.
+///
+/// Separate from `fetch` because `fetch` needs the network and this does not.
+fn cap_error(e: &CapError, url: &str) -> Error {
+    match e {
+        CapError::TooLarge => Error::KeydbInvalid,
+        CapError::Io => Error::KeydbConnect { host: host_of(url) },
+    }
+}
+
+/// Why a capped read did not produce a body.
+///
+/// Two outcomes that a shared `Error::KeydbInvalid` could not tell apart —
+/// see [`cap_error`], which is the only place that turns them into the errors
+/// the user sees.
+#[derive(Debug)]
+enum CapError {
+    /// The body ran past the cap. A statement about the response.
+    TooLarge,
+    /// The socket failed part-way. A statement about the network.
+    Io,
 }
 
 /// Read at most `cap` bytes, rejecting anything larger.
@@ -68,15 +92,15 @@ pub fn fetch(url: &str) -> Result<Vec<u8>> {
 /// cap end-to-end. The whole decompression-bomb defence was therefore
 /// unexercised — every mutant of the limit and its comparison survived. As a
 /// transport-free function it is directly testable with a `Cursor`.
-fn read_capped(r: impl std::io::Read, cap: u64) -> Result<Vec<u8>> {
+fn read_capped(r: impl std::io::Read, cap: u64) -> std::result::Result<Vec<u8>, CapError> {
     let mut buf = Vec::new();
     // One byte past the cap, so an over-cap body is DETECTABLE rather than
     // silently truncated to exactly the limit.
     r.take(cap + 1)
         .read_to_end(&mut buf)
-        .map_err(|_| Error::KeydbInvalid)?;
+        .map_err(|_| CapError::Io)?;
     if buf.len() as u64 > cap {
-        return Err(Error::KeydbInvalid);
+        return Err(CapError::TooLarge);
     }
     Ok(buf)
 }
@@ -420,6 +444,49 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    /// A connection that dies mid-body is a TRANSPORT failure, not a verdict
+    /// about the content.
+    ///
+    /// Both outcomes used to leave `read_capped` as the same error, and `fetch`
+    /// forwards that one specially — so a reset, a read timeout or a dropped
+    /// socket told the user "the key database is empty or invalid, re-download
+    /// it" (E8002), a claim about the server's content, when the right answer
+    /// was "could not connect" (E8000) and "try again". The two cases must not
+    /// be the same value.
+    #[test]
+    fn a_connection_that_dies_mid_body_is_not_an_invalid_keydb() {
+        struct Reset;
+        impl std::io::Read for Reset {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "peer went away mid-download",
+                ))
+            }
+        }
+
+        let too_large = read_capped(std::io::Cursor::new(vec![b'x'; 65]), 64)
+            .expect_err("a body past the cap is refused");
+        let dropped = read_capped(Reset, 64).expect_err("a dead socket is a failure");
+        assert_ne!(
+            std::mem::discriminant(&too_large),
+            std::mem::discriminant(&dropped),
+            "an over-large body and a dropped connection are different \
+             failures and must not collapse into one error"
+        );
+
+        // And each must reach the user as the right one of the two messages.
+        const URL: &str = "https://mirror.example.org/keydb.zip";
+        assert!(
+            matches!(cap_error(&too_large, URL), Error::KeydbInvalid),
+            "an over-large body IS a verdict about the content (E8002)"
+        );
+        match cap_error(&dropped, URL) {
+            Error::KeydbConnect { host } => assert_eq!(host, "mirror.example.org"),
+            other => panic!("a dropped connection must read as E8000, got {other:?}"),
+        }
     }
 
     /// The CGNAT clause must not become over-broad.

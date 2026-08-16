@@ -57,10 +57,16 @@ const DEFAULT_LOG_FILE: &str = "log.txt";
 fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>) {
     let mut level_num: Option<u8> = None;
     let mut log_file: Option<String> = None;
-    let mut it = args.iter();
+    let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--log-level" => match it.next() {
+            // Both arms below refuse a value that is itself a flag. Taking
+            // `it.next()` unconditionally meant `--log-file --raw` set the
+            // path to "--raw" AND consumed the flag, so the rip ran without
+            // `--raw` and silently wrote a decrypted image. `is_flag_token`
+            // lets a negative number through, so `--log-level -1` still
+            // reaches the range check rather than being reported as missing.
+            "--log-level" => match it.next_if(|s| !is_flag_token(s)) {
                 Some(s) => match s.parse::<u8>() {
                     Ok(0) => eprintln!("--log-level: value 0 is out of range (1–4), ignored"),
                     Ok(n) => level_num = Some(n.clamp(1, 4)),
@@ -73,7 +79,7 @@ fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>) {
                 }
             },
             "--log-file" => {
-                if let Some(p) = it.next() {
+                if let Some(p) = it.next_if(|s| !is_flag_token(s)) {
                     log_file = Some(p.clone());
                 }
             }
@@ -150,7 +156,10 @@ fn init_logging(args: &[String]) {
         .init();
 }
 
-/// Every word the dispatcher in [`run`] matches `args[1]` against. Anything NOT
+/// Every word a dispatcher matches `args[1]` against. Note "gui" is NOT matched
+/// in [`run`]: `app_entry::wants_gui` intercepts it before the CLI shell is
+/// reached at all, so looking for it in `run`'s match arms finds nothing and
+/// makes this list look stale when it is correct. Anything NOT
 /// here falls through to the source→destination URL grammar, so a string that
 /// tells the user to run `freemkv <word>` for some other `<word>` is telling
 /// them to run a command that does not exist — which is exactly how
@@ -345,20 +354,25 @@ fn fail_mark() -> &'static str {
 }
 
 /// Split positional stream URLs out of an argument list, accounting for
-/// value-taking flags (`-t`, `-k`).
+/// value-taking flags (`-t`, `--keydb`, …).
 ///
 /// A value-flag normally consumes the following token as its value, but it must
-/// NOT swallow a positional stream URL (`scheme://...`): `freemkv -k disc://
-/// mkv://out.mkv` would otherwise let `-k` eat `disc://`, leaving a single URL
-/// that silently routes to `info` instead of ripping. So if a value-flag is
-/// followed by a URL token, the URL is kept as positional and the flag's value
-/// is treated as absent (crate::pipe::run then reports the missing value).
+/// NOT swallow a positional stream URL (`scheme://...`): `freemkv --keydb
+/// disc:// mkv://out.mkv` would otherwise let `--keydb` eat `disc://`, leaving a
+/// single URL that silently routes to `info` instead of ripping. So if a
+/// value-flag is followed by a URL token, the URL is kept as positional and the
+/// flag's value is treated as absent (crate::pipe::run then reports the missing
+/// value).
+///
 /// Every flag that consumes the following token as its value. This is the ONE
 /// source of truth for flag arity, shared by `collect_urls` (below) and asserted
-/// against `parse_flags` by `value_flag_set_matches_parser` — so adding a
-/// value-flag to the parser without listing it here fails a test rather than
-/// silently mis-parsing (the `-a`/`-s` bug). Boolean flags (`--raw`,
-/// `--multipass`, `-q`) are deliberately absent.
+/// against `parse_flags` by `pipe::tests::value_flag_set_matches_parser` — so
+/// adding a value-flag to the parser without listing it here fails a test rather
+/// than silently mis-parsing (the `-a`/`-s` bug). Boolean flags (`--raw`,
+/// `--multipass`, `-q`) are deliberately absent — and so is `-k`: it is a
+/// RETIRED flag (`--keydb` is the only spelling), and while it sat here the
+/// table claimed an arity for a token the parser rejects, so `freemkv -k
+/// keydb.cfg …` had its path quietly eaten before the rejection was reached.
 pub(crate) const VALUE_FLAGS: &[&str] = &[
     "-t",
     "--title",
@@ -366,13 +380,56 @@ pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--audio",
     "-s",
     "--subtitles",
-    "-k",
     "--keydb",
     "--key-url",
     "--key-auth",
     "--log-file",
     "--log-level",
 ];
+
+/// Whether a token is another FLAG, and so can never be a flag's value.
+///
+/// The companion to the `scheme://` rule above, and the other half of the same
+/// question: a value-flag that blindly takes the next token also takes the next
+/// *flag*. `freemkv --keydb --raw disc:// mkv://out.mkv` set the keydb path to
+/// "--raw" and dropped the `--raw`, and `freemkv info --keydb --full disc://`
+/// dropped the `--full` — in both cases the user was answered with something
+/// they did not ask for, silently.
+///
+/// ONE definition, used by both parsers (`pipe::parse_flags` and
+/// `disc_info::parse_info_flags`), because two spellings of one rule is how
+/// they came to disagree in the first place.
+///
+/// A lone `-` is not a flag (it is the conventional stdin/stdout name), and a
+/// leading dash followed by a DIGIT is a negative number, so `--log-level -1`
+/// still reaches the parser that reports it as out of range rather than being
+/// re-reported as a missing value. Deliberately NOT applied to `--key-auth`:
+/// a bearer token is opaque and may legitimately begin with `-`.
+pub(crate) fn is_flag_token(s: &str) -> bool {
+    let mut rest = s.strip_prefix('-').unwrap_or("").chars();
+    match rest.next() {
+        None => false,
+        Some(c) => !c.is_ascii_digit(),
+    }
+}
+
+/// Flags this CLI no longer accepts, but which DID take a value.
+///
+/// They are not flag arity in the `VALUE_FLAGS` sense — `parse_flags` consumes
+/// nothing for them, it rejects them — but `collect_urls` still has to step
+/// over the value, or the value counts as a third positional and the whole
+/// invocation collapses into the bare usage hint. The user is then told
+/// nothing about the flag that is actually gone. Stepping over it leaves
+/// exactly two URLs, the rip route runs, and `parse_flags` delivers the
+/// precise "unknown flag '-k' — try 'freemkv help'".
+///
+/// Kept honest by `pipe::tests::retired_value_flags_are_rejected_by_the_parser`:
+/// every entry must be one the parser REJECTS, and must not also appear in
+/// `VALUE_FLAGS`. `-k` used to sit in `VALUE_FLAGS` itself, which claimed an
+/// arity for a token no parser arm names.
+/// `-k` was dropped in rc.6 (`--keydb` is the only spelling); `--device`/`-d`
+/// were dropped when the device moved into the source URL (`disc:///dev/sgN`).
+pub(crate) const RETIRED_VALUE_FLAGS: &[&str] = &["-k", "--device", "-d"];
 
 fn collect_urls(args: &[String]) -> Vec<String> {
     // A positional token (not a flag, not a flag's value) is a stream URL — even
@@ -389,15 +446,15 @@ fn collect_urls(args: &[String]) -> Vec<String> {
             skip_is_key_url = false;
             // `--key-url`'s value is itself a URL (the key service) — always
             // consumed. For other value-flags, a value that looks like a stream
-            // URL is a misplaced positional; reclassify it so `-k disc:// mkv://`
-            // still rips.
+            // URL is a misplaced positional; reclassify it so `--keydb disc://
+            // mkv://` still rips.
             if !consume_key_url && is_url(arg) {
                 urls.push(arg.clone());
             }
             continue;
         }
         if arg.starts_with('-') {
-            if VALUE_FLAGS.contains(&arg.as_str()) {
+            if VALUE_FLAGS.contains(&arg.as_str()) || RETIRED_VALUE_FLAGS.contains(&arg.as_str()) {
                 skip_next = true;
                 skip_is_key_url = arg == "--key-url";
             }
@@ -406,6 +463,70 @@ fn collect_urls(args: &[String]) -> Vec<String> {
         }
     }
     urls
+}
+
+/// Format the per-stream summary lines for `info mkv://` / `info m2ts://`.
+///
+/// `v.label`, `a.label`, `a.language`, and `s.language` are disc-derived
+/// strings (an MKV/m2ts track name or a raw MPLS/IFO language tag) and go
+/// straight to the real terminal, so each is run through
+/// `disc_info::sanitize` before printing — the same treatment `disc_info.rs`
+/// and `pipe.rs` give the identical fields, so a crafted file can't inject
+/// terminal escapes here. `a.codec` and `a.channels` are the library's own
+/// enums, not disc bytes, so they are not sanitized.
+fn stream_info_lines(streams: &[libfreemkv::Stream]) -> Vec<String> {
+    let mut lines = Vec::with_capacity(streams.len());
+    for s in streams {
+        match s {
+            libfreemkv::Stream::Video(v) => {
+                let label = if v.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", crate::disc_info::sanitize(&v.label))
+                };
+                lines.push(format!("  {} {}{}", v.codec, v.resolution, label));
+            }
+            libfreemkv::Stream::Audio(a) => {
+                let mut tags: Vec<String> = Vec::new();
+                let purpose_key = match a.purpose {
+                    libfreemkv::LabelPurpose::Commentary => Some("stream.purpose.commentary"),
+                    libfreemkv::LabelPurpose::Descriptive => Some("stream.purpose.descriptive"),
+                    libfreemkv::LabelPurpose::Score => Some("stream.purpose.score"),
+                    libfreemkv::LabelPurpose::Ime => Some("stream.purpose.ime"),
+                    libfreemkv::LabelPurpose::Normal => None,
+                };
+                if let Some(k) = purpose_key {
+                    tags.push(crate::strings::get(k));
+                }
+                if a.secondary {
+                    tags.push(crate::strings::get("stream.secondary"));
+                }
+                if !a.label.is_empty() {
+                    tags.push(crate::disc_info::sanitize(&a.label));
+                }
+                let label = if tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", tags.join(", "))
+                };
+                lines.push(format!(
+                    "  {} {} {}{}",
+                    a.codec,
+                    a.channels,
+                    crate::disc_info::sanitize(&a.language),
+                    label
+                ));
+            }
+            libfreemkv::Stream::Subtitle(s) => {
+                lines.push(format!(
+                    "  {} {}",
+                    s.codec,
+                    crate::disc_info::sanitize(&s.language)
+                ));
+            }
+        }
+    }
+    lines
 }
 
 fn info_cmd(args: &[String]) {
@@ -495,49 +616,8 @@ fn info_cmd(args: &[String]) {
                         );
                     }
                     println!("Streams: {}", meta.streams.len());
-                    for s in &meta.streams {
-                        match s {
-                            libfreemkv::Stream::Video(v) => {
-                                let label = if v.label.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" — {}", v.label)
-                                };
-                                println!("  {} {}{}", v.codec, v.resolution, label);
-                            }
-                            libfreemkv::Stream::Audio(a) => {
-                                let mut tags: Vec<String> = Vec::new();
-                                let purpose_key = match a.purpose {
-                                    libfreemkv::LabelPurpose::Commentary => {
-                                        Some("stream.purpose.commentary")
-                                    }
-                                    libfreemkv::LabelPurpose::Descriptive => {
-                                        Some("stream.purpose.descriptive")
-                                    }
-                                    libfreemkv::LabelPurpose::Score => Some("stream.purpose.score"),
-                                    libfreemkv::LabelPurpose::Ime => Some("stream.purpose.ime"),
-                                    libfreemkv::LabelPurpose::Normal => None,
-                                };
-                                if let Some(k) = purpose_key {
-                                    tags.push(crate::strings::get(k));
-                                }
-                                if a.secondary {
-                                    tags.push(crate::strings::get("stream.secondary"));
-                                }
-                                if !a.label.is_empty() {
-                                    tags.push(a.label.clone());
-                                }
-                                let label = if tags.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" — {}", tags.join(", "))
-                                };
-                                println!("  {} {} {}{}", a.codec, a.channels, a.language, label);
-                            }
-                            libfreemkv::Stream::Subtitle(s) => {
-                                println!("  {} {}", s.codec, s.language);
-                            }
-                        }
+                    for line in stream_info_lines(&meta.streams) {
+                        println!("{line}");
                     }
                 }
                 Err(e) => fatal("error.op_info", &crate::pipe::fmt_err(&e)),
@@ -621,6 +701,10 @@ fn usage() {
     println!("{}", crate::strings::get("usage.flag.quiet"));
     println!("{}", crate::strings::get("usage.flag.raw"));
     println!("{}", crate::strings::get("usage.flag.multipass"));
+    // The ONLY way to write into a non-empty `dir://` target, and the target's
+    // own rejection tells the user to pass it — so it has to be listed here
+    // too, not discoverable only from the error it clears.
+    println!("{}", crate::strings::get("usage.flag.force"));
     println!("{}", crate::strings::get("usage.flag.share"));
     println!("{}", crate::strings::get("usage.flag.mask"));
 }
@@ -741,7 +825,116 @@ fn update_keys(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{SUBCOMMANDS, collect_urls, update_keys_dest};
+    /// A value-taking logging flag must not swallow the NEXT FLAG as its value.
+    ///
+    /// `--log-file` took `it.next()` unconditionally, so
+    /// `freemkv --log-file --raw disc:// iso:///out/d.iso` set the log path to
+    /// "--raw" and consumed the flag — the rip then ran WITHOUT `--raw` and
+    /// silently wrote a decrypted image. `--log-level` has the same shape: it
+    /// consumes the token, fails to parse it as a number, prints "ignored",
+    /// and the flag is gone either way.
+    ///
+    /// A sibling fix guarded `--keydb` in `pipe::parse_flags` and its commit
+    /// message claimed both parsers were covered under one rule. They were
+    /// not: this file DEFINES `is_flag_token` and used it nowhere.
+    #[test]
+    fn a_logging_flag_does_not_swallow_the_following_flag() {
+        for flag in ["--log-file", "--log-level"] {
+            let args: Vec<String> = [flag, "--raw", "disc://", "iso:///out/d.iso"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let (level, log_file) = super::parse_logging_flags(&args);
+            assert!(
+                log_file.as_deref() != Some("--raw"),
+                "{flag} took the following FLAG as its value; the rip then runs \
+                 without --raw and silently writes a decrypted image"
+            );
+            // And the flag must still be visible to the parser that wants it.
+            assert!(
+                args.iter().any(|a| a == "--raw"),
+                "fixture invariant: --raw must still be in the argv"
+            );
+            let _ = level;
+        }
+
+        // A rejected value must stay AVAILABLE, not be eaten by the peek: the
+        // sibling logging flag after it must still parse. `next_if` leaves the
+        // token in place; a plain `next().filter(..)` would have consumed it.
+        let args: Vec<String> = ["--log-file", "--log-level", "3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (level, log_file) = super::parse_logging_flags(&args);
+        assert_eq!(log_file, None, "--log-file had no value to take");
+        assert_eq!(
+            level,
+            Some(3),
+            "--log-level was swallowed by the flag before it"
+        );
+    }
+
+    use super::{SUBCOMMANDS, collect_urls, stream_info_lines, update_keys_dest};
+
+    /// `info mkv://` / `info m2ts://` prints `v.label`, `a.label`,
+    /// `a.language`, and `s.language` straight from the file's own track
+    /// metadata. Each is disc/file-controlled (an MKV track name or a raw
+    /// MPLS/IFO language tag), so a crafted file carrying a terminal escape
+    /// sequence in any of those four fields must not have it survive to the
+    /// terminal — mirroring `disc_info::sanitize_strips_terminal_escape_sequences`.
+    #[test]
+    fn stream_info_lines_strip_terminal_escapes_from_every_disc_controlled_field() {
+        use libfreemkv::{
+            AudioChannels, AudioStream, Codec, ColorSpace, FrameRate, HdrFormat, LabelPurpose,
+            Resolution, SampleRate, SubtitleStream, VideoStream,
+        };
+
+        let hostile = "\x1b[2Jevil\x07";
+
+        let video = libfreemkv::Stream::Video(VideoStream {
+            pid: 0x1011,
+            codec: Codec::Hevc,
+            resolution: Resolution::Unknown,
+            frame_rate: FrameRate::Unknown,
+            hdr: HdrFormat::Sdr,
+            color_space: ColorSpace::Bt709,
+            display_aspect: None,
+            secondary: false,
+            label: hostile.to_string(),
+            measured_cicp: None,
+        });
+        let audio = libfreemkv::Stream::Audio(AudioStream {
+            pid: 0x1100,
+            codec: Codec::TrueHd,
+            channels: AudioChannels::Unknown,
+            language: hostile.to_string(),
+            sample_rate: SampleRate::Unknown,
+            secondary: false,
+            purpose: LabelPurpose::Normal,
+            label: hostile.to_string(),
+        });
+        let subtitle = libfreemkv::Stream::Subtitle(SubtitleStream {
+            pid: 0x1200,
+            codec: Codec::Pgs,
+            language: hostile.to_string(),
+            forced: false,
+            qualifier: libfreemkv::LabelQualifier::None,
+            codec_data: None,
+        });
+
+        let lines = stream_info_lines(&[video, audio, subtitle]);
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains('\x1b') && !joined.contains('\x07'),
+            "control/escape chars must be stripped from every stream line, got {joined:?}"
+        );
+        // Sanity: the fix didn't just drop the field — the printable text
+        // (still containing "evil") should survive, sanitized.
+        assert!(
+            joined.contains("evil"),
+            "printable label text should survive sanitization, got {joined:?}"
+        );
+    }
 
     /// Walk every string value in a locale document.
     fn each_string(v: &serde_json::Value, f: &mut impl FnMut(&str)) {
@@ -917,19 +1110,41 @@ mod tests {
             collect_urls(&v(&["disc://", "mkv://out.mkv", "-t", "1"])),
             v(&["disc://", "mkv://out.mkv"])
         );
-        // -k with a real path value.
+        // --keydb with a real path value.
         assert_eq!(
-            collect_urls(&v(&["-k", "keydb.cfg", "disc://", "mkv://out.mkv"])),
+            collect_urls(&v(&["--keydb", "keydb.cfg", "disc://", "mkv://out.mkv"])),
             v(&["disc://", "mkv://out.mkv"])
         );
     }
 
     #[test]
+    fn a_retired_flags_value_is_stepped_over_so_the_rejection_is_reached() {
+        // `-k` and `--device`/`-d` are gone, but they took a value, and the
+        // value must not become a third positional: three URLs is the bare
+        // usage hint, which says nothing about the flag that was removed. Two
+        // URLs routes to the rip, where `parse_flags` names the retired flag.
+        for retired in super::RETIRED_VALUE_FLAGS {
+            assert_eq!(
+                collect_urls(&v(&[retired, "value", "disc://", "mkv://out.mkv"])),
+                v(&["disc://", "mkv://out.mkv"]),
+                "`{retired}`'s value became a positional"
+            );
+            // …and a following stream URL is still NOT eaten (the same guard
+            // the live value-flags get).
+            assert_eq!(
+                collect_urls(&v(&[retired, "disc://", "mkv://out.mkv"])),
+                v(&["disc://", "mkv://out.mkv"]),
+                "`{retired}` swallowed a positional URL"
+            );
+        }
+    }
+
+    #[test]
     fn value_flag_does_not_swallow_positional_url() {
-        // Regression: `-k` must not eat `disc://`, leaving a single URL that
-        // silently routes to `info`. Both URLs must survive as positional.
+        // Regression: `--keydb` must not eat `disc://`, leaving a single URL
+        // that silently routes to `info`. Both URLs must survive as positional.
         assert_eq!(
-            collect_urls(&v(&["-k", "disc://", "mkv://out.mkv"])),
+            collect_urls(&v(&["--keydb", "disc://", "mkv://out.mkv"])),
             v(&["disc://", "mkv://out.mkv"])
         );
         assert_eq!(

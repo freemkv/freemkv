@@ -60,6 +60,7 @@ Flags:
   -q, --quiet         Suppress output
       --raw           Skip decryption (raw encrypted output)
       --multipass    Write/update mapfile for multipass recovery
+      --force        Extract into a non-empty dir:// target (overwrite)
       --share         Submit drive profile (info disc:// only; on a rip, -s means --subtitles)
   -m, --mask          Mask serial numbers (with --share)
 --- STDERR ---

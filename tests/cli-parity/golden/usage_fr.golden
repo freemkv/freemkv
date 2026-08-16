@@ -60,6 +60,7 @@ Options :
   -q, --quiet         Supprimer la sortie
       --raw           Ignorer le déchiffrement (sortie chiffrée brute)
       --multipass    Écrire/mettre à jour le mapfile pour la récupération multipasse
+      --force        Extract into a non-empty dir:// target (overwrite)
       --share         Soumettre le profil du lecteur (info disc:// uniquement ; lors d'un rip, -s signifie --subtitles)
   -m, --mask          Masquer les numéros de série (avec --share)
 --- STDERR ---

@@ -40,6 +40,14 @@ pub struct Row {
 #[derive(Debug, Clone)]
 pub struct Scanned {
     pub label: String,
+    /// The volume id exactly as the disc carries it — NOT display text.
+    ///
+    /// `label` above is the sanitised, "(no label)"-defaulted form the log
+    /// pane and the disc row show. The output filename is built from the raw
+    /// id instead (`title_basename` → `sanitize_label`), so the two must be
+    /// carried separately or the GUI cannot name the file the rip will write.
+    /// Empty for a container source, and for a disc with no volume id.
+    pub volume_id: String,
     pub rows: Vec<Row>,
     pub key_summary: String,
     pub title_count: usize,
@@ -51,6 +59,16 @@ pub struct Scanned {
     /// version, disc hash, VID, key state, title list) — shown in the log on
     /// open so the desktop app surfaces the same disc facts the CLI does.
     pub details: Vec<String>,
+    /// What each title NUMBER refers to on THIS scan, indexed by canonical
+    /// title index (the same shape `video_codecs` uses).
+    ///
+    /// The user ticks titles against this scan and the rip re-scans before it
+    /// muxes them, so the numbers alone do not prove the rip is about to read
+    /// the titles that were picked. Carried from here into `RipRequest` so the
+    /// engine can check the scan it takes against the scan the operator saw —
+    /// the one window `verify_title_identity` could not cover, because it
+    /// begins before the engine is called at all.
+    pub title_ids: Vec<TitleIdentity>,
 }
 
 fn fmt_dur(secs: f64) -> String {
@@ -273,6 +291,9 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
     ];
     Ok(Scanned {
         label: name,
+        // A container source has no volume id; `run_stream` names its output
+        // from the file's own stem instead.
+        volume_id: String::new(),
         title_count: 1,
         key_summary: "unencrypted".into(),
         video_codecs: vec![
@@ -281,6 +302,10 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
                 .map(|v| v.codec.to_string())
                 .unwrap_or_default(),
         ],
+        // A container is ONE title and it is the file itself; there is no
+        // number to carry across a re-scan, but the shape stays the same as
+        // the disc scan's so the request never has to special-case it.
+        title_ids: vec![TitleIdentity::of(t)],
         rows,
         details,
     })
@@ -460,6 +485,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String, verbose: bool) ->
     let details = disc_details(disc, &summary, verbose);
     Scanned {
         label,
+        volume_id: disc.volume_id.clone(),
         title_count: disc.titles.len(),
         key_summary: summary,
         video_codecs: disc
@@ -472,6 +498,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String, verbose: bool) ->
                     .unwrap_or_default()
             })
             .collect(),
+        title_ids: disc.titles.iter().map(TitleIdentity::of).collect(),
         rows,
         details,
     }
@@ -712,6 +739,82 @@ pub struct RunState {
     pub outcome: Mutex<RunOutcome>,
 }
 
+impl RunState {
+    /// The run's verdict, RECOVERING from a poisoned lock.
+    ///
+    /// `outcome.lock().map(|o| *o).unwrap_or_default()` looks harmless and is
+    /// not: `RunOutcome`'s `#[default]` is `Completed`, so a worker that
+    /// PANICKED — which is precisely when the verdict matters — poisoned the
+    /// mutex and the UI rendered "Finished" over it. That is the exact defect
+    /// this enum's own doc says it exists to prevent: the verdict is carried
+    /// rather than parsed BECAUSE both abort-for-loss paths once rendered as
+    /// success.
+    ///
+    /// A poisoned mutex still holds the last value written to it, and that
+    /// value is the truth we want. Recover and read it, matching the
+    /// poison-recovering convention used across this ecosystem.
+    /// Note the same poison-recovery is applied to every `lines` lock in this
+    /// file. A worker that panicked mid-run poisons the log buffer too, and an
+    /// `unwrap()` there turns one dead thread into a second panic on the next
+    /// line written — losing the diagnostic that would have explained the
+    /// first. The two source-inspection pins below quote the recovering form,
+    /// so a regression to `unwrap()` fails them.
+    pub fn outcome_now(&self) -> RunOutcome {
+        *self.outcome.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The run's summary line, recovering from a poisoned lock for the same
+    /// reason as [`Self::outcome_now`]: `unwrap_or_default()` here renders an
+    /// EMPTY result line, discarding what the worker had already written.
+    pub fn summary_now(&self) -> String {
+        self.summary
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+/// How long a quit waits for a cancelled rip to put its output down.
+///
+/// A cancel is observed at the worker's next frame/sector boundary, which on a
+/// healthy rip is milliseconds; the cap is what keeps a wedged drive (a read
+/// inside an uninterruptible SCSI timeout) from turning "quit" into "hang".
+/// Expiring is no worse than the behaviour this replaces — the process leaves
+/// anyway — so the only thing the bound can cost is the wait it was going to
+/// lose regardless.
+pub const QUIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Wait (up to `grace`) for a cancelled worker to finish. `true` if it did.
+///
+/// `Cmd::Cancel` only SIGNALS: it flips `RunState::cancel` and returns, and the
+/// worker notices at its next boundary, unwinds the mux and drops the sink —
+/// which is what actually closes and finalises the partial file. A quit that
+/// does not wait for that lets AppKit `exit()` the process mid-write, so the
+/// file on disk is whatever the OS write cursor happened to reach rather than
+/// the deliberate "cancelled — partial output kept" artefact the GUI reports.
+///
+/// Polls `finished` rather than joining the thread: the worker publishes state
+/// through `RunState` and nothing hands the UI a `JoinHandle`. `finished` is
+/// set by the worker's own drop guard, after the mux has returned and its sink
+/// has been dropped, so it is exactly the "output is on disk and closed" edge
+/// this needs. Safe to call from the main thread with no borrows held: the
+/// worker touches only atomics and mutexes on `RunState` and never calls back
+/// into the UI.
+pub fn await_worker_exit(run: &RunState, grace: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        if run.finished.load(Ordering::SeqCst) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        // Short enough that a normal cancel is imperceptible, long enough not
+        // to spin a core while a drive finishes a read.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 struct UiSink(Arc<RunState>);
 
 impl fe::Sink for UiSink {
@@ -938,13 +1041,59 @@ pub fn summarize_outcome(
 /// silent-success-on-cancel shape the title loop was already hardened
 /// against via `o.completed`, just never applied to this path.
 ///
+/// `completed` is NOT the whole verdict, and neither is `undelivered_streams`.
+/// It takes the OUTCOME rather than two of its fields for exactly that reason:
+/// grading on a hand-picked subset is how `errors`/`lost_bytes` — the bytes an
+/// `mkv://` → `mkv://` re-mux of a 3D rip drops, with no whole stream missing —
+/// came to be read nowhere at all, and a 3 MB hole rendered as a clean
+/// "Written to <dir>". [`crate::lossy::is_lossy`] is the single question, asked
+/// here and by the CLI. The header is appended, not substituted: the file IS
+/// written, it is simply not everything the user asked for.
+///
 /// Pure so the mapping is unit-testable without driving a real mux.
-pub fn summarize_stream(completed: bool, target: &str, dest_dir: &str) -> String {
-    if completed {
-        format!("Written to {dest_dir}")
-    } else {
-        format!("Cancelled — partial output kept: {target}")
+pub fn summarize_stream(outcome: &libfreemkv::MuxOutcome, target: &str, dest_dir: &str) -> String {
+    if !outcome.completed {
+        return format!("Cancelled — partial output kept: {target}");
     }
+    if !crate::lossy::is_lossy(outcome) {
+        return format!("Written to {dest_dir}");
+    }
+    let n = outcome.undelivered_streams.len();
+    if n > 0 {
+        format!(
+            "Written to {dest_dir} — {}",
+            crate::strings::fmt("mp4.excluded_header", &[("count", &n.to_string())])
+        )
+    } else {
+        // Bytes lost inside the tracks: no stream is missing, so the
+        // excluded-tracks wording would be wrong. Name the loss itself.
+        format!(
+            "Written to {dest_dir} —{}",
+            crate::lossy::lossy_lines(outcome, target).join(" ")
+        )
+    }
+}
+
+/// The lines a GUI run must add when a COMPLETED mux did not deliver
+/// everything — the front-end twin of the CLI's `pipe::print_lossy_outcome`,
+/// and now literally the same renderer ([`crate::lossy::lossy_lines`]).
+///
+/// It used to be a second, narrower one: this file reported
+/// `undelivered_streams` and nothing else, exactly as the CLI's copy did, so
+/// the loss NEITHER of them reported (`errors`/`lost_bytes` — a Blu-ray 3D
+/// dependent view dropped by an `mkv://` → `mkv://` re-mux) reached no user
+/// through either shell. Two half-answers to one question is the shape this
+/// crate keeps having to un-write; there is one answer now.
+///
+/// A warning on a still-successful rip, not a failure: the file is finalised,
+/// structurally valid and playable, and the per-title failure arm below DELETES
+/// the output file — escalating would destroy the bytes this is warning about.
+///
+/// Returns a `Vec` rather than pushing, so the formatting is testable without a
+/// `RipState`: reaching the real call sites needs a live drive or a real disc
+/// image.
+pub fn lossy_lines(outcome: &libfreemkv::MuxOutcome, target: &str) -> Vec<String> {
+    crate::lossy::lossy_lines(outcome, target)
 }
 
 /// Render a finished image decrypt (`iso://` -> `iso://`, the drive-free
@@ -1082,12 +1231,67 @@ impl KeyConfig {
     }
 }
 
+/// Whether a request carries a per-title stream breakdown at all.
+///
+/// This exists because ONE representation was carrying TWO meanings. The field
+/// used to be a bare `Vec<(usize, Vec<u16>, Vec<u16>)>` in which a title's
+/// absence meant *either* "this caller has no per-title data, use the union in
+/// `audio_pids`/`sub_pids`" (the CLI and the container path) *or* "the user
+/// deliberately kept nothing under this title". Those want opposite answers,
+/// and the union won both: a title the user emptied was handed its sibling's
+/// tracks. Blu-ray playlists of one feature routinely share PIDs, so the
+/// sibling's tracks are usually exactly the ones just unticked.
+///
+/// Splitting the two apart into variants makes the ambiguity unrepresentable:
+/// a caller that has no breakdown says so, and a caller that has one is
+/// believed, empty entries included.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum TitleStreams {
+    /// No per-title breakdown exists — the CLI's shape, and a container source.
+    /// Every title gets the union in `audio_pids`/`sub_pids`, which is what
+    /// every caller did before the breakdown existed.
+    #[default]
+    Unspecified,
+    /// The user's ticks, per CANONICAL title index. Authoritative: an entry
+    /// with empty PID lists means the user kept NOTHING of that class under
+    /// that title, and is honoured as such.
+    ///
+    /// The GUI emits an entry for every title that has selectable stream rows,
+    /// ticked or not (see `ui::Tree::ticked_streams_by_title`), so a title
+    /// missing from this list has no selectable streams to describe — a
+    /// video-only title — and falls back to the union, which cannot narrow
+    /// anything it does not have.
+    PerTitle(Vec<(usize, Vec<u16>, Vec<u16>)>),
+}
+
+impl TitleStreams {
+    /// This title's own ticked `(audio, subtitle)` PIDs, or `None` when the
+    /// request says nothing about it and the union must be used.
+    pub fn for_title(&self, title: Option<usize>) -> Option<(&[u16], &[u16])> {
+        let (Self::PerTitle(per), Some(t)) = (self, title) else {
+            return None;
+        };
+        per.iter()
+            .find(|(ti, _, _)| *ti == t)
+            .map(|(_, a, s)| (a.as_slice(), s.as_slice()))
+    }
+}
+
 /// Which titles the user ticked, as canonical indices.
 #[derive(Clone)]
 pub struct RipRequest {
     pub source: String,
     pub dest_dir: String,
     pub titles: Vec<usize>,
+    /// What the numbers in `titles` referred to on the scan they were picked
+    /// against, indexed by CANONICAL title index (not by selection position —
+    /// that is the shape `picked_ids` already uses, and it needs no length
+    /// invariant to be right).
+    ///
+    /// Empty means "nothing was captured", which leaves every check that reads
+    /// it inert and the behaviour exactly as it was: a caller that never saw a
+    /// scan (the headless harness in `main.rs`) has nothing to promise.
+    pub title_ids: Vec<TitleIdentity>,
     pub format: String,
     /// PIDs of the ticked audio tracks. Empty = keep every audio track.
     pub audio_pids: Vec<u16>,
@@ -1098,10 +1302,10 @@ pub struct RipRequest {
     /// `audio_pids`/`sub_pids` are the UNION across every title, and applying
     /// that union to each title in turn wrote a track the user had unticked
     /// whenever a sibling title shared its PID — which Blu-ray playlists of one
-    /// feature routinely do. Empty means "no per-title breakdown available"
-    /// (the CLI, a container source), and the union is used, which is what
-    /// every caller did before.
-    pub title_pids: Vec<(usize, Vec<u16>, Vec<u16>)>,
+    /// feature routinely do. [`TitleStreams::Unspecified`] is the caller saying
+    /// it has no breakdown, and only then is the union used; see that type for
+    /// why "no data" and "an empty selection" cannot share a representation.
+    pub title_pids: TitleStreams,
     /// True when the user actually made a per-track choice; distinguishes
     /// "keep everything" from "keep nothing".
     pub explicit_streams: bool,
@@ -1261,19 +1465,27 @@ fn run_extract_folder(
     // A non-empty target means a previous extract (or another disc). Mirror the
     // CLI's --force gate, but check the SUBDIR — a fresh one is never "not empty".
     folder_writable(&dest, req.force)?;
-    state.lines.lock().unwrap().push(format!(
-        "extracting decrypted file tree → {}",
-        dest.display()
-    ));
+    state
+        .lines
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(format!(
+            "extracting decrypted file tree → {}",
+            dest.display()
+        ));
     match fe::extract_tree(disc, reader, &dest, req.force, sink) {
         Ok(res) => {
             for f in &res.files {
                 if f.bytes_unreadable > 0 {
-                    state.lines.lock().unwrap().push(format!(
-                        "  {} — {:.1} MB unreadable",
-                        f.path.display(),
-                        f.bytes_unreadable as f64 / 1_048_576.0
-                    ));
+                    state
+                        .lines
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(format!(
+                            "  {} — {:.1} MB unreadable",
+                            f.path.display(),
+                            f.bytes_unreadable as f64 / 1_048_576.0
+                        ));
                 }
             }
             Ok(summarize_extract(&res, &dest))
@@ -1388,6 +1600,86 @@ fn out_kind(format: &str) -> OutKind {
     }
 }
 
+/// The path this request will actually write, decided the way the RIP decides
+/// it rather than guessed alongside it.
+///
+/// The GUI shows this in the Information panel for the duration of the run, so
+/// every difference from the real thing is a lie on screen for hours. It used
+/// to be an independent `format!("{dir}/{stem}_t{n}.{ext}")` in `ui.rs` that
+/// knew about neither the filename template (a shipped setting the engine
+/// applies to every title) nor the disc label (what `run_disc` names titles
+/// after — the source file's stem is only used for a CONTAINER source), and
+/// spelled every whole-disc sink as `_t1.mkv`.
+///
+/// Structured as the mirror of `run_blocking`'s dispatch (stream source →
+/// `run_stream`, everything else → `run_disc`/the image path) and `out_kind`'s
+/// arms, so a new sink cannot be added without this seeing it.
+pub fn planned_output_name(
+    source: &str,
+    dest_dir: &str,
+    format: &str,
+    first_title: Option<usize>,
+    template: &str,
+    volume_id: &str,
+) -> String {
+    // A container source is one title, named from the file's own stem; a disc
+    // or image is named from its volume label, with the same "disc" fallback
+    // `run_disc` uses for a label-less disc.
+    let (label, n) = if is_stream_source(source) {
+        let stem = std::path::Path::new(source)
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("output")
+            .to_string();
+        (stem, 1)
+    } else if volume_id.is_empty() {
+        ("disc".to_string(), first_title.unwrap_or(0) + 1)
+    } else {
+        (volume_id.to_string(), first_title.unwrap_or(0) + 1)
+    };
+    match out_kind(format) {
+        OutKind::File(scheme) => {
+            format!(
+                "{dest_dir}/{}.{scheme}",
+                title_basename(template, &label, n)
+            )
+        }
+        // Every track file is named by the demux sink itself, so the target the
+        // engine reports is the directory.
+        OutKind::Demux(_) => format!("{dest_dir}/ (per-track files)"),
+        OutKind::IsoImage => format!("{dest_dir}/{}.iso", sanitize_label(&label)),
+        OutKind::DecryptedFolder => extract_target(dest_dir, &label).display().to_string(),
+    }
+}
+
+/// The word the progress caption uses for what a format actually writes
+/// ("Saving to {container} file").
+///
+/// Derived from [`out_kind`], deliberately: the caption and the sink then
+/// cannot disagree, because they are the same decision read twice. The UI's
+/// own version tested for MP4, then M2TS, then said MKV — so nine of the
+/// twelve offered formats, ISO and JSON and .fvi among them, were captioned
+/// with a container they never produce.
+pub fn container_word(format: &str) -> &'static str {
+    match out_kind(format) {
+        OutKind::File("mp4") => "MP4",
+        OutKind::File("m2ts") => "M2TS",
+        OutKind::File("chapters") => "chapter",
+        OutKind::File("json") => "JSON",
+        OutKind::File("fvi") => "FVI",
+        OutKind::File(_) => "MKV",
+        OutKind::Demux("video") => "video track",
+        OutKind::Demux("audio") => "audio track",
+        OutKind::Demux("sub") => "subtitle track",
+        OutKind::Demux(_) => "track",
+        OutKind::IsoImage => "ISO",
+        // The decrypted file tree as the disc carries it — UDF is the
+        // filesystem being copied out, and the one word that is true of every
+        // file in it.
+        OutKind::DecryptedFolder => "UDF",
+    }
+}
+
 /// Build a per-title output basename from the filename template. `{title}` →
 /// the disc/volume label (or container name), `{n}` → the 1-based title number.
 /// An empty template falls back to the historical `<label>_t<n>`; a template
@@ -1480,16 +1772,17 @@ pub fn title_basename(template: &str, label: &str, n: usize) -> String {
 /// in play.
 ///
 /// `title` is the CANONICAL disc title index. When the request carries a
-/// per-title breakdown, that title's own ticked PIDs are used; otherwise the
-/// union in `audio_pids`/`sub_pids` is, which is the CLI's shape and the
-/// behaviour every caller had before.
+/// per-title breakdown, that title's own ticked PIDs are used — INCLUDING an
+/// empty one, which is the user clearing every row under that title. Only
+/// [`TitleStreams::Unspecified`] falls back to the union in
+/// `audio_pids`/`sub_pids`, which is the CLI's shape and the behaviour every
+/// caller had before the breakdown existed.
 fn stream_selection_for(req: &RipRequest, title: Option<usize>) -> libfreemkv::StreamSelection {
     if !req.explicit_streams {
         return libfreemkv::StreamSelection::default();
     }
-    let per_title = title.and_then(|t| req.title_pids.iter().find(|(ti, _, _)| *ti == t));
-    let (audio, subtitle) = match per_title {
-        Some((_, a, s)) => (a.clone(), s.clone()),
+    let (audio, subtitle) = match req.title_pids.for_title(title) {
+        Some((a, s)) => (a.to_vec(), s.to_vec()),
         None => (req.audio_pids.clone(), req.sub_pids.clone()),
     };
     libfreemkv::StreamSelection {
@@ -1498,18 +1791,32 @@ fn stream_selection_for(req: &RipRequest, title: Option<usize>) -> libfreemkv::S
     }
 }
 
-fn stream_selection(req: &RipRequest) -> libfreemkv::StreamSelection {
-    stream_selection_for(req, None)
-}
-
 fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
     libfreemkv::MuxOptions {
         skip_errors: false,
         batch_sectors: 64,
         raw: req.raw,
-        // Selection lives on InputOptions for the Url mux path — see stream_selection.
+        // Selection lives on InputOptions for the Url mux path — see
+        // stream_selection_for. The Session (live-drive) arm gets its own
+        // per-title options from title_session_mux_opts.
         selection: libfreemkv::StreamSelection::default(),
         send_deadline: Some(std::time::Duration::from_secs(60)),
+    }
+}
+
+/// The mux options for ONE title of a live-drive (single-pass) rip.
+///
+/// The Session mux arm reads its selection from `MuxOptions`, not from
+/// `InputOptions` the way the Url/ISO arm does, so the drive path needs its
+/// own per-title options. It used to build one `MuxOptions` from the UNION of
+/// every title's ticked PIDs before the loop and clone it for each title —
+/// exactly the defect the ISO path already had: two playlists of one feature
+/// routinely share PIDs, so unticking a commentary under title 1 wrote it
+/// anyway whenever title 2 still had it ticked.
+fn title_session_mux_opts(req: &RipRequest, idx: usize) -> libfreemkv::MuxOptions {
+    libfreemkv::MuxOptions {
+        selection: stream_selection_for(req, Some(idx)),
+        ..mux_opts(req)
     }
 }
 
@@ -1553,7 +1860,7 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
     };
 
     if req.explicit_streams {
-        state.lines.lock().unwrap().push(
+        state.lines.lock().unwrap_or_else(|e| e.into_inner()).push(
             "Note: track selection is not applied to container sources yet — every track is kept."
                 .to_string(),
         );
@@ -1574,9 +1881,14 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
             .unwrap()
             .push(format!("cancelled — partial output kept: {target}"));
     } else {
-        state.lines.lock().unwrap().push(format!("wrote {target}"));
+        let mut lines = state.lines.lock().unwrap_or_else(|e| e.into_inner());
+        lines.push(format!("wrote {target}"));
+        // A completed export can still be LOSSY — a missing track OR bytes
+        // dropped inside the tracks. Say so on the same run that reports the
+        // write, never after a silent "Finished".
+        lines.extend(lossy_lines(&o, &target));
     }
-    Ok(summarize_stream(o.completed, &target, &req.dest_dir))
+    Ok(summarize_stream(&o, &target, &req.dest_dir))
 }
 
 /// Whether a demux rip must give each title its own subdirectory.
@@ -1683,18 +1995,24 @@ fn mux_selected_titles(
                     // don't count it as a full write, and SAY it's partial. Never
                     // "nothing written" when a file is sitting in the folder.
                     partial.set(partial.get() + 1);
-                    state.lines.lock().unwrap().push(format!(
-                        "title {} cancelled — partial output kept: {}",
-                        idx + 1,
-                        target
-                    ));
+                    state
+                        .lines
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(format!(
+                            "title {} cancelled — partial output kept: {}",
+                            idx + 1,
+                            target
+                        ));
                     return Ok(());
                 }
-                state
-                    .lines
-                    .lock()
-                    .unwrap()
-                    .push(format!("title {} -> {}", idx + 1, target));
+                {
+                    let mut lines = state.lines.lock().unwrap_or_else(|e| e.into_inner());
+                    lines.push(format!("title {} -> {}", idx + 1, target));
+                    // Completed, but not everything: a lossy export is never
+                    // silent. See `lossy_lines`.
+                    lines.extend(lossy_lines(&o, &target));
+                }
                 written.set(written.get() + 1);
                 state
                     .titles_done
@@ -1702,11 +2020,11 @@ fn mux_selected_titles(
                 Ok(())
             }
             Err(e) => {
-                state.lines.lock().unwrap().push(format!(
-                    "Title {}: {}",
-                    idx + 1,
-                    explain(error_code(&e))
-                ));
+                state
+                    .lines
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(format!("Title {}: {}", idx + 1, explain(error_code(&e))));
                 // A failed per-title FILE mux leaves a 0-byte file behind that
                 // looks like output. Remove it so the folder never shows a broken
                 // result. (Demux writes into a directory — nothing to clean.)
@@ -1848,15 +2166,16 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
                 std::path::Path::new(&req.dest_dir).join(format!("{}.iso", sanitize_label(&label)));
             // Never write over the source. The scan holds it open and the
             // decrypt reads from it while writing, so this would destroy the
-            // input mid-rip and leave neither file intact. Compared by
-            // canonical path so `./Disc.iso` and an absolute path to the same
-            // file are recognised as one file.
-            let same = std::fs::canonicalize(&req.source)
-                .ok()
-                .zip(std::fs::canonicalize(&dest).ok())
-                .map(|(a, b)| a == b)
-                .unwrap_or(false);
-            if same {
+            // input mid-rip and leave neither file intact.
+            //
+            // Asked through the SHARED guard, not a comparison written out
+            // here: this arm compared canonical paths only, which cannot see a
+            // hardlink (two names for one inode are each already canonical), so
+            // the desktop app wrote over a source the CLI refuses.
+            if crate::file_identity::same_file(
+                Some(std::path::Path::new(&req.source)),
+                dest.as_path(),
+            ) {
                 return Err("The output image would overwrite the source. \
                      Choose a different output folder."
                     .into());
@@ -1891,6 +2210,21 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     }
     let disc = disc;
 
+    // The ticked numbers were resolved against `Ui::open`'s scan; this is a
+    // different one, taken now. Same seam as `run_disc`, one source kind over:
+    // a replaced or re-authored image between opening and Start would renumber
+    // the titles under a selection nobody re-checked. Asked here rather than at
+    // the top of the function so a whole-disc output (which has no selection to
+    // invalidate) is never refused over it.
+    verify_selection_identity(
+        &req.titles,
+        &req.title_ids,
+        &disc
+            .titles
+            .iter()
+            .map(TitleIdentity::of)
+            .collect::<Vec<_>>(),
+    )?;
     let sel = if req.titles.is_empty() {
         fe::Selection::MainMovie
     } else {
@@ -1983,25 +2317,21 @@ fn recovery_raw(multipass: bool, want_iso: bool, user_raw: bool) -> Result<bool,
 
 /// What a title NUMBER actually referred to, so a selection survives a rescan.
 ///
-/// The playlist name and the duration together: the name is the disc's own
-/// identifier for the title and is what `freemkv info` lists, and the duration
-/// disambiguates the duplicate playlists discs legitimately carry. Rounded to
-/// whole seconds because a rescan of a recovered image recomputes it from the
-/// same clips and must not miss by a float epsilon.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TitleId {
-    playlist: String,
-    duration_secs: u64,
-}
-
-impl TitleId {
-    pub fn of(t: &libfreemkv::DiscTitle) -> Self {
-        TitleId {
-            playlist: t.playlist.clone(),
-            duration_secs: t.duration_secs.max(0.0) as u64,
-        }
-    }
-}
+/// The type is [`crate::title_identity::TitleIdentity`] and lives there because
+/// the CLI's `pipe::resolve_scanned_title` asks the identical question one scan
+/// later. This module used to carry its OWN answer — playlist name plus
+/// duration — which cannot separate the case the project's rules name outright:
+/// "titles legitimately carry duplicate playlists with identical duration and
+/// size". Duration is precisely the field that legitimately collides. The
+/// shared identity keys on the playlist name, its numeric id, and the EXTENTS,
+/// and the sectors are what make it safe: two titles reading the same sectors
+/// from the same playlist produce byte-identical rips, so there is nothing left
+/// to confuse.
+///
+/// Re-exported under this path rather than aliased so `engine`'s call sites and
+/// its tests keep naming one type, and so nobody adds a second definition here
+/// again.
+pub use crate::title_identity::TitleIdentity;
 
 /// Translate a selection made against the DRIVE scan into indices valid for a
 /// scan of the staged image.
@@ -2012,17 +2342,25 @@ impl TitleId {
 /// name the user asked for, reporting "1 title(s) written". Positions are not
 /// identity; this is the same lesson the audit's identity lens keeps finding.
 ///
-/// Falls back to the original numbers when identities were not captured (an
-/// empty `ids`, which is what an empty selection produces), since there is
-/// nothing to remap and `Selection::MainMovie` handles that case downstream.
+/// `ids` is indexed by CANONICAL title number, not by position in `titles` —
+/// the same shape `picked_ids` uses in the live-drive loop. That is what keeps
+/// the fallback honest: "no identity for title 3" is `ids.get(3) == None`, a
+/// per-title answer, so a title nobody captured costs only itself. Keyed by
+/// selection position instead, a list that came up one entry short (an
+/// out-of-range number dropped on the way in) made this return every raw
+/// position unchanged, putting the WHOLE batch back on the stale-position path
+/// this exists to close — silently, and for titles whose identity was known.
+///
 /// A title that CANNOT be found is a hard error: muxing the remaining ones
 /// silently would deliver a subset under the same summary.
 fn remap_titles_by_identity(
     iso_path: &str,
     titles: &[usize],
-    ids: &[TitleId],
+    ids: &[TitleIdentity],
 ) -> Result<Vec<usize>, String> {
-    if titles.is_empty() || ids.len() != titles.len() {
+    // Nothing selected, or nothing captured at all: no scan needed, and
+    // `Selection::MainMovie` handles the empty case downstream.
+    if titles.is_empty() || ids.is_empty() {
         return Ok(titles.to_vec());
     }
     remap_against(titles, ids, &scan_titles(iso_path)?)
@@ -2036,14 +2374,17 @@ fn remap_titles_by_identity(
 /// mode this audit keeps finding in its own tests.
 fn remap_against(
     titles: &[usize],
-    ids: &[TitleId],
-    staged: &[TitleId],
+    ids: &[TitleIdentity],
+    staged: &[TitleIdentity],
 ) -> Result<Vec<usize>, String> {
-    if titles.is_empty() || ids.len() != titles.len() {
-        return Ok(titles.to_vec());
-    }
-    let mut out = Vec::with_capacity(ids.len());
-    for (id, &was) in ids.iter().zip(titles) {
+    let mut out = Vec::with_capacity(titles.len());
+    for &was in titles {
+        // No identity recorded for this number: nothing to disagree with, so
+        // it keeps its position — and only it does.
+        let Some(id) = ids.get(was) else {
+            out.push(was);
+            continue;
+        };
         match staged.iter().position(|s| s == id) {
             Some(now) => out.push(now),
             None => {
@@ -2051,7 +2392,7 @@ fn remap_against(
                     "Title {} ({}) is not in the recovered image — the damage \
                      destroyed its playlist, so it cannot be muxed.",
                     was + 1,
-                    id.playlist
+                    id.describe()
                 ));
             }
         }
@@ -2059,14 +2400,83 @@ fn remap_against(
     Ok(out)
 }
 
+/// Confirm the title at `idx` in a FRESH scan is still the one the selection
+/// meant, before it is muxed under that number.
+///
+/// The single-pass drive path is the same "position is not identity" shape
+/// `remap_titles_by_identity` handles for the recovery path, one scan later:
+/// `run_disc` scans once to resolve the selection, then EVERY title in the loop
+/// re-opens the drive and scans again, carrying only an integer. A second scan
+/// that lists the titles in a different order, or drops one before the selected
+/// index, still resolves that integer — to a different title, muxed under the
+/// name the user asked for.
+///
+/// It VERIFIES rather than remaps: a live drive whose title list moved between
+/// two scans of the same disc is a disc/drive problem, not the orderly
+/// short-list a recovery produces, so the honest answer is to stop.
+///
+/// `expected` is `None` when nothing was recorded for that index, which leaves
+/// the pre-existing behaviour untouched.
+fn verify_title_identity(
+    expected: Option<&TitleIdentity>,
+    scanned: &[TitleIdentity],
+    idx: usize,
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    match scanned.get(idx) {
+        Some(found) if found == expected => Ok(()),
+        Some(found) => Err(format!(
+            "Title {} changed between scans: it was {}, the drive now reports {} at that \
+             position. Nothing was written for it.",
+            idx + 1,
+            expected.describe(),
+            found.describe()
+        )),
+        None => Err(format!(
+            "Title {} ({}) is no longer on the disc — the rescan lists only {} title(s).",
+            idx + 1,
+            expected.describe(),
+            scanned.len()
+        )),
+    }
+}
+
+/// Confirm a whole SELECTION still means what it meant when it was made.
+///
+/// The window this closes is the one the per-title check cannot see: the user
+/// ticks titles against the scan on screen and then reviews streams, format and
+/// destination before pressing Start. `run_disc` takes a brand-new scan at that
+/// point, and the ticked numbers were resolved against it with nothing to say
+/// they still refer to the same titles — swap the disc (or let the drive
+/// enumerate differently) and the wrong film is muxed and reported as success
+/// under the name the first disc earned.
+///
+/// `picked` is indexed by canonical title number, so an entry that was never
+/// captured is `None` and leaves that title exactly as it behaved before; an
+/// empty `picked` (a caller that saw no scan) disables the check entirely.
+/// Every decision is [`verify_title_identity`]'s — one definition of "is this
+/// still the same title?", not a second one beside this call site.
+fn verify_selection_identity(
+    titles: &[usize],
+    picked: &[TitleIdentity],
+    scanned: &[TitleIdentity],
+) -> Result<(), String> {
+    for &t in titles {
+        verify_title_identity(picked.get(t), scanned, t)?;
+    }
+    Ok(())
+}
+
 /// The staged image's title identities, in order.
-fn scan_titles(iso_path: &str) -> Result<Vec<TitleId>, String> {
+fn scan_titles(iso_path: &str) -> Result<Vec<TitleIdentity>, String> {
     let (disc, _reader) = libfreemkv::scan_iso(
         std::path::Path::new(iso_path),
         libfreemkv::ScanOptions::default(),
     )
     .map_err(|e| format!("could not re-scan the recovered image (E{}).", e.code()))?;
-    Ok(disc.titles.iter().map(TitleId::of).collect())
+    Ok(disc.titles.iter().map(TitleIdentity::of).collect())
 }
 
 /// A recovery that read nothing has nothing to mux. Separate from the caller so
@@ -2133,6 +2543,16 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
     } else {
         disc.volume_id.clone()
     };
+    // What THIS scan's numbers refer to. Banked once, before any branch: the
+    // recovery arm remaps the selection against the staged image with it, and
+    // the per-title arm verifies each re-scan against it.
+    let scanned_ids: Vec<TitleIdentity> = disc.titles.iter().map(TitleIdentity::of).collect();
+    // ...and the first thing it is used for is the scan the SELECTION was made
+    // against, which is not this one: the tree the user ticked came from an
+    // earlier scan, and everything between then and Start (reviewing streams,
+    // choosing a format, a swapped disc) happened without a check. Every later
+    // re-scan in this function is verified; this one was trusted.
+    verify_selection_identity(&req.titles, &req.title_ids, &scanned_ids)?;
 
     // Decrypted folder: extract the UDF tree off the staged drive into a
     // per-disc subdir (same helper the ISO path uses).
@@ -2179,17 +2599,13 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             .take_reader()
             .ok_or("could not stage the drive for recovery")?;
         let disc = session.disc().ok_or("scan produced no disc")?;
-        // The user picked title NUMBERS against THIS scan. The mux below runs
-        // over the staged image, which is scanned again — and if damage
-        // destroyed a playlist, the second list is shorter and every number
-        // after the gap means a different title. Capture what the numbers
-        // currently REFER to, so the selection can be re-resolved by identity
-        // rather than by position. See `remap_titles_by_identity`.
-        let selected_ids: Vec<TitleId> = req
-            .titles
-            .iter()
-            .filter_map(|&t| disc.titles.get(t).map(TitleId::of))
-            .collect();
+        // The user picked title NUMBERS against a scan. The mux below runs over
+        // the staged image, which is scanned again — and if damage destroyed a
+        // playlist, the second list is shorter and every number after the gap
+        // means a different title. `scanned_ids` (banked above, indexed by
+        // canonical title number) is what those numbers refer to, so the
+        // selection can be re-resolved by identity rather than by position.
+        // See `remap_titles_by_identity`.
         let mut job = fe::Job::new(format!("disc://{}", req.source), iso_path.clone());
         job.raw = recovery_raw(req.multipass, want_iso, req.raw)?;
         let opts = fe::MultipassOpts {
@@ -2271,7 +2687,7 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
             return Err("Recovery produced no readable data — nothing to mux.".into());
         }
         // Re-resolve the selection against the staged image before muxing.
-        let titles = match remap_titles_by_identity(&iso_path, &req.titles, &selected_ids) {
+        let titles = match remap_titles_by_identity(&iso_path, &req.titles, &scanned_ids) {
             Ok(t) => t,
             Err(e) => {
                 return Err(format!("{e} The recovered image is kept: {iso_path}"));
@@ -2280,6 +2696,12 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         let iso_req = RipRequest {
             source: iso_path.clone(),
             titles,
+            // The numbers above have just been resolved BY IDENTITY against
+            // the staged image, so the drive scan's identities no longer line
+            // up with them — carrying them on would compare a drive title
+            // against whatever the staged image lists at its new number. The
+            // remap is the check for this hop.
+            title_ids: Vec::new(),
             ..req.clone()
         };
         let mux = run_blocking(&iso_req, sink, state);
@@ -2317,11 +2739,15 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         return Err("Nothing selected to rip.".into());
     }
     let multi = demux_needs_subdirs(indices.len());
-    let selection = stream_selection(req);
     // Byte-size hints per title, banked before the scan session is dropped
     // (releasing the drive) — each title's mux reopens its own session,
     // mirroring the CLI.
     let hints: Vec<u64> = disc.titles.iter().map(|t| t.size_bytes).collect();
+    // What each selected NUMBER refers to on THIS scan — banked before the
+    // session is dropped, above. Every title below re-opens the drive and scans
+    // again, so the index alone does not prove the mux is about to read the
+    // title the user picked. See `verify_title_identity`.
+    let picked_ids = scanned_ids;
     drop(session);
 
     // The engine owns the per-title loop (skip/abort policy); we only supply
@@ -2351,22 +2777,55 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         // Shared drive bring-up (open + lock + scan + resolve) — same core as
         // the CLI's pipe_disc. A fresh session per title matches it (the
         // staged reader is consumed by one mux).
-        let (mut session, _trace) = fe::open_scan_resolve(
+        let (mut session, _trace) = match fe::open_scan_resolve(
             disc_target(&req.source),
             session_credentials(&req.keys),
             key_factory(&req.keys),
-        )
-        .map_err(|e| std::io::Error::other(format!("{e}")))?;
+        ) {
+            Ok(v) => v,
+            // Same bypass as the identity check below: an `Err` returned
+            // straight out of this closure never reaches the arm that writes a
+            // per-title reason into the log, so "no disc in the drive" reaches
+            // the user as "Write failed (Other)."
+            Err(e) => {
+                let msg = format!("title {}: {e}", idx + 1);
+                state
+                    .lines
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(msg.clone());
+                return Err(std::io::Error::other(msg));
+            }
+        };
+        // This is a DIFFERENT scan from the one the selection was made against.
+        // Confirm the title still at this index is the one that was picked
+        // before muxing it under that number.
+        let rescanned: Vec<TitleIdentity> = session
+            .disc()
+            .map(|d| d.titles.iter().map(TitleIdentity::of).collect())
+            .unwrap_or_default();
+        // Say it, then stop it. Returning the verdict through `?` alone skips
+        // the `Err(e)` arm below — the ONLY place a per-title failure becomes a
+        // line in the log pane — and what survives is `RipOutcome::Failed`,
+        // which carries an ErrorKind and no message. The verdict has no
+        // `E<digits>` prefix for `error_code` to read, so `describe_failure`
+        // renders its catch-all, and the user is told "Write failed (Other)."
+        // about the one check built to name the two playlists involved.
+        if let Err(msg) = verify_title_identity(picked_ids.get(idx), &rescanned, idx) {
+            state
+                .lines
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(msg.clone());
+            return Err(std::io::Error::other(msg));
+        }
         session.stage_drive_as_reader();
 
-        let opts = libfreemkv::MuxOptions {
-            skip_errors: false,
-            batch_sectors: 64,
-            raw: req.raw,
-            // Session arm reads selection from MuxOptions (unlike the Url arm).
-            selection: selection.clone(),
-            send_deadline: Some(std::time::Duration::from_secs(60)),
-        };
+        // Session arm reads selection from MuxOptions (unlike the Url arm),
+        // and it is built HERE, per title — one union built before the loop
+        // wrote tracks the user had unticked under this title whenever a
+        // sibling title shared the PID.
+        let opts = title_session_mux_opts(req, idx);
 
         match fe::mux_title_session(&mut session, idx, &dest_url, &opts, hint, sink) {
             Ok(o) => {
@@ -2374,28 +2833,34 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
                     // Cancelled or truncated: a partial file is on disk — keep
                     // it, don't count it as a full write, and say it's partial.
                     partial.set(partial.get() + 1);
-                    state.lines.lock().unwrap().push(format!(
-                        "title {} cancelled — partial output kept: {}",
-                        idx + 1,
-                        target
-                    ));
+                    state
+                        .lines
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(format!(
+                            "title {} cancelled — partial output kept: {}",
+                            idx + 1,
+                            target
+                        ));
                     return Ok(());
                 }
-                state
-                    .lines
-                    .lock()
-                    .unwrap()
-                    .push(format!("title {} -> {}", idx + 1, target));
+                {
+                    let mut lines = state.lines.lock().unwrap_or_else(|e| e.into_inner());
+                    lines.push(format!("title {} -> {}", idx + 1, target));
+                    // Completed, but not everything: a lossy export is never
+                    // silent. See `lossy_lines`.
+                    lines.extend(lossy_lines(&o, &target));
+                }
                 written.set(written.get() + 1);
                 state.titles_done.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
             Err(e) => {
-                state.lines.lock().unwrap().push(format!(
-                    "Title {}: {}",
-                    idx + 1,
-                    explain(error_code(&e))
-                ));
+                state
+                    .lines
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(format!("Title {}: {}", idx + 1, explain(error_code(&e))));
                 // A failed per-title FILE mux leaves a 0-byte file behind that
                 // looks like output. Remove it so the folder never shows a
                 // broken result. (Demux writes into a directory — nothing to
@@ -2431,6 +2896,56 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
 /// every variant fell through to an `Ok` string, and `start_rip` files an `Ok`
 /// as the run summary, so a rip the engine stopped on a full disk was reported
 /// as "2 title(s) written".
+#[cfg(test)]
+mod run_state_poison_tests {
+    /// A panicking worker must not turn its verdict into "Completed".
+    ///
+    /// The UI read the verdict with `unwrap_or_default()`. `RunOutcome`'s
+    /// `#[default]` is `Completed`, so a worker that panicked — poisoning the
+    /// mutex, and precisely the case where the verdict matters — rendered the
+    /// "Finished" heading over a run whose real outcome was lost, along with
+    /// an empty summary line.
+    ///
+    /// That is the same defect `RunOutcome`'s own doc says it exists to
+    /// prevent: the verdict is carried rather than parsed BECAUSE both
+    /// abort-for-loss paths once rendered as success. The expectation here
+    /// comes from that rule, not from what the accessor happens to do.
+    #[test]
+    fn a_poisoned_lock_does_not_turn_a_failure_into_a_completion() {
+        use super::{RunOutcome, RunState};
+        use std::sync::Arc;
+
+        let st = Arc::new(RunState::default());
+        *st.outcome.lock().unwrap() = RunOutcome::Failed;
+        *st.summary.lock().unwrap() = "aborted: loss exceeded tolerance".to_string();
+
+        // Poison both locks the way a panicking worker would.
+        let st2 = Arc::clone(&st);
+        let _ = std::thread::spawn(move || {
+            let _g1 = st2.outcome.lock().unwrap();
+            let _g2 = st2.summary.lock().unwrap();
+            panic!("worker died holding the verdict");
+        })
+        .join();
+        assert!(
+            st.outcome.is_poisoned() && st.summary.is_poisoned(),
+            "fixture invalid: the locks must actually be poisoned"
+        );
+
+        assert_eq!(
+            st.outcome_now(),
+            RunOutcome::Failed,
+            "a poisoned lock rendered a FAILED run as Completed — the heading \
+             then says Finished over a rip that did not produce its deliverable"
+        );
+        assert_eq!(
+            st.summary_now(),
+            "aborted: loss exceeded tolerance",
+            "the summary the worker had already written was discarded"
+        );
+    }
+}
+
 #[cfg(test)]
 mod outcome_summary_tests {
     use super::{
@@ -2541,14 +3056,135 @@ mod outcome_summary_tests {
     #[test]
     fn a_completed_stream_conversion_reports_written() {
         assert_eq!(
-            summarize_stream(true, "/out/movie.mkv", "/out"),
+            summarize_stream(&clean_outcome(), "/out/movie.mkv", "/out"),
             "Written to /out"
+        );
+    }
+
+    // ── A COMPLETED export can still be lossy ───────────────────────────────
+    //
+    // `MuxOutcome::undelivered_streams` is the library's signal that the
+    // finalised file does not match the pre-mux plan — non-empty *with*
+    // `completed = true`. The CLI reports it; the GUI graded on `completed`
+    // alone at four sites, so an MP4 export missing an audio track read as
+    // "Finished" and nothing the user ever saw mentioned the missing track.
+    //
+    // The outcomes below are `libfreemkv::MuxOutcome` values, not booleans, so
+    // the test states the real shape: completed AND lossy at the same time.
+
+    /// The exact outcome the mp4 sink produces when it has to drop a track.
+    fn lossy_outcome() -> libfreemkv::MuxOutcome {
+        libfreemkv::MuxOutcome {
+            completed: true,
+            output_opened: true,
+            bytes_written: 4 << 30,
+            errors: 0,
+            lost_bytes: 0,
+            streams: 3,
+            undelivered_streams: vec![1],
+        }
+    }
+
+    /// The same run with nothing lost — the control that keeps the reporting
+    /// from being unconditional.
+    fn clean_outcome() -> libfreemkv::MuxOutcome {
+        libfreemkv::MuxOutcome {
+            undelivered_streams: Vec::new(),
+            ..lossy_outcome()
+        }
+    }
+
+    #[test]
+    fn a_completed_export_that_dropped_a_track_is_not_reported_as_a_clean_write() {
+        let o = lossy_outcome();
+        assert!(o.completed, "the whole point: this outcome COMPLETED");
+        let msg = summarize_stream(&o, "/out/movie.mp4", "/out");
+        assert_ne!(
+            msg, "Written to /out",
+            "a lossy export must not render identically to a complete one"
+        );
+        assert!(
+            msg.contains("/out"),
+            "the destination is still worth naming: {msg}"
+        );
+    }
+
+    #[test]
+    fn the_dropped_tracks_are_named_one_per_line_and_one_based() {
+        let o = lossy_outcome();
+        let lines = super::lossy_lines(&o, "/out/movie.mp4");
+        assert_eq!(
+            lines.len(),
+            2,
+            "one header plus one line per dropped track: {lines:?}"
+        );
+        assert!(
+            lines[1].ends_with(" 2"),
+            "stream index 1 is track 2 — 1-based, as the CLI and `info` list \
+             them: {:?}",
+            lines[1]
+        );
+    }
+
+    /// A mux that dropped PAYLOAD BYTES is lossy too, and `completed` is true
+    /// for it.
+    ///
+    /// `MuxOutcome::lost_bytes`/`errors` count bytes the library read and could
+    /// not carry — an `mkv://` → `mkv://` re-mux of a 3D rip drops the whole
+    /// dependent-view (right-eye) payload into them, with an EMPTY
+    /// `undelivered_streams` because no whole stream was lost. Grading on
+    /// `undelivered_streams` alone renders that as a clean "Written to <dir>".
+    fn byte_lossy_outcome() -> libfreemkv::MuxOutcome {
+        libfreemkv::MuxOutcome {
+            undelivered_streams: Vec::new(),
+            errors: 2,
+            lost_bytes: 3 << 20,
+            ..lossy_outcome()
+        }
+    }
+
+    #[test]
+    fn a_completed_export_that_dropped_payload_bytes_is_not_a_clean_write() {
+        let o = byte_lossy_outcome();
+        assert!(o.completed, "the whole point: this outcome COMPLETED");
+        assert!(
+            o.undelivered_streams.is_empty(),
+            "and lost no whole stream — the loss is inside the tracks"
+        );
+        let msg = summarize_stream(&o, "/out/movie.mkv", "/out");
+        assert_ne!(
+            msg, "Written to /out",
+            "3 MB of dropped payload must not render as a clean write"
+        );
+        let lines = super::lossy_lines(&o, "/out/movie.mkv");
+        assert!(
+            !lines.is_empty(),
+            "the run that reports the write must report the loss"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains('3')),
+            "the size of the loss is the fact the user needs: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_clean_export_says_nothing_about_undelivered_tracks() {
+        let o = clean_outcome();
+        assert!(super::lossy_lines(&o, "/out/movie.mkv").is_empty());
+        assert_eq!(
+            summarize_stream(&o, "/out/movie.mkv", "/out"),
+            "Written to /out",
+            "an unconditional warning would be worse than none"
         );
     }
 
     #[test]
     fn a_stream_conversion_halted_by_cancel_says_so_not_written() {
-        let msg = summarize_stream(false, "/out/movie.mkv", "/out");
+        let cancelled = libfreemkv::MuxOutcome {
+            completed: false,
+            ..clean_outcome()
+        };
+        let msg = summarize_stream(&cancelled, "/out/movie.mkv", "/out");
         assert!(
             msg.starts_with("Cancelled"),
             "a Cancel mid-conversion must not read as a clean write: {msg}"
@@ -2888,17 +3524,17 @@ mod key_summary_tests {
 /// of them could be replaced wholesale — `-> true`, `-> ""`,
 /// `-> Default::default()` — with the whole suite still green. The consequences
 /// are not cosmetic: `is_disc_source` forced false sends a live-drive rip down
-/// the ISO path, `stream_selection` defaulted discards every track the user
+/// the ISO path, `stream_selection_for` defaulted discards every track the user
 /// ticked, and a missing `title_index` muxes the wrong title under the right
 /// filename.
 #[cfg(test)]
 mod routing_tests {
     use super::{
-        DiscPlan, KeyConfig, OutKind, RipRequest, TitleId, damage_note, demux_needs_subdirs,
+        DiscPlan, KeyConfig, OutKind, RipRequest, TitleIdentity, damage_note, demux_needs_subdirs,
         disc_device, fe, image_or_dir_scheme, is_disc_source, is_stream_source, mux_opts, out_kind,
         recovery_plan, recovery_produced_no_data, recovery_raw, remap_against,
-        should_delete_staging_iso, source_scheme, stream_selection, stream_selection_for,
-        title_input_options, won_from_trace,
+        should_delete_staging_iso, source_scheme, stream_selection_for, title_input_options,
+        title_session_mux_opts, verify_selection_identity, verify_title_identity, won_from_trace,
     };
 
     // ── The recovery job's `raw` flag ──────────────────────────────────────
@@ -3000,6 +3636,290 @@ mod routing_tests {
             img.contains("sanitize_label(&label)"),
             "the image-decrypt destination must sanitise the disc label"
         );
+
+        // 4. The live-drive per-title mux options. `title_session_mux_opts`
+        //    is unit-tested, but nothing else can see WHICH title index the
+        //    loop hands it: passing a constant, or hoisting one MuxOptions
+        //    out of the loop again, is the original defect and leaves every
+        //    other test green.
+        // 5. The live-drive re-scan's identity check. `verify_title_identity`
+        //    is unit-tested, but the ONLY thing that makes it matter is that
+        //    the per-title loop calls it between its fresh scan and the mux.
+        //    Deleting the call leaves every other test green while every rip
+        //    goes back to trusting a position across two scans.
+        let rescan = slice(
+            "        // This is a DIFFERENT scan from the one the selection was made against.",
+            "        session.stage_drive_as_reader();",
+        );
+        assert!(
+            rescan.contains("verify_title_identity(picked_ids.get(idx), &rescanned, idx)"),
+            "the live-drive loop must confirm the title still at this index is \
+             the one that was picked, against the identities banked from the \
+             FIRST scan; without it an integer is carried across two scans"
+        );
+        assert!(
+            rescan.contains("return Err(std::io::Error::other(msg));"),
+            "the identity check's verdict must stop the title — an ignored \
+             Err leaves the wrong-title mux running"
+        );
+        // 5b. And it must SAY why. The verdict names both playlists; the
+        //     engine's `RipOutcome::Failed` carries only an ErrorKind, and the
+        //     message has no `E<digits>` prefix for `error_code`/`explain` to
+        //     pick up, so `describe_failure` renders the catch-all "Write
+        //     failed (Other)." Returning through `?` alone skips the `Err(e)`
+        //     arm below — the only thing that puts a per-title reason in the
+        //     log pane — and the whole two-playlist diagnosis is discarded.
+        assert!(
+            // Matched on the push alone, not the whole lock expression: the
+            // latter is one rustfmt decision away from being wrapped across
+            // lines, at which point a `contains` on the single-line form fails
+            // for a reason that has nothing to do with the behaviour being
+            // pinned. (It just did, when the lock gained poison recovery.)
+            rescan.contains(".push(msg.clone());"),
+            "the identity mismatch must reach the log pane: propagating it \
+             through `?` alone reduces the wrong-title diagnosis to \
+             \"Write failed (Other).\""
+        );
+        // 5c. The drive bring-up two statements above returns through the same
+        //     `?` and loses its reason the same way — "no disc in the drive"
+        //     also arrives as "Write failed (Other)." Same closure, same
+        //     bypass, so it gets the same treatment.
+        let bringup = slice(
+            "        let (mut session, _trace) = match fe::open_scan_resolve(",
+            "        // This is a DIFFERENT scan",
+        );
+        assert!(
+            bringup.contains(".push(msg.clone());"),
+            "a failed per-title drive bring-up must say why in the log pane"
+        );
+
+        let session_mux = slice(
+            "        // Session arm reads selection from MuxOptions",
+            "        match fe::mux_title_session(",
+        );
+        assert!(
+            session_mux.contains("title_session_mux_opts(req, idx)"),
+            "the live-drive loop must build its MuxOptions for THIS title; a \
+             selection built once before the loop is the union, and writes \
+             tracks the user unticked under this title"
+        );
+    }
+
+    // ── "Stop & Quit" must stop before it quits ───────────────────────────
+    //
+    // `Cmd::Cancel` signals and returns; the worker observes the flag at its
+    // next boundary and drops the sink, which is what closes the partial file.
+    // The AppKit shell used to answer `TerminateNow` immediately, so the
+    // process could be torn down mid-write.
+
+    #[test]
+    fn a_quit_waits_for_a_worker_that_is_still_winding_down() {
+        let run = std::sync::Arc::new(super::RunState::default());
+        let worker = run.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            worker
+                .finished
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let start = std::time::Instant::now();
+        assert!(
+            super::await_worker_exit(&run, std::time::Duration::from_secs(5)),
+            "the worker finished well inside the grace period and the wait \
+             must report that it did"
+        );
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(100),
+            "it returned before the worker was done — nothing was waited for"
+        );
+    }
+
+    #[test]
+    fn a_wedged_worker_does_not_turn_quit_into_a_hang() {
+        let run = super::RunState::default();
+        let start = std::time::Instant::now();
+        assert!(
+            !super::await_worker_exit(&run, std::time::Duration::from_millis(80)),
+            "a worker that never finishes must be reported as not finished"
+        );
+        let waited = start.elapsed();
+        assert!(waited >= std::time::Duration::from_millis(80), "{waited:?}");
+        assert!(
+            waited < std::time::Duration::from_secs(2),
+            "the wait must end at its deadline, not linger: {waited:?}"
+        );
+    }
+
+    /// A worker that had already finished is not waited for at all.
+    #[test]
+    fn a_finished_worker_is_not_waited_for() {
+        let run = super::RunState::default();
+        run.finished
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        assert!(super::await_worker_exit(&run, super::QUIT_GRACE));
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(50),
+            "quitting after a finished rip must be instant"
+        );
+    }
+
+    /// The selection the user made is checked against the scan the RIP takes.
+    ///
+    /// `run_disc` opens a brand-new session and reads `disc.titles` again, then
+    /// feeds the ticked NUMBERS straight into `resolve_selection`. Every LATER
+    /// re-scan in this file is identity-checked; this first one — the one with
+    /// the longest window, an operator reviewing the tree before pressing
+    /// Start — was not. A source pin because reaching it needs a live drive.
+    #[test]
+    fn the_drive_rip_checks_the_selection_against_the_scan_it_was_made_on() {
+        let src = include_str!("engine.rs").replace("\r\n", "\n");
+        let start = src
+            .find("\nfn run_disc(")
+            .expect("run_disc definition present");
+        let end = start
+            + src[start..]
+                .find("\n    // Decrypted folder:")
+                .expect("the folder branch still ends the scan section");
+        let body = &src[start..end];
+        let flat: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("verify_selection_identity(&req.titles, &req.title_ids,"),
+            "the fresh scan must be checked against the identities the ticked \
+             numbers referred to, BEFORE any branch resolves them"
+        );
+    }
+
+    /// The IMAGE path re-scans too, and the same selection has to survive it.
+    ///
+    /// `run_blocking` is `run_disc`'s sibling for `iso://`/folder sources: the
+    /// tree the user ticked came from `Ui::open`'s scan, and this function
+    /// scans the source again at Run time. A file can be replaced, re-authored
+    /// or re-mounted in between, and the ticked integers would be resolved
+    /// against the new list with nothing comparing the two.
+    #[test]
+    fn the_image_rip_checks_the_selection_against_the_scan_it_was_made_on() {
+        let src = include_str!("engine.rs").replace("\r\n", "\n");
+        let start = src
+            .find("\nfn run_blocking(")
+            .expect("run_blocking definition present");
+        let end = start
+            + src[start..]
+                .find("\n    let indices = fe::resolve_selection(&disc, &sel);")
+                .expect("the selection is still resolved in run_blocking");
+        let body = &src[start..end];
+        // Whitespace-stripped, not whitespace-collapsed: rustfmt splits this
+        // call across lines, and a pin that fails for a line break rather than
+        // a behaviour change is a pin that gets deleted.
+        let dense: String = body.split_whitespace().collect();
+        assert!(
+            dense.contains("verify_selection_identity(&req.titles,&req.title_ids,"),
+            "the image path resolves ticked numbers against a scan nobody \
+             compared to the one they were ticked on"
+        );
+    }
+
+    /// The GUI's image decrypt must ask the SAME "is the destination the
+    /// source?" question the CLI asks, through the ONE definition of it.
+    ///
+    /// This arm answered it with canonical-path equality alone, which cannot
+    /// see a HARDLINK: two names for one inode are each already canonical, so
+    /// the paths differ while the bytes are shared, the guard stays silent, and
+    /// `recover_to_iso` truncates the user's only copy while the scan is still
+    /// reading it. The CLI's `pipe::same_file` was hardened against exactly
+    /// that; a second, narrower definition beside this call site is the bug.
+    ///
+    /// A source pin because the arm needs a real image and a real destination
+    /// to reach — the same reason the seams above are pinned this way.
+    #[test]
+    fn the_gui_image_decrypt_asks_the_shared_same_file_question() {
+        let src = include_str!("engine.rs").replace("\r\n", "\n");
+        let start = src
+            .find("\n        OutKind::IsoImage => {")
+            .expect("the ISO-image arm is still there");
+        let end = start
+            + src[start..]
+                .find("\n            let result = fe::recover_to_iso(")
+                .expect("the decrypt call still closes the arm's setup");
+        let body = &src[start..end];
+        assert!(
+            body.contains("same_file("),
+            "the image-decrypt arm must decide through the shared same_file \
+             guard, which catches a hardlinked destination too"
+        );
+        assert!(
+            !body.contains("canonicalize("),
+            "a canonical-path comparison beside the call site is the second \
+             definition of file identity that let the GUI diverge from the CLI"
+        );
+    }
+
+    /// Every GUI site that grades a finished mux must grade the LOSS too.
+    ///
+    /// `MuxOutcome::completed` is not the whole answer: the library's contract
+    /// on `undelivered_streams` is explicit that a non-empty list means the
+    /// file does not match the pre-mux plan **even with `completed = true`**,
+    /// and that a caller reporting a successful export must report these too.
+    /// The CLI does (`pipe::print_undelivered_streams`). These four sites did
+    /// not, so a GUI MP4 export missing an audio track read as "Finished".
+    ///
+    /// A source pin because all four sit inside closures that need a live
+    /// drive or a real disc image: `lossy_lines` is unit-tested on its own, but
+    /// nothing else can see whether these arms ever call it — and each one that
+    /// stopped calling it would leave every other test green.
+    #[test]
+    fn every_gui_mux_site_reports_the_streams_it_could_not_deliver() {
+        let src = include_str!("engine.rs").replace("\r\n", "\n");
+        let slice = |from: &str, to: &str| -> String {
+            let a = src
+                .find(from)
+                .unwrap_or_else(|| panic!("anchor missing: {from}"));
+            let b = src[a..]
+                .find(to)
+                .unwrap_or_else(|| panic!("closing anchor missing: {to}"));
+            src[a..a + b].to_string()
+        };
+
+        // 1 + 2. The single-file/container conversion (`run_stream`): both the
+        //        line it pushes and the summary it returns.
+        let stream = slice(
+            "    .map_err(|e| format!(\"convert failed: {e}\"))?;",
+            "/// Whether a demux rip must give each title its own subdirectory.",
+        );
+        assert!(
+            stream.contains("lossy_lines(&o, &target)"),
+            "the stream conversion must report everything the mux lost — the \
+             tracks the sink dropped AND the payload bytes it could not carry"
+        );
+        // Whitespace-collapsed: the call spans several lines once rustfmt has
+        // had it, and the pin is about the ARGUMENTS, not the line breaks.
+        let flat: String = stream.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("summarize_stream(&o, &target, &req.dest_dir)"),
+            "the stream conversion's SUMMARY must grade the whole outcome, not \
+             `completed` alone (true for a lossy export) and not a hand-picked \
+             pair of its fields (which is how the byte loss went unread)"
+        );
+
+        // 3. The ISO/image per-title loop.
+        let iso_loop = slice(
+            "        match fe::mux_title(source_url, &dest_url, input, &mux, hint, sink) {",
+            "            Err(e) => {",
+        );
+        assert!(
+            iso_loop.contains("lossy_lines(&o, &target)"),
+            "the ISO per-title loop must report everything the mux lost"
+        );
+
+        // 4. The live-drive per-title loop.
+        let disc_loop = slice(
+            "        match fe::mux_title_session(&mut session, idx, &dest_url, &opts, hint, sink) {",
+            "            Err(e) => {",
+        );
+        assert!(
+            disc_loop.contains("lossy_lines(&o, &target)"),
+            "the live-drive per-title loop must report everything the mux lost"
+        );
     }
 
     // ── A stream selection is PER TITLE ───────────────────────────────────
@@ -3015,7 +3935,7 @@ mod routing_tests {
             explicit_streams: true,
             audio_pids: vec![0x1100, 0x1101],
             sub_pids: vec![0x1200],
-            title_pids: pids,
+            title_pids: crate::engine::TitleStreams::PerTitle(pids),
             ..req()
         }
     }
@@ -3045,29 +3965,207 @@ mod routing_tests {
         );
     }
 
-    /// A request with no per-title breakdown (the CLI, a container source)
-    /// falls back to the union — unchanged behaviour for every caller that
-    /// cannot supply one.
+    /// The same defect on the LIVE-DRIVE path, which the ISO fix did not
+    /// reach: that path muxes from a `DiscSession`, and the Session arm takes
+    /// its selection from `MuxOptions` rather than `InputOptions`, so it built
+    /// one `MuxOptions` from the union before the loop and reused it for every
+    /// title.
+    ///
+    /// The expectation below is the user's TICKS written out by hand — 0x1101
+    /// is ticked under title 0 and unticked under title 1 — not anything
+    /// `stream_selection*` returns. (`per_title_input_options_…` compared
+    /// `input.selection` against the union (`stream_selection` as it then was),
+    /// i.e. the union against the
+    /// union, and so passed for as long as the defect shipped.)
+    #[test]
+    fn a_live_drive_rip_applies_each_title_s_own_ticks() {
+        let r = req_with_title_pids(vec![
+            // The user ticked both audio tracks and the subtitle under title 0…
+            (0, vec![0x1100, 0x1101], vec![0x1200]),
+            // …and unticked the commentary (0x1101) under title 1.
+            (1, vec![0x1100], vec![0x1200]),
+        ]);
+        let audio_of = |idx: usize| match title_session_mux_opts(&r, idx).selection.audio {
+            libfreemkv::PidFilter::Only(v) => v,
+            _ => panic!("an explicit selection must be a PidFilter::Only"),
+        };
+        assert_eq!(
+            audio_of(0),
+            vec![0x1100, 0x1101],
+            "title 0 keeps the commentary the user left ticked"
+        );
+        assert_eq!(
+            audio_of(1),
+            vec![0x1100],
+            "title 1 must NOT get 0x1101: the user unticked it there, and the \
+             union kept it only because title 0 still has it"
+        );
+        // And the rest of the drive-path options are untouched by this.
+        let base = mux_opts(&r);
+        let o = title_session_mux_opts(&r, 1);
+        assert_eq!(o.raw, base.raw);
+        assert_eq!(o.batch_sectors, base.batch_sectors);
+        assert_eq!(o.skip_errors, base.skip_errors);
+        assert_eq!(o.send_deadline, base.send_deadline);
+    }
+
+    /// A request that says it has no per-title breakdown — the CLI, the
+    /// container path, the `FMKV_APIDS` harness — falls back to the union for
+    /// EVERY title, which is exactly what those callers did before the
+    /// breakdown existed. This is the regression the per-title fix could
+    /// plausibly cause, so it is asserted directly against
+    /// `TitleStreams::Unspecified` rather than against an empty list.
     #[test]
     fn without_a_per_title_breakdown_the_union_still_applies() {
-        let r = req_with_title_pids(Vec::new());
+        let r = RipRequest {
+            title_pids: crate::engine::TitleStreams::Unspecified,
+            ..req_with_title_pids(Vec::new())
+        };
         for t in [None, Some(0), Some(7)] {
-            match &stream_selection_for(&r, t).audio {
-                libfreemkv::PidFilter::Only(v) => assert_eq!(v, &[0x1100, 0x1101]),
+            let s = stream_selection_for(&r, t);
+            match (&s.audio, &s.subtitle) {
+                (libfreemkv::PidFilter::Only(a), libfreemkv::PidFilter::Only(b)) => {
+                    assert_eq!(a, &[0x1100, 0x1101], "the union must reach title {t:?}");
+                    assert_eq!(b, &[0x1200], "the union must reach title {t:?}");
+                }
                 _ => panic!("explicit selection expected"),
             }
         }
     }
 
-    /// A title absent from the breakdown — the user unticked every stream
-    /// under it — falls back to the union rather than silently keeping
-    /// nothing. Selecting no streams at all is a separate, explicit path.
+    /// MEANING CHANGED by the absence/empty split. This used to read "a title
+    /// absent from the breakdown is one the user emptied, so fall back to the
+    /// union" — which was the defect itself. Under `TitleStreams::PerTitle` an
+    /// emptied title carries an EMPTY ENTRY, so the only titles still absent
+    /// are ones with no selectable stream rows at all (a video-only title) or
+    /// ones that do not exist. Those genuinely say nothing, and the union — a
+    /// filter over PIDs such a title does not have — is the harmless answer.
     #[test]
-    fn a_title_missing_from_the_breakdown_falls_back_to_the_union() {
+    fn a_title_the_breakdown_never_mentions_falls_back_to_the_union() {
         let r = req_with_title_pids(vec![(0, vec![0x1100], vec![])]);
         match &stream_selection_for(&r, Some(9)).audio {
             libfreemkv::PidFilter::Only(v) => assert_eq!(v, &[0x1100, 0x1101]),
             _ => panic!("explicit selection expected"),
+        }
+        // But a title the breakdown DOES mention with an empty list is not
+        // "absent": it is the user keeping nothing.
+        let emptied = req_with_title_pids(vec![(0, vec![0x1100], vec![]), (1, vec![], vec![])]);
+        match &stream_selection_for(&emptied, Some(1)).audio {
+            libfreemkv::PidFilter::Only(v) => assert!(
+                v.is_empty(),
+                "an empty entry is a decision, not a missing one"
+            ),
+            _ => panic!("explicit selection expected"),
+        }
+    }
+
+    /// Two titles of one feature that SHARE their PIDs — the ordinary Blu-ray
+    /// shape (a feature and its extended cut). Title 0 keeps everything; the
+    /// user unticks EVERY stream row under title 1.
+    ///
+    /// Every expectation below is the user's ticks written out as a literal.
+    /// Nothing here asks `ticked_streams_by_title` or `stream_selection_for`
+    /// what it thinks the answer is.
+    fn shared_pid_disc() -> crate::engine::Scanned {
+        use crate::engine::{Row, Scanned};
+        let mk = |ty: &str, ti: usize, pid: Option<u16>| Row {
+            type_s: ty.into(),
+            desc: format!("{ty} of title {ti}"),
+            depth: if ty == "Title" { 1 } else { 2 },
+            checkable: ty != "Video",
+            title: ti,
+            info: String::new(),
+            pid,
+            duration_secs: if ty == "Title" { 5400.0 } else { 0.0 },
+            lang: String::new(),
+            forced: false,
+        };
+        let mut rows = vec![Row {
+            depth: 0,
+            checkable: false,
+            title: usize::MAX,
+            ..mk("Bluray disc", usize::MAX, None)
+        }];
+        for ti in 0..2 {
+            rows.push(mk("Title", ti, None));
+            rows.push(mk("Video", ti, None));
+            // The SAME pids under both titles — that sharing is what makes the
+            // union indistinguishable from title 0's own selection.
+            rows.push(mk("Audio", ti, Some(0x1100)));
+            rows.push(mk("Audio", ti, Some(0x1101)));
+            rows.push(mk("Subtitles", ti, Some(0x1200)));
+        }
+        Scanned {
+            label: "SHARED".into(),
+            volume_id: "SHARED".into(),
+            rows,
+            key_summary: String::new(),
+            title_count: 2,
+            video_codecs: vec!["H.264".into(); 2],
+            title_ids: Vec::new(),
+            details: vec![],
+        }
+    }
+
+    /// The hole commit 8f9a31c left: `ticked_streams_by_title` skipped an
+    /// unticked row BEFORE creating its title's slot, so a title the user
+    /// emptied never appeared in the breakdown at all — and
+    /// `stream_selection_for` then fell back to the UNION, writing the sibling
+    /// title's tracks into the very title the user had cleared.
+    #[test]
+    fn a_title_the_user_emptied_rips_no_streams_at_all() {
+        let sc = shared_pid_disc();
+        let t =
+            crate::ui::Tree::from_scan(&sc, "All titles", 0.0, &crate::ui::LangPrefs::default());
+        // The user clears every stream row under title 1 and touches nothing
+        // under title 0.
+        let rows: Vec<usize> = t
+            .arena
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.title_idx == 1 && n.pid.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(rows.len(), 3, "fixture must give title 1 three stream rows");
+        for i in rows {
+            t.set_checked(i, false);
+        }
+
+        let (audio_pids, sub_pids, explicit) = t.ticked_streams();
+        assert!(explicit, "clearing rows must read as an explicit narrowing");
+        let r = RipRequest {
+            explicit_streams: explicit,
+            audio_pids,
+            sub_pids,
+            title_pids: t.ticked_streams_by_title(),
+            ..req()
+        };
+        let sel = |ti: usize| {
+            let s = stream_selection_for(&r, Some(ti));
+            match (s.audio, s.subtitle) {
+                (libfreemkv::PidFilter::Only(a), libfreemkv::PidFilter::Only(b)) => (a, b),
+                _ => panic!("an explicit selection must be a PidFilter::Only"),
+            }
+        };
+        assert_eq!(
+            sel(0),
+            (vec![0x1100u16, 0x1101], vec![0x1200u16]),
+            "title 0 was left alone and must keep exactly what is ticked there"
+        );
+        assert_eq!(
+            sel(1),
+            (Vec::<u16>::new(), Vec::<u16>::new()),
+            "the user cleared every row under title 1: it must rip NO audio \
+             and NO subtitles. Falling back to the union writes title 0's \
+             shared tracks into title 1 anyway."
+        );
+        // The live-drive path must agree — it reads its selection from
+        // MuxOptions, not InputOptions.
+        match title_session_mux_opts(&r, 1).selection.audio {
+            libfreemkv::PidFilter::Only(v) => {
+                assert!(v.is_empty(), "the drive path kept tracks title 1 cleared")
+            }
+            _ => panic!("an explicit selection must be a PidFilter::Only"),
         }
     }
 
@@ -3076,7 +4174,7 @@ mod routing_tests {
     fn an_untouched_selection_keeps_every_stream_for_every_title() {
         let r = RipRequest {
             explicit_streams: false,
-            title_pids: vec![(0, vec![0x1100], vec![])],
+            title_pids: crate::engine::TitleStreams::PerTitle(vec![(0, vec![0x1100], vec![])]),
             ..req()
         };
         assert!(stream_selection_for(&r, Some(0)).is_all());
@@ -3093,21 +4191,47 @@ mod routing_tests {
     // referred to; these tests drive it directly, since reaching it needs a
     // live drive and a two-hour recovery.
 
-    fn id(playlist: &str, secs: u64) -> TitleId {
-        TitleId {
+    /// One scanned title, addressed by its playlist name and the SECTORS it is
+    /// read from. `duration_secs` and `size_bytes` are deliberately IDENTICAL
+    /// across every fixture here: titles legitimately carry duplicate playlists
+    /// with identical duration and size, so neither may be part of the
+    /// identity, and a fixture that varied them would let a name+duration
+    /// identity pass these tests.
+    fn id(playlist: &str, start_lba: u32) -> TitleIdentity {
+        TitleIdentity::of(&libfreemkv::DiscTitle {
             playlist: playlist.to_string(),
-            duration_secs: secs,
-        }
+            playlist_id: playlist
+                .trim_end_matches(".mpls")
+                .parse::<u16>()
+                .unwrap_or(0),
+            duration_secs: 7530.0,
+            size_bytes: 20 << 30,
+            clips: Vec::new(),
+            streams: Vec::new(),
+            chapters: Vec::new(),
+            extents: vec![libfreemkv::Extent {
+                start_lba,
+                sector_count: 1000,
+            }],
+            content_format: libfreemkv::ContentFormat::BdTs,
+            codec_privates: Vec::new(),
+        })
     }
 
     /// The whole point: a title that MOVED is followed to its new index.
     #[test]
     fn a_selection_follows_its_titles_when_the_rescan_renumbers_them() {
         // Drive scan: [feature, extra, trailer]; the user picked 0 and 2.
+        // `ids` is the whole scan, indexed by title number — the extra is in
+        // it even though nobody picked it, because that is what an index means.
         let picked = vec![0usize, 2];
-        let ids = vec![id("00800.mpls", 7530), id("00003.mpls", 120)];
+        let ids = vec![
+            id("00800.mpls", 1000),
+            id("00001.mpls", 5000),
+            id("00003.mpls", 13000),
+        ];
         // The recovered image lost 00001.mpls, so everything after it shifts.
-        let staged = vec![id("00800.mpls", 7530), id("00003.mpls", 120)];
+        let staged = vec![id("00800.mpls", 1000), id("00003.mpls", 13000)];
         assert_eq!(
             remap_against(&picked, &ids, &staged),
             Ok(vec![0, 1]),
@@ -3115,15 +4239,172 @@ mod routing_tests {
         );
     }
 
-    /// Duplicate playlist names are legitimate on real discs, so identity is
-    /// the name AND the duration — matching on the name alone would pick the
-    /// first of a duplicate pair.
+    /// Duplicate playlist names are legitimate on real discs, and so are
+    /// duplicate DURATIONS — the project's rules say so outright. What tells
+    /// the pair apart is the sectors each is read from; matching on the name
+    /// alone would pick the first of the pair.
     #[test]
-    fn duplicate_playlist_names_are_told_apart_by_duration() {
+    fn duplicate_playlist_names_are_told_apart_by_their_sectors() {
         let picked = vec![1usize];
-        let ids = vec![id("00800.mpls", 600)];
-        let staged = vec![id("00800.mpls", 7530), id("00800.mpls", 600)];
+        let ids = vec![id("00800.mpls", 1000), id("00800.mpls", 9000)];
+        let staged = vec![id("00800.mpls", 1000), id("00800.mpls", 9000)];
         assert_eq!(remap_against(&picked, &ids, &staged), Ok(vec![1]));
+    }
+
+    // ── The case the project's own rule names ─────────────────────────────
+    //
+    // "Titles legitimately carry duplicate playlists with identical duration
+    // and size; the index and name are what tell them apart." An identity of
+    // name + duration therefore cannot separate the pair the rule describes —
+    // duration is precisely the field that legitimately collides. The SECTORS
+    // can: two titles that read the same sectors from the same playlist are
+    // byte-identical, so there is nothing left to confuse.
+    //
+    // Both fixtures below are DiscTitle literals differing in exactly one
+    // field, `extents[0].start_lba`. Everything a name+duration identity looks
+    // at is deliberately identical.
+
+    /// One of a legitimately duplicated pair: same playlist name, same
+    /// playlist id, same duration, same size — read from different sectors.
+    fn dup_title(start_lba: u32) -> libfreemkv::DiscTitle {
+        libfreemkv::DiscTitle {
+            playlist: "00800.mpls".to_string(),
+            playlist_id: 800,
+            duration_secs: 7530.0,
+            size_bytes: 20 << 30,
+            clips: Vec::new(),
+            streams: Vec::new(),
+            chapters: Vec::new(),
+            extents: vec![libfreemkv::Extent {
+                start_lba,
+                sector_count: 1000,
+            }],
+            content_format: libfreemkv::ContentFormat::BdTs,
+            codec_privates: Vec::new(),
+        }
+    }
+
+    /// The GUI's remap path must follow the title the user actually picked,
+    /// not the first playlist of the same name and length.
+    #[test]
+    fn a_duplicate_playlist_of_the_same_length_is_still_told_apart_by_its_sectors() {
+        let first = TitleIdentity::of(&dup_title(1000));
+        let second = TitleIdentity::of(&dup_title(9000));
+        assert_ne!(
+            first, second,
+            "same name and duration, different sectors — not the same title"
+        );
+
+        // The user picked the SECOND of the pair (index 1). The staged scan
+        // still lists both, in the same order, so the answer is the literal 1.
+        assert_eq!(
+            remap_against(
+                &[1],
+                &[first.clone(), second.clone()],
+                &[first, second.clone()]
+            ),
+            Ok(vec![1]),
+            "the second of a duplicate pair must remap to index 1, not to the \
+             first playlist that happens to share its name and length"
+        );
+    }
+
+    /// The GUI's live-drive verify must refuse the same pair swapped, instead
+    /// of muxing the other half of it under the number the user asked for.
+    #[test]
+    fn a_duplicate_playlist_swapped_by_the_rescan_is_refused_not_muxed() {
+        let first = TitleIdentity::of(&dup_title(1000));
+        let second = TitleIdentity::of(&dup_title(9000));
+        // The selection was made against a scan whose index 0 was `second`;
+        // the rescan lists the pair the other way round.
+        let rescan = vec![first, second.clone()];
+        assert!(
+            verify_title_identity(Some(&second), &rescan, 0).is_err(),
+            "index 0 now names the other half of the duplicate pair; muxing it \
+             under the picked number is the wrong-title write this guard exists \
+             to stop"
+        );
+    }
+
+    // ── The SINGLE-PASS drive path has the same seam, one scan later ──────
+    //
+    // `run_disc` resolves the selection against its own scan, then EVERY title
+    // in the loop re-opens the drive and scans again — carrying only an
+    // integer. `verify_title_identity` is what stops that integer from naming a
+    // different title the second time round. Driving the real loop needs a live
+    // drive, so these exercise the decision directly, exactly as the
+    // `remap_against` tests above do.
+
+    /// THE DEFECT: the rescan lists the same titles in a different order, so
+    /// the index still resolves — to the wrong film.
+    #[test]
+    fn a_reordered_rescan_stops_the_mux_instead_of_writing_the_wrong_title() {
+        let picked = [id("00800.mpls", 7530), id("00001.mpls", 300)];
+        let rescan = vec![id("00001.mpls", 300), id("00800.mpls", 7530)];
+        let e = verify_title_identity(picked.first(), &rescan, 0)
+            .expect_err("index 0 now names 00001.mpls, not the picked feature");
+        assert!(
+            e.contains("00800.mpls") && e.contains("00001.mpls"),
+            "the message must name both titles: {e}"
+        );
+    }
+
+    /// A rescan that drops a title BEFORE the selected index leaves the index
+    /// in range and pointing somewhere else.
+    #[test]
+    fn a_rescan_that_drops_an_earlier_title_is_refused_not_shifted() {
+        let picked = [
+            id("00800.mpls", 7530),
+            id("00001.mpls", 300),
+            id("00003.mpls", 120),
+        ];
+        let rescan = vec![id("00800.mpls", 7530), id("00003.mpls", 120)];
+        assert!(verify_title_identity(picked.get(1), &rescan, 1).is_err());
+    }
+
+    /// THE NORMAL PATH: a stable disc rescans identically and every title is
+    /// muxed exactly as before — including when an unrelated LATER title is
+    /// missing from the second scan, which says nothing about this one.
+    #[test]
+    fn a_stable_rescan_passes_every_selected_title() {
+        let picked = [id("00800.mpls", 7530), id("00001.mpls", 300)];
+        let rescan = vec![
+            id("00800.mpls", 7530),
+            id("00001.mpls", 300),
+            id("00003.mpls", 120),
+        ];
+        for idx in 0..picked.len() {
+            assert_eq!(verify_title_identity(picked.get(idx), &rescan, idx), Ok(()));
+        }
+        let shorter = vec![id("00800.mpls", 7530), id("00001.mpls", 300)];
+        assert_eq!(verify_title_identity(picked.get(1), &shorter, 1), Ok(()));
+    }
+
+    /// Nothing recorded for that index → nothing to disagree with, and the
+    /// pre-existing behaviour is left exactly as it was.
+    #[test]
+    fn with_no_recorded_identity_the_index_is_used_as_before() {
+        let rescan = vec![id("00800.mpls", 7530)];
+        assert_eq!(verify_title_identity(None, &rescan, 0), Ok(()));
+    }
+
+    /// The rescan is shorter than the index: caught here rather than deeper in
+    /// the mux, and named.
+    #[test]
+    fn a_title_missing_from_the_rescan_is_named() {
+        let picked = [id("00800.mpls", 7530), id("00001.mpls", 300)];
+        let e = verify_title_identity(picked.get(1), &picked[..1], 1).expect_err("must refuse");
+        assert!(e.contains("00001.mpls"), "{e}");
+    }
+
+    /// The playlist name is on-disc metadata and this message is shown to the
+    /// user, so it goes through the same display sanitiser everything else does.
+    #[test]
+    fn a_crafted_playlist_name_cannot_reach_the_ui_raw() {
+        let picked = [id("\u{1b}c00800.mpls", 7530)];
+        let rescan = vec![id("00001.mpls", 300)];
+        let e = verify_title_identity(picked.first(), &rescan, 0).expect_err("must refuse");
+        assert!(!e.contains('\u{1b}'), "ESC survived into the UI: {e:?}");
     }
 
     /// A title that is GONE is a hard error. Muxing the survivors quietly
@@ -3145,6 +4426,84 @@ mod routing_tests {
     #[test]
     fn an_empty_selection_is_left_alone() {
         assert_eq!(remap_against(&[], &[], &[]), Ok(vec![]));
+    }
+
+    /// A title with NO captured identity must cost only itself.
+    ///
+    /// The identities are indexed by canonical title number, exactly like
+    /// `picked_ids` in the live-drive loop, so "nothing recorded for title 3"
+    /// is `ids.get(3) == None` — a per-title answer. Keyed by SELECTION
+    /// position instead, a list that was one entry short made the function
+    /// return every raw position unchanged, so ONE unknown title silently put
+    /// the whole batch back on the stale-position path this exists to close.
+    #[test]
+    fn an_uncaptured_title_does_not_disarm_the_rest_of_the_selection() {
+        // The user picked all three titles; identities are known for the first
+        // two only.
+        let picked = vec![0usize, 1, 2];
+        let ids = vec![id("00800.mpls", 1000), id("00001.mpls", 300)];
+        // The recovered image lists the pair the other way round.
+        let staged = vec![
+            id("00001.mpls", 300),
+            id("00800.mpls", 1000),
+            id("00003.mpls", 13000),
+        ];
+        assert_eq!(
+            remap_against(&picked, &ids, &staged),
+            Ok(vec![1, 0, 2]),
+            "the two titles WITH an identity must be followed to their new \
+             positions; only the one with no identity falls back to its number"
+        );
+    }
+
+    // ── The selection is made against a scan the rip never sees ────────────
+    //
+    // The GUI scans, draws the tree, and the user ticks a title — then reviews
+    // streams and format before pressing Start. `run_disc` opens a BRAND NEW
+    // scan at that point and resolves the ticked NUMBERS against it. That is
+    // the same "position is not identity" seam the per-title loop already
+    // guards, over the longest window in the product: swap the disc while the
+    // operator reviews, and title 3 of the new disc is muxed and reported as
+    // success under the name the old one earned.
+
+    /// The disc changed under the selection: refused, and named.
+    #[test]
+    fn a_selection_made_against_an_earlier_scan_is_refused_when_the_disc_changed() {
+        let when_ticked = vec![id("00800.mpls", 1000), id("00003.mpls", 13000)];
+        // A different disc: title 0 is something else entirely.
+        let fresh = vec![id("00001.mpls", 300), id("00003.mpls", 13000)];
+        let e = verify_selection_identity(&[0], &when_ticked, &fresh)
+            .expect_err("title 1 is not the title the user ticked");
+        assert!(
+            e.contains("00800.mpls") && e.contains("00001.mpls"),
+            "the message must name both titles: {e}"
+        );
+    }
+
+    /// The ordinary case must still rip: the same disc rescans identically, and
+    /// a selection with nothing recorded behaves exactly as it did before.
+    #[test]
+    fn a_selection_that_still_matches_the_fresh_scan_is_allowed() {
+        let when_ticked = vec![id("00800.mpls", 1000), id("00003.mpls", 13000)];
+        let fresh = when_ticked.clone();
+        assert_eq!(
+            verify_selection_identity(&[0, 1], &when_ticked, &fresh),
+            Ok(())
+        );
+        assert_eq!(
+            verify_selection_identity(&[0, 1], &[], &fresh),
+            Ok(()),
+            "no identities captured is the pre-existing behaviour, untouched"
+        );
+    }
+
+    /// A number that is out of range for the fresh scan is caught HERE, not
+    /// silently dropped on the way to the mux.
+    #[test]
+    fn a_selected_number_the_fresh_scan_no_longer_has_is_refused() {
+        let when_ticked = vec![id("00800.mpls", 1000), id("00003.mpls", 13000)];
+        let fresh = vec![id("00800.mpls", 1000)];
+        assert!(verify_selection_identity(&[1], &when_ticked, &fresh).is_err());
     }
 
     /// A single-pass recovery is an ordinary decrypting copy, so the user's
@@ -3175,10 +4534,11 @@ mod routing_tests {
             source: "/media/movie.iso".into(),
             dest_dir: "/out".into(),
             titles: vec![],
+            title_ids: Vec::new(),
             format: "MKV".into(),
             audio_pids: vec![],
             sub_pids: vec![],
-            title_pids: vec![],
+            title_pids: crate::engine::TitleStreams::Unspecified,
             explicit_streams: false,
             raw: false,
             force: false,
@@ -3449,7 +4809,7 @@ mod routing_tests {
         r.explicit_streams = true;
         r.audio_pids = vec![4352];
         r.sub_pids = vec![];
-        let sel = stream_selection(&r);
+        let sel = stream_selection_for(&r, None);
         assert_eq!(sel.audio, libfreemkv::PidFilter::Only(vec![4352]));
         // Ticking nothing under subtitles means keep NONE, not keep all.
         assert_eq!(sel.subtitle, libfreemkv::PidFilter::Only(vec![]));
@@ -3457,7 +4817,7 @@ mod routing_tests {
 
         // No explicit choice: keep everything.
         r.explicit_streams = false;
-        assert!(stream_selection(&r).is_all());
+        assert!(stream_selection_for(&r, None).is_all());
     }
 
     /// `mux_opts` carries the raw passthrough, the read batch and the send
@@ -3495,7 +4855,10 @@ mod routing_tests {
         // unticked while title 0 keeps it. With one filter for the whole rip
         // the union wins and 4354 is written for BOTH — so this fixture is
         // what makes the per-title assertion below able to fail.
-        r.title_pids = vec![(0, vec![4353, 4354], vec![]), (3, vec![4353], vec![])];
+        r.title_pids = crate::engine::TitleStreams::PerTitle(vec![
+            (0, vec![4353, 4354], vec![]),
+            (3, vec![4353], vec![]),
+        ]);
 
         for idx in [0usize, 3] {
             let input = title_input_options(&disc, &r, idx);
@@ -3509,11 +4872,30 @@ mod routing_tests {
                 input.unit_keys, keys,
                 "the resolved AACS keys must be passed"
             );
-            // PER TITLE, not the union. Asserting against `stream_selection(&r)`
+            // PER TITLE, not the union. Asserting against the union
             // encoded the defect: one filter applied to every title, so a PID
             // unticked under one title was still written for it whenever a
             // sibling title kept it ticked.
-            assert_eq!(input.selection, stream_selection_for(&r, Some(idx)));
+            //
+            // Written out, not re-derived. `title_input_options` fills this
+            // field with `stream_selection_for(req, Some(idx))`, so comparing
+            // against a fresh call to the same function moves both sides
+            // together under any change to what that function decides — the
+            // very shape (union vs union) that let the original defect ship.
+            let want: Vec<u16> = if idx == 0 {
+                vec![4353, 4354]
+            } else {
+                vec![4353]
+            };
+            match &input.selection.audio {
+                libfreemkv::PidFilter::Only(got) => assert_eq!(
+                    *got,
+                    want,
+                    "title {} must be muxed with exactly its OWN ticked audio",
+                    idx + 1
+                ),
+                other => panic!("an explicit selection must be a PidFilter::Only, got {other:?}"),
+            }
         }
 
         // An unencrypted disc contributes no keys — and no placeholder either.

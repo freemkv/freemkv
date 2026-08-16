@@ -56,6 +56,7 @@ fn video_only_disc() -> Scanned {
     t.duration_secs = 5400.0;
     Scanned {
         label: "VIDEO_ONLY".into(),
+        volume_id: "VIDEO_ONLY".into(),
         rows: vec![
             row("Bluray disc", "VIDEO_ONLY", 0, false, usize::MAX),
             t,
@@ -63,6 +64,9 @@ fn video_only_disc() -> Scanned {
         ],
         key_summary: "keys: none needed".into(),
         title_count: 1,
+        // No identities: these fixtures build a tree, not a rip, and an empty
+        // list is exactly what a caller with no scan behind it promises.
+        title_ids: vec![],
         video_codecs: vec!["H.264".into()],
         details: vec![],
     }
@@ -76,9 +80,11 @@ fn disc(titles: &[(f64, usize)]) -> Scanned {
     }
     Scanned {
         label: "TEST_DISC".into(),
+        volume_id: "TEST_DISC".into(),
         rows,
         key_summary: "keys: none needed".into(),
         title_count: titles.len(),
+        title_ids: vec![],
         video_codecs: vec!["H.264".into(); titles.len()],
         details: vec![],
     }
@@ -663,6 +669,51 @@ fn the_filter_never_empties_the_list() {
 }
 
 #[test]
+fn the_main_film_default_ticks_a_title_the_filter_actually_kept() {
+    // "Main film only" used to mean the literal disc title 0, whatever the
+    // minimum-length filter had done with it. On a disc whose title 0 is a
+    // 30-second stinger — the shipped default minimum is not 0 — that title is
+    // hidden, so the tree opened with NOTHING ticked and Rip refused with
+    // "select a title first" on a perfectly ordinary disc.
+    let sc = disc(&[(30.0, 1), (5400.0, 1)]);
+    let t = tree(&sc, "Main film only", 300.0);
+    assert_eq!(t.title_count(), 1, "the filter should have hidden title 0");
+    assert_eq!(
+        t.ticked_titles(),
+        vec![1],
+        "the default selection ticked a title the filter had removed, so the \
+         disc opened with nothing selected"
+    );
+}
+
+#[test]
+fn every_default_selection_ticks_only_titles_that_are_on_screen() {
+    // The same rule for the other two modes, and the other direction: a title
+    // the tree SHOWS is a title these modes may tick. A title of unknown
+    // length is shown (see the test below), so "All titles" must include it —
+    // it was excluded by a `>= min_secs` test that an unknown 0.0 can never
+    // pass, which made "All titles" quietly mean "all but that one".
+    let mut sc = disc(&[(5400.0, 1), (30.0, 1)]);
+    sc.rows.extend(title_block(2, 0.0, 1));
+    sc.title_count = 3;
+    sc.video_codecs.push("H.264".into());
+
+    let all = tree(&sc, "All titles", 300.0);
+    assert_eq!(all.title_count(), 2, "the 30 s title should be hidden");
+    assert_eq!(
+        all.ticked_titles(),
+        vec![0, 2],
+        "\"All titles\" did not tick every title it shows"
+    );
+
+    let main = tree(&sc, "Main film only", 300.0);
+    assert_eq!(main.ticked_titles(), vec![0]);
+
+    let longest = tree(&sc, "Longest title", 300.0);
+    assert_eq!(longest.ticked_titles(), vec![0]);
+}
+
+#[test]
 fn a_title_with_no_known_duration_is_never_hidden() {
     // Duration 0.0 means "unknown", not "zero seconds". Hiding on missing
     // information would make a scan that failed to time its titles look empty.
@@ -677,17 +728,23 @@ fn a_title_with_no_known_duration_is_never_hidden() {
 // ══ what the output file is called ═════════════════════════════════════════
 
 #[test]
-fn the_output_file_is_named_after_the_source_and_the_first_ticked_title() {
+fn the_output_file_is_named_after_the_disc_and_the_first_ticked_title() {
     // The Information panel shows this path while the rip runs, so it has to
-    // be the file that actually lands on disk.
+    // be the file that actually lands on disk. The engine names a disc/image
+    // rip from the DISC LABEL (`run_disc` → `title_basename`), not from the
+    // source file's stem — this panel showed the stem, so ripping
+    // /media/Greenland.iso whose volume id is GREENLAND_UHD announced
+    // "Greenland_t1.mkv" and produced "GREENLAND_UHD_t1.mkv".
     assert_eq!(
         output_file_name(
             "/media/Greenland.iso",
             "/out",
             "Selected titles → MKV",
-            Some(0)
+            Some(0),
+            "",
+            "GREENLAND_UHD",
         ),
-        "/out/Greenland_t1.mkv"
+        "/out/GREENLAND_UHD_t1.mkv"
     );
     // The title number is 1-based, matching `freemkv -t N` and the tree labels.
     assert_eq!(
@@ -695,9 +752,83 @@ fn the_output_file_is_named_after_the_source_and_the_first_ticked_title() {
             "/media/Greenland.iso",
             "/out",
             "Selected titles → MKV",
-            Some(4)
+            Some(4),
+            "",
+            "GREENLAND_UHD",
         ),
-        "/out/Greenland_t5.mkv"
+        "/out/GREENLAND_UHD_t5.mkv"
+    );
+}
+
+#[test]
+fn the_shown_output_file_honours_the_filename_template() {
+    // "Output filename template" is a shipped setting (`{title}_t{n}` by
+    // default) that the engine applies to every title it writes. The panel
+    // ignored it completely and always showed `<stem>_t<n>`, so anyone who had
+    // set a template was told a filename that could not appear.
+    assert_eq!(
+        output_file_name(
+            "/media/Greenland.iso",
+            "/out",
+            "Selected titles → MKV",
+            Some(0),
+            "{title} ({n})",
+            "GREENLAND",
+        ),
+        "/out/GREENLAND (1).mkv"
+    );
+    // A template with no {n} still gets the title number appended, exactly as
+    // `title_basename` does for the rip itself — otherwise a multi-title run
+    // would be announced as writing one file over and over.
+    assert_eq!(
+        output_file_name(
+            "/media/Greenland.iso",
+            "/out",
+            "Selected titles → MKV",
+            Some(1),
+            "Feature",
+            "GREENLAND",
+        ),
+        "/out/Feature_t2.mkv"
+    );
+}
+
+#[test]
+fn the_shown_output_file_follows_the_whole_disc_sinks_too() {
+    // These three formats do not write "<something>_t1.mkv" at all, and the
+    // panel said they did.
+    assert_eq!(
+        output_file_name(
+            "/media/Greenland.iso",
+            "/out",
+            "Whole disc → ISO image",
+            Some(0),
+            "",
+            "GREENLAND",
+        ),
+        "/out/GREENLAND.iso"
+    );
+    assert_eq!(
+        output_file_name(
+            "/media/Greenland.iso",
+            "/out",
+            "Whole disc → decrypted folder",
+            Some(0),
+            "",
+            "GREENLAND",
+        ),
+        "/out/GREENLAND"
+    );
+    assert_eq!(
+        output_file_name(
+            "/media/Greenland.iso",
+            "/out",
+            "Selected titles → separate track files",
+            Some(0),
+            "",
+            "GREENLAND",
+        ),
+        "/out/ (per-track files)"
     );
 }
 
@@ -711,8 +842,8 @@ fn the_output_extension_follows_the_chosen_container() {
         ("Selected titles → M2TS", "m2ts"),
     ] {
         assert_eq!(
-            output_file_name("/media/Disc.iso", "/out", format, Some(0)),
-            format!("/out/Disc_t1.{ext}"),
+            output_file_name("/media/Disc.iso", "/out", format, Some(0), "", "DISC"),
+            format!("/out/DISC_t1.{ext}"),
             "{format} produced the wrong extension"
         );
         // And it must agree with the caption on the progress bar, which is
@@ -725,12 +856,69 @@ fn the_output_extension_follows_the_chosen_container() {
     }
 }
 
+/// The container word each offered format really writes, spelled out here as
+/// literals rather than derived from the function under test.
+const CONTAINER_WORDS: &[(&str, &str)] = &[
+    ("Selected titles → MKV", "MKV"),
+    ("Selected titles → MP4", "MP4"),
+    ("Selected titles → M2TS", "M2TS"),
+    ("Selected titles → separate track files", "track"),
+    ("Selected titles → video tracks only", "video track"),
+    ("Selected titles → audio tracks only", "audio track"),
+    ("Selected titles → subtitle tracks only", "subtitle track"),
+    ("Whole disc → ISO image", "ISO"),
+    ("Whole disc → decrypted folder", "UDF"),
+    ("Chapters → file", "chapter"),
+    ("Title info → JSON", "JSON"),
+    ("Video index → .fvi", "FVI"),
+];
+
+#[test]
+fn the_progress_caption_names_what_each_format_actually_writes() {
+    // `container_label` answered MP4 / M2TS / "MKV for everything else", so
+    // ripping a disc to an ISO, a chapter file, a JSON dump or an .fvi index
+    // all said "Saving to MKV file" — nine of the twelve offered formats were
+    // captioned with a container they never produce.
+    for (format, word) in CONTAINER_WORDS {
+        assert_eq!(
+            &container_label(format),
+            word,
+            "{format} is captioned with the wrong container"
+        );
+    }
+}
+
+#[test]
+fn every_offered_format_has_a_container_word_of_its_own() {
+    // The table above must cover the picker exactly — a format missing from it
+    // is a format falling into some catch-all again.
+    let offered: Vec<&str> = output_formats(true, true).into_iter().flatten().collect();
+    for f in &offered {
+        assert!(
+            CONTAINER_WORDS.iter().any(|(k, _)| k == f),
+            "{f} is offered by the picker but has no container word pinned"
+        );
+    }
+    assert_eq!(
+        offered.len(),
+        CONTAINER_WORDS.len(),
+        "the picker and the container-word table have drifted apart"
+    );
+}
+
 #[test]
 fn a_run_with_no_ticked_title_still_names_the_file_the_engine_will_write() {
     // A container source has no title rows, so nothing is "ticked"; the engine
     // rips the single title and numbers it 1.
     assert_eq!(
-        output_file_name("/media/clip.mkv", "/out", "Selected titles → MKV", None),
+        output_file_name(
+            "/media/clip.mkv",
+            "/out",
+            "Selected titles → MKV",
+            None,
+            "",
+            ""
+        ),
         "/out/clip_t1.mkv"
     );
 }
@@ -739,8 +927,11 @@ fn a_run_with_no_ticked_title_still_names_the_file_the_engine_will_write() {
 fn a_source_with_no_stem_still_produces_a_usable_name() {
     // Never a path ending in "_t1.mkv" with nothing in front of it, and never
     // a panic on an odd source string.
-    let n = output_file_name("/", "/out", "Selected titles → MKV", Some(0));
-    assert_eq!(n, "/out/output_t1.mkv");
+    let n = output_file_name("/", "/out", "Selected titles → MKV", Some(0), "", "");
+    // A source with no stem and a disc with no volume id: the engine's own
+    // fallback for a label-less disc is "disc" (`run_disc`), so that is what
+    // the panel shows.
+    assert_eq!(n, "/out/disc_t1.mkv");
 }
 
 // ══ the Information panel ══════════════════════════════════════════════════
@@ -1256,10 +1447,11 @@ fn a_failed_run_always_finishes_and_is_reported_as_failed() {
                 .display()
                 .to_string(),
             titles: vec![],
+            title_ids: vec![],
             format: "Selected titles → MKV".into(),
             audio_pids: vec![],
             sub_pids: vec![],
-            title_pids: vec![],
+            title_pids: freemkv::engine::TitleStreams::Unspecified,
             explicit_streams: false,
             raw: false,
             force: false,
@@ -1426,9 +1618,11 @@ fn tagged_disc(streams: &[(&str, &str, bool)]) -> Scanned {
     }
     Scanned {
         label: "TEST_DISC".into(),
+        volume_id: "TEST_DISC".into(),
         rows,
         key_summary: "keys: none needed".into(),
         title_count: 1,
+        title_ids: vec![],
         video_codecs: vec!["H.264".into()],
         details: vec![],
     }
@@ -1654,6 +1848,155 @@ fn a_video_only_titles_checkbox_can_actually_be_cleared() {
     );
 }
 
+/// A title whose stream rows the user cleared ENTIRELY still gets an entry —
+/// an empty one. Dropping it left `stream_selection_for` unable to tell "the
+/// user kept nothing here" from "this caller has no per-title data", and it
+/// guessed the latter and applied the union.
+#[test]
+fn a_title_whose_rows_are_all_cleared_still_gets_an_empty_entry() {
+    use freemkv::engine::TitleStreams;
+
+    let t = tree(&two_title_disc(), "All titles", 0.0);
+    // Title 0 has audio pids spid(0)/spid(1); title 1 has spid(16). Clear
+    // every stream row under title 1 and leave title 0 alone.
+    for i in 0..t.arena.len() {
+        if t.arena[i].title_idx == 1 && t.arena[i].pid.is_some() {
+            t.set_checked(i, false);
+        }
+    }
+    assert_eq!(
+        t.ticked_streams_by_title(),
+        TitleStreams::PerTitle(vec![
+            (0, vec![spid(0), spid(1)], vec![]),
+            (1, vec![], vec![]),
+        ]),
+        "title 1 must appear with an EMPTY selection, not vanish"
+    );
+}
+
+/// And a caller with no tree at all is a different answer, spelled differently.
+#[test]
+fn no_breakdown_and_an_empty_breakdown_are_different_values() {
+    use freemkv::engine::TitleStreams;
+    assert_ne!(
+        TitleStreams::Unspecified,
+        TitleStreams::PerTitle(vec![(0, vec![], vec![])]),
+        "\"no per-title data\" and \"this title keeps nothing\" must not be \
+         the same value — conflating them is what wrote a sibling title's \
+         tracks into a title the user had emptied"
+    );
+    assert_eq!(TitleStreams::default(), TitleStreams::Unspecified);
+}
+
+// ── A title's box and the rip must be the same answer ───────────────────────
+//
+// `check_state` DRAWS a title by folding its checkable children. `ticked_titles`
+// RIPS by reading the title node's own `checked` flag, and `set_checked` on a
+// child never touches its parent. So the two can disagree in both directions:
+// a title drawn empty is ripped anyway, and a title drawn full is skipped.
+
+/// Every reachable combination of ticks on a title with two audio tracks, and
+/// what the user is entitled to read off the box for each. The table is written
+/// from the TICKS — it is not derived from `check_state` or `ticked_titles`.
+///
+/// Title's own box, then its two tracks, then the glyph drawn and whether it
+/// is ripped.
+struct TickCase {
+    own: bool,
+    tracks: [bool; 2],
+    glyph: Check,
+    ripped: bool,
+}
+
+const fn case(own: bool, tracks: [bool; 2], glyph: Check, ripped: bool) -> TickCase {
+    TickCase {
+        own,
+        tracks,
+        glyph,
+        ripped,
+    }
+}
+
+const TITLE_TICKS: &[TickCase] = &[
+    // Title not selected: nothing under it can put it back in the rip, and the
+    // box must say so.
+    case(false, [false, false], Check::Off, false),
+    case(false, [true, false], Check::Off, false),
+    case(false, [true, true], Check::Off, false),
+    // Title selected with no tracks left: a video-only extract. It IS being
+    // ripped, and not all of it — the one thing it must not draw is empty.
+    case(true, [false, false], Check::Mixed, true),
+    case(true, [true, false], Check::Mixed, true),
+    case(true, [true, true], Check::On, true),
+];
+
+/// The box and the rip are one answer, in every direction.
+///
+/// `check_state` folded ONLY the children while `ticked_titles` read only the
+/// title's own flag, and `set_checked` on a child never writes its parent — so
+/// the drawing and the behaviour were two independent computations. Unticking
+/// a title's tracks one at a time drew the box empty and ripped it anyway;
+/// ticking an unselected title's tracks drew the box full and ripped nothing.
+#[test]
+fn what_a_titles_box_draws_is_what_gets_ripped() {
+    for &TickCase {
+        own,
+        tracks,
+        glyph,
+        ripped,
+    } in TITLE_TICKS
+    {
+        let t = tree(&two_title_disc(), "All titles", 0.0);
+        let title = nth(&t, "Title", 0);
+        let audio: Vec<usize> = t.arena[title]
+            .children
+            .iter()
+            .copied()
+            .filter(|&c| t.arena[c].checkable())
+            .collect();
+        assert_eq!(audio.len(), 2, "the main feature has two audio tracks");
+
+        // Set each box the way the user would: the title's own box first, then
+        // each track, so a cascade cannot be mistaken for the child's own tick.
+        t.set_checked(title, own);
+        for (c, on) in audio.iter().zip(tracks) {
+            t.set_checked(*c, on);
+        }
+
+        assert_eq!(
+            t.check_state(title),
+            glyph,
+            "own={own} tracks={tracks:?}: wrong glyph"
+        );
+        assert_eq!(
+            t.ticked_titles().contains(&0),
+            ripped,
+            "own={own} tracks={tracks:?}: the box drew {glyph:?} and the rip \
+             disagreed"
+        );
+    }
+}
+
+/// Title 1 is the control: nothing done to title 0 may move it.
+#[test]
+fn clearing_one_titles_tracks_leaves_its_sibling_alone() {
+    let t = tree(&two_title_disc(), "All titles", 0.0);
+    let title = nth(&t, "Title", 0);
+    for &c in &t.arena[title].children {
+        if t.arena[c].checkable() {
+            t.set_checked(c, false);
+        }
+    }
+    assert_eq!(t.ticked_titles(), vec![0, 1]);
+    assert_eq!(t.check_state(title), Check::Mixed);
+    assert_eq!(t.check_state(nth(&t, "Title", 1)), Check::On);
+
+    // And clearing the title's own box IS how the user drops it.
+    t.set_checked(title, false);
+    assert_eq!(t.check_state(title), Check::Off);
+    assert_eq!(t.ticked_titles(), vec![1]);
+}
+
 /// The ordinary case is untouched: a title WITH checkable children still folds
 /// to a tri-state.
 #[test]
@@ -1679,4 +2022,144 @@ fn a_title_with_checkable_children_still_folds_to_a_tri_state() {
         Check::Mixed,
         "some but not all children ticked is still Mixed"
     );
+}
+
+// ── The language picker's model ────────────────────────────────────────────
+//
+// `mac.rs::set_lang_picker` / `onToggleLang:` and their windows.rs counterparts
+// are pure presentation over five `ui` functions: what the button says, which
+// rows carry a checkmark, and what a click stores. None of the five had a
+// single test anywhere — `grep -rn lang_toggle src tests` matched only their
+// own definitions and the two shells — so the picker's whole contract rested on
+// AppKit/Win32 code no `cargo test` run can reach. These pin the model half for
+// BOTH shells; what stays uncovered is only the drawing.
+
+#[test]
+fn a_language_picker_click_round_trips_for_every_offered_language() {
+    // The checkmark contract: tick a row, the code is stored and the row reads
+    // as selected; tick it again and the setting is back exactly where it was.
+    // A code that stored one spelling and matched another would draw a row the
+    // user cannot untick.
+    for (code, name) in PICKER_LANGUAGES {
+        let on = lang_toggle("", code);
+        assert!(
+            lang_is_selected(&on, code),
+            "{code} ({name}) ticked but reads as unselected: stored {on:?}"
+        );
+        assert_eq!(
+            lang_selection(&on),
+            vec![code.to_string()],
+            "{code} stored a spelling its own parser does not return"
+        );
+        assert_eq!(lang_toggle(&on, code), "", "{code} could not be unticked");
+    }
+}
+
+#[test]
+fn the_picker_title_is_never_blank() {
+    // Item 0 paints the pull-down's title. An empty selection must still say
+    // something — a blank button reads as a broken control, not as "Any".
+    assert!(!lang_summary("").is_empty());
+    assert!(!lang_summary("   ").is_empty());
+    assert!(!lang_summary(",,").is_empty());
+    // And a real selection names the languages, in the order stored.
+    assert_eq!(lang_summary("eng,spa"), "English, Spanish");
+    assert_eq!(lang_summary("spa,eng"), "Spanish, English");
+}
+
+#[test]
+fn a_setting_written_before_the_picker_existed_still_matches_its_row() {
+    // The free-text boxes accepted 639-1, either 639-2 form, and English names.
+    // Those settings are still on disk; each must light up the SAME row the
+    // picker offers, or the feature looks like it was dropped.
+    for stored in ["en", "eng", "English", "EN"] {
+        assert_eq!(
+            lang_selection(stored),
+            vec!["eng".to_string()],
+            "stored {stored:?} did not resolve to the offered row"
+        );
+        assert!(lang_is_selected(stored, "eng"), "stored {stored:?}");
+    }
+    for stored in ["ger", "deu", "German"] {
+        assert!(lang_is_selected(stored, "deu"), "stored {stored:?}");
+    }
+    // Duplicates collapse however they were spelled, order preserved.
+    assert_eq!(
+        lang_selection("en, eng ; English,spa"),
+        vec!["eng".to_string(), "spa".to_string()]
+    );
+}
+
+#[test]
+fn a_code_the_picker_does_not_offer_stays_visible_and_removable() {
+    // `set_lang_picker` appends a row for any stored code not on the offered
+    // list, precisely so an unknown tag is not a value the user can see in the
+    // title but never untick. That only works if the model keeps it verbatim.
+    const ODD: &str = "zzz";
+    assert_eq!(lang_selection(ODD), vec![ODD.to_string()]);
+    assert_eq!(
+        lang_display_name(ODD),
+        ODD,
+        "an unknown tag must still show"
+    );
+    assert!(lang_is_selected(ODD, ODD));
+    assert_eq!(
+        lang_toggle(ODD, ODD),
+        "",
+        "an unknown tag must be removable"
+    );
+    // Toggling something else must not silently drop it.
+    let with_eng = lang_toggle(ODD, "eng");
+    assert!(lang_is_selected(&with_eng, ODD), "{with_eng:?}");
+    assert!(lang_is_selected(&with_eng, "eng"), "{with_eng:?}");
+}
+
+#[test]
+fn every_bibliographic_code_the_doc_promises_resolves() {
+    // `canonical_lang_code`'s doc says it takes "either 639-2 form (`ger`/`deu`)".
+    // `isolang` knows only the /T form, so the twenty /B codes below silently
+    // fell through to the keep-it-verbatim fallback — accepted in the sense
+    // that nothing errored, and wrong in every sense that matters: a stored
+    // `ger` neither ticked the German row nor could be turned into one.
+    //
+    // Inputs only. The mapping is not restated here, or this test would be a
+    // second copy of the table agreeing with any edit to it: each code must
+    // resolve to the SAME language its /T spelling does.
+    const BIB: [(&str, &str); 20] = [
+        ("alb", "sqi"),
+        ("arm", "hye"),
+        ("baq", "eus"),
+        ("bur", "mya"),
+        ("chi", "zho"),
+        ("cze", "ces"),
+        ("dut", "nld"),
+        ("fre", "fra"),
+        ("geo", "kat"),
+        ("ger", "deu"),
+        ("gre", "ell"),
+        ("ice", "isl"),
+        ("mac", "mkd"),
+        ("mao", "mri"),
+        ("may", "msa"),
+        ("per", "fas"),
+        ("rum", "ron"),
+        ("slo", "slk"),
+        ("tib", "bod"),
+        ("wel", "cym"),
+    ];
+    for (bib, term) in BIB {
+        assert_eq!(
+            canonical_lang_code(bib).as_deref(),
+            Some(term),
+            "the bibliographic code {bib} must resolve like {term}"
+        );
+        // Upper case too — a settings file is hand-editable.
+        assert_eq!(
+            canonical_lang_code(&bib.to_uppercase()).as_deref(),
+            Some(term),
+            "{bib} uppercased"
+        );
+        // And it must light up the offered row, not append one of its own.
+        assert!(lang_is_selected(bib, term), "stored {bib:?}");
+    }
 }
