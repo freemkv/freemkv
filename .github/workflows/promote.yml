@@ -1,0 +1,119 @@
+name: promote
+
+# dev → qa, for all eight repos, as one action.
+#
+# This replaces `promote.sh`. The script's guarantees are kept exactly; only the
+# place it runs changes, so nobody has to remember to run it from a checkout
+# with all eight repos side by side.
+#
+# WHY LOCKSTEP
+# Every repo's `qa.yml` resolves its SIBLINGS at `qa`. Promote half the set and
+# the qa runs still go green — against a combination of trees that will never
+# be released. That is worse than a red run, because it looks like evidence.
+# So: refuse unless the whole set is ready, then push all eight in dependency
+# order, so a dependency is always advanced before the repos that resolve it.
+#
+# WHY THE BOT-WORKFLOW EXCLUSION
+# `Dependabot Updates` runs against dev's own SHA and fails, permanently, on
+# every repo carrying a local path override (`../freemkv-unlock`) — it cannot
+# resolve a path outside the repo. Counting it meant promotion was blocked by a
+# job that can never pass while dev looks the way we deliberately make it look.
+# It tests whether a bot can open a PR, not whether the code is releasable.
+# Kept as a deny-list, not an allow-list of {CI, leak-guard}: a NEW gating
+# workflow must not be ignored just because this file has not heard of it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Check everything, push nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  # Dependency order — freemkv-unlock is the BASE (libfreemkv and bdemu depend
+  # on it), then the libs, then the binaries. Mirrors release.sh's tag cascade
+  # so the two cannot disagree about what "in order" means.
+  REPOS: >-
+    freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n
+    freemkv-engine bdemu freemkv autorip
+  NON_GATING: '^(Dependabot Updates|CodeQL|pages-build-deployment)$'
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check every repo's dev is green and qa can fast-forward
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
+        run: |
+          set -uo pipefail
+          fail=0
+          : > /tmp/shas
+          for r in $REPOS; do
+            dev=$(gh api "repos/freemkv/$r/git/ref/heads/dev" -q .object.sha 2>/dev/null || echo "")
+            if [ -z "$dev" ]; then echo "::error::$r: no dev branch"; fail=1; continue; fi
+            qa=$(gh api "repos/freemkv/$r/git/ref/heads/qa" -q .object.sha 2>/dev/null || echo "")
+
+            if [ "$dev" = "$qa" ]; then
+              echo "  = $r: already promoted (${dev:0:7})"
+              echo "$r $dev already" >> /tmp/shas
+              continue
+            fi
+
+            # qa must be an ANCESTOR of dev. If it is not, someone committed
+            # straight to qa and a push would discard it — stop rather than
+            # force anything.
+            if [ -n "$qa" ]; then
+              cmp=$(gh api "repos/freemkv/$r/compare/$qa...$dev" -q .status 2>/dev/null || echo "unknown")
+              case "$cmp" in
+                ahead|identical) ;;
+                *) echo "::error::$r: qa is '$cmp' relative to dev — not a fast-forward, refusing"; fail=1; continue ;;
+              esac
+            fi
+
+            runs=$(gh api "repos/freemkv/$r/actions/runs?head_sha=$dev&per_page=100" \
+                     -q '[.workflow_runs[] | {name, status, conclusion}]')
+            gating=$(echo "$runs" | jq --arg re "$NON_GATING" '[.[] | select(.name | test($re) | not)]')
+
+            if [ "$(echo "$gating" | jq 'length')" = "0" ]; then
+              echo "::error::$r: no CI run found for dev ${dev:0:7}"; fail=1; continue
+            fi
+            if [ "$(echo "$gating" | jq '[.[] | select(.status != "completed")] | length')" != "0" ]; then
+              echo "::error::$r: CI still running for dev ${dev:0:7}"; fail=1; continue
+            fi
+            bad=$(echo "$gating" | jq -r '[.[] | select(.conclusion != "success" and .conclusion != "skipped") | .name] | unique | join(", ")')
+            if [ -n "$bad" ]; then
+              echo "::error::$r: dev ${dev:0:7} is not green ($bad)"; fail=1; continue
+            fi
+
+            echo "  ✓ $r: dev ${dev:0:7} green, ready"
+            echo "$r $dev ready" >> /tmp/shas
+          done
+          [ "$fail" = "0" ] || { echo "::error::refusing to promote — fix the above first"; exit 1; }
+
+      - name: Promote dev → qa, in dependency order
+        if: ${{ inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          while read -r r sha state; do
+            [ "$state" = "ready" ] || { echo "  = $r: already at ${sha:0:7}"; continue; }
+            printf '  → %-20s ' "$r"
+            # Create the ref if qa does not exist yet, otherwise fast-forward.
+            if gh api "repos/freemkv/$r/git/ref/heads/qa" >/dev/null 2>&1; then
+              gh api -X PATCH "repos/freemkv/$r/git/refs/heads/qa" -f sha="$sha" -F force=false -q .object.sha
+            else
+              gh api -X POST "repos/freemkv/$r/git/refs" -f ref=refs/heads/qa -f sha="$sha" -q .object.sha
+            fi
+          done < /tmp/shas
+          echo "promoted. qa CI is running — the heaviest leg (full-size media) runs last, behind everything else."
+
+      - name: Dry run
+        if: ${{ inputs.dry_run }}
+        run: echo "dry_run=true — every check above passed; pushed nothing."

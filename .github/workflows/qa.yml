@@ -264,6 +264,13 @@ jobs:
     # AACS key material. A fork cannot push to this branch, so keying on the
     # event — not on approval settings someone can relax later — is what makes
     # that unreachable.
+    #
+    # ORDERING: this is the most expensive thing the gate runs, so it runs
+    # LAST. `needs` is not decoration here — it is the cost control. Nothing
+    # touches real media until lint, the unit suites, the cross-lint, the
+    # Windows build and the synthetic CLI matrix have all gone green, so a
+    # typo cannot burn a 90-minute rip.
+    needs: [release-tests, cross-lint, windows-build, cli-integration]
     if: vars.FMKV_ACCEPTANCE != '' && github.event_name == 'push'
     runs-on: [self-hosted, freemkv-media]
     timeout-minutes: 90
@@ -426,3 +433,147 @@ jobs:
         working-directory: freemkv
       - run: tests/cli-integration.sh
         working-directory: freemkv
+
+  # ── Full-size media, on ephemeral EC2 ───────────────────────────────────────
+  #
+  # The one thing no hosted runner can do. GitHub's runners ship ~14 GB of disk
+  # against a 35 GB Blu-ray and a 53 GB UHD, so the fixtures in `hash-matrix`
+  # stop at a 6 GB DVD. These two jobs are the only reason EC2 exists here.
+  #
+  # They run LAST, behind everything cheap, for the same reason `real-media`
+  # does: this is the leg that costs money per minute.
+  #
+  # macOS is deliberately absent. EC2 Mac is bare-metal-only and requires a
+  # Dedicated Host with a 24-hour minimum allocation, so a 90-minute job bills
+  # a full day and no teardown can avoid it. Hosted macOS already covers build,
+  # test, the synthetic CLI matrix and the 6 GB real DVD — full-size media on
+  # macOS is a known, accepted gap rather than a silent one.
+  launch-full-media:
+    needs: [release-tests, cross-lint, windows-build, cli-integration]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      matrix:
+        os: [linux, windows]
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::457667483187:role/freemkv-ci-runners
+          aws-region: us-west-2
+      - name: Mint a single-use registration token
+        id: reg
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tok=$(gh api -X POST "repos/${{ github.repository }}/actions/runners/registration-token" -q .token)
+          echo "::add-mask::$tok"
+          echo "token=$tok" >> "$GITHUB_OUTPUT"
+      - name: Launch the ephemeral runner
+        run: |
+          set -euo pipefail
+          vpc=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
+          subnet=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" --query 'Subnets[0].SubnetId' --output text)
+          aws ec2 run-instances \
+            --launch-template LaunchTemplateName=freemkv-runner-${{ matrix.os }} \
+            --subnet-id "$subnet" \
+            --tag-specifications "ResourceType=instance,Tags=[
+                {Key=freemkv-ci,Value=runner},
+                {Key=runner-token,Value=${{ steps.reg.outputs.token }}},
+                {Key=runner-repo,Value=${{ github.repository }}},
+                {Key=launched-by,Value=${{ github.run_id }}}]" \
+            --query 'Instances[0].InstanceId' --output text
+
+  full-media:
+    needs: launch-full-media
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+    runs-on: [self-hosted, freemkv-media, "${{ matrix.os }}"]
+    timeout-minutes: 180
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with: { path: freemkv }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/libfreemkv,         ref: qa, path: libfreemkv }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/freemkv-engine,     ref: qa, path: freemkv-engine }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/freemkv-keysources, ref: qa, path: freemkv-keysources }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/freemkv-i18n,       ref: qa, path: freemkv-i18n }
+      - uses: actions/checkout@v7
+        with: { repository: freemkv/freemkv-unlock,     ref: qa, path: freemkv-unlock }
+      - name: Point the patches at the sibling checkouts
+        shell: bash
+        run: |
+          mkdir -p freemkv/.cargo
+          cat > freemkv/.cargo/config.toml <<'CFG'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          CFG
+      - name: Build the CLI
+        shell: bash
+        working-directory: freemkv
+        run: cargo build --release --bin freemkv
+      - name: Rip each fixture and hash it
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="$PWD/freemkv/target/release/freemkv"
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          out="full-${{ matrix.os }}.txt" ; : > "$out"
+          # Smallest first: a break shows up on the 6 GB DVD in minutes rather
+          # than after an hour of UHD.
+          for f in dvd bd uhd; do
+            aws s3 cp "s3://freemkv-fixtures-usw2-457667483187/$f.iso" "$f.iso" --quiet
+            "$BIN" "iso://$f.iso" "mkv://$f-out.mkv"
+            if command -v sha256sum >/dev/null; then H=$(sha256sum "$f-out.mkv" | cut -d' ' -f1)
+            else H=$(shasum -a 256 "$f-out.mkv" | cut -d' ' -f1); fi
+            printf '%s  %s-out.mkv\n' "$H" "$f" >> "$out"
+            # Reclaim before the next one: all three together exceed the disk.
+            rm -f "$f.iso" "$f-out.mkv"
+          done
+          cat "$out"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: "full-media-${{ matrix.os }}"
+          path: "full-${{ matrix.os }}.txt"
+
+  compare-full:
+    needs: full-media
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: "full-media-*", path: hashes }
+      - name: Linux and Windows must agree byte for byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          l=hashes/full-media-linux/full-linux.txt
+          w=hashes/full-media-windows/full-windows.txt
+          for f in "$l" "$w"; do
+            [ -s "$f" ] || { echo "::error::$f missing or empty — a leg did not produce hashes"; exit 1; }
+          done
+          # Compare the hash column only: the filenames are identical by
+          # construction, so any difference here is a real cross-platform
+          # divergence in what the ripper produced.
+          if diff <(cut -d' ' -f1 "$l") <(cut -d' ' -f1 "$w"); then
+            echo "full-size media: linux and windows produced identical output"
+          else
+            echo "::error::full-size rips DIVERGED between linux and windows"
+            exit 1
+          fi
