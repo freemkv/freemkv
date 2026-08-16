@@ -17,6 +17,15 @@
 # Optional media fixtures (positive paths run only when set):
 #   FREEMKV_TEST_ISO=/path/to/disc.iso    → `info iso://` + `iso://→mkv://` remux
 #
+# MANUAL-ONLY, AND SAY SO: `FREEMKV_TEST_ISO` is set by no workflow in this
+# repo — qa.yml runs `tests/cli-parity.sh check` with the environment bare — so
+# `cli-parity/golden/info_iso.golden` is recorded and compared ONLY when an
+# operator sets it by hand against the same disc image it was recorded from.
+# CI never reads that file. It is not a gate and must not be counted as one:
+# treat it as a local characterization aid, and re-record it (`record`) if you
+# change it, never hand-edit it. The always-runs surface below is the actual
+# gate.
+#
 # Deterministic surface (always runs, no media): version, help/usage, exit
 # codes, URL validation errors, flag rejections, --language switch, channel
 # discipline, --quiet. Live disc:// rips need the rig and are out of scope
@@ -138,6 +147,8 @@ if [ -n "${FREEMKV_TEST_ISO:-}" ] && [ -f "${FREEMKV_TEST_ISO}" ]; then
   fi
 else
   echo "  (skipping media positive-path cases — set FREEMKV_TEST_ISO to enable)"
+  echo "  note: info_iso.golden is therefore NOT checked by this run, and no CI"
+  echo "        job sets FREEMKV_TEST_ISO — it is a manual, operator-run case."
 fi
 
 echo

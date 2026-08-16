@@ -210,7 +210,15 @@ fn preserve_unreadable(path: &std::path::Path) -> Option<PathBuf> {
             return std::fs::rename(path, &cand).ok().map(|()| cand);
         }
     }
-    None
+    // Every numbered slot is taken. Giving up here is not neutral: the file
+    // stays at the LIVE path, and the next `save()` — the Settings popup, a
+    // window resize — writes defaults over the one copy that still holds the
+    // user's keyserver token, output folder and keydb path. So the choice is
+    // which copy to lose, and the newest is worth more than the tenth-oldest.
+    // The first `.bad`, the one most likely to hold real values, is still
+    // never touched.
+    let overflow = path.with_extension("json.bad.overflow");
+    std::fs::rename(path, &overflow).ok().map(|()| overflow)
 }
 
 impl Settings {
@@ -428,7 +436,29 @@ impl Settings {
         // then silently falls back to defaults via `.ok()`, discarding the
         // user's keyserver_url/keyserver_token/keydb_path with no warning.
         let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        write_new_file_0600(&tmp, json.as_bytes()).map_err(|e| format!("{e}"))?;
+        // The temp name belongs to THIS process and nothing else, so anything
+        // sitting on it is debris from an earlier failed save of ours — and
+        // debris that has to go for two separate reasons: it holds
+        // `keyserver_token` in plaintext, and `create_new` below would refuse
+        // the name for the rest of the process's life, so every later save
+        // returned "File exists" while the user was told nothing had been
+        // written. Clearing it first makes a save recoverable instead of
+        // permanently poisoned.
+        //
+        // This does NOT weaken the `create_new` guard: if something re-creates
+        // the path (a symlink pointed at a file elsewhere, say) between the
+        // removal and the open, `create_new` still refuses it rather than
+        // following it — a failed save, never a token written through someone
+        // else's link.
+        let _ = std::fs::remove_file(&tmp);
+        write_new_file_0600(&tmp, json.as_bytes()).map_err(|e| {
+            // A write that failed PART-WAY has already created the file, and
+            // the bytes in it are the secret. Only the rename branch below used
+            // to clean up, so a full disk left the token on disk under a name
+            // nobody would think to look for.
+            let _ = std::fs::remove_file(&tmp);
+            format!("{e}")
+        })?;
         std::fs::rename(&tmp, &path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             format!("{e}")
@@ -517,7 +547,7 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
 /// claims "you're up to date" when it never reached the server is worse than
 /// no check at all. Blocking — call off the UI thread.
 pub fn check_for_update(current: &str) -> String {
-    const URL: &str = "https://api.github.com/repos/freemkv/freemkv-gui/releases/latest";
+    const URL: &str = "https://api.github.com/repos/freemkv/freemkv/releases/latest";
     // ureq 3 moved the per-request timeout onto the agent config, so this
     // one-shot call gets its own configured agent rather than a bare `get`.
     let config = ureq::config::Config::builder()
@@ -530,6 +560,13 @@ pub fn check_for_update(current: &str) -> String {
         .call();
 
     let body = match resp {
+        // `Body::read_to_string` is NOT the unbounded read it looks like: ureq
+        // 3 applies its own 10 MiB `limit()` inside it (`body/mod.rs`), and the
+        // agent above bounds the whole operation at 10 s. Between them the
+        // response is bounded in both size and time, which is why this path
+        // does not need `keydb_fetch::read_capped` — that exists because the
+        // keydb body is legitimately larger than ureq's default and is read
+        // through `into_reader()`, which is genuinely uncapped.
         Ok(r) => match r.into_body().read_to_string() {
             Ok(b) => b,
             Err(e) => return format!("Update check failed: {e}"),
@@ -665,6 +702,56 @@ mod normalize_tests {
             std::fs::read_to_string(&a).unwrap(),
             "first — holds the real token",
             "the first preserved copy was overwritten"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Running out of `.bad` slots must not leave the corrupt file where the
+    /// next `save()` will write over it.
+    ///
+    /// The whole point of moving it aside is that `load()` runs at startup and
+    /// the next `save()` — opening Settings, a window resize — writes defaults
+    /// straight onto that path. With every numbered slot taken, preservation
+    /// gave up and left the file exactly there, so the copy still holding the
+    /// user's keyserver token, output folder and keydb path was destroyed by
+    /// the first save of the session. Losing the tenth-oldest preserved copy
+    /// is the only alternative, and it is the cheaper one.
+    #[test]
+    fn a_full_set_of_bad_slots_still_moves_the_corrupt_file_out_of_harms_way() {
+        let dir = scratch("overflow");
+        let path = dir.join("gui-settings.json");
+
+        // Every numbered slot `preserve_unreadable` knows: `.json.bad`, then
+        // `.json.bad.2` through `.json.bad.9`.
+        std::fs::write(path.with_extension("json.bad"), "kept").unwrap();
+        for n in 2..10 {
+            std::fs::write(path.with_extension(format!("json.bad.{n}")), "kept").unwrap();
+        }
+
+        std::fs::write(&path, "{ not json — but it still holds the token").unwrap();
+        let (_, outcome) = Settings::load_from(&path);
+
+        let LoadOutcome::Unreadable {
+            preserved: Some(kept),
+            ..
+        } = outcome
+        else {
+            panic!("the file must still be preserved when the slots are full")
+        };
+        assert!(
+            !path.exists(),
+            "the corrupt file was left at the live path, where the next save() \
+             overwrites it with defaults"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&kept).unwrap(),
+            "{ not json — but it still holds the token"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("json.bad")).unwrap(),
+            "kept",
+            "the FIRST preserved copy is the valuable one and must survive"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -851,5 +938,45 @@ mod normalize_tests {
         let mut u = Settings::default();
         u.set_bool("force", true);
         assert!(u.force && !u.raw && !u.keep_iso);
+    }
+
+    /// `check_for_update`'s GitHub API URL must name the same `owner/repo`
+    /// that releases are actually published to — not some other repo that
+    /// happens to share a similar name. Rather than hardcoding the expected
+    /// repo path a second time (which would just restate the constant and
+    /// prove nothing if both copies were wrong the same way), this pulls the
+    /// URL out of this file's own source via `include_str!` — the same
+    /// self-inspection pattern `mac.rs`/`windows.rs`/`engine.rs`/`pipe.rs`
+    /// use — and cross-checks the `owner/repo` it names against the release
+    /// download links baked into the repo's own README.
+    #[test]
+    fn update_check_url_names_the_repo_releases_are_actually_published_to() {
+        let src = include_str!("settings.rs");
+        let marker = "const URL: &str = \"";
+        let start = src
+            .find(marker)
+            .expect("update-check URL constant not found in settings.rs")
+            + marker.len();
+        let end = start
+            + src[start..]
+                .find('"')
+                .expect("unterminated URL string literal");
+        let url = &src[start..end];
+
+        let prefix = "https://api.github.com/repos/";
+        let suffix = "/releases/latest";
+        assert!(
+            url.starts_with(prefix) && url.ends_with(suffix),
+            "update-check URL has an unexpected shape: {url}"
+        );
+        let repo_path = &url[prefix.len()..url.len() - suffix.len()];
+
+        let readme = include_str!("../README.md");
+        assert!(
+            readme.contains(&format!("github.com/{repo_path}/releases")),
+            "check_for_update() queries https://api.github.com/repos/{repo_path}/releases/latest, \
+             but README.md's own release/download links never mention github.com/{repo_path}/releases — \
+             the update check is pointed at the wrong repo"
+        );
     }
 }

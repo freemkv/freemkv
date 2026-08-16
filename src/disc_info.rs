@@ -62,20 +62,40 @@ pub(crate) fn parse_info_flags(args: &[String]) -> InfoParse {
             // unit-key set. Accept + capture its value on every path so it is
             // not mistaken for a positional / unknown option.
             "--keydb" => {
-                i += 1;
-                f.keydb = args.get(i).cloned();
+                // Only a real value, never the next flag: `info --keydb
+                // --full` used to set the keydb path to "--full" and drop the
+                // `--full`. See `cli_entry::is_flag_token`.
+                if let Some(v) = args
+                    .get(i + 1)
+                    .filter(|v| !crate::cli_entry::is_flag_token(v))
+                {
+                    f.keydb = Some(v.clone());
+                    i += 1;
+                }
             }
             // `--log-level N` sets the tracing level (in main::init_logging);
             // here it also widens stdout detail at level >= 2. Accept + skip
             // its value so it isn't treated as a positional / unknown option.
             "--log-level" => {
-                i += 1;
-                if args.get(i).and_then(|s| s.parse::<u8>().ok()).unwrap_or(1) >= 2 {
-                    f.verbose = true;
+                if let Some(v) = args
+                    .get(i + 1)
+                    .filter(|v| !crate::cli_entry::is_flag_token(v))
+                {
+                    if v.parse::<u8>().ok().unwrap_or(1) >= 2 {
+                        f.verbose = true;
+                    }
+                    i += 1;
                 }
             }
             "--log-file" => {
-                i += 1; // skip the path value
+                // Skip the path value — but only if there IS one, or the flag
+                // that follows is swallowed instead.
+                if args
+                    .get(i + 1)
+                    .is_some_and(|v| !crate::cli_entry::is_flag_token(v))
+                {
+                    i += 1;
+                }
             }
             "--full" | "-f" => f.full = true,
             "--basic" | "-b" => f.basic = true,
@@ -841,6 +861,41 @@ mod tests {
             panic!("short forms must parse");
         };
         assert!(f.full && f.quiet && f.verbose && f.basic);
+    }
+
+    /// A value-flag must not eat the NEXT FLAG as its value.
+    ///
+    /// All three value-taking flags here consumed the following token
+    /// unconditionally, so `freemkv info --keydb --full disc://` set the keydb
+    /// path to "--full" and dropped the `--full` the user asked for: a request
+    /// silently answered with something else, from a typo or a missing value.
+    /// A token that starts with `-` is another flag, never a value.
+    #[test]
+    fn a_value_flag_does_not_swallow_the_flag_that_follows_it() {
+        let InfoParse::Ok(f) = parse_info_flags(&args(&["--keydb", "--full"])) else {
+            panic!("a missing --keydb value must not turn --full into one");
+        };
+        assert_eq!(f.keydb, None, "--full is a flag, not a keydb path");
+        assert!(f.full, "--full was the user's request and must still apply");
+
+        // Same for the two logging flags, whose values are consumed here only
+        // so they are not mistaken for positionals.
+        let InfoParse::Ok(f) = parse_info_flags(&args(&["--log-level", "--basic"])) else {
+            panic!("a missing --log-level value must not eat --basic");
+        };
+        assert!(f.basic);
+        let InfoParse::Ok(f) = parse_info_flags(&args(&["--log-file", "--quiet"])) else {
+            panic!("a missing --log-file value must not eat --quiet");
+        };
+        assert!(f.quiet);
+
+        // A real value is still a value — including a keydb path that merely
+        // sits next to a flag.
+        let InfoParse::Ok(f) = parse_info_flags(&args(&["--keydb", "/tmp/k.cfg", "--full"])) else {
+            panic!("a well-formed list must still parse");
+        };
+        assert_eq!(f.keydb.as_deref(), Some("/tmp/k.cfg"));
+        assert!(f.full);
     }
 
     #[test]

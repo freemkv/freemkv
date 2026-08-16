@@ -50,6 +50,33 @@ pub fn apply_locale(language: &str, system_locale: impl FnOnce() -> Option<Strin
     }
 }
 
+/// The GUI's diagnostic log, in the app-support dir.
+const GUI_LOG_NAME: &str = "log.txt";
+
+/// How large that log may already be at startup before it is started over.
+///
+/// `rolling::never` appends and never rotates, so without this the file is
+/// bounded by nothing but how long the user leaves Verbose/Debug on — every
+/// rip of every session, forever, in a directory they never look in.
+const GUI_LOG_CAP_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Start a fresh diagnostic log when the existing one has already grown past
+/// `cap`, instead of appending to it for another session.
+///
+/// This bounds growth ACROSS sessions, which is the unbounded part: a single
+/// session is still limited only by its own length, and `tracing-appender`
+/// offers no size-triggered rotation to fix that without hand-rolling a
+/// `Write` wrapper. The log is a debugging aid the user opted into and can
+/// delete, so the cheap bound is the proportionate one.
+///
+/// Best-effort by design: a log that cannot be removed must not stop the app
+/// from starting, or from logging.
+fn trim_oversized_log(path: &std::path::Path, cap: u64) {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > cap) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Diagnostic-log guard for the GUI (keeps the non-blocking writer alive).
 static GUI_LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuard> =
     std::sync::OnceLock::new();
@@ -74,7 +101,8 @@ pub fn init_gui_logging(log_level: &str) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let file_appender = tracing_appender::rolling::never(&dir, "log.txt");
+    trim_oversized_log(&dir.join(GUI_LOG_NAME), GUI_LOG_CAP_BYTES);
+    let file_appender = tracing_appender::rolling::never(&dir, GUI_LOG_NAME);
     let (nb, guard) = tracing_appender::non_blocking(file_appender);
     let _ = GUI_LOG_GUARD.set(guard);
     let filter = EnvFilter::new(format!("error,freemkv={level},libfreemkv={level}"));
@@ -87,7 +115,48 @@ pub fn init_gui_logging(log_level: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::wants_gui;
+    use super::{GUI_LOG_CAP_BYTES, trim_oversized_log, wants_gui};
+
+    /// The GUI's diagnostic log must not grow without end.
+    ///
+    /// `rolling::never` appends and never rotates, and nothing else truncated
+    /// the file, so leaving Verbose/Debug on accumulated every line of every
+    /// rip of every session in the app-support dir indefinitely.
+    #[test]
+    fn a_diagnostic_log_past_the_cap_is_started_over_not_appended_to() {
+        let dir = std::env::temp_dir().join(format!(
+            "fmkv-guilog-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("log.txt");
+
+        // Under the cap: a session's history is worth keeping.
+        std::fs::write(&log, vec![b'x'; 64]).unwrap();
+        trim_oversized_log(&log, 128);
+        assert!(
+            log.exists(),
+            "a log below the cap must survive — this is the ordinary case"
+        );
+
+        // Past it: started over rather than appended to for another session.
+        std::fs::write(&log, vec![b'x'; 129]).unwrap();
+        trim_oversized_log(&log, 128);
+        assert!(
+            !log.exists(),
+            "a log past the cap is appended to forever; nothing else rotates \
+             or truncates it"
+        );
+
+        // A log that was never written is not an error.
+        trim_oversized_log(&log, 128);
+
+        // A zero cap would throw the log away at every startup, capped or not.
+        assert_ne!(GUI_LOG_CAP_BYTES, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn argv(rest: &[&str]) -> Vec<String> {
         std::iter::once("freemkv".to_string())

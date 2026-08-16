@@ -17,6 +17,123 @@ use std::path::Path;
 /// real dispatcher by `capture_command_is_a_real_subcommand`.
 const CAPTURE_COMMAND: &str = "freemkv info disc://";
 
+/// The drive identity, as it is safe to put in front of a human.
+///
+/// Every field is an INQUIRY / GET CONFIGURATION string: raw bytes under drive
+/// FIRMWARE control, decoded `from_utf8_lossy`. They reach a real terminal, a
+/// `drive.toml` on disk, and — with `--share` — the body of a GitHub issue on a
+/// public tracker. `disc_info.rs` runs the identical class of field through
+/// `sanitize` before printing; this module printed all of them verbatim, so a
+/// drive whose vendor string carries ESC could colour or overwrite the profile
+/// block a user is about to publish, and one carrying a newline could forge a
+/// whole line of it (including the `# … — freemkv info disc://` TOML header
+/// comment, where a newline ends the comment and starts a key).
+///
+/// Sanitising ONCE here, at the point the strings enter this module, is what
+/// makes that unrepeatable: `run` never holds the raw `DriveId`, so there is no
+/// site left that could print an unsanitised field. The raw bytes are still
+/// captured verbatim into `inquiry.bin` — that file is evidence, not display.
+struct DriveIdentity {
+    vendor: String,
+    product: String,
+    revision: String,
+    vendor_specific: String,
+    serial: String,
+    /// Still the raw `CCYYMMDDHHMI` field; [`format_date`] renders it, and its
+    /// fallback is a verbatim passthrough, so it is sanitised here too.
+    firmware_date: String,
+}
+
+impl DriveIdentity {
+    /// Sanitise, then trim — in that order, because stripping a control
+    /// character can expose the whitespace that was hiding behind it.
+    fn field(s: &str) -> String {
+        crate::disc_info::sanitize(s).trim().to_string()
+    }
+
+    fn from_drive(id: &libfreemkv::DriveId) -> Self {
+        Self {
+            vendor: Self::field(&id.vendor_id),
+            product: Self::field(&id.product_id),
+            revision: Self::field(&id.product_revision),
+            vendor_specific: Self::field(&id.vendor_specific),
+            serial: Self::field(&id.serial_number),
+            firmware_date: Self::field(&id.firmware_date),
+        }
+    }
+
+    /// `revision/vendor_specific` — the "Firmware" line and TOML/issue field.
+    fn firmware_version(&self) -> String {
+        format!("{}/{}", self.revision, self.vendor_specific)
+    }
+
+    /// The serial as it may be shown: `--mask` replaces the characters, but the
+    /// masking is applied to the SANITISED value, never the raw one.
+    fn serial_display(&self, mask: bool) -> String {
+        if mask {
+            libfreemkv::mask_string(&self.serial)
+        } else {
+            self.serial.clone()
+        }
+    }
+}
+
+/// The drive-identity block `freemkv info disc://` prints, as lines.
+///
+/// Takes the raw [`libfreemkv::DriveId`] and sanitises it itself, so the block
+/// cannot be produced from unsanitised fields by mistake — pinned by
+/// `the_printed_drive_block_carries_no_firmware_escape_sequences`.
+fn drive_identity_lines(raw: &libfreemkv::DriveId, device: &str, mask: bool) -> Vec<String> {
+    let id = DriveIdentity::from_drive(raw);
+    vec![
+        format!(
+            "  {}:              {}",
+            strings::get("drive.device"),
+            device
+        ),
+        format!(
+            "  {}:        {}",
+            strings::get("drive.manufacturer"),
+            id.vendor
+        ),
+        format!(
+            "  {}:             {}",
+            strings::get("drive.product"),
+            id.product
+        ),
+        format!(
+            "  {}:            {}",
+            strings::get("drive.revision"),
+            id.revision
+        ),
+        format!(
+            "  {}:       {}",
+            strings::get("drive.serial"),
+            id.serial_display(mask)
+        ),
+        format!(
+            "  {}:       {}",
+            strings::get("drive.firmware_date"),
+            format_date(&id.firmware_date)
+        ),
+    ]
+}
+
+/// The `drive.toml` header comment, and the blank line after it.
+///
+/// The one place in the file where a firmware string is NOT `toml_escape`d,
+/// because a comment needs no escaping — except that a comment ends at a
+/// newline, so an embedded one would end the comment and let the rest of the
+/// vendor string be read as TOML. It is safe only because [`DriveIdentity`]
+/// has already removed every control character; that is what
+/// `the_toml_header_comment_is_one_line_whatever_the_firmware_says` pins.
+fn toml_header_comment(id: &DriveIdentity) -> String {
+    format!(
+        "# {} {} {} — {CAPTURE_COMMAND}\n\n",
+        id.vendor, id.product, id.revision
+    )
+}
+
 pub fn run(device: Option<&str>, args: &[String]) {
     let mut share = false;
     let mut mask = false;
@@ -73,18 +190,12 @@ pub fn run(device: Option<&str>, args: &[String]) {
         }),
     };
 
-    let id = session.drive_id.clone();
-    let serial_display = if mask {
-        libfreemkv::mask_string(&id.serial_number)
-    } else {
-        id.serial_number.clone()
-    };
+    // The identity block for every later use — display, `drive.toml`, and the
+    // shared issue body — sanitised once, here. See [`DriveIdentity`].
+    let raw_id = session.drive_id.clone();
+    let id = DriveIdentity::from_drive(&raw_id);
     let platform = session.platform_name().to_string();
-    let fw_version = format!(
-        "{}/{}",
-        id.product_revision.trim(),
-        id.vendor_specific.trim()
-    );
+    let fw_version = id.firmware_version();
     let profile_status = if session.has_profile() {
         strings::get("drive.supported")
     } else {
@@ -96,54 +207,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
     out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
     out.blank(Normal);
     out.print(Normal, "drive.header");
-    out.raw(
-        Normal,
-        &format!(
-            "  {}:              {}",
-            strings::get("drive.device"),
-            session.device_path()
-        ),
-    );
-    out.raw(
-        Normal,
-        &format!(
-            "  {}:        {}",
-            strings::get("drive.manufacturer"),
-            id.vendor_id.trim()
-        ),
-    );
-    out.raw(
-        Normal,
-        &format!(
-            "  {}:             {}",
-            strings::get("drive.product"),
-            id.product_id.trim()
-        ),
-    );
-    out.raw(
-        Normal,
-        &format!(
-            "  {}:            {}",
-            strings::get("drive.revision"),
-            id.product_revision.trim()
-        ),
-    );
-    out.raw(
-        Normal,
-        &format!(
-            "  {}:       {}",
-            strings::get("drive.serial"),
-            serial_display
-        ),
-    );
-    out.raw(
-        Normal,
-        &format!(
-            "  {}:       {}",
-            strings::get("drive.firmware_date"),
-            format_date(&id.firmware_date)
-        ),
-    );
+    for line in drive_identity_lines(&raw_id, session.device_path(), mask) {
+        out.raw(Normal, &line);
+    }
     out.blank(Normal);
     out.print(Normal, "drive.platform_header");
     out.raw(
@@ -197,10 +263,10 @@ pub fn run(device: Option<&str>, args: &[String]) {
     // malformed/malicious firmware string must not steer writes out of CWD.
     let profile_name = sanitize_component(&format!(
         "{}-{}-{}-{}",
-        id.vendor_id.to_lowercase().trim(),
-        id.product_id.to_lowercase().trim(),
-        id.product_revision.to_lowercase().trim(),
-        id.vendor_specific.to_lowercase().trim()
+        id.vendor.to_lowercase(),
+        id.product.to_lowercase(),
+        id.revision.to_lowercase(),
+        id.vendor_specific.to_lowercase()
     ));
 
     let profile_dir = std::path::PathBuf::from(&profile_name);
@@ -284,35 +350,17 @@ pub fn run(device: Option<&str>, args: &[String]) {
 
     // ── Generate drive.toml ────────────────────────────────────────────────
 
-    let serial_toml = if mask {
-        libfreemkv::mask_string(&id.serial_number)
-    } else {
-        id.serial_number.clone()
-    };
+    let serial_toml = id.serial_display(mask);
     let mut toml = String::new();
-    toml.push_str(&format!(
-        "# {} {} {} — {CAPTURE_COMMAND}\n\n",
-        id.vendor_id.trim(),
-        id.product_id.trim(),
-        id.product_revision.trim()
-    ));
+    toml.push_str(&toml_header_comment(&id));
     toml.push_str("[drive]\n");
     // These fields are derived from raw INQUIRY / GET_CONFIG bytes (firmware-
     // controlled, `from_utf8_lossy`/`ascii_field`), so a value may contain a
     // double quote, backslash, or control char that would break the TOML
     // double-quoted string. Escape every embedded value.
-    toml.push_str(&format!(
-        "manufacturer = \"{}\"\n",
-        toml_escape(id.vendor_id.trim())
-    ));
-    toml.push_str(&format!(
-        "product = \"{}\"\n",
-        toml_escape(id.product_id.trim())
-    ));
-    toml.push_str(&format!(
-        "revision = \"{}\"\n",
-        toml_escape(id.product_revision.trim())
-    ));
+    toml.push_str(&format!("manufacturer = \"{}\"\n", toml_escape(&id.vendor)));
+    toml.push_str(&format!("product = \"{}\"\n", toml_escape(&id.product)));
+    toml.push_str(&format!("revision = \"{}\"\n", toml_escape(&id.revision)));
     toml.push_str(&format!("serial = \"{}\"\n", toml_escape(&serial_toml)));
     toml.push_str(&format!(
         "firmware_date = \"{}\"\n",
@@ -360,9 +408,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
     println!(
         "  {}:    {} {} {}",
         strings::get("drive.submit_drive"),
-        id.vendor_id.trim(),
-        id.product_id.trim(),
-        id.product_revision.trim()
+        id.vendor,
+        id.product,
+        id.revision
     );
     println!(
         "  {}:   {}",
@@ -427,12 +475,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
     let mut body = String::new();
     body.push_str("## Drive Profile\n\n");
     body.push_str("```\n");
-    body.push_str(&format!("Manufacturer:    {}\n", id.vendor_id.trim()));
-    body.push_str(&format!("Product:         {}\n", id.product_id.trim()));
-    body.push_str(&format!(
-        "Revision:        {}\n",
-        id.product_revision.trim()
-    ));
+    body.push_str(&format!("Manufacturer:    {}\n", id.vendor));
+    body.push_str(&format!("Product:         {}\n", id.product));
+    body.push_str(&format!("Revision:        {}\n", id.revision));
     body.push_str(&format!("Serial:          {}\n", serial_toml));
     body.push_str(&format!(
         "Firmware date:   {}\n",
@@ -485,11 +530,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
 
     body.push_str(&format!("---\n*Captured by `{CAPTURE_COMMAND} --share`*\n"));
 
-    let title = format!(
-        "Drive profile: {} {}",
-        id.vendor_id.trim(),
-        id.product_id.trim()
-    );
+    let title = format!("Drive profile: {} {}", id.vendor, id.product);
 
     present_for_submission(&profile_name, &zip_path, &title, &body);
 
@@ -602,28 +643,14 @@ fn may_prompt_for_consent(token: &str, stdin_is_tty: bool, stderr_is_tty: bool) 
 /// falls back to the manual print path). Uses `curl` to avoid pulling an HTTP
 /// stack into the CLI, matching the original 0.1-era implementation.
 fn submit_issue(token: &str, title: &str, body: &str) -> Option<String> {
-    const REPO: &str = "freemkv/bdemu";
     let payload = format!(
         r#"{{"title":"{}","body":"{}","labels":["drive-profile"]}}"#,
         json_escape(title),
         json_escape(body)
     );
 
-    let output = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            &format!("https://api.github.com/repos/{REPO}/issues"),
-            "-H",
-            &format!("Authorization: token {token}"),
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-H",
-            "User-Agent: freemkv-info",
-            "-d",
-            &payload,
-        ])
+    let output = std::process::Command::new(curl_program())
+        .args(curl_submit_args(token, &payload))
         .output()
         .ok()?;
 
@@ -639,6 +666,99 @@ fn submit_issue(token: &str, title: &str, body: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The repository `--share` files drive-profile issues against.
+const SUBMIT_REPO: &str = "freemkv/bdemu";
+
+/// Connect timeout for the auto-submit POST, in seconds. A DNS black hole or a
+/// dropped SYN must not park the CLI at the end of a capture the user has
+/// already been shown.
+const SUBMIT_CONNECT_TIMEOUT_SECS: u32 = 10;
+
+/// Whole-operation timeout for the auto-submit POST, in seconds. Generous
+/// because the body carries a base64 zip on whatever uplink the user has, but
+/// FINITE: a stalled peer that trickles a byte a minute would otherwise hold
+/// the process open indefinitely, with no progress shown and no way out but
+/// Ctrl-C.
+const SUBMIT_MAX_TIME_SECS: u32 = 120;
+
+/// Cap on the response body. The reply is a GitHub issue JSON of a few KiB;
+/// this bounds what a hostile or misbehaving endpoint can make us buffer while
+/// scanning it for `html_url`.
+const SUBMIT_MAX_FILESIZE_BYTES: u32 = 1024 * 1024;
+
+/// Which `curl` to run.
+///
+/// A bare program name is resolved by the OS. On Windows that search starts
+/// with the launching executable's own directory and the current working
+/// directory, BEFORE the system directories — so a `curl.exe` sitting in the
+/// folder the user unzipped freemkv into, or simply the folder they happened
+/// to run it from, is preferred over the real one (CWE-427). Windows has
+/// shipped curl in System32 since 1803, so name it outright and leave nothing
+/// for the search order to decide.
+///
+/// Unix keeps the bare name: its `PATH` is the user's own, and it does not
+/// implicitly include the program's directory or the CWD.
+fn curl_program() -> String {
+    // `SystemRoot` is set by the OS on every Windows session; if something has
+    // unset it there is no trustworthy absolute path to build, so fall back to
+    // the bare name rather than guess at `C:\Windows`.
+    let root = if cfg!(target_os = "windows") {
+        std::env::var("SystemRoot").ok()
+    } else {
+        None
+    };
+    curl_program_from(root.as_deref())
+}
+
+/// The path half of [`curl_program`], split out so it is testable off Windows —
+/// the platform decision is the caller's, the string building is here.
+fn curl_program_from(system_root: Option<&str>) -> String {
+    match system_root {
+        Some(root) => format!(r"{root}\System32\curl.exe"),
+        None => "curl".to_string(),
+    }
+}
+
+/// The exact `curl` argv the auto-submit POST runs.
+///
+/// Split out of [`submit_issue`] because inside it it was untestable — the only
+/// way to observe the argv was to make a real request to GitHub. It shipped
+/// with no `--connect-timeout`, no `--max-time` and no `--max-filesize`, so the
+/// last step of `freemkv info disc:// --share` could hang forever on a stalled
+/// peer, after the profile was already safely on disk. `-f` is deliberately NOT
+/// passed: the caller reads the response body to recover the issue URL.
+fn curl_submit_args(token: &str, payload: &str) -> Vec<String> {
+    [
+        "-s",
+        "-X",
+        "POST",
+        // Bound the connect, the whole operation, and the response body. A
+        // silent hang here is worse than a failed submission: the manual
+        // fall-back below always works.
+        "--connect-timeout",
+        &SUBMIT_CONNECT_TIMEOUT_SECS.to_string(),
+        "--max-time",
+        &SUBMIT_MAX_TIME_SECS.to_string(),
+        "--max-filesize",
+        &SUBMIT_MAX_FILESIZE_BYTES.to_string(),
+        // The endpoint is https and fixed; refuse to be redirected off it.
+        "--proto",
+        "=https",
+        &format!("https://api.github.com/repos/{SUBMIT_REPO}/issues"),
+        "-H",
+        &format!("Authorization: token {token}"),
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-H",
+        "User-Agent: freemkv-info",
+        "-d",
+        payload,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 /// Minimal JSON string escaper for the issue payload (quotes, backslashes,
@@ -942,6 +1062,149 @@ mod tests {
         let doc = format!("{{\"v\":\"{escaped}\"}}");
         let parsed: serde_json::Value = serde_json::from_str(&doc).expect("valid JSON");
         assert_eq!(parsed["v"], "he said \"hi\"\npath: C:\\x");
+    }
+
+    /// A drive whose firmware answers INQUIRY with terminal escapes.
+    ///
+    /// Nothing exotic: these are `from_utf8_lossy` of device-supplied bytes, and
+    /// a wedged USB-SATA bridge produces junk here routinely. The interesting
+    /// part is where the junk GOES — a terminal, `drive.toml`, and the body of a
+    /// public GitHub issue.
+    fn hostile_drive_id() -> libfreemkv::DriveId {
+        libfreemkv::DriveId {
+            vendor_id: " HL-DT-ST\u{1b}[31m ".into(),
+            product_id: "BD-RE\u{1b}]0;pwned\u{7}".into(),
+            product_revision: "1.0\nmanufacturer = \"forged\"".into(),
+            vendor_specific: "NC\u{202e}xyz".into(),
+            firmware_date: "2021\u{0}0304".into(),
+            serial_number: "SER\u{1b}[2J1234".into(),
+            raw_inquiry: Vec::new(),
+            raw_gc_010c: Vec::new(),
+        }
+    }
+
+    /// The drive block `freemkv info disc://` prints is firmware-controlled
+    /// text on a real terminal. `disc_info.rs` sanitises the identical class of
+    /// field; this module printed every one of them verbatim.
+    #[test]
+    fn the_printed_drive_block_carries_no_firmware_escape_sequences() {
+        let lines = super::drive_identity_lines(&hostile_drive_id(), "/dev/sg0", false);
+        for line in &lines {
+            for c in line.chars() {
+                assert!(
+                    !crate::strings::is_unsafe_display_char(c),
+                    "a printed drive line still carries {c:?}: {line:?}"
+                );
+            }
+        }
+        let block = lines.join("\n");
+        // The identifying text itself survives — this is display sanitisation,
+        // not redaction. Expectations are literals, not re-derived.
+        assert!(block.contains("HL-DT-ST[31m"), "{block}");
+        assert!(block.contains("BD-RE]0;pwned"), "{block}");
+        assert!(block.contains("1.0manufacturer = \"forged\""), "{block}");
+        assert!(block.contains("SER[2J1234"), "{block}");
+        // The device path is ours, and the block is exactly six lines.
+        assert!(block.contains("/dev/sg0"), "{block}");
+        assert_eq!(lines.len(), 6, "{lines:?}");
+    }
+
+    /// `--mask` must mask the SANITISED serial: masking first and sanitising
+    /// never would leave the escape in an artifact meant to be publishable.
+    #[test]
+    fn a_masked_serial_is_derived_from_the_sanitised_one() {
+        let lines = super::drive_identity_lines(&hostile_drive_id(), "/dev/sg0", true);
+        let block = lines.join("\n");
+        assert!(!block.contains("SER"), "serial not masked: {block}");
+        assert!(
+            !block.contains('\u{1b}'),
+            "escape survived masking: {block:?}"
+        );
+    }
+
+    /// The one unescaped firmware string in `drive.toml`. A comment ends at a
+    /// newline, so a vendor id carrying one used to end the comment and hand
+    /// the rest of the string to the TOML parser as a key.
+    #[test]
+    fn the_toml_header_comment_is_one_line_whatever_the_firmware_says() {
+        let id = super::DriveIdentity::from_drive(&hostile_drive_id());
+        let header = super::toml_header_comment(&id);
+        assert!(header.starts_with("# "), "{header:?}");
+        assert_eq!(
+            header.trim_end_matches('\n').lines().count(),
+            1,
+            "the header comment must be a single line: {header:?}"
+        );
+        assert!(
+            !header.contains("\nmanufacturer"),
+            "a firmware newline forged a TOML key: {header:?}"
+        );
+        assert!(header.ends_with("\n\n"), "{header:?}");
+    }
+
+    /// On Windows the program to run must be named absolutely.
+    ///
+    /// Windows resolves a bare program name by searching the launching
+    /// executable's own directory and the current working directory before the
+    /// system directories — so `freemkv info disc:// --share`, run from a
+    /// folder containing a hostile `curl.exe` (an unzipped download, say),
+    /// would run that one with the submit token on its command line. Naming
+    /// System32's curl outright leaves nothing for the search order to pick.
+    ///
+    /// Testable off Windows because the platform decision lives in
+    /// `curl_program` and the string building lives here.
+    #[test]
+    fn the_submit_curl_is_named_absolutely_where_the_search_order_is_unsafe() {
+        assert_eq!(
+            super::curl_program_from(Some(r"C:\Windows")),
+            r"C:\Windows\System32\curl.exe",
+            "a bare name lets the app directory and the CWD win"
+        );
+        // No SystemRoot to build from (and every non-Windows host): the bare
+        // name is the honest answer, not a guessed absolute path.
+        assert_eq!(super::curl_program_from(None), "curl");
+    }
+
+    /// The auto-submit POST is the one network call this module makes, and it
+    /// is the LAST thing `--share` does: the profile and its zip are already on
+    /// disk, and the manual instructions print either way. It shipped with no
+    /// bound at all on connect, total time, or response size, so a stalled peer
+    /// hung the command after the work was done.
+    #[test]
+    fn the_auto_submit_post_is_bounded_in_time_and_size() {
+        let args = super::curl_submit_args("tok", "{}");
+        let pair = |flag: &str| -> String {
+            let i = args
+                .iter()
+                .position(|a| a == flag)
+                .unwrap_or_else(|| panic!("`{flag}` missing from the curl argv: {args:?}"));
+            args.get(i + 1)
+                .unwrap_or_else(|| panic!("`{flag}` has no value: {args:?}"))
+                .clone()
+        };
+        // Literals, not the constants: a mutation of either would otherwise
+        // agree with itself.
+        assert_eq!(pair("--connect-timeout"), "10");
+        assert_eq!(pair("--max-time"), "120");
+        assert_eq!(pair("--max-filesize"), "1048576");
+        assert_eq!(pair("--proto"), "=https");
+        // Still the same request it always was.
+        assert!(args.contains(&"POST".to_string()), "{args:?}");
+        assert!(
+            args.contains(&"https://api.github.com/repos/freemkv/bdemu/issues".to_string()),
+            "{args:?}"
+        );
+        assert!(
+            args.contains(&"Authorization: token tok".to_string()),
+            "{args:?}"
+        );
+        assert!(args.contains(&"{}".to_string()), "the payload: {args:?}");
+        // Redirect-following is off (curl's default) and must stay off — the
+        // request carries a bearer token.
+        assert!(
+            !args.iter().any(|a| a == "-L" || a == "--location"),
+            "the POST carries a token; it must not follow redirects: {args:?}"
+        );
     }
 
     #[test]

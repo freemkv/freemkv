@@ -91,6 +91,9 @@ impl Output {
     /// Print raw text without newline.
     pub fn raw_inline(&self, level: Level, text: &str) {
         if self.should_print(level) {
+            if intercept(text, false) {
+                return;
+            }
             if self.stderr {
                 eprint!("{}", text);
                 let _ = std::io::stderr().flush();
@@ -104,6 +107,9 @@ impl Output {
     /// Emit one line to the configured channel (stderr when stdout is the data
     /// channel, stdout otherwise).
     fn line(&self, text: &str) {
+        if intercept(text, true) {
+            return;
+        }
         if self.stderr {
             eprintln!("{}", text);
         } else {
@@ -125,6 +131,59 @@ impl Output {
             }
         }
     }
+}
+
+// ── test seam ────────────────────────────────────────────────────────────────
+//
+// Every user-visible line leaves this module through `line`/`raw_inline`, which
+// `println!`/`print!` it. A test cannot read that back: libtest's output capture
+// is a thread-local that `thread::spawn` PROPAGATES, so neither the test thread
+// nor a child of it ever reaches fd 1, and stable Rust exposes no way to read
+// the harness's buffer. So the capture lives here, at the exact point the text
+// would hit the terminal — what a test sees is byte-for-byte what a user sees.
+//
+// Compiled ONLY under `cfg(test)`: the shipped binary has no branch at all
+// (`intercept` is a `#[cfg(not(test))]` `false`, which inlines away).
+
+#[cfg(test)]
+thread_local! {
+    /// `Some` while [`capture`] is running on this thread; collects the lines
+    /// instead of printing them. Thread-local, so tests running in parallel
+    /// cannot capture each other's output.
+    static CAPTURED: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with this thread's `Output` text collected instead of printed, and
+/// return it alongside `f`'s value. Test-only.
+#[cfg(test)]
+pub(crate) fn capture<T>(f: impl FnOnce() -> T) -> (T, String) {
+    CAPTURED.with(|c| *c.borrow_mut() = Some(String::new()));
+    let value = f();
+    let text = CAPTURED.with(|c| c.borrow_mut().take()).unwrap_or_default();
+    (value, text)
+}
+
+/// Divert `text` into the active capture, if any. Returns whether it was
+/// diverted (and so must not also be printed).
+#[cfg(test)]
+fn intercept(text: &str, newline: bool) -> bool {
+    CAPTURED.with(|c| match c.borrow_mut().as_mut() {
+        Some(buf) => {
+            buf.push_str(text);
+            if newline {
+                buf.push('\n');
+            }
+            true
+        }
+        None => false,
+    })
+}
+
+/// Production build: nothing is ever intercepted.
+#[cfg(not(test))]
+fn intercept(_text: &str, _newline: bool) -> bool {
+    false
 }
 
 #[cfg(test)]
