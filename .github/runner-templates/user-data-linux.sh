@@ -21,7 +21,9 @@ apt-get install -y curl jq ffmpeg unzip build-essential
 apt-get install -y awscli || snap install aws-cli --classic
 
 # Toolchain the rip suite needs.
-su - ubuntu -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97'
+RUNNER_USER=ubuntu
+RUNNER_HOME=$(getent passwd "$RUNNER_USER" | cut -d: -f6)
+su - "$RUNNER_USER" -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97'
 
 TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
 md() { curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
@@ -41,17 +43,17 @@ REG=$(md tags/instance/runner-token)
 REPO=$(md tags/instance/runner-repo)
 [ -n "$REG" ] && [ -n "$REPO" ] || { echo "FATAL: tags not visible via IMDS — is InstanceMetadataTags enabled?"; shutdown -h now; }
 
-mkdir -p /home/ubuntu/actions-runner && cd /home/ubuntu/actions-runner
+mkdir -p "$RUNNER_HOME/actions-runner" && cd "$RUNNER_HOME/actions-runner"
 RUNNER_VER=$(curl -sS https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name | tr -d v)
 curl -sSL -o r.tar.gz "https://github.com/actions/runner/releases/download/v${RUNNER_VER}/actions-runner-linux-x64-${RUNNER_VER}.tar.gz"
 tar xzf r.tar.gz && rm r.tar.gz
-chown -R ubuntu:ubuntu /home/ubuntu/actions-runner
+chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_HOME/actions-runner"
 
-su - ubuntu -c "cd /home/ubuntu/actions-runner && ./config.sh \
+su - "$RUNNER_USER" -c "cd $RUNNER_HOME/actions-runner && ./config.sh \
   --url https://github.com/$REPO --token $REG \
   --name ephemeral-linux-$IID --labels freemkv-media,linux --unattended --ephemeral"
 
 # `run.sh` returns as soon as the single job finishes, because of --ephemeral.
-su - ubuntu -c "cd /home/ubuntu/actions-runner && ./run.sh" || true
+su - "$RUNNER_USER" -c "cd $RUNNER_HOME/actions-runner && ./run.sh" || true
 
 shutdown -h now
