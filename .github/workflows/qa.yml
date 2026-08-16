@@ -272,7 +272,18 @@ jobs:
     # typo cannot burn a 90-minute rip.
     needs: [release-tests, cross-lint, windows-build, cli-integration]
     if: vars.FMKV_ACCEPTANCE != '' && github.event_name == 'push'
-    runs-on: [self-hosted, freemkv-media]
+    #
+    # `freemkv-lan`, NOT `freemkv-media`. This job needs a PRE-PROVISIONED box:
+    # the acceptance suite at a fixed path, the ISO hoard mounted, and reach to
+    # the private repo on LAN Gitea. An ephemeral EC2 runner has none of those.
+    #
+    # They shared the `freemkv-media` label for exactly one run, and an EC2
+    # runner immediately grabbed this job and failed on
+    # `acceptance suite not found at /opt/freemkv-acceptance/cli-acceptance.sh`
+    # — a job stolen by a runner that could never satisfy it. The label now
+    # names the requirement (a LAN host) rather than the workload (media), so
+    # the two cannot collide again.
+    runs-on: [self-hosted, freemkv-lan]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
