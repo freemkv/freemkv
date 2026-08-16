@@ -24,12 +24,26 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 // ── CLI shell (the gold-standard freemkv CLI, replicated verbatim) ──────────
 mod cli_entry;
 mod disc_info;
+// Whether two paths name the same file. Declared here as well as in `lib.rs`
+// (same shape as `title_identity` below): both shells have to refuse a rip
+// whose destination IS its source, and the copy that compared paths alone was
+// the one that missed a hardlink.
+mod file_identity;
 mod info;
 mod keydb_fetch;
+// What a finished mux still has to tell the user. Declared here as well as in
+// `lib.rs`: the CLI and the GUI each rendered half of what `MuxOutcome`
+// carried, and the half neither rendered was the byte loss.
+mod lossy;
 mod messaging;
 mod output;
 mod pipe;
 mod strings;
+// What a title NUMBER refers to across a re-scan. Declared here as well as in
+// `lib.rs` (the same shape `strings` uses) because both shells re-scan between
+// picking a title and muxing it — `pipe` in this binary, `engine` in the GUI —
+// and the answer must be ONE type, not one per call site.
+mod title_identity;
 
 // ── GUI shell — macOS ───────────────────────────────────────────────────────
 // The shared GUI core (`ui`/`engine`/`settings`/`platform`) and the AppKit
@@ -274,6 +288,10 @@ fn dev_harness() -> bool {
                     .ok()
                     .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
                     .unwrap_or_default(),
+                // The headless harness never saw a scan, so it has no
+                // identities to promise — which leaves the engine's selection
+                // check inert, exactly as this path behaved before it existed.
+                title_ids: Vec::new(),
                 format: std::env::var("FMKV_FORMAT")
                     .unwrap_or_else(|_| "Selected titles → MKV".into()),
                 audio_pids: std::env::var("FMKV_APIDS")
@@ -296,7 +314,7 @@ fn dev_harness() -> bool {
                     .unwrap_or_default(),
                 // No per-title breakdown from this harness: the union above
                 // applies to every title, which is what it always did.
-                title_pids: Vec::new(),
+                title_pids: engine::TitleStreams::Unspecified,
                 explicit_streams: std::env::var("FMKV_APIDS").is_ok(),
                 raw: std::env::var("FMKV_RAW").is_ok(),
                 force: true,

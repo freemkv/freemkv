@@ -1495,6 +1495,48 @@ impl Shell {
         r
     }
 
+    /// Ask before quitting mid-rip. `true` means go ahead.
+    ///
+    /// Shared by the window's X (`WM_CLOSE`) and File > Exit, which used to
+    /// disagree: the X asked, cancelled and tore down, while the menu item
+    /// went straight to `PostQuitMessage` and skipped all three. One question,
+    /// one place — a second copy of this decision beside a call site is the
+    /// bug, which this crate has now proved three separate times.
+    fn confirm_quit_mid_rip(&self) -> bool {
+        if !self.app.borrow().running() {
+            return true;
+        }
+        let answer = self.wnd.hwnd().MessageBox(
+            &format!(
+                "{}\n\n{}",
+                crate::strings::get("gui.alert.rip_title"),
+                crate::strings::get("gui.alert.rip_body")
+            ),
+            "freemkv",
+            co::MB::YESNO | co::MB::ICONWARNING,
+        );
+        answer.map(|a| a == co::DLGID::YES).unwrap_or(false)
+    }
+
+    /// Signal the worker to stop, then WAIT (bounded) for it to put its output
+    /// down.
+    ///
+    /// `Cmd::Cancel` only signals: the worker notices at its next boundary and
+    /// unwinds the mux, and it is that unwind which closes and finalises the
+    /// partial file. Quitting without waiting lets the process exit mid-write,
+    /// so what lands on disk is wherever the OS write cursor happened to be
+    /// rather than the deliberate "cancelled — partial output kept" artefact
+    /// the GUI claims. `mac.rs` was given exactly this wait; this shell was
+    /// not. Bounded by `QUIT_GRACE`, so a wedged drive cannot turn quit into a
+    /// hang — and expiring is no worse than the behaviour it replaces.
+    fn cancel_and_drain(&self) {
+        self.act(Cmd::Cancel);
+        let run = self.app.borrow().run.clone();
+        if let Some(run) = run {
+            crate::engine::await_worker_exit(&run, crate::engine::QUIT_GRACE);
+        }
+    }
+
     /// The shell's entire job: hand the command to the core, perform the
     /// platform effects it asks for, redraw. No decisions here.
     fn act(&self, cmd: Cmd) {
@@ -1774,7 +1816,19 @@ impl Shell {
                 Effect::StopTicking => {
                     let _ = self.wnd.hwnd().KillTimer(TIMER_TICK);
                 }
-                Effect::Quit => w::PostQuitMessage(0),
+                // File > Exit reaches here. It must not be a second, unguarded
+                // quit path: before this it went straight to PostQuitMessage,
+                // so quitting from the menu mid-rip skipped the confirmation,
+                // skipped the Cancel signal and skipped the drain entirely —
+                // while WM_CLOSE (the window's X) did all three. AppKit's
+                // sibling was given a bounded wait for exactly this race; the
+                // menu item here had none.
+                Effect::Quit => {
+                    if self.confirm_quit_mid_rip() {
+                        self.cancel_and_drain();
+                        w::PostQuitMessage(0);
+                    }
+                }
                 Effect::Redraw => {}
             }
         }
@@ -2002,20 +2056,12 @@ impl Shell {
         // Closing mid-rip must not silently tear down the worker.
         let me = self.clone();
         self.wnd.on().wm_close(move || {
+            // Same decision as File > Exit, asked in one place.
+            if !me.confirm_quit_mid_rip() {
+                return Ok(()); // keep ripping
+            }
             if me.app.borrow().running() {
-                let answer = me.wnd.hwnd().MessageBox(
-                    &format!(
-                        "{}\n\n{}",
-                        crate::strings::get("gui.alert.rip_title"),
-                        crate::strings::get("gui.alert.rip_body")
-                    ),
-                    "freemkv",
-                    co::MB::YESNO | co::MB::ICONWARNING,
-                )?;
-                if answer != co::DLGID::YES {
-                    return Ok(()); // keep ripping
-                }
-                me.act(Cmd::Cancel);
+                me.cancel_and_drain();
             }
             me.wnd.hwnd().DestroyWindow()?;
             Ok(())
@@ -2991,6 +3037,35 @@ struct About {
     wnd: gui::WindowModeless,
     btn_site: gui::Button,
     btn_close: gui::Button,
+    /// The row LABELS ("Version", "Licence", …) and the website caption, kept
+    /// so a live language change can re-text them — see `relocalize`.
+    lbl_keys: Vec<gui::Label>,
+    /// The row VALUES, kept for the same reason: the keydb status is a
+    /// localized sentence, not a constant.
+    lbl_vals: Vec<gui::Label>,
+}
+
+/// The four (label, value) rows the About box shows, in the current locale.
+///
+/// A function, not a literal built inline, because the window is created ONCE
+/// and reused: `relocalize` needs the same rows again in the new language.
+fn about_rows() -> [(String, String); 4] {
+    let g = crate::strings::get;
+    [
+        (
+            g("gui.about.version"),
+            format!("{} (Windows)", env!("CARGO_PKG_VERSION")),
+        ),
+        (
+            g("gui.about.engine"),
+            format!("libfreemkv {}", env!("CARGO_PKG_VERSION")),
+        ),
+        (g("gui.about.licence"), "MIT".to_string()),
+        (
+            g("gui.about.keys"),
+            crate::settings::Settings::load().keydb_status(),
+        ),
+    ]
 }
 
 impl About {
@@ -3022,24 +3097,11 @@ impl About {
                 ..Default::default()
             },
         );
-        let rows: [(String, String); 4] = [
-            (
-                g("gui.about.version"),
-                format!("{} (Windows)", env!("CARGO_PKG_VERSION")),
-            ),
-            (
-                g("gui.about.engine"),
-                format!("libfreemkv {}", env!("CARGO_PKG_VERSION")),
-            ),
-            (g("gui.about.licence"), "MIT".to_string()),
-            (
-                g("gui.about.keys"),
-                crate::settings::Settings::load().keydb_status(),
-            ),
-        ];
+        let mut lbl_keys: Vec<gui::Label> = Vec::new();
+        let mut lbl_vals: Vec<gui::Label> = Vec::new();
         let mut y = s.px(62);
-        for (k, v) in rows {
-            let _ = gui::Label::new(
+        for (k, v) in about_rows() {
+            lbl_keys.push(gui::Label::new(
                 &wnd,
                 gui::LabelOpts {
                     text: &k,
@@ -3048,8 +3110,8 @@ impl About {
                     control_style: co::SS::RIGHT,
                     ..Default::default()
                 },
-            );
-            let _ = gui::Label::new(
+            ));
+            lbl_vals.push(gui::Label::new(
                 &wnd,
                 gui::LabelOpts {
                     text: &v,
@@ -3058,10 +3120,12 @@ impl About {
                     control_style: co::SS::LEFT | co::SS::ENDELLIPSIS,
                     ..Default::default()
                 },
-            );
+            ));
             y += s.px(24);
         }
-        let _ = gui::Label::new(
+        // Last key label, with no value beside it: the website button is the
+        // value. Kept in the same Vec so `relocalize` walks one list.
+        lbl_keys.push(gui::Label::new(
             &wnd,
             gui::LabelOpts {
                 text: &g("gui.about.website"),
@@ -3070,7 +3134,7 @@ impl About {
                 control_style: co::SS::RIGHT,
                 ..Default::default()
             },
-        );
+        ));
         // A real button rather than styled text: it opens the site in the
         // default browser, so it does what it looks like it does.
         let btn_site = gui::Button::new(
@@ -3099,7 +3163,34 @@ impl About {
             wnd,
             btn_site,
             btn_close,
+            lbl_keys,
+            lbl_vals,
         }
+    }
+
+    /// Re-text everything localized here, for a live language change.
+    ///
+    /// The macOS shell drops its cached About window on relocalize so the next
+    /// open rebuilds it in the new language; this shell builds its About ONCE
+    /// (winsafe cannot create controls after the window exists) and reused the
+    /// old one forever — so About stayed in the language the app started in,
+    /// no matter what the operator picked. Same policy, two shells; only one
+    /// of them applied it.
+    fn relocalize(&self) {
+        let g = crate::strings::get;
+        let _ = self.wnd.hwnd().SetWindowText(&g("gui.menu.app_about"));
+        let rows = about_rows();
+        for (l, (k, _)) in self.lbl_keys.iter().zip(rows.iter()) {
+            let _ = l.hwnd().SetWindowText(k);
+        }
+        // The website caption sits after the four rows.
+        if let Some(l) = self.lbl_keys.get(rows.len()) {
+            let _ = l.hwnd().SetWindowText(&g("gui.about.website"));
+        }
+        for (l, (_, v)) in self.lbl_vals.iter().zip(rows.iter()) {
+            let _ = l.hwnd().SetWindowText(v);
+        }
+        let _ = self.btn_close.hwnd().SetWindowText(&g("gui.btn.close"));
     }
 
     fn show(&self) {
@@ -3458,6 +3549,9 @@ impl Shell {
         self.memo.borrow_mut().formats.clear();
         self.memo.borrow_mut().rows.clear();
         self.prefs.relocalize(&self.settings.borrow());
+        // The About box too: it is built once and cached, so nothing else ever
+        // re-texts it.
+        self.about.relocalize();
         self.render();
     }
 }
@@ -4490,6 +4584,7 @@ mod tests {
         }
         Scanned {
             label: "TEST_DISC".into(),
+            volume_id: "TEST_DISC".into(),
             rows,
             key_summary: "keys: none needed".into(),
             title_count: 2,
@@ -4676,6 +4771,44 @@ mod tests {
         let mut swapped = rows.clone();
         swapped.swap(2, 3);
         assert_ne!(base, rows_sig(&swapped), "a reordered tree went unnoticed");
+    }
+
+    // ── a language change reaches the cached About box ────────────────────
+    //
+    // STOPGAP, NOT COVERAGE: `About` is a live `WindowModeless` with real
+    // child controls, so observing its text after a language switch needs a
+    // window and a message pump. Source inspection only: it fails if the
+    // `about.relocalize()` call or the method itself is removed, which is the
+    // state the bug shipped in (the About box stayed in the launch language
+    // forever, because it is built once and reused).
+    #[test]
+    fn the_language_switch_re_texts_the_cached_about_box_source_inspection_only() {
+        let src = include_str!("windows.rs");
+        // Concatenated so these needles cannot match this test's own text.
+        let call = format!("{}{}", "self.about.relocal", "ize();");
+        assert!(
+            src.contains(&call),
+            "Shell::relocalize no longer re-texts the About box — it is built \
+             once and cached, so nothing else ever will"
+        );
+        // Something only About::relocalize does: re-text the VALUE column from
+        // a freshly localized `about_rows()`. Shell::relocalize and
+        // Prefs::relocalize share the method name, so the name alone would pin
+        // nothing.
+        let vals = format!(
+            "{}{}",
+            "for (l, (_, v)) in self.lbl_vals.iter()", ".zip(rows.iter()) {"
+        );
+        assert!(
+            src.contains(&vals),
+            "About::relocalize is gone — the About box would keep the launch \
+             language's labels and its old keydb status line"
+        );
+        let rows_fn = format!("{}{}", "fn about_rows() -> ", "[(String, String); 4] {");
+        assert!(
+            src.contains(&rows_fn),
+            "about_rows is gone, so the About rows can only be built once"
+        );
     }
 
     // ── row text ──────────────────────────────────────────────────────────

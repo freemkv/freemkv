@@ -14,10 +14,21 @@
 /// can be wrong without a window to look at, so it must be testable here.
 pub mod app_entry;
 pub mod engine;
+/// Whether two paths name the same file — the ONE definition both shells use
+/// to refuse a rip whose destination is its own source. Declared here as well
+/// as in `main.rs` (same reason as `title_identity` below): the CLI's `pipe`
+/// and the GUI's `engine` are separate compilations, and each having its own
+/// answer is how the GUI came to miss a hardlinked destination the CLI
+/// refuses.
+pub mod file_identity;
 /// The hardened keydb downloader (SSRF guard, zero redirects, body cap).
 /// Declared here as well as in `main.rs` because `settings.rs` — the GUI's
 /// Update-keydb path — lives in this tree and could not otherwise reach it.
 pub mod keydb_fetch;
+/// What a finished mux still has to tell the user — the ONE renderer both
+/// shells use for a completed-but-lossy export. Declared here as well as in
+/// `main.rs`, same reason as `title_identity`.
+pub mod lossy;
 /// The Level↔code messaging standard. Declared here as well as in `main.rs`
 /// (same reason as `keydb_fetch` above) so `tests/messaging_contract.rs` can
 /// call the REAL `level_for` instead of keeping its own copy-pasted stub —
@@ -31,6 +42,12 @@ pub mod settings;
 // The i18n string facade — the core (`ui`) localizes through it, so the lib
 // target needs it too (it is just a re-export of `freemkv_i18n`).
 pub mod strings;
+/// What a title NUMBER refers to across a re-scan — the ONE definition both
+/// shells share. Declared here as well as in `main.rs` (same reason as
+/// `strings`): the CLI's `pipe` and the GUI's `engine` are separate
+/// compilations, and each having its own answer to "is this the same title?"
+/// is exactly how they came to disagree.
+pub mod title_identity;
 pub mod ui;
 // The Windows shell's DPI→geometry arithmetic. Pure, Win32-free and therefore
 // deliberately NOT `cfg(windows)`: gating it would make its unit tests

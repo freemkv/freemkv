@@ -8,7 +8,7 @@
 //! The rule: if a change to this file would need mirroring in `mac.rs` or
 //! `win.rs`, the split is wrong.
 
-use crate::engine::Scanned;
+use crate::engine::{Scanned, TitleStreams};
 use std::cell::RefCell;
 
 // ── the title tree ────────────────────────────────────────────────────────
@@ -259,6 +259,21 @@ pub struct Tree {
     pub roots: Vec<usize>,
 }
 
+/// Does the minimum-title-length filter keep this title?
+///
+/// ONE predicate, used both to decide which rows the tree shows and which
+/// titles the "Default selection" setting may tick. They were two expressions
+/// before (`d > 0.0 && d < min_eff` for the rows, `d >= min_eff` for the
+/// selection) and disagreed in both directions: a title of unknown length
+/// (`0.0` — "not timed", not "zero seconds") was shown but could not be
+/// ticked, and a filtered-out short title could be ticked but not shown.
+///
+/// `min_eff` is the EFFECTIVE minimum: `from_scan` drops it to 0 when no title
+/// clears it, because hiding every title is never right.
+fn title_visible(duration_secs: f64, min_eff: f64) -> bool {
+    !(duration_secs > 0.0 && duration_secs < min_eff)
+}
+
 impl Tree {
     /// Build from an engine scan. An empty scan yields an empty tree — the
     /// shell shows its empty page rather than inventing rows.
@@ -296,22 +311,25 @@ impl Tree {
         } else {
             0.0
         };
-        // Which title indices start checked.
+        // Which title indices start checked. Every mode chooses from the
+        // titles the tree will actually SHOW — see `title_visible`, which is
+        // the same predicate the row loop below filters on. "Main film only"
+        // used to name disc title 0 outright, so on a disc whose title 0 is a
+        // stinger the shipped default hid it and then ticked it: the tree
+        // opened with nothing selected and Rip refused. The other two modes
+        // used `>= min_eff`, which a title of UNKNOWN length (0.0) can never
+        // pass even though the filter deliberately keeps it — so "All titles"
+        // meant "all but that one".
+        let visible = || titles.iter().filter(|(_, d)| title_visible(*d, min_eff));
         let selected: std::collections::HashSet<usize> = match sel_mode {
-            "All titles" => titles
-                .iter()
-                .filter(|(_, d)| *d >= min_eff)
-                .map(|(i, _)| *i)
-                .collect(),
-            "Longest title" => titles
-                .iter()
-                .filter(|(_, d)| *d >= min_eff)
+            "All titles" => visible().map(|(i, _)| *i).collect(),
+            "Longest title" => visible()
                 .max_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(i, _)| *i)
                 .into_iter()
                 .collect(),
-            // "Main film only" (default): the first disc title.
-            _ => std::iter::once(0usize).collect(),
+            // "Main film only" (default): the first title on screen.
+            _ => visible().map(|(i, _)| *i).take(1).collect(),
         };
 
         // Which stream PIDs the language preferences keep, per canonical title
@@ -344,8 +362,7 @@ impl Tree {
                 0 => skip_title = false,
                 1 => {
                     // Hide a too-short title (and everything under it).
-                    skip_title =
-                        r.type_s == "Title" && r.duration_secs > 0.0 && r.duration_secs < min_eff;
+                    skip_title = r.type_s == "Title" && !title_visible(r.duration_secs, min_eff);
                     if skip_title {
                         continue;
                     }
@@ -396,44 +413,39 @@ impl Tree {
         Tree { arena, roots }
     }
 
-    /// Tick state for a row, folding children into a tri-state for titles.
+    /// Tick state for a row: the row's OWN flag decides `Off`, its checkable
+    /// children decide `On` vs `Mixed`.
+    ///
+    /// The two halves answer two different questions, and the box must not let
+    /// one answer the other's. For a title the own flag is "rip this title" —
+    /// it is literally what [`Tree::ticked_titles`] collects — while the
+    /// children are "which of its tracks". Folding ONLY the children made the
+    /// glyph and the rip independent answers, and since [`Tree::set_checked`]
+    /// on a child never writes its parent, they disagreed in both directions:
+    ///
+    /// * clear every stream row under a ticked title, one row at a time, and
+    ///   the box drew empty while the title was still ripped — a video-only
+    ///   extract, which is a supported outcome (see `is_video_only_selection`),
+    ///   drawn as "not selected";
+    /// * tick the streams of an unticked title back on and the box drew full
+    ///   while the rip skipped the title entirely.
+    ///
+    /// Off now means, exactly, "this will not be ripped". A ticked title with
+    /// no ticked tracks is `Mixed`: it IS being ripped, and not all of it.
     pub fn check_state(&self, i: usize) -> Check {
         let n = &self.arena[i];
-        if n.children.is_empty() {
-            return if *n.checked.borrow() {
-                Check::On
-            } else {
-                Check::Off
-            };
+        if !*n.checked.borrow() {
+            return Check::Off;
         }
-        let sel: Vec<bool> = n
+        // A leaf, and a title with NO checkable children (a video-only title,
+        // since `stream_rows` marks video rows uncheckable) have nothing that
+        // could narrow them, so a ticked one is fully ticked.
+        let all_on = n
             .children
             .iter()
             .filter(|&&c| self.arena[c].checkable())
-            .map(|&c| *self.arena[c].checked.borrow())
-            .collect();
-        // A title with NO checkable children — a video-only title, since
-        // `stream_rows` marks video rows uncheckable — has no child state to
-        // fold, so its own flag IS its state. Falling into the `on == 0` arm
-        // below drew it unticked while `ticked_titles` (which reads the flag)
-        // ripped it, and `toggle` could not move it: Off -> set_checked(true)
-        // -> still Off. The displayed state was the inverse of the behaviour,
-        // and the box was dead.
-        if sel.is_empty() {
-            return if *n.checked.borrow() {
-                Check::On
-            } else {
-                Check::Off
-            };
-        }
-        let on = sel.iter().filter(|x| **x).count();
-        if on == 0 {
-            Check::Off
-        } else if on == sel.len() {
-            Check::On
-        } else {
-            Check::Mixed
-        }
+            .all(|&c| *self.arena[c].checked.borrow());
+        if all_on { Check::On } else { Check::Mixed }
     }
 
     /// What a CLICK on row `i`'s tick box does.
@@ -480,11 +492,27 @@ impl Tree {
 
     /// Canonical indices of ticked titles — what the engine's `Selection`
     /// wants. Tree position is not the index once a disc is listed in full.
+    ///
+    /// A title is ripped when its BOX is not empty, i.e. `check_state` — the
+    /// same fold that draws it — reports anything but [`Check::Off`]. Reading
+    /// the title node's own `checked` flag instead made the drawing and the
+    /// rip two independent answers, and `set_checked` on a child never writes
+    /// its parent, so they disagreed in both directions: clear every stream row
+    /// under a title one at a time and the box drew empty while the stale
+    /// parent flag still ripped it; tick a cleared title's streams back one at
+    /// a time and the box drew full while the rip skipped it. `Mixed` is
+    /// ripped — some tracks are still ticked, which is exactly what the partial
+    /// glyph promises.
     pub fn ticked_titles(&self) -> Vec<usize> {
         self.arena
             .iter()
-            .filter(|n| n.type_s == "Title" && *n.checked.borrow() && n.title_idx != usize::MAX)
-            .map(|n| n.title_idx)
+            .enumerate()
+            .filter(|(i, n)| {
+                n.type_s == "Title"
+                    && n.title_idx != usize::MAX
+                    && self.check_state(*i) != Check::Off
+            })
+            .map(|(_, n)| n.title_idx)
             .collect()
     }
 
@@ -527,28 +555,36 @@ impl Tree {
     ///
     /// The union is still what decides `explicit_streams` (did the user narrow
     /// anything at all), and remains the fallback for a source with no title
-    /// rows at all.
-    pub fn ticked_streams_by_title(&self) -> Vec<(usize, Vec<u16>, Vec<u16>)> {
+    /// rows at all — a case the returned [`TitleStreams`] now names explicitly
+    /// instead of leaving it to be inferred from an absence.
+    ///
+    /// A title's slot is created as soon as it is seen to HAVE a stream row,
+    /// before the row's tick is read. Skipping unticked rows first meant a
+    /// title whose rows the user cleared entirely never reached the list, and
+    /// `stream_selection_for` read that absence as "no data" and applied the
+    /// union — handing the emptied title its sibling's tracks, which on a
+    /// shared-PID disc are the very ones just unticked.
+    pub fn ticked_streams_by_title(&self) -> TitleStreams {
         let mut out: Vec<(usize, Vec<u16>, Vec<u16>)> = Vec::new();
         for n in &self.arena {
             let Some(pid) = n.pid else { continue };
+            let slot = match out.iter().position(|(t, _, _)| *t == n.title_idx) {
+                Some(i) => i,
+                None => {
+                    out.push((n.title_idx, Vec::new(), Vec::new()));
+                    out.len() - 1
+                }
+            };
             if !*n.checked.borrow() {
                 continue;
             }
-            let slot = match out.iter_mut().find(|(t, _, _)| *t == n.title_idx) {
-                Some(slot) => slot,
-                None => {
-                    out.push((n.title_idx, Vec::new(), Vec::new()));
-                    out.last_mut().expect("just pushed")
-                }
-            };
             if n.type_s == "Audio" {
-                slot.1.push(pid);
+                out[slot].1.push(pid);
             } else {
-                slot.2.push(pid);
+                out[slot].2.push(pid);
             }
         }
-        out
+        TitleStreams::PerTitle(out)
     }
 }
 
@@ -682,8 +718,48 @@ pub fn canonical_lang_code(tag: &str) -> Option<String> {
     }
     isolang::Language::from_639_1(&lower)
         .or_else(|| isolang::Language::from_639_3(&lower))
+        // 639-2/B bibliographic (`ger`, `fre`, `dut`, …) → its /T form, THEN
+        // resolve. `isolang` knows only /T, so without this step every one of
+        // the twenty codes the doc above promises to accept fell through to
+        // `lang_selection`'s keep-it-verbatim fallback: a settings file saying
+        // `ger` gave the picker a second, unofferable "ger" row while the
+        // German row it already had sat unticked.
+        .or_else(|| bib_to_terminologic(&lower).and_then(isolang::Language::from_639_3))
         .or_else(|| isolang::Language::from_name(t))
         .map(|l| l.to_639_3().to_string())
+}
+
+/// The ISO 639-2/B (bibliographic) codes that differ from 639-2/T (= 639-3),
+/// mapped to their /T form.
+///
+/// Deliberately a second copy of `freemkv_engine::streams`' table: that one is
+/// private to the engine, and this crate's copy exists to keep a GUI setting
+/// readable, not to select streams. `every_bibliographic_code_the_doc_promises_
+/// resolves` (tests/gui_model.rs) pins the inputs; the engine pins its own.
+fn bib_to_terminologic(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "alb" => "sqi",
+        "arm" => "hye",
+        "baq" => "eus",
+        "bur" => "mya",
+        "chi" => "zho",
+        "cze" => "ces",
+        "dut" => "nld",
+        "fre" => "fra",
+        "geo" => "kat",
+        "ger" => "deu",
+        "gre" => "ell",
+        "ice" => "isl",
+        "mac" => "mkd",
+        "mao" => "mri",
+        "may" => "msa",
+        "per" => "fas",
+        "rum" => "ron",
+        "slo" => "slk",
+        "tib" => "bod",
+        "wel" => "cym",
+        _ => return None,
+    })
 }
 
 /// The stored preference string parsed into canonical codes, order preserved
@@ -985,17 +1061,16 @@ pub fn bar_caption(pct: f64, elapsed_secs: u64, eta_secs: Option<u64>) -> String
     }
 }
 
-/// The container word for a chosen output format ("MKV" / "MP4" / "M2TS").
-/// Single source of the format→container mapping the shells display, so the
-/// progress caption ("Saving to MP4 file") always matches the real extension.
+/// The container word for a chosen output format ("MKV" / "MP4" / "ISO" /
+/// "chapter" / …), for the progress caption "Saving to {container} file".
+///
+/// Answered by the ENGINE, from the same `out_kind` dispatch that decides
+/// which sink actually runs, so the caption cannot name a container the run
+/// does not produce. It used to be a local MP4/M2TS/else-MKV test here, which
+/// told every ISO, folder, demux, chapter, JSON and .fvi run that it was
+/// writing an MKV.
 pub fn container_label(format: &str) -> &'static str {
-    if format.contains("MP4") {
-        "MP4"
-    } else if format.contains("M2TS") {
-        "M2TS"
-    } else {
-        "MKV"
-    }
+    crate::engine::container_word(format)
 }
 
 /// The `gui.format.*` translation key for a canonical output-format string, or
@@ -1327,26 +1402,23 @@ pub fn is_video_only_selection(explicit_streams: bool, audio: &[u16], sub: &[u16
     explicit_streams && audio.is_empty() && sub.is_empty()
 }
 
+/// The file (or directory) the run will actually produce, for the Information
+/// panel.
+///
+/// Answered by the ENGINE — `planned_output_name` is built from the same
+/// `out_kind` dispatch and the same `title_basename` the rip itself uses.
+/// This used to be a parallel `<source stem>_t<n>.<ext>` guess that ignored
+/// the filename template, ignored the disc label the engine actually names
+/// disc titles after, and called every whole-disc sink an MKV.
 pub fn output_file_name(
     source: &str,
     dir: &str,
     format: &str,
     first_title: Option<usize>,
+    template: &str,
+    disc_label: &str,
 ) -> String {
-    let label = std::path::Path::new(source)
-        .file_stem()
-        .and_then(|n| n.to_str())
-        .unwrap_or("output");
-    let ext = if format.contains("MP4") {
-        "mp4"
-    } else if format.contains("M2TS") {
-        "m2ts"
-    } else {
-        "mkv"
-    };
-    // No ticked title means the engine rips the main movie, which it numbers 1.
-    let n = first_title.unwrap_or(0) + 1;
-    format!("{dir}/{label}_t{n}.{ext}")
+    crate::engine::planned_output_name(source, dir, format, first_title, template, disc_label)
 }
 
 // ══ the application core ══════════════════════════════════════════════════
@@ -1451,6 +1523,25 @@ pub struct App {
     /// input to `mp4_possible`/`container_mismatch`, and gating those tests
     /// behind a fixture is why they did not run in CI.
     pub video_codecs: Vec<String>,
+    /// What each title NUMBER referred to on the scan the tree was built from,
+    /// indexed by canonical title index.
+    ///
+    /// The ticked numbers travel to the engine, which SCANS AGAIN before it
+    /// muxes them — and everything the operator does between opening the disc
+    /// and pressing Start (reviewing streams, choosing a format, swapping the
+    /// disc) happens in between. Sent with the request so the engine can prove
+    /// its own scan still means what the tree said, instead of trusting an
+    /// integer across the longest window in the app.
+    pub title_ids: Vec<crate::engine::TitleIdentity>,
+    /// The disc's RAW volume id from the scan, empty for a container source or
+    /// when the disc carries none.
+    ///
+    /// Raw on purpose: this is not display text (`Scanned::label` is, and it is
+    /// sanitised and given a "(no label)" fallback for the log pane) — it is
+    /// the string the ENGINE will build the output filename from, so the panel
+    /// can name the file that will actually appear. It goes nowhere near a
+    /// path without `sanitize_label`, which `title_basename` applies.
+    pub disc_label: String,
     /// The launch probe's in-flight scan, if one is running.
     ///
     /// Its OWN slot, deliberately not `run`. `run` means "a rip is in
@@ -1481,7 +1572,19 @@ pub struct ProbeState {
     /// guarantees the `result` write is visible — the same pairing
     /// `RunState::finished` uses.
     done: AtomicBool,
+    /// When the worker was spawned, so a probe that never answers can be
+    /// abandoned instead of keeping the timer alive for the life of the app.
+    started: std::time::Instant,
 }
+
+/// How long the launch probe is given before the UI stops waiting for it.
+///
+/// A drive scan is seconds; a drive with a disc it cannot read can sit inside
+/// SCSI timeouts for far longer, and nothing about the probe is worth that —
+/// nobody asked for it, and the window keeps redrawing at 5 Hz for as long as
+/// it is outstanding. Generous enough that a slow-but-working drive still
+/// lands its result.
+pub const PROBE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl App {
     pub fn new() -> Self {
@@ -1509,6 +1612,8 @@ impl App {
             result_outcome: crate::engine::RunOutcome::default(),
             selected_row: None,
             video_codecs: Vec::new(),
+            title_ids: Vec::new(),
+            disc_label: String::new(),
             probe: None,
             reported_bad: 0,
         };
@@ -1619,6 +1724,7 @@ impl App {
             Cmd::Close => {
                 self.tree = Tree::default();
                 self.source.clear();
+                self.disc_label.clear();
                 self.page = Page::Empty;
                 self.say(
                     LogKind::Result,
@@ -1740,7 +1846,13 @@ impl App {
                     LogKind::Detail,
                     &crate::strings::fmt(
                         "gui.log.opening_drive",
-                        &[("label", &drives[0].label), ("device", &drives[0].device)],
+                        // The label is the drive's own vendor/model string,
+                        // i.e. bytes the hardware supplies — sanitized like
+                        // every other externally-sourced string in this pane.
+                        &[
+                            ("label", &crate::strings::sanitize_display(&drives[0].label)),
+                            ("device", &drives[0].device),
+                        ],
                     ),
                 );
             }
@@ -1748,7 +1860,13 @@ impl App {
         } else {
             let list = drives
                 .iter()
-                .map(|d| format!("{} ({})", d.label, d.device))
+                .map(|d| {
+                    format!(
+                        "{} ({})",
+                        crate::strings::sanitize_display(&d.label),
+                        d.device
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             self.say(
@@ -1794,6 +1912,7 @@ impl App {
             path: path.to_string(),
             result: Mutex::new(None),
             done: AtomicBool::new(false),
+            started: std::time::Instant::now(),
         });
         // Everything the scan needs is copied out HERE, on the UI thread. The
         // worker gets no reference to `App`.
@@ -1886,6 +2005,10 @@ impl App {
                     self.say(LogKind::Detail, line);
                 }
                 self.video_codecs = sc.video_codecs.clone();
+                // What the tree's title numbers refer to, kept so the request
+                // can carry it to the engine's own (later) scan.
+                self.title_ids = sc.title_ids.clone();
+                self.disc_label = sc.volume_id.clone();
                 let min_secs = self
                     .settings
                     .min_title_secs
@@ -2016,6 +2139,8 @@ impl App {
             &self.output_dir,
             &self.effective_format(),
             titles.first().copied(),
+            &self.settings.filename_template,
+            &self.disc_label,
         );
         self.info = Some(InfoRows::starting(&self.source, &out_file));
         self.page = Page::Progress;
@@ -2029,6 +2154,10 @@ impl App {
                 source: self.source.clone(),
                 dest_dir: self.output_dir.clone(),
                 titles,
+                // The numbers alone are not the selection: the engine re-scans
+                // before it muxes, and these are what they meant on the scan
+                // the user actually ticked.
+                title_ids: self.title_ids.clone(),
                 format: self.effective_format(),
                 audio_pids,
                 sub_pids,
@@ -2066,6 +2195,21 @@ impl App {
         // `Acquire`, pairing with the worker's `Release` store: seeing `true`
         // guarantees the `result` write is visible.
         if !p.done.load(Ordering::Acquire) {
+            if p.started.elapsed() >= PROBE_GRACE {
+                // Past its deadline: stop waiting. The worker thread cannot be
+                // killed — it is blocked inside the drive's own timeouts — but
+                // it holds only its own `Arc<ProbeState>`, so dropping ours
+                // lets it finish into a state nobody reads and exit. Without
+                // this, `tick` kept the 5 Hz timer alive and repainting for
+                // the life of the process over a probe nobody asked for.
+                //
+                // SILENT, like every other probe failure: the launch probe
+                // opens a drive on its own initiative, so it reports nothing
+                // when that does not work out — an alert about a drive the
+                // user never mentioned is noise, and `Ui::open` says plenty
+                // when they do ask for it.
+                self.probe = None;
+            }
             return Vec::new();
         }
         self.probe = None;
@@ -2099,15 +2243,20 @@ impl App {
             }
             return fx;
         };
+        // Poison-recovering, like the verdict and summary below: a worker that
+        // panicked poisons the log buffer, and `unwrap_or_default()` here threw
+        // away the WHOLE diagnostic — including the lines explaining the panic
+        // — which is precisely what the poison handling exists to prevent.
         let lines: Vec<String> = st
             .lines
             .lock()
-            .map(|mut v| v.drain(..).collect())
-            .unwrap_or_default();
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
         for l in lines {
             self.say(LogKind::Detail, &l);
         }
-        let p = st.prog.lock().map(|g| *g).unwrap_or_default();
+        let p = *st.prog.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(info) = &mut self.info {
             info.read_rate = rate_text(p.speed_bps, true);
             info.output_size = fmt_bytes(p.bytes_done);
@@ -2128,10 +2277,13 @@ impl App {
         // assumption that locking `summary`/`outcome` will happen to
         // provide the same guarantee on every platform this ever runs on.
         if st.finished.load(std::sync::atomic::Ordering::Acquire) {
-            let sum = st.summary.lock().map(|s| s.clone()).unwrap_or_default();
+            // Poison-recovering: a worker that PANICKED is exactly when the
+            // verdict matters, and `unwrap_or_default()` turned that into
+            // `RunOutcome::Completed` plus an empty summary.
+            let sum = st.summary_now();
             self.say(LogKind::Result, &sum);
             self.result_summary = sum;
-            self.result_outcome = st.outcome.lock().map(|o| *o).unwrap_or_default();
+            self.result_outcome = st.outcome_now();
             self.run = None;
             self.page = Page::Result;
             return vec![Effect::Redraw, Effect::StopTicking];
@@ -2153,7 +2305,7 @@ impl App {
         let p = self
             .run
             .as_ref()
-            .and_then(|st| st.prog.lock().ok().map(|g| *g))
+            .map(|st| *st.prog.lock().unwrap_or_else(|e| e.into_inner()))
             .unwrap_or_default();
         let pct = if p.bytes_total > 0 {
             p.bytes_done as f64 / p.bytes_total as f64 * 100.0
@@ -2300,6 +2452,32 @@ pub struct View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ticked title is a NUMBER against the scan on screen, and the rip
+    /// re-scans before it uses it. The request therefore has to carry what
+    /// those numbers referred to, or the engine has nothing to check the fresh
+    /// scan against — the disc can be swapped while the operator reviews the
+    /// tree, and title 3 of the new disc is muxed under the old one's name.
+    ///
+    /// A source pin: `start_run` spawns a real rip thread, so no test can
+    /// observe the `RipRequest` it builds.
+    #[test]
+    fn the_rip_request_carries_the_identities_the_ticked_numbers_referred_to() {
+        let src = include_str!("ui.rs").replace("\r\n", "\n");
+        let start = src
+            .find("\n    fn start_run(&mut self)")
+            .expect("start_run definition present");
+        let end = start
+            + src[start..]
+                .find("\n            state,\n        );")
+                .expect("the start_rip call still closes the request");
+        let body = &src[start..end];
+        assert!(
+            body.contains("title_ids:"),
+            "the request must carry the scanned identities alongside the ticked \
+             title numbers"
+        );
+    }
 
     /// Build one stream row for the preference tests.
     fn row(type_s: &str, pid: u16, lang: &str, forced: bool) -> crate::engine::Row {
@@ -2448,6 +2626,37 @@ mod tests {
         }
     }
 
+    /// Both log panes must keep the NEWEST line in view.
+    ///
+    /// A rip's log only grows, and the interesting line is always the last one
+    /// — a warning, a lossy-export note, the failure. `windows.rs` scrolls to
+    /// it and says in a comment that it is doing what the macOS log does;
+    /// `mac.rs` did no such thing, and had no scroll call anywhere in the file,
+    /// so the AppKit user watched a viewport frozen at the top while the run
+    /// wrote lines below the fold. The comment described behaviour only one
+    /// shell had.
+    ///
+    /// Source inspection for the same reason as the About-box test above:
+    /// neither shell can be instantiated off its own platform, but both files
+    /// read fine from anywhere — which is the point, since this has to fail on
+    /// whichever machine runs the suite.
+    #[test]
+    fn both_log_panes_keep_the_newest_line_in_view() {
+        // CRLF-normalized: Windows CI checks the tree out with CRLF.
+        let mac = include_str!("mac.rs").replace("\r\n", "\n");
+        let win = include_str!("windows.rs").replace("\r\n", "\n");
+
+        assert!(
+            mac.contains("scrollRangeToVisible"),
+            "the macOS log never scrolls: the newest line is written below the \
+             visible area and the user has to drag to see it"
+        );
+        assert!(
+            win.contains("self.log.set_selection("),
+            "the Windows log no longer scrolls to its newest line"
+        );
+    }
+
     #[test]
     fn sizes_roll_over_instead_of_staying_in_megabytes() {
         assert_eq!(fmt_bytes(0), "0 B");
@@ -2553,6 +2762,7 @@ mod tests {
             path: PROBE_SOURCE.to_string(),
             result: Mutex::new(None),
             done: AtomicBool::new(false),
+            started: std::time::Instant::now(),
         }));
         let fx = app.tick();
         assert!(
@@ -2566,6 +2776,55 @@ mod tests {
         );
     }
 
+    /// A probe the drive never answers must be abandoned, not waited on for
+    /// the life of the process.
+    ///
+    /// `ProbeState` had no deadline and no cancel: while `probe` stayed
+    /// `Some`, every tick pushed a `Redraw` and refused to stop the timer, so a
+    /// drive wedged inside its SCSI timeouts left the window repainting at
+    /// 5 Hz forever with nothing on screen to say why and no way to stop it.
+    /// The worker thread cannot be killed — it is blocked in the driver — but
+    /// the UI must stop waiting for it.
+    #[test]
+    fn a_probe_that_never_answers_is_abandoned_instead_of_ticking_forever() {
+        let mut app = App::new();
+        app.probe = Some(Arc::new(ProbeState {
+            path: PROBE_SOURCE.to_string(),
+            result: Mutex::new(None),
+            done: AtomicBool::new(false),
+            started: std::time::Instant::now() - (PROBE_GRACE + std::time::Duration::from_secs(1)),
+        }));
+        let fx = app.tick();
+        assert!(
+            app.probe.is_none(),
+            "the UI is still waiting on a probe that is past its deadline"
+        );
+        assert!(
+            fx.contains(&Effect::StopTicking),
+            "and it is still repainting on its behalf: {fx:?}"
+        );
+        assert!(
+            app.source.is_empty() && matches!(app.page, Page::Empty),
+            "abandoning a probe nobody asked for must not disturb the model"
+        );
+    }
+
+    /// ...and one that is merely slow is still waited for: the deadline must
+    /// not cancel the working case.
+    #[test]
+    fn a_probe_still_within_its_deadline_is_kept() {
+        let mut app = App::new();
+        app.probe = Some(Arc::new(ProbeState {
+            path: PROBE_SOURCE.to_string(),
+            result: Mutex::new(None),
+            done: AtomicBool::new(false),
+            started: std::time::Instant::now(),
+        }));
+        let fx = app.tick();
+        assert!(app.probe.is_some(), "a live probe was thrown away");
+        assert!(!fx.contains(&Effect::StopTicking), "{fx:?}");
+    }
+
     /// A finished probe is applied on the tick, on the UI thread.
     #[test]
     fn a_probe_result_is_applied_by_the_tick() {
@@ -2574,6 +2833,7 @@ mod tests {
             path: PROBE_SOURCE.to_string(),
             result: Mutex::new(Some(Ok(probe_scan()))),
             done: AtomicBool::new(true),
+            started: std::time::Instant::now(),
         }));
         let fx = app.tick();
         assert!(app.probe.is_none(), "a collected probe must clear its slot");
@@ -2594,6 +2854,7 @@ mod tests {
             path: PROBE_SOURCE.to_string(),
             result: Mutex::new(Some(Ok(probe_scan()))),
             done: AtomicBool::new(true),
+            started: std::time::Instant::now(),
         }));
         app.tick();
         assert_eq!(
@@ -2617,6 +2878,7 @@ mod tests {
             path: PROBE_SOURCE.to_string(),
             result: Mutex::new(None),
             done: AtomicBool::new(true),
+            started: std::time::Instant::now(),
         }));
         app.tick();
         assert!(app.probe.is_none());
@@ -2628,6 +2890,7 @@ mod tests {
     fn probe_scan() -> Scanned {
         Scanned {
             label: "PROBE_DISC".to_string(),
+            volume_id: "PROBE_DISC".to_string(),
             rows: vec![crate::engine::Row {
                 type_s: "Title".to_string(),
                 desc: "1.  0 chapter(s)".to_string(),
@@ -2643,6 +2906,7 @@ mod tests {
             key_summary: "none".to_string(),
             title_count: 1,
             video_codecs: vec!["HEVC".to_string()],
+            title_ids: Vec::new(),
             details: Vec::new(),
         }
     }
@@ -2680,9 +2944,11 @@ mod tests {
         let t = Tree::from_scan(
             &crate::engine::Scanned {
                 label: String::new(),
+                volume_id: String::new(),
                 title_count: 0,
                 key_summary: String::new(),
                 video_codecs: vec![],
+                title_ids: vec![],
                 rows: vec![],
                 details: vec![],
             },
