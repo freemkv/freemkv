@@ -46,3 +46,18 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # NOT a dependency: `dtolnay/rust-toolchain` is versioned by the RUST
+      # release it installs, and the tag we pin is the toolchain CI is pinned
+      # to on purpose -- precommit.sh runs the same one locally so a lint that
+      # passes on a developer's newer default cannot pass CI by accident.
+      #
+      # Dependabot reads those tags as semver and proposed 1.97.0 -> 1.100.0,
+      # a Rust version that does not exist. Every such PR 404s on toolchain
+      # download across all eight repos, and they regenerate weekly -- eight
+      # permanently-red PRs that promote.yml then has to special-case when it
+      # decides whether dev is green.
+      #
+      # Bumping the toolchain is a deliberate, all-eight-repos change, made by
+      # hand together with precommit.sh. There is nothing here for a bot.
+      - dependency-name: dtolnay/rust-toolchain
