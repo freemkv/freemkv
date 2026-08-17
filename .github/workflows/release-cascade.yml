@@ -72,7 +72,7 @@ jobs:
             echo "Releasing **v$want**." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         if: steps.decide.outputs.go == 'true'
 
       - name: Run the cascade

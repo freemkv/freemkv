@@ -96,7 +96,7 @@ jobs:
             macos-*)   brew install ffmpeg ;;
             windows-*) choco install ffmpeg -y --no-progress ;;
           esac
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: freemkv }
       - run: cargo build --release --bin freemkv
@@ -289,7 +289,7 @@ jobs:
         if: steps.creds.outputs.have == 'true'
         shell: bash
         run: aws s3 cp "${{ secrets.FMKV_FIXTURES_S3 }}/dvd.iso" dvd.iso --quiet && ls -l dvd.iso
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         if: steps.creds.outputs.have == 'true'
       - uses: Swatinem/rust-cache@v2
         if: steps.creds.outputs.have == 'true'
