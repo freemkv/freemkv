@@ -417,15 +417,15 @@ jobs:
       - uses: actions/checkout@v7
         with: { path: freemkv }
       - uses: actions/checkout@v7
-        with: { repository: freemkv/libfreemkv,         ref: qa, path: libfreemkv }
+        with: { repository: freemkv/libfreemkv,         ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
       - uses: actions/checkout@v7
-        with: { repository: freemkv/freemkv-engine,     ref: qa, path: freemkv-engine }
+        with: { repository: freemkv/freemkv-engine,     ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-engine }
       - uses: actions/checkout@v7
-        with: { repository: freemkv/freemkv-keysources, ref: qa, path: freemkv-keysources }
+        with: { repository: freemkv/freemkv-keysources, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-keysources }
       - uses: actions/checkout@v7
-        with: { repository: freemkv/freemkv-i18n,       ref: qa, path: freemkv-i18n }
+        with: { repository: freemkv/freemkv-i18n,       ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
       - uses: actions/checkout@v7
-        with: { repository: freemkv/freemkv-unlock,     ref: qa, path: freemkv-unlock }
+        with: { repository: freemkv/freemkv-unlock,     ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
       # The acceptance suite is not in this public repo — it names fixtures and
       # key sources. It lives in the private `freemkv-ci` repo, which exists
       # because Actions runners cannot reach the LAN Gitea host the scripts
