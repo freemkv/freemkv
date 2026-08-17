@@ -594,14 +594,14 @@ jobs:
       # `always()`: a leg that FAILED still produced artifacts, and those are
       # exactly the ones worth comparing — "windows diverged" is the more
       # useful sentence when windows is also the leg that went red.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: "cli-matrix-${{ matrix.os }}"
           path: "cli-${{ matrix.os }}.txt"
       # Separate artifact, always: this is the one thing that makes a failed
       # leg diagnosable while the other leg is still running.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: "cli-suite-log-${{ matrix.os }}"

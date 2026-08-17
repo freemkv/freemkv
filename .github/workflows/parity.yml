@@ -35,7 +35,7 @@ jobs:
             -map 0:v -map 1:a -map 2:a -c:v libx264 -pix_fmt yuv420p -c:a ac3 -b:a 192k \
             -metadata:s:a:0 language=eng -metadata:s:a:1 language=spa master.mkv
           sha256sum master.mkv | tee master.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: master-media, path: "master.mkv" }
 
   remux:
@@ -105,7 +105,7 @@ jobs:
           if command -v sha256sum >/dev/null; then H=$(sha256sum "$OUT" | cut -d' ' -f1)
           else H=$(shasum -a 256 "$OUT" | cut -d' ' -f1); fi
           echo "$H  ${{ matrix.os }}  libfreemkv=$LF_SHA" | tee "hash-${{ matrix.os }}.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: "hash-${{ matrix.os }}", path: "hash-${{ matrix.os }}.txt" }
 
   compare:

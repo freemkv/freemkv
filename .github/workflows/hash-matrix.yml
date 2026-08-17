@@ -38,7 +38,7 @@ jobs:
             -map 0:v -map 1:a -map 2:a -c:v libx264 -pix_fmt yuv420p -c:a ac3 -b:a 192k \
             -metadata:s:a:0 language=eng -metadata:s:a:1 language=spa master.mkv
           sha256sum master.mkv
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: matrix-master-media, path: master.mkv }
 
   suite:
@@ -121,7 +121,7 @@ jobs:
       # if: always() -- a suite that FAILED still produced artifacts, and those
       # are the ones worth comparing: "windows diverged" is the more useful
       # sentence when the windows run is also the one that went red.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: "matrix-hashes-${{ matrix.os }}"
@@ -311,7 +311,7 @@ jobs:
           else H=$(shasum -a 256 dvd-out.mkv | cut -d' ' -f1); fi
           printf '%s  dvd-out.mkv\nlibfreemkv=%s\n' "$H" "$LF_SHA" > "real-${{ matrix.os }}.txt"
           cat "real-${{ matrix.os }}.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && steps.creds.outputs.have == 'true'
         with:
           name: "matrix-real-${{ matrix.os }}"
