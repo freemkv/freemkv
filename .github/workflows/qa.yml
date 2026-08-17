@@ -579,7 +579,7 @@ jobs:
       # would replace the diagnostic below ("neither leg uploaded a hash file,
       # check whether the runners registered") with a generic download error —
       # burying the actual cause in exactly the case it matters most.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { pattern: "cli-matrix-*", path: hashes }
         continue-on-error: true
       - name: Linux and Windows must produce identical bytes
