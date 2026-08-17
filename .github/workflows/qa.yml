@@ -567,8 +567,19 @@ jobs:
           FMKV_HDDVD_ISO="$ISO_DIR/hddvd.iso" \
           FMKV_KEYDB="$KEYDB_PATH" \
           FMKV_HASHES="$PWD/cli-${{ matrix.os }}.txt" \
-            bash ci/scripts/cli-acceptance.sh
-          rc=$?
+            bash ci/scripts/cli-acceptance.sh 2>&1 | tee "suite-${{ matrix.os }}.log"
+          rc=${PIPESTATUS[0]}
+
+          # The suite's own FAIL/SKIP lines are the diagnosis, and a step log
+          # is NOT readable until the whole RUN completes — so while a matrix
+          # sibling is still ripping, the failed leg's reason is unreachable
+          # for another hour. Artifacts upload immediately, so the transcript
+          # goes out as one, and the failing lines are echoed below as well.
+          if [ "$rc" != 0 ]; then
+            echo "── every failing check on ${{ matrix.os }} ──"
+            grep -E '^  (FAIL|SKIP)' "suite-${{ matrix.os }}.log" || true
+            echo "──"
+          fi
 
           # The suite's own summary already names each FAIL and each unexpected
           # SKIP. Add the one line that says which LEG this was, so a red run in
@@ -588,6 +599,13 @@ jobs:
         with:
           name: "cli-matrix-${{ matrix.os }}"
           path: "cli-${{ matrix.os }}.txt"
+      # Separate artifact, always: this is the one thing that makes a failed
+      # leg diagnosable while the other leg is still running.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: "cli-suite-log-${{ matrix.os }}"
+          path: "suite-${{ matrix.os }}.log"
 
   compare-cli-matrix:
     needs: cli-matrix
