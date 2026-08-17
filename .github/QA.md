@@ -144,14 +144,25 @@ Three jobs, in order:
 because the format, selection and `dir://` groups revisit them — the launch
 templates carry 600 GB for that reason.
 
-**Keys.** `FMKV_KEY_URL` / `FMKV_KEY_AUTH` (repo secrets) point at the online
-key service, the same one autorip ships with by default, so CI tests the
-configuration users actually have. A local `keydb.cfg` is not enough on its
-own: it holds VUKs only for discs it has already seen, and a 62 MB keydb had
-no entry for the UHD fixture. The job checks both secrets are set BEFORE
-fetching 121 GiB, because otherwise the run gets six minutes in, rips the DVD
-fine (CSS needs no key) and only then reports a key error that reads like a
-media defect.
+**Keys — BOTH sources, because neither covers everything.**
+`FMKV_KEY_URL` / `FMKV_KEY_AUTH` (repo secrets) point at the online key
+service, the one autorip ships with by default; `keydb.cfg` is fetched from
+the fixtures bucket alongside the discs. That pairing is what a real user has,
+and it is also what the fixtures require:
+
+- the online service had **no key for the Blu-ray fixture** — the first EC2 run
+  got through the whole DVD and then died on `E7022 No key source has a
+  decryption key for this disc (id: 20312DAD...)`. The keydb holds it.
+- the keydb has **no entry for the UHD fixture** — a keydb holds VUKs only for
+  discs it has already seen. The service serves it.
+
+So each family also exercises a different key path, which one source alone
+would not. With a service configured the suite treats a skip as a FAILURE
+(`EXPECTED_SKIPS` is emptied), so a key gap can no longer hide as a skip.
+
+The job checks both secrets are set BEFORE fetching 121 GiB, because otherwise
+the run gets six minutes in, rips the DVD fine (CSS needs no key) and only then
+reports a key error that reads like a media defect.
 
 **Teardown — three independent mechanisms**, because each can fail alone:
 `--ephemeral` de-registers the runner after one job; `shutdown` against

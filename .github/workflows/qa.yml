@@ -500,6 +500,24 @@ jobs:
           fi
           mkdir -p isos
           echo "ISO_DIR=$ISO_DIR" >> "$GITHUB_ENV"
+          # The key database, alongside the discs. BOTH key sources are
+          # configured, because that is what a real user has and because
+          # neither covers everything on its own: the online service had no
+          # key for the Blu-ray fixture (E7022, disc id 20312DAD...), which
+          # this keydb does hold, and the keydb has no entry for the UHD
+          # fixture, which the service serves. One source alone means a
+          # permanently skipped family — and with a service configured a skip
+          # is now a failure, correctly.
+          if ! aws s3 cp "s3://$B/keydb.cfg" keydb.cfg --quiet; then
+            echo "::error title=Key database download failed::could not fetch keydb.cfg from the fixtures bucket — the BD family cannot decrypt without it"
+            exit 1
+          fi
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            echo "KEYDB_PATH=$(cygpath -m "$(pwd)")/keydb.cfg" >> "$GITHUB_ENV"
+          else
+            echo "KEYDB_PATH=$(pwd)/keydb.cfg" >> "$GITHUB_ENV"
+          fi
+
           for f in dvd bd uhd hddvd; do
             sz=$(aws s3api head-object --bucket "$B" --key "$f.iso" --region us-west-2 \
                    --query ContentLength --output text)
@@ -547,6 +565,7 @@ jobs:
           FMKV_BD_ISO="$ISO_DIR/bd.iso" \
           FMKV_UHD_ISO="$ISO_DIR/uhd.iso" \
           FMKV_HDDVD_ISO="$ISO_DIR/hddvd.iso" \
+          FMKV_KEYDB="$KEYDB_PATH" \
           FMKV_HASHES="$PWD/cli-${{ matrix.os }}.txt" \
             bash ci/scripts/cli-acceptance.sh
           rc=$?
