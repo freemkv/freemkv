@@ -542,23 +542,67 @@ jobs:
         run: cargo build --release --bin freemkv
       - name: Rip each fixture and hash it
         shell: bash
+        env:
+          # The fixtures are REAL retail discs. CSS (DVD) cracks keylessly, but
+          # AACS (BD/UHD) does not — the first run got through the whole 6 GB
+          # DVD and then died on the Blu-ray with `E7022 No key source has a
+          # decryption key`. This is the same online key service autorip runs
+          # with by default, so CI tests the configuration users actually have.
+          FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
+          FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
         run: |
           set -euo pipefail
           BIN="$PWD/freemkv/target/release/freemkv"
           [ -f "$BIN.exe" ] && BIN="$BIN.exe"
           out="full-${{ matrix.os }}.txt" ; : > "$out"
+
+          # Fail EARLY and by name if the key service is not configured. Without
+          # this the job runs for six minutes, rips the DVD fine, and only then
+          # reports a key error on the Blu-ray — which reads like a media
+          # problem rather than a missing secret.
+          if [ -z "${FMKV_KEY_URL:-}" ] || [ -z "${FMKV_KEY_AUTH:-}" ]; then
+            echo "::error title=Key service not configured::FMKV_KEY_URL / FMKV_KEY_AUTH are unset, so the AACS fixtures (bd, uhd) cannot decrypt. Set them as repo secrets. The DVD would still pass, because CSS needs no key — do not read a green DVD as evidence the keys work."
+            exit 1
+          fi
+
           # Smallest first: a break shows up on the 6 GB DVD in minutes rather
           # than after an hour of UHD.
           for f in dvd bd uhd; do
-            aws s3 cp "s3://freemkv-fixtures-usw2-457667483187/$f.iso" "$f.iso" --quiet
-            "$BIN" "iso://$f.iso" "mkv://$f-out.mkv"
+            echo "::group::$f"
+            sz=$(aws s3api head-object --bucket freemkv-fixtures-usw2-457667483187 \
+                   --key "$f.iso" --region us-west-2 --query ContentLength --output text)
+            echo "fetching $f.iso ($((sz/1024/1024)) MiB)"
+            if ! aws s3 cp "s3://freemkv-fixtures-usw2-457667483187/$f.iso" "$f.iso" --quiet; then
+              echo "::error title=Fixture download failed ($f)::could not fetch $f.iso from the Oregon bucket — check the OIDC role can read it"
+              exit 1
+            fi
+            df -h . | tail -1
+
+            # Not `set -e`: the exit code is wanted so the error can NAME the
+            # fixture. A bare non-zero here previously surfaced as an opaque
+            # "Process completed with exit code 1" with the real cause buried
+            # in the middle of the log.
+            rc=0
+            "$BIN" --key-url "$FMKV_KEY_URL" --key-auth "$FMKV_KEY_AUTH" \
+              "iso://$f.iso" "mkv://$f-out.mkv" || rc=$?
+            if [ "$rc" != "0" ]; then
+              echo "::error title=Rip failed ($f)::freemkv exited $rc ripping $f.iso — see the $f group above for its output"
+              exit "$rc"
+            fi
+            [ -s "$f-out.mkv" ] || {
+              echo "::error title=Empty output ($f)::the rip reported success but $f-out.mkv is empty or missing"
+              exit 1
+            }
+
             if command -v sha256sum >/dev/null; then H=$(sha256sum "$f-out.mkv" | cut -d' ' -f1)
             else H=$(shasum -a 256 "$f-out.mkv" | cut -d' ' -f1); fi
             printf '%s  %s-out.mkv\n' "$H" "$f" >> "$out"
+            echo "$f OK  $(du -h "$f-out.mkv" | cut -f1)  sha=${H:0:16}..."
             # Reclaim before the next one: all three together exceed the disk.
             rm -f "$f.iso" "$f-out.mkv"
+            echo "::endgroup::"
           done
-          cat "$out"
+          echo "── all three fixtures ripped ──"; cat "$out"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
