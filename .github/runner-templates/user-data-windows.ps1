@@ -42,6 +42,16 @@ if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
 # the binary existed on the box. Installing through choco puts it somewhere
 # both shells agree on.
 choco install -y git ffmpeg awscli --no-progress | Out-Null
+
+# The MSVC toolchain. rustup installs RUST, not a linker: the base Windows
+# Server AMI has no link.exe and no Windows SDK, so the first full-media run
+# got through six checkouts and then died with
+# `error: linking with link.exe failed: exit code: 1`.
+# rustc locates MSVC through vswhere, so a standard Build Tools install needs
+# no PATH help. This is the slowest step on the box by far (several GB), which
+# is why the Windows runner takes minutes longer to come up than Linux.
+choco install -y visualstudio2022buildtools --no-progress | Out-Null
+choco install -y visualstudio2022-workload-vctools --no-progress | Out-Null
 # Re-read PATH from the MACHINE environment after the installs, rather than
 # appending to the copy this process started with. choco writes the machine
 # PATH itself, and that write is invisible to an already-running process — so
