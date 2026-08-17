@@ -54,7 +54,7 @@ jobs:
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::457667483187:role/freemkv-ci-runners
+          role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Mint a single-use runner registration token

@@ -38,7 +38,7 @@ jobs:
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::457667483187:role/freemkv-ci-runners
+          role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terminate CI runners older than MAX_AGE_MIN
