@@ -45,15 +45,16 @@ question. Current state of each:
 | `prerelease.sh` phase 1 (static) | secret scan across public repos | `leak-guard.yml` |
 | `prerelease.sh` phase 2 (gate) | per-crate fmt/clippy/test | `ci.yml` + `qa.yml` |
 | `prerelease.sh` phase 3 (contract) | CLI contract + exit codes | **still manual** |
-| `prerelease.sh` phase 4 (media) | real-media rips end to end | **still manual — needs hardware** |
-| `cli-acceptance.sh` | real-ISO acceptance, ~96 checks | **still manual — needs hardware** |
+| `prerelease.sh` phase 4 (media) | real-media rips end to end | `qa.yml` `cli-matrix`, push to `qa` |
+| `cli-acceptance.sh` | real-ISO acceptance, ~96 checks | `qa.yml` `cli-matrix`, push to `qa` |
 
 `precommit.sh` stays useful as the *local* fast loop — it is the same gate, run
 before you push rather than after. It is no longer the thing standing between a
 mistake and a release.
 
-The three still-manual rows are the honest remainder. Two of them need physical
-media and are covered under "the one leg that still needs hardware" below.
+One still-manual row is the honest remainder: the CLI contract check. The media
+rows are no longer manual — they run on ephemeral EC2 runners against full-size
+disc images in S3, described under "the real-media gate" below.
 
 ## What runs where, and why
 
@@ -64,7 +65,7 @@ media and are covered under "the one leg that still needs hardware" below.
 | **Linux cross-target clippy** | GitHub Actions (`qa.yml`) | push to `qa` |
 | **CLI integration, end to end** | GitHub Actions (`qa.yml`, `freemkv`) | push to `qa` |
 | **cross-platform output parity** | GitHub Actions (`parity.yml`) | push to `qa` + manual |
-| **real-media acceptance** | self-hosted runner | push to `qa` — see below |
+| **real-media acceptance, full-size** | ephemeral EC2 (linux + windows) | push to `qa` — see below |
 | **GUI automation** | self-hosted or EC2 | `qa` |
 | mutation runs (~12k mutants, ~1 h) | EC2, sharded | pre-release only |
 
@@ -122,52 +123,64 @@ EC2 instance configured with autologon plus a Startup shortcut — that pairing
 is what makes the session interactive, and it is what our conformance harness
 uses.
 
-## Registering the `freemkv-media` runner
+## The real-media gate
 
-The real-media job runs on a self-hosted runner labelled `freemkv-media`, on a
-host with the ISO hoard mounted. The recipe below is the one that was proven by
-hand before the job was written — a container with the toolchain, ffmpeg, the
-hoard read-only, and the sibling crates patched to their local checkouts.
+`disc://` and real `iso://` need media no hosted runner has: hosted runners
+ship ~14 GB of disk against a 34 GB Blu-ray and a 53 GB UHD. So `qa.yml` runs
+the acceptance suite on **ephemeral EC2 runners**, one Linux and one Windows,
+against full-size disc images held in S3.
 
-Two things that are easy to get wrong and were both hit while proving it:
+Three jobs, in order:
 
-1. **The sibling patch is not optional.** Without a `.cargo/config.toml`
-   redirecting the git-tag deps at the checked-out siblings, the build resolves
-   the RELEASED libfreemkv and tests code that is not under test. It fails
-   loudly (`cannot find value scan_dir`), but a future version might not.
-2. **The suite must be able to run on Linux.** It could not: `stat -f %z` (BSD)
-   and `stat -c %s` (GNU) are not two spellings of one thing — on Linux
-   `stat -f` is *filesystem* status and SUCCEEDS, so a `||` fallback never
-   fires. That produced a phantom "size mismatch" on the first Linux run.
+| job | what it does |
+|---|---|
+| `launch-runners` | mints a single-use registration token per OS and starts one EC2 instance from a launch template |
+| `cli-matrix` | builds the CLI, fetches four fixtures, runs `cli-acceptance.sh`, emits a hash ledger |
+| `compare-cli-matrix` | fails unless Linux and Windows produced byte-identical output |
 
-The runner needs, in addition to the hoard:
+**Fixtures — one per family**, in the bucket named by the `FMKV_FIXTURES_BUCKET` secret:
+`dvd.iso` (CSS), `bd.iso` (AACS v1), `uhd.iso` (AACS 2.0), `hddvd.iso`
+(MPEG-PS/VC-1). ~121 GiB, held for the whole run rather than fetched per rip,
+because the format, selection and `dir://` groups revisit them — the launch
+templates carry 600 GB for that reason.
 
-- **`keydb.cfg`**, or every AACS family skips. Set `FMKV_KEYDB` (repo variable).
-- **`FMKV_KEY_URL` / `FMKV_KEY_AUTH`** (repo secrets) for the online key
-  service. Without them the UHD family skips even WITH a keydb, because a
-  keydb holds VUKs only for discs it has already seen — verified: a 62 MB
-  keydb had no entry for the UHD fixture.
-- **The acceptance suite itself**, provisioned on the runner out of band, with
-  its path in the `FMKV_ACCEPTANCE` repo variable. The workflow does NOT clone
-  it: this file is public, and naming the repository or host it lives on would
-  put internal infrastructure into a public workflow. The leak guard refuses
-  that, correctly — it caught exactly this on the first attempt.
+**Keys.** `FMKV_KEY_URL` / `FMKV_KEY_AUTH` (repo secrets) point at the online
+key service, the same one autorip ships with by default, so CI tests the
+configuration users actually have. A local `keydb.cfg` is not enough on its
+own: it holds VUKs only for discs it has already seen, and a 62 MB keydb had
+no entry for the UHD fixture. The job checks both secrets are set BEFORE
+fetching 121 GiB, because otherwise the run gets six minutes in, rips the DVD
+fine (CSS needs no key) and only then reports a key error that reads like a
+media defect.
 
-An existing runner on another host is registered to a different org with the
-hoard not mounted, so it cannot be reused — register a new one scoped to the
-`freemkv` org, and do not enable it for forked-PR triggers, since a self-hosted
-runner executes repo workflow code on that host.
+**Teardown — three independent mechanisms**, because each can fail alone:
+`--ephemeral` de-registers the runner after one job; `shutdown` against
+`InstanceInitiatedShutdownBehavior=terminate` deletes the instance and its
+volume; and `ci-runner-sweeper.yml` terminates anything tagged `freemkv-ci`
+older than 5 h from OUTSIDE the instance — the only one that survives
+user-data dying before it arms the other two.
 
-## The one leg that still needs hardware
+**Cost control is `needs:`, not decoration.** Nothing touches real media until
+lint, the unit suites, the cross-lint, the Windows build and the synthetic CLI
+matrix are green, so a typo cannot burn a two-hour rip. This is also why the
+matrix is `workflow_dispatch` in `ci-runner-launch.yml`: a push trigger is how
+a busy afternoon becomes a surprise bill.
 
-`disc://` and real `iso://` need physical media: an optical drive for the
-former, the image hoard for the latter. No hosted runner has either, so the
-real-media acceptance suite runs on a **self-hosted runner** labelled
-`freemkv-media`, on a host that has the hoard mounted and a drive attached.
+### What this gate does NOT cover
 
-Until such a runner is registered, that job cannot run, and a green `qa` means
-"everything that does not need hardware passed" rather than "everything
-passed". That distinction is worth stating out loud on any release, because
-the two most recent shipped defects — multi-clip A/V drift, and a CSS
-false-positive that silently destroyed a DVD's title table — were both
-invisible to every hardware-free check and were caught only on real media.
+**macOS, on full-size media.** EC2 Mac requires a Dedicated Host with a
+24-hour minimum allocation, which is not worth it per qa push. macOS is still
+compared on hosted runners by `hash-matrix.yml`, against synthetic media and a
+35 MB DVD fixture — so the mux and the UDF walk are proven there; what is not
+proven on macOS is full-size, multi-family real media.
+
+**Seamlessly branched titles.** The UHD fixture is a single-clip title. The
+suite previously defaulted to a branched one specifically to exercise the
+multi-clip seam join; swapping `uhd.iso` for a branched disc restores that
+coverage without any CI change.
+
+Both are stated here rather than left implicit, because a green `qa` should
+mean a known thing. The two most recent shipped defects — multi-clip A/V
+drift, and a CSS false-positive that silently destroyed a DVD's title table —
+were both invisible to every hardware-free check, which is what this gate
+exists for.

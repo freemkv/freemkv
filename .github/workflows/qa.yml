@@ -228,142 +228,6 @@ jobs:
       - run: cargo build --release --tests
         working-directory: freemkv
 
-  # ── The real-media gate ───────────────────────────────────────────────
-  #
-  # Everything above runs on hosted runners and cannot touch a disc image.
-  # This job runs the ~70-check acceptance suite against the actual ISO hoard,
-  # which is the only thing that has ever caught this project's worst defects:
-  # a CSS false positive that silently destroyed a DVD's title table, and
-  # multi-clip A/V drift. Both were invisible to every hardware-free check.
-  #
-  # It needs a self-hosted runner labelled `freemkv-media` on a host that has
-  # the hoard mounted. See .github/QA.md for the registration command; the
-  # runner also needs a keydb and, for the UHD family, the online key service
-  # credentials — without those that family SKIPS, which the suite reports as a
-  # named gap rather than a pass.
-  #
-  # The suite itself lives in the private repo (it needs the hoard and key
-  # material), and the runner can reach Gitea, so it is cloned rather than
-  # vendored.
-  real-media:
-    # Run only when the runner is actually configured.
-    #
-    # A job with no runner does not fail — it QUEUES, for up to 24 hours, and a
-    # queued job keeps the whole workflow "in progress". release.sh's CI gate
-    # reads every run for the commit and refuses while any is queued, so an
-    # unregistered runner does not just skip this check: it blocks every
-    # release, indefinitely, with no error anywhere. That is what it did.
-    #
-    # `timeout-minutes` does NOT fix this — it bounds execution, not queue time.
-    # Gating on the repo variable does: unconfigured, the job is skipped and the
-    # workflow completes; configured, it runs exactly as before. The variable is
-    # the one this job cannot work without, so it is the honest condition.
-    #
-    # AND only on a PUSH. These repos are public and this runner holds the key
-    # database, so a job a fork could trigger is a job that can walk away with
-    # AACS key material. A fork cannot push to this branch, so keying on the
-    # event — not on approval settings someone can relax later — is what makes
-    # that unreachable.
-    #
-    # ORDERING: this is the most expensive thing the gate runs, so it runs
-    # LAST. `needs` is not decoration here — it is the cost control. Nothing
-    # touches real media until lint, the unit suites, the cross-lint, the
-    # Windows build and the synthetic CLI matrix have all gone green, so a
-    # typo cannot burn a 90-minute rip.
-    needs: [release-tests, cross-lint, windows-build, cli-integration]
-    if: vars.FMKV_ACCEPTANCE != '' && github.event_name == 'push'
-    #
-    # `freemkv-lan`, NOT `freemkv-media`. This job needs a PRE-PROVISIONED box:
-    # the acceptance suite at a fixed path, the ISO hoard mounted, and reach to
-    # the private repo on LAN Gitea. An ephemeral EC2 runner has none of those.
-    #
-    # They shared the `freemkv-media` label for exactly one run, and an EC2
-    # runner immediately grabbed this job and failed on
-    # `acceptance suite not found at /opt/freemkv-acceptance/cli-acceptance.sh`
-    # — a job stolen by a runner that could never satisfy it. The label now
-    # names the requirement (a LAN host) rather than the workload (media), so
-    # the two cannot collide again.
-    runs-on: [self-hosted, freemkv-lan]
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          path: freemkv
-      - uses: actions/checkout@v7
-        with:
-          repository: freemkv/libfreemkv
-          ref: qa
-          path: libfreemkv
-      - uses: actions/checkout@v7
-        with:
-          repository: freemkv/freemkv-keysources
-          ref: qa
-          path: freemkv-keysources
-      - uses: actions/checkout@v7
-        with:
-          repository: freemkv/freemkv-engine
-          ref: qa
-          path: freemkv-engine
-      - uses: actions/checkout@v7
-        with:
-          repository: freemkv/freemkv-i18n
-          ref: qa
-          path: freemkv-i18n
-      - uses: actions/checkout@v7
-        with:
-          repository: freemkv/freemkv-unlock
-          ref: qa
-          path: freemkv-unlock
-      - name: Resolve siblings from their qa tips
-        shell: bash
-        working-directory: freemkv
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<'EOF'
-          [patch.crates-io]
-          libfreemkv = { path = "../libfreemkv" }
-          freemkv-keysources = { path = "../freemkv-keysources" }
-          freemkv-engine = { path = "../freemkv-engine" }
-          freemkv-i18n = { path = "../freemkv-i18n" }
-          EOF
-      - uses: dtolnay/rust-toolchain@1.97.0
-      # The step below hands the suite an explicit FMKV_BIN, which suppresses
-      # the build the suite would otherwise do for itself -- so without this,
-      # it is handed a path nothing ever produced and dies on "binary not
-      # executable" before running a single case.
-      - name: Build the CLI the suite will drive
-        shell: bash
-        working-directory: freemkv
-        run: cargo build --release --bin freemkv
-      - name: Real-media acceptance
-        shell: bash
-        env:
-          FMKV_ISO_ROOT: ${{ vars.FMKV_ISO_ROOT }}
-          FMKV_KEYDB: ${{ vars.FMKV_KEYDB }}
-          FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
-          FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
-          ACCEPTANCE: ${{ vars.FMKV_ACCEPTANCE }}
-        run: |
-          # The suite lives ON THE RUNNER, provisioned out of band, and is
-          # named by a repo variable. It is deliberately NOT cloned here: this
-          # file is public, and naming the repository or host it comes from
-          # would put internal infrastructure into a public workflow, which the
-          # leak guard correctly refuses.
-          test -x "$ACCEPTANCE" || {
-            echo "::error::acceptance suite not found at '$ACCEPTANCE' - set the FMKV_ACCEPTANCE repo variable to its path on the runner"
-            exit 2
-          }
-          FMKV_BIN="$PWD/freemkv/target/release/freemkv" bash "$ACCEPTANCE"
-
-  # ── The CLI surface, end to end ───────────────────────────────────────
-  #
-  # tests/cli-integration.sh generates its own Blu-ray-legal media with ffmpeg
-  # and then drives every file-reachable CLI function, verifying output with
-  # ffprobe rather than trusting an exit code. This is the check that would
-  # have caught a sink silently writing the wrong thing while returning 0.
-  #
-  # It needs no hardware, so it belongs here rather than on the hardware
-  # checklist where it previously sat as a manual step.
   cli-integration:
     strategy:
       fail-fast: false
@@ -459,7 +323,7 @@ jobs:
   # a full day and no teardown can avoid it. Hosted macOS already covers build,
   # test, the synthetic CLI matrix and the 6 GB real DVD — full-size media on
   # macOS is a known, accepted gap rather than a silent one.
-  launch-full-media:
+  launch-runners:
     needs: [release-tests, cross-lint, windows-build, cli-integration]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -472,7 +336,7 @@ jobs:
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::457667483187:role/freemkv-ci-runners
+          role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
           aws-region: us-west-2
       - name: Mint a single-use registration token
         id: reg
@@ -500,15 +364,42 @@ jobs:
                 {Key=launched-by,Value=${{ github.run_id }}}]" \
             --query 'Instances[0].InstanceId' --output text
 
-  full-media:
-    needs: launch-full-media
+  # ── The CLI matrix: every feature, both platforms, byte-identical ─────────
+  #
+  # This is the ONLY real-media gate. It replaced two jobs that overlapped and
+  # a third that could never run:
+  #
+  #   - a LAN-only `real-media` job that ran the acceptance suite on a
+  #     pre-provisioned box. It needed a host with the ISO hoard mounted, so it
+  #     was gated behind a repo variable, and with that variable unset it
+  #     SKIPPED every run — the suite that catches this project's worst defects
+  #     was not running at all.
+  #   - a `full-media` job that ripped three ISOs and hashed them. That is four
+  #     of this suite's ~90 checks: it proved the mux, and nothing about the
+  #     selection matrix, the format matrix, `dir://` sources or round-trips.
+  #
+  # Both are gone. The acceptance suite now runs HERE, on ephemeral EC2, on
+  # Linux and Windows, and the two must produce identical hashes.
+  #
+  # macOS is deliberately absent, and it is the one gap in this gate: EC2 Mac
+  # requires a Dedicated Host with a 24-hour minimum allocation, which is not
+  # worth it per qa push. macOS parity is still covered on hosted runners by
+  # hash-matrix.yml against synthetic and small-fixture media — what it does
+  # not cover is full-size real discs.
+  #
+  # ORDERING: `needs` is the cost control, not decoration. This is by far the
+  # most expensive thing the gate runs, so nothing touches real media until
+  # lint, the unit suites, the cross-lint, the Windows build and the synthetic
+  # CLI matrix are all green. A typo cannot burn a two-hour rip.
+  cli-matrix:
+    needs: launch-runners
     if: github.event_name == 'push'
     strategy:
       fail-fast: false
       matrix:
         os: [linux, windows]
     runs-on: [self-hosted, freemkv-media, "${{ matrix.os }}"]
-    timeout-minutes: 180
+    timeout-minutes: 240
     permissions:
       id-token: write
       contents: read
@@ -525,6 +416,16 @@ jobs:
         with: { repository: freemkv/freemkv-i18n,       ref: qa, path: freemkv-i18n }
       - uses: actions/checkout@v7
         with: { repository: freemkv/freemkv-unlock,     ref: qa, path: freemkv-unlock }
+      # The acceptance suite is not in this public repo — it names fixtures and
+      # key sources. It lives in the private `freemkv-ci` repo, which exists
+      # because Actions runners cannot reach the LAN Gitea host the scripts
+      # used to live on. That unreachability is the whole reason the LAN job
+      # this replaces could not be moved to EC2 before.
+      - uses: actions/checkout@v7
+        with:
+          repository: freemkv/freemkv-ci
+          token: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          path: ci
       - name: Point the patches at the sibling checkouts
         shell: bash
         run: |
@@ -536,101 +437,207 @@ jobs:
           freemkv-engine = { path = "../freemkv-engine" }
           freemkv-i18n = { path = "../freemkv-i18n" }
           CFG
+      - name: Record the libfreemkv sha
+        shell: bash
+        # MUX_APP carries libfreemkv's short sha, so two legs built from
+        # different commits differ in output BYTES while being functionally
+        # identical. The compare job refuses to judge a mismatch unless these
+        # agree, rather than reporting a divergence that means nothing.
+        run: echo "LF_SHA=$(git -C libfreemkv rev-parse --short HEAD)" >> "$GITHUB_ENV"
+      - name: Install ffmpeg
+        shell: bash
+        # The suite verifies EVERY output with ffprobe — stream counts, clean
+        # decode, audio actually present on the timeline. Without ffmpeg it
+        # does not fail, it degrades into checking exit codes, which is the
+        # failure mode this gate exists to prevent.
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          else
+            choco install ffmpeg -y --no-progress
+            # choco writes the MACHINE PATH, which the already-running shell
+            # does not see. Re-read it rather than assume — this exact thing
+            # cost a full runner debug cycle with the AWS CLI.
+            export PATH="$PATH:/c/ProgramData/chocolatey/bin"
+            echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
+          fi
+          command -v ffprobe >/dev/null || {
+            echo "::error title=ffprobe missing::the acceptance suite verifies every output with ffprobe; without it the run would only be checking exit codes"
+            exit 1
+          }
+          ffprobe -version | head -1
       - name: Build the CLI
         shell: bash
         working-directory: freemkv
         run: cargo build --release --bin freemkv
-      - name: Rip each fixture and hash it
+      - name: Fetch the four disc fixtures
+        shell: bash
+        # One of each family: DVD/CSS, Blu-ray/AACS v1, UHD/AACS 2.0, HD-DVD.
+        # ~121 GiB, held for the whole run rather than fetched-and-deleted per
+        # rip, because the format/selection/dir:// groups revisit them. The
+        # launch templates carry 600 GB for exactly this.
+        run: |
+          set -euo pipefail
+          B="${{ secrets.FMKV_FIXTURES_BUCKET }}"
+          # Windows: the freemkv binary is a NATIVE build and cannot resolve an
+          # MSYS path like /d/a/iso. `cygpath -m` yields C:/... , which Git-bash
+          # and the native binary both accept — so one variable works for both.
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            ISO_DIR=$(cygpath -m "$(pwd)")/isos
+          else
+            ISO_DIR="$(pwd)/isos"
+          fi
+          mkdir -p isos
+          echo "ISO_DIR=$ISO_DIR" >> "$GITHUB_ENV"
+          for f in dvd bd uhd hddvd; do
+            sz=$(aws s3api head-object --bucket "$B" --key "$f.iso" --region us-west-2 \
+                   --query ContentLength --output text)
+            echo "::group::fetch $f.iso ($((sz/1024/1024/1024)) GiB)"
+            if ! aws s3 cp "s3://$B/$f.iso" "isos/$f.iso" --quiet; then
+              echo "::error title=Fixture download failed ($f)::could not fetch $f.iso from the Oregon bucket — check the runner's instance profile can read it"
+              exit 1
+            fi
+            echo "::endgroup::"
+          done
+          df -h . | tail -1
+      - name: Run the full CLI acceptance suite
+        id: suite
         shell: bash
         env:
-          # The fixtures are REAL retail discs. CSS (DVD) cracks keylessly, but
-          # AACS (BD/UHD) does not — the first run got through the whole 6 GB
-          # DVD and then died on the Blu-ray with `E7022 No key source has a
-          # decryption key`. This is the same online key service autorip runs
-          # with by default, so CI tests the configuration users actually have.
+          # The same online key service autorip ships with by default, so CI
+          # tests the configuration users actually have. The fixtures are real
+          # retail discs: CSS (DVD) cracks keylessly, AACS (BD/UHD) does not.
           FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
           FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
         run: |
-          set -euo pipefail
-          BIN="$PWD/freemkv/target/release/freemkv"
-          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
-          out="full-${{ matrix.os }}.txt" ; : > "$out"
-
-          # Fail EARLY and by name if the key service is not configured. Without
-          # this the job runs for six minutes, rips the DVD fine, and only then
-          # reports a key error on the Blu-ray — which reads like a media
-          # problem rather than a missing secret.
+          set -uo pipefail
+          # Fail EARLY and BY NAME on a missing secret. Without this the run
+          # gets six minutes in, rips the DVD fine (CSS needs no key), and only
+          # then reports a key error on the Blu-ray — which reads like a media
+          # defect rather than an unset secret.
           if [ -z "${FMKV_KEY_URL:-}" ] || [ -z "${FMKV_KEY_AUTH:-}" ]; then
             echo "::error title=Key service not configured::FMKV_KEY_URL / FMKV_KEY_AUTH are unset, so the AACS fixtures (bd, uhd) cannot decrypt. Set them as repo secrets. The DVD would still pass, because CSS needs no key — do not read a green DVD as evidence the keys work."
             exit 1
           fi
 
-          # Smallest first: a break shows up on the 6 GB DVD in minutes rather
-          # than after an hour of UHD.
-          for f in dvd bd uhd; do
-            echo "::group::$f"
-            sz=$(aws s3api head-object --bucket freemkv-fixtures-usw2-457667483187 \
-                   --key "$f.iso" --region us-west-2 --query ContentLength --output text)
-            echo "fetching $f.iso ($((sz/1024/1024)) MiB)"
-            if ! aws s3 cp "s3://freemkv-fixtures-usw2-457667483187/$f.iso" "$f.iso" --quiet; then
-              echo "::error title=Fixture download failed ($f)::could not fetch $f.iso from the Oregon bucket — check the OIDC role can read it"
-              exit 1
-            fi
-            df -h . | tail -1
+          BIN="$PWD/freemkv/target/release/freemkv"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            BIN="$(cygpath -m "$PWD")/freemkv/target/release/freemkv.exe"
+            # $WORK comes from mktemp under $TMPDIR; give it a mixed path too,
+            # or the suite hands the native binary an MSYS path it cannot open.
+            export TMPDIR="$(cygpath -m "${RUNNER_TEMP}")"
+          fi
+          [ -x "${BIN%.exe}" ] || [ -x "$BIN" ] || {
+            echo "::error title=CLI binary missing::expected a release build at $BIN"; exit 1; }
 
-            # Not `set -e`: the exit code is wanted so the error can NAME the
-            # fixture. A bare non-zero here previously surfaced as an opaque
-            # "Process completed with exit code 1" with the real cause buried
-            # in the middle of the log.
-            rc=0
-            "$BIN" --key-url "$FMKV_KEY_URL" --key-auth "$FMKV_KEY_AUTH" \
-              "iso://$f.iso" "mkv://$f-out.mkv" || rc=$?
-            if [ "$rc" != "0" ]; then
-              echo "::error title=Rip failed ($f)::freemkv exited $rc ripping $f.iso — see the $f group above for its output"
-              exit "$rc"
-            fi
-            [ -s "$f-out.mkv" ] || {
-              echo "::error title=Empty output ($f)::the rip reported success but $f-out.mkv is empty or missing"
-              exit 1
-            }
+          chmod +x ci/scripts/cli-acceptance.sh || true
+          FMKV_BIN="$BIN" \
+          FMKV_DVD_ISO="$ISO_DIR/dvd.iso" \
+          FMKV_BD_ISO="$ISO_DIR/bd.iso" \
+          FMKV_UHD_ISO="$ISO_DIR/uhd.iso" \
+          FMKV_HDDVD_ISO="$ISO_DIR/hddvd.iso" \
+          FMKV_HASHES="$PWD/cli-${{ matrix.os }}.txt" \
+            bash ci/scripts/cli-acceptance.sh
+          rc=$?
 
-            if command -v sha256sum >/dev/null; then H=$(sha256sum "$f-out.mkv" | cut -d' ' -f1)
-            else H=$(shasum -a 256 "$f-out.mkv" | cut -d' ' -f1); fi
-            printf '%s  %s-out.mkv\n' "$H" "$f" >> "$out"
-            echo "$f OK  $(du -h "$f-out.mkv" | cut -f1)  sha=${H:0:16}..."
-            # Reclaim before the next one: all three together exceed the disk.
-            rm -f "$f.iso" "$f-out.mkv"
-            echo "::endgroup::"
-          done
-          echo "── all three fixtures ripped ──"; cat "$out"
+          # The suite's own summary already names each FAIL and each unexpected
+          # SKIP. Add the one line that says which LEG this was, so a red run in
+          # a two-platform matrix does not require opening both to find out.
+          if [ "$rc" != 0 ]; then
+            echo "::error title=CLI acceptance failed on ${{ matrix.os }}::the suite exited $rc — the FAIL/SKIP lines naming each check are in this step's log above"
+          fi
+          echo "libfreemkv=$LF_SHA" >> "cli-${{ matrix.os }}.txt"
+          echo "── hashes recorded on ${{ matrix.os }} ──"
+          cat "cli-${{ matrix.os }}.txt"
+          exit $rc
+      # `always()`: a leg that FAILED still produced artifacts, and those are
+      # exactly the ones worth comparing — "windows diverged" is the more
+      # useful sentence when windows is also the leg that went red.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: "full-media-${{ matrix.os }}"
-          path: "full-${{ matrix.os }}.txt"
+          name: "cli-matrix-${{ matrix.os }}"
+          path: "cli-${{ matrix.os }}.txt"
 
-  compare-full:
-    needs: full-media
-    if: github.event_name == 'push'
+  compare-cli-matrix:
+    needs: cli-matrix
+    if: always() && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
+      # continue-on-error: with no matching artifact this action FAILS, which
+      # would replace the diagnostic below ("neither leg uploaded a hash file,
+      # check whether the runners registered") with a generic download error —
+      # burying the actual cause in exactly the case it matters most.
       - uses: actions/download-artifact@v4
-        with: { pattern: "full-media-*", path: hashes }
-      - name: Linux and Windows must agree byte for byte
+        with: { pattern: "cli-matrix-*", path: hashes }
+        continue-on-error: true
+      - name: Linux and Windows must produce identical bytes
         shell: bash
         run: |
           set -euo pipefail
-          l=hashes/full-media-linux/full-linux.txt
-          w=hashes/full-media-windows/full-windows.txt
-          for f in "$l" "$w"; do
-            [ -s "$f" ] || { echo "::error::$f missing or empty — a leg did not produce hashes"; exit 1; }
-          done
-          # Compare the hash column only: the filenames are identical by
-          # construction, so any difference here is a real cross-platform
-          # divergence in what the ripper produced.
-          if diff <(cut -d' ' -f1 "$l") <(cut -d' ' -f1 "$w"); then
-            echo "full-size media: linux and windows produced identical output"
-          else
-            echo "::error::full-size rips DIVERGED between linux and windows"
-            exit 1
-          fi
+          python3 - <<'PY'
+          import glob, os, sys, collections
+
+          arts, shas = collections.defaultdict(dict), {}
+          files = sorted(glob.glob("hashes/*/cli-*.txt"))
+          if not files:
+              print("::error title=No hashes produced::neither leg of the CLI matrix "
+                    "uploaded a hash file, so nothing was compared. Check whether the "
+                    "EC2 runners registered at all.")
+              sys.exit(1)
+
+          for path in files:
+              plat = os.path.basename(path)[len("cli-"):-len(".txt")]
+              for line in open(path):
+                  line = line.strip()
+                  if not line:
+                      continue
+                  if line.startswith("libfreemkv="):
+                      shas[plat] = line.split("=", 1)[1]
+                      continue
+                  h, _, name = line.partition("  ")
+                  arts[name.strip()][plat] = h
+
+          plats = sorted({p for v in arts.values() for p in v})
+          print("platforms:", ", ".join(plats) or "(none)")
+          fail = False
+
+          if len(set(shas.values())) > 1:
+              print(f"::error title=Sibling shas differ::libfreemkv differs across the "
+                    f"matrix ({shas}) — MUX_APP is stamped from it, so a byte comparison "
+                    "would be meaningless. Pin the sibling refs.")
+              fail = True
+
+          # Name the platforms that MUST report rather than accepting whatever
+          # turned up. A run where one leg died before writing hashes would
+          # otherwise compare the survivor with itself, agree, and go green —
+          # claiming parity having tested one, with the missing platform being
+          # the one that failed and so the one most worth comparing.
+          EXPECTED = {"linux", "windows"}
+          absent = sorted(EXPECTED - set(plats))
+          if absent:
+              print(f"::error title=Platform never reported::no hashes from "
+                    f"{', '.join(absent)} — that leg was never compared, so this run "
+                    "cannot claim cross-platform parity")
+              fail = True
+
+          for name in sorted(arts):
+              by = arts[name]
+              missing = sorted(EXPECTED - set(by))
+              if len(set(by.values())) == 1 and not missing:
+                  print(f"  OK    {name}")
+              elif missing:
+                  fail = True
+                  print(f"::error title=Artifact missing on {','.join(missing)}::{name} "
+                        f"was not produced on {', '.join(missing)} — it agrees where it "
+                        "exists, but that platform is unproven for this output")
+              else:
+                  fail = True
+                  print(f"::error title=Output differs::{name} DIFFERS across platforms:")
+                  for p in sorted(by):
+                      print(f"      {p:10} {by[p]}")
+
+          print(f"\n{len(arts)} artifacts compared across {len(plats)} platforms")
+          sys.exit(1 if fail else 0)
+          PY
