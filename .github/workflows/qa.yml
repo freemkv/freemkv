@@ -15,13 +15,23 @@ name: qa
 # one being released, which is the exact failure this branch exists to prevent.
 #
 # What this gate CANNOT cover: `disc://` and real `iso://` need physical media,
-# and no hosted runner has an optical drive or the image hoard. Those run on a
-# self-hosted runner (see the media job at the end) and are the one leg that
-# stays on hardware.
+# and no hosted runner has the disk for a 53 GB UHD. Those run on ephemeral
+# EC2 runners (see cli-matrix at the end), launched per run and torn down
+# after one job.
 on:
   push:
     branches: [qa]
   workflow_dispatch:
+    inputs:
+      run_media:
+        description: >-
+          Also run the full-size media matrix on EC2 (~2h, real money).
+          Off by default: a dispatch is usually someone re-running the cheap
+          gates, and a push trigger for this is how a busy afternoon becomes a
+          surprise bill. On, it is the only way to prove the media gate without
+          promoting all eight repos to qa first.
+        type: boolean
+        default: false
 
 jobs:
   # ── Name the candidate ────────────────────────────────────────────────
@@ -325,7 +335,7 @@ jobs:
   # macOS is a known, accepted gap rather than a silent one.
   launch-runners:
     needs: [release-tests, cross-lint, windows-build, cli-integration]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.run_media
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -393,7 +403,7 @@ jobs:
   # CLI matrix are all green. A typo cannot burn a two-hour rip.
   cli-matrix:
     needs: launch-runners
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.run_media
     strategy:
       fail-fast: false
       matrix:
@@ -562,7 +572,7 @@ jobs:
 
   compare-cli-matrix:
     needs: cli-matrix
-    if: always() && github.event_name == 'push'
+    if: always() && (github.event_name == 'push' || inputs.run_media)
     runs-on: ubuntu-latest
     steps:
       # continue-on-error: with no matching artifact this action FAILS, which
