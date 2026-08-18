@@ -909,7 +909,17 @@ define_class!(
             // own: a Settings window rebuilt while a download runs comes back
             // with a fresh, enabled button.
             if self.ivars().keydb_updating.get() {
-                self.set_keydb_note("A keydb update is already running — please wait.");
+                // Localized, and through the SAME keys the Windows shell
+                // already used. All three of these notes were hard-coded
+                // English here while `windows.rs` read
+                // `gui.set.keydb_no_url` / `gui.set.keydb_updating` from the
+                // catalog — one dialog, two shells, two answers, which is the
+                // exact drift this crate's shared `ui`/`strings` layer exists
+                // to prevent.
+                self.set_keydb_note(&crate::strings::get_or(
+                    "gui.set.keydb_busy",
+                    "A keydb update is already running — please wait.",
+                ));
                 return;
             }
             // Read the live field values, not the last-saved ones, so Update
@@ -932,7 +942,7 @@ define_class!(
             if url.trim().is_empty() {
                 // Nothing to fetch — tell the user in place instead of silently
                 // spawning a thread that errors into the (maybe-hidden) log.
-                self.set_keydb_note("No keydb update URL set — add one above, then click Update.");
+                self.set_keydb_note(&crate::strings::get("gui.set.keydb_no_url"));
                 return;
             }
             self.app_mut(|a| {
@@ -943,7 +953,7 @@ define_class!(
             });
             // Immediate in-Settings feedback: the download is ~20 MB and takes a
             // few seconds; the drain updates this note to the result when done.
-            self.set_keydb_note("Updating keydb… downloading, please wait.");
+            self.set_keydb_note(&crate::strings::get("gui.set.keydb_updating"));
             // Disable the button so a second click can't start a concurrent
             // download; the drain re-enables it when the result arrives.
             self.set_keydb_updating(true);
@@ -953,9 +963,16 @@ define_class!(
                     Ok(m) => m,
                     Err(e) => e,
                 };
-                if let Ok(mut v) = inbox.lock() {
-                    v.push(msg);
-                }
+                // RECOVER rather than skip the push, for the same reason the
+                // drain recovers: this is the ONLY message the keydb worker
+                // ever sends, and dropping it leaves the Update button
+                // disabled and the drain timer polling an empty inbox at 5 Hz
+                // forever — the exact wedge `start_drain`'s own comment says
+                // the one-shot design exists to avoid.
+                inbox
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(msg);
             });
             self.start_drain();
         }
@@ -1083,10 +1100,22 @@ define_class!(
 
         #[unsafe(method(onDrain:))]
         fn on_drain(&self, _s: Option<&AnyObject>) {
-            let msgs: Vec<String> = match self.ivars().inbox.lock() {
-                Ok(mut v) => v.drain(..).collect(),
-                Err(_) => return,
-            };
+            // RECOVER a poisoned inbox rather than returning. The early
+            // return looked harmless and stranded the whole drain: the keydb
+            // "busy" flag stayed set (the Update button never re-enabled), the
+            // Settings note never showed the result, and — because the
+            // invalidate below was skipped too — the 5 Hz timer kept firing
+            // forever, taking this same poisoned lock and returning again for
+            // the rest of the process's life. A poisoned `Vec<String>` is
+            // still a perfectly good `Vec<String>`, and the messages inside it
+            // are the ones explaining why the worker died.
+            let msgs: Vec<String> = self
+                .ivars()
+                .inbox
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .drain(..)
+                .collect();
             if msgs.is_empty() {
                 return;
             }

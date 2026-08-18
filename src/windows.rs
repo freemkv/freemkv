@@ -2265,10 +2265,17 @@ impl Shell {
 
     /// Drain worker-thread messages onto the log and into the Settings note.
     fn drain(&self) {
-        let msgs: Vec<String> = match self.inbox.lock() {
-            Ok(mut v) => v.drain(..).collect(),
-            Err(_) => return,
-        };
+        // RECOVER a poisoned inbox rather than returning — see the identical
+        // comment on the macOS shell's `onDrain:`. Returning here stranded
+        // `set_keydb_updating(false)` (the Update button stayed disabled) and
+        // skipped `KillTimer(TIMER_DRAIN)`, leaving a 5 Hz timer running for
+        // the life of the process re-taking the same poisoned lock.
+        let msgs: Vec<String> = self
+            .inbox
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
         if msgs.is_empty() {
             return;
         }
@@ -3401,9 +3408,11 @@ impl Prefs {
                     Ok(m) => m,
                     Err(e) => e,
                 };
-                if let Ok(mut v) = inbox.lock() {
-                    v.push(msg);
-                }
+                // RECOVER rather than skip the push — see the macOS shell's
+                // identical worker. Dropping this one message leaves the
+                // Update button disabled and `TIMER_DRAIN` firing forever,
+                // because `drain()` only stops the timer once it has a batch.
+                inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
             });
             sh.start_drain();
             Ok(())

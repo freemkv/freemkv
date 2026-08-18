@@ -346,12 +346,20 @@ fn dev_harness() -> bool {
         // `Acquire`, pairing with `engine::start_rip`'s `Release` store — see
         // `ui.rs`'s tick, which reads the same flag before the same
         // `summary`/`outcome` for the same reason.
+        //
+        // Every lock below RECOVERS from poison instead of unwrapping. This
+        // loop is the only thing draining the worker's log, and a worker that
+        // panicked mid-rip poisons `lines` — so `unwrap()` here killed the
+        // reader thread as well, with the panic message that explained the
+        // first failure still sitting unread in the buffer. Recovering prints
+        // it. See `engine::RunState::outcome_now` for the same reasoning
+        // applied to the verdict.
         while !st.finished.load(std::sync::atomic::Ordering::Acquire) {
             std::thread::sleep(std::time::Duration::from_millis(300));
-            for l in st.lines.lock().unwrap().drain(..) {
+            for l in st.lines.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
                 println!("  {l}");
             }
-            let p = *st.prog.lock().unwrap();
+            let p = *st.prog.lock().unwrap_or_else(|e| e.into_inner());
             if p.bytes_total > 0 {
                 println!(
                     "  {:.0}%  speed={:.1} MB/s  eta={}",
@@ -363,10 +371,10 @@ fn dev_harness() -> bool {
                 );
             }
         }
-        for l in st.lines.lock().unwrap().drain(..) {
+        for l in st.lines.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
             println!("  {l}");
         }
-        println!("SUMMARY: {}", st.summary.lock().unwrap());
+        println!("SUMMARY: {}", st.summary_now());
         return true;
     }
 

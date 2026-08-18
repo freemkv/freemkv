@@ -20,10 +20,21 @@ URLs de flux :
   disc://D:                Lecteur optique (Windows)
   mkv://chemin.mkv         Fichier Matroska
   m2ts://chemin.m2ts       Fichier de flux de transport BD
+  mp4://path.mp4           MP4 file
+  iso://image.iso          Image ISO Blu-ray
+  dir://folder/            Decrypted file tree in a folder
   network://hote:port      Flux TCP
   stdio://                 Tube stdin/stdout
-  iso://image.iso          Image ISO Blu-ray
   null://                  Ignorer (benchmarking)
+
+Track outputs (destination only):
+  demux://folder/          Every track as a separate file
+  video://folder/          Video tracks only
+  audio://folder/          Audio tracks only
+  sub://folder/            Subtitle tracks only
+  chapters://file.xml      Chapter list (.xml, .txt/.ogm, .vtt)
+  json://file.json         Title structure as JSON
+  fvi://file.fvi           Per-frame video index
 
   Toutes les URLs nécessitent un préfixe scheme://.
   Les chemins suivent le schéma : mkv://./Film.mkv, m2ts://./Film.m2ts
@@ -58,6 +69,7 @@ Options :
                       diagnostic dans ./log.txt (utiliser 3 pour les rapports de bugs).
       --log-file CHEM  Écrire le journal de diagnostic dans CHEM plutôt que ./log.txt.
   -q, --quiet         Supprimer la sortie
+      --language CODE Interface language (also --lang): a code like de or pt-BR, or auto.
       --raw           Ignorer le déchiffrement (sortie chiffrée brute)
       --multipass    Écrire/mettre à jour le mapfile pour la récupération multipasse
       --force        Extract into a non-empty dir:// target (overwrite)

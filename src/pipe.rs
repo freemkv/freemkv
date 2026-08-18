@@ -3529,22 +3529,16 @@ fn title_changed_message(num: usize, expected: &TitleIdentity, found: &TitleIden
         ("expected", expected.describe()),
         ("found", found.describe()),
     ];
-    match crate::strings::get(KEY) {
-        s if s == KEY => format!(
-            "Title {} changed between scans: expected {}, the drive now reports {}. \
-             The disc list moved under the rip; nothing was written for this title.",
-            num,
-            expected.describe(),
-            found.describe()
-        ),
-        _ => crate::strings::fmt(
-            KEY,
-            &args
-                .iter()
-                .map(|(k, v)| (*k, v.as_str()))
-                .collect::<Vec<_>>(),
-        ),
-    }
+    crate::strings::fmt_or(
+        KEY,
+        "Title {num} changed between scans: expected {expected}, the drive now \
+         reports {found}. The disc list moved under the rip; nothing was \
+         written for this title.",
+        &args
+            .iter()
+            .map(|(k, v)| (*k, v.as_str()))
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// The identity recorded for one job, out of the upfront scan's list.

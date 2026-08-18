@@ -753,12 +753,16 @@ impl RunState {
     /// A poisoned mutex still holds the last value written to it, and that
     /// value is the truth we want. Recover and read it, matching the
     /// poison-recovering convention used across this ecosystem.
-    /// Note the same poison-recovery is applied to every `lines` lock in this
-    /// file. A worker that panicked mid-run poisons the log buffer too, and an
+    /// The same poison-recovery is applied to every `lines` lock in the crate.
+    /// A worker that panicked mid-run poisons the log buffer too, and an
     /// `unwrap()` there turns one dead thread into a second panic on the next
     /// line written — losing the diagnostic that would have explained the
-    /// first. The two source-inspection pins below quote the recovering form,
-    /// so a regression to `unwrap()` fails them.
+    /// first. That claim used to be false: the CANCELLED arm of
+    /// `run_container` and both drain loops in `main.rs` still used `unwrap()`,
+    /// and the poison pin below covered `outcome` and `summary` ONLY, so
+    /// nothing enforced the sentence you are reading.
+    /// `every_lines_lock_recovers_from_poison` now reads both files and fails
+    /// on any `lines` lock that does not recover.
     pub fn outcome_now(&self) -> RunOutcome {
         *self.outcome.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -817,22 +821,34 @@ pub fn await_worker_exit(run: &RunState, grace: std::time::Duration) -> bool {
 
 struct UiSink(Arc<RunState>);
 
+/// The GUI core's ONLY `Sink`, so every line and every progress frame the
+/// library emits reaches the user through these two methods.
+///
+/// Both recover a poisoned lock rather than skipping the write. `if let Ok(..)`
+/// reads like defensive coding and is the opposite: a poisoned `lines` mutex
+/// means a worker panicked, which is precisely when the log is the only record
+/// of what happened — and the silent `else` branch threw away every subsequent
+/// line, so the run went quiet at the exact moment it became interesting.
+/// Dropping progress frames is milder but the same mistake: the bar freezes
+/// mid-rip with no explanation. A poisoned mutex still holds its last value and
+/// the data behind it is a plain `Vec`/`Prog` with no invariant a panic could
+/// have broken halfway, so recovering is safe as well as correct.
 impl fe::Sink for UiSink {
     fn log(&self, _level: fe::Level, msg: &str) {
-        if let Ok(mut v) = self.0.lines.lock() {
-            v.push(msg.to_string());
-        }
+        self.0
+            .lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(msg.to_string());
     }
     fn progress(&self, p: &fe::Progress) {
-        if let Ok(mut g) = self.0.prog.lock() {
-            *g = Prog {
-                bytes_done: p.bytes_done,
-                bytes_total: p.bytes_total,
-                speed_bps: p.speed_bps,
-                eta_secs: p.eta_secs,
-                sectors_bad: p.sectors_bad,
-            };
-        }
+        *self.0.prog.lock().unwrap_or_else(|e| e.into_inner()) = Prog {
+            bytes_done: p.bytes_done,
+            bytes_total: p.bytes_total,
+            speed_bps: p.speed_bps,
+            eta_secs: p.eta_secs,
+            sectors_bad: p.sectors_bad,
+        };
     }
     fn should_cancel(&self) -> bool {
         self.0.cancel.load(Ordering::Relaxed)
@@ -1875,10 +1891,18 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
     )
     .map_err(|e| format!("convert failed: {e}"))?;
     if !o.completed {
+        // Recovering, like every other `lines` lock in this file. This arm is
+        // the CANCELLED path — reached exactly when something already went
+        // wrong — and it sat three lines above a sibling that recovered
+        // correctly. A worker that panicked earlier poisons `lines`, so an
+        // `unwrap()` here turned one dead thread into a second panic while
+        // writing the line that says where the partial file was left. The
+        // failure branch needs the protection more than the success branch,
+        // not less.
         state
             .lines
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .push(format!("cancelled — partial output kept: {target}"));
     } else {
         let mut lines = state.lines.lock().unwrap_or_else(|e| e.into_inner());
@@ -2184,7 +2208,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             state
                 .lines
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .push(format!("decrypting image → {}", dest.display()));
             // `image_or_dir_scheme`, not `source_scheme` — see the former's
             // doc. `recover_to_iso` happens to read only `job.mode`/`job.raw`
@@ -2234,7 +2258,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     state
         .lines
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .push(format!("selection resolved to titles {indices:?}"));
     if indices.is_empty() {
         return Err("Nothing selected to rip.".into());
@@ -2942,6 +2966,140 @@ mod run_state_poison_tests {
             st.summary_now(),
             "aborted: loss exceeded tolerance",
             "the summary the worker had already written was discarded"
+        );
+    }
+
+    /// The GUI core's only `Sink` must still deliver after a worker panics.
+    ///
+    /// `UiSink::log` was `if let Ok(mut v) = ..lock() { v.push(..) }`, which
+    /// reads as caution and behaves as censorship: `UiSink` is the ONE `Sink`
+    /// the shared GUI core installs, so every library log line reaches the user
+    /// through it. Once any thread panicked holding the buffer the `else` arm
+    /// swallowed every line from then on — the run went silent at exactly the
+    /// moment the log became the only evidence of what happened. `progress` had
+    /// the same shape and froze the bar.
+    ///
+    /// Mutation caught: putting either method's `unwrap_or_else` back to
+    /// `if let Ok(..)`/`unwrap()` — the first drops the line, the second panics
+    /// the worker that was trying to report the first panic.
+    #[test]
+    fn the_ui_sink_still_delivers_lines_and_progress_through_a_poisoned_lock() {
+        use super::{Prog, RunState, UiSink};
+        use freemkv_engine as fe;
+        use freemkv_engine::Sink as _;
+        use std::sync::Arc;
+
+        let st = Arc::new(RunState::default());
+        // Poison both buffers the way a panicking worker would.
+        let st2 = Arc::clone(&st);
+        let _ = std::thread::spawn(move || {
+            // Bound to a differently-named local on purpose. This fixture MUST
+            // unwrap — poisoning the lock is the whole point of it — and
+            // `every_lines_lock_recovers_from_poison` reads this file whole,
+            // test code included. Taking the buffer's lock through a field
+            // access spelled the usual way would make that pin fail on its own
+            // sibling, so the field is rebound first.
+            let buf = &st2.lines;
+            let _g1 = buf.lock().unwrap();
+            let _g2 = st2.prog.lock().unwrap();
+            panic!("worker died holding the log buffer");
+        })
+        .join();
+        assert!(
+            st.lines.is_poisoned() && st.prog.is_poisoned(),
+            "fixture invalid: both locks must actually be poisoned"
+        );
+
+        let sink = UiSink(Arc::clone(&st));
+        sink.log(fe::Level::Warn, "E7022: no key for this disc");
+        sink.progress(&fe::Progress {
+            bytes_done: 7,
+            bytes_total: 11,
+            speed_bps: 3,
+            eta_secs: Some(5),
+            sectors_bad: 1,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            *st.lines.lock().unwrap_or_else(|e| e.into_inner()),
+            vec!["E7022: no key for this disc".to_string()],
+            "the sink dropped the line that explains the failure — after a \
+             panic the log is the only record there is"
+        );
+        let Prog {
+            bytes_done,
+            bytes_total,
+            ..
+        } = *st.prog.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            (bytes_done, bytes_total),
+            (7, 11),
+            "the sink stopped publishing progress, so the bar freezes with no \
+             explanation for the rest of the run"
+        );
+    }
+
+    /// Makes `outcome_now`'s doc claim true instead of merely written down.
+    ///
+    /// That doc says the poison-recovering form is applied to EVERY `lines`
+    /// lock, and that "the source-inspection pins below" enforce it. They did
+    /// not: the pin above covers `outcome` and `summary` only. Meanwhile the
+    /// CANCELLED arm of `run_container` and both drain loops in `main.rs` used
+    /// a bare `unwrap()`, so a rip cancelled after an earlier worker panic
+    /// re-panicked while writing the line naming the partial file it had kept.
+    ///
+    /// A source pin because the log buffer is written from paths that need a
+    /// live drive or a real disc image; `main.rs`'s drain loop needs a whole
+    /// process. Reading the text is the only thing that can see all of them at
+    /// once. Both needles are built with `concat!` so this test's own body
+    /// cannot match itself.
+    ///
+    /// Mutation caught: any `lines` lock anywhere in these two files reverting
+    /// to `unwrap()`, `if let Ok(..)`, or `unwrap_or_default()`.
+    #[test]
+    fn every_lines_lock_recovers_from_poison() {
+        let needle = concat!("lines", ".lock()");
+        // Both spellings in the tree recover: the closure form
+        // `unwrap_or_else(|e| e.into_inner())` and the function form
+        // `unwrap_or_else(std::sync::PoisonError::into_inner)`. Matching the
+        // recovery rather than one exact literal is deliberate — a pin that
+        // only knew one of them would fail on correct code, which is worse
+        // than no pin.
+        let recovering = concat!(".unwrap", "_or_else(");
+        let mut found = 0usize;
+        for (name, raw) in [
+            ("engine.rs", include_str!("engine.rs")),
+            ("main.rs", include_str!("main.rs")),
+        ] {
+            // Whitespace-collapsed so a lock split over four lines by rustfmt
+            // reads the same as one written inline — the formatter must not be
+            // able to hide a regression from this pin.
+            let src: String = raw.split_whitespace().collect();
+            let mut at = 0usize;
+            while let Some(i) = src[at..].find(needle) {
+                let pos = at + i;
+                let tail = &src[pos + needle.len()..];
+                let head = &tail[..tail.len().min(80)];
+                assert!(
+                    tail.starts_with(recovering) && head.contains("into_inner"),
+                    "{name}: a log-buffer lock does not recover from poison \
+                     (site {}); a worker that panicked mid-run poisoned it, and \
+                     this turns one dead thread into a second panic — or a \
+                     silently discarded line — losing the diagnostic that \
+                     explains the first. Near: {}",
+                    found + 1,
+                    &tail[..tail.len().min(60)]
+                );
+                found += 1;
+                at = pos + needle.len();
+            }
+        }
+        assert!(
+            found >= 8,
+            "expected to inspect every log-buffer lock in engine.rs and \
+             main.rs, found only {found} — the needle stopped matching and \
+             this pin is now vacuous"
         );
     }
 }
@@ -3860,7 +4018,9 @@ mod routing_tests {
     /// on `undelivered_streams` is explicit that a non-empty list means the
     /// file does not match the pre-mux plan **even with `completed = true`**,
     /// and that a caller reporting a successful export must report these too.
-    /// The CLI does (`pipe::print_undelivered_streams`). These four sites did
+    /// The CLI does, and both now render through the shared `lossy::lossy_lines`
+    /// (the CLI's own `print_undelivered_streams` was folded into it, which is
+    /// what `lossy.rs`'s module doc records). These four sites did
     /// not, so a GUI MP4 export missing an audio track read as "Finished".
     ///
     /// A source pin because all four sit inside closures that need a live
