@@ -289,7 +289,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: freemkv
-      - name: Install ffmpeg
+      - name: Install ffmpeg and python
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
@@ -463,9 +463,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ matrix.os }}" = "linux" ]; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3
           else
-            choco install ffmpeg -y --no-progress
+            choco install ffmpeg python3 -y --no-progress
             # choco writes the MACHINE PATH, which the already-running shell
             # does not see. Re-read it rather than assume — this exact thing
             # cost a full runner debug cycle with the AWS CLI.
@@ -477,6 +477,25 @@ jobs:
             exit 1
           }
           ffprobe -version | head -1
+          # The suite's timeline analyser is a python program. This runner is
+          # self-hosted, so it carries nothing a hosted image would have had:
+          # the windows leg had no python at all, and every timeline check on
+          # it produced an empty verdict, which the harness read as a pass. The
+          # suite now refuses to run without an interpreter; install one, and
+          # name it here rather than leaving it to a PATH search that finds the
+          # Windows Store stub.
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            export PATH="$PATH:/c/Python313:/c/Python312:/c/ProgramData/chocolatey/bin"
+            echo "/c/Python313" >> "$GITHUB_PATH"
+            echo "/c/Python312" >> "$GITHUB_PATH"
+          fi
+          PY=$(command -v python3 || command -v python || true)
+          if [ -z "$PY" ] || ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)'; then
+            echo "::error title=python 3 missing::the acceptance suite analyses every output timeline with a python program; without it the timeline checks would not run"
+            exit 1
+          fi
+          echo "FMKV_PYTHON=$PY" >> "$GITHUB_ENV"
+          "$PY" --version
       - name: Build the CLI
         shell: bash
         working-directory: freemkv
