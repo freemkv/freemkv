@@ -43,20 +43,84 @@ const DEFAULT_LOG_FILE: &str = "log.txt";
 /// `tracing` events are dropped and the terminal stays pristine. The file
 /// destination defaults to `./log.txt`; ANSI is off and timestamps are on so
 /// the log is clean and copy-pasteable for a bug report.
+/// A startup diagnostic that cannot be RENDERED yet, only recorded.
+///
+/// Everything `run()` does before `strings::init()` is trapped between two
+/// hard constraints:
+///
+///   * `--language` has to be read out of argv before the catalog is chosen,
+///     because it is what chooses it; and
+///   * `freemkv_i18n::get` LAZILY installs the environment-derived catalog on
+///     its first call, after which `set_language` refuses to change it — it
+///     `debug_assert!`s, prints "warning: --language ignored", and returns.
+///
+/// So a `strings::get(..)` anywhere in the argv pre-pass does not localize the
+/// message: it silently disables `--language` for the whole process. The old
+/// code took the other horn and hard-coded English, with a comment calling it
+/// "plain English by necessity" — true of the RENDERING, not of the decision.
+/// Deciding and rendering are separate steps, so the pre-pass now decides and
+/// records, and `run()` renders once the catalog is up. Same messages, same
+/// order, now in the user's language.
+///
+/// Owns its arguments (`String`, not `&str`) because the argv slice these are
+/// derived from is rebuilt by `strip_language_flag` before they are printed.
+struct PendingDiag {
+    key: &'static str,
+    /// English to print while the pinned `freemkv-i18n` tag does not ship
+    /// `key`. See [`crate::strings::get_or`]: a missing key renders as its own
+    /// dotted path, and `error.log_level_needs_value` on the terminal is worse
+    /// than the English this replaced, not better.
+    english: &'static str,
+    args: Vec<(&'static str, String)>,
+}
+
+impl PendingDiag {
+    fn new(key: &'static str, english: &'static str) -> Self {
+        PendingDiag {
+            key,
+            english,
+            args: Vec::new(),
+        }
+    }
+
+    fn with(mut self, name: &'static str, value: impl Into<String>) -> Self {
+        self.args.push((name, value.into()));
+        self
+    }
+
+    /// The localized text. Separate from [`Self::emit`] so a test can read it:
+    /// the whole point of deferring is that these go through the catalog, and
+    /// a key with a typo in it renders as the literal dotted path — which is
+    /// exactly as untranslated as the hard-coded English this replaced, only
+    /// less readable.
+    fn render(&self) -> String {
+        let args: Vec<(&str, &str)> = self.args.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        crate::strings::fmt_or(self.key, self.english, &args)
+    }
+
+    /// Print to stderr. Must not be called before `strings::init()`.
+    fn emit(&self) {
+        eprintln!("{}", self.render());
+    }
+}
+
 /// The two logging flags, parsed out of the raw argv.
 ///
 /// Split from `init_logging` because that function installs a PROCESS-GLOBAL
 /// `tracing_subscriber` — it can only run once per test binary, so nothing ever
 /// called it and every one of its parse decisions was unconstrained.
 ///
-/// Returns `(level, file)`. An out-of-range or non-numeric `--log-level` is
-/// reported and IGNORED rather than silently clamped, so a typo does not
-/// quietly hand the user a different verbosity than they asked for. Strings are
-/// not loaded yet at this point in startup, so these diagnostics are plain
-/// English by necessity.
-fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>) {
+/// Returns `(level, file, diagnostics)`. An out-of-range or non-numeric
+/// `--log-level` is reported and IGNORED rather than silently clamped, so a
+/// typo does not quietly hand the user a different verbosity than they asked
+/// for. The reports are RETURNED rather than printed: this runs before the
+/// locale is resolved, and printing here would mean hard-coded English —
+/// see [`PendingDiag`] for why touching `strings` any earlier is worse than
+/// that.
+fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>, Vec<PendingDiag>) {
     let mut level_num: Option<u8> = None;
     let mut log_file: Option<String> = None;
+    let mut diags: Vec<PendingDiag> = Vec::new();
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -68,15 +132,23 @@ fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>) {
             // reaches the range check rather than being reported as missing.
             "--log-level" => match it.next_if(|s| !is_flag_token(s)) {
                 Some(s) => match s.parse::<u8>() {
-                    Ok(0) => eprintln!("--log-level: value 0 is out of range (1–4), ignored"),
+                    Ok(0) => diags.push(PendingDiag::new(
+                        "error.log_level_out_of_range",
+                        "--log-level: value 0 is out of range (1–4), ignored",
+                    )),
                     Ok(n) => level_num = Some(n.clamp(1, 4)),
-                    Err(_) => {
-                        eprintln!("--log-level: expected a number 1–4, got '{s}', ignored")
-                    }
+                    Err(_) => diags.push(
+                        PendingDiag::new(
+                            "error.log_level_not_a_number",
+                            "--log-level: expected a number 1–4, got '{value}', ignored",
+                        )
+                        .with("value", s),
+                    ),
                 },
-                None => {
-                    eprintln!("--log-level: requires a value (1=warn, 2=info, 3=debug, 4=trace)")
-                }
+                None => diags.push(PendingDiag::new(
+                    "error.log_level_needs_value",
+                    "--log-level: requires a value (1=warn, 2=info, 3=debug, 4=trace)",
+                )),
             },
             "--log-file" => {
                 if let Some(p) = it.next_if(|s| !is_flag_token(s)) {
@@ -86,7 +158,7 @@ fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>) {
             _ => {}
         }
     }
-    (level_num, log_file)
+    (level_num, log_file, diags)
 }
 
 /// Split a `--log-file` value into the `(directory, filename)` pair the rolling
@@ -103,12 +175,17 @@ fn split_log_path(path: &str) -> Option<(std::path::PathBuf, std::ffi::OsString)
     Some((dir, name))
 }
 
-fn init_logging(args: &[String]) {
+/// Returns the diagnostics it could not render — see [`PendingDiag`]. The
+/// subscriber is still installed HERE, first thing in `run()`, so no tracing
+/// event can be emitted before there is somewhere for it to go; only the
+/// human-facing complaints are deferred.
+#[must_use = "these diagnostics are never shown unless run() emits them"]
+fn init_logging(args: &[String]) -> Vec<PendingDiag> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{EnvFilter, fmt};
 
-    let (level_num, log_file) = parse_logging_flags(args);
+    let (level_num, log_file, mut diags) = parse_logging_flags(args);
 
     let rust_log = std::env::var("RUST_LOG").is_ok();
 
@@ -116,7 +193,7 @@ fn init_logging(args: &[String]) {
     // a diagnostic log. Install NOTHING — the terminal stays clean and the
     // library's tracing events are silently dropped. This is the common path.
     if level_num.is_none() && log_file.is_none() && !rust_log {
-        return;
+        return diags;
     }
 
     // A diagnostic log was requested. Build the filter: RUST_LOG wins; else map
@@ -143,8 +220,14 @@ fn init_logging(args: &[String]) {
             // An invalid `--log-file` path is a fatal misconfiguration of the
             // diagnostic channel — report it cleanly on the terminal (this is a
             // CLI diagnostic, not a tracing event) and continue without a file.
-            eprintln!("--log-file: invalid path '{path}' — no diagnostic log written");
-            return;
+            diags.push(
+                PendingDiag::new(
+                    "error.log_file_invalid_path",
+                    "--log-file: invalid path '{path}' — no diagnostic log written",
+                )
+                .with("path", path),
+            );
+            return diags;
         }
     };
     let (nb, guard) = tracing_appender::non_blocking(file_appender);
@@ -154,6 +237,7 @@ fn init_logging(args: &[String]) {
         .with(env_filter)
         .with(file_layer)
         .init();
+    diags
 }
 
 /// Every word a dispatcher matches `args[1]` against. Note "gui" is NOT matched
@@ -174,7 +258,7 @@ pub(crate) const SUBCOMMANDS: &[&str] = &["info", "update-keys", "version", "hel
 /// full `std::env::args()` vector (arg 0 = program name), matching what the
 /// standalone CLI's `main` received, so every downstream parser is unchanged.
 pub fn run(args: Vec<String>) {
-    init_logging(&args);
+    let mut pending = init_logging(&args);
 
     // Parse --language before anything else.
     //
@@ -185,13 +269,22 @@ pub fn run(args: Vec<String>) {
     // applies to a following flag token (e.g. `freemkv --language --verbose
     // ...`): a leading `-` means the value is missing, not a language code. If
     // the next token is a URL, a flag, or --language is the last token, the
-    // value is missing: warn and leave the token as positional. Strings aren't
-    // initialized yet, so this diagnostic is necessarily plain English.
-    let (args, language) = strip_language_flag(&args);
+    // value is missing: record a complaint and leave the token as positional.
+    let (args, language, lang_diags) = strip_language_flag(&args);
+    pending.extend(lang_diags);
     if let Some(lang) = language {
         crate::strings::set_language(&lang);
     }
     crate::strings::init();
+
+    // FIRST point in the process where a message can be localized, and
+    // therefore the first point where any of the argv pre-pass's complaints
+    // may be printed. Nothing has written to the terminal in between, so the
+    // user sees them in the same order and the same place as before — just in
+    // their own language. See `PendingDiag`.
+    for d in &pending {
+        d.emit();
+    }
 
     if args.len() < 2 {
         // Bare invocation with no subcommand/URL: print usage but exit non-zero
@@ -281,9 +374,10 @@ fn is_url(s: &str) -> bool {
 /// reached — this is exactly the "add a flag, forget the test" shape the
 /// `collect_urls` comments warn about, applied to the one flag that never got
 /// the same treatment.
-fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>) {
+fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>, Vec<PendingDiag>) {
     let mut filtered = Vec::new();
     let mut language = None;
+    let mut diags: Vec<PendingDiag> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--language" || args[i] == "--lang" {
@@ -293,7 +387,20 @@ fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>) {
                     i += 2;
                 }
                 _ => {
-                    eprintln!("{}: requires a language code (e.g. --language de)", args[i]);
+                    // Deferred, not hard-coded: this function runs BEFORE the
+                    // catalog is chosen (it is what chooses it), and rendering
+                    // here would lock in the environment locale and silently
+                    // kill `--language` for the rest of the process. See
+                    // `PendingDiag`. The flag token is carried through because
+                    // both spellings reach here and the user should see the
+                    // one they typed.
+                    diags.push(
+                        PendingDiag::new(
+                            "error.language_needs_value",
+                            "{flag}: requires a language code (e.g. --language de)",
+                        )
+                        .with("flag", &args[i]),
+                    );
                     i += 1;
                 }
             }
@@ -302,7 +409,7 @@ fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>) {
             i += 1;
         }
     }
-    (filtered, language)
+    (filtered, language, diags)
 }
 
 /// Print the curated fatal-error block and exit non-zero.
@@ -605,17 +712,38 @@ fn info_cmd(args: &[String]) {
             match libfreemkv::input(url, &libfreemkv::InputOptions::default()) {
                 Ok(stream) => {
                     let meta = stream.info();
-                    println!("File: {}", parsed.path_str());
+                    // LOCALIZED, like the `disc://` arm a few lines up. These
+                    // three labels were the only hard-coded English left in
+                    // `info`, so `freemkv info disc://` came out fully
+                    // translated and `freemkv info mkv://Movie.mkv` — the same
+                    // subcommand — printed "File:/Duration:/Streams:" in every
+                    // locale. All three keys live in the `disc.*` block
+                    // because that block is the info-output LABEL set, not a
+                    // disc-only one: `disc.duration` and `disc.streams` are
+                    // the very labels the disc arm already prints. Reusing
+                    // them — rather than minting `info.duration` /
+                    // `info.streams` beside this call site — is what keeps the
+                    // two arms of one subcommand from drifting apart again.
+                    println!(
+                        "{}: {}",
+                        crate::strings::get_or("disc.file", "File"),
+                        parsed.path_str()
+                    );
                     if meta.duration_secs > 0.0 {
                         let d = meta.duration_secs;
                         println!(
-                            "Duration: {}:{:02}:{:02}",
+                            "{}: {}:{:02}:{:02}",
+                            crate::strings::get("disc.duration"),
                             d as u64 / 3600,
                             (d as u64 % 3600) / 60,
                             d as u64 % 60
                         );
                     }
-                    println!("Streams: {}", meta.streams.len());
+                    println!(
+                        "{}: {}",
+                        crate::strings::get("disc.streams"),
+                        meta.streams.len()
+                    );
                     for line in stream_info_lines(&meta.streams) {
                         println!("{line}");
                     }
@@ -640,6 +768,49 @@ fn info_cmd(args: &[String]) {
     }
 }
 
+/// Destination-only schemes, with the English text to print until the pinned
+/// `freemkv-i18n` tag ships their keys — see [`crate::strings::get_or`].
+///
+/// Every line here was verified against `libfreemkv`'s `parse_url` and its
+/// `input()`/`output()` match arms, NOT against the README — the README is
+/// where these nine schemes were documented while `--help` named none of them,
+/// so it is the thing being checked, not the source of truth.
+///
+/// Their own block because the direction is load-bearing, not decoration: each
+/// one's `input()` arm is `StreamWriteOnly`, so offering them as a SOURCE is an
+/// error the user would otherwise only discover by hitting it. `mp4://` and
+/// `dir://` read and write, so they stay inline with the rest above.
+const TRACK_SINK_URL_LINES: &[(&str, &str)] = &[
+    (
+        "usage.url.demux",
+        "  demux://folder/          Every track as a separate file",
+    ),
+    (
+        "usage.url.video",
+        "  video://folder/          Video tracks only",
+    ),
+    (
+        "usage.url.audio",
+        "  audio://folder/          Audio tracks only",
+    ),
+    (
+        "usage.url.sub",
+        "  sub://folder/            Subtitle tracks only",
+    ),
+    (
+        "usage.url.chapters",
+        "  chapters://file.xml      Chapter list (.xml, .txt/.ogm, .vtt)",
+    ),
+    (
+        "usage.url.json",
+        "  json://file.json         Title structure as JSON",
+    ),
+    (
+        "usage.url.fvi",
+        "  fvi://file.fvi           Per-frame video index",
+    ),
+];
+
 fn usage() {
     println!("freemkv {}", libfreemkv::VERSION_LABEL);
     println!();
@@ -655,16 +826,48 @@ fn usage() {
     println!();
     println!("{}", crate::strings::get("usage.subcommands_note"));
     println!();
+    // EVERY scheme the URL pipeline accepts, not the seven it used to list.
+    // The URL grammar is this tool's entire public surface, and `--help` named
+    // disc/mkv/m2ts/network/stdio/iso/null while `mp4://`, `dir://`,
+    // `demux://`, `video://`, `audio://`, `sub://`, `chapters://`, `json://`
+    // and `fvi://` all worked and were documented only in the README — over
+    // half the surface undiscoverable from the tool itself. Each line below
+    // was checked against `libfreemkv`'s `parse_url` and the `input()` /
+    // `output()` match arms, not against the README.
+    //
+    // Split into two groups because the direction is not decoration: the
+    // second group has no `input()` arm at all (`StreamWriteOnly`), so
+    // offering them as a source is an error the user would otherwise discover
+    // by hitting it.
     println!("{}", crate::strings::get("usage.urls_header"));
     println!("{}", crate::strings::get("usage.url.disc_auto"));
     println!("{}", crate::strings::get("usage.url.disc_linux"));
     println!("{}", crate::strings::get("usage.url.disc_windows"));
     println!("{}", crate::strings::get("usage.url.mkv"));
     println!("{}", crate::strings::get("usage.url.m2ts"));
+    println!(
+        "{}",
+        crate::strings::get_or("usage.url.mp4", "  mp4://path.mp4           MP4 file")
+    );
+    println!("{}", crate::strings::get("usage.url.iso"));
+    println!(
+        "{}",
+        crate::strings::get_or(
+            "usage.url.dir",
+            "  dir://folder/            Decrypted file tree in a folder",
+        )
+    );
     println!("{}", crate::strings::get("usage.url.network"));
     println!("{}", crate::strings::get("usage.url.stdio"));
-    println!("{}", crate::strings::get("usage.url.iso"));
     println!("{}", crate::strings::get("usage.url.null"));
+    println!();
+    println!(
+        "{}",
+        crate::strings::get_or("usage.tracks_header", "Track outputs (destination only):")
+    );
+    for (key, english) in TRACK_SINK_URL_LINES {
+        println!("{}", crate::strings::get_or(key, english));
+    }
     println!();
     println!("{}", crate::strings::get("usage.url.scheme_note"));
     println!("{}", crate::strings::get("usage.url.path_note"));
@@ -699,6 +902,17 @@ fn usage() {
     println!("{}", crate::strings::get("usage.flag.log_level_3"));
     println!("{}", crate::strings::get("usage.flag.log_file"));
     println!("{}", crate::strings::get("usage.flag.quiet"));
+    // `--language` / `--lang` has worked since the i18n crate landed and was
+    // listed nowhere — not here, not in the README. A flag nobody can find is
+    // a flag that does not exist, and this one is the only way to override the
+    // locale the environment picked.
+    println!(
+        "{}",
+        crate::strings::get_or(
+            "usage.flag.language",
+            "      --language CODE Interface language (also --lang): a code like de or pt-BR, or auto.",
+        )
+    );
     println!("{}", crate::strings::get("usage.flag.raw"));
     println!("{}", crate::strings::get("usage.flag.multipass"));
     // The ONLY way to write into a non-empty `dir://` target, and the target's
@@ -844,7 +1058,7 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
-            let (level, log_file) = super::parse_logging_flags(&args);
+            let (level, log_file, _) = super::parse_logging_flags(&args);
             assert!(
                 log_file.as_deref() != Some("--raw"),
                 "{flag} took the following FLAG as its value; the rip then runs \
@@ -865,7 +1079,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let (level, log_file) = super::parse_logging_flags(&args);
+        let (level, log_file, _) = super::parse_logging_flags(&args);
         assert_eq!(log_file, None, "--log-file had no value to take");
         assert_eq!(
             level,
@@ -1205,10 +1419,25 @@ mod tests {
 /// process-global subscriber can only be done once per binary.
 #[cfg(test)]
 mod arg_tests {
-    use super::{parse_logging_flags, split_log_path, strip_language_flag, wants_help};
+    use super::{
+        PendingDiag, parse_logging_flags, split_log_path, strip_language_flag, wants_help,
+    };
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Just the two REQUESTS, for the assertions that are about what the user
+    /// asked for. The diagnostics are a separate axis and get their own tests
+    /// below — folding them into every tuple comparison would have made the
+    /// interesting assertions unreadable.
+    fn flags(args: &[String]) -> (Option<u8>, Option<String>) {
+        let (level, file, _) = parse_logging_flags(args);
+        (level, file)
+    }
+
+    fn keys(diags: &[PendingDiag]) -> Vec<&'static str> {
+        diags.iter().map(|d| d.key).collect()
     }
 
     /// The common path: no logging flags means NO subscriber is installed and
@@ -1216,9 +1445,9 @@ mod arg_tests {
     /// every plain `freemkv` run starts writing ./log.txt.
     #[test]
     fn no_logging_flags_requests_nothing() {
-        assert_eq!(parse_logging_flags(&v([].as_slice())), (None, None));
+        assert_eq!(flags(&v([].as_slice())), (None, None));
         assert_eq!(
-            parse_logging_flags(&v(&["freemkv", "iso://a.iso", "mkv://b.mkv", "-t", "2"])),
+            flags(&v(&["freemkv", "iso://a.iso", "mkv://b.mkv", "-t", "2"])),
             (None, None)
         );
     }
@@ -1247,7 +1476,7 @@ mod arg_tests {
         assert_eq!(parse_logging_flags(&v(&["--log-level", "xyz"])).0, None);
         assert_eq!(parse_logging_flags(&v(&["--log-level", "-1"])).0, None);
         // Last token, no value: no panic, nothing requested.
-        assert_eq!(parse_logging_flags(&v(&["--log-level"])), (None, None));
+        assert_eq!(flags(&v(&["--log-level"])), (None, None));
     }
 
     /// `--log-file` takes the following token, in either flag order, and does
@@ -1255,19 +1484,19 @@ mod arg_tests {
     #[test]
     fn the_log_file_flag_takes_the_next_token_in_either_order() {
         assert_eq!(
-            parse_logging_flags(&v(&["--log-file", "/tmp/x.log"])),
+            flags(&v(&["--log-file", "/tmp/x.log"])),
             (None, Some("/tmp/x.log".to_string()))
         );
         assert_eq!(
-            parse_logging_flags(&v(&["--log-file", "a.log", "--log-level", "2"])),
+            flags(&v(&["--log-file", "a.log", "--log-level", "2"])),
             (Some(2), Some("a.log".to_string()))
         );
         assert_eq!(
-            parse_logging_flags(&v(&["--log-level", "2", "--log-file", "a.log"])),
+            flags(&v(&["--log-level", "2", "--log-file", "a.log"])),
             (Some(2), Some("a.log".to_string()))
         );
         // Trailing `--log-file` with no value: nothing requested, no panic.
-        assert_eq!(parse_logging_flags(&v(&["--log-file"])), (None, None));
+        assert_eq!(flags(&v(&["--log-file"])), (None, None));
     }
 
     /// A bare filename logs into the current directory; a directory-qualified
@@ -1300,36 +1529,263 @@ mod arg_tests {
     /// the language and the rip degrades into a usage no-op with exit 0.
     #[test]
     fn the_language_flag_never_swallows_a_url_or_a_flag() {
-        let (args, lang) = strip_language_flag(&v(&["freemkv", "--language", "de", "disc://"]));
+        let (args, lang, _) = strip_language_flag(&v(&["freemkv", "--language", "de", "disc://"]));
         assert_eq!(lang.as_deref(), Some("de"));
         assert_eq!(args, v(&["freemkv", "disc://"]));
 
         // The short alias behaves identically.
-        let (args, lang) = strip_language_flag(&v(&["freemkv", "--lang", "de", "disc://"]));
+        let (args, lang, _) = strip_language_flag(&v(&["freemkv", "--lang", "de", "disc://"]));
         assert_eq!(lang.as_deref(), Some("de"));
         assert_eq!(args, v(&["freemkv", "disc://"]));
 
         // A URL is not a language code — keep it positional.
-        let (args, lang) =
+        let (args, lang, _) =
             strip_language_flag(&v(&["freemkv", "--language", "disc://", "mkv://x.mkv"]));
         assert_eq!(lang, None);
         assert_eq!(args, v(&["freemkv", "disc://", "mkv://x.mkv"]));
 
         // Nor is a flag.
-        let (args, lang) = strip_language_flag(&v(&["freemkv", "--language", "--verbose"]));
+        let (args, lang, _) = strip_language_flag(&v(&["freemkv", "--language", "--verbose"]));
         assert_eq!(lang, None);
         assert_eq!(args, v(&["freemkv", "--verbose"]));
 
         // Last token: no value, no panic.
-        let (args, lang) = strip_language_flag(&v(&["freemkv", "--language"]));
+        let (args, lang, _) = strip_language_flag(&v(&["freemkv", "--language"]));
         assert_eq!(lang, None);
         assert_eq!(args, v(&["freemkv"]));
 
         // Absent entirely: the argument list is untouched.
         let original = v(&["freemkv", "iso://a.iso", "mkv://b.mkv"]);
-        let (args, lang) = strip_language_flag(&original);
+        let (args, lang, _) = strip_language_flag(&original);
         assert_eq!(lang, None);
         assert_eq!(args, original);
+    }
+
+    /// Every deferred startup diagnostic must survive the round trip through
+    /// the catalog: real key, real translation, placeholders filled in.
+    ///
+    /// The defect this closes is subtle. These five messages were hard-coded
+    /// English, and the fix was to route them through `strings::fmt` — but a
+    /// key that is not in the catalog renders as its own dotted path
+    /// (`freemkv_i18n::get`'s documented miss behaviour, "makes missing
+    /// translations visible"). So a typo turns
+    /// "--log-level: requires a value…" into "error.log_level_needs_value",
+    /// which is not a fix, it is a worse bug: still not localized AND no
+    /// longer readable. Nothing else in the suite can see that, because these
+    /// five run before `strings::init()` and are printed from `run()`.
+    ///
+    /// Mutation caught: misspelling any of the five keys, dropping one from
+    /// the locale catalogs, or renaming a `{placeholder}` on either side.
+    #[test]
+    fn every_deferred_startup_diagnostic_resolves_to_real_localized_text() {
+        let cases = [
+            (v(&["--log-level", "0"]), "error.log_level_out_of_range", ""),
+            (
+                v(&["--log-level", "xyz"]),
+                "error.log_level_not_a_number",
+                "xyz",
+            ),
+            (v(&["--log-level"]), "error.log_level_needs_value", ""),
+        ];
+        for (args, key, must_contain) in cases {
+            let (_, _, diags) = parse_logging_flags(&args);
+            assert_eq!(keys(&diags), vec![key], "for argv {args:?}");
+            let text = diags[0].render();
+            assert_ne!(
+                text, key,
+                "'{key}' is not in the catalog — it renders as its own dotted \
+                 path, which is neither English nor localized"
+            );
+            assert!(
+                !text.contains('{'),
+                "'{key}' rendered with an unsubstituted placeholder: {text}"
+            );
+            assert!(
+                text.contains(must_contain),
+                "'{key}' dropped the value the user typed: {text}"
+            );
+        }
+
+        // The `--log-file` half lives in `init_logging`, which installs a
+        // process-global subscriber and so cannot be called from a test. Its
+        // key is checked directly instead — the same miss behaviour applies.
+        let bad_path = PendingDiag::new(
+            "error.log_file_invalid_path",
+            "--log-file: invalid path '{path}' — no diagnostic log written",
+        )
+        .with("path", "/");
+        let text = bad_path.render();
+        assert_ne!(text, "error.log_file_invalid_path");
+        assert!(text.contains('/') && !text.contains('{'), "{text}");
+
+        // And the language flag's own complaint, for both spellings.
+        for flag in ["--language", "--lang"] {
+            let (_, lang, diags) = strip_language_flag(&v(&["freemkv", flag]));
+            assert_eq!(lang, None);
+            assert_eq!(keys(&diags), vec!["error.language_needs_value"]);
+            let text = diags[0].render();
+            assert!(
+                text.contains(flag) && !text.contains('{'),
+                "the complaint must name the spelling the user actually typed, \
+                 got: {text}"
+            );
+        }
+    }
+
+    /// The argv pre-pass must not print anything ITSELF.
+    ///
+    /// This is the constraint that makes the whole `PendingDiag` detour
+    /// necessary, and it is invisible at every call site. `freemkv_i18n::get`
+    /// LAZILY installs the environment-derived catalog on first use, and
+    /// `set_language` then refuses to change it. So a `strings::get` in the
+    /// pre-pass does not localize the message — it silently disables
+    /// `--language` for the whole process — and a bare `eprintln!` there is
+    /// the hard-coded English this change removed. Both regressions look
+    /// completely reasonable in a diff, and neither one fails any other test:
+    /// the message still appears, just in the wrong language or off the wrong
+    /// catalog.
+    ///
+    /// Mutation caught: putting an `eprintln!`/`println!`/`print!` back into
+    /// `parse_logging_flags`, `init_logging` or `strip_language_flag`.
+    #[test]
+    fn the_pre_locale_argv_pass_prints_nothing_of_its_own() {
+        let src = include_str!("cli_entry.rs").replace("\r\n", "\n");
+        let slice = |from: &str, to: &str| -> String {
+            let a = src
+                .find(from)
+                .unwrap_or_else(|| panic!("anchor missing: {from}"));
+            let b = src[a..]
+                .find(to)
+                .unwrap_or_else(|| panic!("closing anchor missing: {to}"));
+            src[a..a + b].to_string()
+        };
+        let regions = [
+            (
+                "parse_logging_flags",
+                slice(
+                    "fn parse_logging_flags(args: &[String])",
+                    "\n/// Every word a dispatcher matches",
+                ),
+            ),
+            (
+                "strip_language_flag",
+                slice(
+                    "fn strip_language_flag(args: &[String])",
+                    "\n/// Print the curated fatal-error block",
+                ),
+            ),
+        ];
+        for (name, body) in regions {
+            for banned in ["eprintln!", "println!", "eprint!", "print!"] {
+                assert!(
+                    !body.contains(banned),
+                    "{name} contains a `{banned}`: it runs BEFORE the locale is \
+                     resolved, so anything it prints is hard-coded English — \
+                     and anything it localizes locks in the wrong catalog and \
+                     kills --language. Record a PendingDiag instead."
+                );
+            }
+            assert!(
+                body.contains("PendingDiag::new("),
+                "{name} no longer records any deferred diagnostic — the bad-input \
+                 paths have gone silent"
+            );
+        }
+    }
+
+    /// The `info` subcommand must speak ONE language, whatever the URL.
+    ///
+    /// `freemkv info disc://` was fully localized and `freemkv info
+    /// mkv://Movie.mkv` — the same subcommand, one match arm away — printed
+    /// `File:` / `Duration:` / `Streams:` in English in all 29 locales. The
+    /// `--share` consent flow had the same split: its manual-fallback
+    /// instructions came from `drive.submit_manual` while the question that
+    /// gates them, the thank-you and both refusal lines were hard-coded.
+    ///
+    /// A source pin because neither path is reachable from a test: the
+    /// container arm needs a real media file open through `libfreemkv::input`,
+    /// and the consent flow needs an interactive stdin AND a live drive
+    /// capture. The cli-parity goldens do not cover them either — `info_iso`
+    /// is operator-run and there is no `info mkv://` case at all — so without
+    /// this the English could come straight back with the whole suite green.
+    ///
+    /// Mutation caught: replacing any of these `strings::get`/`get_or` calls
+    /// with the literal it renders.
+    #[test]
+    fn the_info_surface_never_prints_english_of_its_own() {
+        // CRLF-normalized: Windows CI checks the tree out with CRLF.
+        let entry = include_str!("cli_entry.rs").replace("\r\n", "\n");
+        let info = include_str!("info.rs").replace("\r\n", "\n");
+
+        // The banned shape is the literal as a DIRECT macro argument. The same
+        // English also appears — legitimately — as the `english` argument of
+        // `strings::get_or`, the stopgap for keys the pinned i18n tag does not
+        // ship yet. So "the text is in the file" is not the test; "the text is
+        // what gets printed" is.
+        //
+        // Whitespace-collapsed on both sides so rustfmt cannot hide a
+        // regression by wrapping the macro call, and every needle is assembled
+        // with `concat!` so this test's own body is not what it finds.
+        let squash = |s: &str| -> String { s.split_whitespace().collect() };
+        let entry_sq = squash(&entry);
+        let info_sq = squash(&info);
+        for (file, src, needle) in [
+            (
+                "cli_entry.rs",
+                &entry_sq,
+                concat!("println!(", "\"File: {}\""),
+            ),
+            (
+                "cli_entry.rs",
+                &entry_sq,
+                concat!("println!(", "\"Duration: {}"),
+            ),
+            (
+                "cli_entry.rs",
+                &entry_sq,
+                concat!("println!(", "\"Streams: {}\""),
+            ),
+            (
+                "info.rs",
+                &info_sq,
+                concat!("println!(", "\"Submitted — thank"),
+            ),
+            (
+                "info.rs",
+                &info_sq,
+                concat!("eprintln!(", "\"Cannot write {}"),
+            ),
+            (
+                "info.rs",
+                &info_sq,
+                concat!("eprint!(", "\"Submit this profile"),
+            ),
+        ] {
+            let needle = squash(needle);
+            assert!(
+                !src.contains(&needle),
+                "{file} prints `{needle}` directly — that is one subcommand with \
+                 two languages, which is the drift the shared catalog exists to \
+                 stop"
+            );
+        }
+
+        for (file, src, key) in [
+            ("cli_entry.rs", &entry, "\"disc.file\""),
+            ("cli_entry.rs", &entry, "\"disc.duration\""),
+            ("cli_entry.rs", &entry, "\"disc.streams\""),
+            ("info.rs", &info, "\"drive.submit_prompt\""),
+            ("info.rs", &info, "\"drive.submit_thanks\""),
+            ("info.rs", &info, "\"drive.submit_auto_failed\""),
+            ("info.rs", &info, "\"drive.submit_declined\""),
+            ("info.rs", &info, "\"error.cannot_write\""),
+        ] {
+            assert!(
+                src.contains(key),
+                "{file} no longer looks up {key} — the line it rendered has \
+                 either gone silent or gone back to English"
+            );
+        }
     }
 
     /// `freemkv <cmd> --help` routes to the per-command help before the

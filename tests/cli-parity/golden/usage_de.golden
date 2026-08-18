@@ -20,10 +20,21 @@ Stream-URLs:
   disc://D:                Optisches Laufwerk (Windows)
   mkv://pfad.mkv          Matroska-Datei
   m2ts://pfad.m2ts        BD-Transportstrom-Datei
+  mp4://path.mp4           MP4 file
+  iso://abbild.iso         Blu-ray-ISO-Abbild
+  dir://folder/            Decrypted file tree in a folder
   network://host:port      TCP-Stream
   stdio://                 Stdin/Stdout-Pipe
-  iso://abbild.iso         Blu-ray-ISO-Abbild
   null://                  Verwerfen (Benchmark)
+
+Track outputs (destination only):
+  demux://folder/          Every track as a separate file
+  video://folder/          Video tracks only
+  audio://folder/          Audio tracks only
+  sub://folder/            Subtitle tracks only
+  chapters://file.xml      Chapter list (.xml, .txt/.ogm, .vtt)
+  json://file.json         Title structure as JSON
+  fvi://file.fvi           Per-frame video index
 
   Alle URLs benötigen ein scheme://-Präfix.
   Dateipfade folgen dem Schema: mkv://./Film.mkv, m2ts://./Film.m2ts
@@ -58,6 +69,7 @@ Optionen:
                       Diagnoseprotokoll in ./log.txt (3 für Fehlerberichte).
       --log-file PFAD  Diagnoseprotokoll in PFAD statt ./log.txt schreiben.
   -q, --quiet         Ausgabe unterdrücken
+      --language CODE Interface language (also --lang): a code like de or pt-BR, or auto.
       --raw           Entschlüsselung überspringen (raw verschlüsselte Ausgabe)
       --multipass    Mapfile für Mehrpass-Wiederherstellung schreiben/aktualisieren
       --force        Extract into a non-empty dir:// target (overwrite)

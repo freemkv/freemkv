@@ -8,6 +8,50 @@
 // error code to its `error.E<code>` string.
 pub use freemkv_i18n::*;
 
+/// A catalog string with a compiled-in English fallback, for keys this crate
+/// knows and the PINNED `freemkv-i18n` tag does not ship yet.
+///
+/// `Cargo.toml` resolves `freemkv-i18n` from a release TAG, so between wiring a
+/// new string here and re-tagging i18n in the release cascade the key simply is
+/// not in the catalog — and `freemkv_i18n::get` answers a miss by returning the
+/// dotted path itself ("makes missing translations visible", which is right for
+/// a translator and wrong for a user). `usage.url.mp4` in `--help`, or
+/// `error.log_level_needs_value` on a mistyped flag, is strictly worse than
+/// untranslated English: it is still not localized AND it is no longer
+/// readable.
+///
+/// This existed twice already, hand-rolled at the call site — `ui::format_label`
+/// and `pipe::title_changed_message` each wrote out the same
+/// `match get(key) { s if s == key => .. }`. A second definition beside a call
+/// site is how the CLI and the GUI grew different answers to one question in
+/// the first place, so there is one now and both of those call it.
+///
+/// The fallback is a stopgap by construction: once the key ships in a tagged
+/// catalog, the `english` argument stops being reachable and the call can
+/// collapse to a plain [`get`]. Nothing enforces that cleanup, deliberately —
+/// a test that failed the moment i18n was re-tagged would block the release
+/// cascade it is meant to follow. What IS enforced is that the user never sees
+/// a dotted path: the `usage_en` / `usage_de` / `usage_fr` goldens capture the
+/// whole help text verbatim, so a key with a typo in it and a missing fallback
+/// both show up as a golden diff.
+pub fn get_or(key: &str, english: &str) -> String {
+    match get(key) {
+        s if s == key => english.to_string(),
+        s => s,
+    }
+}
+
+/// [`get_or`] with `{placeholder}` substitution — the fallback half of
+/// [`fmt`]. The substitution runs on whichever text won, so the English
+/// stopgap and the translation take the same arguments and cannot drift.
+pub fn fmt_or(key: &str, english: &str, args: &[(&str, &str)]) -> String {
+    let mut s = get_or(key, english);
+    for (name, value) in args {
+        s = s.replace(&format!("{{{name}}}"), value);
+    }
+    s
+}
+
 /// Strip control/escape characters from untrusted on-disc metadata (volume
 /// label, title name, stream labels) before it is DISPLAYED.
 ///

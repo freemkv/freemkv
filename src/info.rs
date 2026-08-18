@@ -575,7 +575,17 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
         std::io::stderr().is_terminal(),
     ) {
         println!();
-        eprint!("Submit this profile to help expand drive support? [Y/n] ");
+        // Localized like every other line this flow prints. The bracketed
+        // "[Y/n]" stays inside the string so a translator can keep it beside
+        // the question — the ANSWER is still parsed as ASCII y/empty below,
+        // which is why the hint must show the letter the parser accepts.
+        eprint!(
+            "{}",
+            strings::get_or(
+                "drive.submit_prompt",
+                "Submit this profile to help expand drive support? [Y/n] ",
+            )
+        );
         // Flush the stream the PROMPT went to. This used to flush stdout after
         // an eprint!, which is the wrong stream.
         let _ = std::io::stderr().flush();
@@ -588,18 +598,33 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
             match submit_issue(token, title, body) {
                 Some(url) => {
                     println!();
-                    println!("Submitted — thank you!");
+                    println!(
+                        "{}",
+                        strings::get_or("drive.submit_thanks", "Submitted — thank you!")
+                    );
                     println!("  {url}");
                     return;
                 }
                 None => {
                     println!();
-                    println!("Automated submission failed; you can still file it by hand:");
+                    println!(
+                        "{}",
+                        strings::get_or(
+                            "drive.submit_auto_failed",
+                            "Automated submission failed; you can still file it by hand:",
+                        )
+                    );
                     // fall through to the manual instructions
                 }
             }
         } else {
-            println!("Not submitted. You can still file it by hand if you like:");
+            println!(
+                "{}",
+                strings::get_or(
+                    "drive.submit_declined",
+                    "Not submitted. You can still file it by hand if you like:",
+                )
+            );
             // fall through to the manual instructions
         }
     }
@@ -830,7 +855,19 @@ fn zip_files(
 fn save_bin(dir: &std::path::Path, name: &str, data: &[u8], written: &mut Vec<String>) {
     let path = dir.join(name);
     if let Err(e) = std::fs::write(&path, data) {
-        eprintln!("Cannot write {}: {}", path.display(), e);
+        // `error.cannot_write` already exists and already carries exactly
+        // this pair — a second, English-only phrasing of the same failure is
+        // the drift this catalog exists to prevent.
+        eprintln!(
+            "{}",
+            strings::fmt(
+                "error.cannot_write",
+                &[
+                    ("path", path.display().to_string().as_str()),
+                    ("error", e.to_string().as_str()),
+                ],
+            )
+        );
         std::process::exit(1);
     }
     written.push(name.to_string());

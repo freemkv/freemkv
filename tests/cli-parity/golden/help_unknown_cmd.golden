@@ -20,10 +20,21 @@ Stream URLs:
   disc://D:                Optical drive (Windows)
   mkv://path.mkv           Matroska file
   m2ts://path.m2ts         BD transport stream file
+  mp4://path.mp4           MP4 file
+  iso://image.iso          Blu-ray ISO image
+  dir://folder/            Decrypted file tree in a folder
   network://host:port      TCP stream
   stdio://                 Stdin/stdout pipe
-  iso://image.iso          Blu-ray ISO image
   null://                  Discard (benchmarking)
+
+Track outputs (destination only):
+  demux://folder/          Every track as a separate file
+  video://folder/          Video tracks only
+  audio://folder/          Audio tracks only
+  sub://folder/            Subtitle tracks only
+  chapters://file.xml      Chapter list (.xml, .txt/.ogm, .vtt)
+  json://file.json         Title structure as JSON
+  fvi://file.fvi           Per-frame video index
 
   All URLs require a scheme:// prefix.
   File paths follow the scheme: mkv://./Movie.mkv, m2ts://./Movie.m2ts
@@ -58,6 +69,7 @@ Flags:
                       diagnostic log to ./log.txt (use 3 for bug reports).
       --log-file PATH Write the diagnostic log to PATH instead of ./log.txt.
   -q, --quiet         Suppress output
+      --language CODE Interface language (also --lang): a code like de or pt-BR, or auto.
       --raw           Skip decryption (raw encrypted output)
       --multipass    Write/update mapfile for multipass recovery
       --force        Extract into a non-empty dir:// target (overwrite)

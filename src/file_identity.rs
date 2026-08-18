@@ -68,8 +68,13 @@ pub fn file_id(_path: &std::path::Path) -> Option<(u64, u64)> {
 /// canonical-path comparison standing, so the guard can never refuse a rip
 /// because a handle could not be opened.
 ///
-/// NOTE: type-checked for `x86_64-pc-windows-msvc`, but not run — no Windows
-/// machine builds this crate in the environment it was written in.
+/// This used to carry a note saying it was type-checked but never RUN, because
+/// the one test that exercises the whole point of this module — two names, one
+/// file — was `#[cfg(unix)]`. CI runs `windows-latest` and NTFS has had hard
+/// links since it shipped, so the cfg bought nothing and cost the only
+/// coverage this `unsafe` FFI block could ever have had. The test is now
+/// unconditional: `GetFileInformationByHandle` and the hand-checked
+/// `ByHandleFileInformation` layout are executed on every Windows CI run.
 #[cfg(windows)]
 pub fn file_id(path: &std::path::Path) -> Option<(u64, u64)> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -171,13 +176,33 @@ mod tests {
 
     /// A HARDLINK: both names canonicalize to themselves, so only filesystem
     /// identity can see that writing either one destroys the other.
-    #[cfg(unix)]
+    ///
+    /// Runs on WINDOWS TOO. It was `#[cfg(unix)]`, which meant the single test
+    /// covering this module's reason to exist never touched the Windows
+    /// `file_id` — an `unsafe extern "system"` call whose own doc admitted it
+    /// was type-checked but not run. `std::fs::hard_link` is cross-platform,
+    /// NTFS has always supported hard links, they need no elevation (unlike
+    /// symlinks), and CI runs `windows-latest`. So the cfg bought nothing and
+    /// left the only `unsafe` in the crate untested on the only platform it
+    /// compiles for.
+    ///
+    /// Mutation caught on Windows: a wrong field order in
+    /// `ByHandleFileInformation` (the volume serial and both index halves are
+    /// read by byte offset), or a `GetFileInformationByHandle` that always
+    /// answers `None` — either makes `same_file` blind to the case where the
+    /// destination is the source under another name, and the rip overwrites
+    /// its own input.
     #[test]
     fn a_hardlink_is_the_same_file_even_though_the_paths_differ() {
         let t = Tmp::new("hardlink");
         let a = t.file("Movie.mkv", b"one file, two names");
         let hard = t.0.join("Hard.mkv");
-        std::fs::hard_link(&a, &hard).expect("hard link");
+        std::fs::hard_link(&a, &hard).expect(
+            "could not create a hard link in the temp dir — on Windows this \
+             needs an NTFS %TEMP% (FAT32/exFAT cannot do it). Not skipped on \
+             purpose: skipping is what left this module's only unsafe block \
+             untested for three releases",
+        );
         assert_ne!(
             std::fs::canonicalize(&a).expect("canon a"),
             std::fs::canonicalize(&hard).expect("canon hard"),

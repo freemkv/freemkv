@@ -225,6 +225,10 @@ Labels are preserved in all output formats — MKV track names and M2TS metadata
                     3 = debug, 4 = trace. At level ≥2 also widens human stdout detail.
     --log-file PATH Also write the full log to PATH (for bug reports)
 -q, --quiet         Suppress output
+    --language CODE Interface language, e.g. `de`, `pt-BR`, or `auto` to follow
+                    the environment. `--lang` is an accepted alias. Must appear
+                    before the language is needed — it is read out of argv
+                    before anything else, so it can go anywhere on the line.
     --raw           Skip decryption (raw encrypted output)
 -s, --share         Submit drive profile (with info disc://)
 -m, --mask          Mask serial numbers (with --share)

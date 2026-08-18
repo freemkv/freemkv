@@ -1112,10 +1112,7 @@ pub fn format_label(canonical: &str) -> String {
         // the release cascade. Showing `gui.format.video_only` in a dropdown
         // is worse than showing untranslated English, so treat the path
         // echo as "no string" and fall back to the canonical text.
-        Some(key) => match crate::strings::get(key) {
-            s if s == key => canonical.to_string(),
-            s => s,
-        },
+        Some(key) => crate::strings::get_or(key, canonical),
         None => canonical.to_string(),
     }
 }
@@ -2655,6 +2652,71 @@ mod tests {
             win.contains("self.log.set_selection("),
             "the Windows log no longer scrolls to its newest line"
         );
+    }
+
+    /// Neither shell's worker-message drain may bail out on a poisoned inbox.
+    ///
+    /// Both were `match self.inbox.lock() { Ok(v) => .., Err(_) => return }`.
+    /// The early return reads as caution and is a hang: the drain is also what
+    /// clears the keydb "busy" flag (the Update button stays disabled forever),
+    /// what writes the result into the Settings note, and — critically — what
+    /// STOPS the 5 Hz drain timer. Returning skipped all three, so a poisoned
+    /// inbox left a timer re-firing for the life of the process, taking the
+    /// same poisoned lock and returning again every 200 ms, while the messages
+    /// explaining why the worker died sat unread inside it. A poisoned
+    /// `Vec<String>` is still a perfectly good `Vec<String>`.
+    ///
+    /// Source inspection for the same reason as the two tests above: neither
+    /// shell can be instantiated off its own platform, but both files read
+    /// fine from anywhere — which is the point, since this has to fail on
+    /// whichever machine runs the suite.
+    ///
+    /// Mutation caught: restoring `Err(_) => return` (or any `if let Ok(..)`)
+    /// around either inbox lock.
+    #[test]
+    fn neither_shell_drain_gives_up_on_a_poisoned_inbox() {
+        // CRLF-normalized: Windows CI checks the tree out with CRLF.
+        let shells = [
+            ("mac.rs", include_str!("mac.rs").replace("\r\n", "\n")),
+            (
+                "windows.rs",
+                include_str!("windows.rs").replace("\r\n", "\n"),
+            ),
+        ];
+        // Whitespace-collapsed so rustfmt cannot hide a regression by breaking
+        // the expression across lines.
+        let needle = concat!("inbox", ".lock()");
+        for (name, raw) in &shells {
+            let src: String = raw.split_whitespace().collect();
+            // EVERY inbox lock, not just the drain's. The producer half — the
+            // keydb worker's single `push` — had the same `if let Ok(..)`
+            // shape, and dropping that one message wedges the UI in exactly
+            // the same way as bailing out of the drain: the button never
+            // re-enables and the timer never stops, because the drain only
+            // stops it once it has a batch to report.
+            let mut found = 0usize;
+            let mut at = 0usize;
+            while let Some(i) = src[at..].find(needle) {
+                let pos = at + i;
+                let tail = &src[pos + needle.len()..];
+                let head = &tail[..tail.len().min(80)];
+                assert!(
+                    head.starts_with(".unwrap_or_else(") && head.contains("into_inner"),
+                    "{name}: an inbox lock does not recover from poison. That \
+                     strands the keydb busy flag and leaves the drain timer \
+                     firing forever, discarding the very messages that explain \
+                     the panic. Near: {head}"
+                );
+                found += 1;
+                at = pos + needle.len();
+            }
+            assert!(
+                found >= 2,
+                "{name}: expected both the keydb worker's push and the drain's \
+                 take, found {found} — the needle stopped matching and this pin \
+                 is now vacuous"
+            );
+        }
     }
 
     #[test]
