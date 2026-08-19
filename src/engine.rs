@@ -1703,7 +1703,12 @@ pub fn planned_output_name(
         // engine reports is the directory.
         OutKind::Demux(_) => format!("{dest_dir}/ (per-track files)"),
         OutKind::IsoImage => format!("{dest_dir}/{}.iso", sanitize_label(&label)),
-        OutKind::DecryptedFolder => extract_target(dest_dir, &label).display().to_string(),
+        // The SHOWN path, so it reads with the same forward slash the File and
+        // IsoImage arms use — `extract_target`'s PathBuf renders a Windows
+        // backslash and the panel then disagreed with itself across formats.
+        // The real extraction path stays `extract_target` (native separators);
+        // this is only what the user is told.
+        OutKind::DecryptedFolder => format!("{dest_dir}/{}", sanitize_label(&label)),
     }
 }
 
