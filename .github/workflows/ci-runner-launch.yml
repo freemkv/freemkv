@@ -25,9 +25,24 @@ name: ci-runner-launch
 #   3. `ci-runner-sweeper.yml`, hourly, from OUTSIDE the instance — the only
 #      one that survives user-data dying before it arms the other two.
 #
-# The registration token is minted here, per run, and passed as an instance
-# TAG. It is single-use and expires in 60 minutes, so it never sits in an AMI,
-# in SSM, or in a repo secret.
+# The registration token is minted here, per run. It is NOT put in an instance
+# tag: a tag is readable by any principal with `ec2:DescribeTags` /
+# `DescribeInstances`, the token is NOT single-use (a GitHub registration token
+# is valid for REPEATED registrations for its whole 60-minute life), and that
+# window is more than enough for an account-read to register a rogue runner that
+# then picks up a job carrying repo secrets. (The earlier comment here claimed a
+# tag was safe because the token was "single-use" and "never sits in SSM" — both
+# halves were wrong: it is not single-use, and a tag is the LESS protected
+# store.) Instead the token goes into SSM Parameter Store as a SecureString
+# (KMS-encrypted, `ssm:GetParameter` + `kms:Decrypt` to read — a far narrower
+# grant than DescribeTags), keyed per launch; only the non-secret PARAMETER NAME
+# is tagged, and the instance reads-then-deletes the parameter at boot.
+#
+# IAM this requires (AWS-side, not in this repo): the launcher role
+# (`FMKV_RUNNER_ROLE`) needs `ssm:PutParameter` (+ `kms:Encrypt` on the SSM key);
+# the instance role in the launch template needs `ssm:GetParameter`,
+# `ssm:DeleteParameter`, and `kms:Decrypt` on the same key, scoped to
+# `/freemkv-ci/runner-reg/*`.
 
 on:
   workflow_dispatch:
@@ -52,12 +67,15 @@ jobs:
       matrix:
         os: ${{ github.event.inputs.os == 'all' && fromJSON('["linux","windows"]') || fromJSON(format('["{0}"]', github.event.inputs.os)) }}
     steps:
-      - uses: aws-actions/configure-aws-credentials@v4
+      # Pinned to a commit SHA, not the floating `@v4` tag — this step assumes a
+      # role with access to launch instances and write the runner token, so the
+      # action it runs must be immutable.
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Mint a single-use runner registration token
+      - name: Mint a runner registration token and stash it in SSM (SecureString)
         id: reg
         env:
           # GITHUB_TOKEN cannot mint runner registration tokens: that needs
@@ -67,7 +85,13 @@ jobs:
           set -euo pipefail
           tok=$(gh api -X POST "repos/${{ github.repository }}/actions/runners/registration-token" -q .token)
           echo "::add-mask::$tok"
-          echo "token=$tok" >> "$GITHUB_OUTPUT"
+          # Per-launch parameter name (non-secret) — this is the only thing that
+          # gets tagged onto the instance. The TOKEN itself lives here, encrypted,
+          # never in a tag. The instance deletes it after reading; if it dies
+          # first, the token expires in 60 min and the sweeper terminates the box.
+          param="/freemkv-ci/runner-reg/${{ github.run_id }}-${{ matrix.os }}"
+          aws ssm put-parameter --name "$param" --type SecureString --value "$tok" --overwrite >/dev/null
+          echo "param=$param" >> "$GITHUB_OUTPUT"
 
       - name: Launch the ephemeral runner
         run: |
@@ -84,7 +108,7 @@ jobs:
             --subnet-id "$subnet" \
             --tag-specifications "ResourceType=instance,Tags=[
                 {Key=freemkv-ci,Value=runner},
-                {Key=runner-token,Value=${{ steps.reg.outputs.token }}},
+                {Key=runner-token-param,Value=${{ steps.reg.outputs.param }}},
                 {Key=runner-repo,Value=${{ github.repository }}},
                 {Key=launched-by,Value=${{ github.run_id }}}]" \
             --query 'Instances[0].InstanceId' --output text)

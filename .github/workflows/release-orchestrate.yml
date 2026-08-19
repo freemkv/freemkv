@@ -62,26 +62,32 @@ jobs:
 
       # release.sh expects the eight repos side by side under one root, the way
       # an operator checkout looks. Provision exactly that.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-ci, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ci }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-unlock,     ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-unlock,     fetch-depth: 0 }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/libfreemkv,         ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/libfreemkv,         fetch-depth: 0 }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-keysources, ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-keysources, fetch-depth: 0 }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-i18n,       ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-i18n,       fetch-depth: 0 }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-engine,     ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-engine,     fetch-depth: 0 }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/bdemu,              ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/bdemu,              fetch-depth: 0 }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv,            fetch-depth: 0 }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/autorip,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/autorip,            fetch-depth: 0 }
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      # Pinned to a commit SHA, not the floating `1.97.0` BRANCH. dtolnay/rust-
+      # toolchain has no version tags (only `v1` + per-toolchain branches), and
+      # `@1.97.0` is a mutable branch ref. Pinning by SHA loses the ref-name the
+      # action uses to pick the toolchain, so name it explicitly via `toolchain`.
+      - uses: dtolnay/rust-toolchain@889fac408b4da0905346410f253f0c55fbcb6613 # 1.97.0
+        with:
+          toolchain: 1.97.0
 
       - name: Identify as the release bot
         run: |
