@@ -124,46 +124,54 @@ fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>, Vec<Pend
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
-            // Both arms below refuse a value that is itself a flag. Taking
-            // `it.next()` unconditionally meant `--log-file --raw` set the
-            // path to "--raw" AND consumed the flag, so the rip ran without
-            // `--raw` and silently wrote a decrypted image. `is_flag_token`
-            // lets a negative number through, so `--log-level -1` still
-            // reaches the range check rather than being reported as missing.
-            "--log-level" => match it.next_if(|s| !is_flag_token(s)) {
-                Some(s) => match s.parse::<u8>() {
-                    Ok(0) => diags.push(PendingDiag::new(
-                        "error.log_level_out_of_range",
-                        "--log-level: value 0 is out of range (1–4), ignored",
+            // Both arms below refuse a value that is itself a flag OR a
+            // positional `scheme://` URL — the SAME guard `pipe::parse_flags`
+            // applies to its copy of these arms. Taking `it.next()`
+            // unconditionally meant `--log-file --raw` set the path to "--raw"
+            // AND consumed the flag (the rip ran without `--raw` and silently
+            // wrote a decrypted image); without the URL guard `--log-file
+            // disc://` likewise swallowed the source URL as the log path. This
+            // parser had only the flag half, so that hole survived here after
+            // pipe.rs closed it. `is_flag_token` lets a negative number
+            // through, so `--log-level -1` still reaches the range check.
+            "--log-level" => {
+                match it.next_if(|s| !is_flag_token(s) && !crate::pipe::is_url_token(s)) {
+                    Some(s) => match s.parse::<u8>() {
+                        Ok(0) => diags.push(PendingDiag::new(
+                            "error.log_level_out_of_range",
+                            "--log-level: value 0 is out of range (1–4), ignored",
+                        )),
+                        Ok(n) => level_num = Some(n.clamp(1, 4)),
+                        Err(_) => diags.push(
+                            PendingDiag::new(
+                                "error.log_level_not_a_number",
+                                "--log-level: expected a number 1–4, got '{value}', ignored",
+                            )
+                            .with("value", s),
+                        ),
+                    },
+                    None => diags.push(PendingDiag::new(
+                        "error.log_level_needs_value",
+                        "--log-level: requires a value (1=warn, 2=info, 3=debug, 4=trace)",
                     )),
-                    Ok(n) => level_num = Some(n.clamp(1, 4)),
-                    Err(_) => diags.push(
-                        PendingDiag::new(
-                            "error.log_level_not_a_number",
-                            "--log-level: expected a number 1–4, got '{value}', ignored",
-                        )
-                        .with("value", s),
-                    ),
-                },
-                None => diags.push(PendingDiag::new(
-                    "error.log_level_needs_value",
-                    "--log-level: requires a value (1=warn, 2=info, 3=debug, 4=trace)",
-                )),
-            },
-            "--log-file" => match it.next_if(|s| !is_flag_token(s)) {
-                Some(p) => log_file = Some(p.clone()),
-                // Symmetric with the `--log-level` arm above: a refused value
-                // (the next token is a flag, or there is no next token) must be
-                // REPORTED, not swallowed in silence. `freemkv --log-file --raw
-                // disc:// …` used to say nothing, write no diagnostic log, and
-                // run the rip anyway — the user asked for a log and got none,
-                // with no word why. Record the complaint so `run()` emits it
-                // once the locale is resolved.
-                None => diags.push(PendingDiag::new(
-                    "error.log_file_needs_value",
-                    "--log-file: requires a path (e.g. --log-file freemkv.log)",
-                )),
-            },
+                }
+            }
+            "--log-file" => {
+                match it.next_if(|s| !is_flag_token(s) && !crate::pipe::is_url_token(s)) {
+                    Some(p) => log_file = Some(p.clone()),
+                    // Symmetric with the `--log-level` arm above: a refused value
+                    // (the next token is a flag, or there is no next token) must be
+                    // REPORTED, not swallowed in silence. `freemkv --log-file --raw
+                    // disc:// …` used to say nothing, write no diagnostic log, and
+                    // run the rip anyway — the user asked for a log and got none,
+                    // with no word why. Record the complaint so `run()` emits it
+                    // once the locale is resolved.
+                    None => diags.push(PendingDiag::new(
+                        "error.log_file_needs_value",
+                        "--log-file: requires a path (e.g. --log-file freemkv.log)",
+                    )),
+                }
+            }
             _ => {}
         }
     }
