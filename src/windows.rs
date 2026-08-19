@@ -1798,9 +1798,25 @@ impl Shell {
                     // `raw_arg` bypasses Rust's argument quoting: explorer.exe
                     // needs the literal `/select,"<path>"` form, which normal
                     // escaping would mangle.
-                    let _ = std::process::Command::new("explorer.exe")
+                    if let Err(e) = std::process::Command::new("explorer.exe")
                         .raw_arg(format!("/select,\"{p}\""))
-                        .spawn();
+                        .spawn()
+                    {
+                        // Absence of a log is itself a bug: a failed reveal used
+                        // to vanish into `let _ =`, so a user who clicked "show
+                        // in folder" and saw nothing had no way to tell whether
+                        // the file, the path, or Explorer was the problem.
+                        self.app_mut(|a| {
+                            a.say(
+                                LogKind::Notice,
+                                &crate::strings::fmt_or(
+                                    "gui.log.reveal_failed",
+                                    "Could not open the folder in Explorer: {e}",
+                                    &[("e", &e.to_string())],
+                                ),
+                            )
+                        });
+                    }
                 }
                 Effect::OpenUrl(u) => {
                     let _ =
@@ -2026,8 +2042,47 @@ impl Shell {
         let me = self.clone();
         self.wnd.on().wm_drop_files(move |p| {
             let hdrop = p.hdrop;
-            if let Some(path) = hdrop.DragQueryFile()?.next() {
-                let path = path?;
+            // Swallow-and-log, never `?`. This was the ONLY `?` in a handler in
+            // this file; every sibling uses `let _ =`. An `Err` out of here
+            // unwinds `run_main` into `run()`'s error arm, which MessageBoxes
+            // and exits — bypassing `confirm_quit_mid_rip` / `cancel_and_drain`
+            // and DISCARDING a rip in progress. Dropping a virtual or
+            // undecodable item (a search result, a cloud placeholder, a name
+            // that is not valid UTF-16) during a rip must not be able to kill
+            // the app. A failed enumeration is logged and ignored.
+            let mut names = match hdrop.DragQueryFile() {
+                Ok(n) => n,
+                Err(e) => {
+                    me.app_mut(|a| {
+                        a.say(
+                            LogKind::Notice,
+                            &crate::strings::fmt_or(
+                                "gui.log.drop_unreadable",
+                                "Could not read the dropped item: {e}",
+                                &[("e", &e.to_string())],
+                            ),
+                        )
+                    });
+                    return Ok(());
+                }
+            };
+            if let Some(path) = names.next() {
+                let path = match path {
+                    Ok(p) => p,
+                    Err(e) => {
+                        me.app_mut(|a| {
+                            a.say(
+                                LogKind::Notice,
+                                &crate::strings::fmt_or(
+                                    "gui.log.drop_unreadable",
+                                    "Could not read the dropped item: {e}",
+                                    &[("e", &e.to_string())],
+                                ),
+                            )
+                        });
+                        return Ok(());
+                    }
+                };
                 // A DIRECTORY is a valid source (an extracted disc tree opens
                 // as `dir://`), and an extension-only allow-list rejects every
                 // one of them — the same gap the macOS shell had.
