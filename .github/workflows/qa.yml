@@ -496,6 +496,27 @@ jobs:
           fi
           echo "FMKV_PYTHON=$PY" >> "$GITHUB_ENV"
           "$PY" --version
+      - name: Provision the Rust toolchain
+        shell: bash
+        # The media runner is self-hosted and ephemeral; like ffmpeg and python
+        # above, it carries no Rust — the build step below was failing with
+        # `cargo: command not found` (exit 127). Install rustup + the CI-pinned
+        # toolchain per-run rather than depending on a hand-baked AMI, so the
+        # acceptance build reproduces on any contributor's runner. Idempotent:
+        # a runner that already has cargo is left as-is.
+        run: |
+          set -euo pipefail
+          if command -v cargo >/dev/null 2>&1; then
+            cargo --version
+          elif [ "${{ matrix.os }}" = "windows" ]; then
+            curl -sSf -o rustup-init.exe https://win.rustup.rs/x86_64
+            ./rustup-init.exe -y --profile minimal --default-toolchain 1.97.0
+            echo "$USERPROFILE\\.cargo\\bin" >> "$GITHUB_PATH"
+          else
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain 1.97.0
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
       - name: Build the CLI
         shell: bash
         working-directory: freemkv
