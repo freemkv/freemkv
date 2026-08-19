@@ -562,6 +562,13 @@ jobs:
         # launch templates carry 600 GB for exactly this.
         run: |
           set -euo pipefail
+          # The bucket is in us-west-2 and the runner's apt `awscli` is the v1
+          # client, which does NOT read the instance's region from IMDS for an
+          # `s3 cp` — with no region it hits the wrong endpoint and burns the
+          # retry budget on a redirect before failing with a masked error. The
+          # head-object calls below already pass --region for exactly this;
+          # setting it for the whole step covers the cp calls too, on any client.
+          export AWS_DEFAULT_REGION=us-west-2 AWS_REGION=us-west-2
           B="${{ secrets.FMKV_FIXTURES_BUCKET }}"
           # Windows: the freemkv binary is a NATIVE build and cannot resolve an
           # MSYS path like /d/a/iso. `cygpath -m` yields C:/... , which Git-bash
@@ -581,8 +588,8 @@ jobs:
           # fixture, which the service serves. One source alone means a
           # permanently skipped family — and with a service configured a skip
           # is now a failure, correctly.
-          if ! aws s3 cp "s3://$B/keydb.cfg" keydb.cfg --quiet; then
-            echo "::error title=Key database download failed::could not fetch keydb.cfg from the fixtures bucket — the BD family cannot decrypt without it"
+          if ! err=$(aws s3 cp "s3://$B/keydb.cfg" keydb.cfg --region us-west-2 --only-show-errors 2>&1); then
+            echo "::error title=Key database download failed::could not fetch keydb.cfg from the fixtures bucket — the BD family cannot decrypt without it: ${err:-<no client output>}"
             exit 1
           fi
           if [ "${{ matrix.os }}" = "windows" ]; then
@@ -595,8 +602,8 @@ jobs:
             sz=$(aws s3api head-object --bucket "$B" --key "$f.iso" --region us-west-2 \
                    --query ContentLength --output text)
             echo "::group::fetch $f.iso ($((sz/1024/1024/1024)) GiB)"
-            if ! aws s3 cp "s3://$B/$f.iso" "isos/$f.iso" --quiet; then
-              echo "::error title=Fixture download failed ($f)::could not fetch $f.iso from the Oregon bucket — check the runner's instance profile can read it"
+            if ! err=$(aws s3 cp "s3://$B/$f.iso" "isos/$f.iso" --region us-west-2 --only-show-errors 2>&1); then
+              echo "::error title=Fixture download failed ($f)::could not fetch $f.iso from the Oregon bucket — check the runner's instance profile can read it: ${err:-<no client output>}"
               exit 1
             fi
             echo "::endgroup::"
