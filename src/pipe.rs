@@ -3504,7 +3504,9 @@ fn mp4_skip_reason_key(reason: &libfreemkv::Mp4SkipReason) -> &'static str {
 
 /// Whether a token is a positional stream URL (`scheme://...`) rather than a
 /// flag value. A value-flag (`-t`, `--keydb`) must not swallow one of these.
-fn is_url_token(s: &str) -> bool {
+/// `pub(crate)` so `cli_entry`'s copy of the `--log-file`/`--log-level` guard
+/// uses the SAME predicate — the sibling that lacked it swallowed a source URL.
+pub(crate) fn is_url_token(s: &str) -> bool {
     s.contains("://")
 }
 
@@ -6599,10 +6601,20 @@ mod verdict_tests {
             "the message should name the languages involved: {err}"
         );
 
-        // The same title in a batch: warn and keep going.
+        // The same title in a batch: warn (loudly, even in quiet) and keep going.
+        // Assert the WARNING is actually emitted, not merely that the call
+        // returns Ok — otherwise a regression that silently dropped the
+        // language-miss warning on the batch path would pass this test.
+        let (batch_res, printed) = crate::output::capture(|| {
+            check_selection_coverage(&streams, &title, 4, true, &quiet())
+        });
         assert!(
-            check_selection_coverage(&streams, &title, 4, true, &quiet()).is_ok(),
+            batch_res.is_ok(),
             "a batch must not hard-fail on one title of the wrong language"
+        );
+        assert!(
+            printed.contains("jpn") || printed.to_lowercase().contains("eng"),
+            "a batch must still warn loudly about the unmatched language: {printed:?}"
         );
 
         // A language the title DOES carry is not an error in either mode.
