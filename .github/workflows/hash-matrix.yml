@@ -280,7 +280,7 @@ jobs:
             echo "have=false" >> "$GITHUB_OUTPUT"
             echo "No fixture credentials -- real-media parity skipped." >> "$GITHUB_STEP_SUMMARY"
           fi
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         if: steps.creds.outputs.have == 'true'
         with:
           role-to-assume: ${{ secrets.FMKV_FIXTURES_ROLE }}

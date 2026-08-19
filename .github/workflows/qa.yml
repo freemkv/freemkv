@@ -344,7 +344,7 @@ jobs:
       matrix:
         os: [linux, windows]
     steps:
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
           aws-region: us-west-2
