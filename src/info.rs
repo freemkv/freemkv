@@ -576,14 +576,23 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
     ) {
         println!();
         // Localized like every other line this flow prints. The bracketed
-        // "[Y/n]" stays inside the string so a translator can keep it beside
-        // the question — the ANSWER is still parsed as ASCII y/empty below,
-        // which is why the hint must show the letter the parser accepts.
+        // "[y/N]" is the DEFAULT-NO hint, and it must stay honest across every
+        // locale: the catalog string is machine-controlled (catalogs load from
+        // `./locales`), so a crafted `de.json` could render "[j/N]" — a
+        // default-NO hint — while the old parser treated a bare Enter as YES and
+        // POSTed the profile (carrying the drive serial unless `--mask`) to a
+        // public tracker. A default the parser does not honour is a consent /
+        // data-exfil bug. Two rules close it: (1) a bare Enter NEVER posts — the
+        // upload requires an explicit affirmative, so no crafted default can
+        // flip it to yes; (2) the affirmative token comes from the SAME locale
+        // catalog as the prompt (`drive.submit_affirmative`, fallback "y"), so a
+        // translated prompt showing "[j/N]" is answered by "j", not a hard-coded
+        // ASCII "y".
         eprint!(
             "{}",
             strings::get_or(
                 "drive.submit_prompt",
-                "Submit this profile to help expand drive support? [Y/n] ",
+                "Submit this profile to help expand drive support? [y/N] ",
             )
         );
         // Flush the stream the PROMPT went to. This used to flush stdout after
@@ -592,9 +601,12 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
         let mut input = String::new();
         let n = std::io::stdin().read_line(&mut input).unwrap_or(0);
         let ans = input.trim();
-        // A bare Enter (n>0, empty after trim) is the [Y] default; EOF (n==0,
-        // e.g. ^D or a stdin that closed despite is_terminal) is NOT consent.
-        if n > 0 && (ans.is_empty() || ans.eq_ignore_ascii_case("y")) {
+        let affirmative = strings::get_or("drive.submit_affirmative", "y");
+        // Consent must be EXPLICIT: only the locale's affirmative token posts.
+        // A bare Enter (empty) declines, and EOF (n==0) is never consent. See
+        // the prompt comment above for why a default-yes here is a data-exfil
+        // bug when the catalog string is attacker-controlled.
+        if consent_granted(n, ans, &affirmative) {
             match submit_issue(token, title, body) {
                 Some(url) => {
                     println!();
@@ -660,6 +672,25 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
 /// With no compiled-in token there is nothing to submit with, so no prompt.
 fn may_prompt_for_consent(token: &str, stdin_is_tty: bool, stderr_is_tty: bool) -> bool {
     !token.is_empty() && stdin_is_tty && stderr_is_tty
+}
+
+/// Whether the user EXPLICITLY consented to submit the profile.
+///
+/// `n` is `read_line`'s byte count (0 == EOF), `answer` is the trimmed reply,
+/// `affirmative` is the locale's yes-token (from the SAME catalog as the
+/// prompt). Split out from the submit flow so the consent rule is unit-testable
+/// without a real stdin, and so the exfil-relevant decision lives in exactly
+/// one place.
+///
+/// Three things are deliberately NOT consent, because this posts identifying
+/// hardware data (the drive serial, unless `--mask`) to a public tracker:
+///   * EOF (`n == 0`) — a closed/redirected stdin cannot agree to anything.
+///   * A bare Enter (empty answer) — a machine-controlled `de.json` can render
+///     the prompt as "[j/N]" (default NO), so treating Enter as YES would post
+///     against a hint the user reasonably read as "no". Opt-in, never opt-out.
+///   * Anything that is not the locale's affirmative token.
+fn consent_granted(n: usize, answer: &str, affirmative: &str) -> bool {
+    n > 0 && !answer.is_empty() && answer.eq_ignore_ascii_case(affirmative)
 }
 
 /// POST a drive-profile issue to `freemkv/bdemu` via the GitHub Issues API.
@@ -1376,7 +1407,45 @@ mod tests {
 
 #[cfg(test)]
 mod share_safety_tests {
-    use super::{may_prompt_for_consent, zip_files};
+    use super::{consent_granted, may_prompt_for_consent, zip_files};
+
+    /// Submitting the drive profile requires EXPLICIT consent, and the accept
+    /// token comes from the locale — never a hard-coded ASCII "y" against a
+    /// machine-controlled prompt.
+    ///
+    /// The prompt string loads from the catalog (`./locales`), so a crafted
+    /// `de.json` can render "[j/N]" (default NO). The old parser treated a bare
+    /// Enter as YES and eq_ignore_ascii_case("y"), so a German user pressing
+    /// Enter — reasonably reading it as "no" — POSTed the profile (with the
+    /// drive serial unless `--mask`) to a public tracker. This pins the two
+    /// rules that close it.
+    ///
+    /// Mutation caught: bringing back `ans.is_empty()` as an accept (default-yes
+    /// on Enter), or hard-coding "y" instead of the locale's affirmative token.
+    #[test]
+    fn submitting_requires_an_explicit_locale_matched_yes() {
+        // A bare Enter is NOT consent — it declines, whatever the prompt hinted.
+        assert!(!consent_granted(1, "", "y"), "a bare Enter must not post");
+        assert!(!consent_granted(1, "", "j"), "a bare Enter must not post");
+        // EOF (n == 0) is never consent, even if the buffer somehow looks right.
+        assert!(!consent_granted(0, "y", "y"), "EOF is never consent");
+        // The affirmative token is the locale's, matched case-insensitively.
+        assert!(consent_granted(1, "y", "y"));
+        assert!(consent_granted(1, "Y", "y"));
+        assert!(
+            consent_granted(1, "j", "j"),
+            "German 'j' posts under a de prompt"
+        );
+        assert!(consent_granted(1, "J", "j"));
+        // A German 'j' must NOT post while the ASCII 'y' token is active, and an
+        // English 'y' must not post under a German 'j' prompt — the token and
+        // the prompt are the same locale, so a mismatch fails closed.
+        assert!(!consent_granted(1, "j", "y"));
+        assert!(!consent_granted(1, "y", "j"));
+        // Anything else declines.
+        assert!(!consent_granted(1, "n", "y"));
+        assert!(!consent_granted(1, "yes please", "y"));
+    }
     use std::io::Read as _;
 
     fn names(v: &[&str]) -> Vec<String> {

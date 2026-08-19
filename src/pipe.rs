@@ -962,11 +962,30 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // job was built for. Empty when there was no upfront scan (an explicit
     // `-t N` scans exactly once, so there is nothing to disagree with).
     let (title_nums, disc_identities) = if is_disc && all_titles {
-        match disc_title_identities(source, &keys, &out) {
-            Some(ids) => (disc_title_nums(all_titles, &title_nums, ids.len()), ids),
-            // The scan failed; let the normal per-title path report it rather
-            // than inventing a second error message here.
-            None => (title_nums, Vec::new()),
+        match resolve_disc_all_titles(&title_nums, disc_title_identities(source, &keys, &out)) {
+            Some(pair) => pair,
+            // The upfront scan FAILED, and `-t all` cannot proceed without it:
+            // it is the only thing that knows how many titles the disc has. The
+            // old code mapped this to `(title_nums, Vec::new())` with
+            // `title_nums` still EMPTY (that is what `-t all` means), so
+            // `build_jobs` below fell to its single-title catch-all and
+            // `pipe_disc` ripped title 1 and exited 0 — the exact "one job,
+            // title 1, rc 0" defect `disc_title_nums` documents as fixed,
+            // resurrected on the scan-failure path. The claim that "the normal
+            // per-title path reports it" was false: nothing downstream knows
+            // `-t all` was ever requested, so nothing complains. Fail LOUDLY.
+            None => {
+                out.raw(
+                    Normal,
+                    &strings::get_or(
+                        "error.disc_scan_all_titles_failed",
+                        "Error: could not scan the disc to list its titles, so `-t all` \
+                         cannot know which titles to rip. Nothing was ripped — check the \
+                         disc and drive and try again.",
+                    ),
+                );
+                return false;
+            }
         }
     } else {
         (title_nums, Vec::new())
@@ -1643,6 +1662,24 @@ pub(crate) fn disc_title_nums(all_titles: bool, requested: &[usize], found: usiz
         return requested.to_vec();
     }
     (1..=found).collect()
+}
+
+/// Resolve the `(title_nums, identities)` pair for a `-t all` DISC rip from the
+/// result of the upfront scan, or `None` to signal "abort loudly".
+///
+/// `scan` is `disc_title_identities(..)`: `Some(ids)` when the drive was
+/// scanned, `None` when it failed (`.ok()?`, silently). `-t all` REQUIRES that
+/// scan — it is the only source of the title count — so a `None` here must NOT
+/// be papered over. Returning `None` from this function is the caller's cue to
+/// print an error and exit non-zero, instead of letting an empty `title_nums`
+/// fall through `build_jobs` to its single-title catch-all and rip title 1 with
+/// rc 0. Pure so the abort decision is unit-testable without a drive.
+fn resolve_disc_all_titles(
+    requested: &[usize],
+    scan: Option<Vec<TitleIdentity>>,
+) -> Option<(Vec<usize>, Vec<TitleIdentity>)> {
+    let ids = scan?;
+    Some((disc_title_nums(true, requested, ids.len()), ids))
 }
 
 fn build_jobs(
@@ -7266,8 +7303,44 @@ mod language_escape_tests {
 #[cfg(test)]
 mod title_identity_tests {
     use super::{
-        TitleIdentity, disc_title_nums, job_identity, resolve_scanned_title, title_changed_message,
+        TitleIdentity, disc_title_nums, job_identity, resolve_disc_all_titles,
+        resolve_scanned_title, title_changed_message,
     };
+
+    /// A `-t all` DISC rip whose upfront scan FAILS must abort, never degrade to
+    /// ripping title 1 with rc 0.
+    ///
+    /// `resolve_disc_all_titles` is the pure decision behind the scan-failure
+    /// arm in `pipe_disc`. `Some(ids)` expands `-t all` to every scanned title
+    /// (1..=N) and carries the identities; `None` (the scan failed) is the
+    /// caller's cue to print an error and return false. The old code mapped a
+    /// failed scan to `(empty title_nums, no identities)`, which fell through
+    /// `build_jobs`'s single-title catch-all and ripped title 1 while printing
+    /// "Complete" and exiting 0 — the flagship silent-degradation defect, back
+    /// on the transient-scan-failure path. `-t all` is `requested == []`, so an
+    /// empty request with a successful scan is what expands to the full list.
+    ///
+    /// Mutation caught: making the `None` arm fall back to a title list instead
+    /// of aborting (i.e. reintroducing `None => (title_nums, Vec::new())`).
+    #[test]
+    fn a_failed_all_titles_scan_aborts_instead_of_ripping_title_one() {
+        let scan = first_scan();
+        let ids: Vec<TitleIdentity> = scan.iter().map(TitleIdentity::of).collect();
+
+        // Scan succeeded: `-t all` expands to every scanned title, identities
+        // carried through so each job can verify against its own title.
+        let (nums, got_ids) =
+            resolve_disc_all_titles(&[], Some(ids.clone())).expect("a good scan proceeds");
+        assert_eq!(nums, vec![1, 2, 3, 4]);
+        assert_eq!(got_ids, ids);
+
+        // Scan FAILED: the resolver returns None so the caller aborts loudly.
+        // Anything other than None here is the resurrected rc-0-over-title-1 bug.
+        assert!(
+            resolve_disc_all_titles(&[], None).is_none(),
+            "a failed -t all scan must abort, not silently rip one title"
+        );
+    }
 
     /// A title with a distinct playlist and distinct sectors — the shape a real
     /// scan produces. `duration_secs`/`size_bytes` are deliberately IDENTICAL

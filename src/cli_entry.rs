@@ -150,11 +150,20 @@ fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>, Vec<Pend
                     "--log-level: requires a value (1=warn, 2=info, 3=debug, 4=trace)",
                 )),
             },
-            "--log-file" => {
-                if let Some(p) = it.next_if(|s| !is_flag_token(s)) {
-                    log_file = Some(p.clone());
-                }
-            }
+            "--log-file" => match it.next_if(|s| !is_flag_token(s)) {
+                Some(p) => log_file = Some(p.clone()),
+                // Symmetric with the `--log-level` arm above: a refused value
+                // (the next token is a flag, or there is no next token) must be
+                // REPORTED, not swallowed in silence. `freemkv --log-file --raw
+                // disc:// …` used to say nothing, write no diagnostic log, and
+                // run the rip anyway — the user asked for a log and got none,
+                // with no word why. Record the complaint so `run()` emits it
+                // once the locale is resolved.
+                None => diags.push(PendingDiag::new(
+                    "error.log_file_needs_value",
+                    "--log-file: requires a path (e.g. --log-file freemkv.log)",
+                )),
+            },
             _ => {}
         }
     }
@@ -272,16 +281,39 @@ pub fn run(args: Vec<String>) {
     // value is missing: record a complaint and leave the token as positional.
     let (args, language, lang_diags) = strip_language_flag(&args);
     pending.extend(lang_diags);
-    if let Some(lang) = language {
+    if let Some(lang) = language
+        && !lang.eq_ignore_ascii_case("auto")
+    {
+        // `auto` means "follow the environment" — the same value the GUI's
+        // Settings picker stores for its Auto option, and which
+        // `app_entry::apply_locale` honours by NOT installing a `--language`
+        // override. The `--help`/README both document `--language ... auto`, so
+        // the CLI has to accept it too. Honour it the same way: install NO
+        // override, and let `strings::init()` below resolve from
+        // LC_ALL/LC_MESSAGES/LANG exactly as if no flag were passed. Feeding a
+        // literal "auto" into `set_language` instead makes i18n hunt for an
+        // `auto.json`, fail, and print "locale 'auto' not found, using English"
+        // — documenting a value the CLI then rejects. An unknown code like
+        // `xx` is deliberately NOT treated as auto: it still reaches
+        // `set_language`, which resolves it to English with a warning, so a
+        // typo is visible rather than silently swallowed into the environment.
         crate::strings::set_language(&lang);
     }
     crate::strings::init();
 
     // FIRST point in the process where a message can be localized, and
     // therefore the first point where any of the argv pre-pass's complaints
-    // may be printed. Nothing has written to the terminal in between, so the
-    // user sees them in the same order and the same place as before — just in
-    // their own language. See `PendingDiag`.
+    // may be printed. The pre-pass itself printed NOTHING — that is the whole
+    // point of `PendingDiag` — so its complaints still reach the user in the
+    // original order and place, just in their own language. The one thing that
+    // CAN have written above is the i18n layer reporting on ITSELF:
+    // `set_language` warns on a dropped/duplicate `--language`, and
+    // `strings::init()` prints "locale '…' not found, using English" for an
+    // unavailable locale. Those are deliberately locale-independent English and
+    // are not pre-pass complaints, so they do not disturb the ordering this
+    // guarantees. (The earlier claim that "nothing has written in between" was
+    // simply false — `init()` above can print that locale warning.) See
+    // `PendingDiag`.
     for d in &pending {
         d.emit();
     }
@@ -1499,6 +1531,36 @@ mod arg_tests {
         assert_eq!(flags(&v(&["--log-file"])), (None, None));
     }
 
+    /// A refused `--log-file` value must be REPORTED, not swallowed silently.
+    ///
+    /// The `--log-level` arm records a `PendingDiag` for every failure mode
+    /// (missing value, out of range, not a number). The `--log-file` arm
+    /// recorded NONE: `freemkv --log-file --raw disc:// …` refused "--raw" as
+    /// the path (correctly, per the value guard) and then said nothing — no
+    /// diagnostic, no log written, the rip ran anyway. The user asked for a log
+    /// and got neither a log nor a word why. Absence of a log is itself a bug.
+    ///
+    /// Mutation caught: dropping the `None =>` diagnostic from the `--log-file`
+    /// arm (which reverts it to the silent `if let Some(..)` form).
+    #[test]
+    fn a_refused_log_file_value_records_a_diagnostic() {
+        // Next token is a flag: value refused, so the path is None AND a
+        // complaint is recorded.
+        let (_, file, diags) = parse_logging_flags(&v(&["--log-file", "--raw"]));
+        assert_eq!(file, None);
+        assert_eq!(keys(&diags), vec!["error.log_file_needs_value"]);
+
+        // Last token, no value at all: same complaint.
+        let (_, file, diags) = parse_logging_flags(&v(&["--log-file"]));
+        assert_eq!(file, None);
+        assert_eq!(keys(&diags), vec!["error.log_file_needs_value"]);
+
+        // A real value still takes cleanly and records nothing.
+        let (_, file, diags) = parse_logging_flags(&v(&["--log-file", "out.log"]));
+        assert_eq!(file.as_deref(), Some("out.log"));
+        assert!(diags.is_empty());
+    }
+
     /// A bare filename logs into the current directory; a directory-qualified
     /// one logs there. A value with no filename component is invalid and the
     /// caller must report it rather than write somewhere unintended.
@@ -1564,7 +1626,7 @@ mod arg_tests {
     /// Every deferred startup diagnostic must survive the round trip through
     /// the catalog: real key, real translation, placeholders filled in.
     ///
-    /// The defect this closes is subtle. These five messages were hard-coded
+    /// The defect this closes is subtle. These messages were hard-coded
     /// English, and the fix was to route them through `strings::fmt` — but a
     /// key that is not in the catalog renders as its own dotted path
     /// (`freemkv_i18n::get`'s documented miss behaviour, "makes missing
@@ -1572,10 +1634,18 @@ mod arg_tests {
     /// "--log-level: requires a value…" into "error.log_level_needs_value",
     /// which is not a fix, it is a worse bug: still not localized AND no
     /// longer readable. Nothing else in the suite can see that, because these
-    /// five run before `strings::init()` and are printed from `run()`.
+    /// run before `strings::init()` and are printed from `run()`.
     ///
-    /// Mutation caught: misspelling any of the five keys, dropping one from
-    /// the locale catalogs, or renaming a `{placeholder}` on either side.
+    /// The check MUST go against the raw catalog (`strings::get`), never through
+    /// `PendingDiag::render`. `render` calls `get_or`/`fmt_or`, whose whole job
+    /// is to substitute compiled-in English for a missing key — so a
+    /// `render() != key` assertion can never fail whether or not the key is
+    /// really translated. That was the previous version of this test, and it
+    /// was vacuous in precisely the way it claimed to catch. `get(key) != key`
+    /// holds only when the catalog actually carries a string for the key.
+    ///
+    /// Mutation caught: misspelling any of these keys, dropping one from the
+    /// locale catalogs, or renaming a `{placeholder}` on either side.
     #[test]
     fn every_deferred_startup_diagnostic_resolves_to_real_localized_text() {
         let cases = [
@@ -1590,12 +1660,21 @@ mod arg_tests {
         for (args, key, must_contain) in cases {
             let (_, _, diags) = parse_logging_flags(&args);
             assert_eq!(keys(&diags), vec![key], "for argv {args:?}");
-            let text = diags[0].render();
+            // Assert against the RAW catalog, NOT through `PendingDiag::render`.
+            // `render` calls `strings::get_or`/`fmt_or`, whose entire job is to
+            // turn a key echo into compiled-in English — so `assert_ne!(render,
+            // key)` can NEVER fail, hit or miss, which made the old assertion
+            // vacuous in the exact way this test claims to cure. `strings::get`
+            // returns the dotted path itself on a miss, so `get(key) != key`
+            // holds ONLY when a real localized string is present for the key.
+            let raw = crate::strings::get(key);
             assert_ne!(
-                text, key,
-                "'{key}' is not in the catalog — it renders as its own dotted \
-                 path, which is neither English nor localized"
+                raw, key,
+                "'{key}' has no entry in the catalog — nothing localizes it, and \
+                 only `PendingDiag`'s English fallback was hiding that"
             );
+            // Render still has to fill placeholders and carry the typed value.
+            let text = diags[0].render();
             assert!(
                 !text.contains('{'),
                 "'{key}' rendered with an unsubstituted placeholder: {text}"
@@ -1606,19 +1685,26 @@ mod arg_tests {
             );
         }
 
-        // The `--log-file` half lives in `init_logging`, which installs a
-        // process-global subscriber and so cannot be called from a test. Its
-        // key is checked directly instead — the same miss behaviour applies.
-        let bad_path = PendingDiag::new(
-            "error.log_file_invalid_path",
-            "--log-file: invalid path '{path}' — no diagnostic log written",
-        )
-        .with("path", "/");
-        let text = bad_path.render();
-        assert_ne!(text, "error.log_file_invalid_path");
+        // The `--log-file` invalid-path half lives in `init_logging`, which
+        // installs a process-global subscriber and so cannot be called from a
+        // test. Its key is checked directly against the raw catalog instead.
+        let key = "error.log_file_invalid_path";
+        assert_ne!(
+            crate::strings::get(key),
+            key,
+            "'{key}' is not in the catalog"
+        );
+        let text = PendingDiag::new(key, "unused fallback")
+            .with("path", "/")
+            .render();
         assert!(text.contains('/') && !text.contains('{'), "{text}");
 
         // And the language flag's own complaint, for both spellings.
+        assert_ne!(
+            crate::strings::get("error.language_needs_value"),
+            "error.language_needs_value",
+            "the language-needs-value key is not in the catalog"
+        );
         for flag in ["--language", "--lang"] {
             let (_, lang, diags) = strip_language_flag(&v(&["freemkv", flag]));
             assert_eq!(lang, None);

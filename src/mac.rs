@@ -909,13 +909,22 @@ define_class!(
             // own: a Settings window rebuilt while a download runs comes back
             // with a fresh, enabled button.
             if self.ivars().keydb_updating.get() {
-                // Localized, and through the SAME keys the Windows shell
-                // already used. All three of these notes were hard-coded
-                // English here while `windows.rs` read
-                // `gui.set.keydb_no_url` / `gui.set.keydb_updating` from the
-                // catalog — one dialog, two shells, two answers, which is the
-                // exact drift this crate's shared `ui`/`strings` layer exists
-                // to prevent.
+                // Localized through the catalog, like the other two keydb notes
+                // (`gui.set.keydb_no_url` / `gui.set.keydb_updating`), which the
+                // Windows shell reads from the SAME keys — the shared-catalog
+                // parity this crate's `ui`/`strings` layer exists to keep.
+                //
+                // `gui.set.keydb_busy` is the exception, and this comment used
+                // to claim otherwise: it is NEW to this crate and `windows.rs`
+                // has NO reader for it. The Windows Update button relies on
+                // being disabled while a download runs (`set_keydb_updating`)
+                // and never re-checks a "busy" flag, so it has no "already
+                // running" note to share yet. This mac path adds one because a
+                // Settings window rebuilt mid-download comes back with a fresh,
+                // enabled button — a race the disabled button alone does not
+                // cover. Wiring the same guard (and this key) into `windows.rs`
+                // would need a stored updating-state flag it does not carry
+                // today; until then the key is mac-only, by fact, not by claim.
                 self.set_keydb_note(&crate::strings::get_or(
                     "gui.set.keydb_busy",
                     "A keydb update is already running — please wait.",

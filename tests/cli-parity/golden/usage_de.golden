@@ -20,21 +20,21 @@ Stream-URLs:
   disc://D:                Optisches Laufwerk (Windows)
   mkv://pfad.mkv          Matroska-Datei
   m2ts://pfad.m2ts        BD-Transportstrom-Datei
-  mp4://path.mp4           MP4 file
+  mp4://path.mp4           MP4-Datei
   iso://abbild.iso         Blu-ray-ISO-Abbild
-  dir://folder/            Decrypted file tree in a folder
+  dir://folder/            Entschlüsselter Dateibaum in einem Ordner
   network://host:port      TCP-Stream
   stdio://                 Stdin/Stdout-Pipe
   null://                  Verwerfen (Benchmark)
 
-Track outputs (destination only):
-  demux://folder/          Every track as a separate file
-  video://folder/          Video tracks only
-  audio://folder/          Audio tracks only
-  sub://folder/            Subtitle tracks only
-  chapters://file.xml      Chapter list (.xml, .txt/.ogm, .vtt)
-  json://file.json         Title structure as JSON
-  fvi://file.fvi           Per-frame video index
+Spurausgaben (nur als Ziel):
+  demux://folder/          Jede Spur als eigene Datei
+  video://folder/          Nur Videospuren
+  audio://folder/          Nur Audiospuren
+  sub://folder/            Nur Untertitelspuren
+  chapters://file.xml      Kapitelliste (.xml, .txt/.ogm, .vtt)
+  json://file.json         Titelstruktur als JSON
+  fvi://file.fvi           Videoindex je Einzelbild
 
   Alle URLs benötigen ein scheme://-Präfix.
   Dateipfade folgen dem Schema: mkv://./Film.mkv, m2ts://./Film.m2ts
@@ -69,7 +69,7 @@ Optionen:
                       Diagnoseprotokoll in ./log.txt (3 für Fehlerberichte).
       --log-file PFAD  Diagnoseprotokoll in PFAD statt ./log.txt schreiben.
   -q, --quiet         Ausgabe unterdrücken
-      --language CODE Interface language (also --lang): a code like de or pt-BR, or auto.
+      --language CODE Oberflächensprache (auch --lang): ein Code wie de oder pt-BR, oder auto.
       --raw           Entschlüsselung überspringen (raw verschlüsselte Ausgabe)
       --multipass    Mapfile für Mehrpass-Wiederherstellung schreiben/aktualisieren
       --force        Extract into a non-empty dir:// target (overwrite)

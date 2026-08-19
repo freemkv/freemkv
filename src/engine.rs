@@ -921,41 +921,80 @@ pub fn error_code(e: &std::io::Error) -> u16 {
     rest[..digits_end].parse().unwrap_or(0)
 }
 
+/// Map a recovery sweep's terminal flags to the run's result, BEFORE the ISO is
+/// muxed — or `None` when the sweep is not terminal and the write/mux path
+/// should proceed.
+///
+/// This is the engine-side twin of the CLI's `pipe::copy_verdict`: the halt /
+/// loss-abort / continue grading used to be inline `if`s in `run_disc` with no
+/// test, while the identical CLI decision is a pure, unit-tested function. The
+/// case that matters most is `aborted_for_loss`, which returns `Err`, NOT `Ok`:
+/// a title muxed from an image this damaged would be missing footage, and
+/// returning `Ok` here once exited 0 and rendered the abort as a completed rip
+/// (the silent-loss failure the gate exists to prevent). A halt outranks a loss
+/// abort — "you stopped it" is the more useful thing to say, and the partial
+/// image is kept in every case, so an abort never throws away the read.
+fn recovery_terminal_result(
+    halted: bool,
+    aborted_for_loss: bool,
+    want_iso: bool,
+    iso_path: &str,
+) -> Option<Result<String, String>> {
+    if halted {
+        Some(Ok(if want_iso {
+            format!("Cancelled — partial ISO kept: {iso_path}")
+        } else {
+            format!("Cancelled — nothing muxed; partial ISO kept: {iso_path}")
+        }))
+    } else if aborted_for_loss {
+        Some(Err(if want_iso {
+            format!("Recovery aborted — too much unreadable data; partial ISO kept: {iso_path}")
+        } else {
+            format!(
+                "Recovery aborted — too much unreadable data to mux a complete title \
+                 (raise the lost-seconds tolerance to accept it, or re-run recovery). \
+                 Partial ISO kept: {iso_path}"
+            )
+        }))
+    } else {
+        None
+    }
+}
+
 /// Turn a library error code into something a person can act on.
 ///
 /// The library carries no English by design, so a front-end that just prints
-/// `E9048` has told the user nothing. Only codes a user can actually do
-/// something about are spelled out; the rest keep the code for a bug report.
+/// `E9048` has told the user nothing. This ROUTES THROUGH THE CATALOG — the
+/// same `error.E<code>` keys the CLI renders via `strings::error_message` — so
+/// a desktop-app failure is localized in all 29 locales instead of the
+/// hard-coded English it used to be (GUI/CLI parity). A code whose catalog
+/// string needs runtime data the GUI does not have here (E7022's `{hash}`,
+/// E8005's `{detail}`) would render with an unfilled `{…}`, so those map to the
+/// placeholder-free `error.E7018` ("No key source has a decryption key for this
+/// disc."), which the catalog already localizes. A code with no string at all
+/// keeps its number for a bug report, via a last-resort localizable wrapper.
 pub fn explain(code: u16) -> String {
-    match code {
-        // Must match `error.E9048` in freemkv-i18n and `ui::MP4_VIDEO`: the mux
-        // gate admits H.264 and HEVC only. This used to also claim AV1, so the
-        // message could list the user's own failing codec as supported. E9048
-        // covers both causes — an unmappable codec AND a title with no video
-        // track at all — so the wording names what MP4 needs, not what is wrong.
-        9048 => "MP4 needs a video track it can carry (H.264 or HEVC); this \
-                 title has none. Choose MKV, which keeps everything."
-            .to_string(),
-        7022 | 8005 => "No decryption key for this disc. Check the keydb or \
-                        online key service in Settings."
-            .to_string(),
-        // 7028/7029/7030 are NOT 7022. The online key service failed to ANSWER —
-        // nothing is known about this disc's key — and each failure is a
-        // different thing for a person to do. Folding them into the 7022 message
-        // above is the bug: a seven-hour run of HTTP 502s told operators the disc
-        // was not in the key database and sent them hunting for a VUK.
-        7028 => "The online key service could not be reached, so it never said \
-                 whether this disc has a key. Wait a few minutes and try again."
-            .to_string(),
-        7029 => "The online key service rejected the access token. Fix the key \
-                 service token in Settings and try again."
-            .to_string(),
-        7030 => "The online key service is rate-limiting requests. Wait a few \
-                 minutes and try again, or rip fewer discs at once."
-            .to_string(),
-        6013 => "This file is not a disc image.".to_string(),
-        c => format!("Mux failed (E{c})."),
+    // E7022 (no key for this disc) is the single most common real failure on an
+    // AACS disc, and it arrives here through `error_code`. Its catalog string
+    // names the disc by `{hash}`, which the desktop app does not carry to this
+    // point; E8005 (keydb load) likewise needs `{detail}`. Both map to the
+    // argument-free no-key sibling so nothing renders a literal `{hash}`.
+    let key_code = match code {
+        7022 | 8005 => 7018,
+        c => c,
+    };
+    let msg = crate::strings::error_message(u32::from(key_code));
+    if msg != format!("error.E{key_code}") && !msg.contains('{') {
+        return msg;
     }
+    // No catalog string (or one that still needs an argument): keep the ORIGINAL
+    // code visible for a bug report, inside a localizable wrapper rather than
+    // reintroducing hard-coded English.
+    crate::strings::fmt_or(
+        "error.mux_failed_generic",
+        "Mux failed (E{code}).",
+        &[("code", &code.to_string())],
+    )
 }
 
 /// Explain why a title died, from the two halves of the cause
@@ -2666,31 +2705,15 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         //
         // The recovered image is kept in every case, so an abort never throws
         // away the read; the user can retry the mux or keep recovering.
-        if result.halted {
-            return Ok(if want_iso {
-                format!("Cancelled — partial ISO kept: {iso_path}")
-            } else {
-                format!("Cancelled — nothing muxed; partial ISO kept: {iso_path}")
-            });
-        }
-        if result.aborted_for_loss {
-            // Not an Ok: a title muxed from an image this damaged would be
-            // missing footage, and reporting that as a written title is the
-            // silent-loss failure the gate exists to prevent.
-            return if want_iso {
-                // Err, not Ok: the partial ISO is worth keeping, but the run did
-                // not deliver what was asked for. Returning Ok here exited 0 and
-                // rendered the abort as a completed rip.
-                Err(format!(
-                    "Recovery aborted — too much unreadable data; partial ISO kept: {iso_path}"
-                ))
-            } else {
-                Err(format!(
-                    "Recovery aborted — too much unreadable data to mux a complete title \
-                     (raise the lost-seconds tolerance to accept it, or re-run recovery). \
-                     Partial ISO kept: {iso_path}"
-                ))
-            };
+        // The halt/abort grading is the engine-side twin of the CLI's
+        // `pipe::copy_verdict`, and like it, it must be a pure, tested decision
+        // rather than inline `if`s — an abort returned as `Ok` once exited 0 and
+        // rendered a too-damaged recovery as a completed rip (the silent-loss
+        // failure the gate exists to prevent). See `recovery_terminal_result`.
+        if let Some(terminal) =
+            recovery_terminal_result(result.halted, result.aborted_for_loss, want_iso, &iso_path)
+        {
+            return terminal;
         }
 
         if want_iso {
@@ -3515,6 +3538,81 @@ mod outcome_summary_tests {
         let res = extract_result(true, 1, 1_048_576);
         let msg = summarize_extract(&res, std::path::Path::new("/out/Disc"));
         assert!(msg.starts_with("Cancelled"), "{msg}");
+    }
+}
+
+#[cfg(test)]
+mod verdict_and_explain_tests {
+    use super::{explain, recovery_terminal_result};
+
+    /// A recovery that aborted for loss is an ERROR, never a completed rip —
+    /// for BOTH output kinds — while a halt is an `Ok` cancel and a clean sweep
+    /// proceeds. This is the engine-side twin of `pipe::copy_verdict`, which was
+    /// unit-tested while this decision was inline and untested.
+    ///
+    /// Mutation caught: returning `Ok` for `aborted_for_loss` (which exits 0 and
+    /// renders a too-damaged recovery as a completed rip), or dropping the
+    /// halt-outranks-loss precedence.
+    #[test]
+    fn a_loss_abort_is_an_error_not_a_completed_rip() {
+        // Halt → Ok cancel, image kept, both output kinds.
+        assert!(matches!(
+            recovery_terminal_result(true, false, true, "d.iso"),
+            Some(Ok(_))
+        ));
+        assert!(matches!(
+            recovery_terminal_result(true, false, false, "d.iso"),
+            Some(Ok(_))
+        ));
+        // Loss abort → Err, both output kinds. This is the exit-0-over-damage bug.
+        assert!(matches!(
+            recovery_terminal_result(false, true, true, "d.iso"),
+            Some(Err(_))
+        ));
+        assert!(matches!(
+            recovery_terminal_result(false, true, false, "d.iso"),
+            Some(Err(_))
+        ));
+        // Neither terminal → proceed to the normal write/mux path.
+        assert!(recovery_terminal_result(false, false, true, "d.iso").is_none());
+        // Halt outranks a coincident loss abort — "you stopped it" wins, and it
+        // is an Ok cancel, not an Err.
+        assert!(matches!(
+            recovery_terminal_result(true, true, false, "d.iso"),
+            Some(Ok(_))
+        ));
+    }
+
+    /// A desktop-app failure code is LOCALIZED through the catalog, not
+    /// hard-coded English. `explain` must equal what the CLI renders for the
+    /// same `error.E<code>` key, so both shells give one answer in all 29
+    /// locales (GUI/CLI parity).
+    ///
+    /// Mutation caught: reverting `explain` to its hard-coded English arms — the
+    /// old `9048 => "…Choose MKV…"` differs from the catalog's E9048, so the
+    /// equality below fails the moment the routing is removed. Also pins that no
+    /// placeholder-carrying code (E7022's `{hash}`) ever leaks a literal `{…}`.
+    #[test]
+    fn explain_localizes_through_the_catalog() {
+        // Routed codes equal the catalog string the CLI uses for the same key.
+        for code in [9048u16, 7028, 7029, 7030, 6013] {
+            assert_eq!(
+                explain(code),
+                crate::strings::error_message(u32::from(code)),
+                "E{code} must render from the catalog, not hard-coded English"
+            );
+        }
+        // No-key codes that carry runtime data the GUI lacks map to the
+        // argument-free sibling — localized, and with NO leaked placeholder.
+        for code in [7022u16, 8005] {
+            let msg = explain(code);
+            assert_eq!(msg, crate::strings::error_message(7018));
+            assert!(!msg.contains('{'), "E{code} leaked a placeholder: {msg}");
+        }
+        // An unknown code keeps its number for a bug report, no placeholder.
+        let unknown = explain(4242);
+        assert!(unknown.contains("4242"), "{unknown}");
+        assert!(!unknown.contains('{'), "{unknown}");
     }
 }
 
