@@ -496,22 +496,55 @@ jobs:
           fi
           echo "FMKV_PYTHON=$PY" >> "$GITHUB_ENV"
           "$PY" --version
-      - name: Provision the Rust toolchain
+      - name: Provision the build toolchain
         shell: bash
         # The media runner is self-hosted and ephemeral; like ffmpeg and python
-        # above, it carries no Rust — the build step below was failing with
-        # `cargo: command not found` (exit 127). Install rustup + the CI-pinned
-        # toolchain per-run rather than depending on a hand-baked AMI, so the
-        # acceptance build reproduces on any contributor's runner. Idempotent:
-        # a runner that already has cargo is left as-is.
+        # above, it carries no build toolchain — the build step below was failing
+        # with `cargo: command not found` (exit 127), and a bare runner also lacks
+        # the C compiler/linker the build needs (rustc's linker driver + ring's C
+        # backend on both OSes; MSVC link.exe on windows). Provision per-run rather
+        # than depend on a hand-baked AMI, so the acceptance build reproduces on any
+        # contributor's runner. Every install is idempotent/guarded — a no-op when
+        # the AMI already provided it.
         run: |
           set -euo pipefail
+          # ── Native C toolchain + linker ──────────────────────────────────────
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            # The build targets x86_64-pc-windows-msvc (what the release ships and
+            # what build.rs's manifest/icon path assumes). rustup installs RUST, not
+            # a linker: a bare Windows Server AMI has no link.exe/Windows SDK, so
+            # `cargo build` dies with `linking with link.exe failed`, and ring needs
+            # cl.exe. rustc locates MSVC via vswhere (no PATH help needed). Gate on a
+            # vswhere probe so this is a no-op when the AMI already has VS Build Tools.
+            vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+            have_vc=
+            if [ -x "$vswhere" ]; then
+              have_vc=$("$vswhere" -latest -products '*' \
+                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
+                -property installationPath 2>/dev/null || true)
+            fi
+            if [ -z "$have_vc" ]; then
+              choco install -y visualstudio2022buildtools --no-progress
+              choco install -y visualstudio2022-workload-vctools --no-progress
+            fi
+          else
+            # rustc's default linker driver is `cc` and ring compiles C, so gcc + ld
+            # are mandatory; curl bootstraps rustup. Idempotent (apt lists already
+            # refreshed by the ffmpeg step earlier in this job).
+            sudo apt-get install -y -qq build-essential curl
+          fi
+          # ── Rust, pinned to the CI toolchain. Idempotent: a runner that already
+          # has cargo on PATH is left as-is. ──────────────────────────────────────
           if command -v cargo >/dev/null 2>&1; then
             cargo --version
           elif [ "${{ matrix.os }}" = "windows" ]; then
             curl -sSf -o rustup-init.exe https://win.rustup.rs/x86_64
-            ./rustup-init.exe -y --profile minimal --default-toolchain 1.97.0
-            echo "$USERPROFILE\\.cargo\\bin" >> "$GITHUB_PATH"
+            ./rustup-init.exe -y --profile minimal --default-toolchain 1.97.0 \
+              --default-host x86_64-pc-windows-msvc
+            # POSIX form for $GITHUB_PATH, matching the /c/... entries the ffmpeg and
+            # python steps already write. A C:\Users\...\bin entry gets split on its
+            # drive-letter colon when Git-Bash re-parses PATH for the next step.
+            echo "$(cygpath -u "$USERPROFILE")/.cargo/bin" >> "$GITHUB_PATH"
           else
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --profile minimal --default-toolchain 1.97.0
