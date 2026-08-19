@@ -12,9 +12,18 @@
 // `Error` is `#[non_exhaustive]`, so this list is hand-maintained — that is the
 // design: a new variant with no string/locale/level trips the contract test
 // rather than shipping a bare code.
+//
+// Hand-maintained does not mean unchecked. See
+// `fixture_enumerates_every_libfreemkv_error_code` in
+// `tests/messaging_contract.rs`: it compares the code set below against the
+// `pub const E_*` declarations in libfreemkv's own `src/error.rs`, in both
+// directions, so a variant added upstream and forgotten here FAILS rather than
+// silently dropping out of every assertion that iterates this list.
 
-/// Construct one instance of every `libfreemkv::Error` variant the CLI can
-/// surface. Kept in lock-step with `libfreemkv::Error`'s definition by hand.
+/// Construct one instance of every error code `libfreemkv` publishes.
+///
+/// NOT "every code the CLI can surface" — that narrower reading is what left
+/// eleven codes unchecked; see the long note at the end of the list.
 pub fn all_error_variants() -> Vec<libfreemkv::Error> {
     use libfreemkv::Error;
     let p = || "p".to_string();
@@ -160,11 +169,15 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::ExtentNotUnitAligned,
         Error::M2tsPacketMalformed,
         Error::DiscCapacityMalformed,
-        // dir:// extraction errors that surface to the user as raw E-codes
-        // (the three preflight-caught dir codes — E9019/E9024/E9025 — are
-        // intercepted by CLI validation strings and never reach `fmt_err`,
-        // so they are intentionally NOT enumerated here). These four are
-        // produced inside `Disc::extract_tree` and DO reach the user.
+        // dir:// extraction errors, produced inside `Disc::extract_tree`.
+        //
+        // This block used to end with a note explaining that E9019/E9024/E9025
+        // were "intentionally NOT enumerated here" because `pipe.rs` catches
+        // those three combinations in preflight with its own CLI-owned strings
+        // (`error.raw_iso_only`, `error.multipass_iso_only`,
+        // `error.dir_source_unsupported`) before libfreemkv is ever asked. That
+        // is true, and it was still the wrong rule — see the block at the end of
+        // this list. They are enumerated now.
         Error::DirNotEmpty,
         Error::DirInsufficientSpace {
             required: 0,
@@ -197,6 +210,69 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
             written: 0,
         },
         Error::SinkWroteNothing,
+        // ── The eleven codes this fixture published a string for and never
+        //    asked about ─────────────────────────────────────────────────────
+        //
+        // WHY this block exists, in full, because the same hole has now been
+        // punched three times (E6013/E6014, then E9059-E9070, now these):
+        //
+        // Two tests read this list and read it as two DIFFERENT things.
+        // `every_error_code_has_an_en_string` /
+        // `every_variant_has_code_message_locales_placeholders_and_level` treat
+        // it as "codes that need a string" — so anything missing here is simply
+        // never asked for. `no_orphan_error_code_keys_in_en` treats it as "the
+        // set of codes that legitimately have a string" — so anything missing
+        // here is reported as a STALE STRING TO DELETE. One hand-maintained list
+        // under two opposite readings: an omission first hides a real gap, then
+        // accuses the party who fixed it.
+        //
+        // That is exactly what happened. freemkv-i18n diffed libfreemkv's 127
+        // `pub const E_*` constants against en.json, found eleven with no
+        // message at all — E9056/E9057 among them, the two that tell a user the
+        // rip could NOT be confirmed written to disk, rendering as the literal
+        // text `error.E9056` to someone deciding whether it is safe to delete
+        // the source — and wrote strings for all eleven across 29 locales.
+        // Whereupon this fixture, 117 variants against libfreemkv's 127 codes,
+        // called those eleven strings orphans.
+        //
+        // The rule is therefore restated, and it is the rule the rest of this
+        // file now follows: THIS LIST ENUMERATES EVERY ERROR CODE LIBFREEMKV
+        // PUBLISHES, not every code the CLI's own code paths can reach.
+        //
+        // Eight of the eleven were plain omissions — libfreemkv really does
+        // return them, from `mux/disc.rs` and `sector/prefetched.rs` (E5001),
+        // `udf.rs` (E6016/E6017/E6018), `mux/mp4/mod.rs` (E9055),
+        // `io/writeback_file/{macos,linux}.rs` (E9056/E9057) and `identity.rs`
+        // (E9058). Nothing but this fixture's incompleteness kept them from
+        // being caught by the string check years earlier.
+        //
+        // Three — E9019/E9024/E9025 — are genuinely unreachable from the CLI:
+        // `pipe.rs` rejects those flag/URL combinations in preflight with its
+        // own strings. They are still `pub` variants of a `pub` enum in a
+        // library with other consumers, they still have a `code()` arm, and a
+        // number that can appear in a log line or a bug report is worth a
+        // sentence. Excluding them bought nothing and cost the bijection below.
+        //
+        // The bijection is the point. With this list complete,
+        // `every_variant_has_...` (fixture ⊆ en.json) and
+        // `no_orphan_error_code_keys_in_en` (en.json ⊆ fixture) together assert
+        // fixture == en.json, and freemkv-i18n's own CI asserts en.json ==
+        // libfreemkv's constants in both directions. Chained, that is one list,
+        // mechanically. `fixture_enumerates_every_libfreemkv_error_code` in
+        // tests/messaging_contract.rs closes the loop directly against
+        // libfreemkv's source wherever a sibling checkout exists — which, per
+        // .github/workflows/ci.yml, is every job in this repo's CI.
+        Error::SourceTerminated,
+        Error::UdfAdChainTooLong,
+        Error::UdfUnrecordedExtent { path: p() },
+        Error::UdfEmbeddedData,
+        Error::DirRawRejected,
+        Error::DirMultipassRejected,
+        Error::DirSourceUnsupported,
+        Error::Mp4UnknownResolution,
+        Error::SyncTimeout,
+        Error::SyncWorkerLost,
+        Error::DriveInquiryShort,
     ]
 }
 
