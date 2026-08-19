@@ -11,23 +11,36 @@ $ErrorActionPreference = "Stop"
 $tok  = Invoke-RestMethod -Method PUT -Uri "http://169.254.169.254/latest/api/token" -Headers @{"X-aws-ec2-metadata-token-ttl-seconds"="300"}
 $iid  = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/instance-id" -Headers @{"X-aws-ec2-metadata-token"=$tok}
 
-# Read the tags through IMDS, not `aws ec2 describe-tags`. The Linux sibling
-# died on `aws: command not found` before it could install anything, and while
-# the Windows AMI does ship the CLI, going through IMDS removes the dependency,
-# an IAM call, and the ordering trap in one move. Requires
+# The registration token is NOT in a tag (any ec2:DescribeTags principal can
+# read a tag, and the token stays valid for repeated registrations for 60 min).
+# The launcher puts it in SSM as a SecureString and tags only its NAME. Read the
+# NAME (and the region) through IMDS here — no tooling needed — and fetch the
+# token itself later, once awscli is on PATH. Requires
 # InstanceMetadataTags=enabled on the launch template.
-$hdr  = @{"X-aws-ec2-metadata-token"=$tok}
-$reg  = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/tags/instance/runner-token" -Headers $hdr
-$repo = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/tags/instance/runner-repo"  -Headers $hdr
-if (-not $reg -or -not $repo) { Write-Error "tags not visible via IMDS"; Stop-Computer -Force }
+$hdr    = @{"X-aws-ec2-metadata-token"=$tok}
+$param  = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/tags/instance/runner-token-param" -Headers $hdr
+$repo   = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/tags/instance/runner-repo"  -Headers $hdr
+$region = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/placement/region" -Headers $hdr
+if (-not $param -or -not $repo) { Write-Error "tags not visible via IMDS"; Stop-Computer -Force }
 
 # Toolchain: rustup + ffmpeg (the suite shells out to ffprobe).
 Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile C:\rustup-init.exe
 C:\rustup-init.exe -y --default-toolchain 1.97 | Out-Null
-# choco is NOT on the base Windows Server AMI, so install it first.
+# choco is NOT on the base Windows Server AMI, so install it first — but PINNED
+# to an exact version, not a floating `latest` piped straight into `iex` as
+# SYSTEM. That bootstrap ran whatever community.chocolatey.org served at boot,
+# unverified, with full privilege, seconds before this box registers as a runner
+# that handles repo secrets — a supply-chain hole. `$env:chocolateyVersion` +
+# `$env:chocolateyDownloadUrl` make the bootstrap install THIS immutable package
+# version (a published nupkg version is never re-published, so the bytes are
+# fixed), instead of whatever is current. To bump it, change $chocoVer to a
+# version from https://community.chocolatey.org/packages/chocolatey#versionhistory.
 if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
   Set-ExecutionPolicy Bypass -Scope Process -Force
   [System.Net.ServicePointManager]::SecurityProtocol = 3072
+  $chocoVer = '2.4.3'
+  $env:chocolateyVersion     = $chocoVer
+  $env:chocolateyDownloadUrl = "https://community.chocolatey.org/api/v2/package/chocolatey/$chocoVer"
   iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
   $env:PATH += ";$env:ProgramData\chocolatey\bin"
 }
@@ -69,6 +82,13 @@ foreach ($t in @("git","ffprobe","aws","cargo")) {
     Write-Error "FATAL: $t missing from PATH after install"; Stop-Computer -Force
   }
 }
+
+# awscli is on PATH now (asserted above), so fetch the registration token from
+# the SSM SecureString the launcher stashed, decrypt it, and DELETE it right
+# away so it never outlives this boot. The tag only ever held the NAME.
+$reg = (aws ssm get-parameter --region $region --name $param --with-decryption --query Parameter.Value --output text).Trim()
+aws ssm delete-parameter --region $region --name $param 2>$null
+if (-not $reg) { Write-Error "registration token not found in SSM ($param)"; Stop-Computer -Force }
 
 $rv = (Invoke-RestMethod -Uri "https://api.github.com/repos/actions/runner/releases/latest").tag_name.TrimStart("v")
 New-Item -ItemType Directory -Force -Path C:\actions-runner | Out-Null

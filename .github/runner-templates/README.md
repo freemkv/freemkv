@@ -39,6 +39,28 @@ it, and the runner inherited that. The fix is to re-read PATH from the machine
 environment after the installs, then assert every tool is present — failing at
 boot rather than twenty minutes into a rip.
 
+## Where the registration token lives
+
+The token is **not** in an instance tag. A tag is readable by any principal with
+`ec2:DescribeTags`/`DescribeInstances`, and a GitHub registration token is valid
+for *repeated* registrations for its whole 60-minute life — long enough for an
+account-read to register a rogue runner that then picks up a job carrying repo
+secrets. So the launching workflow (`ci-runner-launch.yml`) stashes the token in
+**SSM Parameter Store as a SecureString** and tags only its NAME
+(`runner-token-param`, non-secret). The user-data reads the name from IMDS, then
+`aws ssm get-parameter --with-decryption`, then `aws ssm delete-parameter` so the
+token does not outlive the boot. If the box dies first, the token expires in
+60 min and the sweeper terminates it.
+
+IAM this needs (AWS-side, not in this repo):
+
+- launcher role (`FMKV_RUNNER_ROLE`): `ssm:PutParameter` (+ `kms:Encrypt`).
+- instance role (in the launch template): `ssm:GetParameter`,
+  `ssm:DeleteParameter`, `kms:Decrypt` — scoped to `/freemkv-ci/runner-reg/*`.
+
+Only the parameter *name* travels through IMDS tags, so
+`InstanceMetadataTags=enabled` is still required.
+
 ## Teardown
 
 Three independent mechanisms, because each fails alone:

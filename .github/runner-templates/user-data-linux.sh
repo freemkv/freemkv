@@ -29,19 +29,22 @@ TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-
 md() { curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
 IID=$(md instance-id)
 
-# The registration token is passed in as a TAG by the launching workflow (it is
-# single-use and expires in 60 min, so it never sits in an AMI or in SSM) and
-# read back through IMDS rather than `aws ec2 describe-tags`.
-#
-# That is not a style choice: this AMI does not ship the AWS CLI, so the first
-# version of this script died on `aws: command not found` BEFORE it could
-# install anything, and `set -e` took the whole boot down with it. IMDS needs
-# no tooling at all, which removes both the ordering trap and an IAM call from
-# the critical path. It requires InstanceMetadataTags=enabled on the launch
-# template.
-REG=$(md tags/instance/runner-token)
+# The registration token is NOT passed in a tag: a tag is readable by any
+# principal with ec2:DescribeTags/DescribeInstances, and a GitHub registration
+# token is valid for REPEATED registrations for its whole 60-minute life — long
+# enough for an account-read to register a rogue runner. So the launcher stashes
+# the token in SSM Parameter Store as a SecureString and tags only its NAME
+# (non-secret). We read the NAME from IMDS (no tooling), then fetch+decrypt+
+# DELETE the token via awscli, which is installed above (so `aws` is on PATH and
+# there is no ordering trap). IMDS tags still require InstanceMetadataTags=enabled.
+PARAM=$(md tags/instance/runner-token-param)
 REPO=$(md tags/instance/runner-repo)
-[ -n "$REG" ] && [ -n "$REPO" ] || { echo "FATAL: tags not visible via IMDS — is InstanceMetadataTags enabled?"; shutdown -h now; }
+[ -n "$PARAM" ] && [ -n "$REPO" ] || { echo "FATAL: tags not visible via IMDS — is InstanceMetadataTags enabled?"; shutdown -h now; }
+REGION=$(md placement/region)
+REG=$(aws ssm get-parameter --region "$REGION" --name "$PARAM" --with-decryption --query Parameter.Value --output text)
+# Delete immediately so the token never outlives this boot, whatever happens next.
+aws ssm delete-parameter --region "$REGION" --name "$PARAM" || true
+[ -n "$REG" ] || { echo "FATAL: registration token not found in SSM ($PARAM)"; shutdown -h now; }
 
 mkdir -p "$RUNNER_HOME/actions-runner" && cd "$RUNNER_HOME/actions-runner"
 RUNNER_VER=$(curl -sS https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name | tr -d v)
