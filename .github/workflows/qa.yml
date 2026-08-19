@@ -485,11 +485,22 @@ jobs:
           # name it here rather than leaving it to a PATH search that finds the
           # Windows Store stub.
           if [ "${{ matrix.os }}" = "windows" ]; then
-            export PATH="$PATH:/c/Python313:/c/Python312:/c/ProgramData/chocolatey/bin"
-            echo "/c/Python313" >> "$GITHUB_PATH"
-            echo "/c/Python312" >> "$GITHUB_PATH"
+            # choco installs python3 into /c/PythonNNN where NNN floats with the
+            # release (3.14 today; this was pinned to 3.13/3.12 and silently
+            # missed a 3.14 box, aborting the whole windows leg). The shim it
+            # drops is python3.NN.exe, never plain python3/python. Add whatever
+            # /c/Python3* actually holds python.exe — for THIS step (export) and
+            # the later ones ($GITHUB_PATH) — plus the choco shim dir.
+            echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
+            export PATH="$PATH:/c/ProgramData/chocolatey/bin"
+            for d in /c/Python3*/; do
+              if [ -x "${d}python.exe" ]; then
+                echo "${d%/}" >> "$GITHUB_PATH"
+                export PATH="$PATH:${d%/}"
+              fi
+            done
           fi
-          PY=$(command -v python3 || command -v python || true)
+          PY=$(command -v python3 || command -v python || ls /c/Python3*/python.exe 2>/dev/null | head -1 || true)
           if [ -z "$PY" ] || ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)'; then
             echo "::error title=python 3 missing::the acceptance suite analyses every output timeline with a python program; without it the timeline checks would not run"
             exit 1
