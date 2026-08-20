@@ -87,6 +87,13 @@ jobs:
         with: { repository: freemkv/freemkv,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv,            fetch-depth: 0 }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/autorip,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/autorip,            fetch-depth: 0 }
+      # The public docs site. release.sh updates its changelog page + download
+      # version and pushes them, then a final gate verifies the site names this
+      # release; without this checkout that whole step silently no-op'd, which is
+      # how 1.6.5 shipped with freemkv.org stuck on 1.6.4. It has no dev/qa — it
+      # IS the deployed artifact — so it comes in on `main`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { repository: freemkv/freemkv.github.io,  ref: main, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv.github.io,  fetch-depth: 0 }
 
       # Pinned to a commit SHA, not the floating `1.97.0` BRANCH. dtolnay/rust-
       # toolchain has no version tags (only `v1` + per-toolchain branches), and
