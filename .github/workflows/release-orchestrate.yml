@@ -40,7 +40,14 @@ jobs:
       - name: Refuse unless qa is green on all eight
         env:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
-          NON_GATING: '^(Dependabot Updates|CodeQL|pages-build-deployment)$'
+          # Only true release-quality gates count (CI, leak-guard, qa,
+          # hash-matrix, parity). Excluded: the release workflows THEMSELVES —
+          # release-orchestrate is the run executing this very check, so counting
+          # it makes the check wait on itself forever ("still running"), and a
+          # prior failed release-orchestrate at the SHA must not block a re-run —
+          # plus the periodic runner-infra workflows (ci-runner-sweeper/-launch),
+          # which can be mid-flight at any instant and are not a quality signal.
+          NON_GATING: '^(Dependabot Updates|CodeQL|pages-build-deployment|release-orchestrate|release-cascade|Release|ci-runner-launch|ci-runner-sweeper)$'
         run: |
           set -uo pipefail
           fail=0
