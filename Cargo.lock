@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.6.4"
+version = "1.6.5"
 dependencies = [
  "freemkv-engine",
  "freemkv-i18n",
@@ -364,8 +364,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.6.4"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.4#b21194ca49a981bdee14b964549761b21809617b"
+version = "1.6.5"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.5#60bd8c0310c1764d9e1563118ee709ffa007de81"
 dependencies = [
  "freemkv-keysources",
  "isolang",
@@ -376,16 +376,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.6.4"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.4#b399d2a93ea0fece369e10a546dd931d12994417"
+version = "1.6.5"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.5#14bd69534619b86e2c01995d43e24e4354776f95"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.6.4"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.4#a7d04e2f4365714b324ac12e22ed38f7eea16fc9"
+version = "1.6.5"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.5#4e55255203bd0544c581a93c22382a243b5aff0b"
 dependencies = [
  "base64",
  "flate2",
@@ -398,8 +398,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.6.4"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.4#719a226dba88c914fad4398086ecbfe25bda748b"
+version = "1.6.5"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.5#1bc3fb7ef8163e3b99e5aa82df05f82d0239935e"
 dependencies = [
  "aes",
  "base64",
@@ -629,8 +629,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.6.4"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.4#d3103453f1da9b982e76f1c3d448e5f5b3c572ca"
+version = "1.6.5"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.5#9560248c49a63d422470a8c0c93a0f434ab00142"
 dependencies = [
  "aes",
  "base64",
@@ -1650,9 +1650,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec"
-version = "0.11.7"
+version = "0.11.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94b5c6b5976d66c1d703c4fd17d3f5e43c8cedaacf604961b171adc7130896d8"
+checksum = "bb0464e17806c1d976d5cba29399c7f08e516e279e2ba493f63123b5fca67dd8"
 dependencies = [
  "yoke",
  "zerofrom",
@@ -1661,9 +1661,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec-derive"
-version = "0.11.4"
+version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47402523226a02bfe5230160dc3ccc089aa6f6f19e7fcbb4e6f824bbb1b4aa62"
+checksum = "9f212a141d820099d57ffafb9569be9617a6f27d3dc881fbee8fb56642f917a9"
 dependencies = [
  "proc-macro2",
  "quote",

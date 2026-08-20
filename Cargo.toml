@@ -1,6 +1,6 @@
 [package]
 name = "freemkv"
-version = "1.6.4"
+version = "1.6.5"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
@@ -89,7 +89,7 @@ objc2-foundation = { version = "0.3", features = [
 # dev overrides this with a path patch in the gitignored .cargo/config.toml (a
 # config-level [patch.crates-io] wins over this manifest one).
 [patch.crates-io]
-libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.6.4" }
-freemkv-engine = { git = "https://github.com/freemkv/freemkv-engine", tag = "v1.6.4" }
-freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.6.4" }
-freemkv-i18n = { git = "https://github.com/freemkv/freemkv-i18n", tag = "v1.6.4" }
+libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.6.5" }
+freemkv-engine = { git = "https://github.com/freemkv/freemkv-engine", tag = "v1.6.5" }
+freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.6.5" }
+freemkv-i18n = { git = "https://github.com/freemkv/freemkv-i18n", tag = "v1.6.5" }
