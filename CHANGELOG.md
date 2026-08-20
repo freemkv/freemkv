@@ -1,5 +1,98 @@
 # Changelog
 
+## [1.6.5] — 2026-08-20
+
+### Fixed
+
+- **A re-mux that silently dropped data reported a clean "Written to …".** An
+  mkv→mkv re-mux that lost bytes counted the loss nowhere the user could see,
+  so a job that dropped several megabytes rendered as a successful write with a
+  zero exit code. The whole outcome is now graded, the CLI and GUI share one
+  loss-reporting path, a partial recovery is reported even without
+  `--multipass`, and the exit code follows the verdict.
+
+- **A rip that could not be confirmed written to disk showed the raw text
+  `error.E9056`.** The two codes that warn a write-back was never confirmed
+  reached the terminal as their literal dotted path — in front of someone
+  deciding whether it was safe to delete the source disc — because eleven
+  library error codes had no message. All eleven now carry a sentence in every
+  one of the 29 locales, and the fixture that guards them is derived from the
+  library's own source instead of a hand-copied list that kept going stale.
+
+- **A rip whose worker crashed could report itself as finished.** A panic
+  poisoned the shared status lock, and the default status was "completed", so a
+  crashed rip could surface as a clean success. Every poisoned read now recovers
+  the real value instead of defaulting.
+
+- **The CLI and GUI could freeze mid-rip after an earlier hiccup.** A poisoned
+  log lock was treated as an error at several sites: the progress bar could
+  stop, later log lines were silently dropped, a cancel after an earlier panic
+  re-crashed while naming the partial file it had just preserved, and the GUI's
+  "Update keydb now" button could stay disabled for the life of the process.
+  All of these paths now recover the buffer and keep going.
+
+- **`freemkv info mkv://Movie.mkv` printed its labels in English in every
+  language.** The `File:`/`Duration:`/`Streams:` lines, the `--share` consent
+  prompt and its thank-you and refusal lines, and desktop rip-failure messages
+  were hard-coded English while `info disc://` was fully localized. They are all
+  routed through the catalog now, so the tool answers in one language. A missing
+  translation also no longer renders as its own dotted key path.
+
+- **`-t all` on a disc whose scan failed quietly ripped only the first title and
+  exited 0.** A failed up-front scan fell through to a single-title catch-all
+  that ripped title 1 and reported success. It now prints an error and stops.
+
+- **A value-taking flag could swallow the token after it.** `freemkv --log-file
+  --raw disc://` set the log path to `--raw`, consumed the flag, and silently
+  wrote a *decrypted* image; `freemkv --log-file disc:// mkv://out.mkv` ate the
+  source URL as the log path; and `--log-file` with no path at all wrote no log
+  and ran the rip in silence. Both flag parsers now share one predicate, refuse
+  a following flag or a `scheme://` URL as the value, and report the mistake
+  instead of swallowing it.
+
+- **Dragging a disc onto the Windows window during a rip could discard the rip
+  in progress.** An error out of the drop handler unwound past the
+  "rip still running" guard and exited. The handler now logs and swallows the
+  failure, and the reveal-in-Explorer failure is logged rather than dropped.
+
+- **On Windows, File > Exit skipped the "rip still running" check.** The two
+  quit paths disagreed — File > Exit bypassed the running-rip confirmation, the
+  cancel signal, and the drain. There is one quit decision now, matching the
+  macOS build.
+
+- **A decrypted folder's destination was shown with a Windows backslash** while
+  an image showed a forward slash on the same panel. Only the displayed string
+  changed; the real extraction path is unchanged.
+
+- **The desktop app's diagnostic log grew without bound.** It appended forever
+  and was limited only by how long Verbose/Debug was left on. It is now started
+  over once it passes roughly 8 MB, across sessions.
+
+### Added
+
+- **`--help` now lists every URL scheme the tool accepts.** It listed 7 of the
+  16 the pipeline handles; `mp4://` and `dir://` (read and write) and the
+  write-only sinks (`demux://`, `video://`, `audio://`, `sub://`,
+  `chapters://`, `json://`, `fvi://`) were discoverable only from the README.
+  The `--language` flag is now documented in both `--help` and the README.
+
+- **`--language auto` follows the environment locale** instead of failing with
+  "locale 'auto' not found". It now defers to the environment, matching the
+  desktop app.
+
+### Security
+
+- **A crafted drive-profile prompt could submit your drive profile on a bare
+  Enter.** The `info disc:// --share` submit prompt draws its text from a
+  machine-controlled catalog, and the old parser treated a bare Enter as "yes",
+  so a prompt phrased to look like a default-no `[j/N]` could POST the profile
+  (including the drive serial, unless `--mask`) to a public tracker. Consent now
+  requires an explicit affirmative; a bare Enter and end-of-input both decline.
+
+- **A failed settings write could leave a plaintext token behind in a temp
+  file.** The temporary file is now cleaned up on a write failure instead of
+  being left on disk.
+
 ## [1.6.4] — 2026-08-15
 
 ### Fixed
