@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.6.7"
+version = "1.6.8"
 dependencies = [
  "freemkv-engine",
  "freemkv-i18n",
@@ -364,8 +364,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.6.7"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.7#463decb4ad8c01f8531001722d4640de1f0487e9"
+version = "1.6.8"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.8#5311e32cbece5b3559e53c06fc350dd4cbdef190"
 dependencies = [
  "freemkv-keysources",
  "isolang",
@@ -376,16 +376,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.6.7"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.7#b45f527fab1dbb1bb97de70b3c8cc899cd3ebf4e"
+version = "1.6.8"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.8#6d936c3ed51db8605252af693e3f578e0aeeaf23"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.6.7"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.7#4e5f1431b9f7c4275629ae6bbdd28a3c71059dc1"
+version = "1.6.8"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.8#a3a0a80bb7b18a40d0fbad006031ce2e2c812a2b"
 dependencies = [
  "base64",
  "flate2",
@@ -398,8 +398,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.6.7"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.7#fc07b131411e8ce3087a52aceef3267661adfcd1"
+version = "1.6.8"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.8#0a543741b7f09845f3535c42b2a9bb8c102dbd23"
 dependencies = [
  "aes",
  "base64",
@@ -629,8 +629,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.6.7"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.7#e8ab33d6f2c6d61955459da9bee97ed86213d65a"
+version = "1.6.8"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.8#1316251e7147fff3c96c7bf0e3a821844b2d4329"
 dependencies = [
  "aes",
  "base64",
@@ -1079,9 +1079,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.14"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0527518605e68109d875e248ea259b6758801cf165e4b2c2733ae3b51f12535a"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",
