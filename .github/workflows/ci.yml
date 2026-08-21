@@ -50,6 +50,32 @@ on:
 #     GUI is target-gated off, so a Linux build is pure CLI);
 #   - a lib-only check keeps the shared core (ui.rs/engine.rs) portable.
 jobs:
+  # CI owns the changelog: main may never carry a released version without a
+  # CHANGELOG.md entry for it. The release orchestrator dates an existing
+  # `## [X.Y.Z]` heading — it does NOT invent one — so a version bump that
+  # forgot its changelog entry must fail here rather than ship a blank release.
+  # Hard-fails on main (and PRs targeting main); warns elsewhere so an
+  # in-progress dev/qa branch whose entry isn't written yet is not blocked.
+  changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Require a CHANGELOG entry for the crate version on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          if grep -qE "^## \[${version}\]" CHANGELOG.md; then
+            echo "CHANGELOG.md has an entry for ${version}."
+            exit 0
+          fi
+          msg="CHANGELOG.md has no '## [${version}]' entry"
+          if [ "${GITHUB_REF_NAME:-}" = "main" ] || [ "${GITHUB_BASE_REF:-}" = "main" ]; then
+            echo "::error::${msg} — main requires a changelog entry for the released version."
+            exit 1
+          fi
+          echo "::warning::${msg} (allowed on ${GITHUB_REF_NAME:-unknown}; required before it can reach main)."
+
   # ── macOS: the whole crate, GUI shell included ─────────────────────────────
   # --all-targets so the tests and the AppKit shell are linted too.
   lint-macos:
