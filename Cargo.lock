@@ -302,9 +302,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.17.0"
+version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
+checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "equivalent"
@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.6.5"
+version = "1.6.6"
 dependencies = [
  "freemkv-engine",
  "freemkv-i18n",
@@ -364,8 +364,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.6.5"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.5#60bd8c0310c1764d9e1563118ee709ffa007de81"
+version = "1.6.6"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.6#dc3eba18a1509551c6ae29b2173b867044b46012"
 dependencies = [
  "freemkv-keysources",
  "isolang",
@@ -376,16 +376,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.6.5"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.5#14bd69534619b86e2c01995d43e24e4354776f95"
+version = "1.6.6"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.6#224b0306e08b49d2f20d233a669ede46ef359da7"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.6.5"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.5#4e55255203bd0544c581a93c22382a243b5aff0b"
+version = "1.6.6"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.6#742137ae6f682cbb0919ab966e2b081b2a2d7d2a"
 dependencies = [
  "base64",
  "flate2",
@@ -547,9 +547,9 @@ checksum = "e590f038c1464a96894fd6d10127e90a8be4509f56ff7ecef851b15cee0b7caa"
 
 [[package]]
 name = "icu_provider"
-version = "2.3.0"
+version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92a7ed671a6aad807a8651a2e1782a6598fda9ce5185dd8158549e95a91c6428"
+checksum = "d27bbb9d3abbefac45d55f647c9de1d44aafcd1186eb91879afef17c396c3e73"
 dependencies = [
  "displaydoc",
  "icu_locale_core",
@@ -629,8 +629,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.6.5"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.5#9560248c49a63d422470a8c0c93a0f434ab00142"
+version = "1.6.6"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.6#7a63bac709b75aa01ca04ef024e4200912b65669"
 dependencies = [
  "aes",
  "base64",
@@ -1661,9 +1661,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec-derive"
-version = "0.11.5"
+version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f212a141d820099d57ffafb9569be9617a6f27d3dc881fbee8fb56642f917a9"
+checksum = "34df6fc39dbd26ddc9c10e6a2984476e13acce22e64e4487636ef494369225da"
 dependencies = [
  "proc-macro2",
  "quote",
