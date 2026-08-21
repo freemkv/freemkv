@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.6] — UNRELEASED
+
+### Changed
+
+- Version aligned to 1.6.6 for the unified release. No functional changes
+  to this crate; the release was driven by autorip (webhooks may now target
+  private/LAN addresses — see the autorip 1.6.6 notes).
+
 ## [1.6.5] — 2026-08-20
 
 ### Fixed
