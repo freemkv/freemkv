@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.6.7] — 2026-08-21
+
+### Changed
+
+- Version aligned to 1.6.7 for the unified release. No functional changes to
+  this crate; the release was driven by autorip (per-webhook event selection,
+  a progress bar per moved artifact, and move-queue / webhook-error fixes —
+  see the autorip 1.6.7 notes).
+
 ## [1.6.6] — 2026-08-20
 
 ### Changed
