@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.6.8] — 2026-08-21
+
+### Changed
+
+- Version aligned to 1.6.8 for the unified release. No functional changes to
+  this crate; the release was driven by autorip (webhooks now fire per pipeline
+  stage — Rip / Mux / Move — with the Rip hook firing the moment the drive is
+  free again, plus a Ripper-tab activity-banner fix so it also shows during
+  moves — see the autorip 1.6.8 notes).
+
 ## [1.6.7] — 2026-08-21
 
 ### Changed
