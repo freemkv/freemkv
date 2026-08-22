@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.6.8"
+version = "1.6.9"
 dependencies = [
  "freemkv-engine",
  "freemkv-i18n",
@@ -364,8 +364,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.6.8"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.8#5311e32cbece5b3559e53c06fc350dd4cbdef190"
+version = "1.6.9"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.9#267dfcf216a53c863c415edd367e43d96e9cbf4b"
 dependencies = [
  "freemkv-keysources",
  "isolang",
@@ -376,16 +376,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.6.8"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.8#6d936c3ed51db8605252af693e3f578e0aeeaf23"
+version = "1.6.9"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.9#4cedac9d2faa3f2d734931f7839dbba1247d774a"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.6.8"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.8#a3a0a80bb7b18a40d0fbad006031ce2e2c812a2b"
+version = "1.6.9"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.9#9f99d00577b0824ac2b558750ea27d834018e8e1"
 dependencies = [
  "base64",
  "flate2",
@@ -398,8 +398,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.6.8"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.8#0a543741b7f09845f3535c42b2a9bb8c102dbd23"
+version = "1.6.9"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.9#07c23ade3127d39b8f2b4678f1a3e12eace7790c"
 dependencies = [
  "aes",
  "base64",
@@ -629,8 +629,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.6.8"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.8#1316251e7147fff3c96c7bf0e3a821844b2d4329"
+version = "1.6.9"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.9#f12e47d61ec363315b345c5af9c4bfe421fb22c9"
 dependencies = [
  "aes",
  "base64",
@@ -671,9 +671,9 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "log"
-version = "0.4.33"
+version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "matchers"
