@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.6.9] — UNRELEASED
+
+### Changed
+
+- Version aligned to 1.6.9 for the unified release. No functional changes to
+  this crate; the release was driven by autorip (automatic per-episode TV
+  ripping — each episode named `S{NN}E{MM}`, with TMDB runtime-aligned episode
+  numbering across multi-disc seasons — a Manual Rename option, and a unified
+  per-disc staging state file — see the autorip 1.6.9 notes).
+
 ## [1.6.8] — 2026-08-21
 
 ### Changed
