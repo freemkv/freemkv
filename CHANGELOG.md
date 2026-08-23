@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.6.10] — 2026-08-23
+
+### Changed
+
+- Version aligned to 1.6.10 for the unified release. No functional changes to
+  this crate; the release was driven by libfreemkv (TrueHD/MLP audio now resyncs
+  to the next major-sync access unit after a source transport-stream
+  discontinuity, instead of splicing post-gap audio mid-stream — fixing
+  decoder-choking seams on discs whose stream carries a continuity-counter gap;
+  see the libfreemkv 1.6.10 notes).
+
 ## [1.6.9] — 2026-08-22
 
 ### Changed
