@@ -183,9 +183,9 @@ dependencies = [
 
 [[package]]
 name = "crc32fast"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
+checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
 dependencies = [
  "cfg-if",
 ]
@@ -288,7 +288,7 @@ checksum = "c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.6.9"
+version = "1.6.10"
 dependencies = [
  "freemkv-engine",
  "freemkv-i18n",
@@ -364,8 +364,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.6.9"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.9#267dfcf216a53c863c415edd367e43d96e9cbf4b"
+version = "1.6.10"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.10#5a77b5766fb1f81d682d248a25256c40d2236efe"
 dependencies = [
  "freemkv-keysources",
  "isolang",
@@ -376,16 +376,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.6.9"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.9#4cedac9d2faa3f2d734931f7839dbba1247d774a"
+version = "1.6.10"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.10#fd45e6db17877f12a691c6c865cf849ec73add79"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.6.9"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.9#9f99d00577b0824ac2b558750ea27d834018e8e1"
+version = "1.6.10"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.10#6d894daf8b63ce3e8c1dac2cdb14ddee6bec8d7f"
 dependencies = [
  "base64",
  "flate2",
@@ -398,8 +398,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.6.9"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.9#07c23ade3127d39b8f2b4678f1a3e12eace7790c"
+version = "1.6.10"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.10#f236a6328b85a882151102b5c2ee648fb8b55f7f"
 dependencies = [
  "aes",
  "base64",
@@ -629,8 +629,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.6.9"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.9#f12e47d61ec363315b345c5af9c4bfe421fb22c9"
+version = "1.6.10"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.10#2525e262996f1012fb690173139f4b0117daa1e7"
 dependencies = [
  "aes",
  "base64",
@@ -1115,7 +1115,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -1217,9 +1217,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.3"
+version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1254,7 +1254,7 @@ checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -1667,7 +1667,7 @@ checksum = "34df6fc39dbd26ddc9c10e6a2984476e13acce22e64e4487636ef494369225da"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
