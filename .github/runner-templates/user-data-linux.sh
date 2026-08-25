@@ -23,7 +23,7 @@ apt-get install -y awscli || snap install aws-cli --classic
 # Toolchain the rip suite needs.
 RUNNER_USER=ubuntu
 RUNNER_HOME=$(getent passwd "$RUNNER_USER" | cut -d: -f6)
-su - "$RUNNER_USER" -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97'
+su - "$RUNNER_USER" -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98'
 
 TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
 md() { curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
