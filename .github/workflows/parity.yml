@@ -62,7 +62,7 @@ jobs:
         with: { repository: freemkv/freemkv-i18n, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
       - uses: actions/checkout@v7
         with: { repository: freemkv/freemkv-unlock, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.98.0
       - name: Point the patches at the sibling checkouts
         shell: bash
         run: |

@@ -95,13 +95,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv.github.io,  ref: main, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv.github.io,  fetch-depth: 0 }
 
-      # Pinned to a commit SHA, not the floating `1.97.0` BRANCH. dtolnay/rust-
+      # Pinned to a commit SHA, not the floating `1.98.0` BRANCH. dtolnay/rust-
       # toolchain has no version tags (only `v1` + per-toolchain branches), and
-      # `@1.97.0` is a mutable branch ref. Pinning by SHA loses the ref-name the
+      # `@1.98.0` is a mutable branch ref. Pinning by SHA loses the ref-name the
       # action uses to pick the toolchain, so name it explicitly via `toolchain`.
-      - uses: dtolnay/rust-toolchain@889fac408b4da0905346410f253f0c55fbcb6613 # 1.97.0
+      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
         with:
-          toolchain: 1.97.0
+          toolchain: 1.98.0
 
       - name: Identify as the release bot
         run: |
