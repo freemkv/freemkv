@@ -4094,7 +4094,6 @@ impl Controller {
                 if { mi.title() }.to_string() != item_title {
                     continue;
                 }
-                // Respect enablement exactly as AppKit would.
                 // Respect enablement exactly as AppKit would before invoking.
                 let enabled: objc2::runtime::Bool =
                     unsafe { msg_send![self, validateMenuItem: &*mi] };
