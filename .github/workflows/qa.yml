@@ -544,10 +544,13 @@ jobs:
             # refreshed by the ffmpeg step earlier in this job).
             sudo apt-get install -y -qq build-essential curl
           fi
-          # ── Rust, pinned to the CI toolchain. Idempotent: a runner that already
-          # has cargo on PATH is left as-is. ──────────────────────────────────────
+          # ── Rust, pinned to the CI toolchain. A runner whose baked AMI carries an
+          # older default (e.g. 1.97.x) must still be pinned to the bins' 1.98 MSRV,
+          # so install+default 1.98.0 even when cargo is already present. ──────────
           if command -v cargo >/dev/null 2>&1; then
             cargo --version
+            rustup toolchain install 1.98.0 --profile minimal 2>/dev/null || true
+            rustup default 1.98.0 2>/dev/null || true
           elif [ "${{ matrix.os }}" = "windows" ]; then
             curl -sSf -o rustup-init.exe https://win.rustup.rs/x86_64
             ./rustup-init.exe -y --profile minimal --default-toolchain 1.98.0 \
