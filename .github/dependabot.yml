@@ -52,7 +52,7 @@ updates:
       # to on purpose -- precommit.sh runs the same one locally so a lint that
       # passes on a developer's newer default cannot pass CI by accident.
       #
-      # Dependabot reads those tags as semver and proposed 1.97.0 -> 1.100.0,
+      # Dependabot reads those tags as semver and proposed 1.98.0 -> 1.100.0,
       # a Rust version that does not exist. Every such PR 404s on toolchain
       # download across all eight repos, and they regenerate weekly -- eight
       # permanently-red PRs that promote.yml then has to special-case when it
