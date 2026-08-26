@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.6.11] — 2026-08-26
+
+### Changed
+
+- Version aligned to 1.6.11 for the unified release, driven by the libfreemkv
+  main-feature selection improvements (main-feature selection now follows the
+  disc's own navigation instead of guessing by title size, so it no longer
+  picks a decoy over the real feature) and the autorip mux-quarantine fix (a
+  stuck disc no longer gets stuck retrying mux forever; see the libfreemkv and
+  autorip 1.6.11 notes).
+
+### Added
+
+- Website and Discord links, and a coverage badge.
+- Substantially expanded unit-test coverage.
+
 ## [1.6.10] — 2026-08-23
 
 ### Changed
