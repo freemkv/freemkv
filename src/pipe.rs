@@ -1857,8 +1857,9 @@ fn keyless_scan_opts() -> libfreemkv::ScanOptions {
 
 /// ScanOptions for a **live-drive** scan: keyless, plus the AACS host
 /// credentials for the authenticated handshake (sourced from the local keydb).
-/// A locked drive needs the cert to read its Volume ID; an unlocked / LibreDrive
-/// drive takes the OEM path and ignores them. ISO scans use [`keyless_scan_opts`].
+/// A locked drive needs the cert to read its Volume ID; an unlocked /
+/// firmware-unlocked drive takes the OEM path and ignores them. ISO scans use
+/// [`keyless_scan_opts`].
 pub(crate) fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOptions {
     libfreemkv::ScanOptions {
         credentials: drive_credentials(keydb_path),

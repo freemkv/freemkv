@@ -248,9 +248,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
 
     // Unlocker matrix — which registered unlockers actually RAN this rip (did
     // work, not merely "matched the disc kind"), so the user can see (and
-    // question) a missing one (e.g. "LibreDrive: no" on a supported drive = the
-    // firmware unlock didn't take). Registry-driven: names come from libfreemkv's
-    // unlocker registry, never hardcoded. Kept byte-identical to autorip's
+    // question) a missing one (e.g. a firmware-unlock entry reading "no" on a
+    // supported drive = the firmware unlock didn't take). Registry-driven:
+    // names come from libfreemkv's unlocker registry, never hardcoded. Kept byte-identical to autorip's
     // rendering for consistency across the two apps.
     {
         let matrix = disc
