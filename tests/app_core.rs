@@ -312,7 +312,7 @@ fn bar_caption_never_fakes_an_eta() {
 /// The Information panel's "Output file" row must name a FILE.
 #[test]
 fn info_rows_output_is_a_file_not_a_folder() {
-    let i = InfoRows::starting("/src/Greenland.iso", "/out/Greenland_t1.mkv");
+    let i = InfoRows::starting("/src/Movie.iso", "/out/Movie_t1.mkv");
     let rows = i.as_array();
     assert!(rows[4].ends_with(".mkv"), "{:?}", rows[4]);
     // Every row is populated at start — no blanks, which the user reported.
