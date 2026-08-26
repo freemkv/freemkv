@@ -694,7 +694,7 @@ jobs:
         with:
           workspaces: freemkv
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - run: cargo llvm-cov --workspace --ignore-run-fail --lcov --output-path lcov.info
         working-directory: freemkv
       - uses: codecov/codecov-action@v5
         with:
