@@ -1460,11 +1460,41 @@ mod tests {
 #[cfg(test)]
 mod arg_tests {
     use super::{
-        PendingDiag, parse_logging_flags, split_log_path, strip_language_flag, wants_help,
+        PendingDiag, is_flag_token, is_url, parse_logging_flags, split_log_path,
+        strip_language_flag, wants_help,
     };
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The predicate that keeps a value-flag from eating a following flag, and
+    /// its one deliberate exception: a leading `-` on a NEGATIVE NUMBER is a
+    /// value, not a flag, so `--log-level -1` still reaches the range check
+    /// instead of being read as the flag `-1`.
+    #[test]
+    fn is_flag_token_treats_negative_numbers_as_values_not_flags() {
+        assert!(is_flag_token("--raw"));
+        assert!(is_flag_token("-t"));
+        assert!(!is_flag_token("-1"), "a negative number is a value");
+        assert!(!is_flag_token("-9"));
+        assert!(!is_flag_token("disc://"), "a positional is not a flag");
+        assert!(!is_flag_token(""), "an empty token is not a flag");
+        // A bare '-' has nothing after the dash — not a flag.
+        assert!(!is_flag_token("-"));
+    }
+
+    /// `is_url` is the schemeless-URL gate: anything carrying `://` is a
+    /// positional stream URL, everything else (a keydb path, a bare number) is
+    /// not — so a value-flag does not misread its value as a positional.
+    #[test]
+    fn is_url_matches_only_scheme_bearing_tokens() {
+        assert!(is_url("disc://"));
+        assert!(is_url("mkv://out.mkv"));
+        assert!(is_url("https://keys.example/api"));
+        assert!(!is_url("keydb.cfg"));
+        assert!(!is_url("/path/to/out.mkv"));
+        assert!(!is_url("3"));
     }
 
     /// Just the two REQUESTS, for the assertions that are about what the user

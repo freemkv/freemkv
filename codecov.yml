@@ -3,6 +3,7 @@ coverage:
     project:
       default:
         informational: true
+        target: 85%
     patch:
       default:
         informational: true
@@ -10,8 +11,10 @@ coverage:
 comment: false
 
 ignore:
-  - "tests"
   - "**/tests"
-  - "macos"
-  - "windows"
+  - "**/macos"
+  - "**/windows"
   - "**/*.md"
+  # info.rs is one `run()` of device + curl + fs I/O (55.9%, 387 misses); its
+  # pure helpers are already covered, the remainder is unreachable without hardware.
+  - "**/src/info.rs"

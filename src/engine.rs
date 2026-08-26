@@ -3778,6 +3778,154 @@ mod key_summary_tests {
     }
 }
 
+/// `disc_details` builds the multi-line disc summary the GUI log pane shows and
+/// the CLI mirrors. Every branch (capacity, each region shape, the AACS MKB /
+/// hash / VID block, and the verbose key reveal) is reachable only behind a
+/// scanned disc, so a mutant that dropped the VID line or the bus-encryption
+/// suffix passed. Tested against a synthetic disc as the lines it returns.
+#[cfg(test)]
+mod disc_details_tests {
+    use super::disc_details;
+    use super::key_summary_tests::{aacs, disc};
+
+    #[test]
+    fn a_plain_unencrypted_disc_shows_type_capacity_region_and_titles() {
+        let d = disc(false);
+        let lines = disc_details(&d, "unencrypted", false);
+        assert!(lines.contains(&"Type: BluRay".to_string()), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("Capacity:") && l.contains("layer")),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"Region: free".to_string()), "{lines:?}");
+        assert!(
+            lines.contains(&"Protection: unencrypted".to_string()),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"Titles: 0".to_string()), "{lines:?}");
+        // No AACS block on a disc with no aacs state.
+        assert!(!lines.iter().any(|l| l.starts_with("MKB")), "{lines:?}");
+    }
+
+    #[test]
+    fn zero_capacity_omits_the_capacity_line() {
+        let mut d = disc(false);
+        d.capacity_bytes = 0;
+        let lines = disc_details(&d, "unencrypted", false);
+        assert!(
+            !lines.iter().any(|l| l.starts_with("Capacity:")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn each_region_shape_renders_its_own_line() {
+        let mut bd = disc(false);
+        bd.region = libfreemkv::disc::DiscRegion::BluRay(vec![
+            libfreemkv::disc::BdRegion::A,
+            libfreemkv::disc::BdRegion::C,
+        ]);
+        assert!(
+            disc_details(&bd, "x", false).contains(&"Region: Blu-ray A/C".to_string()),
+            "{:?}",
+            disc_details(&bd, "x", false)
+        );
+
+        let mut dvd = disc(false);
+        dvd.region = libfreemkv::disc::DiscRegion::Dvd(vec![1, 2]);
+        assert!(
+            disc_details(&dvd, "x", false).contains(&"Region: DVD 1,2".to_string()),
+            "{:?}",
+            disc_details(&dvd, "x", false)
+        );
+
+        // An empty region list falls through to no region line at all.
+        let mut empty = disc(false);
+        empty.region = libfreemkv::disc::DiscRegion::BluRay(vec![]);
+        assert!(
+            !disc_details(&empty, "x", false)
+                .iter()
+                .any(|l| l.starts_with("Region:")),
+            "an empty region list emits no line"
+        );
+    }
+
+    #[test]
+    fn the_aacs_block_shows_mkb_hash_and_a_non_zero_vid() {
+        let mut d = disc(true);
+        let mut a = aacs(vec![(1, [0x5A; 16])]);
+        a.mkb_version = Some(64);
+        a.bus_encryption = true;
+        a.disc_hash = "deadbeef".into();
+        a.volume_id = [0xAB; 16];
+        d.aacs = Some(a);
+
+        let lines = disc_details(&d, "unlocked via keydb", false);
+        assert!(
+            lines.contains(&"MKB v64 (bus encryption)".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"Disc hash: deadbeef".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "VID: 0xabababababababababababababababab"),
+            "{lines:?}"
+        );
+        // Non-verbose hides the resolved key material.
+        assert!(!lines.iter().any(|l| l.contains("VUK")), "{lines:?}");
+        assert!(
+            !lines.iter().any(|l| l.trim_start().starts_with("CPS")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn an_all_zero_volume_id_prints_no_vid_line() {
+        let mut d = disc(true);
+        d.aacs = Some(aacs(vec![])); // volume_id defaults to all-zero
+        assert!(
+            !disc_details(&d, "x", false)
+                .iter()
+                .any(|l| l.starts_with("VID:")),
+            "an unavailable (all-zero) VID must not print a line"
+        );
+    }
+
+    #[test]
+    fn verbose_reveals_the_vuk_and_each_cps_unit_key() {
+        let mut d = disc(true);
+        let mut a = aacs(vec![(3, [0x11; 16]), (7, [0x22; 16])]);
+        a.vuk = Some([0xEE; 16]);
+        d.aacs = Some(a);
+
+        let lines = disc_details(&d, "unlocked via keydb", true);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "  VUK: 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "  CPS 3: 0x11111111111111111111111111111111"),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "  CPS 7: 0x22222222222222222222222222222222"),
+            "{lines:?}"
+        );
+    }
+}
+
 /// The routing and per-title wiring decisions a rip makes before it touches a
 /// drive.
 ///
