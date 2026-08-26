@@ -733,30 +733,30 @@ fn the_output_file_is_named_after_the_disc_and_the_first_ticked_title() {
     // be the file that actually lands on disk. The engine names a disc/image
     // rip from the DISC LABEL (`run_disc` → `title_basename`), not from the
     // source file's stem — this panel showed the stem, so ripping
-    // /media/Greenland.iso whose volume id is GREENLAND_UHD announced
-    // "Greenland_t1.mkv" and produced "GREENLAND_UHD_t1.mkv".
+    // /media/Movie.iso whose volume id is MOVIE_UHD announced
+    // "Movie_t1.mkv" and produced "MOVIE_UHD_t1.mkv".
     assert_eq!(
         output_file_name(
-            "/media/Greenland.iso",
+            "/media/Movie.iso",
             "/out",
             "Selected titles → MKV",
             Some(0),
             "",
-            "GREENLAND_UHD",
+            "MOVIE_UHD",
         ),
-        "/out/GREENLAND_UHD_t1.mkv"
+        "/out/MOVIE_UHD_t1.mkv"
     );
     // The title number is 1-based, matching `freemkv -t N` and the tree labels.
     assert_eq!(
         output_file_name(
-            "/media/Greenland.iso",
+            "/media/Movie.iso",
             "/out",
             "Selected titles → MKV",
             Some(4),
             "",
-            "GREENLAND_UHD",
+            "MOVIE_UHD",
         ),
-        "/out/GREENLAND_UHD_t5.mkv"
+        "/out/MOVIE_UHD_t5.mkv"
     );
 }
 
@@ -768,26 +768,26 @@ fn the_shown_output_file_honours_the_filename_template() {
     // set a template was told a filename that could not appear.
     assert_eq!(
         output_file_name(
-            "/media/Greenland.iso",
+            "/media/Movie.iso",
             "/out",
             "Selected titles → MKV",
             Some(0),
             "{title} ({n})",
-            "GREENLAND",
+            "MOVIE",
         ),
-        "/out/GREENLAND (1).mkv"
+        "/out/MOVIE (1).mkv"
     );
     // A template with no {n} still gets the title number appended, exactly as
     // `title_basename` does for the rip itself — otherwise a multi-title run
     // would be announced as writing one file over and over.
     assert_eq!(
         output_file_name(
-            "/media/Greenland.iso",
+            "/media/Movie.iso",
             "/out",
             "Selected titles → MKV",
             Some(1),
             "Feature",
-            "GREENLAND",
+            "MOVIE",
         ),
         "/out/Feature_t2.mkv"
     );
@@ -799,34 +799,34 @@ fn the_shown_output_file_follows_the_whole_disc_sinks_too() {
     // panel said they did.
     assert_eq!(
         output_file_name(
-            "/media/Greenland.iso",
+            "/media/Movie.iso",
             "/out",
             "Whole disc → ISO image",
             Some(0),
             "",
-            "GREENLAND",
+            "MOVIE",
         ),
-        "/out/GREENLAND.iso"
+        "/out/MOVIE.iso"
     );
     assert_eq!(
         output_file_name(
-            "/media/Greenland.iso",
+            "/media/Movie.iso",
             "/out",
             "Whole disc → decrypted folder",
             Some(0),
             "",
-            "GREENLAND",
+            "MOVIE",
         ),
-        "/out/GREENLAND"
+        "/out/MOVIE"
     );
     assert_eq!(
         output_file_name(
-            "/media/Greenland.iso",
+            "/media/Movie.iso",
             "/out",
             "Selected titles → separate track files",
             Some(0),
             "",
-            "GREENLAND",
+            "MOVIE",
         ),
         "/out/ (per-track files)"
     );
