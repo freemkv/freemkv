@@ -1234,4 +1234,206 @@ mod tests {
         assert!(prefix.starts_with("      Sottotitoli:"));
         assert!(prefix.ends_with("  "));
     }
+
+    // ── Pure formatters (665-806) ────────────────────────────────────────────
+    //
+    // Every `disc-info` line the user reads is one of these functions' return
+    // value. They are pure string builders — no drive, no key — but nothing
+    // exercised their branches, so a mutant that swapped "DD+" for "DD" or
+    // dropped the verbose `[PID …]` tail passed CI. Tested as the values they
+    // are, with the locale pinned so the `strings::get` tags read predictably.
+
+    fn video(codec: Codec, resolution: Resolution) -> VideoStream {
+        VideoStream {
+            pid: 0x1011,
+            codec,
+            resolution,
+            frame_rate: FrameRate::Unknown,
+            hdr: HdrFormat::Sdr,
+            color_space: ColorSpace::Bt709,
+            display_aspect: None,
+            secondary: false,
+            label: String::new(),
+            measured_cicp: None,
+        }
+    }
+
+    fn audio(codec: Codec, channels: AudioChannels, language: &str) -> AudioStream {
+        AudioStream {
+            pid: 0x1100,
+            codec,
+            channels,
+            language: language.to_string(),
+            sample_rate: SampleRate::Unknown,
+            secondary: false,
+            purpose: LabelPurpose::Normal,
+            label: String::new(),
+        }
+    }
+
+    fn subtitle(language: &str) -> SubtitleStream {
+        SubtitleStream {
+            pid: 0x1200,
+            codec: Codec::Pgs,
+            language: language.to_string(),
+            forced: false,
+            qualifier: LabelQualifier::None,
+            codec_data: None,
+        }
+    }
+
+    #[test]
+    fn format_video_assembles_codec_resolution_and_only_the_flags_present() {
+        strings::set_locale("en");
+        // Bare: codec + resolution, no fps (Unknown), no HDR (SDR), no BT.2020.
+        let v = video(Codec::Hevc, Resolution::R1080p);
+        assert_eq!(format_video(&v, false), "HEVC 1080p");
+        // Verbose appends the PID, upper-case hex, zero-padded to four digits.
+        assert_eq!(format_video(&v, true), "HEVC 1080p [PID 0x1011]");
+
+        // Frame rate, HDR name and BT.2020 each add exactly one part when set.
+        let mut rich = video(Codec::Hevc, Resolution::R2160p);
+        rich.frame_rate = FrameRate::F23_976;
+        rich.hdr = HdrFormat::DolbyVision;
+        rich.color_space = ColorSpace::Bt2020;
+        assert_eq!(
+            format_video(&rich, false),
+            "HEVC 2160p 23.976fps Dolby Vision BT.2020"
+        );
+
+        // A secondary Dolby Vision stream is the enhancement layer (localized).
+        let mut el = video(Codec::Hevc, Resolution::R2160p);
+        el.secondary = true;
+        el.hdr = HdrFormat::DolbyVision;
+        assert_eq!(
+            format_video(&el, false),
+            "HEVC 2160p Dolby Vision Dolby Vision EL"
+        );
+
+        // A secondary non-DV stream with a label shows the sanitized label.
+        let mut labelled = video(Codec::H264, Resolution::R1080p);
+        labelled.secondary = true;
+        labelled.label = "PiP\x1b[2J".to_string();
+        let out = format_video(&labelled, false);
+        assert!(out.contains("PiP") && !out.contains('\x1b'), "got {out}");
+    }
+
+    #[test]
+    fn format_audio_renders_lang_codec_channels_and_tags() {
+        strings::set_locale("en");
+        let a = audio(Codec::TrueHd, AudioChannels::Surround51, "eng");
+        assert_eq!(format_audio(&a, false), "English TrueHD 5.1");
+        // Verbose inserts sample rate and PID before the tags.
+        assert_eq!(
+            format_audio(&a, true),
+            "English TrueHD 5.1 unknown [PID 0x1100]"
+        );
+
+        // Purpose + secondary + label collect into one parenthesised group.
+        let mut tagged = audio(Codec::Ac3, AudioChannels::Stereo, "fra");
+        tagged.purpose = LabelPurpose::Commentary;
+        tagged.secondary = true;
+        tagged.label = "Director".to_string();
+        assert_eq!(
+            format_audio(&tagged, false),
+            "French DD stereo (Commentary, Secondary, Director)"
+        );
+    }
+
+    #[test]
+    fn format_subtitle_renders_lang_forced_and_qualifier() {
+        strings::set_locale("en");
+        assert_eq!(format_subtitle(&subtitle("eng"), false), "English");
+        assert_eq!(
+            format_subtitle(&subtitle("eng"), true),
+            "English [PID 0x1200]"
+        );
+
+        let mut forced = subtitle("jpn");
+        forced.forced = true;
+        forced.qualifier = LabelQualifier::Sdh;
+        assert_eq!(format_subtitle(&forced, false), "Japanese (forced, SDH)");
+    }
+
+    #[test]
+    fn region_name_covers_free_bluray_and_dvd() {
+        assert_eq!(region_name(&DiscRegion::Free), "Region-free");
+        // Empty region lists on either carrier read as region-free, not "".
+        assert_eq!(region_name(&DiscRegion::BluRay(vec![])), "Region-free");
+        assert_eq!(region_name(&DiscRegion::Dvd(vec![])), "Region-free");
+        assert_eq!(
+            region_name(&DiscRegion::BluRay(vec![
+                BdRegion::A,
+                BdRegion::B,
+                BdRegion::C
+            ])),
+            "A/B/C"
+        );
+        assert_eq!(region_name(&DiscRegion::Dvd(vec![1, 2])), "1, 2");
+    }
+
+    #[test]
+    fn hex_bytes_is_lower_case_two_digit_no_separator() {
+        assert_eq!(hex_bytes(&[]), "");
+        assert_eq!(hex_bytes(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
+    }
+
+    #[test]
+    fn codec_name_maps_the_special_cases_and_falls_through_to_name() {
+        assert_eq!(codec_name(Codec::Ac3), "DD");
+        assert_eq!(codec_name(Codec::Ac3Plus), "DD+");
+        assert_eq!(codec_name(Codec::DvdSub), "DVD Sub");
+        assert_eq!(codec_name(Codec::Unknown(0x1b)), "0x1b");
+        // Everything else defers to the library's own display name.
+        assert_eq!(codec_name(Codec::Hevc), "HEVC");
+        assert_eq!(codec_name(Codec::TrueHd), "TrueHD");
+        assert_eq!(codec_name(Codec::Pgs), "PGS");
+    }
+
+    #[test]
+    fn key_origin_label_names_every_source() {
+        use libfreemkv::KeyOrigin;
+        assert_eq!(key_origin_label(KeyOrigin::DeviceKey), "MKB + device key");
+        assert_eq!(
+            key_origin_label(KeyOrigin::ProcessingKey),
+            "MKB + processing key"
+        );
+        assert_eq!(key_origin_label(KeyOrigin::KeyDbDerived), "KEYDB (derived)");
+        assert_eq!(key_origin_label(KeyOrigin::KeyDb), "KEYDB");
+        assert_eq!(
+            key_origin_label(KeyOrigin::KeyDbUnitKeys),
+            "KEYDB (unit keys)"
+        );
+        assert_eq!(key_origin_label(KeyOrigin::ExternalUk), "external UK");
+    }
+
+    #[test]
+    fn aacs_generation_labels_the_carrier_and_falls_back_to_the_minor() {
+        let mut disc = synthetic_disc();
+        disc.format = DiscFormat::Fmts;
+        assert_eq!(aacs_generation(&disc), "AACS 2.1");
+        disc.format = DiscFormat::Uhd;
+        assert_eq!(aacs_generation(&disc), "AACS 2.0");
+        // Non-carrier with no aacs struct falls back to 1.0.
+        disc.format = DiscFormat::BluRay;
+        disc.aacs = None;
+        assert_eq!(aacs_generation(&disc), "AACS 1.0");
+    }
+
+    #[test]
+    fn lang_name_resolves_codes_sanitizes_unknowns_and_marks_empty() {
+        assert_eq!(lang_name("eng"), "English");
+        assert_eq!(lang_name("en"), "English"); // 639-1 fallback
+        assert_eq!(lang_name(""), "?");
+        // An unrecognized code is returned raw, but sanitized of escapes.
+        let out = lang_name("\x1b[31mzz");
+        assert!(!out.contains('\x1b'), "got {out}");
+    }
+
+    #[test]
+    fn format_volume_id_title_cases_underscored_labels() {
+        assert_eq!(format_volume_id("THE_MOVIE_2020"), "The Movie 2020");
+        assert_eq!(format_volume_id("bluray_disc"), "Bluray Disc");
+        assert_eq!(format_volume_id(""), "");
+    }
 }
