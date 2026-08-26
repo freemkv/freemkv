@@ -1436,4 +1436,58 @@ mod tests {
         assert_eq!(format_volume_id("bluray_disc"), "Bluray Disc");
         assert_eq!(format_volume_id(""), "");
     }
+
+    #[test]
+    fn title_lines_truncates_to_five_and_footers_the_remainder() {
+        // A disc with more titles than the non-`--full` cap (5) lists exactly
+        // five and closes with the localized "+N more" footer. `synthetic_disc`
+        // has one title, so this many-title footer path had no coverage.
+        strings::set_locale("en");
+        let mut disc = synthetic_disc();
+        let one = disc.titles[0].clone();
+        disc.titles = std::iter::repeat_n(one, 8).collect();
+        let joined = title_lines(&disc, false, false, false).join("\n");
+        // Five rows shown (1..=5), the sixth is not.
+        assert!(joined.contains("  1. "), "first title shown: {joined}");
+        assert!(joined.contains("  5. "), "fifth title shown: {joined}");
+        assert!(!joined.contains("  6. "), "sixth title truncated: {joined}");
+        // The footer names the 3 remaining.
+        assert!(
+            joined.contains('3') && joined.to_lowercase().contains("more"),
+            "expected the +N more footer, got: {joined}"
+        );
+        // `--full` shows every title and prints no footer.
+        let full = title_lines(&disc, true, false, false).join("\n");
+        assert!(full.contains("  8. "), "full lists the eighth: {full}");
+    }
+
+    #[test]
+    fn title_lines_aligns_continuation_rows_for_multi_stream_groups() {
+        // A title with two of each stream kind exercises the `vi/ai/si > 0`
+        // continuation-line arms (the indented rows with no label prefix), which
+        // the single-stream `synthetic_disc` never reaches.
+        strings::set_locale("en");
+        let mut disc = synthetic_disc();
+        let title = &mut disc.titles[0];
+        title.streams = vec![
+            Stream::Video(video(Codec::Hevc, Resolution::R2160p)),
+            Stream::Video(video(Codec::H264, Resolution::R1080p)),
+            Stream::Audio(audio(Codec::TrueHd, AudioChannels::Surround71, "eng")),
+            Stream::Audio(audio(Codec::Ac3, AudioChannels::Stereo, "fra")),
+            Stream::Subtitle(subtitle("eng")),
+            Stream::Subtitle(subtitle("jpn")),
+        ];
+        let joined = title_lines(&disc, true, false, false).join("\n");
+        // Both members of each group render; the second of each is a
+        // continuation row (present, distinct language/codec).
+        assert!(
+            joined.contains("HEVC") && joined.contains("H.264"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("English") && joined.contains("French"),
+            "{joined}"
+        );
+        assert!(joined.contains("Japanese"), "{joined}");
+    }
 }

@@ -5686,3 +5686,35 @@ mod display_sanitisation_tests {
         assert!(HOSTILE.chars().any(is_unsafe_display_char));
     }
 }
+
+#[cfg(test)]
+mod pure_helper_tests {
+    use super::{fmt_damage_time, purpose_label};
+
+    /// `fmt_damage_time` picks its unit by magnitude across all five bands.
+    /// The GUI twin of the CLI's `pipe::fmt_damage_time` (which is tested); this
+    /// copy had no test, so a mutant that swapped a threshold or a unit passed.
+    #[test]
+    fn fmt_damage_time_picks_the_unit_by_magnitude() {
+        assert_eq!(fmt_damage_time(7200.0), "2.0h"); // >= 1h
+        assert_eq!(fmt_damage_time(90.0), "2m"); // >= 1m
+        assert_eq!(fmt_damage_time(5.0), "5s"); // >= 1s
+        assert_eq!(fmt_damage_time(0.25), "0.25s"); // >= 0.01s
+        assert_eq!(fmt_damage_time(0.004), "4ms"); // sub-centisecond
+    }
+
+    /// Every audio `LabelPurpose` maps to its own label, and `Normal` to none —
+    /// so a stream row's purpose tag is never dropped or mislabeled.
+    #[test]
+    fn purpose_label_names_each_purpose_and_omits_normal() {
+        use libfreemkv::LabelPurpose;
+        assert_eq!(purpose_label(LabelPurpose::Commentary), Some("Commentary"));
+        assert_eq!(
+            purpose_label(LabelPurpose::Descriptive),
+            Some("Descriptive")
+        );
+        assert_eq!(purpose_label(LabelPurpose::Score), Some("Score"));
+        assert_eq!(purpose_label(LabelPurpose::Ime), Some("IME"));
+        assert_eq!(purpose_label(LabelPurpose::Normal), None);
+    }
+}
