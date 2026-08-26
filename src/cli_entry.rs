@@ -1130,6 +1130,97 @@ mod tests {
 
     use super::{SUBCOMMANDS, collect_urls, stream_info_lines, update_keys_dest};
 
+    /// The `info mkv://` / `info m2ts://` stream lines carry the localized
+    /// PURPOSE / secondary / label tags for an audio track, and a video label —
+    /// the tag-assembly arms of `stream_info_lines` that the escape-stripping
+    /// test above never reaches (it uses `LabelPurpose::Normal`, no secondary,
+    /// no tags). Each purpose maps to its own locale key, so every arm of the
+    /// `purpose_key` match must render; a mutant that dropped the `secondary`
+    /// tag or collapsed two purposes would otherwise pass CI.
+    #[test]
+    fn stream_info_lines_render_purpose_secondary_and_label_tags() {
+        use libfreemkv::{
+            AudioChannels, AudioStream, Codec, ColorSpace, FrameRate, HdrFormat, LabelPurpose,
+            LabelQualifier, Resolution, Stream, SubtitleStream, VideoStream,
+        };
+        crate::strings::set_locale("en");
+
+        // Every purpose arm renders a distinct, non-empty tag.
+        for (purpose, needle) in [
+            (LabelPurpose::Commentary, "Commentary"),
+            (LabelPurpose::Descriptive, "Descriptive"),
+            (LabelPurpose::Score, "Score"),
+        ] {
+            let a = Stream::Audio(AudioStream {
+                pid: 0x1100,
+                codec: Codec::Ac3,
+                channels: AudioChannels::Stereo,
+                language: "eng".into(),
+                sample_rate: SampleRate::S48,
+                secondary: false,
+                purpose,
+                label: String::new(),
+            });
+            let line = stream_info_lines(&[a]).join("\n");
+            assert!(line.contains(needle), "{purpose:?} → {line:?}");
+        }
+
+        // A secondary track with a codec-variant label: both the "Secondary"
+        // tag and the label survive, joined in one parenthesised group.
+        let tagged = Stream::Audio(AudioStream {
+            pid: 0x1100,
+            codec: Codec::TrueHd,
+            channels: AudioChannels::Surround51,
+            language: "fra".into(),
+            sample_rate: SampleRate::S48,
+            secondary: true,
+            purpose: LabelPurpose::Commentary,
+            label: "Atmos".into(),
+        });
+        let line = stream_info_lines(&[tagged]).join("\n");
+        assert!(
+            line.contains("Commentary") && line.contains("Secondary") && line.contains("Atmos"),
+            "all three tags present: {line:?}"
+        );
+
+        // A video label renders after the resolution; a subtitle line carries
+        // its language.
+        let video = Stream::Video(VideoStream {
+            pid: 0x1011,
+            codec: Codec::Hevc,
+            resolution: Resolution::R2160p,
+            frame_rate: FrameRate::F23_976,
+            hdr: HdrFormat::Hdr10,
+            color_space: ColorSpace::Bt2020,
+            display_aspect: None,
+            secondary: false,
+            label: "Feature".into(),
+            measured_cicp: None,
+        });
+        let sub = Stream::Subtitle(SubtitleStream {
+            pid: 0x1200,
+            codec: Codec::Pgs,
+            language: "eng".into(),
+            forced: false,
+            qualifier: LabelQualifier::None,
+            codec_data: None,
+        });
+        let lines = stream_info_lines(&[video, sub]);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("Feature"),
+            "video label present: {joined:?}"
+        );
+        // The container `info` path prints the raw on-disc language tag
+        // (sanitized), not a resolved name — unlike the disc-info listing.
+        assert!(
+            joined.contains("eng"),
+            "subtitle language present: {joined:?}"
+        );
+    }
+
+    use libfreemkv::SampleRate;
+
     /// `info mkv://` / `info m2ts://` prints `v.label`, `a.label`,
     /// `a.language`, and `s.language` straight from the file's own track
     /// metadata. Each is disc/file-controlled (an MKV track name or a raw
