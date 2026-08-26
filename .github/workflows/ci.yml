@@ -636,3 +636,68 @@ jobs:
             rc=1
           }
           exit $rc
+
+  # ── Coverage: informational, tokenless Codecov upload ──────────────────────
+  # Additive, NON-REQUIRED. Mirrors the Linux CLI job's sibling-checkout layout
+  # (this is not a monorepo) so cargo llvm-cov can resolve the freemkv crates
+  # from their dev tips via the generated .cargo/config.toml. `--locked` is
+  # intentionally omitted for the same reason the rest of this file omits it
+  # (see the header note): the committed Cargo.lock describes a developer's
+  # machine, not a release. Uploads tokenless to Codecov and never fails CI.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: freemkv
+      - uses: actions/checkout@v7
+        with:
+          repository: freemkv/libfreemkv
+          ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
+          path: libfreemkv
+      - uses: actions/checkout@v7
+        with:
+          repository: freemkv/freemkv-keysources
+          ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
+          path: freemkv-keysources
+      - uses: actions/checkout@v7
+        with:
+          repository: freemkv/freemkv-engine
+          ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
+          path: freemkv-engine
+      - uses: actions/checkout@v7
+        with:
+          repository: freemkv/freemkv-i18n
+          ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
+          path: freemkv-i18n
+      - uses: actions/checkout@v7
+        with:
+          repository: freemkv/freemkv-unlock
+          ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
+          path: freemkv-unlock
+      - name: Resolve siblings from their dev tips
+        shell: bash
+        working-directory: freemkv
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [patch.crates-io]
+          libfreemkv = { path = "../libfreemkv" }
+          freemkv-keysources = { path = "../freemkv-keysources" }
+          freemkv-engine = { path = "../freemkv-engine" }
+          freemkv-i18n = { path = "../freemkv-i18n" }
+          EOF
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: freemkv
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+        working-directory: freemkv
+      - uses: codecov/codecov-action@v5
+        with:
+          files: freemkv/lcov.info
+          slug: freemkv/freemkv
+          fail_ci_if_error: false
