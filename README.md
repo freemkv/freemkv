@@ -1,8 +1,13 @@
+[![Website](https://img.shields.io/badge/website-freemkv.org-2ea44f)](https://freemkv.org)
+[![Discord](https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/yu7xMGTyek)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![CI](https://github.com/freemkv/freemkv/actions/workflows/ci.yml/badge.svg)](https://github.com/freemkv/freemkv/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/freemkv/freemkv?label=latest&color=brightgreen)](https://github.com/freemkv/freemkv/releases/latest)
 [![codecov](https://codecov.io/gh/freemkv/freemkv/branch/dev/graph/badge.svg)](https://codecov.io/gh/freemkv/freemkv)
 
 # freemkv
+
+**[freemkv.org](https://freemkv.org)** · **[Join the Discord](https://discord.gg/yu7xMGTyek)** — help with rips, drives, and decryption.
 
 Open source 4K UHD / Blu-ray / DVD backup tool — a **command-line tool and a native desktop app in one binary**. On the command line it's two arguments — source and destination; stream URLs let you rip, remux, and transfer between any combination of disc, file, and network. Or open the desktop app (macOS today, Windows next; `freemkv gui` or the `.app`): pick titles and tracks, choose a format, press Rip. Same binary, same engine — the app just opens a window.
 
