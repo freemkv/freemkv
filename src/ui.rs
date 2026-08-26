@@ -2494,7 +2494,7 @@ mod tests {
 
     /// A forced-subtitle preference that matches nothing must keep NOTHING.
     ///
-    /// The real case: a UHD of Dunkirk carrying forced subtitles in French,
+    /// The real case: a UHD feature carrying forced subtitles in French,
     /// German, Spanish and Portuguese, but none in English. Asking for forced
     /// subtitles in English ticked ALL FIVE of them, because this class fell
     /// back to "keep everything" the way audio does when a language is absent.

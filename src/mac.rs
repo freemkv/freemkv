@@ -3070,11 +3070,11 @@ pub fn run() {
         let f = c.ivars().fields.borrow();
         if f.len() >= 7 {
             {
-                f[0].setStringValue(&NSString::from_str("/Volumes/media/iso/dvd/Greenland.iso"));
-                f[1].setStringValue(&NSString::from_str("Greenland.iso"));
+                f[0].setStringValue(&NSString::from_str("/Volumes/media/iso/dvd/Movie.iso"));
+                f[1].setStringValue(&NSString::from_str("Movie.iso"));
                 f[2].setStringValue(&NSString::from_str(&crate::ui::fmt_bytes(6_743_590_912)));
                 f[3].setStringValue(&NSString::from_str("—"));
-                f[4].setStringValue(&NSString::from_str("/tmp/audit/demo/GREENLAND_t1.mkv"));
+                f[4].setStringValue(&NSString::from_str("/tmp/audit/demo/Movie_t1.mkv"));
                 f[5].setStringValue(&NSString::from_str(&crate::ui::fmt_bytes(6_147_000_000)));
                 f[6].setStringValue(&NSString::from_str(&crate::ui::fmt_bytes(243_000_000_000)));
             }

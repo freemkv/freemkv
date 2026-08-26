@@ -4540,11 +4540,11 @@ impl Shell {
                 self.bar_cur.set_position(pct.round() as u32);
                 self.bar_all.set_position(100);
                 let sample = [
-                    "D:\\media\\iso\\Greenland.iso",
-                    "Greenland.iso",
+                    "D:\\media\\iso\\Movie.iso",
+                    "Movie.iso",
                     &crate::ui::fmt_bytes(6_743_590_912),
                     &format!("{}/s", crate::ui::fmt_bytes(41_400_000)),
-                    "C:\\Users\\me\\Videos\\GREENLAND_t1.mkv",
+                    "C:\\Users\\me\\Videos\\Movie_t1.mkv",
                     &crate::ui::fmt_bytes(4_312_000_000),
                     &crate::ui::fmt_bytes(243_000_000_000),
                 ];
