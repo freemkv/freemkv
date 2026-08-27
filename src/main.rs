@@ -24,39 +24,25 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 // ── CLI shell (the gold-standard freemkv CLI, replicated verbatim) ──────────
 mod cli_entry;
 mod disc_info;
-// Whether two paths name the same file. Declared here as well as in `lib.rs`
-// (same shape as `title_identity` below): both shells have to refuse a rip
-// whose destination IS its source, and the copy that compared paths alone was
-// the one that missed a hardlink.
+// Also declared in `lib.rs`: both shells must refuse a rip whose destination
+// IS its source, and comparing paths alone (instead of this) missed hardlinks.
 mod file_identity;
 mod info;
 mod keydb_fetch;
-// What a finished mux still has to tell the user. Declared here as well as in
-// `lib.rs`: the CLI and the GUI each rendered half of what `MuxOutcome`
-// carried, and the half neither rendered was the byte loss.
+// Also declared in `lib.rs`: the CLI and GUI each rendered half of what
+// `MuxOutcome` carried, and the half neither rendered was the byte loss.
 mod lossy;
 mod messaging;
 mod output;
 mod pipe;
 mod strings;
-// What a title NUMBER refers to across a re-scan. Declared here as well as in
-// `lib.rs` (the same shape `strings` uses) because both shells re-scan between
-// picking a title and muxing it — `pipe` in this binary, `engine` in the GUI —
-// and the answer must be ONE type, not one per call site.
+// Also declared in `lib.rs`: `pipe` (here) and `engine` (GUI) both re-scan
+// between picking a title and muxing it, and need ONE shared answer type.
 mod title_identity;
 
 // ── GUI shell — macOS ───────────────────────────────────────────────────────
-// The shared GUI core (`ui`/`engine`/`settings`/`platform`) and the AppKit
-// shell are compiled into this binary only where AppKit is. On Linux the
-// binary is pure CLI (like the historical `freemkv`), so none of this compiles
-// in — no dead code, no unused deps, and `clippy -D warnings` stays clean on a
-// Linux runner. (The lib target still exposes the core on every platform, so
-// CI's portable-core check keeps `ui.rs`/`engine.rs` honest.)
-//
-// Windows is NOT here: its shell lives in the lib (`freemkv::win_app`) so the
-// second binary, `freemkv-gui.exe`, can open the same window. Declaring
-// `mod windows` here as well would compile those 4.4k lines a second time into
-// every binary.
+// Compiles into this binary only where AppKit is; Windows' shell lives in
+// the lib (`freemkv::win_app`) instead, reused by `freemkv-gui.exe`.
 #[cfg(target_os = "macos")]
 mod engine;
 #[cfg(target_os = "macos")]
@@ -343,17 +329,9 @@ fn dev_harness() -> bool {
             },
             st.clone(),
         );
-        // `Acquire`, pairing with `engine::start_rip`'s `Release` store — see
-        // `ui.rs`'s tick, which reads the same flag before the same
-        // `summary`/`outcome` for the same reason.
-        //
-        // Every lock below RECOVERS from poison instead of unwrapping. This
-        // loop is the only thing draining the worker's log, and a worker that
-        // panicked mid-rip poisons `lines` — so `unwrap()` here killed the
-        // reader thread as well, with the panic message that explained the
-        // first failure still sitting unread in the buffer. Recovering prints
-        // it. See `engine::RunState::outcome_now` for the same reasoning
-        // applied to the verdict.
+        // `Acquire` pairs with `engine::start_rip`'s `Release` store. Locks below
+        // recover from poison instead of unwrapping, else a panicking worker's
+        // message gets buried when it also kills the reader thread.
         while !st.finished.load(std::sync::atomic::Ordering::Acquire) {
             std::thread::sleep(std::time::Duration::from_millis(300));
             for l in st.lines.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {

@@ -97,10 +97,9 @@ fn lost_mb(bytes: u64) -> String {
         // number for what the library could quantify.
         return "0.00".to_string();
     }
-    // Hundredths of a MiB, rounded up. Computed as one exact division rather
-    // than through a rounded 1-MiB/100 constant, whose drift showed up as
-    // "1023.98 MB" for a whole gibibyte. `u128` because `bytes * 100` overflows
-    // `u64` for a large enough loss.
+    // Hundredths of a MiB, rounded up, via one exact division (a rounded
+    // 1-MiB/100 constant drifted to "1023.98 MB" for a whole gibibyte).
+    // `u128` because `bytes * 100` overflows `u64` for a large enough loss.
     let hundredths = (u128::from(bytes) * 100).div_ceil(1 << 20);
     format!("{}.{:02}", hundredths / 100, hundredths % 100)
 }

@@ -15,10 +15,8 @@ use freemkv::engine::{Row as ScanRow, Scanned};
 use freemkv::ui::*;
 
 // ── synthetic scans ────────────────────────────────────────────────────────
-//
-// Shaped exactly like `engine::scan_disc`'s output: a depth-0 disc row, then
-// per title a depth-1 Title row followed by its depth-2 stream rows. `title` is
-// the CANONICAL disc title index and is deliberately not the row position.
+// Shaped like `engine::scan_disc`'s output. `title` is the CANONICAL disc
+// title index, deliberately not the row position.
 
 fn row(type_s: &str, desc: &str, depth: u8, checkable: bool, title: usize) -> ScanRow {
     ScanRow {
@@ -120,10 +118,9 @@ fn nth(t: &Tree, type_s: &str, n: usize) -> usize {
 
 #[test]
 fn the_disc_row_is_not_a_choice() {
-    // Ticking "the disc" means nothing — the choice is which titles. A
-    // checkbox there is a control that cannot do anything.
-    // VERIFIED against the shells' own rule: both render a row with no
-    // checkbox as a blank spacer / no state image.
+    // Ticking "the disc" means nothing — the choice is which titles, so a
+    // checkbox there is a control that cannot do anything. Verified against
+    // the shells' own rule: both render a no-checkbox row as a blank spacer.
     let t = tree(&two_title_disc(), "Main film only", 0.0);
     let root = t.roots[0];
     assert!(!t.arena[root].checkable(), "the disc root grew a checkbox");
@@ -305,10 +302,9 @@ fn every_arena_row_becomes_exactly_one_view_row_in_order() {
 
 #[test]
 fn a_view_row_carries_a_tick_only_when_the_row_is_a_choice() {
-    // `Row::check == None` is what both shells render as "no checkbox at all".
-    // If it disagreed with `checkable()`, one shell would show a checkbox the
-    // model refuses to change — the exact macOS bug the self-test was written
-    // for.
+    // `Row::check == None` is what both shells render as "no checkbox at
+    // all". If it disagreed with `checkable()`, one shell would show a
+    // checkbox the model refuses to change — the exact macOS bug pinned here.
     let mut app = App::new();
     app.tree = tree(&two_title_disc(), "All titles", 0.0);
     app.page = Page::Titles;
@@ -477,10 +473,9 @@ fn a_parent_always_precedes_its_children() {
 
 #[test]
 fn a_rebuilt_tree_opens_on_the_ticked_title_not_the_last_one() {
-    // The bug: the Windows shell opens every title to match the macOS outline,
-    // and each expand scrolls its children into view, so a 97-title Blu-ray
-    // left the user parked at the bottom of the list. The row to show is the
-    // ticked one — which under "Longest title" is NOT row 0.
+    // The bug: the Windows shell opened every title to match the macOS
+    // outline, and each expand scrolled children into view, parking the
+    // user at the bottom of a 97-title Blu-ray. Show the ticked row instead.
     let sc = disc(&[(600.0, 1), (300.0, 1), (5400.0, 1)]);
     let mut app = App::new();
     app.tree = tree(&sc, "Longest title", 0.0);
@@ -564,10 +559,9 @@ fn an_unrecognized_selection_setting_falls_back_to_the_main_film() {
 
 #[test]
 fn ticked_titles_are_canonical_disc_indices_not_tree_positions() {
-    // THE bug this guards: the minimum-length filter removes short titles from
-    // the tree, so the third surviving row can be disc title 5. The engine
-    // selects by disc index, so returning a row position would rip the wrong
-    // film.
+    // THE bug this guards: the minimum-length filter removes short titles, so
+    // the third surviving row can be disc title 5. The engine selects by disc
+    // index, so returning a row position would rip the wrong film.
     let sc = disc(&[(30.0, 1), (30.0, 1), (5400.0, 1), (30.0, 1), (3600.0, 1)]);
     let t = tree(&sc, "All titles", 300.0);
     assert_eq!(
@@ -670,11 +664,9 @@ fn the_filter_never_empties_the_list() {
 
 #[test]
 fn the_main_film_default_ticks_a_title_the_filter_actually_kept() {
-    // "Main film only" used to mean the literal disc title 0, whatever the
-    // minimum-length filter had done with it. On a disc whose title 0 is a
-    // 30-second stinger — the shipped default minimum is not 0 — that title is
-    // hidden, so the tree opened with NOTHING ticked and Rip refused with
-    // "select a title first" on a perfectly ordinary disc.
+    // "Main film only" used to mean literal disc title 0, regardless of the
+    // minimum-length filter. On a disc whose title 0 is a 30-second stinger,
+    // that title is hidden, so the tree opened with NOTHING ticked.
     let sc = disc(&[(30.0, 1), (5400.0, 1)]);
     let t = tree(&sc, "Main film only", 300.0);
     assert_eq!(t.title_count(), 1, "the filter should have hidden title 0");
@@ -688,11 +680,9 @@ fn the_main_film_default_ticks_a_title_the_filter_actually_kept() {
 
 #[test]
 fn every_default_selection_ticks_only_titles_that_are_on_screen() {
-    // The same rule for the other two modes, and the other direction: a title
-    // the tree SHOWS is a title these modes may tick. A title of unknown
-    // length is shown (see the test below), so "All titles" must include it —
-    // it was excluded by a `>= min_secs` test that an unknown 0.0 can never
-    // pass, which made "All titles" quietly mean "all but that one".
+    // Other direction: a title the tree SHOWS must be tickable. An
+    // unknown-length title is shown, so "All titles" must include it — it was
+    // excluded by a `>= min_secs` test that 0.0 can never pass.
     let mut sc = disc(&[(5400.0, 1), (30.0, 1)]);
     sc.rows.extend(title_block(2, 0.0, 1));
     sc.title_count = 3;
@@ -729,12 +719,9 @@ fn a_title_with_no_known_duration_is_never_hidden() {
 
 #[test]
 fn the_output_file_is_named_after_the_disc_and_the_first_ticked_title() {
-    // The Information panel shows this path while the rip runs, so it has to
-    // be the file that actually lands on disk. The engine names a disc/image
-    // rip from the DISC LABEL (`run_disc` → `title_basename`), not from the
-    // source file's stem — this panel showed the stem, so ripping
-    // /media/Movie.iso whose volume id is MOVIE_UHD announced
-    // "Movie_t1.mkv" and produced "MOVIE_UHD_t1.mkv".
+    // The Information panel shows this path while the rip runs, so it must
+    // match what lands on disk. The engine names a disc/image rip from the
+    // DISC LABEL, not the source file's stem — the panel once showed the stem.
     assert_eq!(
         output_file_name(
             "/media/Movie.iso",
@@ -762,10 +749,9 @@ fn the_output_file_is_named_after_the_disc_and_the_first_ticked_title() {
 
 #[test]
 fn the_shown_output_file_honours_the_filename_template() {
-    // "Output filename template" is a shipped setting (`{title}_t{n}` by
-    // default) that the engine applies to every title it writes. The panel
-    // ignored it completely and always showed `<stem>_t<n>`, so anyone who had
-    // set a template was told a filename that could not appear.
+    // "Output filename template" (`{title}_t{n}` default) is applied to
+    // every title the engine writes. The panel ignored it and always showed
+    // `<stem>_t<n>`, telling users a filename that could not appear.
     assert_eq!(
         output_file_name(
             "/media/Movie.iso",
@@ -876,9 +862,8 @@ const CONTAINER_WORDS: &[(&str, &str)] = &[
 #[test]
 fn the_progress_caption_names_what_each_format_actually_writes() {
     // `container_label` answered MP4 / M2TS / "MKV for everything else", so
-    // ripping a disc to an ISO, a chapter file, a JSON dump or an .fvi index
-    // all said "Saving to MKV file" — nine of the twelve offered formats were
-    // captioned with a container they never produce.
+    // ISO, chapter, JSON and .fvi outputs all said "Saving to MKV file" —
+    // nine of twelve formats captioned with a container they never produce.
     for (format, word) in CONTAINER_WORDS {
         assert_eq!(
             &container_label(format),
@@ -961,9 +946,8 @@ fn no_information_row_is_ever_blank() {
 #[test]
 fn every_settings_dropdown_stores_a_canonical_value_the_code_matches_on() {
     // The label is translated; the stored value is not. These canonical
-    // strings are compared verbatim elsewhere (`selection` in `Tree::from_scan`,
-    // `rip_mode` in `start_run`, `key_source` in `KeyConfig`), so renaming one
-    // here silently disables the feature it selects.
+    // strings are compared verbatim elsewhere, so renaming one here
+    // silently disables the feature it selects.
     let expect: &[(&str, &[&str])] = &[
         (
             "selection",
@@ -1592,11 +1576,8 @@ fn a_format_the_source_cannot_offer_is_never_left_selected() {
 }
 
 // ══ preferred languages ════════════════════════════════════════════════════
-//
-// The user's request, verbatim: "German & Spanish audio, only German subtitles,
-// and forced only if in English." That is THREE independent sets, and each of
-// the tests below pins one property of that reading which a plausible
-// simplification would break.
+// The request: "German & Spanish audio, only German subtitles, forced only
+// if English." THREE independent sets; each test pins a property that would break.
 
 /// A one-title disc whose streams carry language tags. `(type, lang, forced)`,
 /// in stream order; PIDs are assigned from 0x1100 in that order so a test can
@@ -1793,13 +1774,8 @@ fn language_lists_split_on_commas_not_on_spaces() {
 }
 
 // ── A video-only title's checkbox ────────────────────────────────────────────
-//
-// `check_state` folds a title's CHECKABLE children into a tri-state, and video
-// rows are not checkable. A title whose only child is video therefore had an
-// EMPTY fold set, fell into the "none ticked" arm, and drew unticked — while
-// `ticked_titles`, which reads the node's own flag rather than the fold, ripped
-// it anyway. `toggle` could not move it either: Off -> set true -> still Off.
-// The box was dead, and it showed the opposite of what would happen.
+// `check_state` folds CHECKABLE children, but video rows aren't checkable, so
+// a video-only title drew unticked while `ticked_titles` ripped it anyway.
 
 /// The box must say what the rip will do.
 #[test]
@@ -1889,11 +1865,8 @@ fn no_breakdown_and_an_empty_breakdown_are_different_values() {
 }
 
 // ── A title's box and the rip must be the same answer ───────────────────────
-//
-// `check_state` DRAWS a title by folding its checkable children. `ticked_titles`
-// RIPS by reading the title node's own `checked` flag, and `set_checked` on a
-// child never touches its parent. So the two can disagree in both directions:
-// a title drawn empty is ripped anyway, and a title drawn full is skipped.
+// `check_state` DRAWS by folding children; `ticked_titles` RIPS via the
+// title's own `checked` flag, untouched by a child's `set_checked`.
 
 /// Every reachable combination of ticks on a title with two audio tracks, and
 /// what the user is entitled to read off the box for each. The table is written
@@ -2025,21 +1998,14 @@ fn a_title_with_checkable_children_still_folds_to_a_tri_state() {
 }
 
 // ── The language picker's model ────────────────────────────────────────────
-//
-// `mac.rs::set_lang_picker` / `onToggleLang:` and their windows.rs counterparts
-// are pure presentation over five `ui` functions: what the button says, which
-// rows carry a checkmark, and what a click stores. None of the five had a
-// single test anywhere — `grep -rn lang_toggle src tests` matched only their
-// own definitions and the two shells — so the picker's whole contract rested on
-// AppKit/Win32 code no `cargo test` run can reach. These pin the model half for
-// BOTH shells; what stays uncovered is only the drawing.
+// The mac/windows picker shells are pure presentation over five `ui`
+// functions, none of which had a single test. These pin the model.
 
 #[test]
 fn a_language_picker_click_round_trips_for_every_offered_language() {
-    // The checkmark contract: tick a row, the code is stored and the row reads
-    // as selected; tick it again and the setting is back exactly where it was.
-    // A code that stored one spelling and matched another would draw a row the
-    // user cannot untick.
+    // The checkmark contract: tick a row, the code is stored and reads as
+    // selected; tick again and it's back. A code storing one spelling but
+    // matching another would draw a row the user cannot untick.
     for (code, name) in PICKER_LANGUAGES {
         let on = lang_toggle("", code);
         assert!(
@@ -2116,15 +2082,9 @@ fn a_code_the_picker_does_not_offer_stays_visible_and_removable() {
 
 #[test]
 fn every_bibliographic_code_the_doc_promises_resolves() {
-    // `canonical_lang_code`'s doc says it takes "either 639-2 form (`ger`/`deu`)".
-    // `isolang` knows only the /T form, so the twenty /B codes below silently
-    // fell through to the keep-it-verbatim fallback — accepted in the sense
-    // that nothing errored, and wrong in every sense that matters: a stored
-    // `ger` neither ticked the German row nor could be turned into one.
-    //
-    // Inputs only. The mapping is not restated here, or this test would be a
-    // second copy of the table agreeing with any edit to it: each code must
-    // resolve to the SAME language its /T spelling does.
+    // `canonical_lang_code`'s doc promises 639-2/B forms too, but `isolang`
+    // knows only /T, so /B codes fell through to a verbatim fallback: `ger`
+    // neither ticked German nor could become it. No restated mapping here.
     const BIB: [(&str, &str); 20] = [
         ("alb", "sqi"),
         ("arm", "hye"),

@@ -33,11 +33,9 @@ use crate::ui::Page;
 /// 100% scaling is 96 DPI, 125% is 120, 150% is 144, 200% is 192.
 pub const BASE_DPI: u32 = 96;
 
-// ── the 96-DPI baseline ───────────────────────────────────────────────────
-//
-// The same proportions the macOS shell uses, so the two look like one product:
-// tree 46.4% wide, log 32% of the height on the tree page and more while
-// ripping, Output/Info groups stacked on the right.
+// ── the 96-DPI baseline: same proportions as the macOS shell, so the two ──
+// look like one product — tree 46.4% wide, log 32% of the height on the tree
+// page and more while ripping, Output/Info groups stacked on the right.
 
 /// Default window client size.
 pub const W: i32 = 1180;
@@ -81,8 +79,8 @@ impl Scale {
     /// `GetDpiForWindow` returns 0 for a window that does not exist yet — which
     /// happens for real, because `WM_GETMINMAXINFO` arrives before `WM_CREATE`.
     /// A zero would collapse the whole layout to nothing, so it is clamped to
-    /// the baseline. The upper clamp is a sanity rail: Windows tops out at 480
-    /// DPI (500%).
+    /// the baseline. The upper clamp is a sanity rail: Windows tops out at 960
+    /// DPI (1000%).
     #[must_use]
     pub fn new(dpi: u32) -> Self {
         Self {
@@ -251,12 +249,8 @@ pub fn main_layout(dpi: u32, cw: i32, ch: i32, st: MainState) -> MainLayout {
     let empty_head = Rect::new(pad, cy - s.px(50), cw - pad * 2, s.px(26));
     let empty_sub = Rect::new(pad, cy - s.px(22), cw - pad * 2, s.px(20));
     // TWO buttons: the empty page offers "Open disc" as well as "Open file or
-    // ISO…", so the one source its own headline is about is reachable without
-    // hunting through the menu bar.
-    //
-    // The pair straddles the centre with a fixed gap — the result page's
-    // pattern — so they stay symmetric at any DPI instead of each rounding
-    // away from centre on its own.
+    // ISO…" so its own headline's source is reachable without the menu bar. The
+    // pair straddles the centre with a fixed gap (result page's pattern), symmetric.
     let open_w = s.px(180);
     let open_gap = s.px(16);
     let open_y = cy + s.px(16);
@@ -679,9 +673,7 @@ mod tests {
         assert_eq!(l.btn_done, Rect::new(600, 112, 170, 32));
         // The Result page reserves RESULT_H and the log takes the remainder.
         // Without this the "delete the Page::Result arm" mutant is invisible:
-        // page_h would fall to 0 and log_h would switch to the LOG_FRAC branch,
-        // moving nothing the other assertions look at.
-        // 760 - 4 - 200 - 24 = 532.
+        // page_h falls to 0 and log_h switches to LOG_FRAC (760-4-200-24=532).
         assert_eq!(l.log.h, 532);
 
         let l = main_layout(192, 2360, 1520, st);
@@ -940,18 +932,9 @@ mod tests {
     /// 2 gaps, 2 checkboxes).
     #[test]
     fn the_tallest_settings_pages_still_fit_the_settings_window() {
-        // COUNT THE REAL PAGE, do not restate it. The previous version carried
-        // hand-written row counts ("5 * row_step"), so adding a control to the
-        // actual Settings page in windows.rs left this green while the page it
-        // claims to measure grew past the window. Nothing tied the two
-        // together, and they live in different files.
-        //
-        // The page builders mark their sections with `// ── Name ──` and add
-        // rows through `r.field` / `r.lang` / `r.note` / `r.check`, so the
-        // composition can be read straight out of the shell. Add a row there
-        // and this test measures it, whether or not anyone remembers to come
-        // here. `r.lang` is counted with the fields because a language picker
-        // is a `row_step`-tall row like any other.
+        // COUNT THE REAL PAGE, don't restate it: hand-written row counts left
+        // this green while the actual page grew past the window. Instead parse
+        // the `// ── Name ──` sections and field/lang/note/check rows from windows.rs.
         let shell = include_str!("windows.rs");
         let section = |name: &str| -> (usize, usize, usize) {
             let head = format!("// ── {name} ──");

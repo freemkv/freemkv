@@ -51,12 +51,8 @@ mod imp {
 
     pub fn home_dir() -> PathBuf {
         // NEVER an empty path. `unwrap_or_default()` returned one, and every
-        // path built on it then came out RELATIVE: `shellexpand("~/x")` gave
-        // "x", `support_dir()` gave "Library/Application Support/freemkv",
-        // `default_dest_dir()` gave "Movies". Settings, the keydb and rips all
-        // landed relative to the process's CWD instead of the user's home.
-        // Unset HOME is not exotic — a container, a systemd unit, a cron job
-        // or `env -i` all produce it, and autorip ships in Docker.
+        // path built on it came out RELATIVE to the CWD instead of home.
+        // Unset HOME is not exotic — containers, cron, `env -i`, Docker.
         std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(PathBuf::from)

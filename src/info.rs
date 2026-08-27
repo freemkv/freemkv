@@ -1,7 +1,5 @@
 // freemkv info disc:// — Show drive information and capture profiles
-// MIT — freemkv project
-//
-// CLI is dumb — all drive data from libfreemkv.
+// MIT — freemkv project. CLI is dumb — all drive data from libfreemkv.
 
 use crate::output::{Level::Normal, Output};
 use crate::strings;
@@ -257,10 +255,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
         }
     };
 
-    // Build the profile dir name from the (untrusted) INQUIRY strings. These
-    // come from drive firmware and could contain `/`, `\`, `..`, NUL, etc., so
-    // sanitize to a strict allowlist before using the result as a path — a
-    // malformed/malicious firmware string must not steer writes out of CWD.
+    // Profile dir name comes from untrusted firmware INQUIRY strings (may hold
+    // `/`, `\`, `..`, NUL, etc.) — sanitize to a strict allowlist first so a
+    // malicious firmware string can't steer writes out of CWD.
     let profile_name = sanitize_component(&format!(
         "{}-{}-{}-{}",
         id.vendor.to_lowercase(),
@@ -354,10 +351,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
     let mut toml = String::new();
     toml.push_str(&toml_header_comment(&id));
     toml.push_str("[drive]\n");
-    // These fields are derived from raw INQUIRY / GET_CONFIG bytes (firmware-
-    // controlled, `from_utf8_lossy`/`ascii_field`), so a value may contain a
-    // double quote, backslash, or control char that would break the TOML
-    // double-quoted string. Escape every embedded value.
+    // These fields come from raw firmware-controlled INQUIRY/GET_CONFIG bytes and
+    // may contain a quote, backslash, or control char that would break the TOML
+    // double-quoted string — escape every embedded value.
     toml.push_str(&format!("manufacturer = \"{}\"\n", toml_escape(&id.vendor)));
     toml.push_str(&format!("product = \"{}\"\n", toml_escape(&id.product)));
     toml.push_str(&format!("revision = \"{}\"\n", toml_escape(&id.revision)));
@@ -435,12 +431,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
     );
     println!();
 
-    // ── Package + present for manual submission ────────────────────────────
-    //
-    // We zip the captured profile to disk and print a ready-to-paste GitHub
-    // issue (title + body + the issues/new URL); the user submits it manually.
-    // A genuine I/O failure (zip or write) exits non-zero so scripts can detect
-    // it.
+    // Package + present for manual submission: zip the captured profile and
+    // print a ready-to-paste GitHub issue (title + body + issues/new URL). A
+    // genuine I/O failure (zip or write) exits non-zero so scripts can detect it.
 
     print!("  {}  ", strings::get("drive.submit_packaging"));
     let _ = std::io::stdout().flush();
@@ -557,37 +550,22 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
         )
     );
 
-    // Build-injected, issues-only PAT scoped to freemkv/bdemu. Set
-    // FREEMKV_GH_TOKEN at build time (release CI / local) so the secret lives
-    // in the binary, NOT the source — GitHub's secret scanner revokes any token
-    // committed to a repo (that's what killed the old base64'd one). When no
-    // token is compiled in, we fall straight through to the manual flow below.
+    // Build-injected, issues-only PAT (FREEMKV_GH_TOKEN at build time) so the
+    // secret lives in the binary, not source (GitHub's scanner revokes any
+    // committed token). No token compiled in => manual flow below.
     let token = option_env!("FREEMKV_GH_TOKEN").unwrap_or("").trim();
-    // Only offer auto-submit on an INTERACTIVE terminal. A non-interactive stdin
-    // (closed/redirected/piped — a CI runner, cron, or `... --share </dev/null`)
-    // cannot give informed consent, and EOF there must NOT be read as "yes": the
-    // posted profile carries the drive serial (unless --mask), so a default-yes
-    // on EOF would upload identifying hardware data without the user agreeing.
-    // In that case fall straight through to the manual flow below.
+    // Auto-submit needs an INTERACTIVE terminal — a closed/piped stdin can't
+    // give informed consent, and EOF must never read as "yes" (profile carries
+    // the drive serial unless --mask); otherwise fall through to manual flow.
     if may_prompt_for_consent(
         token,
         std::io::stdin().is_terminal(),
         std::io::stderr().is_terminal(),
     ) {
         println!();
-        // Localized like every other line this flow prints. The bracketed
-        // "[y/N]" is the DEFAULT-NO hint, and it must stay honest across every
-        // locale: the catalog string is machine-controlled (catalogs load from
-        // `./locales`), so a crafted `de.json` could render "[j/N]" — a
-        // default-NO hint — while the old parser treated a bare Enter as YES and
-        // POSTed the profile (carrying the drive serial unless `--mask`) to a
-        // public tracker. A default the parser does not honour is a consent /
-        // data-exfil bug. Two rules close it: (1) a bare Enter NEVER posts — the
-        // upload requires an explicit affirmative, so no crafted default can
-        // flip it to yes; (2) the affirmative token comes from the SAME locale
-        // catalog as the prompt (`drive.submit_affirmative`, fallback "y"), so a
-        // translated prompt showing "[j/N]" is answered by "j", not a hard-coded
-        // ASCII "y".
+        // Prompt is localized; a crafted catalog could show "[j/N]" with a bare
+        // Enter treated as YES, exfiltrating the profile. Fix: bare Enter never
+        // posts, and the affirmative check uses the SAME locale token as shown.
         eprint!(
             "{}",
             strings::get_or(
@@ -602,10 +580,8 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
         let n = std::io::stdin().read_line(&mut input).unwrap_or(0);
         let ans = input.trim();
         let affirmative = strings::get_or("drive.submit_affirmative", "y");
-        // Consent must be EXPLICIT: only the locale's affirmative token posts.
-        // A bare Enter (empty) declines, and EOF (n==0) is never consent. See
-        // the prompt comment above for why a default-yes here is a data-exfil
-        // bug when the catalog string is attacker-controlled.
+        // Consent must be EXPLICIT: only the locale's affirmative token posts;
+        // a bare Enter or EOF (n==0) is never consent (see prompt comment above).
         if consent_granted(n, ans, &affirmative) {
             match submit_issue(token, title, body) {
                 Some(url) => {
@@ -662,7 +638,7 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
 /// used to test stdin only while the question itself is printed to STDERR, so
 /// `freemkv info disc:// --share 2>/dev/null` passed the gate, asked nothing
 /// the user could see, and blocked on a read. A bare Enter — pressed to
-/// unstick an apparently hung command — is the [Y] default, and the posted
+/// unstick an apparently hung command — is the \[Y\] default, and the posted
 /// profile carries the drive serial unless `--mask` was given. That is
 /// publishing identifying hardware data to a public tracker without the user
 /// having been asked a question they could read.
@@ -978,10 +954,9 @@ fn toml_escape(s: &str) -> String {
 }
 
 fn format_date(fw_date: &str) -> String {
-    // The byte-index slices below are only sound on ASCII. `len()` is a byte
-    // length, so a corrupted/non-ASCII firmware-date field (multibyte UTF-8
-    // with a char boundary mid-slice) would panic. Guard on `is_ascii()` and
-    // fall through to the raw passthrough for anything unexpected.
+    // Byte-index slices below are only sound on ASCII; a corrupted/non-ASCII
+    // firmware-date field could panic on a mid-char split. Guard with
+    // `is_ascii()` and pass through raw for anything unexpected.
     if fw_date.len() < 8 || !fw_date.is_ascii() {
         return fw_date.to_string();
     }
@@ -1090,11 +1065,9 @@ mod tests {
 
     #[test]
     fn capture_command_is_a_real_subcommand() {
-        // This string is stamped into the profile TOML header AND into the body
-        // of the GitHub issue `--share` files, so a wrong command here does not
-        // just mislead one user — it is published to a public tracker and read
-        // by everyone who opens the issue. It shipped as `freemkv drive-info`,
-        // which the dispatcher has never accepted.
+        // Stamped into the TOML header and the `--share` GitHub issue body, so a
+        // wrong command is published to a public tracker, not just one user. It
+        // shipped as `freemkv drive-info`, which the dispatcher never accepted.
         let word = CAPTURE_COMMAND
             .strip_prefix("freemkv ")
             .unwrap_or_else(|| panic!("CAPTURE_COMMAND must invoke freemkv: {CAPTURE_COMMAND}"))
@@ -1310,11 +1283,9 @@ mod tests {
 
     #[test]
     fn toml_escape_round_trips_to_parseable_toml() {
-        // Regression (HIGH): firmware INQUIRY/GET_CONFIG strings were embedded
-        // into `drive.toml` double-quoted values with NO escaping, so a value
-        // containing `"`, `\`, or a newline produced an unparseable file. Every
-        // such value must escape to a well-formed basic string that decodes back
-        // to the original.
+        // Regression (HIGH): firmware strings were embedded unescaped into
+        // `drive.toml`, so `"`, `\`, or newline produced an unparseable file.
+        // Every value must escape to a form that decodes back to the original.
         let cases = [
             r#"HL-DT-ST"#,          // ordinary
             r#"BAD"VENDOR"#,        // embedded quote

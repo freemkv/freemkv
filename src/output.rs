@@ -1,8 +1,7 @@
 // freemkv — Output writer with verbosity filtering
 // MIT — freemkv project
-//
-// All CLI output goes through this. One filter point for quiet/normal/verbose.
-// No `if verbose` scattered through code — tag each line with its level.
+
+// All CLI output goes through this: one filter point, tag each line's level.
 
 use crate::strings;
 use std::io::Write;
@@ -134,16 +133,8 @@ impl Output {
 }
 
 // ── test seam ────────────────────────────────────────────────────────────────
-//
-// Every user-visible line leaves this module through `line`/`raw_inline`, which
-// `println!`/`print!` it. A test cannot read that back: libtest's output capture
-// is a thread-local that `thread::spawn` PROPAGATES, so neither the test thread
-// nor a child of it ever reaches fd 1, and stable Rust exposes no way to read
-// the harness's buffer. So the capture lives here, at the exact point the text
-// would hit the terminal — what a test sees is byte-for-byte what a user sees.
-//
-// Compiled ONLY under `cfg(test)`: the shipped binary has no branch at all
-// (`intercept` is a `#[cfg(not(test))]` `false`, which inlines away).
+// Lines leave via `line`/`raw_inline`. Libtest's capture is thread-local and
+// unreadable from stable Rust, so this captures at the terminal boundary.
 
 #[cfg(test)]
 thread_local! {

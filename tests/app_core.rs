@@ -193,8 +193,7 @@ fn source_extensions_match_the_documented_stream_urls() {
 }
 
 // ── Coverage the shell-driving self-test cannot give us ─────────────────────
-//
-// These pin the platform-neutral core so the Windows shell inherits the same
+// Pins the platform-neutral core so the Windows shell inherits the same
 // behaviour without a second set of assertions.
 
 use freemkv::ui::{
@@ -516,11 +515,8 @@ fn platform_work_is_requested_not_performed() {
 }
 
 // ── Output format actually takes effect ────────────────────────────────────
-//
-// The popup was decoration for a while: it showed a choice the model never
-// heard about, so picking MP4 still produced an MKV. These assert the chain
-// popup → Cmd::SetFormat → App.format → output extension, not just that the
-// list contains the right entries.
+// The popup once was decoration: it showed a choice the model never heard
+// about, so picking MP4 still produced MKV. Assert the full chain instead.
 
 /// A shell resolves its widget text through the core, and unknown text is
 /// rejected rather than entering the model.

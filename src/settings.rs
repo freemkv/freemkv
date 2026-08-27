@@ -56,11 +56,9 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             dest_dir: dirs_movies(),
-            // Canonical output-format string — must be one of the values
-            // `ui::output_formats` produces, so the Settings popup and the main
-            // window's format dropdown can both select it. (An older
-            // "Matroska (.mkv)" default matched no popup item and rendered
-            // blank.)
+            // Canonical output-format string — must match a value `ui::output_formats`
+            // produces so the Settings popup and main window dropdown can both
+            // select it. (An older "Matroska (.mkv)" default matched none, blank.)
             container: "Selected titles → MKV".into(),
             filename_template: "{title}_t{n}".into(),
             keep_iso: false,
@@ -210,13 +208,9 @@ fn preserve_unreadable(path: &std::path::Path) -> Option<PathBuf> {
             return std::fs::rename(path, &cand).ok().map(|()| cand);
         }
     }
-    // Every numbered slot is taken. Giving up here is not neutral: the file
-    // stays at the LIVE path, and the next `save()` — the Settings popup, a
-    // window resize — writes defaults over the one copy that still holds the
-    // user's keyserver token, output folder and keydb path. So the choice is
-    // which copy to lose, and the newest is worth more than the tenth-oldest.
-    // The first `.bad`, the one most likely to hold real values, is still
-    // never touched.
+    // Every numbered slot is taken. Giving up isn't neutral: the file stays LIVE
+    // and the next `save()` overwrites the one copy still holding real values.
+    // Overflow the newest; `.bad` (oldest, likeliest to hold real values) stays.
     let overflow = path.with_extension("json.bad.overflow");
     std::fs::rename(path, &overflow).ok().map(|()| overflow)
 }
@@ -337,18 +331,15 @@ impl Settings {
             }
         };
         // A leading UTF-8 BOM is not whitespace to serde_json — it rejects the
-        // document outright. PowerShell's `Out-File -Encoding utf8` writes one
-        // and Notepad has historically saved UTF-8 with a BOM by default, so a
-        // Windows user hand-editing this file to paste a keyserver token would
-        // otherwise lose every setting they have.
+        // document outright. PowerShell and Notepad both write one by default, so
+        // a Windows user hand-editing this file would otherwise lose every setting.
         let body = text.strip_prefix('\u{feff}').unwrap_or(&text);
         match serde_json::from_str::<Settings>(body) {
             Ok(s) => (s, LoadOutcome::Loaded),
             Err(e) => {
-                // The file still holds the user's key service token, output
-                // folder and keydb path. Move it aside NOW: `load()` runs at
-                // startup and the next `save()` — settings popup, window
-                // resize — would write defaults straight over it.
+                // The file still holds the user's token/folder/keydb path. Move
+                // it aside NOW: `load()` runs at startup and the next `save()`
+                // would write defaults straight over it.
                 let preserved = preserve_unreadable(path);
                 let outcome = LoadOutcome::Unreadable {
                     path: path.to_path_buf(),
@@ -365,8 +356,10 @@ impl Settings {
     /// match on. `#[serde(default)]` fills fields missing from the file; this
     /// additionally snaps an enum-valued field back to its default when the
     /// persisted string is not one of the recognized options (a stale file from
-    /// an older build, or a hand-edit). Free-form fields (paths, URLs, numbers)
-    /// are left as-is.
+    /// an older build, or a hand-edit). `dest_dir` and `keydb_path` get the
+    /// same fallback-to-default treatment when they aren't usable (a
+    /// non-absolute destination, an empty keydb path) — every other free-form
+    /// field (URLs, numbers) is left as-is.
     fn normalize(&mut self) {
         let d = Settings::default();
         let snap = |cur: &mut String, opts: &[&str], def: &str| {
@@ -408,10 +401,8 @@ impl Settings {
         // endonym / unknown value to a clean code.
         self.language = crate::ui::locale_code(&self.language).to_string();
         // A destination that isn't an absolute path (empty, or a stale "..."
-        // placeholder from an older build) can't be written to and shows blank
-        // in the field — fall back to the default output folder. The test is
-        // per-OS: `starts_with('/')` called every valid Windows path relative
-        // and silently reset the user's destination on each load.
+        // placeholder) can't be written to — fall back to the default folder.
+        // Test is per-OS: `starts_with('/')` wrongly reset every Windows path.
         if !crate::platform::is_absolute(&self.dest_dir) {
             self.dest_dir = d.dest_dir.clone();
         }
@@ -427,35 +418,18 @@ impl Settings {
         std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
         let json = serde_json::to_string_pretty(self).map_err(|e| format!("{e}"))?;
         let path = settings_path();
-        // This file holds `keyserver_token` in plaintext, so it gets the same
-        // two guards a secret on disk needs: mode 0600 (a plain `fs::write`
-        // leaves it at the process umask, typically 0644 — readable by every
-        // other local account) and an atomic write (temp file in the SAME
-        // directory, then rename). Without the rename, a crash/power-loss
-        // mid-write leaves a truncated/corrupt JSON file; `Settings::load`
-        // then silently falls back to defaults via `.ok()`, discarding the
-        // user's keyserver_url/keyserver_token/keydb_path with no warning.
+        // Holds `keyserver_token` in plaintext, so it needs mode 0600 (plain
+        // `fs::write` leaves it at umask, often 0644) and an atomic write — a
+        // crash mid-write else corrupts the JSON and `load()` silently drops it.
         let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        // The temp name belongs to THIS process and nothing else, so anything
-        // sitting on it is debris from an earlier failed save of ours — and
-        // debris that has to go for two separate reasons: it holds
-        // `keyserver_token` in plaintext, and `create_new` below would refuse
-        // the name for the rest of the process's life, so every later save
-        // returned "File exists" while the user was told nothing had been
-        // written. Clearing it first makes a save recoverable instead of
-        // permanently poisoned.
-        //
-        // This does NOT weaken the `create_new` guard: if something re-creates
-        // the path (a symlink pointed at a file elsewhere, say) between the
-        // removal and the open, `create_new` still refuses it rather than
-        // following it — a failed save, never a token written through someone
-        // else's link.
+        // The temp name is unique to THIS process, so anything on it is debris
+        // from an earlier failed save; clear it first so saves recover instead of
+        // permanently failing `create_new` (which still refuses a re-created symlink).
         let _ = std::fs::remove_file(&tmp);
         write_new_file_0600(&tmp, json.as_bytes()).map_err(|e| {
-            // A write that failed PART-WAY has already created the file, and
-            // the bytes in it are the secret. Only the rename branch below used
-            // to clean up, so a full disk left the token on disk under a name
-            // nobody would think to look for.
+            // A write that failed PART-WAY has already created the file with the
+            // secret in it. Only the rename branch used to clean up, so a full
+            // disk left the token on disk under a name nobody would check.
             let _ = std::fs::remove_file(&tmp);
             format!("{e}")
         })?;
@@ -517,11 +491,9 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
     if dest.trim().is_empty() {
         return Err("No keydb.cfg location set — add one in Settings ▸ Keys".into());
     }
-    // Route through the SAME hardened fetch the CLI's `update-keys` uses:
-    // SSRF/private-IP guard on the resolved address, zero redirects, and a body
-    // cap. This used to be a bare `ureq::get`, so the GUI button downloaded an
-    // arbitrary user-supplied URL with redirects followed and no size limit —
-    // none of the guards the CLI applies to the very same untrusted resource.
+    // Route through the SAME hardened fetch the CLI's `update-keys` uses
+    // (SSRF/private-IP guard, zero redirects, body cap). Used to be a bare
+    // `ureq::get`, so the GUI lacked every guard the CLI applies to this URL.
     let buf = crate::keydb_fetch::fetch(url).map_err(|e| format!("Download failed: {e}"))?;
     if buf.is_empty() {
         return Err("Download was empty".into());
@@ -560,13 +532,9 @@ pub fn check_for_update(current: &str) -> String {
         .call();
 
     let body = match resp {
-        // `Body::read_to_string` is NOT the unbounded read it looks like: ureq
-        // 3 applies its own 10 MiB `limit()` inside it (`body/mod.rs`), and the
-        // agent above bounds the whole operation at 10 s. Between them the
-        // response is bounded in both size and time, which is why this path
-        // does not need `keydb_fetch::read_capped` — that exists because the
-        // keydb body is legitimately larger than ureq's default and is read
-        // through `into_reader()`, which is genuinely uncapped.
+        // `Body::read_to_string` is NOT unbounded: ureq applies its own 10 MiB
+        // `limit()`, and the agent bounds the op at 10s — no need for
+        // `keydb_fetch::read_capped`, which exists for the larger, uncapped path.
         Ok(r) => match r.into_body().read_to_string() {
             Ok(b) => b,
             Err(e) => return format!("Update check failed: {e}"),
