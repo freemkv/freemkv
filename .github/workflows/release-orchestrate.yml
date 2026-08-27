@@ -1,31 +1,30 @@
 name: release-orchestrate
 
-# qa → tags → main, as one action.
+# qa -> tags -> main, as ONE dispatch. The release LOGIC LIVES INLINE below —
+# there is no release.sh, no promote.sh, nothing on disk to run. A .yaml cannot
+# be executed on a laptop, so the release is CI-only by construction (this
+# replaces the old `GITHUB_ACTIONS` guard on a script — the guard is unnecessary
+# once the logic isn't a file).
 #
-# This is the last hand-run step. It does NOT reimplement `release.sh`: that
-# script is ~1900 lines of version bumping, git-tag re-pin cascade across eight
-# repos, tag ordering, artifact waits and main advancement, and rewriting it as
-# YAML would trade a proven implementation for an unproven one at exactly the
-# moment mistakes are most expensive. It was already built to run here —
-# `FMKV_ROOT` exists so CI can point it at a provisioned workspace instead of a
-# developer's laptop.
+# Division of labour: qa does the hard verification (full-platform CI + the
+# real-media matrix on ephemeral EC2). GREEN qa across all eight IS the release
+# signal. This workflow re-checks that qa is green, then does pure MECHANICS:
+# version bumps, the git-tag re-pin cascade, lockfile regen, tags in dependency
+# order, `main` advance, docs-site version. No clippy/test/media re-run here.
 #
-# So this workflow's whole job is to BE that workspace: check out all eight
-# repos plus the scripts, then hand over.
-#
-# `release.sh` lives in the `freemkv-ci` repo (private, on GitHub) for one
-# reason: hosted runners cannot reach a self-hosted git host on a LAN, and the
-# scripts previously lived on one. Nothing else moved.
+# Toolchain: read from ws/freemkv `rust-version` (single source of truth) and
+# installed on the runner — the lockfile regen is the only cargo the release
+# runs. The stale hardcoded 1.97 that failed a release is gone.
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version to release, without the leading v (e.g. 1.6.5)
+        description: Version to release, without the leading v (e.g. 1.6.12)
         required: true
         type: string
       dry_run:
-        description: Run every check and print the plan, change nothing
+        description: Run every mechanic in print-only mode, change nothing
         type: boolean
         default: true
 
@@ -40,13 +39,6 @@ jobs:
       - name: Refuse unless qa is green on all eight
         env:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
-          # Only true release-quality gates count (CI, leak-guard, qa,
-          # hash-matrix, parity). Excluded: the release workflows THEMSELVES —
-          # release-orchestrate is the run executing this very check, so counting
-          # it makes the check wait on itself forever ("still running"), and a
-          # prior failed release-orchestrate at the SHA must not block a re-run —
-          # plus the periodic runner-infra workflows (ci-runner-sweeper/-launch),
-          # which can be mid-flight at any instant and are not a quality signal.
           NON_GATING: '^(Dependabot Updates|CodeQL|pages-build-deployment|release-orchestrate|release-cascade|Release|ci-runner-launch|ci-runner-sweeper)$'
         run: |
           set -uo pipefail
@@ -63,14 +55,12 @@ jobs:
               || { echo "::error::$r: qa still running for ${sha:0:7}"; fail=1; continue; }
             bad=$(echo "$gating" | jq -r '[.[]|select(.conclusion!="success" and .conclusion!="skipped")|.name]|unique|join(", ")')
             [ -z "$bad" ] || { echo "::error::$r: qa ${sha:0:7} not green ($bad)"; fail=1; continue; }
-            echo "  ✓ $r: qa ${sha:0:7} green"
+            echo "  ok $r: qa ${sha:0:7} green"
           done
           [ "$fail" = "0" ] || { echo "::error::refusing to release — qa is not green across the set"; exit 1; }
 
-      # release.sh expects the eight repos side by side under one root, the way
-      # an operator checkout looks. Provision exactly that.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-ci, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ci }
+      # The eight repos side by side under one root, the way the inline mechanics
+      # expect (FMKV_ROOT). No freemkv-ci checkout — there is no script to fetch.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-unlock,     ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-unlock,     fetch-depth: 0 }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -87,21 +77,18 @@ jobs:
         with: { repository: freemkv/freemkv,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv,            fetch-depth: 0 }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/autorip,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/autorip,            fetch-depth: 0 }
-      # The public docs site. release.sh updates its changelog page + download
-      # version and pushes them, then a final gate verifies the site names this
-      # release; without this checkout that whole step silently no-op'd, which is
-      # how 1.6.5 shipped with freemkv.org stuck on 1.6.4. It has no dev/qa — it
-      # IS the deployed artifact — so it comes in on `main`.
+      # The public docs site: no dev/qa, it IS the deployed artifact, so main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv.github.io,  ref: main, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv.github.io,  fetch-depth: 0 }
 
-      # Pinned to a commit SHA, not the floating `1.98.0` BRANCH. dtolnay/rust-
-      # toolchain has no version tags (only `v1` + per-toolchain branches), and
-      # `@1.98.0` is a mutable branch ref. Pinning by SHA loses the ref-name the
-      # action uses to pick the toolchain, so name it explicitly via `toolchain`.
-      - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0 # 1.98.0
-        with:
-          toolchain: 1.98.0
+      - name: Toolchain from the single source of truth (ws/freemkv rust-version)
+        run: |
+          set -euo pipefail
+          V=$(grep -m1 '^rust-version' ws/freemkv/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          [ -n "$V" ] || { echo "::error::could not read rust-version from ws/freemkv/Cargo.toml"; exit 1; }
+          rustup toolchain install "$V" --component clippy,rustfmt --profile minimal
+          echo "TOOLCHAIN=$V" >> "$GITHUB_ENV"
+          echo "release toolchain pinned to $V (from ws/freemkv/Cargo.toml)"
 
       - name: Identify as the release bot
         run: |
@@ -109,18 +96,1721 @@ jobs:
           git config --global user.email "dev@getbusbar.com"
           git config --global url."https://x-access-token:${{ secrets.ORG_DISPATCH_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
-      - name: release.sh
+      - name: Release cascade (INLINE — no .sh; qa is the gate; mechanics only)
         env:
           FMKV_ROOT: ${{ github.workspace }}/ws
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
-          # The script's own branch model: it operates on WORK_BRANCH and moves
-          # `main` only at the end, so `main` always equals the newest tag.
           WORK_BRANCH: qa
         run: |
           set -euo pipefail
-          chmod +x ci/scripts/*.sh
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            ci/scripts/release.sh --dry-run "${{ inputs.version }}"
+          set -- ${{ inputs.dry_run && '--dry-run' || '' }} "${{ inputs.version }}"
+          #!/usr/bin/env bash
+          #
+          # release.sh — unified, cross-repo, GIT-TAG-ONLY release for the freemkv crates.
+          #
+          # Order:  freemkv-unlock (base) → libfreemkv → freemkv-keysources (libs) →
+          #         bdemu + freemkv + autorip (binaries)
+          #
+          # ── The git-tag-only model (2026-06, off crates.io) ───────────────────────
+          #
+          #   NOTHING publishes to crates.io anymore. `freemkv-unlock` carries drive
+          #   firmware (never crates.io); `libfreemkv` git-deps it, so libfreemkv can only
+          #   be consumed by git tag too; `freemkv-keysources` deps libfreemkv, so it
+          #   follows. Every crate is consumed by GIT TAG, end to end.
+          #
+          #   Dependency graph (who deps whom) — note the inversion: freemkv-unlock is the
+          #   BASE; libfreemkv depends on IT (it defines the Unlocker trait libfreemkv
+          #   dispatches):
+          #       freemkv-unlock  ◄── libfreemkv ◄── freemkv-keysources
+          #              ▲                 ▲                  ▲
+          #              └── bdemu         └── freemkv / autorip (+ keysources)
+          #
+          #   Committed dep forms (CI-resolvable + locally buildable):
+          #     - binaries (freemkv/autorip/bdemu) + keysources carry a committed
+          #       [patch.crates-io] redirecting `libfreemkv`/`freemkv-keysources` to a GIT
+          #       TAG. A gitignored .cargo/config.toml overrides those to local paths for
+          #       dev. release.sh re-pins the committed tags.
+          #     - libfreemkv + bdemu dep freemkv-unlock by a committed `{ path = ... }`
+          #       (it has no crates.io name to [patch.crates-io]). The release SWAPS that
+          #       path→`{ git, tag }` in the TAGGED commit (so the tag is CI-resolvable),
+          #       then a follow-up commit restores the path dep on the branch tip
+          #       (tag_release_with_unlock_swap).
+          #
+          #   This script:
+          #     1. tags freemkv-unlock FIRST (the base — its tag must exist before the
+          #        downstream path→git swaps resolve);
+          #     2. tags libfreemkv (swap freemkv-unlock path→git in the tag), then
+          #        keysources (re-pin libfreemkv git tag) — neither touches crates.io;
+          #     3. confirms all three lib tags on the remote (a binary's Cargo.lock regen
+          #        fetches them);
+          #     4. for each binary: re-pins its [patch.crates-io] git tags (+ base version
+          #        reqs), regenerates Cargo.lock with the dev .cargo/config.toml DISABLED
+          #        (so the lock references the git tag, not a local path), verifies the
+          #        lock, scans the source, commits, pushes, tags. bdemu additionally swaps
+          #        its freemkv-unlock path→git tag in its tagged commit.
+          #
+          # Lockfile invariant (binaries, committed lock):
+          #   - exactly ONE libfreemkv entry, source =
+          #     "git+https://github.com/freemkv/libfreemkv?tag=vX.Y.Z#<sha>"
+          #   - (bdemu's tagged lock additionally references freemkv-unlock by git tag)
+          #   A wrong/missing tag makes the lock regen fail closed; CI re-checks the tag.
+          #
+          # Usage:
+          #   release.sh <version>
+          #   release.sh --dry-run <version>
+          #   release.sh --skip-libs <version>   # all five LIB tags already pushed:
+          #                                      # freemkv-unlock + libfreemkv +
+          #                                      # freemkv-keysources + freemkv-i18n +
+          #                                      # freemkv-engine
+          #
+          # ── What must be true before this script will tag anything ───────────────
+          #
+          #   1. CI green at HEAD, on every repo. Checked automatically: preflight asks
+          #      GitHub whether the `CI` and `leak-guard` workflows succeeded at the
+          #      exact commit about to be tagged. CI already runs fmt, clippy -D
+          #      warnings and the test suite on Linux + macOS + Windows, so this script
+          #      does not re-run any of it. Normal flow: push to dev, CI goes green,
+          #      release.
+          #
+          #   2. A real-disc run in CI, green at the exact commit being tagged:
+          #
+          #        push the commit to qa  →  qa.yml runs the media matrix
+          #
+          #      qa.yml runs the acceptance suite on ephemeral EC2 runners as
+          #      cli-matrix (linux) and cli-matrix (windows), against full-size disc
+          #      images in S3. Preflight CHECKS that BOTH legs are green for THIS SHA —
+          #      bound to the commit, not to a file mtime. It drives
+          #      CLI -> freemkv-engine -> libfreemkv, the shared core the GUI and autorip
+          #      also sit on, so a green run is evidence for all three consumers. No
+          #      laptop, no prerelease.sh: the evidence is produced by CI or it does
+          #      not exist.
+          #
+          #   Emergency hatches, both loud in the log: RELEASE_CI_SKIP=1,
+          #   MEDIA_EVIDENCE_SKIP=1 (PRERELEASE_SKIP still honoured).
+          #
+          # See also: freemkv-private/memory/RELEASE_CHECKLIST.md — the operator checklist
+          # this script automates, kept in step with what the code above actually does.
+
+          set -euo pipefail
+
+          # Branch policy (2026-07): work lands on `dev` and CI must be green there.
+          # `main` is a RELEASE POINTER — it only ever moves at release time, to the
+          # commit that gets tagged, so `main` always equals the latest tag. Everything
+          # below therefore operates on $WORK_BRANCH; `main` is advanced once, by
+          # advance_main_to_release(), after the tags are on the remote.
+          WORK_BRANCH="${WORK_BRANCH:-dev}"
+
+          # ───────────────────────────── configuration ─────────────────────────────
+
+          # Where the nine checkouts live. Overridable so this can run somewhere that is
+          # not an operator's laptop -- CI runs it against a provisioned workspace, and
+          # hardcoding the developer layout was the only thing making that impossible.
+          # The default is unchanged, so an operator run needs no environment at all.
+          CANONICAL_ROOT="${FMKV_ROOT:-$HOME/Developer/freemkv}"
+          LIBFREEMKV_DIR="$CANONICAL_ROOT/libfreemkv"
+          # freemkv-i18n — the i18n string loader. A dependency-free LEAF (no deps of its
+          # own); consumed only by the freemkv + autorip binaries via a committed
+          # [patch.crates-io] git-tag redirect (NOT by libfreemkv/keysources/bdemu). Off
+          # crates.io like the rest; tagged as a leaf lib before the binaries, then the
+          # binaries re-pin its tag. Ships the unified version even when it has no
+          # functional change, so every component reports the same version.
+          FREEMKV_I18N_DIR="$CANONICAL_ROOT/freemkv-i18n"
+          # freemkv.github.io — the public docs site (Astro, deploys via GitHub Pages).
+          # Its changelog page is a CURATED, consumer-facing changelog (grouped by
+          # component, terse), authored by hand in that repo — NOT a mirror of any crate
+          # changelog. The release gate requires a `## <version>` entry and
+          # verify_website_in_sync() confirms it; a missing site checkout is now fatal.
+          WEBSITE_DIR="$CANONICAL_ROOT/freemkv.github.io"
+          # NOTE: the docs were restructured under /docs/*, so this is
+          # src/content/docs/docs/changelog.md, not src/content/docs/changelog.md. The
+          # CHANGELOG gate and verify_website_in_sync() both read THIS path; the old path
+          # would make them miss the curated entry entirely.
+          WEBSITE_CHANGELOG_REL="src/content/docs/docs/changelog.md"
+          # The download page shows a STATIC default version (`data-latest-version`) until
+          # the GitHub Releases API responds; it must track each release so a fresh /
+          # offline visitor sees the right version. update_website_download_version()
+          # rewrites it to vX.Y.Z at release time.
+          WEBSITE_DOWNLOAD_REL="src/pages/download.astro"
+          # freemkv-unlock — a single public GitHub crate carrying the Unlocker contract +
+          # the firmware/AACS/CSS unlocker modules. It is the BASE of the dependency graph:
+          # libfreemkv depends on IT (the inversion — freemkv-unlock defines the trait
+          # libfreemkv dispatches), and bdemu depends on it for drive emulation. So it is
+          # tagged FIRST, before everything. NEVER published to crates.io (it carries drive
+          # firmware); consumed only by git tag. Its Cargo.lock is gitignored.
+          FREEMKV_UNLOCK_DIR="$CANONICAL_ROOT/freemkv-unlock"
+          # The dep name libfreemkv + bdemu reference for the unlock layer. Both commit it
+          # as a `{ path = "../freemkv-unlock" }` dep (local cross-repo dev); the release
+          # swaps it to `{ git, tag = "vX.Y.Z" }` in the TAGGED commit so the tag is
+          # CI-resolvable, then restores the path dep on the branch (see swap_unlock_dep_*).
+          UNLOCK_DEP="freemkv-unlock"
+          # LIB crates tagged after freemkv-unlock + libfreemkv. keysources depends on
+          # libfreemkv (now git-only), so it git-tag-pins it like the binaries do. NONE of
+          # the libs publish to crates.io anymore: libfreemkv git-deps the firmware crate,
+          # so it (and anything depending on it) can only be consumed by git tag.
+          LIB_CRATES=(freemkv-keysources)
+          # BINARY crates — git-tag-pin libfreemkv/keysources via [patch.crates-io]; bdemu
+          # additionally swaps its freemkv-unlock path dep → git tag. No crates.io publish;
+          # each tag triggers a CI binary build (autorip → GHCR).
+          # (freemkv-tools was retired from the public release 2026-06-23 — it now lives
+          # inside freemkv-private as an internal debug crate, not version-locked here.)
+          BINARY_CRATES=(bdemu freemkv autorip)
+          # Nothing publishes to crates.io anymore (libfreemkv left crates.io when it began
+          # git-deping the firmware crate; keysources followed since it deps libfreemkv).
+          # Kept as an (empty) hook so the orchestration's publish step is a clean no-op.
+          SCRIPT_PUBLISH_CRATES=""
+          # The toolchain the release builds and lockfile regens run on. MUST match what
+          # CI pins (`dtolnay/rust-toolchain@1.97.0` in every repo's ci.yml) and what
+          # precommit.sh forces, or the lock this script commits is generated by a
+          # different compiler than the one that will consume it.
+          # 2026-08-02: this said 1.86, left behind when the ecosystem moved to 1.97.
+          # Every crate now declares `rust-version = "1.97"`, so `cargo +1.86 build
+          # --all-features` in verify_engine_builds() would have failed the release
+          # outright on an MSRV error — the pin was not merely stale, it was unrunnable.
+          TOOLCHAIN="${TOOLCHAIN:-1.98}"
+          # Directory of this script — locates the security scanners (scan-tarball.sh,
+          # scan-secrets.sh) that live alongside it. Used by the pre-publish gate.
+          SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          # GitHub org owning the public repos — used to build the git-patch URLs that the
+          # binaries pin (https://github.com/<ORG>/libfreemkv etc.).
+          GIT_ORG="freemkv"
+
+          DRY_RUN=false
+          SKIP_LIBS=false
+          VERSION=""
+
+          # Track which .cargo/config.toml files we have temporarily disabled so
+          # the EXIT trap can restore them if the script is interrupted.
+          DISABLED_CONFIGS=()
+
+          # ──────────────────────────────── helpers ────────────────────────────────
+
+          say()  { printf '→ %s\n' "$*"; }
+          ok()   { printf '✓ %s\n' "$*"; }
+          warn() { printf '! %s\n' "$*" >&2; }
+          err()  { printf '✗ %s\n' "$*" >&2; }
+          die()  { err "$*"; exit 1; }
+
+          # The date this release actually happens, stamped ONCE so every crate in one
+          # cascade lands the same date in its CHANGELOG even if the run crosses midnight.
+          # Overridable for a re-run that must reproduce an earlier date:
+          #   RELEASE_DATE=2026-07-29 release.sh 1.6.0
+          RELEASE_DATE="${RELEASE_DATE:-$(date +%Y-%m-%d)}"
+
+          # In dry-run we print the action; in live mode we run it.
+          run() {
+            if $DRY_RUN; then
+              printf '  [dry-run] %s\n' "$*"
+            else
+              eval "$@"
+            fi
+          }
+
+          restore_configs() {
+            local cfg
+            for cfg in "${DISABLED_CONFIGS[@]+"${DISABLED_CONFIGS[@]}"}"; do
+              if [ -f "$cfg" ]; then
+                local restored="${cfg%.disabled}"
+                mv "$cfg" "$restored" 2>/dev/null || true
+                err "trap: restored $restored"
+              fi
+            done
+          }
+
+          trap 'rc=$?; restore_configs; exit $rc' EXIT
+          trap 'err "interrupted"; exit 130' INT TERM
+
+          # ──────────────────────────────── argparse ───────────────────────────────
+
+          for arg in "$@"; do
+            case "$arg" in
+              --dry-run)   DRY_RUN=true ;;
+              --skip-libs) SKIP_LIBS=true ;;
+              --help|-h)
+                # Through the "MANUAL pre-release gate" block: the range stopped at 40,
+                # which cut off the Usage lines themselves — `--help` printed the design
+                # notes and not the usage.
+                sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+                exit 0
+                ;;
+              -* )
+                die "unknown flag: $arg"
+                ;;
+              *)
+                if [ -n "$VERSION" ]; then
+                  die "version specified twice: '$VERSION' and '$arg'"
+                fi
+                VERSION="$arg"
+                ;;
+            esac
+          done
+
+          [ -n "$VERSION" ] || die "usage: $(basename "$0") [--dry-run] [--skip-libs] <version>"
+
+          # Loose version sanity. Accept e.g. 0.18.99, 1.0.0-rc1.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+            die "version '$VERSION' does not look like semver (e.g. 0.18.99)"
+          fi
+
+          if $DRY_RUN; then
+            say "DRY RUN — no commits, no pushes, no file edits."
+          fi
+          say "target version: $VERSION"
+
+          # ─────────────────────────────── preflight ───────────────────────────────
+
+          preflight() {
+            say "preflight (pure-yaml release: qa is the gate; this path only does mechanics)"
+
+            command -v cargo >/dev/null 2>&1 || die "cargo not found in PATH"
+            command -v gh    >/dev/null 2>&1 || die "gh not found in PATH"
+            command -v curl  >/dev/null 2>&1 || die "curl not found in PATH"
+            ok "tools present (cargo, gh, curl)"
+
+            local repos=("$LIBFREEMKV_DIR" "$FREEMKV_UNLOCK_DIR" "$FREEMKV_I18N_DIR" \
+                         "$CANONICAL_ROOT/freemkv-engine")
+            local c
+            for c in "${LIB_CRATES[@]}" "${BINARY_CRATES[@]}"; do
+              repos+=("$CANONICAL_ROOT/$c")
+            done
+
+            local r
+            for r in "${repos[@]}"; do
+              [ -d "$r/.git" ]       || die "$r is not a git repo"
+              [ -f "$r/Cargo.toml" ] || die "$r is missing Cargo.toml"
+            done
+            ok "all ${#repos[@]} repos present"
+
+            for r in "${repos[@]}"; do
+              local name; name=$(basename "$r")
+              local branch; branch=$(git -C "$r" rev-parse --abbrev-ref HEAD)
+              [ "$branch" = "$WORK_BRANCH" ] || die "$name not on $WORK_BRANCH (on '$branch')"
+              if [ -n "$(git -C "$r" status --porcelain -uno)" ]; then
+                git -C "$r" status --short -uno >&2
+                die "$name has uncommitted changes to tracked files"
+              fi
+              ok "$name: on $WORK_BRANCH, clean"
+            done
+
+            # Release notes must exist (cheap, file-only; NOT code verification).
+            if [ "${CHANGELOG_GATE_SKIP:-0}" = "1" ]; then
+              warn "CHANGELOG GATE BYPASSED (CHANGELOG_GATE_SKIP=1)"
+            else
+              local cl_repos=("$LIBFREEMKV_DIR" "$FREEMKV_UNLOCK_DIR" "$FREEMKV_I18N_DIR" "$CANONICAL_ROOT/freemkv-engine")
+              for c in "${LIB_CRATES[@]}" "${BINARY_CRATES[@]}"; do
+                cl_repos+=("$CANONICAL_ROOT/$c")
+              done
+              for r in "${cl_repos[@]}"; do
+                check_changelog_ready "$r" "$VERSION"
+              done
+              ok "CHANGELOG gate: every crate has a non-empty [$VERSION] entry"
+
+              if [ "${WEBSITE_SKIP:-0}" != "1" ]; then
+                local site_cl="$WEBSITE_DIR/$WEBSITE_CHANGELOG_REL"
+                if [ ! -f "$site_cl" ]; then
+                  die "public site changelog not checked out at $site_cl (WEBSITE_SKIP=1 to bypass)"
+                elif ! grep -Eq "^## +$VERSION([[:space:]]|\$)" "$site_cl"; then
+                  die "the consumer changelog for $VERSION is not written in freemkv.github.io/$WEBSITE_CHANGELOG_REL (WEBSITE_SKIP=1)"
+                else
+                  ok "consumer changelog: site has a ## $VERSION entry"
+                fi
+              fi
+            fi
+          }
+
+          # check_changelog_ready <crate-dir> <version>
+          #
+          # Enforces, for CHANGELOG.md in <crate-dir>:
+          #   1. a `## [<version>]` heading exists at all
+          #   2. the section under the heading is not empty (heading immediately
+          #      followed by another `## ` heading or EOF)
+          #
+          # It deliberately does NOT reject an `— UNRELEASED` heading: dating it is
+          # `date_changelog_heading`'s job, later in this same run.
+          # A missing CHANGELOG.md is not a failure — it's a skip, reported loudly so
+          # it's a visible decision, not a silent exemption.
+          check_changelog_ready() {
+            local dir="$1" ver="$2"
+            local cl="$dir/CHANGELOG.md"
+            local name; name=$(basename "$dir")
+
+            if [ ! -f "$cl" ]; then
+              warn "$name: no CHANGELOG.md — SKIPPED from the changelog gate (not a public-release requirement for this crate)"
+              return 0
+            fi
+
+            # Locate the heading line for this version. Anchored to line start so a
+            # version mentioned only in prose (e.g. "since 1.6.0") can't match.
+            local match
+            match=$(grep -nE "^## \[$ver\]([[:space:]]|\$)" "$cl" | head -1)
+            if [ -z "$match" ]; then
+              die "$name: CHANGELOG.md has no '## [$ver]' heading — write the release notes before tagging (or set CHANGELOG_GATE_SKIP=1 to bypass; recorded loudly)."
+            fi
+
+            local lineno heading
+            lineno="${match%%:*}"
+            heading="${match#*:}"
+
+            # NOT checked: whether the heading still says UNRELEASED. That is this
+            # script's OWN job — `date_changelog_heading` rewrites it later in the run —
+            # so failing on it here would reject every release including a correct one,
+            # and a gate that always fires is a gate that always gets bypassed. The
+            # question worth asking before tagging is whether the notes were WRITTEN, not
+            # whether a step further down this same script has run yet.
+
+            # First non-blank line after the heading. If the very next thing is another
+            # top-level heading (or nothing — EOF), the section has no content.
+            #
+            # One awk over the whole file, NOT `tail | awk '…{exit}'`: awk exits on the
+            # first line it wants, which closes the pipe while tail is still writing.
+            # Tail then dies of SIGPIPE (141), `pipefail` adopts that as the pipeline's
+            # status, and `set -e` aborts the release — on a changelog that is perfectly
+            # valid. It only shows up once a file is long enough that tail has not
+            # already finished, so it stayed hidden until libfreemkv's changelog grew.
+            local body
+            body=$(awk -v start="$((lineno + 1))" '
+              NR < start        { next }
+              /^## /            { exit }
+              !/^[[:space:]]*$/ { print; exit }
+            ' "$cl")
+            if [ -z "$body" ]; then
+              die "$name: CHANGELOG.md '[$ver]' section is empty (heading immediately followed by another heading or EOF) — write the release notes before tagging (or set CHANGELOG_GATE_SKIP=1 to bypass; recorded loudly)."
+            fi
+
+            ok "$name: CHANGELOG.md '[$ver]' present with content"
+          }
+
+          # ──────────────────────────────── editors ────────────────────────────────
+
+          # date_changelog_heading <crate-dir> <version>
+          #
+          # Rewrites `## [<version>] — UNRELEASED` to `## [<version>] — YYYY-MM-DD` using
+          # RELEASE_DATE (stamped once at startup, so every crate in one cascade gets the
+          # same date even if the run crosses midnight).
+          #
+          # WHY THIS EXISTS: nothing used to date these headings. Each cycle the crate
+          # CHANGELOGs were tagged reading `— UNRELEASED`, and a later commit had to go
+          # back and date them by hand — 1.5.x shipped that way in several crates, and
+          # every 1.6.0 heading was still UNRELEASED at audit time. A public changelog
+          # that says UNRELEASED for a shipped tag is permanent and wrong, so the release
+          # stamps it at the moment it actually releases.
+          #
+          # Idempotent and conservative: it matches ONLY the heading for the version being
+          # released, and only when that heading is still UNRELEASED. An already-dated
+          # heading (an idempotent re-run, or a date set by hand) is left untouched.
+          #
+          # MATCHING IS DELIBERATELY LOOSE, FAILURE IS DELIBERATELY LOUD (2026-08-02):
+          # this used to demand a literal `^## [<ver>] — UNRELEASED$` — em dash, exact
+          # case, no trailing space — and merely WARN on a miss. Every one of those is a
+          # way to ship a public changelog permanently reading "UNRELEASED" for a shipped
+          # tag: an en dash or a plain hyphen typed instead of the em dash, an editor
+          # leaving a trailing space, `Unreleased` instead of `UNRELEASED`. The warning
+          # scrolls past inside a long release log and the tag lands anyway. So:
+          #   - the separator may be an em dash, en dash, hyphen, or absent;
+          #   - "unreleased" is matched case-insensitively;
+          #   - trailing whitespace is tolerated;
+          #   - a `## [<ver>]` heading that exists but matches NEITHER the unreleased nor
+          #     the dated form is a hard failure, not a warning — it means the heading is
+          #     in a shape this function cannot date, which is precisely the case that used
+          #     to slip through.
+          # A crate with NO `## [<ver>]` heading at all is still only a warning: the
+          # CHANGELOG readiness gate in preflight already refuses that case for every
+          # crate that has a CHANGELOG.md, so reaching here means a deliberate no-entry
+          # version sync rather than an oversight.
+          #
+          # Python does the match/rewrite (not sed) for reliable UTF-8 handling of the
+          # dash variants across BSD and GNU userlands.
+          date_changelog_heading() {
+            local dir="$1" ver="$2"
+            local cl="$dir/CHANGELOG.md"
+            local name
+            name=$(basename "$dir")
+            [ -f "$cl" ] || { ok "$name: no CHANGELOG.md — nothing to date"; return 0; }
+
+            # Classify the heading before touching anything: unreleased / dated / other /
+            # absent. Printing a word and switching on it keeps the tolerant regex in one
+            # place instead of duplicating it between the probe and the rewrite.
+            local state
+            state="$(RELEASE_VER="$ver" python3 - "$cl" <<'PYEOF'
+          import os, re, sys
+          ver = re.escape(os.environ["RELEASE_VER"])
+          # Separator: em dash, en dash, non-breaking hyphen, or ASCII hyphen — optional,
+          # with optional surrounding space. Trailing whitespace always tolerated.
+          sep = r'(?:\s*[—–‑-]\s*|\s+)'
+          unrel = re.compile(r'^##\s+\[' + ver + r'\]' + sep + r'unreleased\s*$', re.I)
+          dated = re.compile(r'^##\s+\[' + ver + r'\]' + sep + r'\d{4}-\d{2}-\d{2}\s*$')
+          head  = re.compile(r'^##\s+\[' + ver + r'\]')
+          state = "absent"
+          for line in open(sys.argv[1], encoding="utf-8").read().splitlines():
+              if not head.match(line):
+                  continue
+              if unrel.match(line):
+                  state = "unreleased"
+              elif dated.match(line):
+                  state = "dated"
+              else:
+                  state = "unparseable"
+              break
+          print(state)
+          PYEOF
+          )" || die "$name: could not read CHANGELOG.md while dating [$ver]"
+
+            case "$state" in
+              dated)
+                ok "$name: CHANGELOG [$ver] already dated"
+                return 0
+                ;;
+              absent)
+                warn "$name: no '## [$ver]' heading in CHANGELOG.md — not dated"
+                return 0
+                ;;
+              unparseable)
+                die "$name: CHANGELOG has a '## [$ver]' heading this script cannot date.
+            Expected '## [$ver] — UNRELEASED' (any dash, any case) or an already-dated
+            '## [$ver] — YYYY-MM-DD'. Found:
+          $(grep -n "^##[[:space:]]\{1,\}\[$ver\]" "$cl" | head -1 | sed 's/^/    /')
+            Fix the heading — shipping a tag whose public changelog says UNRELEASED is
+            permanent and cannot be corrected in the tag."
+                ;;
+            esac
+
+            if $DRY_RUN; then
+              printf '  [dry-run] date %s: ## [%s] — UNRELEASED → — %s\n' "$name" "$ver" "$RELEASE_DATE"
+              return 0
+            fi
+
+            if ! RELEASE_VER="$ver" RELEASE_DATE="$RELEASE_DATE" python3 - "$cl" <<'PYEOF'
+          import os, re, sys
+          ver  = os.environ["RELEASE_VER"]
+          date = os.environ["RELEASE_DATE"]
+          sep  = r'(?:\s*[—–‑-]\s*|\s+)'
+          unrel = re.compile(r'^##\s+\[' + re.escape(ver) + r'\]' + sep + r'unreleased\s*$', re.I)
+          path = sys.argv[1]
+          with open(path, encoding="utf-8") as f:
+              lines = f.read().splitlines(True)
+          out, done = [], False
+          for line in lines:
+              if not done and unrel.match(line.rstrip("\n")):
+                  # Normalise to the house style (em dash) while dating it, so the file
+                  # converges on one shape instead of preserving whatever was typed.
+                  out.append("## [%s] — %s\n" % (ver, date))
+                  done = True
+              else:
+                  out.append(line)
+          with open(path, "w", encoding="utf-8") as f:
+              f.writelines(out)
+          sys.exit(0 if done else 1)
+          PYEOF
+            then
+              die "$name: CHANGELOG dating failed — could not rewrite the '## [$ver]' heading"
+            fi
+
+            grep -qE "^## \[$ver\] — $RELEASE_DATE$" "$cl" \
+              || die "$name: CHANGELOG dating failed — heading still not '## [$ver] — $RELEASE_DATE'"
+            ok "$name: CHANGELOG [$ver] dated $RELEASE_DATE"
+          }
+
+          # bump_cargo_toml_version <crate-dir> <new-version>
+          # Replaces the first top-level `version = "..."` line in Cargo.toml.
+          # Uses sed -i.bak (portable across macOS and GNU sed).
+          bump_cargo_toml_version() {
+            local dir="$1" newver="$2"
+            local toml="$dir/Cargo.toml"
+            [ -f "$toml" ] || die "no Cargo.toml at $toml"
+
+            local current
+            current=$(grep -m1 '^version' "$toml" | sed -E 's/^version *= *"([^"]+)".*/\1/')
+            if [ -z "$current" ]; then
+              die "could not find a top-level 'version = \"...\"' line in $toml"
+            fi
+
+            if [ "$current" = "$newver" ]; then
+              ok "$(basename "$dir"): Cargo.toml already at $newver"
+              return 0
+            fi
+
+            if $DRY_RUN; then
+              printf '  [dry-run] bump %s: version "%s" → "%s"\n' "$(basename "$dir")" "$current" "$newver"
+              return 0
+            fi
+
+            # Replace ONLY the first occurrence; preserves trailing newline + EOL.
+            # `sed -i.bak` works on both BSD (macOS) and GNU sed.
+            sed -i.bak -E "1,/^version *= *\"[^\"]+\"/ s/^version *= *\"[^\"]+\"/version = \"$newver\"/" "$toml"
+            rm -f "$toml.bak"
+
+            # Verify
+            local updated
+            updated=$(grep -m1 '^version' "$toml" | sed -E 's/^version *= *"([^"]+)".*/\1/')
+            [ "$updated" = "$newver" ] || die "Cargo.toml bump failed: still '$updated' in $toml"
+            ok "$(basename "$dir"): Cargo.toml $current → $newver"
+          }
+
+          # bump_readme_version <crate-dir> <crate-name> <new-version>
+          #
+          # Some READMEs state the current version as "<crate> X.Y.Z". That used to be
+          # maintained by an update-readme workflow firing on `release: published`, which
+          # committed straight to `main` -- the branch this script points at the tag. So
+          # every release left main one commit ahead of the tag it was supposed to BE,
+          # and the next release aborted on it.
+          #
+          # Doing it here instead puts the bump in the release commit, where it is part
+          # of the tag: main then equals the tag with a correct README, and there is no
+          # out-of-band write to main to collide with.
+          #
+          # A README without the pattern is left untouched -- which is most of them; the
+          # workflows this replaces were silent no-ops in every repo but one.
+          bump_readme_version() {
+            local dir="$1" name="$2" newver="$3"
+            local readme="$dir/README.md"
+            [ -f "$readme" ] || return 0
+            grep -qE "\b$name [0-9]+\.[0-9]+\.[0-9]+" "$readme" || return 0
+
+            local current
+            current=$(grep -oE "\b$name [0-9]+\.[0-9]+\.[0-9]+" "$readme" | head -1 | awk '{print $2}')
+            if [ "$current" = "$newver" ]; then
+              ok "$(basename "$dir"): README already at $newver"
+              return 0
+            fi
+            if $DRY_RUN; then
+              printf '  [dry-run] bump %s: README "%s" → "%s"\n' "$(basename "$dir")" "$current" "$newver"
+              return 0
+            fi
+
+            # python3, not sed, because this needs a word boundary and the two sed
+            # dialects disagree about how to spell one: GNU takes \b, BSD (macOS, where
+            # this is normally run) silently substitutes nothing, and an alternation
+            # anchored with ^ inside a group is a parse error there. The boundary is not
+            # optional -- without it, bumping "freemkv" also rewrites "libfreemkv".
+            python3 - "$readme" "$name" "$newver" <<'PY'
+          import re, sys
+          path, name, ver = sys.argv[1], sys.argv[2], sys.argv[3]
+          src = open(path, encoding="utf-8").read()
+          out = re.sub(r"\b%s \d+\.\d+\.\d+" % re.escape(name), "%s %s" % (name, ver), src)
+          if out != src:
+              open(path, "w", encoding="utf-8").write(out)
+          PY
+
+            local updated
+            updated=$(grep -oE "\b$name [0-9]+\.[0-9]+\.[0-9]+" "$readme" | head -1 | awk '{print $2}')
+            [ "$updated" = "$newver" ] || die "README bump failed: still '$updated' in $readme"
+            ok "$(basename "$dir"): README $current → $newver"
+          }
+
+          # bump_macos_plist_version <crate-dir> <new-version>
+          #
+          # The macOS app bundle carries its own version, and freemkv's release workflow
+          # REFUSES to build when it disagrees with the tag:
+          #
+          #     ##[error]Info.plist says v1.6.0 but tag is v1.6.1
+          #
+          # Nothing here bumped it, so v1.6.1 tagged, pushed, advanced main, and only then
+          # failed at the first job of the release build — after the tag was public. The
+          # check is right to be strict (a .app whose bundle version lies is permanent);
+          # what was missing is bumping the file it checks.
+          bump_macos_plist_version() {
+            local dir="$1" newver="$2"
+            local plist="$dir/macos/Info.plist"
+            [ -f "$plist" ] || return 0   # crates without a macOS bundle: nothing to do
+
+            local current
+            current=$(sed -n 's/.*<key>CFBundleShortVersionString<\/key><string>\(.*\)<\/string>.*/\1/p' "$plist")
+            if [ "$current" = "$newver" ]; then
+              ok "$(basename "$dir"): Info.plist already at $newver"
+              return 0
+            fi
+            if $DRY_RUN; then
+              printf '  [dry-run] bump %s: Info.plist "%s" → "%s"\n' "$(basename "$dir")" "$current" "$newver"
+              return 0
+            fi
+            sed -i.bak -E "s|(<key>CFBundleVersion</key><string>)[^<]*(</string>)|\1$newver\2|; \
+                           s|(<key>CFBundleShortVersionString</key><string>)[^<]*(</string>)|\1$newver\2|" "$plist"
+            rm -f "$plist.bak"
+
+            local updated
+            updated=$(sed -n 's/.*<key>CFBundleShortVersionString<\/key><string>\(.*\)<\/string>.*/\1/p' "$plist")
+            [ "$updated" = "$newver" ] || die "Info.plist bump failed: still '$updated' in $plist"
+            ok "$(basename "$dir"): Info.plist $current → $newver"
+          }
+
+          # ─────────────────────── step 1: libfreemkv release ──────────────────────
+
+          release_libfreemkv() {
+            # The idempotent-resume guard every other step in this cascade already had.
+            # Without it, re-running after a later step failed did not skip libfreemkv:
+            # it re-applied the freemkv-unlock path->git swap, committed and PUSHED that
+            # to the work branch -- undoing the deliberate path-dep restore that keeps
+            # local cross-repo builds working -- and then died on "tag v$VERSION exists
+            # at <other sha>", because the tag rightly still pointed at the original
+            # commit. A resume is the normal way this script is used after a late
+            # failure, so the one step that could not survive one was the step that
+            # broke every recovery.
+            if git -C "$LIBFREEMKV_DIR" ls-remote --exit-code --tags origin "v$VERSION" >/dev/null 2>&1; then
+              ok "libfreemkv v$VERSION already tagged on origin — skipping (idempotent resume)"
+              return 0
+            fi
+            say "step 2: libfreemkv → v$VERSION (OFF crates.io; swaps freemkv-unlock path→git for the tag)"
+            bump_cargo_toml_version "$LIBFREEMKV_DIR" "$VERSION"
+            bump_macos_plist_version "$LIBFREEMKV_DIR" "$VERSION"
+            bump_readme_version "$LIBFREEMKV_DIR" "libfreemkv" "$VERSION"
+            date_changelog_heading "$LIBFREEMKV_DIR" "$VERSION"
+            # libfreemkv is git-only now (it git-deps the firmware crate), so there is no
+            # crates.io tarball to scan — run the leak tripwire over the git-tracked source.
+            run_security_gate "$LIBFREEMKV_DIR" "libfreemkv" source
+            # libfreemkv's Cargo.lock is gitignored → stage_lock=false (no lock to regen).
+            # The helper cuts the tag on a git-pinned freemkv-unlock commit, then restores
+            # the path dep on the branch tip.
+            tag_release_with_unlock_swap "$LIBFREEMKV_DIR" "libfreemkv" "v$VERSION: bump version" false
+          }
+
+          # ────────────── step 2: confirm the lib git TAG is on the remote ──────────
+          #
+          # The binaries git-tag-pin libfreemkv/keysources, so the ONLY cross-repo
+          # barrier is that those tags must exist on the GitHub remote before a binary's
+          # Cargo.lock regen tries to fetch them. This is near-instant (the tag was just
+          # pushed in step 1) — NOT a multi-minute crates.io index propagation. We no
+          # longer poll crates.io on the binary critical path at all.
+          wait_for_git_tag() {
+            local crate="$1"
+            local dir="$CANONICAL_ROOT/$crate"
+            say "confirming git tag v$VERSION on $GIT_ORG/$crate remote"
+
+            if $DRY_RUN; then
+              printf '  [dry-run] git -C %s ls-remote --tags origin v%s  (expect a hit)\n' "$dir" "$VERSION"
+              return 0
+            fi
+
+            # Up to ~30s of fast retries — covers GitHub's brief post-push tag latency.
+            local i
+            for i in $(seq 1 15); do
+              if git -C "$dir" ls-remote --tags origin "v$VERSION" 2>/dev/null | grep -q "refs/tags/v$VERSION"; then
+                ok "$crate: tag v$VERSION present on remote"
+                return 0
+              fi
+              sleep 2
+            done
+            die "timeout: $crate tag v$VERSION not visible on origin after ~30s — push it before regenerating downstream lockfiles"
+          }
+
+          # ─────────────────── canonical Cargo.lock regen + verify ─────────────────
+
+          # regenerate_lockfile <crate-dir>
+          # Implements the canonical recipe verbatim.
+          regenerate_lockfile() {
+            local dir="$1"
+            local name; name=$(basename "$dir")
+            local cfg="$dir/.cargo/config.toml"
+            local cfg_disabled="$dir/.cargo/config.toml.disabled"
+            local lock="$dir/Cargo.lock"
+
+            if $DRY_RUN; then
+              printf '  [dry-run] mv %s %s\n' "$cfg" "$cfg_disabled"
+              printf '  [dry-run] rm -f %s\n' "$lock"
+              printf '  [dry-run] (cd %s && cargo +%s generate-lockfile)\n' "$dir" "$TOOLCHAIN"
+              printf '  [dry-run] mv %s %s\n' "$cfg_disabled" "$cfg"
+              return 0
+            fi
+
+            # Cargo merges config from the manifest directory AND every ancestor, so
+            # disabling only the crate's own config leaves a checkout-root dev override
+            # in force — and that override is exactly the one that points libfreemkv at
+            # a local path. The regen then produces a lock whose libfreemkv entry has no
+            # `source`, which the verifier catches one step later, mid-cascade, with the
+            # libs already tagged. Disable both.
+            local root_cfg="$CANONICAL_ROOT/.cargo/config.toml"
+            local root_cfg_disabled="$CANONICAL_ROOT/.cargo/config.toml.disabled"
+            if [ -f "$root_cfg" ]; then
+              mv "$root_cfg" "$root_cfg_disabled"
+              DISABLED_CONFIGS+=("$root_cfg_disabled")
+            fi
+
+            if [ -f "$cfg" ]; then
+              mv "$cfg" "$cfg_disabled"
+              DISABLED_CONFIGS+=("$cfg_disabled")
+            fi
+
+            rm -f "$lock"
+
+            # cargo generate-lockfile honors the manifest path; no need to cd.
+            cargo "+$TOOLCHAIN" generate-lockfile --manifest-path "$dir/Cargo.toml"
+
+            local restored
+            for restored in "$cfg_disabled" "$root_cfg_disabled"; do
+              [ -f "$restored" ] || continue
+              mv "$restored" "${restored%.disabled}"
+              # Remove from DISABLED_CONFIGS tracking
+              local new=()
+              for c in "${DISABLED_CONFIGS[@]+"${DISABLED_CONFIGS[@]}"}"; do
+                [ "$c" = "$restored" ] || new+=("$c")
+              done
+              DISABLED_CONFIGS=("${new[@]+"${new[@]}"}")
+            done
+            ok "$name: regenerated Cargo.lock against the git tags (toolchain $TOOLCHAIN)"
+          }
+
+          # verify_lockfile_invariants <crate-dir> <dep-name> <expected-version>
+          # Aborts unless Cargo.lock has, for <dep-name>, EXACTLY ONE [[package]] block
+          # whose:
+          #   version = "<expected>"
+          #   source  = "git+https://github.com/<ORG>/<dep>?tag=v<expected>#<sha>"
+          # i.e. the binary's [patch.crates-io] git redirect resolved (and unified the
+          # direct + transitive refs to one entry). A no-op if the crate doesn't declare
+          # <dep> in its [dependencies] (e.g. bdemu has no freemkv-keysources dep).
+          #
+          # This replaces the old "source must be crates.io registry" rule — under the
+          # fast-release model the lock MUST reference the git tag, not crates.io.
+          verify_lockfile_invariants() {
+            local dir="$1" dep="$2" expected="$3"
+            local name; name=$(basename "$dir")
+            local lock="$dir/Cargo.lock"
+
+            # Skip cleanly if this crate doesn't declare <dep>. (bdemu has no
+            # freemkv-keysources dep.) We check the [dependencies]-style line, not the
+            # [patch] line, so we don't false-positive on the patch redirect.
+            grep -qE "^$dep *= *\"" "$dir/Cargo.toml" || { ok "$name: no $dep dependency — verify skipped"; return 0; }
+
+            if $DRY_RUN; then
+              printf '  [dry-run] verify %s/Cargo.lock has exactly one %s %s from the git tag v%s\n' \
+                "$name" "$dep" "$expected" "$expected"
+              return 0
+            fi
+
+            [ -f "$lock" ] || die "$name: Cargo.lock missing after regenerate"
+
+            # Count [[package]] blocks named <dep> — must be exactly one (unified).
+            local count
+            count=$(awk -v dep="$dep" '
+              /^\[\[package\]\]/ { in_block=1; next }
+              in_block && $0 ~ ("^name *= *\"" dep "\"") { c++ }
+              END { print c+0 }
+            ' "$lock")
+
+            local got_version got_source
+            got_version=$(awk -v dep="$dep" '
+              /^\[\[package\]\]/ { in_block=1; n=""; v=""; next }
+              in_block && /^\[/   { in_block=0 }
+              in_block && $0 ~ ("^name *= *\"" dep "\"") { n=$0 }
+              in_block && /^version *= *"/               { v=$0 }
+              in_block && n && v {
+                gsub(/.*version *= *"|".*/,"",v); print v; exit
+              }
+            ' "$lock")
+
+            got_source=$(awk -v dep="$dep" '
+              /^\[\[package\]\]/ { in_block=1; n=""; s=""; next }
+              in_block && /^\[/   { in_block=0 }
+              in_block && $0 ~ ("^name *= *\"" dep "\"") { n=$0 }
+              in_block && /^source *= *"/                { s=$0 }
+              in_block && n && s {
+                gsub(/.*source *= *"|".*/,"",s); print s; exit
+              }
+            ' "$lock")
+
+            local fix="To fix:
+              re-pin the [patch.crates-io] $dep tag in $dir/Cargo.toml to v$expected, then:
+              mv $dir/.cargo/config.toml $dir/.cargo/config.toml.disabled 2>/dev/null || true
+              rm -f $dir/Cargo.lock
+              cargo +$TOOLCHAIN generate-lockfile --manifest-path $dir/Cargo.toml
+              mv $dir/.cargo/config.toml.disabled $dir/.cargo/config.toml 2>/dev/null || true"
+
+            [ -n "$got_version" ] || die "$name: Cargo.lock has no [[package]] entry for $dep. $fix"
+
+            if [ "$count" -ne 1 ]; then
+              die "$name: Cargo.lock has $count $dep entries (expected 1). The [patch.crates-io] git redirect did not unify the direct + transitive refs — a duplicate causes a trait-identity mismatch at build. $fix"
+            fi
+
+            if [ "$got_version" != "$expected" ]; then
+              die "$name: Cargo.lock has $dep = '$got_version', expected '$expected' (the v0.18.7 class of bug — wrong dep resolution). $fix"
+            fi
+
+            case "$got_source" in
+              git+https://github.com/$GIT_ORG/$dep\?tag=v$expected\#*) : ;;
+              "")  die "$name: Cargo.lock $dep entry has NO 'source' line — cargo resolved it via a local [patch] path (the dev .cargo/config.toml was not disabled during regen). $fix" ;;
+              registry+*) die "$name: Cargo.lock $dep 'source' is a crates.io registry ('$got_source') — the committed [patch.crates-io] git redirect is missing or its tag is wrong. $fix" ;;
+              *)   die "$name: Cargo.lock $dep 'source' is '$got_source', expected 'git+https://github.com/$GIT_ORG/$dep?tag=v$expected#<sha>'. $fix" ;;
+            esac
+
+            ok "$name: Cargo.lock invariants pass ($dep $got_version from git tag v$expected)"
+          }
+
+          # repin_git_patch <crate-dir> <dep-name> <new-version> [repo-slug]
+          # Rewrites the `tag = "v..."` on the dep's git line wherever it appears in this
+          # crate's Cargo.toml — both the [patch.crates-io] redirect and a direct
+          # [dependencies] git line. Idempotent. No-op if the crate has no tag-pinned git
+          # line for <dep>.
+          #   [repo-slug] is the GitHub repo path under the org; defaults to <dep-name>
+          #   (repo==crate for libfreemkv/keysources). For freemkv-unlock-ld the repo is
+          #   `freemkv-unlock`, so callers pass that as the slug.
+          repin_git_patch() {
+            local dir="$1" dep="$2" newver="$3" slug="${4:-$2}"
+            local toml="$dir/Cargo.toml"
+            [ -f "$toml" ] || return 0
+            local tag="v$newver"
+            local url="https://github.com/$GIT_ORG/$slug"
+
+            # Only act if the crate references this dep via a TAG-pinned git line (the sed
+            # below only rewrites a line that has both the URL and a tag=). Guarding here
+            # keeps the dry-run honest (no phantom "tag" line for an absent/path dep).
+            grep -qF "$url" "$toml" || return 0
+            local esc_grep; esc_grep=$(printf '%s' "$url" | sed 's/[.[\*^$]/\\&/g')
+            grep -qE "${esc_grep}.*tag *= *\"" "$toml" || return 0
+
+            if $DRY_RUN; then
+              printf '  [dry-run] repin %s: %s git line → tag = "%s"\n' "$(basename "$dir")" "$dep" "$tag"
+              return 0
+            fi
+
+            # Rewrite tag="..." on the (single) line that pins this dep's git URL. Uses a
+            # portable per-line s/// (BSD + GNU sed): match a line containing the URL AND
+            # a tag=, capture everything up to the quoted value, rewrite the value. The
+            # URL is regex-escaped. (bdemu pins unlock-ld by rev — not touched here; the
+            # libfreemkv git line is always tag-pinned.)
+            local esc_url; esc_url=$(printf '%s' "$url" | sed 's/[\/&.]/\\&/g')
+            sed -i.bak -E "s|^(.*${esc_url}.*tag *= *\")[^\"]*(\".*)\$|\1${tag}\2|" "$toml"
+            rm -f "$toml.bak"
+            ok "$(basename "$dir"): $dep git patch re-pinned → tag = \"$tag\""
+          }
+
+          # swap_unlock_dep_to_git <crate-dir> <version>
+          # Rewrite a committed `freemkv-unlock = { path = "../freemkv-unlock"[, opts] }`
+          # dep to `{ git = "<url>", tag = "vX.Y.Z"[, opts] }`, preserving trailing options
+          # (e.g. `features = ["emulation"]`). libfreemkv + bdemu commit the path form for
+          # local cross-repo dev; the release swaps it so the TAGGED commit resolves
+          # freemkv-unlock from git (a sibling path won't exist in CI / a consumer's git
+          # checkout). No-op if there is no path-form freemkv-unlock dep. Idempotent.
+          swap_unlock_dep_to_git() {
+            local dir="$1" ver="$2"
+            local toml="$dir/Cargo.toml"
+            [ -f "$toml" ] || return 0
+            local url="https://github.com/$GIT_ORG/$UNLOCK_DEP"
+            grep -qE "^[[:space:]]*${UNLOCK_DEP}[[:space:]]*=[[:space:]]*\{[[:space:]]*path[[:space:]]*=" "$toml" || return 0
+            if $DRY_RUN; then
+              printf '  [dry-run] %s: %s path dep → { git = "%s", tag = "v%s"<, opts> }\n' "$(basename "$dir")" "$UNLOCK_DEP" "$url" "$ver"
+              return 0
+            fi
+            # Capture everything after the path value (` }` or `, features = [...] }`) and
+            # re-emit it on the git form. Portable BSD+GNU sed.
+            sed -i.bak -E "s|^([[:space:]]*${UNLOCK_DEP}[[:space:]]*=[[:space:]]*\{)[[:space:]]*path[[:space:]]*=[[:space:]]*\"[^\"]*\"(.*)\$|\1 git = \"${url}\", tag = \"v${ver}\"\2|" "$toml"
+            rm -f "$toml.bak"
+            ok "$(basename "$dir"): $UNLOCK_DEP path dep → git tag v$ver"
+          }
+
+          # swap_unlock_dep_to_path <crate-dir>
+          # Reverse of swap_unlock_dep_to_git: restore `{ git, tag }` back to
+          # `{ path = "../freemkv-unlock"[, opts] }` so the BRANCH keeps the local-dev path
+          # dep after the tag is cut (the git form lives only in the tagged commit).
+          # Preserves trailing options. No-op if already path. Idempotent.
+          swap_unlock_dep_to_path() {
+            local dir="$1"
+            local toml="$dir/Cargo.toml"
+            [ -f "$toml" ] || return 0
+            grep -qE "^[[:space:]]*${UNLOCK_DEP}[[:space:]]*=[[:space:]]*\{[[:space:]]*git[[:space:]]*=" "$toml" || return 0
+            if $DRY_RUN; then
+              printf '  [dry-run] %s: %s git dep → { path = "../%s"<, opts> }\n' "$(basename "$dir")" "$UNLOCK_DEP" "$UNLOCK_DEP"
+              return 0
+            fi
+            # Strip the pinned `git = "...", tag = "..."` fields, re-emit the path form,
+            # preserving any trailing options after the tag value.
+            sed -i.bak -E "s|^([[:space:]]*${UNLOCK_DEP}[[:space:]]*=[[:space:]]*\{)[[:space:]]*git[[:space:]]*=[[:space:]]*\"[^\"]*\",[[:space:]]*tag[[:space:]]*=[[:space:]]*\"[^\"]*\"(.*)\$|\1 path = \"../${UNLOCK_DEP}\"\2|" "$toml"
+            rm -f "$toml.bak"
+            ok "$(basename "$dir"): $UNLOCK_DEP git dep → path (dev)"
+          }
+
+          # tag_release_with_unlock_swap <crate-dir> <name> <msg> <stage_lock>
+          # For libfreemkv + bdemu, which depend on freemkv-unlock by a committed path dep.
+          # Honors the "path committed, release swaps" model with TWO ordinary commits (no
+          # history rewrite): the tagged commit carries the CI-resolvable git+tag form; a
+          # follow-up "restore" commit returns the branch tip to the path dep for dev.
+          #   commit A (tagged): swap path→git tag (+ regen lock if committed), then the
+          #                      shared git_commit_push_tag commits/pushes/tags it.
+          #   commit B (branch tip): swap git→path back (+ regen), commit + push.
+          # Idempotent: if the tag already exists, just ensure the branch tip is the path
+          # form (commit B) and return.
+          tag_release_with_unlock_swap() {
+            local dir="$1" name="$2" msg="$3" stage_lock="${4:-true}"
+            shift 4   # remaining args = dep names to verify in the git-form lock
+
+            # commit A — the tagged, git-pinned release commit. git_commit_push_tag is
+            # idempotent (skips the commit if the tag already exists at this version).
+            swap_unlock_dep_to_git "$dir" "$VERSION"
+            if [ "$stage_lock" = true ] && ! $DRY_RUN; then
+              regenerate_lockfile "$dir"
+              local vdep
+              for vdep in "$@"; do verify_lockfile_invariants "$dir" "$vdep" "$VERSION"; done
+            fi
+            git_commit_push_tag "$dir" "$name" "$msg (freemkv-unlock git-pinned for the tag)" "$stage_lock"
+
+            # commit B — restore the path dep so the branch tip is back to local-dev form.
+            swap_unlock_dep_to_path "$dir"
+            if $DRY_RUN; then
+              printf '  [dry-run] %s: restore %s path dep on branch tip (commit + push $WORK_BRANCH)\n' "$name" "$UNLOCK_DEP"
+              return 0
+            fi
+            [ "$stage_lock" = true ] && regenerate_lockfile "$dir"
+            git -C "$dir" add Cargo.toml
+            [ "$stage_lock" = true ] && git -C "$dir" add Cargo.lock 2>/dev/null || true
+            if ! git -C "$dir" diff --cached --quiet; then
+              git -C "$dir" commit -m "restore $UNLOCK_DEP path dep for local dev (post-v$VERSION)"
+              git -C "$dir" push origin "$WORK_BRANCH" \
+                || { git -C "$dir" pull --rebase origin "$WORK_BRANCH" && git -C "$dir" push origin "$WORK_BRANCH"; }
+              ok "$name: branch tip restored to $UNLOCK_DEP path dep"
+            fi
+          }
+
+          # bump_dep <crate-dir> <dep-name> <new-version>
+          # Updates the `<dep> = "..."` line in Cargo.toml to the right specifier for the
+          # target release:
+          #   - STABLE  X.Y.Z   → "X.Y"   (a 0.x/1.x minor bump is semver-breaking, so the
+          #                                 dep specifier must track it for the lockfile
+          #                                 regen to pull the new version, not the old)
+          #   - PRERELEASE X.Y.Z-rc.N → "X.Y.Z-rc.N"  (the FULL version — a bare "X.Y"
+          #                                 specifier will NOT match a pre-release on
+          #                                 crates.io, so it must be exact)
+          # A no-op if the dep line is absent (e.g. bdemu has no freemkv-keysources dep,
+          # libfreemkv has neither).
+          bump_dep() {
+            local dir="$1" dep="$2" newver="$3"
+            local toml="$dir/Cargo.toml"
+            [ -f "$toml" ] || return 0
+
+            local target
+            case "$newver" in
+              *-*) target="$newver" ;;                                          # pre-release: exact
+              *)   target=$(printf '%s' "$newver" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/') ;;  # stable: X.Y
+            esac
+
+            # `|| true`: grep exits 1 when the crate doesn't declare <dep> (e.g. bdemu has
+            # no freemkv-keysources dep). Under `set -euo pipefail` that bare non-zero
+            # would kill the release; the empty result is handled as "nothing to bump".
+            local current
+            current=$(grep -m1 "^$dep *=" "$toml" | sed -E "s/^$dep *= *\"([^\"]+)\".*/\1/" || true)
+            [ -n "$current" ] || return 0
+
+            if [ "$current" = "$target" ]; then
+              ok "$(basename "$dir"): $dep dep already at \"$target\""
+              return 0
+            fi
+
+            if $DRY_RUN; then
+              printf '  [dry-run] bump %s: %s dep "%s" → "%s"\n' "$(basename "$dir")" "$dep" "$current" "$target"
+              return 0
+            fi
+
+            sed -i.bak -E "s|^$dep *= *\"[^\"]+\"|$dep = \"$target\"|" "$toml"
+            rm -f "$toml.bak"
+            ok "$(basename "$dir"): $dep dep \"$current\" → \"$target\""
+          }
+
+          # ─── git commit + push + tag (idempotent) — shared by lib + binary paths ──
+          # git_commit_push_tag <dir> <name> <commit-msg> [stage-lockfile=true]
+          git_commit_push_tag() {
+            local dir="$1" name="$2" msg="$3" stage_lock="${4:-true}"
+
+            if $DRY_RUN; then
+              printf '  [dry-run] git -C %s add Cargo.toml%s\n' "$dir" "$([ "$stage_lock" = true ] && echo ' Cargo.lock')"
+              printf '  [dry-run] git -C %s commit -m %q  (skip if nothing staged)\n' "$dir" "$msg"
+              printf '  [dry-run] git -C %s push origin "$WORK_BRANCH"  (rebase+retry on non-ff)\n' "$dir"
+              printf '  [dry-run] git -C %s tag -a v%s -m %q <bump-sha> ; push origin v%s\n' "$dir" "$VERSION" "v$VERSION" "$VERSION"
+              return 0
+            fi
+
+            git -C "$dir" add Cargo.toml
+            # CHANGELOG.md too. `date_changelog_heading` rewrote the heading from
+            # UNRELEASED to today's date earlier in this run, but nothing ever staged it,
+            # so the dating lived only in the working tree and every tag published a
+            # changelog still saying UNRELEASED — v1.5.0, v1.5.1 and v1.5.2 all shipped
+            # that way, and a tag is immutable, so none of them can be corrected now.
+            git -C "$dir" add CHANGELOG.md 2>/dev/null || true
+            # macos/Info.plist too, for exactly the same reason. `bump_macos_plist_version`
+            # was added after v1.6.1 failed its release build on a stale bundle version —
+            # but it only ever edited the working tree, and nothing staged the result, so
+            # v1.6.2 was tagged with the plist still saying 1.6.1 and failed at the same
+            # job, the same way, one release later. Bumping a file and committing it are
+            # two separate things; the guard only catches the second.
+            git -C "$dir" add macos/Info.plist 2>/dev/null || true
+            # README.md, for the same reason -- see bump_readme_version.
+            git -C "$dir" add README.md 2>/dev/null || true
+            # Cargo.lock is committed for binary crates but gitignored for library crates
+            # (freemkv-keysources). `git add` of an ignored path errors under set -e, so
+            # guard it. CI/consumers don't need keysources's lock anyway.
+            [ "$stage_lock" = true ] && git -C "$dir" add Cargo.lock 2>/dev/null || true
+
+            local sha
+            if git -C "$dir" diff --cached --quiet; then
+              say "$name: no changes to commit (already at v$VERSION on this commit)"
+              sha=$(git -C "$dir" rev-parse HEAD)
+            else
+              git -C "$dir" commit -m "$msg"
+              sha=$(git -C "$dir" rev-parse HEAD)
+              if ! git -C "$dir" push origin "$WORK_BRANCH"; then
+                say "$name: push rejected, attempting rebase + retry"
+                git -C "$dir" pull --rebase origin "$WORK_BRANCH"
+                git -C "$dir" push origin "$WORK_BRANCH"
+                sha=$(git -C "$dir" rev-parse HEAD)
+              fi
+            fi
+
+            # Verify what is about to be TAGGED, not what is in the working tree.
+            #
+            # Every version-bump bug this script has shipped had the same shape: the file
+            # was edited correctly, the working tree looked right, and the commit did not
+            # contain it. Checking `$dir/macos/Info.plist` here would pass in exactly the
+            # case that breaks, because the fix is sitting unstaged next to it. So read the
+            # committed blob out of $sha.
+            #
+            # This fires BEFORE the tag exists, which is the whole point: freemkv's release
+            # workflow already checks this, but it runs after the tag is public, so its
+            # verdict arrives too late to do anything except burn a version number.
+            if git -C "$dir" cat-file -e "$sha:macos/Info.plist" 2>/dev/null; then
+              local committed_plist_ver
+              committed_plist_ver=$(git -C "$dir" show "$sha:macos/Info.plist" \
+                | sed -n 's/.*<key>CFBundleShortVersionString<\/key><string>\(.*\)<\/string>.*/\1/p')
+              [ "$committed_plist_ver" = "$VERSION" ] || die "$name: commit $sha carries macos/Info.plist at '$committed_plist_ver', not '$VERSION' — the bump did not reach the commit. Refusing to tag (the release build would fail after the tag is public)."
+              ok "$name: committed Info.plist is $VERSION"
+            fi
+
+            # Idempotent tag.
+            if git -C "$dir" rev-parse "v$VERSION" >/dev/null 2>&1; then
+              local tag_sha; tag_sha=$(git -C "$dir" rev-list -n 1 "v$VERSION")
+              [ "$tag_sha" = "$sha" ] || die "$name: tag v$VERSION exists at $tag_sha (expected $sha) — resolve manually"
+              ok "$name: tag v$VERSION already at $sha"
+            else
+              git -C "$dir" tag -a "v$VERSION" -m "v$VERSION" "$sha"
+              git -C "$dir" push origin "v$VERSION"
+              ok "$name v$VERSION pushed (commit $sha, tag v$VERSION)"
+            fi
+            if ! git -C "$dir" ls-remote --tags origin "v$VERSION" | grep -q "refs/tags/v$VERSION"; then
+              git -C "$dir" push origin "v$VERSION"
+              ok "$name: tag v$VERSION pushed to remote"
+            fi
+          }
+
+          # run_security_gate <dir> <name>
+          run_security_gate() {
+            return 0  # pure-yaml release: qa + leak-guard already scanned this exact SHA
+            local dir="$1" name="$2" mode="${3:-tarball}"
+            local scan="$SELF_DIR/scan-tarball.sh"
+            if $DRY_RUN; then
+              printf '  [dry-run] %s gate (%s) over %s\n' "$mode" "$name" "$dir"
+              return 0
+            fi
+            if [ "$mode" = source ]; then
+              # Binary crates do NOT publish to crates.io, and a git-only dependency
+              # (freemkv-unlock-ld, no version req) makes `cargo package` impossible.
+              # Scan the git-tracked source tree directly as the leak tripwire instead of
+              # a would-be crates.io tarball (the bytes that actually ship are this commit).
+              local work; work="$(mktemp -d "${TMPDIR:-/tmp}/scan-src.XXXXXX")"
+              git -C "$dir" archive HEAD | tar -x -C "$work" \
+                || { rm -rf "$work"; die "git archive failed for $name"; }
+              if "$SELF_DIR/scan-secrets.sh" --strict "$work"; then
+                rm -rf "$work"
+              else
+                rm -rf "$work"
+                die "SECURITY GATE FAILED for $name (source scan) — fix the finding above (do NOT allowlist a real value)."
+              fi
+            else
+              "$scan" "$dir" || die "SECURITY GATE FAILED for $name — refusing to release. These bytes would be permanent on crates.io. Fix the finding above (do NOT allowlist a real value)."
+            fi
+          }
+
+          # ──────────────── step 1: freemkv-unlock (the BASE crate) ─────────────────
+          # Tagged FIRST — it is the base of the dependency graph (libfreemkv git-deps it,
+          # bdemu deps it). A single crate now (no `ld` workspace member); it does NOT
+          # depend on libfreemkv (the inversion). NEVER published to crates.io. Its
+          # Cargo.lock is gitignored, so nothing lockfile-ish is staged/regenerated.
+          #   1. bump root Cargo.toml [package] version
+          #   2. `cargo build --all-features` to prove it still compiles (covers bdemu's
+          #      `emulation` surface too)
+          #   3. source-scan, commit + push + tag vX.Y.Z
+          # Idempotent: an already-pushed tag short-circuits the whole step.
+          release_unlock() {
+            local name="freemkv-unlock"
+            local dir="$FREEMKV_UNLOCK_DIR"
+            if git -C "$dir" ls-remote --exit-code --tags origin "v$VERSION" >/dev/null 2>&1; then
+              ok "$name v$VERSION already tagged on origin — skipping (idempotent resume)"
+              return 0
+            fi
+            say "step 1.$name: bump version + build proof + tag (base crate, tagged first)"
+
+            bump_cargo_toml_version "$dir" "$VERSION"
+            bump_macos_plist_version "$dir" "$VERSION"
+            bump_readme_version "$dir" "$name" "$VERSION"
+            date_changelog_heading "$dir" "$VERSION"
+            if $DRY_RUN; then
+              printf '  [dry-run] (cargo +%s build --all-features --manifest-path %s/Cargo.toml)\n' "$TOOLCHAIN" "$dir"
+            else
+              cargo "+$TOOLCHAIN" build --all-features --manifest-path "$dir/Cargo.toml" \
+                || die "$name: cargo build --all-features failed at v$VERSION"
+              ok "$name: builds (incl. emulation feature) at v$VERSION"
+            fi
+            # Leak tripwire over the git-tracked source (Cargo.lock gitignored, git-only
+            # consumption — same rationale as the binary "source" scan).
+            run_security_gate "$dir" "$name" source
+            # Single [package]; the bump is in the root Cargo.toml git_commit_push_tag stages.
+            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" false
+          }
+
+          # ─────────────────── step 3: freemkv-i18n (a LEAF LIB) ────────────────────
+          # A dependency-free string loader — nothing to re-pin, just bump + tag. Off
+          # crates.io; consumed by freemkv/autorip via a git-tag [patch.crates-io]. Its
+          # Cargo.lock is gitignored (nothing lockfile-ish to stage). Scan the source.
+          release_i18n() {
+            local name="freemkv-i18n"
+            local dir="$CANONICAL_ROOT/$name"
+            if git -C "$dir" ls-remote --exit-code --tags origin "v$VERSION" >/dev/null 2>&1; then
+              ok "$name v$VERSION already tagged on origin — skipping (idempotent resume)"
+              return 0
+            fi
+            say "step 3.$name: bump + tag (leaf lib, OFF crates.io)"
+
+            bump_cargo_toml_version "$dir" "$VERSION"
+            bump_macos_plist_version "$dir" "$VERSION"
+            bump_readme_version "$dir" "$name" "$VERSION"
+            date_changelog_heading "$dir" "$VERSION"
+            run_security_gate "$dir" "$name" source
+            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" false
+          }
+
+          # ─────────────────── step 3: freemkv-keysources (a LIB) ───────────────────
+          # OFF crates.io now (it deps git-only libfreemkv). It git-tag-pins libfreemkv via
+          # a committed [patch.crates-io] — re-pin that tag here. Its Cargo.lock is
+          # gitignored; nothing lockfile-ish to regen. Scan the source tree (no tarball).
+          release_keysources() {
+            local name="freemkv-keysources"
+            local dir="$CANONICAL_ROOT/$name"
+            if git -C "$dir" ls-remote --exit-code --tags origin "v$VERSION" >/dev/null 2>&1; then
+              ok "$name v$VERSION already tagged on origin — skipping (idempotent resume)"
+              return 0
+            fi
+            say "step 3.$name: re-pin libfreemkv git tag + bump + tag (OFF crates.io)"
+
+            repin_git_patch "$dir" libfreemkv "$VERSION"   # committed [patch.crates-io] git tag
+            bump_dep "$dir" libfreemkv "$VERSION"          # bare version req, satisfied by the tag
+            bump_cargo_toml_version "$dir" "$VERSION"
+            bump_macos_plist_version "$dir" "$VERSION"
+            bump_readme_version "$dir" "$name" "$VERSION"
+            date_changelog_heading "$dir" "$VERSION"
+            run_security_gate "$dir" "$name" source
+            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" false
+          }
+
+          # freemkv-engine — the shared rip engine (new in 1.6.0). Owns the orchestration
+          # that used to be duplicated between the freemkv binary and autorip: optical
+          # bring-up, the multipass recovery loop and its abort math, key-source
+          # orchestration, extract_tree, mux_title_session. Consumed by freemkv + autorip
+          # (NOT by bdemu). It git-deps BOTH libfreemkv and freemkv-keysources, so it is
+          # tagged after both of them and before the binaries that re-pin it.
+          release_engine() {
+            local name="freemkv-engine"
+            local dir="$CANONICAL_ROOT/$name"
+            if git -C "$dir" ls-remote --exit-code --tags origin "v$VERSION" >/dev/null 2>&1; then
+              ok "$name v$VERSION already tagged on origin — skipping (idempotent resume)"
+              return 0
+            fi
+            say "step 3.$name: re-pin libfreemkv + keysources git tags + bump + tag (OFF crates.io)"
+
+            repin_git_patch "$dir" libfreemkv "$VERSION"
+            repin_git_patch "$dir" freemkv-keysources "$VERSION"
+            bump_dep "$dir" libfreemkv "$VERSION"
+            bump_dep "$dir" freemkv-keysources "$VERSION"
+            bump_cargo_toml_version "$dir" "$VERSION"
+            bump_macos_plist_version "$dir" "$VERSION"
+            bump_readme_version "$dir" "$name" "$VERSION"
+            date_changelog_heading "$dir" "$VERSION"
+            run_security_gate "$dir" "$name" source
+            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" false
+          }
+
+          # ─────────────────────── step 3: each BINARY crate ────────────────────────
+          # Binaries git-tag-pin libfreemkv/keysources via [patch.crates-io]. We re-pin
+          # those tags + the base version reqs to vX.Y.Z, regen the lock with the dev
+          # config disabled (so it references the git tag, not the local path), verify
+          # the git-tag invariants, scan, commit, tag.
+          release_binary() {
+            local name="$1"
+            local dir="$CANONICAL_ROOT/$name"
+            if git -C "$dir" ls-remote --exit-code --tags origin "v$VERSION" >/dev/null 2>&1; then
+              ok "$name v$VERSION already tagged on origin — skipping (idempotent resume)"
+              return 0
+            fi
+            say "step 3.$name: re-pin git tags + bump + regen lock + verify + commit + tag"
+
+            # Re-pin the [patch.crates-io] git tags to this release. (libfreemkv +
+            # keysources are both git-only now; freemkv/autorip reach freemkv-unlock
+            # transitively through libfreemkv's tagged Cargo.toml, so they carry no
+            # freemkv-unlock dep of their own to re-pin.)
+            repin_git_patch "$dir" libfreemkv "$VERSION"
+            repin_git_patch "$dir" freemkv-keysources "$VERSION"
+            # freemkv-i18n is a git-tag [patch.crates-io] dep of freemkv + autorip only;
+            # both helpers no-op on bdemu (no i18n dep line), so calling unconditionally
+            # is safe.
+            repin_git_patch "$dir" freemkv-i18n "$VERSION"
+            # freemkv-engine is a git-tag [patch.crates-io] dep of freemkv + autorip only
+            # (bdemu has no engine dep line, so both helpers no-op there).
+            repin_git_patch "$dir" freemkv-engine "$VERSION"
+            # Bump the base crates.io version reqs so they're satisfiable by the patched
+            # tag version (a pre-release req must match exactly).
+            bump_dep "$dir" libfreemkv "$VERSION"
+            bump_dep "$dir" freemkv-keysources "$VERSION"
+            bump_dep "$dir" freemkv-i18n "$VERSION"
+            bump_dep "$dir" freemkv-engine "$VERSION"
+            bump_cargo_toml_version "$dir" "$VERSION"
+            bump_macos_plist_version "$dir" "$VERSION"
+            bump_readme_version "$dir" "$name" "$VERSION"
+            date_changelog_heading "$dir" "$VERSION"
+
+            # bdemu directly deps freemkv-unlock by a committed path dep — its tagged
+            # commit must carry the git+tag form (and a lock that references it), then the
+            # branch restores the path dep. tag_release_with_unlock_swap does the swap +
+            # regen + verify + commit/tag + restore. The other binaries have no
+            # freemkv-unlock dep, so they take the plain regen + verify + commit + tag path.
+            if [ "$name" = bdemu ]; then
+              run_security_gate "$dir" "$name" source
+              tag_release_with_unlock_swap "$dir" "$name" \
+                "v$VERSION: bump version (unified release with libfreemkv $VERSION)" true \
+                libfreemkv freemkv-keysources
+              return 0
+            fi
+
+            regenerate_lockfile "$dir"
+            verify_lockfile_invariants "$dir" libfreemkv "$VERSION"
+            verify_lockfile_invariants "$dir" freemkv-keysources "$VERSION"
+            verify_lockfile_invariants "$dir" freemkv-i18n "$VERSION"
+            verify_lockfile_invariants "$dir" freemkv-engine "$VERSION"
+
+            # Security tripwire for leaked key material / internal infra. Binary crates
+            # don't publish to crates.io and have git-only deps, so scan the git-tracked
+            # source ("source" mode) rather than a `cargo package` tarball.
+            run_security_gate "$dir" "$name" source
+
+            git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release with libfreemkv $VERSION)" true
+          }
+
+          # ──────────────── step 4b: mirror the changelog to the website ────────────
+          #
+          # Single source of truth: libfreemkv/CHANGELOG.md. The public docs site
+          # (freemkv.github.io) carries a changelog PAGE that must mirror it. This step
+          # regenerates that page from the crate changelog so the website can never drift
+          # (the bug this replaces: a hand-edited site changelog left at "rc.5.2 upcoming"
+          # long after rc.5.2 shipped).
+          #
+          # What it preserves vs. replaces:
+          #   - PRESERVE the website file's header block verbatim — the Astro frontmatter
+          #     (`--- … ---`) and the intro prose, i.e. everything BEFORE its first
+          #     `## ` version heading.
+          #   - REPLACE the body (first `## ` onward) with the crate changelog's body,
+          #     reconciling the heading house style:
+          #       crate:  `## [1.0.0-rc.5.2] — UNRELEASED`   site: `## 1.0.0-rc.5.2`
+          #     i.e. strip the `[ ]` brackets and any `— UNRELEASED`/`- Unreleased` tail.
+          #     (Dates already present in the crate file — `## [x] - 2026-06-24` — are
+          #     kept; only the brackets are removed.)
+          #
+          # Behavior contract:
+          #   - $DRY_RUN-aware: prints the planned action, writes/commits/pushes nothing.
+          #   - Idempotent: if the regenerated page is byte-identical to what's committed,
+          #     it makes no commit (no empty commit, no push).
+          #   - Graceful: if freemkv.github.io isn't checked out, warn + skip — never fail
+          #     the release over a docs mirror.
+          #   - Commits ONLY the changelog page (other uncommitted site docs are left
+          #     untouched/unstaged).
+          # The public changelog is CURATED by hand in freemkv.github.io (consumer-
+          # facing, grouped by component, terse) — it is NOT a mirror of any crate
+          # changelog. The CHANGELOG gate requires a `## <version>` entry to exist before
+          # tagging, and verify_website_in_sync() confirms it at the end; release.sh no
+          # longer regenerates the page. Only the download-version marker is auto-updated.
+
+          # Set the download page's STATIC default version (`data-latest-version`) to the
+          # release version. This is what a fresh/offline visitor sees until the GitHub
+          # Releases API responds; without this it drifts (it sat at an rc tag long after
+          # 1.0). Graceful-skip if the site repo / marker is absent (release unaffected).
+          update_website_download_version() {
+            say "step 4c: set website download-page default version → v$VERSION"
+
+            local dir="$WEBSITE_DIR"
+            local page="$dir/$WEBSITE_DOWNLOAD_REL"
+            # The site repo has no dev branch — it IS the deployed artifact — so push
+            # whatever branch it is checked out on (main), never $WORK_BRANCH.
+            local site_branch
+            site_branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+
+            if [ ! -d "$dir/.git" ] || [ ! -f "$page" ]; then
+              if $DRY_RUN || [ "${WEBSITE_SKIP:-0}" = "1" ]; then
+                err "WARN: download-version sync skipped ($page missing) — WEBSITE_SKIP/dry-run"
+                return 0
+              fi
+              die "cannot update the download page: $page missing.
+            The release MUST update freemkv.github.io. Check it out at
+            FMKV_ROOT/freemkv.github.io with push creds. Bypass: WEBSITE_SKIP=1 (logged)."
+            fi
+            if ! grep -Eq '(data-latest-version>)v[^<]*(<)' "$page"; then
+              err "WARN: data-latest-version marker not found in $page — skipping"
+              return 0
+            fi
+            if $DRY_RUN; then
+              printf '  [dry-run] set data-latest-version → v%s (and data-latest-date → today) in %s; commit + push\n' \
+                "$VERSION" "$WEBSITE_DOWNLOAD_REL"
+              return 0
+            fi
+
+            perl -0pi -e "s/(data-latest-version>)v[^<]*(<)/\${1}v$VERSION\${2}/" "$page"
+            # The date badge next to the version had no baker, so it drifted independently
+            # of the version it sits under (the page shipped "July 19, 2026" beside a later
+            # release). Bake today's date in the page's own "Month D, YYYY" format — the
+            # Releases API still overwrites it client-side with the true published_at.
+            local reldate
+            reldate="$(python3 -c 'import datetime as d; t=d.date.today(); print(t.strftime("%B ")+str(t.day)+t.strftime(", %Y"))' 2>/dev/null || true)"
+            if [ -n "$reldate" ] && grep -q 'data-latest-date' "$page"; then
+              perl -0pi -e "s/(data-latest-date>)[^<]*(<)/\${1}$reldate\${2}/" "$page"
+            else
+              err "WARN: could not bake data-latest-date (marker or python3 missing) — version still updated"
+            fi
+            git -C "$dir" add "$WEBSITE_DOWNLOAD_REL"
+            if git -C "$dir" diff --cached --quiet -- "$WEBSITE_DOWNLOAD_REL"; then
+              ok "website download version already at v$VERSION — nothing to commit"
+              return 0
+            fi
+            git -C "$dir" commit -m "download: default version → v$VERSION" -- "$WEBSITE_DOWNLOAD_REL"
+            if ! git -C "$dir" push origin "$site_branch"; then
+              say "website download: push rejected, attempting rebase + retry"
+              git -C "$dir" pull --rebase origin "$site_branch"
+              git -C "$dir" push origin "$site_branch"
+            fi
+            ok "website download default version set to v$VERSION + pushed"
+          }
+
+          # Runs LAST, after the site updates + pushes. A release must not report success
+          # while the public site still names the old version — that is the exact miss
+          # that let 1.6.5 ship with freemkv.org stuck on 1.6.4. Re-read the site files
+          # and assert BOTH the changelog's newest heading and the download page's default
+          # version are v$VERSION; a mismatch fails the release. DRY runs warn instead.
+          verify_website_in_sync() {
+            say "step 4d: verify the public site is in sync with v$VERSION"
+            local dir="$WEBSITE_DIR"
+            local cl="$dir/$WEBSITE_CHANGELOG_REL"
+            local dl="$dir/$WEBSITE_DOWNLOAD_REL"
+
+            if [ ! -d "$dir/.git" ]; then
+              if $DRY_RUN || [ "${WEBSITE_SKIP:-0}" = "1" ]; then
+                err "WARN: site not checked out — skipping site-sync verification (WEBSITE_SKIP/dry-run)"
+                return 0
+              fi
+              die "site-sync check: $dir not checked out — cannot verify the public site."
+            fi
+
+            # Changelog: the FIRST '## ' heading (release.sh renders it as '## X.Y.Z').
+            local top
+            top="$(awk '/^## /{print; exit}' "$cl" 2>/dev/null)"
+            if [ "$top" != "## $VERSION" ]; then
+              if $DRY_RUN; then
+                err "WARN: [dry-run] site changelog top is \"$top\", expected \"## $VERSION\""
+              else
+                die "public changelog OUT OF SYNC: newest heading is \"$top\", expected \"## $VERSION\".
+            freemkv.org/docs/changelog would show the wrong newest version. The website
+            changelog sync did not land — do not treat this release as complete."
+              fi
+            fi
+
+            # Download page: the static default version marker.
+            if ! grep -q "data-latest-version>v$VERSION<" "$dl" 2>/dev/null; then
+              if $DRY_RUN; then
+                err "WARN: [dry-run] download page default is not v$VERSION"
+              else
+                die "download page OUT OF SYNC: data-latest-version is not v$VERSION in $dl."
+              fi
+            fi
+
+            ok "public site verified in sync: changelog + download both at v$VERSION"
+          }
+
+          # ──────────────────── step 5: print CI run URLs to watch ──────────────────
+
+          watch_ci() {
+            say "CI run URLs (the binaries are already building — tests run in parallel):"
+            local c
+            for c in libfreemkv "${LIB_CRATES[@]}" freemkv-i18n freemkv-unlock "${BINARY_CRATES[@]}"; do
+              if $DRY_RUN; then
+                printf '  [dry-run] gh run list --repo %s/%s --workflow Release --limit 1\n' "$GIT_ORG" "$c"
+                continue
+              fi
+              local url
+              url=$(gh run list --repo "$GIT_ORG/$c" --workflow Release --limit 1 \
+                      --json url --jq '.[0].url' 2>/dev/null || true)
+              if [ -n "$url" ]; then
+                printf '  %-22s %s\n' "$c" "$url"
+              else
+                printf '  %-22s (no Release run found yet)\n' "$c"
+              fi
+            done
+            ok "release flow complete — monitor CI runs above"
+          }
+
+          # ─────────── step 6: the download page's links must actually resolve ───────────
+          #
+          # Why this exists: the download page hard-codes asset FILENAMES and links them as
+          # `releases/latest/download/<name>`. If a workflow renames, drops, or never
+          # produced one, the HTML still looks perfectly fine and the button 404s. Nothing
+          # in CI compares the two sides, so the mismatch is only ever found by a user.
+          # (It had already happened: the page offered `autorip-x86_64-macos`, a target
+          # autorip's build matrix deliberately dropped.)
+          #
+          # This is a REPORT, not a gate — it runs after the tags are pushed, so failing
+          # hard here would achieve nothing. It prints exactly which links are dead.
+          #
+          # The expected lists below must stay in step with
+          # freemkv.github.io/src/pages/download.astro. Windows desktop-app note: the
+          # `.zip` is attached by freemkv's `build-windows` job; the page only *links* it
+          # once `windowsAppShipping` is flipped to true there.
+          verify_release_assets() {
+            say "step 6: verify every download-page asset exists on the release"
+
+            if ! command -v gh >/dev/null 2>&1; then
+              err "WARN: gh not on PATH — skipping download-asset verification"
+              return 0
+            fi
+
+            local freemkv_expected=(
+              # desktop app (macOS .dmg per arch, Windows .zip)
+              freemkv-aarch64-macos.dmg
+              freemkv-x86_64-macos.dmg
+              freemkv-x86_64-windows.zip
+              # bare CLI binaries
+              freemkv-aarch64-macos
+              freemkv-x86_64-macos
+              freemkv-x86_64-linux
+              freemkv-aarch64-linux
+              freemkv-x86_64-windows.exe
+            )
+            local autorip_expected=(
+              autorip-aarch64-macos
+              autorip-x86_64-linux
+              autorip-aarch64-linux
+              autorip-x86_64-windows.zip
+            )
+
+            # How long to wait for a release's assets to appear. The release workflow
+            # builds them after the tag lands, so an empty list right after tagging is
+            # normal for a while — but it is NOT a reason to skip the check. It used to
+            # `continue`, which skipped every expected asset for that repo, left `missing`
+            # at zero, and printed "every download-page asset is attached" for a release
+            # that had NONE. A gate that passes hardest when there is least to check.
+            local wait_secs="${RELEASE_ASSET_WAIT_SECS:-1800}"
+            local poll_secs=30
+
+            local missing=0 repo names want checked=0
+            for repo in freemkv autorip; do
+              if $DRY_RUN; then
+                printf '  [dry-run] gh release view v%s --repo %s/%s --json assets\n' \
+                  "$VERSION" "$GIT_ORG" "$repo"
+                continue
+              fi
+              local -a expected
+              if [ "$repo" = freemkv ]; then expected=("${freemkv_expected[@]}");
+              else expected=("${autorip_expected[@]}"); fi
+              # Wait for the assets we actually NEED, not merely for the first one to
+              # appear. Breaking on "any asset exists" made this report a complete
+              # release as broken: the Linux leg finishes in about two minutes while the
+              # macOS and Windows builds are still running, so the very first upload
+              # ended the wait and every slower platform was then declared MISSING. That
+              # failed the 1.6.3 release after it was already tagged and published, which
+              # is the worst moment to be wrong in this direction.
+              local waited=0 want_n have_n
+              want_n=${#expected[@]}
+              while :; do
+                names=$(gh release view "v$VERSION" --repo "$GIT_ORG/$repo" \
+                          --json assets --jq '.assets[].name' 2>/dev/null || true)
+                have_n=0
+                for want in "${expected[@]}"; do
+                  printf '%s\n' "$names" | grep -Fxq "$want" && have_n=$((have_n + 1))
+                done
+                [ "$have_n" -ge "$want_n" ] && break
+                if [ "$waited" -ge "$wait_secs" ]; then break; fi
+                printf '  %s: %d/%d assets, waiting (%ds/%ds)\n' \
+                  "$repo" "$have_n" "$want_n" "$waited" "$wait_secs"
+                sleep "$poll_secs"
+                waited=$((waited + poll_secs))
+              done
+              checked=$((checked + 1))
+              if [ -z "$names" ]; then
+                err "$repo v$VERSION has NO assets after ${wait_secs}s — every download button for it is dead"
+                missing=$((missing + ${#expected[@]}))
+                continue
+              fi
+              for want in "${expected[@]}"; do
+                if printf '%s\n' "$names" | grep -Fxq "$want"; then
+                  printf '  %-34s OK\n' "$want"
+                else
+                  printf '  %-34s MISSING from %s/%s v%s\n' "$want" "$GIT_ORG" "$repo" "$VERSION"
+                  missing=$((missing + 1))
+                fi
+              done
+            done
+
+            if [ "$missing" -gt 0 ]; then
+              err "$missing download-page asset(s) MISSING — those buttons on /download/ are dead links"
+              # The caller turns this into a failed run. Without it the function fell off
+              # the end returning 0, so `verify_release_assets || ...` could never fire —
+              # a gate that reports and cannot gate, which is the exact shape it exists to
+              # catch on the release itself.
+              return 1
+            elif ! $DRY_RUN; then
+              if [ "$checked" -lt 2 ]; then
+                err "only $checked of 2 repos were checked — refusing to call this verified"
+                return 1
+              fi
+              ok "every download-page asset is attached to v$VERSION"
+            fi
+            return 0
+          }
+
+          # ───────────────────────────────── main ──────────────────────────────────
+          #
+          # Dependency-ordered tag cascade (nothing touches crates.io anymore):
+          #   1.  tag freemkv-unlock  — the BASE crate (libfreemkv git-deps it, bdemu deps
+          #       it). Tagged FIRST so the downstream path→git swaps resolve.
+          #   2.  tag libfreemkv      — swaps its freemkv-unlock path→git tag in the tagged
+          #       commit; off crates.io; branch keeps the path dep.
+          #   3.  tag keysources      — git-tag-pins libfreemkv; off crates.io.
+          #   3b. tag freemkv-i18n    — dependency-free leaf.
+          #   3c. tag freemkv-engine  — NEW in 1.6.0; git-tag-pins libfreemkv AND
+          #       keysources, so it is tagged after both. freemkv + autorip re-pin it
+          #       (bdemu has no engine dep).
+          #       └── confirm all five lib tags on remote (~seconds)
+          #   4.  release each binary (re-pin git tags, regen lock, tag) — builds start the
+          #       instant each binary tag lands. bdemu also swaps its freemkv-unlock dep.
+
+          # ── main = the latest tag ────────────────────────────────────────────────────
+          #
+          # Branch policy: work lands on $WORK_BRANCH, and `main` is a RELEASE POINTER —
+          # it always equals the newest tag, nothing else. So after every tag is on the
+          # remote, move each repo's `main` to that tag and push it.
+          #
+          # This is a fast-forward in the normal case (`main` is an ancestor of the tag,
+          # because the tag was cut from $WORK_BRANCH which descends from the last
+          # release). When it is NOT a fast-forward the repo has commits on `main` that
+          # never went through $WORK_BRANCH, which means someone pushed to `main`
+          # directly — that is exactly what this policy exists to stop, so refuse rather
+          # than silently rewriting published history.
+          advance_main_to_release() {
+            local dir="$1" name tag
+            name=$(basename "$dir")
+            tag="v$VERSION"
+
+            if $DRY_RUN; then
+              printf '  [dry-run] %s: fast-forward main -> %s and push\n' "$name" "$tag"
+              return 0
+            fi
+
+            # A crate released for the FIRST time has no `main` on the remote yet, and
+            # `git fetch origin main` dies on "couldn't find remote ref main". That is
+            # not an error — `main` is a release pointer, so a crate that has never been
+            # released cannot have one. The push below creates it. This mattered:
+            # freemkv-engine is new in 1.6.0, and this line would have aborted the
+            # cascade at step 7, AFTER all eight tags were pushed and irreversible.
+            #
+            # Distinguish "no main yet" from a genuine fetch failure by asking the
+            # remote directly — a network error must still be fatal, or a release could
+            # silently skip advancing a main that does exist.
+            if ! git -C "$dir" fetch --quiet origin main 2>/dev/null; then
+              if git -C "$dir" ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
+                die "$name: fetch main failed (the remote HAS a main — network or auth problem)"
+              fi
+              say "  $name: no main on the remote yet (first release) — it will be created"
+            fi
+
+            # What actually matters is that `main` CONTAINS the release, not that it
+            # equals it. Three cases, and only one is a problem:
+            #
+            #   * main is an ancestor of the tag  -> fast-forward, the normal path;
+            #   * the tag is an ancestor of main  -> main already contains the release
+            #     and carries something extra. This is routine, not an incident: the
+            #     README bot commits to main on every `release: published`, and a repo
+            #     whose main was merged rather than reset looks exactly the same. The
+            #     old check asked only the first question, so it called this "someone
+            #     pushed to main directly" and aborted the cascade AFTER the tags were
+            #     public -- every release, for any repo with that bot;
+            #   * neither contains the other      -> genuinely diverged, still fatal.
+            if git -C "$dir" rev-parse --verify -q origin/main >/dev/null 2>&1; then
+              if git -C "$dir" merge-base --is-ancestor "$tag" origin/main; then
+                ok "$name: main already contains $tag — leaving it ahead"
+                return 0
+              fi
+              if ! git -C "$dir" merge-base --is-ancestor origin/main "$tag"; then
+                die "$name: origin/main and $tag have diverged — main carries commits the tag does not, and does not contain the tag either. Reconcile before releasing."
+              fi
+            fi
+
+            # Update the ref without checking it out: the working tree stays on
+            # $WORK_BRANCH, so nothing here can disturb the release in progress.
+            git -C "$dir" push origin "$tag^{commit}:refs/heads/main" \
+              || die "$name: could not advance main to $tag"
+            ok "$name: main -> $tag"
+          }
+
+          preflight
+
+          # Steps 1-3 — the libraries, in dependency order: freemkv-unlock (base) →
+          # libfreemkv → keysources. None publish to crates.io; each is git-tag-only.
+          if $SKIP_LIBS; then
+            say "skipping steps 1-3 (--skip-libs); assuming freemkv-unlock + libfreemkv + keysources + freemkv-i18n + freemkv-engine tags v$VERSION already pushed"
           else
-            ci/scripts/release.sh "${{ inputs.version }}"
+            release_unlock       # base crate — tagged first
+            release_libfreemkv   # git-deps freemkv-unlock (path→git swap in the tag)
+            release_keysources   # git-tag-pins libfreemkv
+            release_i18n         # dependency-free leaf; freemkv/autorip re-pin its tag
+            release_engine       # git-tag-pins libfreemkv + keysources; freemkv/autorip re-pin its tag
+          fi
+
+          # Structural barrier: the lib TAGS must be on the remote before a binary's lock
+          # regen fetches them. Near-instant.
+          wait_for_git_tag freemkv-unlock
+          wait_for_git_tag libfreemkv
+          wait_for_git_tag freemkv-keysources
+          wait_for_git_tag freemkv-i18n
+          wait_for_git_tag freemkv-engine
+
+          # Step 4 — binaries. Each tag kicks an independent CI build immediately.
+          for c in "${BINARY_CRATES[@]}"; do
+            release_binary "$c"
+          done
+
+          # (No crates.io publish step — every freemkv crate is git-tag-only now.)
+
+          # Step 5 — mirror the crate changelog to the public docs site. Off the binary
+          # critical path; graceful if the site repo isn't checked out.
+          update_website_download_version
+          verify_website_in_sync
+
+          watch_ci
+
+          # Step 6 — cross-check the download page's hard-coded asset names against what
+          # the releases actually carry.
+          #
+          # This runs AFTER the tags are pushed, which is a structural limit: by here the
+          # release exists and cannot be un-published, so this cannot prevent a bad
+          # release, only refuse to call it a good one. It used to warn and return 0, so
+          # a release shipping dead download buttons still ended with a green
+          # "complete" line and a zero exit — the operator had no signal to act on.
+          #
+          # It now fails the run. The remedy at this point is to attach the missing
+          # assets to the existing release (or delete and re-tag), not to pretend the
+          # release succeeded.
+          verify_release_assets || {
+            err "release v$VERSION is TAGGED and PUBLISHED but incomplete — fix the assets above before announcing it"
+            exit 1
+          }
+
+          # Step 7 — point every repo's `main` at the tag just published, so `main`
+          # always equals the latest release. Runs last: only tags that actually landed
+          # and verified should ever move a release pointer.
+          say "advancing main to v$VERSION in every repo"
+          for c in freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n \
+                   freemkv-engine "${BINARY_CRATES[@]}"; do
+            d="$CANONICAL_ROOT/$c"
+            [ -d "$d/.git" ] || continue
+            advance_main_to_release "$d"
+          done
+
+          if $DRY_RUN; then
+            say "DRY RUN complete — nothing changed."
+          else
+            ok "unified release v$VERSION complete."
           fi
