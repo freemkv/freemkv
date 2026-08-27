@@ -33,6 +33,11 @@ on:
 permissions:
   contents: read
 
+# Two promote runs must never race their qa PATCH/POST pushes.
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
 env:
   # Dependency order — freemkv-unlock is the BASE (libfreemkv and bdemu depend
   # on it), then the libs, then the binaries. Mirrors release.sh's tag cascade
@@ -73,6 +78,22 @@ jobs:
               case "$cmp" in
                 ahead|identical) ;;
                 *) echo "::error::$r: qa is '$cmp' relative to dev — not a fast-forward, refusing"; fail=1; continue ;;
+              esac
+            fi
+
+            # main COHERENCE — catch out-of-band commits on main HERE, pre-qa, not
+            # at release-time. main is a pure release pointer; it must contain
+            # nothing that dev does not (else the release's qa→main advance
+            # diverges AFTER all 8 tags are public — the 1.6.12 failure). If main
+            # carries commits dev lacks (a README web-UI edit, a hand hotfix),
+            # refuse and name the reconcile: cherry-pick them into dev, then
+            # re-promote, so qa→main stays a clean push.
+            main=$(gh api "repos/freemkv/$r/git/ref/heads/main" -q .object.sha 2>/dev/null || echo "")
+            if [ -n "$main" ] && [ "$main" != "$dev" ]; then
+              mcmp=$(gh api "repos/freemkv/$r/compare/$dev...$main" -q .status 2>/dev/null || echo "unknown")
+              case "$mcmp" in
+                behind|identical) ;;   # main ⊆ dev — clean
+                *) echo "::error::$r: main is '$mcmp' vs dev — main carries commit(s) not in dev (out-of-band edit). Bring them back: git -C $r cherry-pick <sha> onto dev, push, then re-promote."; fail=1; continue ;;
               esac
             fi
 

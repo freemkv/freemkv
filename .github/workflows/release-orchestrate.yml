@@ -31,18 +31,28 @@ on:
 permissions:
   contents: read
 
+# Two release dispatches must never run the cascade at once — they would
+# interleave tag pushes and qa commits across eight repos.
+concurrency:
+  group: release-orchestrate
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # Generous: the qa-green gate, 9 checkouts, toolchain, the 8-repo tag cascade
+    # AND verify_release_assets (which waits up to 30m for platform builds). Too
+    # low and the job is killed mid-cascade, after tags are already public.
+    timeout-minutes: 180
     steps:
-      - name: Refuse unless qa is green on all eight
+      - name: Preflight — qa green on all eight, main coherent, real-media evidence
         env:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
-          NON_GATING: '^(Dependabot Updates|CodeQL|pages-build-deployment|release-orchestrate|release-cascade|Release|ci-runner-launch|ci-runner-sweeper)$'
+          NON_GATING: '^(Dependabot Updates|CodeQL|pages-build-deployment|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
         run: |
           set -uo pipefail
           fail=0
+          : > /tmp/qa-shas
           for r in freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n \
                    freemkv-engine bdemu freemkv autorip; do
             sha=$(gh api "repos/freemkv/$r/git/ref/heads/qa" -q .object.sha 2>/dev/null || echo "")
@@ -55,9 +65,45 @@ jobs:
               || { echo "::error::$r: qa still running for ${sha:0:7}"; fail=1; continue; }
             bad=$(echo "$gating" | jq -r '[.[]|select(.conclusion!="success" and .conclusion!="skipped")|.name]|unique|join(", ")')
             [ -z "$bad" ] || { echo "::error::$r: qa ${sha:0:7} not green ($bad)"; fail=1; continue; }
-            echo "  ok $r: qa ${sha:0:7} green"
+
+            # main COHERENCE (F1): main must be an ANCESTOR of the qa sha we are
+            # about to tag, so qa→main is a clean push. If main carries commits qa
+            # does not, the release would abort at advance_main AFTER all 8 tags
+            # are public. Catch it here, before a single tag is cut.
+            main=$(gh api "repos/freemkv/$r/git/ref/heads/main" -q .object.sha 2>/dev/null || echo "")
+            if [ -n "$main" ] && [ "$main" != "$sha" ]; then
+              mcmp=$(gh api "repos/freemkv/$r/compare/$sha...$main" -q .status 2>/dev/null || echo "unknown")
+              case "$mcmp" in
+                behind|identical) ;;   # main ⊆ qa — clean
+                *) echo "::error::$r: main is '$mcmp' vs qa ${sha:0:7} — out-of-band commit on main. Bring it into dev (cherry-pick), re-promote, then release."; fail=1; continue ;;
+              esac
+            fi
+
+            echo "$r $sha" >> /tmp/qa-shas
+            echo "  ok $r: qa ${sha:0:7} green, main coherent"
           done
-          [ "$fail" = "0" ] || { echo "::error::refusing to release — qa is not green across the set"; exit 1; }
+          [ "$fail" = "0" ] || { echo "::error::refusing to release — qa not green / main not coherent across the set"; exit 1; }
+
+          # real-media EVIDENCE (F5): the qa 'green' above counts a SKIPPED media
+          # matrix as green. A release must be backed by a real-disc run at the
+          # exact freemkv qa sha — both cli-matrix legs SUCCEEDED (not skipped).
+          # Bypass for a genuine emergency: MEDIA_EVIDENCE_SKIP=1 (logged loud).
+          if [ "${MEDIA_EVIDENCE_SKIP:-0}" = "1" ]; then
+            echo "::warning::MEDIA_EVIDENCE gate BYPASSED (MEDIA_EVIDENCE_SKIP=1) — releasing without a real-disc run"
+          else
+            fsha=$(gh api repos/freemkv/freemkv/git/ref/heads/qa -q .object.sha)
+            rid=$(gh api "repos/freemkv/freemkv/actions/runs?head_sha=$fsha&per_page=50" \
+                    -q '[.workflow_runs[]|select(.name=="qa")][0].databaseId' 2>/dev/null || echo "")
+            legs=$(gh api "repos/freemkv/freemkv/actions/runs/$rid/jobs" \
+                    -q '[.jobs[]|select(.name|startswith("cli-matrix ("))|.conclusion]' 2>/dev/null || echo "[]")
+            n=$(echo "$legs" | jq 'length'); good=$(echo "$legs" | jq '[.[]|select(.=="success")]|length')
+            if [ "${n:-0}" -ge 2 ] && [ "$n" = "$good" ]; then
+              echo "  ok real-media: both cli-matrix legs green at freemkv ${fsha:0:7} (run $rid)"
+            else
+              echo "::error::no real-media evidence at freemkv ${fsha:0:7}: cli-matrix legs=$legs (need >=2 all success). Push to qa so the media matrix runs, or MEDIA_EVIDENCE_SKIP=1."
+              exit 1
+            fi
+          fi
 
       # The eight repos side by side under one root, the way the inline mechanics
       # expect (FMKV_ROOT). No freemkv-ci checkout — there is no script to fetch.
@@ -80,6 +126,17 @@ jobs:
       # The public docs site: no dev/qa, it IS the deployed artifact, so main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv.github.io,  ref: main, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv.github.io,  fetch-depth: 0 }
+
+      - name: Assert the checkouts match the preflight-verified qa shas (F6 TOCTOU)
+        run: |
+          set -euo pipefail
+          fail=0
+          while read -r r sha; do
+            got=$(git -C "ws/$r" rev-parse HEAD)
+            [ "$got" = "$sha" ] || { echo "::error::$r: qa moved between preflight and checkout ($got != $sha) — a concurrent promote landed. Re-run."; fail=1; }
+          done < /tmp/qa-shas
+          [ "$fail" = "0" ] || exit 1
+          echo "all 8 checkouts match the preflight-verified qa shas"
 
       - name: Toolchain from the single source of truth (ws/freemkv rust-version)
         run: |
@@ -412,15 +469,17 @@ jobs:
               done
               ok "CHANGELOG gate: every crate has a non-empty [$VERSION] entry"
 
+              # Consumer release notes must exist in a NON-PUBLIC source (the freemkv repo,
+              # flowing dev→qa) — NOT on the live site. Writing to the live site changelog
+              # is the public announcement (Pages deploy + RSS→Discord), so gating on it
+              # forces the announcement BEFORE the release exists. The release itself
+              # publishes these notes to the site as its LAST step (publish_site_changelog).
               if [ "${WEBSITE_SKIP:-0}" != "1" ]; then
-                local site_cl="$WEBSITE_DIR/$WEBSITE_CHANGELOG_REL"
-                if [ ! -f "$site_cl" ]; then
-                  die "public site changelog not checked out at $site_cl (WEBSITE_SKIP=1 to bypass)"
-                elif ! grep -Eq "^## +$VERSION([[:space:]]|\$)" "$site_cl"; then
-                  die "the consumer changelog for $VERSION is not written in freemkv.github.io/$WEBSITE_CHANGELOG_REL (WEBSITE_SKIP=1)"
-                else
-                  ok "consumer changelog: site has a ## $VERSION entry"
+                local notes="$CANONICAL_ROOT/freemkv/docs/consumer-changelog/$VERSION.md"
+                if [ ! -s "$notes" ]; then
+                  die "consumer release notes missing/empty: freemkv/docs/consumer-changelog/$VERSION.md — write them (they publish to the live site as the announcement at the END of the release). Bypass: WEBSITE_SKIP=1."
                 fi
+                ok "consumer notes present: docs/consumer-changelog/$VERSION.md"
               fi
             fi
           }
@@ -1426,6 +1485,57 @@ jobs:
           # tagging, and verify_website_in_sync() confirms it at the end; release.sh no
           # longer regenerates the page. Only the download-version marker is auto-updated.
 
+          # publish_site_changelog — the release IS the sole writer of the live site
+          # changelog, and it writes it DEAD LAST (after every tag + main advance). The
+          # consumer notes are authored in the freemkv repo at
+          # docs/consumer-changelog/<version>.md (non-public, flows dev→qa); this renders
+          # them into a `## <version>` entry, dates it, prepends it above the newest entry
+          # on freemkv.github.io, and pushes — which is the public announcement (Pages
+          # deploy + RSS→Discord). Because nobody hand-pushes the site changelog, a release
+          # can never be announced before it exists (the 1.6.12 premature-announce bug).
+          # Idempotent: if the site already has `## <version>`, it no-ops (a re-run).
+          publish_site_changelog() {
+            say "step 8a: publish consumer changelog → the site (this is the public announcement)"
+            local notes="$CANONICAL_ROOT/freemkv/docs/consumer-changelog/$VERSION.md"
+            local site_cl="$WEBSITE_DIR/$WEBSITE_CHANGELOG_REL"
+
+            if [ "${WEBSITE_SKIP:-0}" = "1" ]; then warn "WEBSITE_SKIP=1 — not publishing site changelog"; return 0; fi
+            [ -s "$notes" ]   || die "consumer notes missing/empty: $notes (write docs/consumer-changelog/$VERSION.md; bypass WEBSITE_SKIP=1)"
+            [ -f "$site_cl" ] || die "site changelog not checked out at $site_cl (WEBSITE_SKIP=1 to bypass)"
+
+            if grep -Eq "^## +$VERSION([[:space:]]|\$)" "$site_cl"; then
+              ok "site changelog already has ## $VERSION — nothing to publish (idempotent)"
+              return 0
+            fi
+            if $DRY_RUN; then
+              printf '  [dry-run] prepend "## %s" (dated %s) from docs/consumer-changelog/%s.md to the site changelog + push\n' "$VERSION" "$RELEASE_DATE" "$VERSION"
+              return 0
+            fi
+
+            RELEASE_VER="$VERSION" RELEASE_DATE="$RELEASE_DATE" python3 - "$site_cl" "$notes" <<'PYEOF' \
+              || die "failed to render the site changelog entry for $VERSION"
+          import os, re, sys
+          site, notes = sys.argv[1], sys.argv[2]
+          ver, date = os.environ["RELEASE_VER"], os.environ["RELEASE_DATE"]
+          body = open(notes, encoding="utf-8").read().strip("\n")
+          entry = "## %s\n\n<small>%s</small>\n\n%s\n\n" % (ver, date, body)
+          src = open(site, encoding="utf-8").read()
+          m = re.search(r'^## ', src, re.M)          # insert above the previous newest release
+          out = (src[:m.start()] + entry + src[m.start():]) if m else (src.rstrip() + "\n\n" + entry)
+          open(site, "w", encoding="utf-8").write(out)
+          PYEOF
+
+            local site_branch; site_branch="$(git -C "$WEBSITE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+            git -C "$WEBSITE_DIR" add "$WEBSITE_CHANGELOG_REL"
+            if git -C "$WEBSITE_DIR" diff --cached --quiet -- "$WEBSITE_CHANGELOG_REL"; then
+              ok "site changelog already current — nothing to commit"; return 0
+            fi
+            git -C "$WEBSITE_DIR" commit -m "changelog: $VERSION" -- "$WEBSITE_CHANGELOG_REL"
+            git -C "$WEBSITE_DIR" push origin "$site_branch" \
+              || { git -C "$WEBSITE_DIR" pull --rebase origin "$site_branch" && git -C "$WEBSITE_DIR" push origin "$site_branch"; }
+            ok "site changelog published: ## $VERSION (release announced now — after tags + main)"
+          }
+
           # Set the download page's STATIC default version (`data-latest-version`) to the
           # release version. This is what a fresh/offline visitor sees until the GitHub
           # Releases API responds; without this it drifts (it sat at an rc tag long after
@@ -1742,7 +1852,29 @@ jobs:
                 return 0
               fi
               if ! git -C "$dir" merge-base --is-ancestor origin/main "$tag"; then
-                die "$name: origin/main and $tag have diverged — main carries commits the tag does not, and does not contain the tag either. Reconcile before releasing."
+                # main diverged. main is a pure RELEASE POINTER — its only valid state is
+                # "equals the newest tag" — so out-of-band commits (a README edit made in
+                # the GitHub web UI, a stray bot push) are anomalies the tag supersedes,
+                # not development to preserve. If the divergent commits touch ONLY
+                # README.md, force-advance the pointer to the tag. If they touch anything
+                # else, someone pushed real work straight to main outside dev→qa — that is
+                # the incident this policy exists to catch, so refuse. This is what broke
+                # the 1.6.12 release at its very last step: a one-line README web edit on
+                # main was enough to abort the whole cascade after all eight tags were
+                # public. A README-only pointer skew must never do that again.
+                local offmain; offmain=$(git -C "$dir" diff --name-only "$tag...origin/main" 2>/dev/null | grep -v '^README\.md$' || true)
+                if [ -n "$offmain" ]; then
+                  die "$name: origin/main diverged from $tag with non-README changes ($(echo "$offmain" | tr '\n' ' ')) — someone pushed to main outside dev→qa. Reconcile before releasing."
+                fi
+                warn "$name: main diverged only by out-of-band README edit(s) — force-advancing the release pointer to $tag"
+                if $DRY_RUN; then
+                  printf '  [dry-run] %s: force-advance main -> %s (README-only divergence discarded)\n' "$name" "$tag"
+                  return 0
+                fi
+                git -C "$dir" push --force-with-lease="refs/heads/main:$(git -C "$dir" rev-parse origin/main)" \
+                  origin "$tag^{commit}:refs/heads/main" || die "$name: could not force-advance main to $tag"
+                ok "$name: main force-advanced -> $tag (README-only out-of-band edit discarded)"
+                return 0
               fi
             fi
 
@@ -1782,40 +1914,40 @@ jobs:
 
           # (No crates.io publish step — every freemkv crate is git-tag-only now.)
 
-          # Step 5 — mirror the crate changelog to the public docs site. Off the binary
-          # critical path; graceful if the site repo isn't checked out.
-          update_website_download_version
-          verify_website_in_sync
-
           watch_ci
 
           # Step 6 — cross-check the download page's hard-coded asset names against what
-          # the releases actually carry.
-          #
-          # This runs AFTER the tags are pushed, which is a structural limit: by here the
-          # release exists and cannot be un-published, so this cannot prevent a bad
-          # release, only refuse to call it a good one. It used to warn and return 0, so
-          # a release shipping dead download buttons still ended with a green
-          # "complete" line and a zero exit — the operator had no signal to act on.
-          #
-          # It now fails the run. The remedy at this point is to attach the missing
-          # assets to the existing release (or delete and re-tag), not to pretend the
-          # release succeeded.
+          # the releases actually carry. Runs after tags are pushed (structural limit):
+          # it cannot prevent a bad release, only refuse to call it good. It fails the run
+          # rather than warn — a release shipping dead download buttons is not complete.
           verify_release_assets || {
             err "release v$VERSION is TAGGED and PUBLISHED but incomplete — fix the assets above before announcing it"
             exit 1
           }
 
-          # Step 7 — point every repo's `main` at the tag just published, so `main`
-          # always equals the latest release. Runs last: only tags that actually landed
-          # and verified should ever move a release pointer.
+          # Step 7 — advance every repo's `main` to its tag. FAIL-SOFT: a failure in one
+          # repo must not strand the others. advance_main_to_release runs in a subshell so
+          # its `die` is caught here (a die is an exit; `||` cannot catch it otherwise) —
+          # the loop records the repo and keeps going, then aborts at the end if any
+          # failed. Preflight already proved main ⊆ qa for all 8, so a failure here is a
+          # genuine race, not the normal path; a re-dispatch finishes it idempotently.
           say "advancing main to v$VERSION in every repo"
+          adv_fail=""
           for c in freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n \
                    freemkv-engine "${BINARY_CRATES[@]}"; do
             d="$CANONICAL_ROOT/$c"
             [ -d "$d/.git" ] || continue
-            advance_main_to_release "$d"
+            ( advance_main_to_release "$d" ) || adv_fail="${adv_fail:+$adv_fail }$c"
           done
+          [ -z "$adv_fail" ] || die "main advance failed for: $adv_fail — the 8 tags are public; re-dispatch to finish (idempotent)."
+
+          # Step 8 — the PUBLIC ANNOUNCEMENT, DEAD LAST. Publishing the consumer changelog
+          # to freemkv.github.io main deploys the site and fires RSS→Discord. It runs only
+          # after every tag AND every main pointer is done, so users are never notified of
+          # a release that has not fully landed (the 1.6.12 premature-announce failure).
+          publish_site_changelog
+          update_website_download_version
+          verify_website_in_sync
 
           if $DRY_RUN; then
             say "DRY RUN complete — nothing changed."
