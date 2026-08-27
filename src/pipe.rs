@@ -21,13 +21,9 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 fn install_signal_handler() {
     #[cfg(unix)]
     unsafe {
-        // Register via sigaction, not signal(): on musl libc (the
-        // cross-compiled deployment target) signal() is one-shot — the
-        // disposition resets to SIG_DFL after the handler fires once, so the
-        // second Ctrl-C would never re-enter handle_sigint and the
-        // double-Ctrl-C _exit(130) guard would be dead. sigaction with
-        // SA_RESTART (and no SA_RESETHAND) keeps the handler installed across
-        // every delivery on both musl and glibc, and restarts slow syscalls.
+        // sigaction, not signal(): on musl, signal() is one-shot and would
+        // kill the double-Ctrl-C _exit(130) guard after the first fire.
+        // SA_RESTART (no SA_RESETHAND) fixes that and restarts syscalls.
         let mut sa: libc::sigaction = std::mem::zeroed();
         // Cast through a thin pointer: a bare `fn as usize` is a double
         // coercion that clippy 1.97 rejects.
@@ -344,12 +340,9 @@ fn fmt_err_str(s: &str) -> String {
         // `strings::get` returns the dotted path verbatim on a miss, so a
         // present locale entry is one whose lookup does NOT equal its own key.
         if strings::get(&key) != key {
-            // WS2: the localized message is prefixed with its language-neutral
-            // `E<code>` token — the code is SHOWN, not stripped. The `Error:`
-            // level word is added once at the render site (`render_error` /
-            // `main::fatal`), never here, so the fragment can also be embedded
-            // as `{cause}`/`{detail}` inside a localized wrapper without
-            // doubling the level prefix.
+            // WS2: keep the language-neutral `E<code>` prefix (shown, not
+            // stripped). `Error:` is added once at the render site, never
+            // here, so this nests as `{cause}`/`{detail}` without doubling it.
             let localized = if code_part == "E7022" {
                 // E7022 names the disc by hash; keep its dedicated placeholder.
                 strings::fmt(&key, &[("hash", data), ("detail", data)])
@@ -369,10 +362,8 @@ fn fmt_err_str(s: &str) -> String {
         // code. The contract test makes this unreachable for any real variant.
         return strings::fmt("error.generic", &[("code", code_part), ("detail", data)]);
     }
-    // A non-code string (a CLI-side message): no code to show. The generic
-    // wrapper is `{code} {detail}`; with an empty code that leaves a leading
-    // space, so trim it — the render site adds the level word, and a stray
-    // leading space would show as `Error:  msg`.
+    // A non-code string: the generic `{code} {detail}` wrapper with an empty
+    // code leaves a leading space, so trim it or it shows as `Error:  msg`.
     strings::fmt("error.generic", &[("code", ""), ("detail", s)])
         .trim_start()
         .to_string()
@@ -411,15 +402,9 @@ fn check_selection_coverage(
     }
     let mut first_error = None;
     for u in &unmatched {
-        // One full message per track class, NOT one message with the class
-        // interpolated as a noun. Interpolating it cannot be translated
-        // correctly: German needs "keine Tonspur"/"keine Untertitelspur" and
-        // Polish/Russian need case agreement, so a shared "no {class} track"
-        // template forces every translator into broken grammar. `u.class` is
-        // "audio" or "subtitle", giving `..._audio` / `..._subtitle`.
-        // `available` is disc-derived language tags; `requested` is the
-        // user's own `-a`/`-s` text. Both are sanitised for the same reason
-        // the sibling renderer below is: this goes to a real terminal.
+        // One full message per track class, not one with the class
+        // interpolated: German/Polish/Russian grammar can't handle a shared
+        // template. `available`/`requested` are sanitised: real terminal output.
         let sanitize_all = |v: &[String]| -> String {
             v.iter()
                 .map(|s| crate::disc_info::sanitize(s))
@@ -463,11 +448,9 @@ fn render_stream_sel_error(
             let mut langs: Vec<String> = title
                 .streams
                 .iter()
-                // Sanitised: a language tag is three raw MPLS/IFO bytes, and
-                // this string goes to the real terminal. `print_stream_info`
-                // already treats the same field this way; this path did not,
-                // so a crafted disc plus a mistyped `-a` printed disc bytes
-                // straight through. Three bytes is enough for `ESC c`.
+                // Sanitised: a language tag is raw MPLS/IFO bytes going to a
+                // real terminal, and unlike `print_stream_info`, this path
+                // didn't sanitise it — `ESC c` fits in 3 bytes.
                 .filter_map(|s| match s {
                     libfreemkv::Stream::Audio(a) if !a.language.is_empty() => {
                         Some(crate::disc_info::sanitize(&a.language))
@@ -570,7 +553,7 @@ fn parse_stream_spec(spec: &str) -> freemkv_engine::StreamFilter {
 /// sources and hands it to `Disc::decrypt_with`. When both `--keydb` and
 /// `--key-url` are given, the keydb is consulted first (local-first), so an
 /// offline hit never makes a key-service round-trip. Passing `--key-url` alone
-/// bypasses the keydb entirely. See [`build_key_sources`] for the full
+/// bypasses the keydb entirely. See [`build_key_sources_quiet`] for the full
 /// source-list policy.
 #[derive(Default, Debug, Clone)]
 pub struct KeyConfig {
@@ -602,10 +585,9 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            // `--log-level N` sets the tracing level (main::init_logging); here
-            // it widens prose detail at level >= 2. VAL-1: reject a non-numeric
-            // or out-of-range value with a clean localized error rather than
-            // silently ignoring it and leaving the user without a log file.
+            // `--log-level N` sets the tracing level; widens prose detail at
+            // level >= 2. VAL-1: reject a bad value with a clean localized
+            // error rather than silently leaving the user without a log file.
             "--log-level" => {
                 match args.get(i + 1) {
                     // `is_flag_token` lets `-1` through, so an out-of-range
@@ -633,13 +615,8 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
             // here so the path isn't mistaken for a positional / unknown flag.
             "--log-file" => {
                 // Not a positional URL, and not another flag. Guarding on
-                // `is_url_token` alone meant `--log-file --raw` consumed the
-                // `--raw` here, so the rip silently ran WITHOUT it and wrote a
-                // decrypted image; `--log-file --multipass` likewise lost
-                // multipass and single-passed a damaged disc while reporting
-                // success. `cli_entry::parse_logging_flags` guards its own copy
-                // of these two arms — this is the second parser, and a fix
-                // applied to only one of them is why the hole survived twice.
+                // `is_url_token` alone meant `--log-file --raw` consumed
+                // `--raw`, silently dropping it and writing a decrypted image.
                 if args
                     .get(i + 1)
                     .is_some_and(|p| !is_url_token(p) && !crate::cli_entry::is_flag_token(p))
@@ -659,12 +636,9 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                         i += 1;
                         f.all_titles = true;
                     }
-                    // Not a positional URL, and not another flag: `-t --raw`
-                    // used to consume the `--raw` and then reject it as an
-                    // invalid title, which at least errored — but `-t --force`
-                    // would swallow a flag the parser needed. See
-                    // `cli_entry::is_flag_token`, which lets `-1` through so a
-                    // negative number still reaches the range check below.
+                    // Not a positional URL, and not another flag: `-t --force`
+                    // used to swallow a flag. `is_flag_token` lets `-1` through
+                    // so a negative number still reaches the range check below.
                     Some(v) if !is_url_token(v) && !crate::cli_entry::is_flag_token(v) => {
                         i += 1;
                         match v.parse::<usize>() {
@@ -736,14 +710,9 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                     }
                 }
             }
-            // `--key-url URL` enables the online key service. The URL must not be
-            // a positional stream URL token (`scheme://...` other than http(s)) —
-            // but a key-service URL IS `https://…`, which `is_url_token` matches
-            // on "://". So accept it on its own merit: require an http(s) scheme
-            // here, and reject a missing value (next token is a flag, or absent).
-            // VAL-2: a non-http(s) URL (e.g. ftp://) gets its own clear error
-            // rather than the confusing "requires a value" message, since the
-            // user DID provide a value — it just has the wrong scheme.
+            // `--key-url URL`: a key-service URL IS `https://…`, which
+            // `is_url_token` also matches, so require http(s) directly instead
+            // of excluding URL tokens. VAL-2: non-http(s) gets its own error.
             "--key-url" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
@@ -752,13 +721,9 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                         f.key_url = Some(u.clone());
                     }
                     Some(u) if u.contains("://") && !is_keyserver_url(u) => {
-                        // Has a scheme but it is NOT an http(s) key-service URL
-                        // (e.g. `ftp://…`, or a stream scheme like `disc://`).
-                        // The user DID supply a value — it just has the wrong
-                        // scheme — so give the clear bad-scheme error instead of
-                        // the misleading "requires a value". (`is_url_token` is
-                        // exactly `contains("://")`, so the old guard was `A && !A`
-                        // — dead code; key on the keyserver-scheme check instead.)
+                        // Has a scheme but not http(s) (`ftp://…`, `disc://…`):
+                        // give the clear bad-scheme error instead of the
+                        // misleading "requires a value" (the old `A && !A` guard).
                         return Err(strings::fmt("error.key_url_bad_scheme", &[("value", u)]));
                     }
                     _ => {
@@ -791,10 +756,8 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                 }
             }
             // An unrecognized dash-prefixed token is a typo (`--titel`,
-            // `--qiet`), not something to silently ignore — the default would
-            // be used and the rip would exit 0 having done the wrong thing.
-            // Reject it. Bare `-` and non-dash positionals (URLs) are left for
-            // the caller to interpret.
+            // `--qiet`), not something to silently ignore. Bare `-` and
+            // non-dash positionals (URLs) are left for the caller to interpret.
             other if other.starts_with('-') && other != "-" => {
                 return Err(strings::fmt("error.unknown_flag", &[("flag", &args[i])]));
             }
@@ -802,10 +765,8 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
         }
         i += 1;
     }
-    // Dedup repeated `-t` values: `-t 1 -t 1` is a no-op, not a double rip of
-    // the same title (which would otherwise route into the multi-title branch
-    // and produce two jobs that overwrite the same file). Sort so the rip order
-    // is deterministic regardless of flag order.
+    // Dedup repeated `-t` values: `-t 1 -t 1` is a no-op, not a double rip
+    // (two jobs overwriting the same file). Sort for deterministic rip order.
     f.title_nums.sort_unstable();
     f.title_nums.dedup();
     Ok(f)
@@ -847,13 +808,9 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // no flags reads as "no selection". `-t all` (all_titles) counts as explicit.
     let selection_flags_used = stream_sel_active || !title_nums.is_empty() || all_titles;
 
-    // `-t` DEFAULT (1.6.0): with no `-t N` and no `-t all`, rip the MAIN TITLE
-    // only (title 1). Pre-1.6 the empty case meant all-titles, which on an
-    // obfuscated disc (50+ near-equal-length playlists) rips everything — a
-    // 40 GB disc became ~200 GB of near-duplicate MKVs. `-t all` restores the
-    // all-titles behaviour explicitly. Normalizing to `[1]` here reuses the
-    // existing single-`-t 1` path in build_jobs unchanged; `-t all` leaves
-    // title_nums empty, which build_jobs already treats as all-titles.
+    // `-t` DEFAULT (1.6.0): with no `-t N`/`-t all`, rip the MAIN TITLE only.
+    // Pre-1.6 the empty case meant all-titles, which on an obfuscated disc
+    // (50+ near-equal playlists) turned a 40 GB disc into ~200 GB of duplicates.
     normalize_title_nums(&mut title_nums, all_titles);
 
     let keys = KeyConfig {
@@ -865,10 +822,9 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     let parsed_source = libfreemkv::parse_url(source);
     let parsed_dest = libfreemkv::parse_url(dest);
 
-    // When the destination is `stdio://`, stdout IS the ripped byte stream, so
-    // every human-facing line must go to stderr — otherwise the banner and
-    // progress corrupt the piped output. (Progress already writes to stderr; this
-    // routes the Output sink too.)
+    // When the destination is `stdio://`, stdout IS the ripped byte stream,
+    // so every human-facing line must go to stderr, or the banner and
+    // progress corrupt the piped output.
     let mut out = Output::new(verbose, quiet);
     if matches!(parsed_dest, libfreemkv::StreamUrl::Stdio) {
         out = out.to_stderr();
@@ -877,12 +833,9 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
     out.blank(Normal);
 
-    // Fail loud and EARLY: validate the whole invocation (URL schemes, ISO-only
-    // flags, source reachability, dest writability) BEFORE any drive open, scan,
-    // or file creation. On any error this prints one clear message and returns
-    // false (→ nonzero exit), so no partial output is ever produced. Each
-    // individual check is small and unit-tested; this is the single entry point
-    // that orders them.
+    // Fail loud and EARLY: validate the whole invocation before any drive
+    // open, scan, or file creation, so no partial output is ever produced.
+    // Each check is small and unit-tested; this is the single entry point.
     if let Err(msg) = preflight_validate(
         source,
         dest,
@@ -914,11 +867,9 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         return image_to_iso(source, dest, &keys, &out);
     }
 
-    // Disc / ISO → dir://: decrypted file-tree extraction (Disc::extract_tree,
-    // not a stream). Placed BEFORE the generic mux path: a `dir://` dest with a
-    // disc-source input never flows through the PES/mux highway. Byte-stream
-    // sources, `--raw`, and `--multipass` are already rejected by
-    // `preflight_validate` above, so reaching here means the source is a disc.
+    // Disc / ISO → dir://: decrypted file-tree extraction, not a stream.
+    // Placed before the generic mux path. Byte-stream sources, `--raw`, and
+    // `--multipass` are already rejected above, so the source here is a disc.
     if matches!(parsed_dest, libfreemkv::StreamUrl::Dir { .. }) {
         return dir_to_extract(source, dest, &keys, &parsed_source, force, &out);
     }
@@ -927,53 +878,22 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // For disc with explicit -t, skip the upfront ISO scan (pipe_disc scans itself)
     let is_disc = matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. });
 
-    // `--multipass` (and `--raw`) on a non-iso:// destination is rejected up
-    // front by `preflight_validate` (iso://-only flags). The old silent
-    // warn-and-ignore here is gone: reaching this point with `multipass` set
-    // means the destination IS iso:// (handled by the disc_to_iso branch above)
-    // or it's a non-disc source where multipass never applied. No action needed.
-    // For a disc source we skip the upfront `scan_iso` (pipe_disc does its
-    // own scan per title); we still need to honor MULTIPLE `-t` flags, so build
-    // jobs straight from `title_nums` rather than collapsing to a single title.
-    // Scan the ISO structure ONCE (keyless) and share it: titles here, unit keys
-    // below (`resolve_iso_unit_keys`). A disc source scans per-title in `pipe_disc`.
+    // `--multipass`/`--raw` on a non-iso:// dest is already rejected by
+    // `preflight_validate`. A disc source skips the upfront `scan_iso` but
+    // still honors multiple `-t` flags, building jobs from `title_nums`.
     let iso_disc = if is_disc { None } else { scan_iso(source) };
     let titles = iso_disc.as_ref().map(|(d, _)| d.titles.clone());
     let is_dir_dest = dest_is_directory(dest, &parsed_dest);
 
-    // Resolve the per-title indices we will rip. For a scanned source this comes
-    // from its title list; for a disc source it comes straight from `title_nums`.
-    // Returns None after printing a directory-creation error, in which case we
-    // abort with a non-zero exit.
-    //
-    // `-t all` on a DISC needs a title count, and the disc path deliberately
-    // skips the upfront `scan_iso`. So scan once here to learn it and expand
-    // into an explicit list, which drops straight into the existing
-    // multi-title disc arm. The extra open is not a new risk: `pipe_disc`
-    // already opens per title (so this is N+1 of a pattern that ships), and
-    // the desktop app has always scanned up front, dropped the session, and
-    // reopened per title.
-    //
-    // That upfront scan is also the ONLY record of what each expanded index
-    // meant. `pipe_disc` re-scans the drive per title, and an index carries no
-    // proof that the second scan lists the same titles in the same order — so
-    // keep each selected title's IDENTITY here and hand it to `pipe_disc`,
-    // which fails loudly if the title at that index is no longer the one this
-    // job was built for. Empty when there was no upfront scan (an explicit
-    // `-t N` scans exactly once, so there is nothing to disagree with).
+    // Resolve the per-title indices to rip (None means a dir-creation error
+    // was printed; abort). `-t all` on a DISC scans once to learn the title
+    // count and carries each title's IDENTITY for `pipe_disc`'s re-scan to check.
     let (title_nums, disc_identities) = if is_disc && all_titles {
         match resolve_disc_all_titles(&title_nums, disc_title_identities(source, &keys, &out)) {
             Some(pair) => pair,
-            // The upfront scan FAILED, and `-t all` cannot proceed without it:
-            // it is the only thing that knows how many titles the disc has. The
-            // old code mapped this to `(title_nums, Vec::new())` with
-            // `title_nums` still EMPTY (that is what `-t all` means), so
-            // `build_jobs` below fell to its single-title catch-all and
-            // `pipe_disc` ripped title 1 and exited 0 — the exact "one job,
-            // title 1, rc 0" defect `disc_title_nums` documents as fixed,
-            // resurrected on the scan-failure path. The claim that "the normal
-            // per-title path reports it" was false: nothing downstream knows
-            // `-t all` was ever requested, so nothing complains. Fail LOUDLY.
+            // The upfront scan FAILED, and `-t all` cannot proceed without it.
+            // The old code left `title_nums` empty, so `pipe_disc` ripped
+            // title 1 and exited 0, unaware `-t all` was requested. Fail LOUDLY.
             None => {
                 out.raw(
                     Normal,
@@ -1032,25 +952,17 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     };
 
     // Fresh-key-on-failure factory for the ISO mux: when an online key service
-    // is configured, a unit no upfront key decrypts is re-tried by forwarding
-    // that ciphertext to the service. `None` (no `--key-url`) keeps the prior
-    // behaviour. Built once; cheap `Arc` clone per title below.
+    // is configured, a unit no upfront key decrypts is re-tried against it.
+    // `None` (no `--key-url`) keeps the prior behaviour.
     let iso_key_fetch = if is_disc {
         None
     } else {
         build_iso_key_fetch(source, &keys)
     };
 
-    // When the rip covers MORE THAN ONE title and the user did NOT name a
-    // specific title (`-t N`), an incidental extra title that turns out to be
-    // copy-protected-but-uncrackable (a 0.5 s menu stub, an FBI-warning loop,
-    // any tiny CSS-locked nav title) must NOT abort the whole rip. We skip it
-    // with a warning and keep muxing the rest. See `is_title_failure_fatal`.
-    // `-t all` asks for everything, which is NOT the same as naming titles: an
-    // uncrackable menu stub must still be skipped, exactly as it is for an ISO
-    // source (where `-t all` leaves `title_nums` empty). Without the
-    // `!all_titles` term, expanding `-t all` into a title list below would make
-    // the first stub abort the entire rip.
+    // A multi-title rip with no specific title named must skip an uncrackable
+    // incidental title (menu stub) rather than abort. `-t all` isn't the same
+    // as naming titles, so `!all_titles` keeps a stub from aborting it.
     let (multi_title, explicit_selection) = title_policy(jobs.len(), &title_nums, all_titles);
 
     for (title_idx, dest_url) in &jobs {
@@ -1072,9 +984,8 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                     )
                 );
                 // An explicitly-requested out-of-range title is a hard failure,
-                // not a warning-and-carry-on: without this the CLI would exit 0
-                // despite ripping nothing for the requested title. (The disc
-                // path enforces the same via pipe_disc returning Err.)
+                // not a warning-and-carry-on, or the CLI would exit 0 despite
+                // ripping nothing for the requested title.
                 ok = false;
                 continue;
             }
@@ -1108,9 +1019,8 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
             )
         } else {
             // Non-disc (ISO): translate the -a/-s language policy into PIDs
-            // against THIS scanned title, then hand it in with the unit keys.
-            // A bad language tag (typo) fails the whole rip — it would fail
-            // every title identically.
+            // against THIS scanned title. A typo'd language tag fails the
+            // whole rip, since it would fail every title identically.
             let selection = match (&titles, title_idx) {
                 (Some(t), Some(idx)) if stream_sel_active => match streams.resolve(&t[*idx]) {
                     Ok(sel) => {
@@ -1155,10 +1065,8 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
             ) {
                 freemkv_engine::TitleAction::Skip => {
                     // An incidental extra title in an all-titles rip is a stub
-                    // (copy-protected-but-uncrackable E7023, or empty/no muxable
-                    // frames E6008). Skip it with a clear, non-error notice and
-                    // keep muxing the rest — the command can still exit 0. The
-                    // E6008-vs-other distinction only picks the notice flavor.
+                    // (E7023 uncrackable, or E6008 empty). Skip with a clear
+                    // notice and keep muxing the rest so the command can exit 0.
                     let num = title_idx.map(|i| i + 1).unwrap_or(0);
                     let key = match parse_error_code(&e.display) {
                         Some(("E6008", _)) => "rip.title_skipped_empty",
@@ -1182,10 +1090,8 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                     break;
                 }
                 freemkv_engine::TitleAction::StopFatal => {
-                    // The title the user actually wants (a `-t N` selection, or
-                    // the main feature) failed hard. Print it and fail the
-                    // command, but keep the loop shape identical to before for a
-                    // multi-title rip where a LATER wanted title might differ.
+                    // The title the user actually wants failed hard. Print and
+                    // fail, but keep looping in case a later wanted title differs.
                     out.raw(Normal, &render_error(&e.display));
                     ok = false;
                 }
@@ -1246,10 +1152,9 @@ fn preflight_validate(
     force: bool,
     selection_flags_used: bool,
 ) -> Result<(), String> {
-    // 1a. Destination must have a recognized scheme. A schemeless dest
-    // (`out.mkv`, `/path/out.mkv`) parses as Unknown — guide the user to add a
-    // scheme rather than later failing with a cryptic StreamUrlInvalid or
-    // writing `name_t1.unknown`.
+    // 1a. Destination must have a recognized scheme. A schemeless dest parses
+    // as Unknown — guide the user rather than failing later with a cryptic
+    // StreamUrlInvalid or writing `name_t1.unknown`.
     if matches!(parsed_dest, libfreemkv::StreamUrl::Unknown { .. }) {
         return Err(strings::fmt("error.dest_needs_scheme", &[("dest", dest)]));
     }
@@ -1262,11 +1167,9 @@ fn preflight_validate(
         ));
     }
 
-    // 1c. Title/stream selection (`-t` / `-a` / `-s`) applies only to a source
-    // that is scanned into a title list — disc:// or iso://. A stream/file
-    // source (mkv://, m2ts://, network://, stdio://) is remuxed as one opaque
-    // stream: it has no title list and no per-stream language/PID map, so the
-    // flags cannot be honored. Fail loud rather than silently ignore them.
+    // 1c. Title/stream selection (`-t`/`-a`/`-s`) applies only to a scanned
+    // source (disc:// or iso://); a stream/file source has no title list or
+    // per-stream map to honor the flags against. Fail loud, don't ignore them.
     if selection_flags_used && !parsed_source.is_disc_source() {
         return Err(strings::fmt(
             "error.selection_disc_only",
@@ -1274,24 +1177,9 @@ fn preflight_validate(
         ));
     }
 
-    // 2. `--raw` and `--multipass` need BOTH a drive source and an image
-    // destination, and the two halves fail for different reasons.
-    //
-    // Destination: both flags write or recover a raw sector image, which only an
-    // `iso://` destination can receive.
-    //
-    // Source: both are DRIVE semantics — `--multipass` is sweep-then-retry
-    // against a drive's read errors, `--raw` says don't decrypt the sectors
-    // coming off the disc. Neither means anything without a drive.
-    //
-    // The source half used to be implied by the destination half, because an
-    // `iso://` destination was reachable only from `disc://`. Now that any image
-    // source can write an `iso://`, that coincidence is gone and the source must
-    // be checked on its own — otherwise `iso://in.iso iso://out.iso --multipass`
-    // reaches a path with no drive and no bad sectors to retry.
-    //
-    // Check raw before multipass in each half, so the message names the actual
-    // offending flag.
+    // 2. `--raw`/`--multipass` need BOTH a drive source and an `iso://` dest;
+    // the source half used to be implied by the dest half (iso:// was only
+    // reachable from disc://), but any image source can write iso:// now too.
     if !matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. }) {
         if raw {
             return Err(strings::fmt("error.raw_iso_only", &[("dest", dest)]));
@@ -1311,11 +1199,9 @@ fn preflight_validate(
         }
     }
 
-    // 2b. `dir://` (decrypted file-tree extraction) gates. A `dir://` output
-    // needs a filesystem source (disc:// or iso://) — a byte-stream source
-    // (mkv://, m2ts://, network://, stdio://) has no UDF tree, so reject it up
-    // front. (`--raw` / `--multipass` are already rejected by step 2, since
-    // `dir://` is not `iso://`.) Writability/non-empty are checked in step 4.
+    // 2b. `dir://` output needs a filesystem source (disc:// or iso://); a
+    // byte-stream source has no UDF tree, so reject it up front. Writability
+    // and non-empty are checked in step 4.
     if matches!(parsed_dest, libfreemkv::StreamUrl::Dir { .. }) && !parsed_source.is_disc_source() {
         return Err(strings::fmt(
             "error.dir_source_unsupported",
@@ -1338,50 +1224,27 @@ fn preflight_validate(
         libfreemkv::StreamUrl::Iso { path } => {
             validate_iso_input(path)?;
         }
-        // A dir:// SOURCE is checked here for the same reason an iso:// one is.
-        // Without it a bad folder path reached the open, which printed
-        // "Opening dir://...OK" and only then failed with a bare OS error — the
-        // line said OK about something that had not opened. The exit code was
-        // right; the message was not.
+        // A dir:// SOURCE is checked here for the same reason an iso:// one
+        // is: without it a bad folder path printed "Opening dir://...OK" and
+        // only then failed with a bare OS error — right exit code, wrong message.
         libfreemkv::StreamUrl::Dir { path } => {
             validate_dir_input(path)?;
         }
         _ => {}
     }
 
-    // 4. The destination must not BE the source.
-    //
-    // Every sink opens its file with `File::create`, which TRUNCATES —
-    // `mux_stream` → `drive_mux` → `output()` → `WritebackFile::
-    // create_with_size_hint` for the container sinks, `write_image` for
-    // `iso://`. The source is still open and still being read when that
-    // happens, so `freemkv mkv://Movie.mkv mkv://Movie.mkv` wrote a partial
-    // re-mux over the user's only copy: measured pre-fix, a 7.9 MB MKV came
-    // back 4.2 MB with the CLI blaming the file ("malformed or truncated"), a
-    // 50 MB M2TS came back 21 MB while reporting "Complete", and an MP4 was
-    // replaced by 12 MB of preallocated zeroes.
-    //
-    // Round 3 fixed exactly this for `iso://X iso://X` inside `image_to_iso`,
-    // but that is one path out of many and its `source_path_of` saw only
-    // `Iso`/`Dir`. The check belongs HERE: this gate is the one place that runs
-    // before any drive open, scan or file creation, so the refusal lands before
-    // anything is opened for writing, and it covers every scheme pairing at
-    // once — same-scheme (`mkv://X mkv://X`) and cross-scheme
-    // (`iso://X.iso json://X.iso`) alike. `image_to_iso` keeps its own copy of
-    // the guard as a second line of defence.
-    //
-    // Compared by filesystem identity, not by string: `./Movie.mkv`,
-    // `Movie.mkv`, `sub/../Movie.mkv`, a symlink and a hardlink are one file.
+    // 4. The destination must not BE the source: every sink truncates via
+    // `File::create` while the source is still open, wiping the only copy
+    // in-place. Compared by filesystem identity, before any drive/file open.
     if let Some(dest_path) = url_path_of(parsed_dest)
         && same_file(url_path_of(parsed_source).as_deref(), &dest_path)
     {
         return Err(strings::get("error.dest_is_source"));
     }
 
-    // 5. Destination writability for a single-file output. Directory dests and
-    // scheme-only sinks (null://, stdio://, network://) are not pre-checked here:
-    // a directory dest is created on demand by `dir_jobs` (which reports its own
-    // error), and the sinks have no filesystem path to validate.
+    // 5. Destination writability for a single-file output. Directory dests
+    // (created on demand by `dir_jobs`) and scheme-only sinks (no fs path)
+    // are not pre-checked here.
     match parsed_dest {
         libfreemkv::StreamUrl::Mkv { path }
         | libfreemkv::StreamUrl::Mp4 { path }
@@ -1427,10 +1290,9 @@ fn validate_dir_dest(path: &std::path::Path, dest: &str, force: bool) -> Result<
             &[("path", &path.display().to_string())],
         ));
     }
-    // Side-effect-free preflight: do NOT create the directory here. The write
-    // path (`dir_jobs`) does `create_dir_all` and fails fast with a clear message
-    // if it can't, so creating it here only risks leaving a stray empty dir when a
-    // later step fails. A missing dir reads as empty below (created at write time).
+    // Side-effect-free preflight: don't create the directory here. `dir_jobs`
+    // does `create_dir_all` at write time, so creating it here only risks a
+    // stray empty dir if a later step fails. A missing dir reads as empty below.
     if !force {
         let non_empty = std::fs::read_dir(path)
             .map(|mut it| it.next().is_some())
@@ -1445,10 +1307,6 @@ fn validate_dir_dest(path: &std::path::Path, dest: &str, force: bool) -> Result<
     Ok(())
 }
 
-/// Validate an `iso://` input path: must exist, be a regular file (not a
-/// directory), and be non-empty. A deeper "is it a real disc image?" probe is
-/// the scan's job; this catches the instant mistakes (typo'd path, a directory,
-/// a 0-byte stub) before any scan work.
 /// Validate a `dir://` SOURCE: it must exist, be readable, and be a directory.
 ///
 /// The mirror of [`validate_iso_input`]. `dir://` became a first-class input in
@@ -1483,6 +1341,10 @@ fn validate_dir_input(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate an `iso://` input path: must exist, be a regular file (not a
+/// directory), and be non-empty. A deeper "is it a real disc image?" probe is
+/// the scan's job; this catches the instant mistakes (typo'd path, a directory,
+/// a 0-byte stub) before any scan work.
 fn validate_iso_input(path: &std::path::Path) -> Result<(), String> {
     let md = match std::fs::metadata(path) {
         Ok(m) => m,
@@ -1553,11 +1415,9 @@ fn validate_file_dest(path: &std::path::Path) -> Result<(), String> {
             &[("path", &parent.display().to_string())],
         ));
     }
-    // Writability probe: try to create (then remove) the target. This is the
-    // honest test — directory write/exec permission, a read-only filesystem, an
-    // existing read-only file all surface here. We only probe when the target
-    // does not already exist (so we never truncate a real prior output during a
-    // dry validation); if it exists, we check it's writable via its metadata.
+    // Writability probe: try to create (then remove) the target — the honest
+    // test for permissions/read-only filesystems. Only probe when the target
+    // doesn't exist yet, so we never truncate real prior output during a dry check.
     if path.exists() {
         match std::fs::OpenOptions::new().append(true).open(path) {
             Ok(_) => {}
@@ -1596,18 +1456,6 @@ fn validate_file_dest(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Build the `(title_index, dest_url)` job list.
-///
-/// - Scanned source (ISO, etc.) with a title list: select the requested titles
-///   (or all, when none given); one file when a single title goes to a file,
-///   else one file per title in a directory.
-/// - Disc source: there is no upfront title list, so build straight from
-///   `title_nums`. Multiple `-t` flags each get their own job (writing to a
-///   directory when more than one is selected) instead of silently dropping all
-///   but the first. Empty `title_nums` is the single all-titles pass.
-///
-/// Returns `None` (after printing the error) if a needed output directory can't
-/// be created, so the caller can exit non-zero.
 /// The titles this disc has, for expanding `-t all` — one [`TitleIdentity`] per
 /// title, in scan order, so the count is `len()` and index `i` carries the
 /// identity of the title `-t {i+1}` was expanded from.
@@ -1682,6 +1530,18 @@ fn resolve_disc_all_titles(
     Some((disc_title_nums(true, requested, ids.len()), ids))
 }
 
+/// Build the `(title_index, dest_url)` job list.
+///
+/// - Scanned source (ISO, etc.) with a title list: select the requested titles
+///   (or all, when none given); one file when a single title goes to a file,
+///   else one file per title in a directory.
+/// - Disc source: there is no upfront title list, so build straight from
+///   `title_nums`. Multiple `-t` flags each get their own job (writing to a
+///   directory when more than one is selected) instead of silently dropping all
+///   but the first. Empty `title_nums` is the single all-titles pass.
+///
+/// Returns `None` (after printing the error) if a needed output directory can't
+/// be created, so the caller can exit non-zero.
 fn build_jobs(
     titles: &Option<Vec<libfreemkv::DiscTitle>>,
     is_disc: bool,
@@ -1697,9 +1557,8 @@ fn build_jobs(
         let ext = parsed_dest.scheme();
         let dest_dir = std::path::Path::new(parsed_dest.path_str());
         // Fail fast with one clear message if the output directory can't be
-        // created (permissions, a file at that path, NFS stale handle).
-        // Swallowing it here makes every per-title `output()` fail later with a
-        // cryptic StreamUrlInvalid/IO error.
+        // created; swallowing it here makes every per-title `output()` fail
+        // later with a cryptic StreamUrlInvalid/IO error instead.
         if let Err(e) = std::fs::create_dir_all(dest_dir) {
             out.raw(
                 Normal,
@@ -1725,14 +1584,9 @@ fn build_jobs(
         )
     };
 
-    // A scheme-only sink (null://, stdio://) has NO filesystem path, so it can
-    // never receive per-title file naming. Multiple selected titles all route to
-    // the SAME sink URL (each title decoded then discarded / streamed in turn).
-    // Without this, the multi-title branches below call `dir_jobs`, which derives
-    // an invalid `null://disc_t1.null` (a path on a scheme that must be empty) —
-    // `parse_url` then rejects it (Unknown) and `output()` errors, so `null://`
-    // wrongly failed on any multi-title source. `sink_jobs` maps each selected
-    // index to the bare sink URL instead.
+    // A scheme-only sink (null://, stdio://) has no filesystem path, so it
+    // can never get per-title naming; all titles route to the SAME sink URL.
+    // Without this, `dir_jobs` derives an invalid path and `null://` wrongly fails.
     let sink_jobs = |indices: &[usize]| -> Option<Vec<(Option<usize>, String)>> {
         Some(
             indices
@@ -1742,22 +1596,17 @@ fn build_jobs(
         )
     };
 
-    // `demux://` is a directory-target sink that fans each title's tracks out to
-    // ES files INSIDE the directory (the sink does its own per-track naming).
-    // A single title writes straight into `demux://<dir>/`; multiple titles each
-    // get their own `demux://<dir>/t<NN>/` subdirectory so their files don't
-    // collide. (Unlike `dir_jobs`, we never append a `.demux` filename — the
-    // path stays a directory.)
+    // `demux://` is a directory-target sink that fans each title's tracks out
+    // to ES files inside it. A single title writes straight into
+    // `demux://<dir>/`; multiple get their own `demux://<dir>/t<NN>/` subdir.
     let demux_jobs = |indices: &[usize], base_dir: &str| -> Vec<(Option<usize>, String)> {
         if indices.len() == 1 {
             return vec![(Some(indices[0]), dest.to_string())];
         }
         let trimmed = base_dir.trim_end_matches('/');
-        // Re-prefix the ORIGINAL scheme (`demux`/`video`/`audio`/`sub`): `base_dir`
-        // came from `path_str()` (scheme stripped), so a bare `out/t02/` would be
-        // rejected by `parse_url` as Unknown. Hardcoding `demux://` here would drop
-        // the kind filter and dump every track for a multi-title `video/audio/sub`
-        // rip — so carry the sink's own scheme through.
+        // Re-prefix the ORIGINAL scheme (`demux`/`video`/`audio`/`sub`):
+        // `base_dir` has the scheme stripped, so hardcoding `demux://` would
+        // drop the kind filter and dump every track for a `video/audio/sub` rip.
         let scheme = parsed_dest.scheme();
         indices
             .iter()
@@ -1822,10 +1671,8 @@ fn build_jobs(
                 return Some(demux_jobs(&indices, &demux_dir));
             }
             // A single-file dest can't hold multiple titles: `dir_jobs` would
-            // `create_dir_all` it, silently turning `movie.mkv` into a directory.
-            // Mirror the scanned-source guard above and reject up front. (The
-            // scanned branch falls through to per-title-in-a-dir only when the
-            // dest IS a directory; the disc branch must do the same.)
+            // silently turn `movie.mkv` into a directory. Mirror the
+            // scanned-source guard above and reject up front.
             if !is_dir_dest {
                 out.raw(
                     Normal,
@@ -1850,7 +1697,7 @@ fn build_jobs(
 /// Disc source: one open, one scan, one stream. No double init.
 /// ScanOptions for a keyless structure scan — libfreemkv captures structure +
 /// AACS inputs but resolves no key. The CLI resolves the key afterward from the
-/// local keydb (see [`apply_local_key`]).
+/// local keydb (see [`resolve_disc_keys`]).
 fn keyless_scan_opts() -> libfreemkv::ScanOptions {
     libfreemkv::ScanOptions::default()
 }
@@ -1915,16 +1762,9 @@ pub(crate) fn resolve_info_keys(
 /// in `resolve_iso_unit_keys`. `None` for a non-iso source or an unreadable
 /// image.
 fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>)> {
-    // `dir://` is an image-level source too: libfreemkv::scan_dir synthesizes a
-    // UDF volume over the folder and returns the same (Disc, SectorSource) pair
-    // scan_iso does. Without this arm every caller that opens a source "as an
-    // image" silently rejected folders — `dir://` -> `iso://` reported
-    // error.iso_unreadable, and `dir://` -> `dir://` could not re-extract,
-    // while `dir://` -> `mkv://` worked. A sink is a sink: any input has to
-    // work with any output, and this helper was where that broke.
-    //
-    // scan_dir additionally decides the encryption verdict from CONTENT rather
-    // than from whether an AACS/ directory survived the copy.
+    // `dir://` is an image-level source too: `scan_dir` synthesizes a UDF
+    // volume and returns the same pair `scan_iso` does. Without this arm,
+    // opening a source "as an image" silently rejected folders.
     match libfreemkv::parse_url(source) {
         libfreemkv::StreamUrl::Iso { path } => {
             libfreemkv::scan_iso(std::path::Path::new(&path), keyless_scan_opts()).ok()
@@ -1977,12 +1817,9 @@ fn build_iso_key_fetch(source: &str, keys: &KeyConfig) -> Option<libfreemkv::sec
         return None;
     }
     let auth = keys.key_auth.clone().unwrap_or_default();
-    // Iso AND Dir. A folder is an image-level source, so its AACS inputs come
-    // off exactly the same reader path. Matching only `Iso` here meant the
-    // online key fetch was silently unavailable for `dir://`: the same disc
-    // that fetched its key fine as an ISO failed as an extracted folder, on a
-    // key it could have retrieved. A sink is a sink — that has to include the
-    // key path, not just the data path.
+    // Iso AND Dir: a folder is an image-level source with the same AACS
+    // inputs. Matching only `Iso` silently disabled online key fetch for
+    // `dir://` even when the same disc's key was retrievable as an ISO.
     let (path, from_dir) = match libfreemkv::parse_url(source) {
         libfreemkv::StreamUrl::Iso { path } => (path, false),
         libfreemkv::StreamUrl::Dir { path } => (path, true),
@@ -2010,10 +1847,9 @@ fn build_iso_key_fetch(source: &str, keys: &KeyConfig) -> Option<libfreemkv::sec
         samples: Vec::new(),
         volume_label: None,
     };
-    // Zero duplicated fetch logic: the lib's `key_fetch` owns the
-    // build-inputs-with-samples → ask-sources → return-keys flow. The CLI only
-    // supplies the disc inputs and a way to (re)build its key source (the
-    // `--key-url` OnlineSource).
+    // Zero duplicated fetch logic: the lib's `key_fetch` owns the full flow.
+    // The CLI only supplies the disc inputs and a way to rebuild its key
+    // source (the `--key-url` OnlineSource).
     let make_sources: std::sync::Arc<
         dyn Fn() -> Vec<Box<dyn libfreemkv::keysource::KeySource>> + Send + Sync,
     > = std::sync::Arc::new(move || {
@@ -2056,7 +1892,7 @@ pub(crate) fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::Pat
 /// build used inside the [`libfreemkv::KeySourceFactory`] closure, which is
 /// invoked repeatedly (per on-decrypt-miss fetch) and must not re-warn. An
 /// SSRF-rejected `--key-url` is silently dropped here; the visible warning is
-/// emitted ONCE up front by [`build_key_sources`] / [`key_source_factory`].
+/// emitted ONCE up front by [`build_key_sources_quiet`] / [`key_source_factory`].
 fn build_key_sources_quiet(keys: &KeyConfig) -> Vec<Box<dyn freemkv_keysources::KeySource>> {
     freemkv_engine::key_sources(&key_params(keys))
 }
@@ -2218,21 +2054,9 @@ fn pipe_disc(
     };
 
     out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", source)]));
-    // Drive open + SCSI bring-up (wait_ready/init/probe_disc, all advisory) now
-    // lives in `DiscSession::open`; the AACS host creds ride in on the KeySpec
-    // instead of being pre-baked into ScanOptions. The advisory wait_ready/init
-    // failures that `debug_drive_step` used to print to stderr are now logged via
-    // the library's tracing (semantics — non-fatal — unchanged).
-    // Drive bring-up (open + lock-tray + scan + resolve keys) is the SHARED
-    // optical core in `freemkv_engine::open_scan_resolve` — the desktop GUI
-    // calls the exact same function, so the two shells cannot diverge. The tray
-    // unlock is still guaranteed by `Drive::drop` (via the session/DiscStream)
-    // on every return path below. The CLI keeps its own presentation: the
-    // key-source factory (which logs each source attempt through `out`), the
-    // dedicated "no drive" message on an empty-path autodetect, and the
-    // resolution-trace render. Any error surfaces through the same PipeFail —
-    // only open produces an empty-path DeviceNotFound, so folding the three
-    // map_errs into one is behaviourally identical.
+    // Drive bring-up (open + lock-tray + scan + resolve keys) is the shared
+    // optical core in `freemkv_engine::open_scan_resolve`, also used by the
+    // desktop GUI. Tray unlock is guaranteed by `Drive::drop`; CLI keeps only presentation.
     let (mut session, trace) = freemkv_engine::open_scan_resolve(
         target,
         drive_credentials(keys.keydb_path()),
@@ -2248,24 +2072,16 @@ fn pipe_disc(
     })?;
     emit_resolution_trace(out, &trace);
     // ── Pre-flight validation (borrows the scanned disc; no drive I/O) ──
-    //
-    // The session is KEPT intact so `mux_stream(MuxInput::Session)` can take its
-    // staged reader. Range-check + the decrypt gates run against the scanned
-    // `disc` by immutable borrow.
+    // The session is kept intact so `mux_stream(MuxInput::Session)` can take
+    // its staged reader; range-check and decrypt gates borrow `disc` immutably.
     let batch = libfreemkv::disc::detect_max_batch_sectors(session.device_path());
     // Resolved -a/-s PID selection for this title (default = keep all).
     let mut selection = libfreemkv::StreamSelection::default();
     {
         let disc = session.disc().expect("scan populated the disc");
-        // The SAME range rule the scanned-source path in `run()` applies, plus
-        // the identity rule — both live in `resolve_scanned_title`, not in a
-        // second hand-rolled copy here. The range rule used to be spelled out
-        // inline, and inverted it does not merely reject a good title:
-        // `disc.titles[title_idx]` is indexed below, so an out-of-range index
-        // panics the rip on a live drive. The identity rule covers what range
-        // alone cannot: THIS scan is a fresh one, independent of the scan the
-        // job list was built from, so the index alone does not prove we are
-        // about to rip the title the user asked for.
+        // The same range + identity rules from `run()`'s scanned-source path,
+        // centralized in `resolve_scanned_title`: range prevents a panic on
+        // `disc.titles[title_idx]` below; identity catches a diverging re-scan.
         let title =
             resolve_scanned_title(&disc.titles, title_idx, expected).map_err(PipeFail::fatal)?;
 
@@ -2282,20 +2098,13 @@ fn pipe_disc(
         }
 
         // Pre-flight decrypt gate (disc-wide): catches a scrambled-but-uncracked
-        // CSS disc and an AACS disc with no resolved key BEFORE the mux — so the
-        // failure surfaces as the dedicated NoDiscKey/CssKeyMissing message, not
-        // a downstream zero-output guard. `--raw` and unencrypted discs pass.
+        // CSS disc or an AACS disc with no resolved key before the mux, so the
+        // dedicated NoDiscKey/CssKeyMissing message fires. `--raw` discs pass.
         disc.ensure_decryptable(raw).map_err(PipeFail::from_typed)?;
 
-        // Per-title decrypt gate for the AACS / non-DVD path. For AACS,
-        // `decrypt_keys_for_title` does NO drive I/O — it returns
-        // `(disc.decrypt_keys(), false)`, the SAME keys `mux_stream`'s Session
-        // arm resolves — so the gate here is equivalent to the old per-title
-        // check without a second drive read. A `None` key means no usable disc
-        // key (would mux garbage at exit 0); fail loudly with NoDiscKey. The DVD
-        // path is gated inside `DiscStream::new` (its per-title CSS crack, driven
-        // by `mux_stream`), so it is deliberately not pre-cracked here; `--raw`
-        // passes.
+        // Per-title decrypt gate for AACS/non-DVD: same keys `mux_stream`
+        // resolves later, but a `None` key fails loudly here rather than
+        // muxing garbage. DVD is gated inside `DiscStream::new` instead.
         if needs_pre_mux_title_key(disc.format) {
             let keys = disc.decrypt_keys();
             disc.ensure_title_decryptable(raw, &keys, false)
@@ -2308,11 +2117,9 @@ fn pipe_disc(
     // the per-title CSS crack, the header pump) now lives inside `mux_stream`.
     out.raw(Normal, &strings::get("rip.ok"));
 
-    // Stage the drive as the session's boxed reader so the Session arm can take
-    // it, then run the shared driver: it builds the `DiscStream`, pumps headers
-    // (chapters:// / json:// short-circuit BEFORE the header gate — the metadata
-    // export no longer false-fails on a title whose video headers never resolve),
-    // opens the sink, and pumps frames through the write pipeline to EOF or halt.
+    // Stage the drive as the session's boxed reader, then run the shared
+    // driver: builds `DiscStream`, pumps headers (metadata short-circuit runs
+    // before the header gate now), opens the sink, and pumps frames to EOF/halt.
     session.stage_drive_as_reader();
     let metadata_sink = is_metadata_sink(dest);
     let events = Arc::new(CliMuxEvents::new(*out, dest.to_string(), metadata_sink));
@@ -2320,11 +2127,9 @@ fn pipe_disc(
         skip_errors: false,
         batch_sectors: batch,
         raw,
-        // Interactive stdout / network sink: NO per-frame send deadline. A
-        // slow-but-alive downstream (paused pager, backpressured pipe, slow
-        // peer) must block, not be reported as an interrupted mux after 60 s of
-        // backpressure — matching the pre-refactor inline blocking write. Ctrl-C
-        // still interrupts via the SIGINT halt.
+        // Interactive stdout/network sink: no per-frame send deadline. A
+        // slow-but-alive downstream (paused pager, backpressured pipe) must
+        // block, not be reported as interrupted. Ctrl-C still works via SIGINT.
         send_deadline: None,
         selection,
     };
@@ -2460,12 +2265,9 @@ fn pipe(
     opts: &libfreemkv::InputOptions,
     out: &Output,
 ) -> Result<(), PipeFail> {
-    // The source open (`input()`), the header pump + gate, the sink open, the
-    // chapters:// / json:// short-circuit (now BEFORE the header gate — the
-    // metadata-export bug fix), the frame pump, and the NoStreams guard all live
-    // inside `mux_stream` now. The CLI keeps only the presentation: the source
-    // "opening…/ok" line and — via `CliMuxEvents` — the stream-info block, the
-    // destination open line, and the throttled progress bar.
+    // Source open, header pump/gate, sink open, metadata short-circuit, frame
+    // pump, and NoStreams guard all live inside `mux_stream` now. The CLI
+    // keeps only presentation, via `CliMuxEvents` (stream-info, progress bar).
     out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", source)]));
     out.raw(Normal, &strings::get("rip.ok"));
 
@@ -2498,22 +2300,6 @@ fn pipe(
 
 // ── Disc → ISO (raw sector copy, not a stream) ────────────────────────────
 
-/// Returns true on success, false on any failure (no drive, scan error,
-/// `Disc::copy` error). The caller propagates this to `main`'s exit code so a
-/// scripted `$?` check sees the failure.
-/// `<image source> → iso://` — write a decrypted sector image from a source that
-/// is NOT a physical drive.
-///
-/// This is the generic `iso://` sink. It is deliberately not
-/// [`disc_to_iso`]: that one is the recovery path (mapfile, `--multipass`,
-/// damage-jump, auto-resume), all of which exists because an optical drive
-/// returns read errors on marginal media. A file-backed source has no marginal
-/// media, so it gets a plain sequential write instead — see
-/// `libfreemkv::io::image_writer` for the full reasoning, including why sharing
-/// the recovery path would let a mapfile resume over a DIFFERENT source.
-///
-/// `--raw` and `--multipass` cannot reach here: they are drive flags and
-/// `preflight_validate` rejects them for a non-drive source.
 /// The filesystem path behind a URL — for EVERY scheme that names one.
 ///
 /// The same-file guard needs this on both sides of the invocation, so the
@@ -2558,6 +2344,19 @@ fn source_path_of(source: &str) -> Option<std::path::PathBuf> {
 /// grew a narrower copy of it that a hardlink walks straight through.
 use crate::file_identity::same_file;
 
+/// `<image source> → iso://` — write a decrypted sector image from a source that
+/// is NOT a physical drive.
+///
+/// This is the generic `iso://` sink. It is deliberately not
+/// [`disc_to_iso`]: that one is the recovery path (mapfile, `--multipass`,
+/// damage-jump, auto-resume), all of which exists because an optical drive
+/// returns read errors on marginal media. A file-backed source has no marginal
+/// media, so it gets a plain sequential write instead — see
+/// `libfreemkv::io::image_writer` for the full reasoning, including why sharing
+/// the recovery path would let a mapfile resume over a DIFFERENT source.
+///
+/// `--raw` and `--multipass` cannot reach here: they are drive flags and
+/// `preflight_validate` rejects them for a non-drive source.
 fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
     let iso_path = match libfreemkv::parse_url(dest) {
         libfreemkv::StreamUrl::Iso { path } => path,
@@ -2585,14 +2384,9 @@ fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> boo
         return false;
     }
 
-    // Never write over the source. `write_image` opens the destination with
-    // `File::create` BEFORE the first read, so this truncates the still-open
-    // input to zero and leaves neither file intact — and `freemkv
-    // iso://Disc.iso iso://Disc.iso` is the natural way to ask for an in-place
-    // decrypt, as well as an easy paste. Compared by canonical path, so a
-    // relative and an absolute spelling of one file are recognised as one file.
-    // The GUI has had this guard since round 1 (`engine.rs`); the CLI, which
-    // has no confirmation prompt at all, did not.
+    // Never write over the source: `write_image` opens the dest with
+    // `File::create` before the first read, truncating a still-open input
+    // (e.g. an in-place decrypt paste). The GUI has had this guard since round 1.
     if same_file(
         source_path_of(source).as_deref(),
         std::path::Path::new(&iso_path),
@@ -2604,12 +2398,9 @@ fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> boo
     let total_sectors = disc.capacity_sectors;
     let start = std::time::Instant::now();
     let halt = libfreemkv::halt::Halt::new();
-    // AACS decryption is MAP-ONLY: `decrypt_span` refuses outright when no key
-    // map is installed, whatever unit keys the `DecryptKeys` carries. Building
-    // a bare decorator here meant every AACS image decrypt aborted on its first
-    // batch with `DecryptFailed`, seconds after the trace reported the key
-    // RESOLVED. Mirrors `freemkv-engine`'s own construction: a map for AACS, a
-    // content gate for CSS, nothing for a clear image.
+    // AACS decryption is MAP-ONLY: `decrypt_span` refuses without a key map
+    // installed. A bare decorator here made every AACS decrypt abort on its
+    // first batch — mirrors `freemkv-engine`'s own construction instead.
     let mut keys = disc.decrypt_keys();
     let key_map = if matches!(keys, libfreemkv::decrypt::DecryptKeys::Aacs { .. }) {
         match disc.resolve_content_key_map(reader.as_mut(), &mut keys, None, None) {
@@ -2671,6 +2462,9 @@ fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> boo
     }
 }
 
+/// Returns true on success, false on any failure (no drive, scan error,
+/// `Disc::copy` error). The caller propagates this to `main`'s exit code so a
+/// scripted `$?` check sees the failure.
 fn disc_to_iso(
     source: &str,
     dest: &str,
@@ -2727,13 +2521,9 @@ fn disc_to_iso(
     // sampled internally so the resolved key is validated against real data.
     resolve_disc_keys(&mut disc, &mut drive, keys, out);
 
-    // Pre-flight decrypt gate: a decrypting disc→ISO copy (not --raw) of an
-    // encrypted disc with no usable key would write ciphertext to the ISO and
-    // exit 0. Refuse here — right after scan + key resolution, BEFORE locking
-    // the tray, sizing the ISO, or reading a single sector — so the failure is
-    // pre-flight with no partial ISO. (`Disc::copy` enforces the same gate
-    // internally; this surfaces it earlier with the localized message.) --raw
-    // and unencrypted discs pass.
+    // Pre-flight decrypt gate: a decrypting copy of an encrypted disc with no
+    // usable key would write ciphertext and exit 0. Refuse here, before
+    // locking the tray, so `Disc::copy`'s gate is surfaced with a localized message.
     if let Err(e) = disc.ensure_decryptable(raw) {
         out.raw(Normal, &render_error(&e));
         return false;
@@ -2797,10 +2587,8 @@ fn disc_to_iso(
                 }
             }
             // Returning false halts the copy. Consult the global SIGINT flag so
-            // the FIRST Ctrl-C cleanly stops the sweep and lets `unlock_tray()`
-            // run below — instead of being ignored until a second Ctrl-C forces
-            // `_exit(130)`, which bypasses tray unlock entirely. (The previous
-            // `halt` Arc was wired to a value nothing ever stored into — dead.)
+            // the FIRST Ctrl-C stops the sweep and lets `unlock_tray()` run
+            // below, instead of waiting for `_exit(130)`, which skips it.
             copy_should_continue(INTERRUPTED.load(Ordering::SeqCst))
         }
     }
@@ -2813,10 +2601,9 @@ fn disc_to_iso(
     let copy_opts = disc_copy_options(raw, multipass, &progress);
     let success = match freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts) {
         Ok(r) if copy_verdict(&r) == CopyVerdict::Interrupted => {
-            // Ctrl-C halted the copy (report() returned false). Don't print
-            // "Complete" over a partial ISO — say it was interrupted and report
-            // failure so the exit code is non-zero. The mapfile is preserved, so
-            // a later run can resume.
+            // Ctrl-C halted the copy. Don't print "Complete" over a partial
+            // ISO — report interrupted/failure so exit is non-zero. Mapfile
+            // is preserved, so a later run can resume.
             if !out.is_quiet() {
                 eprint!("\r\x1b[K");
             }
@@ -2824,12 +2611,9 @@ fn disc_to_iso(
             false
         }
         Ok(r) if copy_verdict(&r) == CopyVerdict::NoData => {
-            // The copy ran to completion but recovered ZERO readable bytes —
-            // every ECC block was zero-filled and marked NonTrimmed (whole disc
-            // unreadable). The ISO on disk is all zeroes and unusable. Don't
-            // print "Complete" or return success: a scripted caller checking $?
-            // must see a non-zero exit, mirroring the NoStreams guard on the
-            // mux paths in this file.
+            // The copy completed but recovered ZERO readable bytes: the ISO on
+            // disk is unusable. Don't print "Complete" — a scripted caller
+            // checking $? must see non-zero, like the mux paths' NoStreams guard.
             if !out.is_quiet() {
                 eprint!("\r\x1b[K");
             }
@@ -2860,12 +2644,9 @@ fn disc_to_iso(
                     ],
                 ),
             );
-            // Report the LOSS whenever there is any, not only when the user
-            // asked for recovery. Gated on `multipass`, a plain single-pass rip
-            // of a scratched disc printed the completion line and nothing else
-            // — the "Complete, exit 0, bytes missing" shape this crate must
-            // never produce. `--multipass` is a strategy, not a reporting
-            // preference.
+            // Report the LOSS whenever there is any, not only when recovery was
+            // requested. Gated on `multipass`, a single-pass rip of a scratched
+            // disc printed completion and nothing else — never produce that.
             if !disc_copy_succeeded(verdict) {
                 let gb_good = r.bytes_good as f64 / 1_073_741_824.0;
                 let mb_bad = r.bytes_unreadable as f64 / 1_048_576.0;
@@ -2875,14 +2656,9 @@ fn disc_to_iso(
                 let main_title_bad = main_title
                     .map(|t| freemkv_engine::bytes_bad_in_title_from_mapfile(&mapfile_path, t))
                     .unwrap_or(0);
-                // Report damage as a MAIN-TITLE duration only. The previous
-                // disc-wide figure multiplied a whole-disc bad-byte ratio by
-                // `disc_dur` — but `disc_dur` is only the FIRST title's runtime,
-                // so once bonus content makes the disc larger than the main
-                // title the product was dimensionally wrong (bad MB scaled by the
-                // wrong duration). Scale the main title's bad bytes by its OWN
-                // size and runtime; the raw unreadable/pending MB above still
-                // surfaces any loss that falls outside the main title.
+                // Report damage as a main-title duration only: the old figure
+                // multiplied a whole-disc ratio by `disc_dur` (first title's
+                // runtime), wrong once bonus content grows the disc past it.
                 let main_lost_secs = main_title
                     .map(|t| (t.size_bytes, t.duration_secs))
                     .filter(|&(sz, dur)| main_title_bad > 0 && sz > 0 && dur > 0.0)
@@ -2992,14 +2768,9 @@ fn dir_to_extract(
             drive.unlock_tray();
             ok
         }
-        // Iso AND Dir. A folder is an image-level source: scan_dir synthesizes
-        // a UDF volume over it and returns the same (Disc, SectorSource) pair.
-        //
-        // Dir used to fall to the `_` arm below, which is commented
-        // "unreachable: preflight rejects non-disc sources for dir://". That
-        // stopped being true the moment Dir joined is_disc_source(): preflight
-        // let it through, this match had no arm for it, and the supposedly
-        // unreachable branch told the user their folder "has no file tree".
+        // Iso AND Dir: scan_dir synthesizes a UDF volume over a folder,
+        // returning the same pair. Dir used to fall to the `_` arm marked
+        // "unreachable", which stopped being true once Dir joined is_disc_source().
         libfreemkv::StreamUrl::Iso { path } | libfreemkv::StreamUrl::Dir { path } => {
             let scan = if matches!(parsed_source, libfreemkv::StreamUrl::Dir { .. }) {
                 libfreemkv::scan_dir
@@ -3049,8 +2820,6 @@ impl freemkv_engine::Sink for HaltSink<'_> {
     }
 }
 
-/// Run `Disc::extract_tree` (via `freemkv_engine::extract_tree`) and render
-/// the result. Shared by the disc:// and iso:// `dir://` paths.
 /// Whether a `dir://` extraction counts as a success — and therefore whether
 /// `freemkv` exits 0.
 ///
@@ -3064,6 +2833,8 @@ fn extract_succeeded(halted: bool, complete: bool) -> bool {
     !halted && complete
 }
 
+/// Run `Disc::extract_tree` (via `freemkv_engine::extract_tree`) and render
+/// the result. Shared by the disc:// and iso:// `dir://` paths.
 fn run_extract(
     disc: &libfreemkv::Disc,
     reader: &mut dyn libfreemkv::SectorSource,
@@ -3080,11 +2851,9 @@ fn run_extract(
     );
     out.blank(Normal);
 
-    // Bridge the CLI's SIGINT flag into a libfreemkv Halt the producer polls at
-    // file / batch boundaries, so a long extract stops promptly (the producer
-    // leaves the in-flight file as `.partial`, never a half-written file that
-    // looks complete). `SigintHalt`'s guard joins the watcher on drop — even on
-    // the unwind path, since `extract_tree` is not panic-free.
+    // Bridge the CLI's SIGINT flag into a libfreemkv Halt the producer polls,
+    // so a long extract stops promptly, leaving the in-flight file as
+    // `.partial`. `SigintHalt` joins the watcher on drop, even on unwind.
     let sigint = SigintHalt::install();
 
     let outcome =
@@ -3486,13 +3255,9 @@ fn mp4_skip_reason_key(reason: &libfreemkv::Mp4SkipReason) -> &'static str {
         libfreemkv::Mp4SkipReason::UnmappableAudio => "mp4.reason.audio",
         libfreemkv::Mp4SkipReason::SecondaryVideo => "mp4.reason.video",
         libfreemkv::Mp4SkipReason::UnmappableVideo => "mp4.reason.video_unmappable",
-        // Post-mux reasons added in 1.6.0. Both reuse the existing, fully
-        // TRANSLATED strings whose user-visible meaning matches — the track did not
-        // make it into the file because its audio could not be carried. Dedicated
-        // wording ("carried no samples", "no frame described the audio") would need
-        // 29 real translations; reusing a correct localisation beats shipping
-        // English into every locale, and beats inventing translations. Tracked as
-        // follow-up.
+        // Post-mux reasons added in 1.6.0. Both reuse the existing translated
+        // strings, since dedicated wording would need 29 real translations;
+        // reusing a correct localisation beats shipping English. Follow-up tracked.
         libfreemkv::Mp4SkipReason::UndescribableAudio | libfreemkv::Mp4SkipReason::NoSamples => {
             "mp4.reason.audio"
         }
@@ -3755,16 +3520,8 @@ mod tests {
     use libfreemkv::parse_url;
 
     // ── The `--help` examples must actually run ─────────────────────────────
-    //
-    // `usage()` prints a block of `usage.ex.*` lines as the binary's headline
-    // documentation. Nothing connected those strings to the parser, so
-    // `usage.ex.rip_titles` shipped as `disc:// mkv://Movie.mkv -t 1 -t 3` —
-    // two `-t` flags at a single-FILE destination, which `build_jobs` rejects
-    // outright. The first example a new user copies exited non-zero.
-    //
-    // This drives each shipped example through the REAL `parse_flags` and
-    // `build_jobs`, so an example that the CLI would reject fails here instead
-    // of in a user's terminal.
+    // Nothing connected `usage.ex.*` strings to the parser, so one shipped
+    // rejected by `build_jobs`. Drives each through the real parser here instead.
 
     /// Split a `usage.ex.*` line into its command tokens, dropping the leading
     /// `freemkv` and the trailing right-hand description column (separated from
@@ -3912,21 +3669,10 @@ mod tests {
         }
     }
 
-    // ── `-t` default (1.6.0): main title unless `-t N` / `-t all` ───────────────
-    // Normalization lives in `run()` (not parse_flags): no `-t` and no `-t all`
-    // rips the MAIN title only; `-t all` rips everything; `-t N` rips title N.
-    // These pin the PARSE layer only. The run()-level normalization at
-    // `run():783` is NOT exercised here — an earlier version of this comment
-    // claimed it was, and both of that line's mutants survive the suite. The
-    // test below covers it directly instead.
+    // ── `-t` default (1.6.0): main title unless `-t N` / `-t all` ───────────
+    // Normalization lives in `run()`, not parse_flags; these pin the parse
+    // layer only. The run()-level normalization is covered directly below.
 
-    /// The `-t` DEFAULT, at the layer that actually applies it.
-    ///
-    /// `run()` normalizes "no `-t` and no `-t all`" to `[1]` — the 1.6.0
-    /// change that stopped an obfuscated 50-playlist disc from producing
-    /// ~200 GB of near-duplicate MKVs. The comment above used to claim the
-    /// parse-layer tests covered it; they do not, and the mutation run
-    /// confirmed both mutants of that line survive.
     /// `-t all` on a DISC must expand to every title, exactly as it already
     /// does for an `iso://` source.
     ///
@@ -3982,6 +3728,13 @@ mod tests {
         assert_eq!(jobs[0].0, Some(0));
     }
 
+    /// The `-t` DEFAULT, at the layer that actually applies it.
+    ///
+    /// `run()` normalizes "no `-t` and no `-t all`" to `[1]` — the 1.6.0
+    /// change that stopped an obfuscated 50-playlist disc from producing
+    /// ~200 GB of near-duplicate MKVs. The comment above used to claim the
+    /// parse-layer tests covered it; they do not, and the mutation run
+    /// confirmed both mutants of that line survive.
     #[test]
     fn the_t_default_normalizes_to_the_main_title_only() {
         // The rule `run()` itself applies, called directly. It used to be
@@ -4111,14 +3864,9 @@ mod tests {
         assert!(parse_flags(&["-a".into(), "iso://x".into(), "mkv://o".into()]).is_err());
     }
 
-    // The decrypt no-key verdict matrix (AACS / CSS / css_error / --raw /
-    // unencrypted) now lives in `libfreemkv::Disc::ensure_decryptable[_keys]`,
-    // which both CLI entry points (`pipe_disc`, `disc_to_iso`) and the ISO mux
-    // (`libfreemkv::input`) delegate to. It is exhaustively tested at that single
-    // source of truth in `libfreemkv::disc::tests`, so the CLI no longer carries
-    // its own copies of the matrix. The CLI-specific concern — that the resulting
-    // `Error::NoDiscKey` renders to an English message with no raw code leak — is
-    // covered by `no_keydb_aacs_disc_surfaces_e7022_in_english` below.
+    // The decrypt no-key verdict matrix now lives in
+    // `libfreemkv::Disc::ensure_decryptable[_keys]`, tested in
+    // `libfreemkv::disc::tests`; no-raw-code-leak is covered below.
 
     // ── PipeFail::from_mux skippable-stub classification (the is_skippable swap) ─
 
@@ -4220,12 +3968,9 @@ mod tests {
         assert!(disc_copy_recovered_data(50_000_000_000));
     }
 
-    // The header-resolution gate that used to live in the CLI (`headers_resolved`
-    // + the `while !input.headers_ready()` loop) now lives inside
-    // `libfreemkv::mux::mux_stream` (the header pump + `Error::MkvInvalid` gate),
-    // covered by `header_gate_rejects_unresolved_codec_private` there. The CLI no
-    // longer carries its own gate, so it can no longer place it after the
-    // metadata short-circuit (bug #1).
+    // The header-resolution gate that used to live in the CLI now lives in
+    // `libfreemkv::mux::mux_stream`, covered by
+    // `header_gate_rejects_unresolved_codec_private` there.
 
     // ── fmt_err generalization (english errors for ALL codes) ───────────────
 
@@ -4443,14 +4188,9 @@ mod tests {
         assert!(!copy_should_continue(true), "interrupt → halt the copy");
     }
 
-    // The mux interrupt check that used to live here (`mux_was_interrupted`, an
-    // `||` of the loop flag and a pre-`finish()` re-read of the global SIGINT
-    // flag) is gone: the CLI no longer runs the frame loop. `mux_stream` polls a
-    // real `libfreemkv::Halt` (flipped by `SigintHalt`'s watcher) and reports an
-    // interrupt as `MuxOutcome { completed: false }`; `finalize_mux` maps that to
-    // `interrupted_error` (non-zero exit, never a finalized truncated file). The
-    // halt-mid-pump behaviour is covered by `halt_mid_pump_stops_cleanly` in
-    // `libfreemkv::mux::driver`.
+    // The `mux_was_interrupted` check that used to live here is gone: the CLI
+    // no longer runs the frame loop. `mux_stream` polls `libfreemkv::Halt` and
+    // reports interrupts via `MuxOutcome`, mapped to `interrupted_error`.
 
     #[test]
     fn work_pct_is_finite_when_work_total_zero() {
@@ -4557,11 +4297,9 @@ mod tests {
 
     #[test]
     fn stream_info_uses_dedicated_keys() {
-        // Regression: `print_stream_info` mislabeled the elementary-track count
-        // with `disc.titles` ("Titles: 7") and the runtime with `disc.format`
-        // ("Format: 2:34:10"). Both now have dedicated keys that must resolve to
-        // real strings — `strings::get` returns the dotted path verbatim on a
-        // miss, so a present key is one that does NOT equal its own path.
+        // Regression: `print_stream_info` mislabeled the track count with
+        // `disc.titles` and the runtime with `disc.format`. Both now have
+        // dedicated keys, which must not equal their own dotted path (a miss).
         assert_ne!(crate::strings::get("disc.streams"), "disc.streams");
         assert_ne!(crate::strings::get("disc.duration"), "disc.duration");
         // And they must be distinct from the keys they were confused with, so a
@@ -4604,10 +4342,8 @@ mod tests {
 
     #[test]
     fn disc_multiple_titles_build_one_job_each() {
-        // Regression (HIGH): multiple `-t` on a disc source must build one job
-        // per requested title — not silently drop all but the first. `titles`
-        // is None for a disc (pipe_disc scans per title); the jobs come straight
-        // from title_nums.
+        // Regression (HIGH): multiple `-t` on a disc source must build one
+        // job per requested title, not silently drop all but the first.
         let out = Output::new(false, true);
         // Repo-local scratch (not /tmp): survives reboots and stays inside the
         // build tree so stray dirs are obvious and cleaned by `cargo clean`.
@@ -4642,16 +4378,13 @@ mod tests {
 
     #[test]
     fn disc_multiple_titles_to_file_dest_rejected() {
-        // Regression (MEDIUM): a disc multi-title rip to a single-FILE dest used
-        // to fall into dir_jobs, which `create_dir_all`s the dest — silently
-        // turning `movie.mkv` into a directory. It must now be rejected (build
-        // returns None) when the dest is not directory-style, mirroring the
-        // scanned-source guard.
+        // Regression (MEDIUM): a disc multi-title rip to a single-FILE dest
+        // used to fall into dir_jobs, silently turning `movie.mkv` into a
+        // directory. Must now be rejected (build returns None) instead.
         let out = Output::new(false, true);
-        // Under a unique temp path, not the process CWD and not a name shared
-        // with another test process: the negative assertion below is about a
-        // directory NOT existing, so a stray one left by anything else makes
-        // this test fail for the wrong reason.
+        // A unique temp path, not the process CWD or a shared name: the
+        // assertion below is that a directory does NOT exist, so a stray
+        // one from another test process would fail this for the wrong reason.
         let file = temp_path("multi-to-file").join("movie.mkv");
         let _ = std::fs::remove_dir_all(&file);
         let dest = format!("mkv://{}", file.display());
@@ -4687,11 +4420,9 @@ mod tests {
         assert!(!title_in_range(3, 3), "one past the end is out of range");
         assert!(!title_in_range(99, 3), "far past the end is out of range");
         assert!(!title_in_range(0, 0), "no titles → any index out of range");
-        // The live-drive path (`pipe_disc`) applies the SAME rule through this
-        // same function now. It used to spell the comparison out inline, so
-        // hardening one copy left the other open — and inverted there it does
-        // not merely reject a good title: `disc.titles[title_idx]` is indexed
-        // two lines later, turning the rejection into an index panic mid-rip.
+        // `pipe_disc` applies the SAME rule through this function now; it used
+        // to spell the comparison out inline, so hardening one copy left the
+        // other open, risking an index panic mid-rip if inverted.
     }
 
     #[test]
@@ -4786,13 +4517,8 @@ mod tests {
     }
 
     // ── VAL-2 regression: --key-url scheme validation ──────────────────────
-    //
-    // Bug: the guard was `!is_url_token(u)` (i.e. `!u.contains("://")`) so the
-    // bad-scheme branch's `u.contains("://") && !is_keyserver_url(u)` was
-    // `A && !A` — dead code that could never fire. `ftp://x` and `disc://` both
-    // fell through to "requires a value" even though the user DID supply a value.
-    // Fix: guard the accept arm on `is_keyserver_url(u)` so the bad-scheme arm
-    // is reachable for any `://` URL that is NOT http(s).
+    // Bug: the guard was `!is_url_token(u)`, making the bad-scheme branch
+    // `A && !A` — dead code. Fix: guard on `is_keyserver_url(u)` instead.
 
     /// VAL-2: `--key-url ftp://x` — a non-http(s) scheme — must produce the
     /// bad-scheme error, NOT "requires a value" (the value was present).
@@ -5039,26 +4765,17 @@ mod tests {
     /// `--key-url` carries its own http(s) scheme check.
     #[test]
     fn no_value_flag_takes_the_following_flag_as_its_value() {
-        // Derived from VALUE_FLAGS, NOT hand-listed. The first version of this
-        // test spelled out seven flags and omitted --log-file and --log-level,
-        // which are in VALUE_FLAGS — so the very hole it was written to close
-        // stayed open in this parser for another round. A list you maintain by
-        // hand cannot assert a class.
-        //
-        // Two exemptions, both with a reason in `is_flag_token`'s own doc:
-        // --key-auth takes a bearer token that may legitimately begin with '-',
-        // and --key-url carries its own http(s) scheme check.
+        // Derived from VALUE_FLAGS, not hand-listed: a hand-listed version
+        // omitted --log-file/--log-level, leaving the hole it closed reopened.
+        // Exempts --key-auth (token may start with '-') and --key-url (own scheme check).
         for flag in crate::cli_entry::VALUE_FLAGS
             .iter()
             .copied()
             .filter(|f| !matches!(*f, "--key-auth" | "--key-url"))
         {
-            // The property is that the FOLLOWING FLAG SURVIVES, not that a
-            // particular error is produced: a value-flag whose value is
-            // missing may legitimately either reject (-t/-a/-s/--keydb) or
-            // simply decline to consume it (--log-file, whose value is read by
-            // logging init, not here). Both are correct; swallowing `--raw` is
-            // not, because the rip then decrypts when told not to.
+            // The property is that the following flag SURVIVES, not that a
+            // particular error occurs: a missing value may reject or just
+            // decline to consume it — but swallowing `--raw` decrypts unasked.
             match parse_flags(&v(&[flag, "--raw"])) {
                 Err(e) => assert!(
                     e.contains(flag),
@@ -5104,14 +4821,9 @@ mod tests {
         ));
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // Adversarial input battery — "tests galore to try and break it".
-    //
-    // Every bad-input class + combinations, each asserting fail-LOUD-EARLY:
-    // `preflight_validate` returns Err (a printable message) — never panics,
-    // never silently succeeds. The CLI maps that Err to a printed message +
-    // `run()` returning false → nonzero exit + no output.
-    // ════════════════════════════════════════════════════════════════════════
+    // Adversarial input battery: every bad-input class + combinations, each
+    // asserting `preflight_validate` fails loud and early (Err, never panic,
+    // never silent success) — the CLI maps Err to nonzero exit + no output.
 
     /// Run `preflight_validate` on a (source, dest, raw, multipass) tuple,
     /// parsing the URLs the same way `run()` does. Returns the Result so tests
@@ -5148,9 +4860,8 @@ mod tests {
         assert!(preflight_sel("m2ts://in.m2ts", "mkv://out.mkv").is_err());
         assert!(preflight_sel("network://0.0.0.0:9000", "mkv://out.mkv").is_err());
         // disc:// IS scanned into titles: selection passes this gate. (iso://
-        // shares the same is_disc_source() branch — see libfreemkv's
-        // is_disc_source_only_for_disc_and_iso — but needs a real file to clear
-        // the later reachability check, so it isn't asserted here.)
+        // shares the same is_disc_source() branch but needs a real file to
+        // clear the later reachability check, so it isn't asserted here.)
         assert!(preflight_sel("disc://", &temp_dest("mkv", "sel_ok")).is_ok());
         // No selection flags: a plain file remux stays legal.
         assert!(
@@ -5765,15 +5476,9 @@ mod tests {
         }
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // WS3 — dropped `-k` short flag (rc.6: `--keydb` long form ONLY).
-    //
-    // The `-k` short flag was removed from `parse_flags`. It must now be
-    // treated as an UNKNOWN flag (hard error), NOT silently consume its value
-    // as a keydb path — otherwise a user who learned `-k` in an earlier rc would
-    // get a confusing "unexpected positional" downstream, or worse, the value
-    // would be eaten and the rip would proceed against the default keydb.
-    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — dropped `-k` short flag (rc.6: `--keydb` long form only). Must be
+    // an unknown-flag hard error, not silently consume its value, or a user
+    // on the old flag gets a confusing error, or the rip proceeds against the default keydb.
 
     /// `-k <path>` is no longer a recognized flag: it must be rejected as an
     /// unknown flag (so the user is told to use `--keydb`), never quietly
@@ -5872,16 +5577,9 @@ mod tests {
                     "`{flag}` is in VALUE_FLAGS but `parse_flags` does not know it: {e}"
                 );
             }
-            // The sentinel is FLAG-SHAPED, so this probe now measures the
-            // flag-guard rather than arity for any flag that refuses a
-            // flag-shaped value — which every value flag should, and the
-            // logging pair demonstrably do. Their arity is still covered: they
-            // are asserted present above, and
-            // `no_value_flag_takes_the_following_flag_as_its_value` pins that
-            // they do not swallow a following flag. Probing them here would
-            // assert the opposite of that, which is how a real defect
-            // (`--log-file --raw` writing a decrypted image) survived a round
-            // with a green suite.
+            // The sentinel is flag-shaped, so this probe measures the flag-guard,
+            // not arity, for flags refusing a flag-shaped value (the logging
+            // pair) — their arity is covered by a dedicated test instead.
             if matches!(*flag, "--log-file" | "--log-level") {
                 continue;
             }
@@ -5932,14 +5630,9 @@ mod tests {
         }
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // WS3 — device comes from the source URL (`disc:///dev/sgN`).
-    //
-    // `main::info_cmd` / `pipe_disc` / `dir_to_extract` all read the device out
-    // of the parsed `disc://` URL — there is no `--device` flag anymore. Pin the
-    // exact `parse_url` shape those routes depend on, so a parser change that
-    // breaks device-from-URL is caught here in the CLI's own tests.
-    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — device comes from the source URL (`disc:///dev/sgN`), not a
+    // `--device` flag. Pins the exact `parse_url` shape that `info_cmd` /
+    // `pipe_disc` / `dir_to_extract` depend on to read the device out.
 
     #[test]
     fn device_comes_from_disc_url() {
@@ -5966,20 +5659,15 @@ mod tests {
         }
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // WS3 — path handling (Windows-relevant). `sanitize_name` seeds per-title
-    // output filenames under a directory dest; it must never emit a path
-    // separator, a host-illegal character, or an empty stem — on ANY platform,
-    // since a rip authored on Linux may be muxed on Windows. These run on every
-    // platform (the function is platform-agnostic by design).
-    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — path handling. `sanitize_name` seeds per-title output filenames;
+    // it must never emit a path separator, illegal character, or empty stem
+    // on any platform, since a rip authored on Linux may be muxed on Windows.
 
     #[test]
     fn sanitize_name_strips_path_separators_and_illegal_chars() {
-        // Forward AND back slashes must not survive — a `Movie/Part2` stem would
-        // otherwise synthesize `dir/Movie/Part2_t1.mkv`, escaping the dest dir.
-        // The separator is STRIPPED (not converted), so the space-only gaps are
-        // what become underscores.
+        // Forward AND back slashes must not survive, or a `Movie/Part2` stem
+        // synthesizes `dir/Movie/Part2_t1.mkv`, escaping the dest dir. The
+        // separator is stripped (not converted), so space-only gaps become underscores.
         let s = sanitize_name("Movie/Part 2");
         assert!(!s.contains('/'), "path separator survived: {s}");
         assert_eq!(s, "MoviePart_2", "got {s}");
@@ -6013,14 +5701,9 @@ mod tests {
         assert_eq!(sanitize_name("日本語"), "disc");
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // WS3 — keydb path resolution (Windows-relevant). `resolved_keydb_path`
-    // honors an explicit `--keydb` override verbatim, and falls back to the
-    // exe-local / default location otherwise. It must NEVER panic and ALWAYS
-    // return a usable path (the bare `keydb.cfg` last resort guarantees Some).
-    // The exe-relative search policy itself is owned + tested by
-    // `freemkv-keysources::paths`; this pins the CLI's wrapper behavior.
-    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — keydb path resolution. `resolved_keydb_path` honors an explicit
+    // `--keydb` override, else falls back to exe-local/default, and never
+    // panics. The search policy itself lives in `freemkv-keysources::paths`.
 
     #[test]
     fn resolved_keydb_path_honors_explicit_override() {
@@ -6044,13 +5727,9 @@ mod tests {
         );
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // WS3 — dir:// preflight messaging render. The dir:// validation strings
-    // carry placeholders; pin that the RENDERED message substitutes them (no
-    // leftover `{path}` / `{source}` braces) and surfaces actionable guidance.
-    // The gating (which inputs error) is covered by the dir:// gate tests above;
-    // this covers the user-facing TEXT.
-    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — dir:// preflight messaging render. Pins that the rendered message
+    // substitutes placeholders (no leftover `{path}`/`{source}`); the dir://
+    // gate tests above cover which inputs error, this covers the text.
 
     #[test]
     fn dir_source_unsupported_message_substitutes_and_guides() {
@@ -6088,14 +5767,9 @@ mod tests {
         assert!(!err.contains("{path}"), "leftover placeholder: {err}");
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // WS3 — the new (WS2) messaging render shape. `main::fatal` builds the fatal
-    // block from `error.fatal_header` (`{level}: {op} failed: {cause}`) and the
-    // `error.fatal_diagnostic_hint`. `fmt_err` produces the code-forward
-    // `{cause}` fragment. Pin the assembled shape end-to-end so a locale or
-    // template change that drops the code, the level word, or a placeholder is
-    // caught.
-    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — the WS2 messaging render shape: `main::fatal` builds the fatal
+    // block from `error.fatal_header` and `error.fatal_diagnostic_hint`.
+    // Pins the shape so a locale/template drop of the code or level is caught.
 
     #[test]
     fn fatal_header_assembles_level_op_and_code_forward_cause() {
@@ -6155,12 +5829,9 @@ mod tests {
         }
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // WS3 — Windows-only compile-gated coverage. `cfg(windows)` does NOT run in
-    // the Mac precommit, but it MUST compile-gate cleanly so CI (which builds on
-    // Windows) validates it. These pin the OS-specific path/keydb shapes the
-    // CLI relies on under Windows.
-    // ════════════════════════════════════════════════════════════════════════
+    // WS3 — Windows-only, compile-gated. Doesn't run in the Mac precommit but
+    // must compile cleanly so Windows CI validates it. Pins the OS-specific
+    // path/keydb shapes the CLI relies on under Windows.
 
     #[cfg(windows)]
     #[test]
@@ -6177,10 +5848,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_sanitize_name_drops_reserved_punctuation() {
-        // On Windows the `:` (drive separator) and `\` MUST never reach a
-        // synthesized filename. (The function is platform-agnostic, but pin it
-        // explicitly under the Windows build so a regression is caught on CI's
-        // Windows job even if a future change made it cfg-specific.)
+        // `:` (drive separator) and `\` must never reach a synthesized
+        // filename. Pinned under the Windows build so CI's Windows job
+        // catches a regression even if this later becomes cfg-specific.
         let s = sanitize_name(r"C:\Movie");
         assert!(!s.contains(':') && !s.contains('\\'), "got {s}");
     }
@@ -6602,10 +6272,9 @@ mod verdict_tests {
             "the message should name the languages involved: {err}"
         );
 
-        // The same title in a batch: warn (loudly, even in quiet) and keep going.
-        // Assert the WARNING is actually emitted, not merely that the call
-        // returns Ok — otherwise a regression that silently dropped the
-        // language-miss warning on the batch path would pass this test.
+        // Same title in a batch: warn loudly and keep going. Assert the
+        // warning is actually emitted, not just that the call returns Ok, or
+        // a regression that silently drops the warning would still pass.
         let (batch_res, printed) = crate::output::capture(|| {
             check_selection_coverage(&streams, &title, 4, true, &quiet())
         });
@@ -6859,12 +6528,8 @@ mod build_jobs_edge_tests {
 }
 
 // ── The image-decrypt destination must not be the source ─────────────────────
-//
-// `write_image` opens the destination with `File::create` BEFORE the first
-// read, so `freemkv iso://Disc.iso iso://Disc.iso` — the natural way to ask
-// for an in-place decrypt, and an easy paste — truncated the still-open input
-// to zero and left neither file intact. The GUI has had this guard since round
-// 1; the CLI, which has no confirmation prompt at all, did not.
+// `write_image` truncates via `File::create` before the first read, so
+// `iso://Disc.iso iso://Disc.iso` zeroed the still-open input; the CLI lacked this guard.
 #[cfg(test)]
 mod dest_is_source_tests {
     use super::{preflight_validate, same_file, source_path_of, url_path_of};
@@ -6964,10 +6629,9 @@ mod dest_is_source_tests {
                 .find("\n    let result = libfreemkv::write_image(")
                 .expect("the write call still ends the setup section");
         let body = &src[start..end];
-        // Matched as two independent tokens, not one call expression:
-        // `cargo fmt` is free to split the arguments across lines (and did),
-        // so a pin on the joined text fails for a formatting change rather
-        // than a behavioural one — a guard that cries wolf gets deleted.
+        // Two independent tokens, not one call expression: `cargo fmt` splits
+        // arguments across lines, so a joined-text pin would fail on
+        // formatting changes alone — a guard that cries wolf gets deleted.
         assert!(
             body.contains("same_file(") && body.contains("source_path_of(source)"),
             "image_to_iso must refuse a destination that IS the source before \
@@ -6993,17 +6657,8 @@ mod dest_is_source_tests {
     }
 
     // ── Every file-backed scheme, not just iso:// ────────────────────────────
-    //
-    // The round-3 guard was wired into `image_to_iso` ALONE and
-    // `source_path_of` matched `Iso` and `Dir` ALONE, so every other pairing
-    // was unguarded. `freemkv mkv://Movie.mkv mkv://Movie.mkv` reached
-    // `mux_stream` → `drive_mux` → `output()` → `WritebackFile::
-    // create_with_size_hint` → `File::create`, which truncates the still-open
-    // input: a 7.9 MB MKV came back 4.2 MB and the CLI blamed the file
-    // ("malformed or truncated"); a 50 MB M2TS came back 21 MB and the CLI
-    // said "Complete"; an MP4 was replaced outright by 12 MB of preallocated
-    // zeroes. The guard now lives in `preflight_validate`, which runs before
-    // any drive open, scan or file creation.
+    // The round-3 guard covered only `Iso`/`Dir`, truncating other schemes'
+    // still-open input. Now lives in `preflight_validate`, before any write.
 
     /// The path behind a URL, for EVERY scheme that names one — the source
     /// side and the destination side both.
@@ -7229,12 +6884,8 @@ mod dest_is_source_tests {
 }
 
 // ── Disc language tags reach a real terminal ─────────────────────────────────
-//
-// A language tag is three raw MPLS/IFO bytes through `from_utf8_lossy`, with
-// no charset validation anywhere between the parser and here. `print_stream_info`
-// already sanitises the same field; these two error renderers did not, so a
-// crafted disc plus a mistyped `-a`/`-s` printed disc bytes straight to the
-// terminal. Three bytes is enough for `ESC c` — a full terminal reset.
+// A language tag is raw MPLS/IFO bytes; unlike `print_stream_info`, these
+// error renderers didn't sanitise it — `ESC c` (a full reset) fits in 3 bytes.
 #[cfg(test)]
 mod language_escape_tests {
     use super::render_stream_sel_error;
@@ -7296,23 +6947,8 @@ mod language_escape_tests {
 }
 
 // ── A title's POSITION is not its identity across an independent re-scan ──────
-//
-// An `-t all` disc rip performs N+1 INDEPENDENT scans: one to learn the title
-// count (`disc_title_identities`), then one inside every `pipe_disc` call. There
-// is no scan cache, so all that travels between them is an integer. If the
-// second scan lists the titles in a different order, or drops one BEFORE the
-// requested index, that integer still resolves — and the wrong title gets muxed
-// under the requested number, silently. The old `title_in_range` guard only
-// catches the narrow case where the list got short enough for the index to fall
-// off the end.
-//
-// These exercise `resolve_scanned_title`, the single point where an index from
-// the earlier scan meets a later scan's title list — the exact line `pipe_disc`
-// runs before it indexes `disc.titles[title_idx]`. Driving the whole rip would
-// need a live drive (`open_scan_resolve` does real SCSI I/O and the crate has no
-// fake for it), so the divergent re-scan is simulated by handing the resolver
-// the second scan's list directly. That is the same list `pipe_disc` would hand
-// it.
+// `-t all` runs N+1 scans sharing only an integer index; a reordered later
+// scan can silently mux the wrong title. Drives `resolve_scanned_title` directly.
 #[cfg(test)]
 mod title_identity_tests {
     use super::{
@@ -7556,12 +7192,8 @@ mod title_identity_tests {
 }
 
 // ── Pure progress/stream formatters and the CLI mux-event callbacks ──────────
-//
-// These render every line of a live rip — the "Streams:" block, the mp4-fit
-// warnings, the throughput/ETA/damage fields — yet each is reachable in
-// production only behind a real drive or disc image, so nothing in CI ever
-// exercised their branches. They are pure (or pure given a captured `Output`),
-// so they are tested as the strings they emit through the capture harness.
+// Each is reachable in production only behind a real drive or disc image, so
+// CI never exercised their branches; tested here as the strings they emit.
 #[cfg(test)]
 mod formatter_tests {
     use super::{

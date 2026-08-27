@@ -50,13 +50,9 @@ fn help_shows_usage() {
 /// fail here.
 #[test]
 fn every_flag_the_rip_parser_accepts_is_named_in_the_help() {
-    // NOTE ON SCOPE: despite this list's name, `--share` and `--mask` below
-    // are NOT rip-parser flags — they belong to the `info` subcommand
-    // (`info.rs`), and `pipe::parse_flags` rejects them. They are listed here
-    // because the assertion is about `usage()` naming every flag the TOOL
-    // accepts, which is the property that matters to a user reading `--help`.
-    // Calling them rip-parser flags is what made this list look like it had
-    // drifted from `parse_flags` when it had not.
+    // NOTE ON SCOPE: `--share`/`--mask` are NOT rip-parser flags (they belong
+    // to `info`, and `pipe::parse_flags` rejects them) but are listed here
+    // because the assertion covers every flag the TOOL accepts in `--help`.
     const FLAGS: &[&str] = &[
         "--title",
         "--audio",
@@ -138,10 +134,9 @@ fn bad_scheme_errors() {
         .expect("failed to run");
     assert!(!out.status.success());
     let combined = combined_output(&out);
-    // An unrecognized SOURCE scheme (`foo://`) is now caught up front by
-    // `preflight_validate` (fail loud and early) with a clear English message
-    // that names the offending URL and guides toward a real scheme. No raw error
-    // code may reach the user.
+    // An unrecognized SOURCE scheme (`foo://`) is caught up front by
+    // `preflight_validate`, naming the offending URL. No raw error code
+    // may reach the user.
     assert!(
         combined.contains("not a usable source URL") && combined.contains("foo://bar"),
         "expected the source-scheme guidance message, got: {combined}"
@@ -178,10 +173,8 @@ fn null_input_errors() {
         .expect("failed to run");
     assert!(!out.status.success());
     let combined = combined_output(&out);
-    // `fmt_err` renders E9001 (StreamWriteOnly) to its English locale string.
-    // WS2: the line is now code-forward — the `E9001` token is SHOWN as a
-    // prefix ahead of the localized message (`Error: E9001 Stream is
-    // write-only.`), not stripped.
+    // `fmt_err` renders E9001 (StreamWriteOnly) to English. The `E9001`
+    // token is shown as a prefix ahead of the message, not stripped.
     assert!(
         combined.contains("Stream is write-only"),
         "expected the English E9001 message, got: {combined}"
@@ -272,11 +265,9 @@ fn dropped_short_k_flag_is_rejected_end_to_end() {
 
 #[test]
 fn dropped_device_flag_is_rejected_end_to_end() {
-    // The sibling of the `-k` case: `--device` was removed too (the device is
-    // carried by `disc:///dev/sgN`), and it also took a value. Its value must
-    // be stepped over so the invocation still resolves to source+dest and the
-    // user is told WHICH flag is gone — not handed the bare usage hint because
-    // "/dev/sg0" counted as a third URL.
+    // Sibling of the `-k` case: `--device` (removed; device now comes via
+    // `disc:///dev/sgN`) also took a value, which must be stepped over so the
+    // user is told WHICH flag is gone, not handed the bare usage hint.
     let out = freemkv()
         .args(["--device", "/dev/sg99", "disc://", "mkv://out.mkv"])
         .output()
@@ -318,10 +309,9 @@ fn dir_dest_byte_stream_source_rejected_end_to_end() {
 
 #[test]
 fn dir_dest_existing_file_rejected_end_to_end() {
-    // A dir:// target that is an existing regular FILE must be rejected (you
-    // can't extract a tree into a file). Use the auto-detect `disc://` source so
-    // the (cheap, side-effect-free) dest-file check is reached: an explicit
-    // `disc:///dev/sgN` would trip the earlier device-reachability gate first.
+    // A dir:// target that is an existing regular FILE must be rejected. Uses
+    // auto-detect `disc://` so the cheap dest-file check is reached; explicit
+    // `disc:///dev/sgN` would trip the device-reachability gate first.
     let f = std::env::temp_dir().join(format!("freemkv_ws3_isfile_{}", std::process::id()));
     std::fs::write(&f, b"i am a file").unwrap();
     let dest = format!("dir://{}", f.display());
@@ -354,19 +344,8 @@ fn quiet_mode_suppresses_output() {
 }
 
 // ── The destination must never BE the source ────────────────────────────────
-//
-// `freemkv mkv://Movie.mkv mkv://Movie.mkv` used to destroy the user's only
-// copy: the sink chain `mux_stream` → `drive_mux` → `output()` →
-// `WritebackFile::create_with_size_hint` → `File::create` truncates the
-// still-open input, so the run wrote back a partial re-mux over the original.
-// Measured against the pre-fix binary on real media: a 7.9 MB MKV came back
-// 4.2 MB (and the CLI reported the file as "malformed or truncated"), a 50 MB
-// M2TS came back 21 MB while reporting "Complete", and an MP4 was replaced
-// outright by 12 MB of preallocated zeroes.
-//
-// The refusal has to be a preflight refusal — before ANY sink is opened — so
-// these run against files that are not real media: nothing should get far
-// enough to care.
+// `mkv://Movie.mkv` -> itself used to destroy the copy: sink's `File::create`
+// truncated the still-open input. Fix refuses at preflight; tests below use non-media files.
 
 /// One scratch directory per test, removed on drop.
 struct Scratch(std::path::PathBuf);
@@ -477,14 +456,8 @@ fn two_different_files_are_still_rippable_end_to_end() {
 }
 
 // ── `info dir://` — an extracted disc FOLDER ────────────────────────────────
-//
-// `cli_entry`'s info dispatch merges `StreamUrl::Dir` with `StreamUrl::Iso` so
-// a folder enumerates exactly like an image, and picks `scan_dir` vs `scan_iso`
-// from which of the two it got. Before the merge a folder fell through to the
-// catch-all and reported "Cannot get info", while RIPPING from the same folder
-// worked. The merge shipped with nothing covering it — no unit test, no
-// integration case, no golden — so deleting the `Dir` half, or collapsing the
-// scan selector onto `scan_iso`, left the suite green.
+// `cli_entry`'s info dispatch merges `Dir` with `Iso` so a folder enumerates
+// like an image via `scan_dir`; pre-merge it fell through, uncovered by any test.
 
 /// A folder that looks like a disc backup: `scan_dir` synthesizes a UDF volume
 /// over it, `scan_iso` cannot read it at all. That asymmetry is what makes the

@@ -201,28 +201,9 @@ fn preferred_pids(
         Err(_) => all_normal.clone(),
     });
 
-    // Forced subtitles, matched only against the `forced` set — its own class,
-    // so "only German subtitles, forced only if in English" resolves both
-    // halves on their own terms.
-    //
-    // This class does NOT fall back to keeping everything, unlike the two
-    // above, and the difference is deliberate. The fallback exists so a
-    // language that isn't on the disc cannot produce a file missing a whole
-    // track class — a rip with no audio is broken. Neither half of that
-    // reasoning holds here:
-    //
-    //   * A title with no forced subtitles is perfectly normal. They are an
-    //     optional overlay for foreign dialogue, not a class every file needs.
-    //   * Forced subtitles DISPLAY BY THEMSELVES during playback. Ticking ones
-    //     the user did not ask for is not a harmless superset — it burns
-    //     wrong-language text onto the screen. Asking for forced-only-in-
-    //     English on a disc that has none, and being handed French, German,
-    //     Spanish and Portuguese forced tracks that all auto-display, is worse
-    //     than being handed nothing.
-    //
-    // So an unmatched preference keeps NONE here. An empty preference is
-    // unaffected: it means "no preference", arrives as `PidFilter::All`, and
-    // still keeps every forced track.
+    // Forced subtitles have no fallback, unlike audio/normal subs: missing them
+    // is normal, but wrong-language ones auto-display during playback, worse
+    // than none. Unmatched pref keeps nothing; empty pref (All) keeps everything.
     let forced = resolve_stream_selection_forced(
         &title,
         &StreamFilter::None,
@@ -311,15 +292,9 @@ impl Tree {
         } else {
             0.0
         };
-        // Which title indices start checked. Every mode chooses from the
-        // titles the tree will actually SHOW — see `title_visible`, which is
-        // the same predicate the row loop below filters on. "Main film only"
-        // used to name disc title 0 outright, so on a disc whose title 0 is a
-        // stinger the shipped default hid it and then ticked it: the tree
-        // opened with nothing selected and Rip refused. The other two modes
-        // used `>= min_eff`, which a title of UNKNOWN length (0.0) can never
-        // pass even though the filter deliberately keeps it — so "All titles"
-        // meant "all but that one".
+        // Which title indices start checked, chosen only from titles `title_visible`
+        // shows. Old code named title 0 outright for "Main film only", so a hidden
+        // title 0 opened unselected; `>= min_eff` also failed UNKNOWN-length titles.
         let visible = || titles.iter().filter(|(_, d)| title_visible(*d, min_eff));
         let selected: std::collections::HashSet<usize> = match sel_mode {
             "All titles" => visible().map(|(i, _)| *i).collect(),
@@ -332,10 +307,9 @@ impl Tree {
             _ => visible().map(|(i, _)| *i).take(1).collect(),
         };
 
-        // Which stream PIDs the language preferences keep, per canonical title
-        // index. Computed only for the titles that start checked — an unchecked
-        // title has no ticked streams to narrow — and only when there is a
-        // preference at all, so the default build does no extra work.
+        // Which stream PIDs the language preferences keep, per canonical title index.
+        // Computed only for titles that start checked (unchecked ones have no ticked
+        // streams to narrow) and only when a preference exists, to avoid extra work.
         let keep: std::collections::HashMap<usize, std::collections::HashSet<u16>> =
             if prefs.is_empty() {
                 Default::default()
@@ -395,11 +369,9 @@ impl Tree {
                 _ => {
                     if let Some(t) = last_title {
                         arena[t].children.push(idx);
-                        // A stream row starts checked when its TITLE does — and,
-                        // when the user has language preferences, only if this
-                        // PID is one the preferences keep. A row with no PID
-                        // (video) is never narrowed: it is not selectable and is
-                        // always retained.
+                        // A stream row starts checked when its TITLE does, narrowed by
+                        // language preferences if the PID isn't one they keep. A row
+                        // with no PID (video) is never narrowed: it's always retained.
                         let on = *arena[t].checked.borrow()
                             && match (r.pid, keep.get(&r.title)) {
                                 (Some(pid), Some(set)) => set.contains(&pid),
@@ -634,16 +606,9 @@ pub enum Page {
     Result,
 }
 
-// ── preferred-language pickers ──────────────────────────────────────────────
-//
-// The three preference boxes used to be free text: the user typed codes or
-// names and hoped. That asked people to know that a German audio track is
-// tagged `deu` and not `ger` or `de` — and a typo was indistinguishable from
-// "this disc has no German", because both simply matched nothing.
-//
-// The shells now show a checklist of language NAMES and store ISO codes. This
-// module owns the list and both directions of the conversion so macOS and
-// Windows cannot drift; a shell only renders what it is given.
+// ── preferred-language pickers: used to be free text (e.g. `deu` vs `ger` vs
+// `de`), where a typo was indistinguishable from "disc has no German". Shells
+// now show a checklist of names and store ISO codes; this module owns both conversions.
 
 /// The languages offered in the pickers, as (stored code, English name).
 ///
@@ -718,12 +683,9 @@ pub fn canonical_lang_code(tag: &str) -> Option<String> {
     }
     isolang::Language::from_639_1(&lower)
         .or_else(|| isolang::Language::from_639_3(&lower))
-        // 639-2/B bibliographic (`ger`, `fre`, `dut`, …) → its /T form, THEN
-        // resolve. `isolang` knows only /T, so without this step every one of
-        // the twenty codes the doc above promises to accept fell through to
-        // `lang_selection`'s keep-it-verbatim fallback: a settings file saying
-        // `ger` gave the picker a second, unofferable "ger" row while the
-        // German row it already had sat unticked.
+        // 639-2/B bibliographic (`ger`, `fre`, `dut`, …) → its /T form, then resolve.
+        // `isolang` only knows /T; without this, e.g. `ger` fell through to the
+        // verbatim fallback, adding an unofferable duplicate row instead of ticking German.
         .or_else(|| bib_to_terminologic(&lower).and_then(isolang::Language::from_639_3))
         .or_else(|| isolang::Language::from_name(t))
         .map(|l| l.to_639_3().to_string())
@@ -855,11 +817,9 @@ pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>>
     }
     titles.push("Selected titles → M2TS");
     titles.push("Selected titles → separate track files");
-    // The three narrowed forms of the demux sink — the CLI's `video://`,
-    // `audio://` and `sub://`, which are `demux://` with a track-kind filter
-    // (libfreemkv `mux::resolve`). They apply to any source the plain demux
-    // sink applies to, container included, so they live in the titles group
-    // and are never gated on the source kind.
+    // `video://`, `audio://`, `sub://` are `demux://` with a track-kind filter
+    // (libfreemkv `mux::resolve`); they apply to any source the plain demux
+    // sink does, container included, so they're always in the titles group.
     titles.push("Selected titles → video tracks only");
     titles.push("Selected titles → audio tracks only");
     titles.push("Selected titles → subtitle tracks only");
@@ -935,13 +895,9 @@ pub fn blocked_while_running(cmd: Cmd) -> bool {
             | Cmd::About
             | Cmd::Docs
             | Cmd::Quit
-            // Showing and clearing the log are VIEW state. They touch nothing
-            // the rip reads, so blocking them bought no safety and cost the
-            // thing the log is for: a rip is exactly when someone wants to
-            // watch it, or to get it out of the way and watch the progress
-            // block instead. Leaving them disabled meant the only moment you
-            // could change your mind was before starting or after finishing —
-            // never while there was anything to see.
+            // Showing/clearing the log is VIEW state that touches nothing the rip
+            // reads, so blocking it bought no safety — it just disabled the log
+            // during the one time (mid-rip) someone actually wants to watch it.
             | Cmd::ToggleLog
             | Cmd::ClearLog
     )
@@ -1105,13 +1061,9 @@ pub fn format_key(canonical: &str) -> Option<&'static str> {
 /// what the picker SHOWS is translated. An unknown format returns as-is.
 pub fn format_label(canonical: &str) -> String {
     match format_key(canonical) {
-        // `strings::get` returns the dotted path when a key is absent from the
-        // active locale AND from English. That happens whenever this crate
-        // knows a key the pinned `freemkv-i18n` tag does not yet ship — the
-        // window between wiring a new picker row here and re-tagging i18n in
-        // the release cascade. Showing `gui.format.video_only` in a dropdown
-        // is worse than showing untranslated English, so treat the path
-        // echo as "no string" and fall back to the canonical text.
+        // `strings::get` echoes the dotted path when a key is missing from both
+        // the active locale and English (e.g. a new row not yet in the pinned
+        // `freemkv-i18n` tag). That's worse than English, so fall back instead.
         Some(key) => crate::strings::get_or(key, canonical),
         None => canonical.to_string(),
     }
@@ -1418,18 +1370,9 @@ pub fn output_file_name(
     crate::engine::planned_output_name(source, dir, format, first_title, template, disc_label)
 }
 
-// ══ the application core ══════════════════════════════════════════════════
-//
-// Model / Update / View. `App` owns every piece of state and every decision;
-// a shell does exactly three things:
-//
-//   1. render `App::view()`            — assign strings and flags to widgets
-//   2. call `App::dispatch(cmd)`       — on any click, menu pick or key
-//   3. perform the returned `Effect`s  — the platform-only actions
-//
-// Every button on every platform therefore runs the SAME code. Adding a shell
-// (Win32, GTK, a TUI) means implementing render + event → Cmd; it means
-// writing no behaviour, and fixing a bug here fixes it everywhere at once.
+// ══ the application core ══ Model/Update/View: `App` owns all state and
+// decisions; a shell only renders `App::view()`, calls `App::dispatch(cmd)`
+// on input, and performs the returned `Effect`s — no behavior of its own.
 
 use crate::engine::{KeyConfig, RipRequest, RunState};
 use crate::settings::Settings;
@@ -1638,10 +1581,9 @@ impl App {
             kind,
         });
         if self.log.len() > Self::LOG_MAX {
-            // Oldest first: the tail is where a failure surfaces. No notice
-            // line — `gui.log.elided` does not exist and freemkv-i18n is pinned
-            // to a release tag, so the only alternative would be the one
-            // untranslated string in the pane. Debt recorded.
+            // Oldest first: the tail is where a failure surfaces. No "elided" notice
+            // line, since `gui.log.elided` doesn't exist and i18n is pinned to a
+            // release tag — the alternative is one untranslated string. Debt recorded.
             self.log.drain(..Self::LOG_TRIM);
         }
     }
@@ -1815,18 +1757,9 @@ impl App {
     /// every launch. That is worse than the silence it replaced. When nobody
     /// asked, a drive is only worth opening if it actually holds something.
     pub fn disc_source(&mut self, announce_missing: bool) -> Option<String> {
-        // A probe nobody asked for must not GUESS a drive. Bare `disc://`
-        // means autodetect — the resolver tries every drive and takes the one
-        // that actually holds media — which is the right answer at launch
-        // whether the machine has one drive or four. Naming drives[0] because
-        // it happened to be the only one enumerated picked a drive with an
-        // empty tray and then reported a scan failure the user never asked for.
-        //
-        // Returned WITHOUT enumerating: `list_optical_drives` is a SCSI walk,
-        // and this runs on the UI thread before the first paint. The probe's
-        // worker does the enumeration instead, and a machine with no drive
-        // still sees nothing at all — that outcome is now produced by the
-        // quiet failure path rather than by this early return.
+        // A probe nobody asked for must not GUESS: bare `disc://` autodetects the
+        // drive with media, vs. naming drives[0] and risking an empty tray. Not
+        // enumerated here: `list_optical_drives` is a SCSI walk, left to the probe worker.
         if !announce_missing {
             return Some(PROBE_SOURCE.to_string());
         }
@@ -1920,12 +1853,9 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("launch-probe".into())
             .spawn(move || {
-                // The enumeration the probe used to do before deciding
-                // whether to scan at all — for a drive source only, since that
-                // is the only thing it tells you anything about. No drive at
-                // all is not an error worth reporting (nobody asked for this),
-                // so it becomes the same quiet failure an empty tray already
-                // produces.
+                // Enumeration before deciding whether to scan, drive sources only
+                // (the only case it says anything about). No drive at all isn't
+                // worth reporting (nobody asked) — same quiet failure as an empty tray.
                 let no_drive = crate::engine::is_disc_source(&path)
                     && crate::engine::list_optical_drives().is_empty();
                 let scanned = if no_drive {
@@ -2052,13 +1982,9 @@ impl App {
                 }
             }
             Err(e) => {
-                // The launch probe opens a drive NOBODY asked it to open. A
-                // drive with an empty tray is the ordinary state of a machine
-                // that has one, and enumerating drives says nothing about
-                // whether media is loaded — so this arm is the common case at
-                // launch, not the rare one. Announcing it put an error on
-                // screen every time the app started, which is worse than the
-                // silence the probe replaced.
+                // An empty tray is the ordinary state at launch, not a rare error —
+                // enumerating drives says nothing about loaded media. Announcing it
+                // put an error on screen every startup, worse than the silence it replaced.
                 if !quiet {
                     self.say(LogKind::Notice, &e);
                 }
@@ -2084,10 +2010,9 @@ impl App {
             return vec![Effect::Redraw];
         }
         let titles = self.tree.ticked_titles();
-        // A disc/ISO scan has title rows; if the user unchecked them all, refuse
-        // rather than silently ripping the main title (the engine maps an empty
-        // list to the main movie). A container source has no title rows, so this
-        // guard doesn't fire — the whole stream is the "title".
+        // A disc/ISO scan has title rows; if all are unchecked, refuse rather than
+        // silently ripping the main title (the engine maps empty to main movie).
+        // A container source has no title rows, so this guard never fires there.
         if self.tree.title_count() > 0 && titles.is_empty() {
             self.say(
                 LogKind::Notice,
@@ -2106,17 +2031,15 @@ impl App {
                 &crate::strings::get("gui.log.video_only_warning"),
             );
         }
-        // Re-check the MP4/codec mismatch NOW (not just when the format was
-        // picked): the user may have ticked an MPEG-2/VC-1 title after choosing
-        // MP4, which the picker-time check never saw. Better an up-front notice
-        // than a late per-title mux failure.
+        // Re-check MP4/codec mismatch NOW, not just at format-pick time: the user
+        // may have ticked an MPEG-2/VC-1 title afterward. Better an up-front
+        // notice than a late per-title mux failure.
         if let Some(msg) = self.container_mismatch() {
             self.say(LogKind::Notice, &msg);
         }
-        // `--raw` (keep-encrypted) only means anything for a "Whole disc → ISO
-        // image" output; for any mux it would write ciphertext into the
-        // container. Mirror the CLI's iso-only rule instead of silently
-        // forwarding it.
+        // `--raw` (keep-encrypted) only makes sense for "Whole disc → ISO image";
+        // any mux would write ciphertext into the container. Mirror the CLI's
+        // iso-only rule instead of silently forwarding it.
         let iso_output = self.effective_format().contains("ISO image");
         let raw = raw_applies(self.settings.raw, iso_output);
         if self.settings.raw && !iso_output {
@@ -2193,18 +2116,9 @@ impl App {
         // guarantees the `result` write is visible.
         if !p.done.load(Ordering::Acquire) {
             if p.started.elapsed() >= PROBE_GRACE {
-                // Past its deadline: stop waiting. The worker thread cannot be
-                // killed — it is blocked inside the drive's own timeouts — but
-                // it holds only its own `Arc<ProbeState>`, so dropping ours
-                // lets it finish into a state nobody reads and exit. Without
-                // this, `tick` kept the 5 Hz timer alive and repainting for
-                // the life of the process over a probe nobody asked for.
-                //
-                // SILENT, like every other probe failure: the launch probe
-                // opens a drive on its own initiative, so it reports nothing
-                // when that does not work out — an alert about a drive the
-                // user never mentioned is noise, and `Ui::open` says plenty
-                // when they do ask for it.
+                // Past deadline: the worker (blocked in drive timeouts) can't be killed,
+                // but dropping our `Arc<ProbeState>` lets it exit quietly, ending the
+                // 5 Hz repaint. SILENT, like every probe failure: nobody asked for this.
                 self.probe = None;
             }
             return Vec::new();
@@ -2240,10 +2154,9 @@ impl App {
             }
             return fx;
         };
-        // Poison-recovering, like the verdict and summary below: a worker that
-        // panicked poisons the log buffer, and `unwrap_or_default()` here threw
-        // away the WHOLE diagnostic — including the lines explaining the panic
-        // — which is precisely what the poison handling exists to prevent.
+        // Poison-recovering, like the verdict/summary below: a panicked worker
+        // poisons the log buffer, and `unwrap_or_default()` would throw away the
+        // WHOLE diagnostic, including the lines explaining the panic.
         let lines: Vec<String> = st
             .lines
             .lock()
@@ -2268,11 +2181,8 @@ impl App {
             );
         }
         // `Acquire`, pairing with the worker's `Release` store in
-        // `engine::start_rip`'s `SignalDone::drop`: seeing `true` here
-        // guarantees the `summary`/`outcome` writes sequenced-before that
-        // store are visible below, without leaning on an unstated
-        // assumption that locking `summary`/`outcome` will happen to
-        // provide the same guarantee on every platform this ever runs on.
+        // `SignalDone::drop`: seeing `true` guarantees the `summary`/`outcome`
+        // writes are visible below, without relying on lock semantics alone.
         if st.finished.load(std::sync::atomic::Ordering::Acquire) {
             // Poison-recovering: a worker that PANICKED is exactly when the
             // verdict matters, and `unwrap_or_default()` turned that into
@@ -2352,17 +2262,14 @@ impl App {
                 .map(|n| n.info.clone())
                 .unwrap_or_else(|| crate::strings::get("gui.page.detail_default")),
             result_summary: self.result_summary.clone(),
-            // The summary text is engine-emitted English; classify on it, but
-            // show a localized heading.
-            // Matched on the TYPED verdict. Substring-matching the summary
-            // sent an undecryptable disc and both abort-for-loss paths to the
-            // success heading, and sent a failed convert to "nothing written".
+            // Summary text is engine-emitted English; heading is localized, matched
+            // on the TYPED verdict — substring-matching the summary text used to send
+            // an undecryptable disc and abort-for-loss paths to the success heading.
             result_heading: match self.result_outcome {
                 crate::engine::RunOutcome::Cancelled => crate::strings::get("gui.result.cancelled"),
-                // Reuses the existing "nothing written" string rather than
-                // adding a key: `freemkv-i18n` is pinned to a release tag, so a
-                // new key means cutting a tag in another repo. Wording debt,
-                // recorded, not a behaviour gap.
+                // Reuses "nothing written" instead of a new key: `freemkv-i18n` is
+                // pinned to a release tag, so a new key means cutting a tag there.
+                // Wording debt, recorded, not a behaviour gap.
                 crate::engine::RunOutcome::Failed => crate::strings::get("gui.result.nothing"),
                 crate::engine::RunOutcome::Completed => crate::strings::get("gui.result.finished"),
             },
@@ -2603,13 +2510,9 @@ mod tests {
                 let at = src.find(key).unwrap_or_else(|| {
                     panic!("{name}: no About row for {key} — did the box move?")
                 });
-                // Bound the window at the NEXT About row, so each row is
-                // judged on its own text. A fixed-size window silently bled
-                // into the following row — and since the row after "version"
-                // is "engine", which legitimately contains CARGO_PKG_VERSION,
-                // the check passed even with the version hard-coded. A test
-                // that cannot fail is worse than no test, so this is measured
-                // against the real boundary rather than a guess.
+                // Bound the window at the NEXT About row so each is judged on its own
+                // text. A fixed-size window bled into "engine" after "version", which
+                // also contains CARGO_PKG_VERSION, letting a hard-coded version pass.
                 let rest = &src[at + key.len()..];
                 let end = rest.find("gui.about.").unwrap_or(rest.len());
                 let window = &rest[..end];
@@ -2688,12 +2591,9 @@ mod tests {
         let needle = concat!("inbox", ".lock()");
         for (name, raw) in &shells {
             let src: String = raw.split_whitespace().collect();
-            // EVERY inbox lock, not just the drain's. The producer half — the
-            // keydb worker's single `push` — had the same `if let Ok(..)`
-            // shape, and dropping that one message wedges the UI in exactly
-            // the same way as bailing out of the drain: the button never
-            // re-enables and the timer never stops, because the drain only
-            // stops it once it has a batch to report.
+            // EVERY inbox lock, not just the drain's: the keydb worker's `push` has
+            // the same `if let Ok(..)` shape, and dropping that message wedges the
+            // UI the same way — button never re-enables, timer never stops.
             let mut found = 0usize;
             let mut at = 0usize;
             while let Some(i) = src[at..].find(needle) {
@@ -2742,10 +2642,9 @@ mod tests {
         const BAD: &str = "iso:///nonexistent/definitely-not-here.iso";
         let mut app = App::new();
         let before = app.log.len();
-        // Driven to COMPLETION, not just started. The probe is asynchronous
-        // now, so asserting straight after `open_probe` would assert about a
-        // scan that had not run — a test that passes because nothing has
-        // happened yet is the same test deleted.
+        // Driven to COMPLETION: the probe is async, so asserting right after
+        // `open_probe` would assert about a scan that hadn't run yet — a test
+        // that passes because nothing happened is the same as no test.
         app.open_probe(BAD);
         drain_probe(&mut app);
         assert_eq!(
@@ -2776,12 +2675,9 @@ mod tests {
         panic!("the launch probe never finished");
     }
 
-    // ── The launch probe is off the UI thread ──────────────────────────────
-    //
-    // It ran a drive enumeration, a SCSI scan and an AACS key resolution
-    // synchronously at every start, so the window was frozen until the drive
-    // answered. It now goes through the SAME `StartTicking` + `tick` seam a
-    // running rip uses, which is why neither shell needed a line changed.
+    // ── The launch probe is off the UI thread: it used to run drive enumeration,
+    // a SCSI scan and AACS key resolution synchronously, freezing the window until
+    // the drive answered. Now it uses the SAME `StartTicking`+`tick` seam as a rip.
 
     /// `open_probe` must hand the work off and RETURN, asking for the tick
     /// that will collect it.

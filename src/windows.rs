@@ -18,7 +18,7 @@
 //! The shell also holds no state that duplicates `App`. On macOS six such
 //! fields existed and one of them went stale, silently disabling the
 //! menu-disabling logic during a rip. The only cached values here are *render
-//! memos* (`last_rows`, `last_formats`): a signature of what was last painted,
+//! memos* (`rows`, `formats`, `log_len`): a signature of what was last painted,
 //! used purely to avoid rebuilding a control that has not changed. Rebuilding a
 //! tree or a dropdown unconditionally on a 100 ms tick would flicker and drop
 //! the user's expansion state mid-rip.
@@ -47,18 +47,9 @@ use winsafe::{self as w, co, gui, msg, prelude::*};
 
 use crate::ui::{App, Check, Cmd, Effect, LogKind, LogLine, Page, Row, View};
 
-// ── window geometry ───────────────────────────────────────────────────────
-//
-// The numbers live in `win_layout`, which turns a DPI plus a client size into
-// every rectangle. NOTHING here may position a control from a bare constant:
-// the manifest declares PerMonitorV2, so Windows hands this process the real
-// DPI and does no scaling of its own. A literal `8` is 8 physical pixels at
-// 200% just as it is at 100% — half the intended padding, with the text
-// clipped to match.
-//
-// The proportions are the macOS shell's, so the two look like one product:
-// tree 46.4% wide, log 32% of the height on the tree page and more while
-// ripping, Output/Info groups stacked on the right.
+// Window geometry: rects come from `win_layout` (DPI-aware, PerMonitorV2);
+// never position from a bare constant or it'll be wrong at non-100% scaling.
+// Proportions mirror the macOS shell (tree 46.4% wide, etc.).
 
 use crate::win_layout as lay;
 
@@ -229,10 +220,8 @@ fn launch_probe_enabled() -> bool {
         .all(|k| dev_env(k).is_err())
 }
 
-// ── Win32 entry points winsafe does not wrap ──────────────────────────────
-//
-// Declared directly, the same way `platform.rs` declares `GetDiskFreeSpaceExW`,
-// rather than pulling in a second binding crate for four functions.
+// Win32 entry points winsafe does not wrap; declared directly (as `platform.rs`
+// does for `GetDiskFreeSpaceExW`) rather than pulling in a second binding crate.
 
 mod extra {
     use std::ffi::c_void;
@@ -277,11 +266,9 @@ mod extra {
     pub const DFCS_BUTTON3STATE: u32 = 0x0000_0008;
 }
 
-// ── DPI ───────────────────────────────────────────────────────────────────
-//
-// Every physical length in this shell comes from one of these three calls.
-// `win_layout` does the arithmetic; this section is the only place that asks
-// Windows what the DPI *is*.
+// DPI: every physical length in this shell comes from one of these three calls.
+// `win_layout` does the arithmetic; this is the only place that asks Windows
+// what the DPI *is*.
 
 /// The DPI of the monitor `hwnd` is currently on.
 ///
@@ -345,12 +332,9 @@ fn ui_font(dpi: u32) -> Option<w::HFONT> {
             ) != 0
         };
         if !got {
-            // The per-DPI call refused (it validates its arguments). Fall back
-            // to the metrics at the system DPI and rescale the height by hand.
-            //
-            // Not a compatibility path: both imports above are Windows 10 1607
-            // and the PerMonitorV2 manifest already requires 1703, so a machine
-            // that lacked them could not start this binary at all.
+            // Per-DPI call refused (it validates args); fall back to system-DPI
+            // metrics and rescale by hand. Not a compat path — both imports are
+            // Win10 1607 and the manifest already requires 1703 to start at all.
             unsafe {
                 w::SystemParametersInfo(
                     co::SPI::GETNONCLIENTMETRICS,
@@ -464,12 +448,9 @@ fn set_icons(hwnd: &w::HWND) {
         );
         let Ok(mut icon) = loaded else { continue };
 
-        // Leak deliberately. The icon must outlive this call for as long as the
-        // window exists, and there is exactly one window per process lifetime,
-        // so letting the guard drop here would destroy the HICON the title bar
-        // is still pointing at. Not `LR::SHARED`: that is documented as
-        // unreliable for a non-default requested size, which is the whole point
-        // of loading these two explicitly.
+        // Leak deliberately: the icon must outlive this call for the window's
+        // whole (one per process) lifetime, else the guard drops the HICON the
+        // title bar points at. Not `LR::SHARED`, which is unreliable at this size.
         let hicon = icon.leak();
         unsafe {
             hwnd.SendMessage(msg::WmSetIcon { size: slot, hicon });
@@ -678,21 +659,17 @@ impl Shell {
     fn new() -> Self {
         let settings = crate::settings::Settings::load();
 
-        // No window exists yet, so the only DPI on offer is the system one.
-        // Every size below is a placeholder anyway — `relayout` runs on the
-        // first `WM_SIZE`, at the DPI of the monitor the window actually opens
-        // on — but the *window* size is used as given, so it must be scaled or
-        // the app opens as a postage stamp on a HiDPI screen.
+        // No window exists yet, so only the system DPI is available. Sizes below
+        // are placeholders (`relayout` fixes them on first `WM_SIZE`), but the
+        // *window* size is used as-is, so scale it or it's a postage stamp on HiDPI.
         let s = lay::Scale::new(system_dpi());
 
         let wnd = gui::WindowMain::new(gui::WindowMainOpts {
             title: "freemkv",
             class_name: "FmkvMain",
-            // The window class icon is what Windows falls back to for the
-            // taskbar and Alt-Tab. It is NOT enough on its own: winsafe fills
-            // both `hIcon` and `hIconSm` from this one value via `LoadIcon`,
-            // which always returns the 32 px frame, so the title bar would show
-            // a 32→16 downscale. `set_icons` below fixes that with WM_SETICON.
+            // Class icon is the taskbar/Alt-Tab fallback, but not enough alone:
+            // winsafe fills hIcon/hIconSm from it via LoadIcon (always the 32px
+            // frame), so the title bar would show a downscale; `set_icons` fixes it.
             class_icon: gui::Icon::Id(IDI_APP),
             size: lay::default_size(s.dpi()),
             style: co::WS::CAPTION
@@ -1087,10 +1064,9 @@ fn build_menu() -> w::SysResult<w::HMENU> {
         },
     ])?;
 
-    // The Edit menu mixes two kinds of item: standard text commands that act on
-    // the focused control (so Copy works in the log), and our tree-selection
-    // commands. The tree commands deliberately do NOT take Ctrl+A/Ctrl+C, which
-    // would break text selection in the log.
+    // Edit menu mixes standard text commands (act on the focused control, so
+    // Copy works in the log) with tree-selection commands, which deliberately
+    // skip Ctrl+A/Ctrl+C so they don't break text selection in the log.
     let edit = w::HMENU::CreatePopupMenu()?;
     edit.append_item(&[
         w::MenuItem::Entry {
@@ -1367,11 +1343,9 @@ impl Shell {
         self.set_tree_redraw(false);
         let _ = self.tree.items().delete_all();
 
-        // Which row hangs off which comes from the core (`ui::row_parents`), so
-        // this shell and the macOS outline cannot nest the same rows
-        // differently. Handles are kept per ROW POSITION, so a child always
-        // attaches to its own parent rather than to whichever row happened to
-        // come last.
+        // Parentage comes from the core (`ui::row_parents`), so this shell and
+        // the macOS outline can't nest rows differently. Handles are kept per
+        // ROW POSITION so a child attaches to its own parent, not the last one.
         let parents = crate::ui::row_parents(rows);
         let mut handles: Vec<Option<w::HTREEITEM>> = Vec::with_capacity(rows.len());
         for (i, r) in rows.iter().enumerate() {
@@ -1408,17 +1382,9 @@ impl Shell {
             }
         }
         self.set_tree_redraw(true);
-        // Each expand above scrolled its newly-revealed children into view, so
-        // the loop ends parked on the LAST title of the disc — a user opening a
-        // 97-title Blu-ray was handed the bottom of the list. Put the row the
-        // core nominates (the first ticked one) back at the top.
-        //
-        // `ensure_visible` will not do: it scrolls the minimum distance, which
-        // lands the row at the BOTTOM edge — exactly where the expand loop
-        // already left things. `TVM_SELECTITEM`/`TVGN_FIRSTVISIBLE` is the one
-        // that means "this row goes at the top"; it scrolls as far as the
-        // content allows and no further, which is the right behaviour for a
-        // target near the end.
+        // Expanding above leaves the view parked on the LAST title, so scroll the
+        // core's nominated row (first ticked) back to top. `ensure_visible` won't
+        // do — it scrolls the minimum distance, landing at the bottom edge.
         if let Some(h) = crate::ui::first_visible_row(rows).and_then(|i| handles[i].as_ref()) {
             let _ = unsafe {
                 self.tree.hwnd().SendMessage(msg::TvmSelectItem {
@@ -1549,10 +1515,9 @@ impl Shell {
     fn render(&self) {
         let v = self.app.borrow().view();
 
-        // The format list depends on the source kind, so it is re-derived on
-        // every render from the view rather than only at build time. Building it
-        // once was a real bug on macOS: opening an MKV after an ISO left
-        // "Whole disc → ISO image" on offer for a source that cannot produce it.
+        // Format list depends on source kind, so it's re-derived every render,
+        // not just at build time — a real macOS bug had "Whole disc → ISO image"
+        // still on offer after opening an MKV, which can't produce it.
         self.sync_formats(&v);
 
         // ── pages ──
@@ -1802,10 +1767,9 @@ impl Shell {
                         .raw_arg(format!("/select,\"{p}\""))
                         .spawn()
                     {
-                        // Absence of a log is itself a bug: a failed reveal used
-                        // to vanish into `let _ =`, so a user who clicked "show
-                        // in folder" and saw nothing had no way to tell whether
-                        // the file, the path, or Explorer was the problem.
+                        // Silent failure is itself a bug: a failed reveal used to
+                        // vanish into `let _ =`, leaving a user who clicked "show
+                        // in folder" with no clue what went wrong.
                         self.app_mut(|a| {
                             a.say(
                                 LogKind::Notice,
@@ -1832,13 +1796,9 @@ impl Shell {
                 Effect::StopTicking => {
                     let _ = self.wnd.hwnd().KillTimer(TIMER_TICK);
                 }
-                // File > Exit reaches here. It must not be a second, unguarded
-                // quit path: before this it went straight to PostQuitMessage,
-                // so quitting from the menu mid-rip skipped the confirmation,
-                // skipped the Cancel signal and skipped the drain entirely —
-                // while WM_CLOSE (the window's X) did all three. AppKit's
-                // sibling was given a bounded wait for exactly this race; the
-                // menu item here had none.
+                // File > Exit must not be a second, unguarded quit path: it used
+                // to go straight to PostQuitMessage, skipping confirmation, the
+                // Cancel signal, and the drain that WM_CLOSE (the window's X) did.
                 Effect::Quit => {
                     if self.confirm_quit_mid_rip() {
                         self.cancel_and_drain();
@@ -1925,13 +1885,9 @@ impl Shell {
 
         let me = self.clone();
         self.wnd.on().wm_create(move |_| {
-            // The window now exists, so its real DPI is finally knowable —
-            // which may not be the system DPI the controls were created at, if
-            // freemkv opened on a secondary display. `apply_dpi` rebuilds the
-            // font AND the tri-state glyph image list at that DPI, so it
-            // replaces the fixed-size `build_check_images` this used to call:
-            // building glyphs at 16 px first would just be work thrown away,
-            // and on a HiDPI panel the wrong size until the first DPI change.
+            // Real DPI is finally knowable now the window exists (may differ from
+            // system DPI on a secondary display). `apply_dpi` rebuilds font AND
+            // glyph image list at that DPI, replacing fixed-size `build_check_images`.
             me.apply_dpi();
             // Title-bar icons need the window, so they belong here too.
             set_icons(me.wnd.hwnd());
@@ -1939,23 +1895,9 @@ impl Shell {
             // Nothing is open at launch: show the empty state rather than a
             // tree of invented rows.
             me.render();
-            // ── the launch probe ──
-            //
-            // A disc already in the drive was never detected at launch. Not
-            // because detection was deferred or its result was dropped:
-            // NOTHING ran it. The shell built the window, rendered the empty
-            // page and handed control to the message loop, and `App::new`
-            // opens no source — so the only thing that ever enumerated the
-            // drive was File ▸ Open disc, on click. Hence "the menu finds it
-            // immediately": the code works; it was simply never called.
-            //
-            // Fixed by CALLING it, off a one-shot timer rather than inline
-            // here. The probe ends in `App::open`, which scans the disc and
-            // resolves its keys synchronously — seconds, sometimes more, on
-            // the UI thread. Inline in `WM_CREATE` that is a launch with no
-            // window on screen until the drive has spun up, which reads as a
-            // hang. On the timer, the empty page is already painted before
-            // anything touches the drive.
+            // Launch probe: a disc already in the drive was never scanned at
+            // launch (only File > Open disc did that). Fixed via a one-shot timer,
+            // not inline in WM_CREATE, so the empty page paints before the scan.
             if launch_probe_enabled() {
                 let _ = me
                     .wnd
@@ -1965,10 +1907,9 @@ impl Shell {
             Ok(0)
         });
 
-        // The probe itself: one shot, killed before it runs so a slow scan can
-        // never queue a second one. `false` = no "no optical drive found"
-        // notice; nobody asked for this probe, so a machine with no drive must
-        // see nothing at all.
+        // One shot, killed before it runs so a slow scan can't queue a second.
+        // `false` = no "no optical drive found" notice — nobody asked for this
+        // probe, so a driveless machine should see nothing.
         let me = self.clone();
         self.wnd.on().wm_timer(TIMER_LAUNCH_PROBE, move || {
             let _ = me.wnd.hwnd().KillTimer(TIMER_LAUNCH_PROBE);
@@ -1982,16 +1923,9 @@ impl Shell {
             Ok(())
         });
 
-        // ── the window moved to a monitor with different scaling ──
-        //
-        // Under PerMonitorV2 this is the app's cue to redraw itself at the new
-        // scale; Windows does nothing on its own. Without it freemkv is correct
-        // only on the display it opened on, and drags between a laptop panel
-        // and an external monitor — the ordinary case — leave it wrong.
-        //
-        // `lParam` carries the rectangle Windows suggests: the size the window
-        // *should* become so it keeps its apparent size and stays under the
-        // cursor. Ignoring it and resizing by hand fights the drag.
+        // Window moved to a monitor with different scaling: under PerMonitorV2
+        // this is the app's cue to redraw at the new scale (Windows won't do it).
+        // `lParam` is the suggested rect that keeps apparent size under the cursor.
         let me = self.clone();
         self.wnd.on().wm(co::WM::DPICHANGED, move |p: msg::Wm| {
             // LOWORD is the X DPI; Windows keeps X and Y equal in practice.
@@ -2015,12 +1949,9 @@ impl Shell {
             Ok(0)
         });
 
-        // Never let the window shrink below the point the layout stops working.
-        //
-        // `ptMinTrackSize` is an OUTER window size, so the frame and caption
-        // have to be added to the client minimum — and both of those are
-        // themselves DPI-dependent, which is what `GetSystemMetricsForDpi` is
-        // for. `GetSystemMetrics` would answer for the primary monitor.
+        // Never shrink below the point layout stops working. `ptMinTrackSize` is
+        // an OUTER size, so frame+caption (DPI-dependent) must be added to the
+        // client minimum via `GetSystemMetricsForDpi`, not the primary-monitor one.
         let me = self.clone();
         self.wnd.on().wm_get_min_max_info(move |p| {
             let dpi = window_dpi(me.wnd.hwnd());
@@ -2042,14 +1973,9 @@ impl Shell {
         let me = self.clone();
         self.wnd.on().wm_drop_files(move |p| {
             let hdrop = p.hdrop;
-            // Swallow-and-log, never `?`. This was the ONLY `?` in a handler in
-            // this file; every sibling uses `let _ =`. An `Err` out of here
-            // unwinds `run_main` into `run()`'s error arm, which MessageBoxes
-            // and exits — bypassing `confirm_quit_mid_rip` / `cancel_and_drain`
-            // and DISCARDING a rip in progress. Dropping a virtual or
-            // undecodable item (a search result, a cloud placeholder, a name
-            // that is not valid UTF-16) during a rip must not be able to kill
-            // the app. A failed enumeration is logged and ignored.
+            // Swallow-and-log, never `?`: an `Err` here unwinds into `run()`'s
+            // error arm, which MessageBoxes and exits, bypassing quit-confirm/
+            // drain and discarding a rip in progress. Log a failed enumeration.
             let mut names = match hdrop.DragQueryFile() {
                 Ok(n) => n,
                 Err(e) => {
@@ -2205,10 +2131,9 @@ impl Shell {
         let me = self.clone();
         self.tree.on().nm_click(move || {
             if let Some(row) = me.hit_state_icon() {
-                // The toggle DIRECTION is core policy, not a shell decision.
-                // This used to read `Off | Mixed` here while mac.rs read the
-                // NSButton mixed state as "off", so a click on a partly-ticked
-                // title selected all of it on Windows and cleared it on macOS.
+                // Toggle DIRECTION is core policy, not a shell decision — this used
+                // to read `Off | Mixed` here while mac.rs read mixed as "off", so a
+                // partly-ticked title selected on Windows and cleared on macOS.
                 me.app_mut(|a| a.tree.toggle(row));
             }
             Ok(0)
@@ -2320,11 +2245,9 @@ impl Shell {
 
     /// Drain worker-thread messages onto the log and into the Settings note.
     fn drain(&self) {
-        // RECOVER a poisoned inbox rather than returning — see the identical
-        // comment on the macOS shell's `onDrain:`. Returning here stranded
-        // `set_keydb_updating(false)` (the Update button stayed disabled) and
-        // skipped `KillTimer(TIMER_DRAIN)`, leaving a 5 Hz timer running for
-        // the life of the process re-taking the same poisoned lock.
+        // RECOVER a poisoned inbox rather than returning (see macOS `onDrain:`):
+        // returning stranded `set_keydb_updating(false)` and skipped KillTimer,
+        // leaving a 5 Hz timer running for the process's life on a dead lock.
         let msgs: Vec<String> = self
             .inbox
             .lock()
@@ -2359,13 +2282,9 @@ impl Shell {
 /// means "not an enum combo".
 fn enum_options(key: &str) -> Vec<(&'static str, String)> {
     match key {
-        // The output container is the format list, localized for display.
-        //
-        // Windows-only: this shell's default-output control is a FLAT combo box
-        // with no separator rows, so the format list maps 1:1 onto its indices
-        // and can be treated as an enum here. The macOS popup interleaves group
-        // separators, so it maps by title instead — which is why this arm stays
-        // in the shell and is deliberately absent from `ui::enum_options`.
+        // Output container, localized. Windows-only: this combo is FLAT with no
+        // separator rows, so the format list maps 1:1 onto indices; macOS's popup
+        // interleaves separators and maps by title, so this stays out of `ui`.
         "container" => crate::ui::output_formats(true, true)
             .into_iter()
             .flatten()
@@ -2443,10 +2362,8 @@ impl LangPicker {
     fn track_once(&self, owner: &w::HWND, anchor: w::RECT) -> Option<String> {
         let mut menu = w::HMENU::CreatePopupMenu().ok()?;
         let langs = crate::ui::PICKER_LANGUAGES;
-        // `SM::CYMENU` is the menu-bar height, which is what a popup row is
-        // sized from, and `SM::CYSCREEN` the display height. Feeding both to
-        // the layout module turns a list taller than the screen into columns
-        // rather than Windows' scroll arrows — see `menu_column_rows`.
+        // CYMENU (popup row height) and CYSCREEN feed `menu_column_rows`, which
+        // turns a list taller than the screen into columns instead of scroll arrows.
         let rows = lay::menu_column_rows(
             langs.len(),
             w::GetSystemMetrics(co::SM::CYMENU),
@@ -2487,10 +2404,9 @@ impl LangPicker {
             w::POINT::with(anchor.left, anchor.bottom),
             owner,
         );
-        // Both required, and in this order. The null post is the documented
-        // workaround for TrackPopupMenu leaving the owner unable to see the
-        // click that dismissed the menu; the menu is not attached to a window,
-        // so nothing else will ever destroy it.
+        // Both required, in this order: the null post is the documented fix for
+        // TrackPopupMenu leaving the owner blind to the dismiss click, and since
+        // the menu isn't attached to a window, nothing else will destroy it.
         let _ = unsafe { owner.PostMessage(msg::WmNull {}) };
         let _ = menu.DestroyMenu();
 
@@ -2602,9 +2518,8 @@ impl<'a> Rows<'a> {
                 position: (self.gutter, self.y),
                 width: self.s.px(wd),
                 height: self.m.field_h,
-                // Left-aligned, not the button default of centred: this sits in
-                // the column of text boxes and combos, and a centred summary
-                // that re-centres itself every time a language is ticked reads
+                // Left-aligned, not the default centred: this sits in a column of
+                // text boxes/combos, and a summary re-centring on every tick reads
                 // as the whole control jumping about.
                 control_style: co::BS::PUSHBUTTON | co::BS::LEFT,
                 ..Default::default()
@@ -2744,15 +2659,9 @@ struct Prefs {
 impl Prefs {
     fn new(parent: &gui::WindowMain, st: &crate::settings::Settings) -> Self {
         let g = crate::strings::get;
-        // Wide enough that the longest label ("Keep encrypted (raw
-        // passthrough) :") and its longer translations fit the gutter without
-        // clipping, while the controls still have room.
-        //
-        // Built before the main window is created, so the system DPI is the
-        // only one available. That is also the DPI this form stays at: its rows
-        // are laid out once, at creation, and a Settings window is opened on
-        // the same monitor as the app that opened it in every case but a
-        // dragged-across-monitors one.
+        // Wide enough that the longest label and its translations fit the gutter
+        // without clipping. Built before the main window exists, so system DPI is
+        // the only one available — also the DPI it stays at, laid out once.
         let dpi = system_dpi();
         let s = lay::Scale::new(dpi);
         let (ww, wh) = (s.px(lay::PREFS_W), s.px(lay::PREFS_H));
@@ -2819,14 +2728,9 @@ impl Prefs {
         ));
         r.note(&g("gui.set.min_length_note"));
         r.gap();
-        // Three INDEPENDENT language sets — see `ui::LangPrefs`. They decide
-        // which stream rows start ticked; nothing here bypasses the tick boxes,
-        // so the user still sees and can change every choice.
-        //
-        // Checklists, not text boxes. Typed free text could not be validated
-        // without guessing what the user meant, and "German" silently failing
-        // to match a stream tagged `deu` looked exactly like the feature not
-        // working. A list of names that stores codes cannot be mistyped.
+        // Three INDEPENDENT language sets (see `ui::LangPrefs`) decide which
+        // stream rows start ticked. Checklists, not text boxes: free text like
+        // "German" could silently fail to match a `deu` stream, unlike a code list.
         langs.push((
             "audio_langs",
             r.lang(&g("gui.set.audio_langs"), &st.audio_langs, 240),
@@ -3329,10 +3233,9 @@ fn save_settings_reporting_error(sh: &Shell) {
 
 impl Prefs {
     fn events(&self, shell: &Shell) {
-        // OK: commit the form, persist it, and push it into the running App so
-        // changes (log detail, key source, multipass, dest dir, …) take effect at
-        // once — App holds its own copy, loaded at startup, and would otherwise
-        // stay stale until the next launch.
+        // OK: commit the form, persist it, and push into the running App so
+        // changes take effect at once — App's own copy, loaded at startup,
+        // would otherwise stay stale until the next launch.
         let me = self.clone();
         let sh = shell.clone();
         self.btn_ok.on().bn_clicked(move || {
@@ -3463,10 +3366,9 @@ impl Prefs {
                     Ok(m) => m,
                     Err(e) => e,
                 };
-                // RECOVER rather than skip the push — see the macOS shell's
-                // identical worker. Dropping this one message leaves the
-                // Update button disabled and `TIMER_DRAIN` firing forever,
-                // because `drain()` only stops the timer once it has a batch.
+                // RECOVER rather than skip the push (see macOS's identical worker):
+                // dropping this message leaves the Update button disabled and
+                // TIMER_DRAIN firing forever, since drain() stops it only on a batch.
                 inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
             });
             sh.start_drain();
@@ -3620,15 +3522,11 @@ impl Shell {
     }
 }
 
-// ── self-screenshot ───────────────────────────────────────────────────────
-//
-// No screen-capture permission and no window-server tricks: `PrintWindow` asks
-// the window to render itself into a memory DC, which is the Win32 counterpart
-// of the macOS shell's `cacheDisplayInRect:`. Written as a BMP because that
-// needs no encoder dependency — the macOS harness writes PNG, so the captures
-// are equivalent but not byte-comparable across platforms.
+// Self-screenshot: `PrintWindow` renders the window into a memory DC (Win32's
+// counterpart to macOS's `cacheDisplayInRect:`), no capture permission needed.
+// Written as BMP (no encoder dep); macOS writes PNG, so captures aren't byte-comparable.
 
-/// True when every pixel is identical — i.e. the capture produced nothing.
+/// True when every byte is identical — i.e. the capture produced nothing.
 ///
 /// Worth checking because the obvious capture call can "succeed" and still
 /// return a blank plate, and a screenshot harness that silently writes black
@@ -3650,13 +3548,9 @@ fn snapshot(hwnd: &w::HWND, path: &str) -> w::AnyResult<()> {
     let size = (stride * cy) as usize;
     let mut buf = vec![0u8; size];
 
-    // Three ways to get the pixels, tried in order until one is not blank.
-    //
-    // `PW_RENDERFULLCONTENT` is the right answer on a normal desktop (it is the
-    // only mode that captures DirectComposition-rendered content), but it needs
-    // DWM composition — on a headless/session-0 machine, which is exactly where
-    // CI runs, it returns success and paints nothing. Plain `PrintWindow` (which
-    // goes through `WM_PRINT`) works there, and a screen blit is the last resort.
+    // Three ways to get pixels, tried in order until one is not blank.
+    // PW_RENDERFULLCONTENT needs DWM composition (fails silently in CI's
+    // headless session-0); plain PrintWindow works there; screen blit is last resort.
     let mut last_err: Option<co::ERROR> = None;
     for strategy in 0..3u8 {
         {
@@ -3762,12 +3656,9 @@ fn pump(ms: u64) {
     }
 }
 
-// ── UI driver ─────────────────────────────────────────────────────────────
-//
-// Drives the REAL controls — `BM_CLICK` on the actual buttons, real
-// `WM_COMMAND`s off the menu — so every action goes through the same wiring a
-// mouse click takes. Calling the handlers directly would bypass exactly the
-// wiring that broke on macOS twice.
+// UI driver: drives the REAL controls (BM_CLICK, real WM_COMMANDs) so every
+// action goes through the same wiring a mouse click takes — calling handlers
+// directly would bypass exactly the wiring that broke on macOS twice.
 
 impl Shell {
     /// Click a button as a user would: `trigger_click` posts `BM_CLICK`.
@@ -3906,12 +3797,9 @@ impl Shell {
             ),
         );
 
-        // ── every row's state image matches the tick the core decided ──
-        //
-        // Asserted against `state_for(row.check)`, i.e. the whole mapping, not
-        // just "the root has none": a row the core says carries no checkbox
-        // must show NO state image, and a row it says is Mixed must show the
-        // third glyph rather than falling back to checked or unchecked.
+        // Every row's state image matches the core's tick, checked against the
+        // whole `state_for` mapping: a row with no checkbox must show none, and
+        // a Mixed row must show the third glyph, not fall back to checked/unchecked.
         for r in &v.title_rows {
             let want = state_for(r.check);
             let got = self.widget_state(r.index);
@@ -3925,10 +3813,9 @@ impl Shell {
             );
         }
 
-        // ── the format combo shows exactly the core's list, localized ──
-        //
-        // Not "the combo is non-empty": the CONTENT is the property. This is
-        // what catches an ISO sink still on offer for an MKV source.
+        // Format combo shows exactly the core's list, localized. Not "the combo
+        // is non-empty" — the CONTENT is the property that catches an ISO sink
+        // still on offer for an MKV source.
         let want: Vec<String> = v
             .formats
             .iter()
@@ -4087,12 +3974,9 @@ impl Shell {
         );
         check("info-text", !v.detail.is_empty(), "detail pane populated");
 
-        // ── WIDGET-level checks: what the controls actually show, not what the
-        // model said. Model-level tests pass while the widget is broken. The
-        // same sweep runs as an ordinary `#[test]` (see this file's test
-        // module), so a regression is caught by `cargo test` too.
-        // (`check` borrows `results`; its borrow ends at the line above, so the
-        // batch append is legal and a fresh recorder is bound afterwards.)
+        // WIDGET-level checks: what controls actually show, not the model — the
+        // same sweep also runs as an ordinary `#[test]`, so `cargo test` catches
+        // regressions too. (`check`'s borrow of `results` ends above the append.)
         results.extend(self.widget_checks());
         let mut check = |name: &str, ok: bool, detail: &str| {
             results.push((ok, format!("{name} — {detail}")));
@@ -4304,12 +4188,9 @@ impl Shell {
 
         // 9 ── REAL RUN: click Run Now, watch it start, click Cancel
         self.act(Cmd::SelectNone);
-        // Resolve the index in its OWN statement, exactly as step 3 does. An
-        // `if let Some(t) = self.app.borrow()…` keeps the `Ref` alive for the
-        // whole then-block — including across `app_mut`, whose `borrow_mut`
-        // then panics with "RefCell already borrowed" and, because it unwinds
-        // out of a Win32 window procedure, aborts the process outright. The
-        // index is a plain `usize`, so there is no reason to hold the borrow.
+        // Resolve the index in its OWN statement (as step 3 does): an `if let
+        // Some(t) = self.app.borrow()…` keeps the `Ref` alive across `app_mut`,
+        // whose `borrow_mut` then panics and aborts the process outright.
         let first_title = self
             .app
             .borrow()
@@ -4594,17 +4475,9 @@ impl Shell {
     }
 }
 
-// ── tests ─────────────────────────────────────────────────────────────────
-//
-// Two tiers, both reachable from `cargo test` on a Windows host:
-//
-//   * the pure shell decisions (menu routing, tick glyphs, the redraw memo,
-//     row text, the log gutter) — no window, no message loop;
-//   * `widget_checks`, the same sweep the interactive `FMKV_SELFTEST` mode
-//     runs, driven here against a real window built from a synthetic scan.
-//
-// The behaviour tests over `App`/`Tree`/`View` are NOT repeated here: they live
-// in `tests/gui_model.rs`, run on every host, and cover both shells at once.
+// Tests, two tiers, both via `cargo test` on Windows: pure shell decisions (no
+// window/message loop) and `widget_checks` (the FMKV_SELFTEST sweep, driven
+// against a real window). App/Tree/View behavior lives in tests/gui_model.rs.
 
 #[cfg(test)]
 mod tests {
@@ -4778,10 +4651,9 @@ mod tests {
 
     #[test]
     fn the_row_signature_ignores_tick_state() {
-        // `render` rebuilds the tree whenever the signature changes, and a
-        // rebuild destroys the user's expansion and selection. Ticking a box
-        // must therefore NOT change the signature — it goes down the
-        // `sync_tree_states` path instead.
+        // `render` rebuilds the tree when the signature changes, destroying
+        // expansion/selection. Ticking a box must NOT change the signature — it
+        // goes through `sync_tree_states` instead.
         let rows = view_rows();
         let before = rows_sig(&rows);
         let flipped: Vec<Row> = rows
@@ -4841,14 +4713,9 @@ mod tests {
         assert_ne!(base, rows_sig(&swapped), "a reordered tree went unnoticed");
     }
 
-    // ── a language change reaches the cached About box ────────────────────
-    //
-    // STOPGAP, NOT COVERAGE: `About` is a live `WindowModeless` with real
-    // child controls, so observing its text after a language switch needs a
-    // window and a message pump. Source inspection only: it fails if the
-    // `about.relocalize()` call or the method itself is removed, which is the
-    // state the bug shipped in (the About box stayed in the launch language
-    // forever, because it is built once and reused).
+    // STOPGAP, NOT COVERAGE: `About` is a live `WindowModeless`, so observing
+    // its text after a language switch needs a window/message pump. Source
+    // inspection only: fails if the `relocalize()` call/method is removed.
     #[test]
     fn the_language_switch_re_texts_the_cached_about_box_source_inspection_only() {
         let src = include_str!("windows.rs");
@@ -4859,10 +4726,9 @@ mod tests {
             "Shell::relocalize no longer re-texts the About box — it is built \
              once and cached, so nothing else ever will"
         );
-        // Something only About::relocalize does: re-text the VALUE column from
-        // a freshly localized `about_rows()`. Shell::relocalize and
-        // Prefs::relocalize share the method name, so the name alone would pin
-        // nothing.
+        // Something only About::relocalize does: re-text the VALUE column from a
+        // fresh `about_rows()`. Shell/Prefs::relocalize share the method name,
+        // so the name alone would pin nothing.
         let vals = format!(
             "{}{}",
             "for (l, (_, v)) in self.lbl_vals.iter()", ".zip(rows.iter()) {"
@@ -4898,10 +4764,9 @@ mod tests {
 
     #[test]
     fn the_disc_row_does_not_repeat_its_type_in_the_label() {
-        // The root's Description is the volume label and its Type is the disc
-        // format; the macOS outline has a Type column to put that in, this
-        // shell does not, and prefixing "Bluray disc   " to the volume label
-        // reads as noise. Recorded as the shell's deliberate rule.
+        // Root's Description is the volume label, Type is the disc format; macOS
+        // has a Type column for that, this shell doesn't, and prefixing "Bluray
+        // disc  " to the label reads as noise — deliberate shell rule.
         let rows = view_rows();
         let root = &rows[0];
         assert_eq!(root.depth, 0);
@@ -5078,11 +4943,9 @@ mod tests {
             w::PostQuitMessage(0);
             Ok(())
         });
-        // Armed from BOTH create and show. A runner that creates the window but
-        // never raises WM_SHOWWINDOW would otherwise leave `run_main` pumping
-        // forever with nothing to quit it — a CI hang instead of a failure.
-        // Re-arming the same timer id just restarts it, so firing twice is
-        // harmless.
+        // Armed from BOTH create and show: a runner that never raises WM_SHOWWINDOW
+        // would leave `run_main` pumping forever (a CI hang, not a failure).
+        // Re-arming the same timer id just restarts it, so firing twice is fine.
         let me = shell.clone();
         shell.wnd.on().wm_create(move |_| {
             let _ = me.wnd.hwnd().SetTimer(TIMER_HARNESS, 200, None);
@@ -5129,17 +4992,9 @@ mod tests {
         );
     }
 
-    // ── timer failure is reported, not swallowed ────────────────────────────
-    //
-    // STOPGAP, NOT COVERAGE: this crate cannot compile `windows.rs` outside a
-    // Windows target (it is `#[cfg(target_os = "windows")]` all the way up in
-    // `lib.rs`), and this environment has no Windows toolchain to actually run
-    // `SetTimer` against — so unlike `the_real_controls_show_what_the_core_decided`
-    // above, this cannot drive a real HWND and force `SetTimer` to fail. This is
-    // a source-inspection check: it fails against the pre-fix source (a bare
-    // `let _ = ...SetTimer(...)` with no error path) and fails again if the
-    // error path is deleted, but it does NOT prove a MessageBox actually shows
-    // up on a real timer-exhaustion failure. That needs a Windows CI run.
+    // Timer failure is reported, not swallowed. STOPGAP, NOT COVERAGE: no
+    // Windows toolchain here to force a real SetTimer failure, so this is
+    // source inspection only — can't prove the MessageBox fires; needs Windows CI.
     /// This file's own text, with CRLF folded to LF.
     ///
     /// The source-inspection stopgaps below match multi-line needles against
@@ -5184,23 +5039,15 @@ mod tests {
         );
     }
 
-    // ── one settings-save policy, not two ───────────────────────────────────
-    //
-    // STOPGAP, NOT COVERAGE: same caveat as the timer test above — this crate
-    // cannot compile or run `windows.rs` outside a Windows target, so this
-    // cannot drive the real language combo and force a save failure. Source
-    // inspection only: fails if the language-switch handler goes back to a
-    // bare `let _ = sh.settings.borrow().save` (…) (or re-inlines its own
-    // Ok/Err match) instead of routing through the shared helper the OK
-    // button already uses.
+    // One settings-save policy, not two. STOPGAP, NOT COVERAGE (same caveat as
+    // the timer test above): source inspection only, fails if the language-switch
+    // handler stops routing through the shared save helper the OK button uses.
     #[test]
     fn language_switch_reports_a_failed_save_source_inspection_only() {
         let src = own_source();
-        // `.settings.borrow().save` (…) should appear in exactly ONE place:
-        // the shared helper. A second occurrence means some call site
-        // re-inlined the Ok/Err match (or a bare `let _ =`) again — the exact
-        // "one policy implemented twice" shape this crate already shipped
-        // once for this code path.
+        // `.settings.borrow().save` `(…)` should appear in exactly ONE place:
+        // the shared helper. A second occurrence means a call site re-inlined
+        // its own Ok/Err match — the "one policy implemented twice" bug, again.
         let direct_save = format!("{}{}", ".settings.borrow().save", "()");
         let occurrences = src.matches(&direct_save).count();
         assert_eq!(
@@ -5229,13 +5076,9 @@ mod tests {
         );
     }
 
-    // ── the language pickers use the shared rules, not a local parser ───────
-    //
-    // Source inspection only, for the same reason as the tests above: proving
-    // the menu really ticks needs a real HWND. What CAN be checked here is the
-    // thing most likely to go wrong — the set logic being reimplemented in this
-    // file. Two shells with two parsers is exactly the drift `ui::lang_*` was
-    // written to prevent, and it would not show up as a compile error.
+    // Language pickers use the shared rules, not a local parser. Source
+    // inspection only (proving the menu ticks needs a real HWND): checks the
+    // set logic isn't reimplemented here — the drift `ui::lang_*` prevents.
     #[test]
     fn the_language_pickers_own_no_parsing_source_inspection_only() {
         let src = own_source();
@@ -5262,10 +5105,9 @@ mod tests {
                 "the picker no longer goes through ui::{f}"
             );
         }
-        // The tells of a hand-rolled second parser: splitting the stored string
-        // on commas, or joining codes back up, anywhere in this file. Built
-        // from concatenated literals so these needles cannot match this test's
-        // own text through `include_str!` of this same file.
+        // Tells of a hand-rolled second parser: splitting on commas or joining
+        // codes back up, anywhere in this file. Concatenated literals so these
+        // needles can't match this test's own text via `include_str!`.
         let tells = [
             format!("{}{}", "split(", "',')"),
             format!("{}{}", "split([", "','"),
@@ -5282,13 +5124,9 @@ mod tests {
         }
     }
 
-    // ── the keyserver token is not shown in plaintext ───────────────────────
-    //
-    // STOPGAP, NOT COVERAGE: whether `ES::PASSWORD` actually masks keystrokes
-    // on screen needs a real HWND — the same gap noted on the timer and
-    // settings-save source-inspection tests above. Source inspection only:
-    // fails if the Keys tab goes back to building `keyserver_token` with the
-    // plain `field` constructor.
+    // Keyserver token is not shown in plaintext. STOPGAP, NOT COVERAGE: whether
+    // ES::PASSWORD masks keystrokes needs a real HWND (same gap as above).
+    // Source inspection only: fails if the Keys tab uses the plain `field` ctor.
     #[test]
     fn the_keyserver_token_field_is_secure_source_inspection_only() {
         let src = own_source();
