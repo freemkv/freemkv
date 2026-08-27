@@ -280,12 +280,9 @@ define_class!(
             let b: &NSButton = unsafe { &*(s as *const AnyObject as *const NSButton) };
             let i = { b.tag() } as usize;
             if let Some(c) = self.ivars().ctrl.borrow().as_ref() {
-                // The core owns cascade, tri-state AND the toggle direction;
-                // the shell only reports which row was clicked. It used to read
-                // the direction off the button's own state, and an NSButton
-                // with allowsMixedState reports -1 for mixed — so a click on a
-                // partly-ticked title CLEARED it here while the Win32 shell,
-                // which read `Off | Mixed` as "turn on", selected all of it.
+                // The core owns cascade, tri-state AND toggle direction; the
+                // shell only reports which row was clicked. Reading the
+                // direction from the button's own state broke on mixed state.
                 c.app_mut(|a| a.tree.toggle(i));
                 c.render();
             }
@@ -394,10 +391,9 @@ impl TitlesSource {
             else {
                 continue;
             };
-            // `make_if_necessary: false` on purpose — only cells AppKit has
-            // already built (the visible ones) are touched. Anything off
-            // screen has no view to update and is built from `rows` above
-            // when it scrolls in.
+            // `make_if_necessary: false` on purpose — only touch cells AppKit
+            // already built (visible ones); off-screen ones rebuild from
+            // `rows` above when they scroll in.
             let Some(v) = ov.viewAtColumn_row_makeIfNecessary(col, display, false) else {
                 continue;
             };
@@ -430,13 +426,9 @@ impl TitlesSource {
                         Retained::cast_unchecked(NSNumber::new_usize(root));
                     ov.expandItem_expandChildren(Some(&obj), true);
                 }
-                // `reloadData` keeps the OLD scroll offset, so opening a second
-                // disc while scrolled down leaves the user mid-list looking at
-                // titles they never asked for. Which row to show is the core's
-                // call, shared with the Windows tree.
-                //
-                // Every row is expanded above, so the outline's display row IS
-                // the position in the flat row list.
+                // `reloadData` keeps the OLD scroll offset; the core (shared
+                // with Windows) picks the row to show. All rows are expanded
+                // above, so display row == flat index.
                 if let Some(at) = crate::ui::first_visible_row(rows) {
                     let origin = ov.rectOfRow(at as isize).origin;
                     ov.scrollPoint(origin);
@@ -557,9 +549,8 @@ define_class!(
                 return objc2::runtime::Bool::NO;
             };
             // A DIRECTORY is a valid source: an extracted disc tree opens as
-            // `dir://`. Gating purely on file extension rejected every folder,
-            // so dragging a backup folder onto the window was refused for a
-            // source kind the engine accepts.
+            // `dir://`. Gating purely on extension rejected every folder,
+            // even though the engine accepts that source kind.
             let ok = std::path::Path::new(&p).is_dir()
                 || matches!(
                     std::path::Path::new(&p)
@@ -621,19 +612,8 @@ define_class!(
 
     unsafe impl NSWindowDelegate for Controller {}
 
-    // This shell had NO application delegate at all: the only `setDelegate:`
-    // calls were the outline view's, the output combo box's and the window's.
-    // Two things followed from that one omission.
-    //
-    // 1. The close button's "Stop & Quit" answered YES on the assumption that
-    //    closing the window ends the process. It does not: AppKit's default
-    //    when there is no delegate is to keep running with no window, so the
-    //    5 Hz timer and the rip thread both carried on with nothing on screen
-    //    and no way back to it.
-    // 2. ⌘Q / File ▸ Quit went straight to `terminate:`, which asks the
-    //    delegate — and there was none — so the rip-in-progress confirmation
-    //    implemented ~190 lines away for the close button was simply skipped.
-    //
+    // This shell had NO application delegate: AppKit kept running with no
+    // window after close, and ⌘Q skipped the rip-in-progress confirmation.
     // Both routes now ask the SAME question, through `confirm_quit`.
     unsafe impl NSApplicationDelegate for Controller {
         #[unsafe(method(applicationShouldTerminate:))]
@@ -655,12 +635,9 @@ define_class!(
     }
 
     unsafe impl NSControlTextEditingDelegate for Controller {
-        // Without this the output field is decoration: the operator types a
-        // path, the model never hears about it, and the next 5 Hz render()
-        // tick overwrites the field with the STALE `output_dir` it already
-        // had — mid-keystroke. Run then writes to wherever `output_dir` was
-        // last set some other way (Browse…, or nothing), not what the field
-        // says. Mirrors the Windows shell's `edit_out.on().en_change` guard.
+        // Without this the output field is decoration: the model never hears
+        // typed edits, and the next render() tick overwrites the field with
+        // the STALE `output_dir`. Mirrors Windows' `edit_out.on().en_change`.
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, n: Option<&objc2_foundation::NSNotification>) {
             let Some(f) = self.ivars().out_field.borrow().clone() else {
@@ -756,16 +733,13 @@ define_class!(
             // tell whether the user changed it in this Settings session.
             let old_dest = self.ivars().settings.borrow().dest_dir.clone();
             self.read_prefs_form();
-            // Push the freshly-edited settings into the running App so changes
-            // (log detail, key source, multipass, dest dir, …) take effect at
-            // once — App holds its own copy, loaded at startup, and would
+            // Push edited settings into the running App so changes take effect
+            // at once — App holds its own copy loaded at startup, which would
             // otherwise stay stale until the next launch.
             let edited = self.ivars().settings.borrow().clone();
-            // The active output directory is a separate live value (a one-off
-            // folder pick in the main window overrides the default). Re-point it
-            // ONLY when the user actually changed the default here — so editing
-            // the default destination takes effect, without clobbering a
-            // deliberate one-off pick on an unrelated settings edit.
+            // The active output dir is a separate live value (a one-off folder
+            // pick overrides the default); re-point it ONLY when the default
+            // actually changed, so this can't clobber a one-off pick.
             let new_dest = edited.dest_dir.clone();
             let dest_changed = new_dest != old_dest && !new_dest.trim().is_empty();
             self.app_mut(|a| {
@@ -909,22 +883,9 @@ define_class!(
             // own: a Settings window rebuilt while a download runs comes back
             // with a fresh, enabled button.
             if self.ivars().keydb_updating.get() {
-                // Localized through the catalog, like the other two keydb notes
-                // (`gui.set.keydb_no_url` / `gui.set.keydb_updating`), which the
-                // Windows shell reads from the SAME keys — the shared-catalog
-                // parity this crate's `ui`/`strings` layer exists to keep.
-                //
-                // `gui.set.keydb_busy` is the exception, and this comment used
-                // to claim otherwise: it is NEW to this crate and `windows.rs`
-                // has NO reader for it. The Windows Update button relies on
-                // being disabled while a download runs (`set_keydb_updating`)
-                // and never re-checks a "busy" flag, so it has no "already
-                // running" note to share yet. This mac path adds one because a
-                // Settings window rebuilt mid-download comes back with a fresh,
-                // enabled button — a race the disabled button alone does not
-                // cover. Wiring the same guard (and this key) into `windows.rs`
-                // would need a stored updating-state flag it does not carry
-                // today; until then the key is mac-only, by fact, not by claim.
+                // `gui.set.keydb_busy` is mac-only: Windows relies solely on
+                // its disabled Update button (`set_keydb_updating`) and never
+                // re-checks a "busy" flag, so it has no matching note to share.
                 self.set_keydb_note(&crate::strings::get_or(
                     "gui.set.keydb_busy",
                     "A keydb update is already running — please wait.",
@@ -972,12 +933,9 @@ define_class!(
                     Ok(m) => m,
                     Err(e) => e,
                 };
-                // RECOVER rather than skip the push, for the same reason the
-                // drain recovers: this is the ONLY message the keydb worker
-                // ever sends, and dropping it leaves the Update button
-                // disabled and the drain timer polling an empty inbox at 5 Hz
-                // forever — the exact wedge `start_drain`'s own comment says
-                // the one-shot design exists to avoid.
+                // RECOVER rather than skip the push: this is the ONLY message
+                // the keydb worker sends, and dropping it would wedge the
+                // Update button disabled forever, per `start_drain`'s comment.
                 inbox
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -1031,9 +989,8 @@ define_class!(
             let disc = !crate::ui::is_container(&src);
             let mp4 = self.ivars().app.borrow().mp4_possible();
             // Resolve the LOCALIZED popup label against the core's list rather
-            // than trusting the widget text, so an unknown title can never
-            // reach the model — and so selection works in every locale (the
-            // popup shows format_label(canonical), not the canonical string).
+            // than the widget text, so an unknown title can't reach the model
+            // and selection works in every locale.
             if let Some(f) = crate::ui::format_from_label(&t.to_string(), disc, mp4) {
                 self.act(crate::ui::Cmd::SetFormat(f));
             }
@@ -1109,15 +1066,9 @@ define_class!(
 
         #[unsafe(method(onDrain:))]
         fn on_drain(&self, _s: Option<&AnyObject>) {
-            // RECOVER a poisoned inbox rather than returning. The early
-            // return looked harmless and stranded the whole drain: the keydb
-            // "busy" flag stayed set (the Update button never re-enabled), the
-            // Settings note never showed the result, and — because the
-            // invalidate below was skipped too — the 5 Hz timer kept firing
-            // forever, taking this same poisoned lock and returning again for
-            // the rest of the process's life. A poisoned `Vec<String>` is
-            // still a perfectly good `Vec<String>`, and the messages inside it
-            // are the ones explaining why the worker died.
+            // RECOVER a poisoned inbox rather than returning: an early return
+            // stranded the drain (keydb "busy" flag stuck, note never shown,
+            // timer firing forever) and a poisoned `Vec<String>` is still fine.
             let msgs: Vec<String> = self
                 .ivars()
                 .inbox
@@ -1134,25 +1085,15 @@ define_class!(
                 self.app_mut(|a| a.say(crate::ui::LogKind::Result, m));
             }
             // This drain path is the keydb-update worker; surface its outcome
-            // (success "keydb updated — N entries" or the error) in the Settings
-            // note so the user sees the result in place, not just in the log,
-            // and re-enable the button now that the update is done.
+            // in the Settings note so the user sees it in place, not just the
+            // log, and re-enable the button now the update is done.
             if let Some(last) = msgs.last() {
                 self.set_keydb_note(last);
             }
             self.set_keydb_updating(false);
-            // The keydb update is one-shot: once its result has been drained
-            // there is nothing left for this timer to ever observe again, so
-            // stop it here — matching the Windows shell's `drain()`, which
-            // kills `TIMER_DRAIN` at the same point. Without this the timer
-            // (armed the first time any Settings session clicks "Update
-            // keydb") never stops: it re-fires at 5 Hz, taking the inbox lock
-            // and finding it empty, for the rest of the process's life, even
-            // after Settings is closed. `start_drain`'s own guard
-            // (`if self.ivars().drain.borrow().is_some() { return; }`) means
-            // a later click reuses this same timer rather than adding a
-            // second one, so the bug is one eternal timer, not an
-            // accumulating pile of them — but eternal is still wrong.
+            // The keydb update is one-shot: once drained, stop the timer here
+            // (matching Windows' `drain()`/`TIMER_DRAIN`) or it re-fires at
+            // 5 Hz against an empty inbox for the rest of the process's life.
             if let Some(t) = self.ivars().drain.borrow_mut().take() {
                 t.invalidate();
             }
@@ -1267,24 +1208,14 @@ impl Controller {
         )));
         let choice = quit_choice(alert.runModal());
         if choice == QuitChoice::StopThenProceed {
-            // Latch BEFORE cancelling: `Cmd::Cancel` only signals the worker,
-            // so `running()` is still true when closing the last window turns
-            // into a terminate a moment later. Without the latch that
-            // terminate would ask the same question a second time.
+            // Latch BEFORE cancelling: `running()` stays true until the
+            // worker unwinds, so without the latch a terminate a moment
+            // later would ask the same question again.
             self.ivars().quit_confirmed.set(true);
             self.act(crate::ui::Cmd::Cancel);
-            // ...and then actually WAIT for it. `Cmd::Cancel` only signals; the
-            // worker notices at its next boundary and unwinds the mux, and it
-            // is that unwind — dropping the sink — that closes and finalises
-            // the partial file. Returning here handed AppKit a `TerminateNow`
-            // (or let the last window close, which becomes a terminate) while
-            // the worker was still mid-write, so "Stop & Quit" could kill the
-            // rip it had just promised to stop cleanly.
-            //
-            // Bounded: a wedged drive must not turn quit into a hang, and
-            // expiring leaves exactly the behaviour this replaces. The borrow
-            // is dropped before waiting — the 5 Hz tick is not running while
-            // this blocks, and nothing else may hold the model.
+            // ...then actually WAIT for it: `Cmd::Cancel` only signals, and
+            // it's the worker's unwind that closes/finalises the partial
+            // file. Bounded by QUIT_GRACE so a wedged drive can't hang quit.
             let run = self.ivars().app.borrow().run.clone();
             if let Some(run) = run {
                 crate::engine::await_worker_exit(&run, crate::engine::QUIT_GRACE);
@@ -1466,10 +1397,8 @@ impl Controller {
                     .map(|e| NSString::from_str(e))
                     .collect();
                 let arr = objc2_foundation::NSArray::from_retained_slice(&types);
-                // `allowedContentTypes` is the modern spelling but needs
-                // UTType from UniformTypeIdentifiers; the deprecated call
-                // still filters correctly, so swapping it is a separate
-                // change with its own dependency.
+                // `allowedContentTypes` needs UTType from UniformTypeIdentifiers;
+                // the deprecated call still filters correctly for now.
                 #[allow(deprecated)]
                 panel.setAllowedFileTypes(Some(&arr));
             }
@@ -1591,11 +1520,9 @@ impl Controller {
                 for l in &v.log {
                     log_append(tv, &l.text, log_colour(l.kind));
                 }
-                // Keep the newest line in view — the log only grows, and the
-                // line worth reading (a warning, a lossy-export note, the
-                // failure) is always the last one. Only inside this branch, so
-                // an ordinary progress tick never yanks the view; the rewrite
-                // above has already discarded any selection anyway.
+                // Keep the newest line in view — the log only grows and the
+                // line worth reading is always the last one. Only inside this
+                // branch, so an ordinary progress tick never yanks the view.
                 let end = { tv.string() }.length();
                 tv.scrollRangeToVisible(objc2_foundation::NSRange::new(end, 0));
             }
@@ -1607,13 +1534,9 @@ impl Controller {
         // re-titled whenever the log's visibility changes — it is a toggle, and
         // a toggle that always says "Show log" is wrong half the time.
         self.sync_log_menu_title(&v.log_menu_label);
-        // Mirror the view state the layout reads. `log_hidden` belongs in this
-        // group and was the one missing from it: `relayout` reads the ivar, so
-        // without this the layout always reserved the log's strip of height,
-        // whatever the log was actually doing. Hiding the log then removed the
-        // view but not the space it occupied, leaving a dead band across the
-        // bottom of the window and the tree and Info panel short of the
-        // content they could have filled.
+        // Mirror the view state the layout reads: `relayout` reads this ivar,
+        // so without it the layout always reserved the log's strip of height,
+        // leaving a dead band when the log was actually hidden.
         *iv.log_hidden.borrow_mut() = v.log_hidden;
         *iv.two_bars.borrow_mut() = v.show_overall_bar;
         *iv.on_prog.borrow_mut() = v.page == Page::Progress;
@@ -1795,18 +1718,12 @@ impl Controller {
         install_drop_view(mtm, &win, self);
 
         // `build_ui` installed a BRAND NEW, empty `TitlesSource`; `tree_sig`
-        // still describes the rows the OLD one was painted with. Left alone,
-        // the `render()` below compares the unchanged rows against that stale
-        // signature, finds them equal, skips `apply` — and the user's disc
-        // comes back from a language switch as an empty tree. The signature is
-        // a memo of what this outline has painted, so it has to die with the
-        // outline it described.
+        // still describes the OLD one's rows. Left alone, `render()` below
+        // finds them equal, skips `apply`, and the disc comes back empty.
         self.ivars().tree_sig.borrow_mut().clear();
 
-        // The Settings and About windows are cached (built once, reused on
-        // reopen). They were built in the old language, so drop them — the next
-        // open rebuilds them in the new one. (Settings is already closing when
-        // this runs; close a stray About too.)
+        // Settings and About are cached, built once and reused on reopen — but
+        // in the old language, so drop them; next open rebuilds them fresh.
         *self.ivars().win_prefs.borrow_mut() = None;
         if let Some(w) = self.ivars().win_about.borrow_mut().take() {
             w.close();
@@ -1920,10 +1837,8 @@ impl Controller {
 fn popup_item_titles(groups: &[Vec<&'static str>]) -> Vec<String> {
     let mut titles = Vec::new();
     for (gi, g) in groups.iter().enumerate() {
-        // The separator the builder puts between groups is an item like any
-        // other, and AppKit reports its title as "". Leaving it out of this
-        // list is what made the rebuild guard compare lists of different
-        // lengths and never match.
+        // The separator between groups is an item too, and AppKit reports its
+        // title as "". Omitting it made the rebuild guard's lists mismatch.
         if gi > 0 {
             titles.push(String::new());
         }
@@ -2037,18 +1952,9 @@ fn popup_fmt(mtm: MainThreadMarker, fr: NSRect) -> Retained<NSPopUpButton> {
 /// omitted rather than offered and then failing.
 fn popup_fmt_for(mtm: MainThreadMarker, fr: NSRect, disc: bool) -> Retained<NSPopUpButton> {
     let p = { NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), fr, false) };
-    // Grouped so the ordinary case is line one and never needs scrolling past.
-    // The whole-disc rows are what a separate "Backup" command used to do; the
-    // extract/metadata rows expose sinks the library already supports.
-    // The tree's checkboxes decide WHICH tracks; this decides what SHAPE the
-    // output takes. The per-kind "video / audio / subtitle tracks only" rows
-    // are not a competing selector: they are the CLI's `video://`, `audio://`
-    // and `sub://` sinks, which produce a DIFFERENT set of files than a demux
-    // of the same ticked tracks (no chapters sidecar, one track class only).
-    // Without them the GUI could not reach three sinks the CLI exposes.
-    // Content comes from the core so the Mac popup, the Windows popup and the
-    // tests can never drift apart. The shell decides only how it LOOKS.
-    // Built empty; `render` fills it from the View, which knows the codecs.
+    // Grouped so the ordinary case is line one. The per-kind rows are the
+    // CLI's `video://`/`audio://`/`sub://` sinks, a DIFFERENT output than a
+    // demux of the same tracks. Built empty; `render` fills it from the View.
     let groups = crate::ui::output_formats(disc, true);
     unsafe {
         let menu = NSMenu::new(mtm);
@@ -2303,22 +2209,16 @@ fn install_drop_view(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) {
             objc2_app_kit::NSWindowOrderingMode::Below,
             None,
         );
-        // `drop` goes out of scope here, and that is correct: the superview
-        // took its own retain above, which keeps the overlay alive for exactly
-        // as long as it is installed. Withholding ours as well (this used to
-        // end in `mem::forget`) leaked one whole DropView per call — and
-        // `relocalize` calls this again on every language switch.
+        // `drop` goes out of scope here, and that is correct: the superview's
+        // own retain keeps the overlay alive. The old `mem::forget` here
+        // leaked one DropView per call — and `relocalize` calls this often.
     }
 }
 
 fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retained<TitlesSource> {
-    // This runs again on every language switch (`relocalize` tears the content
-    // down and rebuilds it), and the widgets below are PUSHED here rather than
-    // assigned like every other ivar. Without this the list keeps the previous
-    // build's views — detached from the window, alive forever, and walked by
-    // `render()` at 5 Hz — and grows by three more on the next switch. Same
-    // class as the `tree_sig` reset `relocalize` documents; it lives here, next
-    // to the pushes, so any future caller of `build_ui` is correct too.
+    // This runs again on every language switch (`relocalize` rebuilds the
+    // content), and the widgets below are PUSHED, not assigned like other
+    // ivars — else the list would keep growing with detached old views.
     c.ivars().bar2_row.borrow_mut().clear();
     let content = window.contentView().unwrap();
     // NSView draws nothing by default, so give the content an explicit
@@ -2375,12 +2275,9 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
             page_empty.addSubview(&head);
             page_empty.addSubview(&sub);
         }
-        // BOTH ways in, side by side. The empty page used to offer only "Open
-        // file or ISO…", so the one thing its own headline is about — a disc —
-        // could only be reached from the menu bar.
-        //
-        // Straddling the centre with a fixed gap (the result page's pattern)
-        // rather than centring each one, so the pair stays symmetric.
+        // BOTH ways in, side by side — the empty page used to offer only
+        // "Open file or ISO…", so opening a disc needed the menu bar.
+        // Straddles the centre with a fixed gap, the result page's pattern.
         const EB_W: f64 = 160.0;
         const EB_GAP: f64 = 16.0;
         let eb_y = eh * 0.55 - 70.0;
@@ -2402,16 +2299,9 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         page_empty.addSubview(&b_disc);
         page_empty.addSubview(&b);
 
-        // `relayout` resizes `page_empty` itself, but a subview keeps its
-        // build-time frame unless it is told to track the parent. Without
-        // these the two labels stay at the ORIGINAL window width, so their
-        // centred text centres inside a stale rect and drifts left as the
-        // window grows, and the button — pinned at `W/2 - 80` for the
-        // original `W` — simply stays put.
-        //
-        // Same masks the result page already uses: full-width labels stretch,
-        // the fixed-width buttons keep equal margins on both sides — which is
-        // also what keeps the PAIR straddling the centre as the window grows.
+        // `relayout` resizes `page_empty`, but a subview keeps its build-time
+        // frame unless told to track the parent, or centred text would drift
+        // left as the window grows. Same masks the result page uses.
         for v in [&head, &sub] {
             mask(
                 v,
@@ -3168,30 +3058,9 @@ pub fn run() {
         return;
     }
 
-    // ── the launch probe ──
-    //
-    // A disc already in the drive was never detected at launch. Not because
-    // detection was deferred or its result was dropped: NOTHING ran it. The
-    // shell built the window, set `Page::Empty` and handed control to the run
-    // loop, and `App::new` opens no source — so the only thing that ever
-    // enumerated the drive was File ▸ Open disc, on click. Hence "the menu
-    // finds it immediately": the code works; it was simply never called.
-    //
-    // Fixed by CALLING it, off a one-shot timer rather than inline here. The
-    // probe ends in `App::open`, which scans the disc and resolves its keys
-    // synchronously — seconds, sometimes more, on the main thread. Inline that
-    // is a launch that shows no window at all until the drive has spun up,
-    // which reads as a hang. On the timer, the window is already up and
-    // painted (`makeKeyAndOrderFront` + `activate` above) and the empty state
-    // is on screen before anything touches the drive; the "Opening …" line
-    // then appears before the scan, because `open_disc` repaints between the
-    // two steps.
-    //
-    // `false`: no "no optical drive found" notice. Nobody asked for this probe,
-    // so a machine with no drive must see nothing at all.
-    //
-    // Not in the dev harness: `FMKV_OPEN` has already opened a fixture, and a
-    // probe would fight the screenshot for the page.
+    // A disc in the drive went undetected at launch: nothing ran detection
+    // until File ▸ Open disc was clicked. Fixed via a one-shot timer so the
+    // window paints before the drive scan blocks the main thread.
     if ["FMKV_OPEN", "FMKV_DEMO", "FMKV_PAGE"]
         .iter()
         .all(|k| dev_env(k).is_err())
@@ -3398,10 +3267,9 @@ impl Rows {
     /// silently disable a language preference.
     fn langs(&mut self, mtm: MainThreadMarker, key: &str, s: &str, w: f64, c: &Controller) {
         self.label(mtm, s);
-        // Pull-down, not pop-up: a pop-up's title is whichever row is
-        // selected, which is wrong here — the button must show the whole SET.
-        // A pull-down takes its title from item 0, which is ours to write, and
-        // that item is the picker's memory (see `lang_picker_value`).
+        // Pull-down, not pop-up: a pop-up's title tracks the selected row, but
+        // this button must show the whole SET, so item 0 (ours to write) is
+        // the picker's memory (see `lang_picker_value`).
         let p = {
             NSPopUpButton::initWithFrame_pullsDown(
                 NSPopUpButton::alloc(mtm),
@@ -3567,9 +3435,8 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         "gui.win.settings",
     )));
     // NSWindow defaults to releasedWhenClosed=YES: `close()` would deallocate
-    // the window while `win_prefs` still holds a Retained ref, so reopening
-    // Settings after an OK/close is a use-after-free (crash). Keep it alive and
-    // let the Retained own the lifetime; reopen reuses the same window.
+    // it while `win_prefs` still holds a Retained ref, a use-after-free on
+    // reopen. Keep it alive and let the Retained own the lifetime.
     unsafe { win.setReleasedWhenClosed(false) };
     let content = win.contentView().unwrap();
     let bd = { NSBox::initWithFrame(NSBox::alloc(mtm), r(0.0, 0.0, w, h)) };
@@ -3905,9 +3772,8 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         ok.setKeyEquivalent(&NSString::from_str("\r"));
         bd.addSubview(&ok);
         // Cancel must NOT be onClosePrefs: — that reads the form, pushes it
-        // into the running App and writes it to disk. Wired to the same
-        // selector as OK, Cancel committed every edit the user had just decided
-        // against, to disk, with a "Settings saved" line in the log.
+        // into the running App and writes it to disk. Wired the same as OK,
+        // Cancel committed every edit the user had just decided against.
         bd.addSubview(&btn(
             mtm,
             &crate::strings::get("gui.btn.cancel"),
@@ -3953,12 +3819,9 @@ fn build_about(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         title.setFont(Some(&NSFont::boldSystemFontOfSize(18.0)));
         bd.addSubview(&title);
     }
-    // Every value here is DERIVED. All three used to be string literals, and
-    // all three were wrong: the box still said 1.6.0 three releases later, and
-    // the key line reported "keydb ✓ 3 971 entries" to everyone — a real-
-    // looking count belonging to whoever's machine it was copied from, shown
-    // even to someone with no keydb at all. The Windows About box already
-    // derived all three; this is the one that had drifted.
+    // Every value here is DERIVED. All three used to be string literals and
+    // all three were wrong (stale version, a copied-machine keydb count shown
+    // to users with no keydb). The Windows About box already derived all three.
     let rows: [(String, String); 5] = [
         (
             crate::strings::get("gui.about.version"),
@@ -4025,11 +3888,8 @@ fn build_about(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
 }
 
 // ── UI driver (debug builds only) ─────────────────────────────────────────
-//
-// Drives the REAL controls: finds the actual NSButton/NSPopUpButton objects and
-// sends them `performClick:` / `selectItem`, so every action goes through the
-// same target/action path a mouse click takes. Not a shortcut around the UI —
-// it exercises the UI.
+// Drives the REAL controls via `performClick:` / `selectItem`, so every
+// action goes through the same target/action path a mouse click takes.
 
 impl Controller {
     /// Click the Run Now button exactly as a user would.
@@ -4182,9 +4042,8 @@ impl Controller {
             return false;
         }
         // Selecting programmatically does NOT fire the action, so send it the
-        // way AppKit would. Without this the driver proves only that the popup
-        // changed appearance — which is exactly how the "picked MP4, got MKV"
-        // bug survived.
+        // way AppKit would — else this only proves the popup changed
+        // appearance, how the "picked MP4, got MKV" bug survived.
         unsafe {
             if let (Some(t), Some(a)) = (p.target(), p.action()) {
                 let _: bool = msg_send![&*NSApplication::sharedApplication(
@@ -4797,18 +4656,9 @@ impl Controller {
     }
 }
 
-// ── tests ─────────────────────────────────────────────────────────────────
-//
-// Only the pure, widget-free decisions this shell makes are tested here.
-// Anything that touches AppKit needs a main thread AND a window server, and
-// `cargo test` gives a harness thread with neither — so the widget-driving
-// assertions stay in the `FMKV_SELFTEST` harness on this platform. See the
-// report in CHANGELOG/CI notes for what that costs.
-//
-// Behaviour over `App`/`Tree`/`View` is NOT repeated here: it lives in
-// `tests/gui_model.rs`, runs on every host, and covers both shells at once.
-// Keeping a shell-side copy would be exactly the duplication this split
-// exists to prevent.
+// ── tests ── Only pure, widget-free decisions are tested here — AppKit
+// needs a main thread and window server `cargo test` lacks, so widget-driving
+// assertions stay in `FMKV_SELFTEST`; `App`/`Tree`/`View` lives in `gui_model.rs`.
 
 #[cfg(test)]
 mod tests {
@@ -4819,14 +4669,9 @@ mod tests {
 
     #[test]
     fn the_menu_reaches_every_command_the_core_defines() {
-        // `validateMenuItem:` asks `cmd_for` whether an item is blocked
-        // mid-rip. A selector that falls off the end of `cmd_for` is a menu
-        // item with NO rule: it stays live during a rip and runs anyway. So
-        // the property is coverage — every command the core can dispatch must
-        // be produced by some menu selector.
-        //
-        // `SetFormat` is excluded (it comes from the format popup, not a menu)
-        // and so is `Cancel` (the progress page's button, always reachable).
+        // A selector that falls off the end of `cmd_for` is a menu item with
+        // NO rule, so it stays live mid-rip. `SetFormat` (format popup) and
+        // `Cancel` (progress page button) are excluded — neither is a menu item.
         let sels = [
             sel!(onOpenFiles:),
             sel!(onOpenDisc:),
@@ -5009,10 +4854,9 @@ mod tests {
     #[test]
     fn every_action_selector_this_shell_defines_is_wired_to_something() {
         let src = include_str!("mac.rs");
-        // Production only. A selector named solely by a test is not wired to
-        // anything a user can reach (`sel!(onPickFormat:)` appears in the test
-        // below purely as an example of a non-command), and the tests' own
-        // assembled needles are not declarations.
+        // Production only: a selector named solely by a test is not wired to
+        // anything a user can reach, and the tests' own assembled needles
+        // are not declarations.
         let src = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
         let decl = format!("{}{}", "#[unsafe(me", "thod(on");
 
@@ -5112,12 +4956,9 @@ mod tests {
 
     #[test]
     fn the_format_popup_is_not_an_index_mapped_enum() {
-        // This shell's default-output popup interleaves group SEPARATOR rows,
-        // so its selected index does not line up with the core's flat format
-        // list — `read_prefs_form` therefore maps it back by TITLE. Adding a
-        // "container" arm to the shared table would silently switch it to
-        // index mapping and persist the wrong format, so the absence of that
-        // arm is a contract this shell depends on.
+        // This popup interleaves group SEPARATOR rows, so its index does not
+        // line up with the core's flat format list — `read_prefs_form` maps
+        // it back by TITLE. A "container" arm here would silently break that.
         assert!(
             enum_options("container").is_empty(),
             "the container popup must not be index-mapped: this shell's popup \
@@ -5171,25 +5012,14 @@ mod tests {
     }
 
     // ── output field wiring ─────────────────────────────────────────────────
-    //
-    // STOPGAP, NOT COVERAGE: exercising the real bug (type into `out_field`,
-    // confirm `output_dir` updates and survives the next render tick) needs a
-    // live NSComboBox inside a real AppKit run loop. `windows.rs` has exactly
-    // that harness (`the_real_controls_show_what_the_core_decided`, driven
-    // through a real HWND + message pump); nothing equivalent exists for
-    // AppKit in this crate, and building one is out of scope here. This is a
-    // source-inspection check instead: it would have failed against the
-    // pre-fix source (no `setDelegate` call on `fld`, no
-    // `controlTextDidChange:` method), and it fails again if either is
-    // deleted, but it does NOT prove the delegate actually fires at runtime.
+    // STOPGAP, NOT COVERAGE: the real bug needs a live NSComboBox in a real
+    // run loop (`windows.rs` has that harness). Source inspection only.
     #[test]
     fn the_output_field_has_a_delegate_wired_source_inspection_only() {
         let src = include_str!("mac.rs");
-        // Built by concatenation rather than as one literal so this needle
-        // cannot match the assertion's OWN source text via `include_str!` —
-        // a source-inspection test that can only ever find itself is the
-        // exact tautological-test defect this crate already shipped once
-        // (`tests/messaging_contract.rs`'s stub `level_for`).
+        // Built by concatenation so this needle cannot match the assertion's
+        // OWN source via `include_str!` — a self-matching source-inspection
+        // test is the tautology this crate already shipped once.
         let wired = format!("{}{}", "fld.set", "Delegate(");
         assert!(
             src.contains(&wired),
@@ -5206,22 +5036,14 @@ mod tests {
     }
 
     // ── one settings-save policy, not two ───────────────────────────────────
-    //
-    // STOPGAP, NOT COVERAGE: `save_settings_reporting_error` needs a live
-    // `Controller` (an AppKit object) to call, and this crate has no harness
-    // that builds one outside a real run loop — see the identical caveat on
-    // `the_output_field_has_a_delegate_wired_source_inspection_only`. This
-    // only inspects source text: it fails if `onApplyLanguage:` goes back to
-    // calling `.settings.borrow().save` (…) directly (dropping the Err arm
-    // again) instead of routing through the shared helper.
+    // STOPGAP, NOT COVERAGE: needs a live `Controller`, no harness for that
+    // exists. Inspects source text for a re-inlined Ok/Err match.
     #[test]
     fn language_switch_reports_a_failed_save_source_inspection_only() {
         let src = include_str!("mac.rs");
         // `.settings.borrow().save` (…) should appear in exactly ONE place: the
         // shared helper. A second occurrence means someone re-inlined the
-        // Ok/Err match (or a bare `let _ =`) at a second call site — the
-        // exact "one policy implemented twice" shape this crate already
-        // shipped once for this very code path.
+        // Ok/Err match at a second call site — "one policy implemented twice".
         let direct_save = format!("{}{}", ".settings.borrow().save", "()");
         let occurrences = src.matches(&direct_save).count();
         assert_eq!(
@@ -5249,12 +5071,8 @@ mod tests {
     }
 
     // ── the keyserver token is not shown in plaintext ───────────────────────
-    //
-    // STOPGAP, NOT COVERAGE: whether a live `NSSecureTextField` actually masks
-    // keystrokes on screen needs a real rendered window — the same gap noted
-    // on the other AppKit source-inspection tests above. Source inspection
-    // only: fails if the Keys tab goes back to building `keyserver_token`
-    // with the plain `field` constructor.
+    // STOPGAP, NOT COVERAGE: masking needs a real rendered window. Source
+    // inspection only: fails if the Keys tab uses the plain `field` ctor.
     #[test]
     fn the_keyserver_token_field_is_secure_source_inspection_only() {
         let src = include_str!("mac.rs");
@@ -5275,19 +5093,9 @@ mod tests {
         );
     }
 
-    // ── the tree redraw memo (round-2 concurrency/performance audit) ───────
-    //
-    // `render` used to call `TitlesSource::apply` — a full `reloadData` +
-    // re-expand of every root — unconditionally, on every call. Because
-    // `render` also runs from the 5 Hz progress tick (`onTick:` → `App::tick`
-    // → `app_mut` → `render`), a running rip forced that full outline rebuild
-    // every 200 ms for its entire duration, even though the titles tree is
-    // not the page on screen during a rip and its rows never move while one
-    // is in flight. The Windows shell already had this guard (`rows_sig` /
-    // `Memo::rows`, with a comment claiming macOS "does the same" for its
-    // format popup — true for `sync_formats`, but never true for the tree).
-    // `rows_sig` is a pure function, so — unlike most of this file — it is
-    // real, non-source-inspection coverage.
+    // ── the tree redraw memo ── `render` used to rebuild the outline on
+    // every 5 Hz tick even when rows never moved. Windows already had this
+    // guard (`rows_sig`); real coverage since `rows_sig` is a pure function.
     fn rows_sig_fixture() -> Vec<crate::ui::Row> {
         vec![
             crate::ui::Row {
@@ -5357,14 +5165,9 @@ mod tests {
 
     #[test]
     fn the_row_signature_ignores_tick_state() {
-        // A rebuild is `reloadData` + re-expand + `scrollPoint(first_visible_row)`,
-        // so it throws the outline back to the top of the list. Ticking a box
-        // must therefore NOT change the signature — it goes down the
-        // `sync_check_states` path, which repaints the checkboxes in place.
-        // This is the Windows shell's contract
-        // (`the_row_signature_ignores_tick_state` in `windows.rs`); this shell
-        // folded `r.check` into the signature instead, so deselecting extras on
-        // a 100-title disc scrolled the list to the top on every single click.
+        // A rebuild throws the outline back to the top of the list, so ticking
+        // a box must NOT change the signature — it goes down the
+        // `sync_check_states` path instead, which repaints ticks in place.
         let rows = rows_sig_fixture();
         let before = rows_sig(&rows);
         let flipped: Vec<crate::ui::Row> = rows
@@ -5392,12 +5195,9 @@ mod tests {
         );
     }
 
-    // STOPGAP, NOT COVERAGE: whether `render` actually consults `tree_sig`
-    // before calling `apply` needs a live `Controller` with a real
-    // `NSOutlineView` to observe call counts against — the same AppKit gap
-    // noted throughout this module. Source inspection only: fails if the
-    // guard is removed and `render` goes back to calling `apply`
-    // unconditionally.
+    // STOPGAP, NOT COVERAGE: needs a live `Controller` with a real
+    // `NSOutlineView` to observe call counts. Source inspection only: fails
+    // if the guard is removed and `render` calls `apply` unconditionally.
     #[test]
     fn render_gates_the_tree_rebuild_on_the_row_signature_source_inspection_only() {
         let src = include_str!("mac.rs");
@@ -5425,11 +5225,9 @@ mod tests {
         );
     }
 
-    // STOPGAP, NOT COVERAGE: `relocalize` tears down and rebuilds the whole
-    // window (a live `NSWindow`, its content view and a fresh `TitlesSource`),
-    // which this crate cannot stand up outside a real AppKit run loop — the
-    // same gap noted throughout this module. Source inspection only: it fails
-    // if the memo reset is removed, which is the state the bug shipped in.
+    // STOPGAP, NOT COVERAGE: `relocalize` rebuilds a live `NSWindow`, which
+    // this crate cannot stand up outside a real AppKit run loop. Source
+    // inspection only: fails if the memo reset is removed.
     #[test]
     fn a_language_switch_forgets_the_tree_memo_source_inspection_only() {
         let src = include_str!("mac.rs");
@@ -5444,7 +5242,6 @@ mod tests {
     }
 
     // ── quitting goes through the same guard as closing ───────────────────
-    //
     // The alert itself needs a real `NSAlert` on a run loop, but the two
     // DECISIONS around it are pure functions and are tested for real here.
 
@@ -5455,10 +5252,9 @@ mod tests {
         assert!(!needs_rip_confirmation(false, true));
         // Running and nobody has answered yet: ask.
         assert!(needs_rip_confirmation(true, false));
-        // Running, and the operator already chose "Stop & Quit" on the way out
-        // of the window: do NOT ask a second time. `Cmd::Cancel` only signals
-        // the worker, so `running()` is still true when the last-window-closed
-        // termination reaches applicationShouldTerminate:.
+        // Already chose "Stop & Quit" on the way out: do NOT ask again.
+        // `Cmd::Cancel` only signals the worker, so `running()` stays true
+        // when the last-window-closed termination reaches the delegate.
         assert!(!needs_rip_confirmation(true, true));
     }
 
@@ -5486,13 +5282,9 @@ mod tests {
         }
     }
 
-    // STOPGAP, NOT COVERAGE: whether AppKit actually calls back into this
-    // Controller on ⌘Q needs a live `NSApplication` with a run loop, which
-    // this crate cannot stand up in a unit test — the same gap noted
-    // throughout this module. Source inspection only. It would have failed
-    // against the pre-fix source (which had NO NSApplicationDelegate at all:
-    // the only `setDelegate:` calls were the outline's, the combo box's and
-    // the window's), and it fails again if any of the three pieces is removed.
+    // STOPGAP, NOT COVERAGE: whether AppKit calls back on ⌘Q needs a live
+    // `NSApplication`, which this crate cannot stand up in a unit test.
+    // Source inspection only; fails if any of the three delegate pieces is removed.
     /// The AppKit language pickers own no parsing of their own.
     ///
     /// The Win32 shell has had this pin since the pickers were unified
@@ -5531,10 +5323,9 @@ mod tests {
             "the language menu item's selector is gone; the pickers would \
              render a value nothing can change"
         );
-        // The tells of a hand-rolled second parser: splitting the stored
-        // string on commas, or joining codes back up, anywhere in this file.
-        // Built from concatenated literals so these needles cannot match this
-        // test's own text through `include_str!` of this same file.
+        // The tells of a hand-rolled second parser: splitting/joining the
+        // stored comma string anywhere in this file. Built from concatenated
+        // literals so these needles can't match this test's own text.
         for needle in [
             format!("{}{}", "split(", "','"),
             format!("{}{}", "split([", "','"),
@@ -5657,13 +5448,9 @@ mod tests {
         );
     }
 
-    // ── one keydb download at a time ──────────────────────────────────────
-    //
-    // STOPGAP, NOT COVERAGE: `onUpdateKeys:` needs a live Controller and a
-    // Settings window to click — the same AppKit gap noted throughout this
-    // module. Source inspection only: it fails if the guard goes back to being
-    // nothing but the button's enabled state, which a rebuilt Settings window
-    // resets to enabled.
+    // ── one keydb download at a time ── STOPGAP, NOT COVERAGE: needs a live
+    // Controller/Settings window to click. Fails if the guard reverts to
+    // just the button's enabled state, which a rebuild resets to enabled.
     #[test]
     fn a_second_keydb_download_is_refused_by_state_not_by_a_button_source_inspection_only() {
         let src = include_str!("mac.rs");
@@ -5685,20 +5472,9 @@ mod tests {
         );
     }
 
-    // ── the keydb-update drain timer stops once drained ─────────────────────
-    //
-    // `onUpdateKeys:` arms a repeating 0.2 s `NSTimer` (`start_drain`) to poll
-    // the one-shot keydb-download result out of `inbox`. Nothing ever
-    // invalidated it: once armed by the first "Update keydb" click in any
-    // Settings session, it kept firing at 5 Hz — taking the inbox mutex and
-    // finding it empty — for the rest of the process's life, even after
-    // Settings closed. The Windows shell's equivalent (`drain()`) already
-    // calls `KillTimer(TIMER_DRAIN)` at the same point; this was exactly the
-    // "one policy implemented twice, only one copy hardened" shape.
-    //
-    // STOPGAP, NOT COVERAGE: `onDrain:` needs a live `Controller` and a real
-    // `NSTimer` firing on a run loop to exercise end-to-end. Source
-    // inspection only: fails if the `invalidate()` call is removed.
+    // ── the drain timer stops once drained ── nothing invalidated it, so it
+    // fired forever after the first keydb update; Windows' `drain()` already
+    // calls `KillTimer` at the same point. Source inspection only.
     #[test]
     fn the_drain_timer_stops_itself_once_drained_source_inspection_only() {
         let src = include_str!("mac.rs");

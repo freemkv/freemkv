@@ -1,17 +1,6 @@
-// freemkv — Open source 4K UHD / Blu-ray / DVD backup tool
-// MIT — freemkv project
-//
-// Usage: freemkv <source> <dest> [flags]
-//        freemkv info <url> [flags]
-//
-// Examples:
-//   freemkv disc:// mkv://Movie.mkv
-//   freemkv disc:///dev/sg4 m2ts://Movie.m2ts
-//   freemkv m2ts://Movie.m2ts mkv://Movie.mkv
-//   freemkv disc:// network://192.0.2.10:9000
-//   freemkv info disc://
-// (module declarations + the global allocator live in main.rs — this file is
-// the CLI shell entry point, invoked by the dispatcher for CLI-style args.)
+// freemkv — Open source 4K UHD / Blu-ray / DVD backup tool (MIT).
+// Usage: freemkv <source> <dest> [flags] | freemkv info <url> [flags]
+// (module decls + global allocator live in main.rs; this is the CLI shell entry point.)
 
 /// Worker guard for the optional non-blocking file log layer. Held for the
 /// life of the process so buffered records are flushed on exit; `None` when
@@ -124,16 +113,9 @@ fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>, Vec<Pend
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
-            // Both arms below refuse a value that is itself a flag OR a
-            // positional `scheme://` URL — the SAME guard `pipe::parse_flags`
-            // applies to its copy of these arms. Taking `it.next()`
-            // unconditionally meant `--log-file --raw` set the path to "--raw"
-            // AND consumed the flag (the rip ran without `--raw` and silently
-            // wrote a decrypted image); without the URL guard `--log-file
-            // disc://` likewise swallowed the source URL as the log path. This
-            // parser had only the flag half, so that hole survived here after
-            // pipe.rs closed it. `is_flag_token` lets a negative number
-            // through, so `--log-level -1` still reaches the range check.
+            // Both arms refuse a value that's itself a flag or a `scheme://` URL
+            // (mirrors pipe::parse_flags's guard) — else e.g. `--log-file --raw`
+            // would eat `--raw` as the path and silently drop the flag.
             "--log-level" => {
                 match it.next_if(|s| !is_flag_token(s) && !crate::pipe::is_url_token(s)) {
                     Some(s) => match s.parse::<u8>() {
@@ -159,13 +141,8 @@ fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>, Vec<Pend
             "--log-file" => {
                 match it.next_if(|s| !is_flag_token(s) && !crate::pipe::is_url_token(s)) {
                     Some(p) => log_file = Some(p.clone()),
-                    // Symmetric with the `--log-level` arm above: a refused value
-                    // (the next token is a flag, or there is no next token) must be
-                    // REPORTED, not swallowed in silence. `freemkv --log-file --raw
-                    // disc:// …` used to say nothing, write no diagnostic log, and
-                    // run the rip anyway — the user asked for a log and got none,
-                    // with no word why. Record the complaint so `run()` emits it
-                    // once the locale is resolved.
+                    // Symmetric with --log-level: a refused value must be reported, not
+                    // silently dropped, so `run()` can emit it once locale is resolved.
                     None => diags.push(PendingDiag::new(
                         "error.log_file_needs_value",
                         "--log-file: requires a path (e.g. --log-file freemkv.log)",
@@ -277,59 +254,31 @@ pub(crate) const SUBCOMMANDS: &[&str] = &["info", "update-keys", "version", "hel
 pub fn run(args: Vec<String>) {
     let mut pending = init_logging(&args);
 
-    // Parse --language before anything else.
-    //
-    // Apply the same is-URL guard `collect_urls` uses: a value-flag must not
-    // swallow a following positional stream URL. `freemkv --language disc://
-    // mkv://out.mkv` would otherwise eat `disc://` as the "language", leaving a
-    // single URL that silently degrades into an info/usage no-op. The same
-    // applies to a following flag token (e.g. `freemkv --language --verbose
-    // ...`): a leading `-` means the value is missing, not a language code. If
-    // the next token is a URL, a flag, or --language is the last token, the
-    // value is missing: record a complaint and leave the token as positional.
+    // Parse --language before anything else, with the same is-URL guard `collect_urls`
+    // uses: a value-flag must not swallow a following positional URL or flag token
+    // (e.g. `--language disc://` or `--language --verbose`) as if it were a language code.
     let (args, language, lang_diags) = strip_language_flag(&args);
     pending.extend(lang_diags);
     if let Some(lang) = language
         && !lang.eq_ignore_ascii_case("auto")
     {
-        // `auto` means "follow the environment" — the same value the GUI's
-        // Settings picker stores for its Auto option, and which
-        // `app_entry::apply_locale` honours by NOT installing a `--language`
-        // override. The `--help`/README both document `--language ... auto`, so
-        // the CLI has to accept it too. Honour it the same way: install NO
-        // override, and let `strings::init()` below resolve from
-        // LC_ALL/LC_MESSAGES/LANG exactly as if no flag were passed. Feeding a
-        // literal "auto" into `set_language` instead makes i18n hunt for an
-        // `auto.json`, fail, and print "locale 'auto' not found, using English"
-        // — documenting a value the CLI then rejects. An unknown code like
-        // `xx` is deliberately NOT treated as auto: it still reaches
-        // `set_language`, which resolves it to English with a warning, so a
-        // typo is visible rather than silently swallowed into the environment.
+        // `auto` (the GUI's "Auto" option) means "follow the environment": install no
+        // override, letting `strings::init()` resolve from LC_ALL/LANG. An unknown
+        // code like `xx` still reaches `set_language`, giving a visible warning.
         crate::strings::set_language(&lang);
     }
     crate::strings::init();
 
-    // FIRST point in the process where a message can be localized, and
-    // therefore the first point where any of the argv pre-pass's complaints
-    // may be printed. The pre-pass itself printed NOTHING — that is the whole
-    // point of `PendingDiag` — so its complaints still reach the user in the
-    // original order and place, just in their own language. The one thing that
-    // CAN have written above is the i18n layer reporting on ITSELF:
-    // `set_language` warns on a dropped/duplicate `--language`, and
-    // `strings::init()` prints "locale '…' not found, using English" for an
-    // unavailable locale. Those are deliberately locale-independent English and
-    // are not pre-pass complaints, so they do not disturb the ordering this
-    // guarantees. (The earlier claim that "nothing has written in between" was
-    // simply false — `init()` above can print that locale warning.) See
-    // `PendingDiag`.
+    // FIRST point a message can be localized: the argv pre-pass's silent
+    // `PendingDiag` complaints emit here, in order, in the resolved language.
+    // (`set_language`/`init()` above may already print their own English warnings.)
     for d in &pending {
         d.emit();
     }
 
     if args.len() < 2 {
-        // Bare invocation with no subcommand/URL: print usage but exit non-zero
-        // so a scripted `freemkv; echo $?` (e.g. a misconfigured wrapper) sees a
-        // failure rather than a false success. Explicit `help`/`--help`/`-h`
+        // Bare invocation: print usage but exit non-zero so a scripted
+        // `freemkv; echo $?` sees a failure. Explicit `help`/`--help`/`-h`
         // still exits 0 (handled below).
         usage();
         std::process::exit(2);
@@ -344,10 +293,9 @@ pub fn run(args: Vec<String>) {
 
         "info" => info_cmd(&args[2..]),
         "update-keys" => update_keys(&args[2..]),
-        // NOTE: there is deliberately NO `remux` (or any conversion) verb. The
-        // operation IS the URL pair: `freemkv <source-url> <dest-url> [opts]`.
-        // e.g. `freemkv iso://Disc.iso -t 1 mkv://Movie.mkv`. Source→dest is the
-        // whole grammar; a conversion "command" would be redundant.
+        // NOTE: deliberately no `remux`/conversion verb. The operation IS the
+        // URL pair: `freemkv <source-url> <dest-url> [opts]` — source→dest is
+        // the whole grammar, so a conversion "command" would be redundant.
         "version" | "--version" | "-V" => println!("{}", libfreemkv::VERSION_LABEL),
         // `freemkv help`, `freemkv --help`, `freemkv -h`: top-level usage.
         // `freemkv help <command>`: command-specific help.
@@ -371,19 +319,15 @@ pub fn run(args: Vec<String>) {
 
             if urls.len() == 2 {
                 if !crate::pipe::run(&urls[0], &urls[1], &args[1..]) {
-                    // `crate::pipe::run` has already printed the curated cause/result
-                    // on the terminal; exit non-zero so a scripted `$?` sees the
-                    // failure. (The pretty fatal block for cause-bearing errors
-                    // is emitted inside the rip path where the cause is known.)
+                    // `pipe::run` already printed the curated cause/result (the pretty
+                    // fatal block is emitted inside the rip path, where the cause is
+                    // known); just exit non-zero so a scripted `$?` sees the failure.
                     std::process::exit(1);
                 }
             } else if urls.len() == 1 {
-                // Single URL with no dest — show info. `info_cmd` treats its
-                // `args[0]` as the URL, but a preceding flag (e.g. `freemkv
-                // --verbose disc://`) would otherwise sit at `args[0]` and be
-                // parsed as the URL. `collect_urls` already resolved the real
-                // URL token, so put it first and append the remaining (non-URL)
-                // flag tokens so downstream flags like `-d`/`--share` survive.
+                // Single URL, no dest — show info. `info_cmd` expects `args[0]` to be
+                // the URL, but a preceding flag (e.g. `--verbose disc://`) would land
+                // there instead; put the resolved URL first, then the remaining flags.
                 let mut info_args = vec![urls[0].clone()];
                 info_args.extend(args[1..].iter().filter(|a| **a != urls[0]).cloned());
                 info_cmd(&info_args);
@@ -427,13 +371,9 @@ fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>, Vec<Pen
                     i += 2;
                 }
                 _ => {
-                    // Deferred, not hard-coded: this function runs BEFORE the
-                    // catalog is chosen (it is what chooses it), and rendering
-                    // here would lock in the environment locale and silently
-                    // kill `--language` for the rest of the process. See
-                    // `PendingDiag`. The flag token is carried through because
-                    // both spellings reach here and the user should see the
-                    // one they typed.
+                    // Deferred (see `PendingDiag`): this runs BEFORE the catalog is
+                    // chosen, so rendering now would lock in the env locale and kill
+                    // `--language`. The flag token is kept so the user sees their spelling.
                     diags.push(
                         PendingDiag::new(
                             "error.language_needs_value",
@@ -471,10 +411,9 @@ fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>, Vec<Pen
 /// streaming; the leading mark is ANSI-free when stderr is redirected.
 fn fatal(op_key: &str, cause: &str) -> ! {
     let op = crate::strings::get(op_key);
-    // WS2: the `Error:` level word is rendered from `error.level_error` (a
-    // translatable key, the one home for the three level words) so the fatal
-    // block reads `✗ Error: <op> failed: <cause>.` with the code-forward cause
-    // produced by `crate::pipe::fmt_err`.
+    // WS2: `Error:` is rendered from the translatable `error.level_error` key so
+    // the fatal block reads `✗ Error: <op> failed: <cause>.` with the code-forward
+    // cause from `crate::pipe::fmt_err`.
     let level = crate::strings::get(crate::messaging::Level::Error.locale_key());
     eprintln!();
     eprintln!(
@@ -579,10 +518,9 @@ pub(crate) fn is_flag_token(s: &str) -> bool {
 pub(crate) const RETIRED_VALUE_FLAGS: &[&str] = &["-k", "--device", "-d"];
 
 fn collect_urls(args: &[String]) -> Vec<String> {
-    // A positional token (not a flag, not a flag's value) is a stream URL — even
-    // a schemeless one, which we KEEP so `parse_url` can reject it with a clear
-    // "needs a scheme" error rather than silently dropping it. To tell a flag's
-    // value apart from a positional we must know flag arity: `VALUE_FLAGS`.
+    // A positional token (not a flag, not a flag's value) is a stream URL, even a
+    // schemeless one — kept so `parse_url` can give a clear "needs a scheme" error
+    // rather than silently dropping it. Telling a value apart needs `VALUE_FLAGS`.
     let mut urls = Vec::new();
     let mut skip_next = false;
     let mut skip_is_key_url = false;
@@ -591,10 +529,9 @@ fn collect_urls(args: &[String]) -> Vec<String> {
             skip_next = false;
             let consume_key_url = skip_is_key_url;
             skip_is_key_url = false;
-            // `--key-url`'s value is itself a URL (the key service) — always
-            // consumed. For other value-flags, a value that looks like a stream
-            // URL is a misplaced positional; reclassify it so `--keydb disc://
-            // mkv://` still rips.
+            // `--key-url`'s value is itself a URL (the key service) — always consumed.
+            // For other value-flags, a value that looks like a stream URL is a
+            // misplaced positional; reclassify it so `--keydb disc:// mkv://` rips.
             if !consume_key_url && is_url(arg) {
                 urls.push(arg.clone());
             }
@@ -697,26 +634,13 @@ fn info_cmd(args: &[String]) {
                 crate::disc_info::run(dev.as_deref(), flags);
             }
         }
-        // `dir://` — an extracted disc FOLDER — enumerates exactly like an
-        // image, because `libfreemkv::scan_dir` synthesizes a real UDF volume
-        // over the folder and hands back the same `(Disc, SectorSource)` pair
-        // `scan_iso` does. The mux path already routed `dir://` through that
-        // machinery; `info` was the one place that never learned, so a folder
-        // fell through to the catch-all and reported "cannot get info" while
-        // ripping from the same folder worked.
+        // `dir://` (an extracted disc folder) enumerates like an image: `scan_dir`
+        // synthesizes a UDF volume and returns the same pair as `scan_iso`. `info`
+        // was the one place that never learned this, so a folder used to fail here.
         libfreemkv::StreamUrl::Dir { path } | libfreemkv::StreamUrl::Iso { path } => {
-            // Listing titles needs NO AACS key — only clear UDF navigation.
-            // Scan the ISO keylessly and reuse disc_info's full title list
-            // (duration, size, clip count, video/audio/subtitle streams).
-            // Going through the key-gated `input()` here would hit libfreemkv's
-            // no-key gate and surface E7022 for an encrypted disc, and would
-            // only ever open a single title. `--keydb` is accepted but the
-            // listing never requires it. `--full` shows every title.
-            //
-            // Flags go through the SAME parser the `disc://` route uses, so an
-            // unknown one exits 1 here too. This route used to scan the list for
-            // `--full` and ignore every other token, so a typo'd flag produced
-            // output that had quietly dropped what the user asked for.
+            // Listing titles needs NO AACS key — scan keylessly and reuse disc_info's
+            // full title list; the key-gated `input()` would hit E7022 on an encrypted
+            // disc. Flags use the SAME parser as `disc://`, so an unknown one exits 1.
             let flags = match crate::disc_info::parse_info_flags(&args[1..]) {
                 crate::disc_info::InfoParse::Ok(f) => f,
                 crate::disc_info::InfoParse::Help => {
@@ -752,18 +676,9 @@ fn info_cmd(args: &[String]) {
             match libfreemkv::input(url, &libfreemkv::InputOptions::default()) {
                 Ok(stream) => {
                     let meta = stream.info();
-                    // LOCALIZED, like the `disc://` arm a few lines up. These
-                    // three labels were the only hard-coded English left in
-                    // `info`, so `freemkv info disc://` came out fully
-                    // translated and `freemkv info mkv://Movie.mkv` — the same
-                    // subcommand — printed "File:/Duration:/Streams:" in every
-                    // locale. All three keys live in the `disc.*` block
-                    // because that block is the info-output LABEL set, not a
-                    // disc-only one: `disc.duration` and `disc.streams` are
-                    // the very labels the disc arm already prints. Reusing
-                    // them — rather than minting `info.duration` /
-                    // `info.streams` beside this call site — is what keeps the
-                    // two arms of one subcommand from drifting apart again.
+                    // LOCALIZED like the `disc://` arm above — these were the last
+                    // hard-coded English labels in `info`. Reuses `disc.*` keys (the
+                    // info-output LABEL set, not disc-only) instead of minting `info.*`.
                     println!(
                         "{}: {}",
                         crate::strings::get_or("disc.file", "File"),
@@ -866,19 +781,9 @@ fn usage() {
     println!();
     println!("{}", crate::strings::get("usage.subcommands_note"));
     println!();
-    // EVERY scheme the URL pipeline accepts, not the seven it used to list.
-    // The URL grammar is this tool's entire public surface, and `--help` named
-    // disc/mkv/m2ts/network/stdio/iso/null while `mp4://`, `dir://`,
-    // `demux://`, `video://`, `audio://`, `sub://`, `chapters://`, `json://`
-    // and `fvi://` all worked and were documented only in the README — over
-    // half the surface undiscoverable from the tool itself. Each line below
-    // was checked against `libfreemkv`'s `parse_url` and the `input()` /
-    // `output()` match arms, not against the README.
-    //
-    // Split into two groups because the direction is not decoration: the
-    // second group has no `input()` arm at all (`StreamWriteOnly`), so
-    // offering them as a source is an error the user would otherwise discover
-    // by hitting it.
+    // EVERY scheme the URL pipeline accepts, not the seven it used to list — over
+    // half the working schemes were previously README-only. Split in two: the
+    // second group has no `input()` arm (write-only), so it's dest-only below.
     println!("{}", crate::strings::get("usage.urls_header"));
     println!("{}", crate::strings::get("usage.url.disc_auto"));
     println!("{}", crate::strings::get("usage.url.disc_linux"));
@@ -942,10 +847,8 @@ fn usage() {
     println!("{}", crate::strings::get("usage.flag.log_level_3"));
     println!("{}", crate::strings::get("usage.flag.log_file"));
     println!("{}", crate::strings::get("usage.flag.quiet"));
-    // `--language` / `--lang` has worked since the i18n crate landed and was
-    // listed nowhere — not here, not in the README. A flag nobody can find is
-    // a flag that does not exist, and this one is the only way to override the
-    // locale the environment picked.
+    // `--language`/`--lang` has worked since the i18n crate landed but was listed
+    // nowhere (not here, not the README) — the only way to override the locale.
     println!(
         "{}",
         crate::strings::get_or(
@@ -1048,10 +951,9 @@ fn update_keys(args: &[String]) {
     // The download lands at the `--keydb` path when given, else the standard
     // location.
     let dest = update_keys_dest(args);
-    // Fetch the keydb bytes via ureq (HTTP **and** HTTPS) and hand them to the
-    // keydb source to verify + atomically save to `dest`. The CLI supplies its
-    // own SSRF-guarded `ureq` transport (`crate::keydb_fetch::fetch`); the keydb
-    // source stays transport-agnostic on the update path.
+    // Fetch keydb bytes via ureq (HTTP+HTTPS) and hand them to the keydb source to
+    // verify + atomically save. The CLI supplies its own SSRF-guarded transport
+    // (`crate::keydb_fetch::fetch`); the keydb source stays transport-agnostic.
     let result = freemkv_keysources::KeydbSource::new(dest).update(crate::keydb_fetch::fetch, url);
     match result {
         Ok(result) => {
@@ -1339,12 +1241,9 @@ mod tests {
 
     #[test]
     fn every_command_named_in_a_locale_exists() {
-        // `error.E2000`, `error.E7020`, `drive.share_hint`, `drive.share_usage`,
-        // `disc.usage`, `remux.usage`, `help.remux.*` and `help.verify.*` all
-        // instructed the user to run `freemkv drive-info` / `disc-info` /
-        // `remux` / `verify`. None of those are dispatched: they fall through to
-        // the URL grammar and fail. Checked across ALL bundled locales, since
-        // the strings were wrong in all 29.
+        // Several locale strings used to instruct running `drive-info`/`disc-info`/
+        // `remux`/`verify`, none of which are dispatched — they fall through to the
+        // URL grammar and fail. Checked across ALL bundled locales (wrong in all 29).
         let mut offenders: std::collections::BTreeSet<(String, String)> = Default::default();
         for code in freemkv_i18n::SHIPPED_CODES {
             let raw = freemkv_i18n::bundled_locale_json(code)
@@ -1415,12 +1314,9 @@ mod tests {
 
     #[test]
     fn stream_selection_flag_values_are_not_read_as_urls() {
-        // Regression: `-a`/`-s` (and any flag whose value isn't a URL) must not
-        // let their value (`none`/`eng`/…) be collected as a third stream URL.
-        // Before the scheme://-only rewrite these weren't in the value-flag list,
-        // so `freemkv iso://x mkv://y -a none` collected `none` as a URL → 3 URLs
-        // → the rip printed usage and silently did nothing. The whole class of
-        // "add a flag, forget the list" bug is gone: values are never URLs.
+        // Regression: `-a`/`-s` values (`none`/`eng`/…) must not be collected as a
+        // third stream URL. Before the scheme://-only rewrite, an unlisted value-flag
+        // let its value collect as a URL → 3 URLs → usage printed and nothing ran.
         assert_eq!(
             collect_urls(&v(&[
                 "iso://d.iso",
@@ -1464,10 +1360,9 @@ mod tests {
 
     #[test]
     fn a_retired_flags_value_is_stepped_over_so_the_rejection_is_reached() {
-        // `-k` and `--device`/`-d` are gone, but they took a value, and the
-        // value must not become a third positional: three URLs is the bare
-        // usage hint, which says nothing about the flag that was removed. Two
-        // URLs routes to the rip, where `parse_flags` names the retired flag.
+        // `-k`/`--device`/`-d` are gone but took a value; that value must not
+        // become a third positional (3 URLs = bare usage hint, no mention of the
+        // removed flag). 2 URLs routes to the rip, where `parse_flags` names it.
         for retired in super::RETIRED_VALUE_FLAGS {
             assert_eq!(
                 collect_urls(&v(&[retired, "value", "disc://", "mkv://out.mkv"])),
@@ -1789,13 +1684,9 @@ mod arg_tests {
         for (args, key, must_contain) in cases {
             let (_, _, diags) = parse_logging_flags(&args);
             assert_eq!(keys(&diags), vec![key], "for argv {args:?}");
-            // Assert against the RAW catalog, NOT through `PendingDiag::render`.
-            // `render` calls `strings::get_or`/`fmt_or`, whose entire job is to
-            // turn a key echo into compiled-in English — so `assert_ne!(render,
-            // key)` can NEVER fail, hit or miss, which made the old assertion
-            // vacuous in the exact way this test claims to cure. `strings::get`
-            // returns the dotted path itself on a miss, so `get(key) != key`
-            // holds ONLY when a real localized string is present for the key.
+            // Assert against the RAW catalog, not `PendingDiag::render`: render's
+            // fallback always turns a key echo into English, so `assert_ne!(render,
+            // key)` could never fail. `strings::get` echoes the key on a miss instead.
             let raw = crate::strings::get(key);
             assert_ne!(
                 raw, key,
@@ -1932,15 +1823,9 @@ mod arg_tests {
         let entry = include_str!("cli_entry.rs").replace("\r\n", "\n");
         let info = include_str!("info.rs").replace("\r\n", "\n");
 
-        // The banned shape is the literal as a DIRECT macro argument. The same
-        // English also appears — legitimately — as the `english` argument of
-        // `strings::get_or`, the stopgap for keys the pinned i18n tag does not
-        // ship yet. So "the text is in the file" is not the test; "the text is
-        // what gets printed" is.
-        //
-        // Whitespace-collapsed on both sides so rustfmt cannot hide a
-        // regression by wrapping the macro call, and every needle is assembled
-        // with `concat!` so this test's own body is not what it finds.
+        // Banned shape: the literal as a DIRECT macro argument (English also
+        // legitimately appears as `get_or`'s fallback `english` arg) — testing
+        // what's printed, not what's in the file. Collapsed/`concat!`'d against rustfmt.
         let squash = |s: &str| -> String { s.split_whitespace().collect() };
         let entry_sq = squash(&entry);
         let info_sq = squash(&info);

@@ -6,11 +6,8 @@
 use freemkv::engine::{RunOutcome, extract_target, sanitize_label, title_basename};
 
 // ── The GUI classified a run by substring-matching the engine's English. ────
-//
-// Three separate real messages defeated it: an undecryptable disc, and both
-// abort-for-loss paths, all rendered as the SUCCESS heading. A fourth
-// ("convert failed") landed in the wrong bucket the other way. The verdict is
-// now carried as a value, so no wording can change the classification.
+// Three real messages defeated it, all rendered as SUCCESS; a fourth landed
+// in the wrong bucket. The verdict is now a typed value, immune to wording.
 
 /// The exact strings the engine emits today must not be classifiable by
 /// accident — this pins that we are NOT reading them.
@@ -96,10 +93,9 @@ fn the_extract_destination_cannot_escape_the_chosen_folder() {
             tail.len(),
             out.display()
         );
-        // As in the sibling test: `..` surviving as TEXT inside one component
-        // is harmless and deliberate — `.._.._..Users` navigates nowhere, and
-        // stripping dots would mangle a legitimate "Vol.. 2". What must never
-        // survive is a component BOUNDARY, asserted above.
+        // `..` surviving as TEXT in one component is harmless (navigates
+        // nowhere); stripping dots would mangle "Vol.. 2". A component
+        // BOUNDARY must never survive, asserted above.
         assert!(
             !std::path::Path::new(&out)
                 .components()
@@ -107,18 +103,9 @@ fn the_extract_destination_cannot_escape_the_chosen_folder() {
             "a real parent-dir component survived: {}",
             out.display()
         );
-        // Assert the SEPARATORS are gone, not just that this platform does
-        // not treat them as such. On Linux a backslash is an ordinary
-        // character, so without this the Windows vector above would pass even
-        // with the fix reverted.
-        //
-        // Checked against the single COMPONENT, not a string-trim of the whole
-        // path: `join` uses the platform separator, so on Windows
-        // `/tmp/out`.join(..) yields `/tmp/out\component` and trimming only
-        // the prefix leaves that separator behind. The first Windows run of
-        // this test failed on exactly that — the backslash it caught was
-        // `join`'s own, not one that survived sanitising. `tail` is asserted
-        // to be exactly one component just above, so this is that component.
+        // Assert SEPARATORS are gone (a backslash is ordinary on Linux).
+        // Checked against the single COMPONENT, not the whole joined path,
+        // since `join` itself adds a separator a whole-string trim would miss.
         let component = tail[0].as_os_str().to_string_lossy();
         assert!(
             !component.contains('\\'),
@@ -171,12 +158,9 @@ fn a_crafted_volume_label_cannot_escape_the_destination() {
         assert!(!out.contains('/'), "forward slash survived: {out}");
         assert!(!out.contains('\\'), "backslash survived: {out}");
         assert!(!out.contains(':'), "drive colon survived: {out}");
-        // NOTE: `..` may survive as TEXT — `.._.._..Users_victim` is a single
-        // filename component and cannot traverse anywhere. The security
-        // property is "stays one component inside dest", not "contains no
-        // dots"; stripping dots would also mangle legitimate titles like
-        // "Vol.. 2". What must never survive is a SEPARATOR, and a bare
-        // `.`/`..` name, which is covered below.
+        // NOTE: `..` may survive as TEXT — it's one filename component and
+        // cannot traverse. The property is "stays one component inside dest",
+        // not "contains no dots" (which would mangle "Vol.. 2").
         assert!(
             !std::path::Path::new(&out)
                 .components()

@@ -1,6 +1,4 @@
-// freemkv info disc:// — Show disc titles, streams, and sizes
-// MIT — freemkv project
-//
+// freemkv info disc:// — Show disc titles, streams, and sizes. MIT — freemkv project.
 // CLI is dumb — all logic in libfreemkv. This file only formats output.
 
 use crate::output::{Level::Normal, Output};
@@ -16,10 +14,9 @@ use libfreemkv::{
 /// terminal, so a crafted or corrupt disc cannot inject terminal escape
 /// sequences (color/cursor/OSC) via those fields.
 pub(crate) fn sanitize(s: &str) -> String {
-    // One implementation, two targets. This module is declared only by
-    // `main.rs`, so the desktop shells (built from the lib target) could not
-    // call it — the GUI went unsanitised for exactly that reason. The helper
-    // now lives in `engine`, which both targets share.
+    // One implementation, two targets: this was declared only by `main.rs`, so
+    // desktop shells (lib target) couldn't call it and went unsanitised. Now lives
+    // in `engine`, shared by both.
     crate::strings::sanitize_display(s)
 }
 
@@ -57,10 +54,9 @@ pub(crate) fn parse_info_flags(args: &[String]) -> InfoParse {
         match args[i].as_str() {
             "--quiet" | "-q" => f.quiet = true,
             "--verbose" | "-v" => f.verbose = true,
-            // `--keydb PATH` — used ONLY on `-v` to resolve keys (host-cert
-            // handshake + local keydb lookup) so the crypto block shows a real
-            // unit-key set. Accept + capture its value on every path so it is
-            // not mistaken for a positional / unknown option.
+            // `--keydb PATH`: used only on `-v` to resolve keys for the crypto block.
+            // Accept + capture its value on every path so it isn't mistaken for a
+            // positional / unknown option.
             "--keydb" => {
                 // Only a real value, never the next flag: `info --keydb
                 // --full` used to set the keydb path to "--full" and drop the
@@ -100,10 +96,9 @@ pub(crate) fn parse_info_flags(args: &[String]) -> InfoParse {
             "--full" | "-f" => f.full = true,
             "--basic" | "-b" => f.basic = true,
             "--share" | "-s" | "--mask" | "-m" => {
-                // Drive-profile capture — meaningful only for `disc://`, and
-                // consumed by `info::run` before this parser is reached. Listed
-                // so a `disc://`-shaped flag on an `iso://` URL is reported as
-                // unsupported-here rather than silently accepted.
+                // Drive-profile capture: meaningful only for `disc://`, consumed by
+                // `info::run` earlier. Listed so it's reported unsupported-here on
+                // an `iso://` URL rather than silently accepted.
                 return InfoParse::Unknown(args[i].clone());
             }
             "--help" | "-h" => return InfoParse::Help,
@@ -149,12 +144,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
         Some(p) => libfreemkv::DeviceTarget::Path(std::path::PathBuf::from(p)),
         None => libfreemkv::DeviceTarget::Autodetect,
     };
-    // Normal `info` is a fast keyless scan. `-v` supplies the AACS host
-    // credentials (from the local keydb) so the handshake captures the Volume
-    // ID + Unit_Key_RO.inf a live-drive key resolution needs; without them a
-    // locked drive yields no VID and no resolvable keys. `DiscSession::open`
-    // runs the same advisory wait_ready/init/probe_disc bring-up as before —
-    // best-effort, non-fatal; `session.scan` below is the authoritative gate.
+    // Normal `info` is a fast keyless scan; `-v` supplies AACS host credentials so
+    // the handshake captures the VID + Unit_Key_RO.inf a locked drive needs. Open's
+    // bring-up is advisory/non-fatal — `session.scan` below is the authoritative gate.
     let keyspec = libfreemkv::KeySpec {
         credentials: if verbose {
             crate::pipe::drive_credentials(&keydb)
@@ -176,10 +168,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
         std::process::exit(1);
     });
 
-    // Read the PGS streams to detect forced subtitles from their content, so the
-    // reported forced flags match what a rip's muxer produces. Gated to verbose:
-    // it needs the AACS keys to read encrypted UHD subtitle content, and it reads
-    // the clip (slow) — keyless `info` stays fast and uses vendor-label forced.
+    // Reads PGS streams to detect forced subtitles from content, matching a rip's
+    // muxer. Gated to verbose: it needs AACS keys for encrypted UHD subtitles and
+    // reads the clip (slow) — keyless `info` stays fast, using vendor-label forced.
     let scan_opts = ScanOptions {
         probe_forced_subtitles: verbose,
         ..Default::default()
@@ -246,12 +237,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
     );
     emit_encryption_line(&out, &disc);
 
-    // Unlocker matrix — which registered unlockers actually RAN this rip (did
-    // work, not merely "matched the disc kind"), so the user can see (and
-    // question) a missing one (e.g. a firmware-unlock entry reading "no" on a
-    // supported drive = the firmware unlock didn't take). Registry-driven:
-    // names come from libfreemkv's unlocker registry, never hardcoded. Kept byte-identical to autorip's
-    // rendering for consistency across the two apps.
+    // Unlocker matrix: which registered unlockers actually RAN this rip (not just
+    // "matched the disc kind"), so a missing one (e.g. firmware-unlock = "no" on a
+    // supported drive) is visible. Registry-driven names; rendering matches autorip's.
     {
         let matrix = disc
             .unlocker_matrix(&drive)
@@ -262,19 +250,17 @@ pub fn run(device: Option<&str>, args: &[String]) {
         out.raw(Normal, &format!("Unlockers — {matrix}"));
     }
 
-    // Verbose: hardware/disc facts first, then a blank line, then the AACS
-    // crypto block. Key resolution runs ONLY here (`-v`): sample ciphertext from
-    // the live drive and resolve against the local keydb so the crypto block
-    // shows a real unit-key set rather than the keyless 0.
+    // Verbose: hardware/disc facts, blank line, then the AACS crypto block. Key
+    // resolution runs only here (`-v`): sample ciphertext from the live drive and
+    // resolve against the local keydb, so the crypto block shows a real unit-key set.
     if verbose {
         if disc.aacs.is_some() {
             crate::pipe::resolve_info_keys(&mut drive, &mut disc, &keydb, &out);
         }
 
-        // Sanitize the SCSI INQUIRY strings: vendor/product/revision come from
-        // the drive/bridge firmware (an untrusted source — a spoofed enclosure
-        // could return terminal escapes), so strip control bytes like every other
-        // externally-sourced field.
+        // Sanitize SCSI INQUIRY strings: vendor/product/revision come from the
+        // drive/bridge firmware (untrusted — a spoofed enclosure could return
+        // terminal escapes), so strip control bytes like every other external field.
         out.raw(
             Normal,
             &format!(
@@ -348,10 +334,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
 pub fn print_disc_titles(disc: &Disc, flags: &InfoFlags) {
     let out = Output::new(flags.verbose, flags.quiet);
     let full = flags.full;
-    // The iso:// path is keyless, but the disc format and MKB generation are
-    // read at scan time, so state the encryption generation here with the SAME
-    // renderer the drive path uses (`emit_encryption_line`) — no duplicated
-    // match. An unencrypted disc (clear DVD, clear HD DVD) prints no line.
+    // iso:// is keyless, but format/MKB generation are read at scan time, so state
+    // the encryption generation with the SAME renderer the drive path uses
+    // (`emit_encryption_line`) — no duplicated match. Unencrypted discs print no line.
     if emit_encryption_line(&out, disc) {
         out.blank(Normal);
     }
@@ -387,11 +372,9 @@ fn title_lines(disc: &Disc, full: bool, verbose: bool, basic: bool) -> Vec<Strin
 
     let max_titles = if full { disc.titles.len() } else { 5 };
 
-    // Stream rows align their value column to one shared indent derived from the
-    // widest of the three (localized) labels, so the layout holds for any locale
-    // instead of hardcoding English label widths against a fixed 17-space
-    // continuation. The labels don't vary per title, so compute it once. Skipped
-    // in `--basic` (no stream rows are printed) to avoid the unused binding.
+    // Stream rows align to one shared indent, derived from the widest of the three
+    // (localized) labels, so layout holds for any locale instead of hardcoding
+    // English widths. Labels don't vary per title, so compute once; skipped in `--basic`.
     let indent = if basic {
         0
     } else {
@@ -615,8 +598,8 @@ fn format_subtitle(s: &SubtitleStream, verbose: bool) -> String {
 
 /// AACS generation label ("AACS 1.0" / "AACS 2.0" / "AACS 2.1"). The 2.1
 /// discriminator is the FMTS content-protection format (`DiscFormat::Fmts`); UHD
-/// is 2.0; every other AACS carrier (BD / HD-DVD) is 1.0. Falls back to the
-/// `aacs.version` minor when the format isn't a known AACS carrier.
+/// is 2.0; every other format renders `AACS {aacs.version}.0`, defaulting to
+/// 1.0 only when no `aacs` struct is present.
 fn aacs_generation(disc: &Disc) -> String {
     match disc.format {
         DiscFormat::Fmts => "AACS 2.1".to_string(),
@@ -810,13 +793,9 @@ mod tests {
     use super::*;
     use libfreemkv::disc::DiscRegion;
 
-    // ── `info` flag validation is the same for every URL scheme ────────────
-    //
-    // `freemkv info disc:// --typo` exited 1, but `freemkv info iso://x.iso
-    // --typo` printed a listing and said nothing: that route scanned the
-    // argument list for `--full` with an `.any()` and dropped every other
-    // token. A user who mistyped a flag got output that had silently ignored
-    // what they asked for. Both routes now go through `parse_info_flags`.
+    // `info` flag validation is the same for every URL scheme: `disc:// --typo`
+    // used to exit 1, but `iso://x.iso --typo` silently listed titles because that
+    // route scanned args for `--full` via `.any()`. Both now go through `parse_info_flags`.
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -1037,11 +1016,9 @@ mod tests {
         uhd.encrypted = false;
         assert_eq!(encryption_label(&uhd), None);
 
-        // The case `is_aacs_format` exists for, and the only one that can tell
-        // it apart from `true`: encrypted, no CSS signal at all, no `aacs`
-        // struct, and a format that is NOT an AACS carrier. That is a generic
-        // unresolved encryption, not "AACS 1.0" — labelling it AACS tells the
-        // user a specific protection was detected when nothing was.
+        // The case `is_aacs_format` exists for: encrypted, no CSS signal, no `aacs`
+        // struct, not an AACS carrier. That's generic unresolved encryption, not
+        // "AACS 1.0" — labelling it AACS would claim detection of something specific.
         let mut unknown = synthetic_disc();
         unknown.format = DiscFormat::Dvd;
         unknown.encrypted = true;
@@ -1130,10 +1107,9 @@ mod tests {
 
     #[test]
     fn scan_failed_substitutes_detail_and_drops_no_placeholder() {
-        // Regression: the scan-failure handler keyed the format arg "error" while
-        // the `error.scan_failed` locale string uses `{detail}` — so the real
-        // cause was dropped and the user saw the literal `{detail}`. The handler
-        // must key the arg "detail" (and route the cause through `fmt_err`).
+        // Regression: the handler keyed the format arg "error" while `error.scan_failed`
+        // uses `{detail}`, so the real cause was dropped and users saw the literal
+        // `{detail}`. Must key "detail" and route the cause through `fmt_err`.
         let rendered = strings::fmt(
             "error.scan_failed",
             &[(
@@ -1162,12 +1138,9 @@ mod tests {
 
     #[test]
     fn open_failure_renders_through_fmt_err_shows_code() {
-        // Regression: the `disc-info --device` open-failure handler did
-        // `eprintln!("{}", e)`, printing libfreemkv's raw `E####: <data>`
-        // Display and bypassing the i18n renderer. It must route the error
-        // through `pipe::fmt_err`, which localizes the message (E1001 explains
-        // the disk-group / privilege fix). WS2: the `E<code>` token is now
-        // shown as a code-forward prefix ahead of the localized message.
+        // Regression: the open-failure handler did `eprintln!("{}", e)`, printing
+        // libfreemkv's raw `E####: <data>` and bypassing the i18n renderer. Must route
+        // through `pipe::fmt_err`, which localizes and shows `E<code>` as a code-forward prefix.
         let rendered = crate::pipe::fmt_err(&libfreemkv::Error::DevicePermission {
             path: "/dev/sg0".to_string(),
         });
@@ -1235,13 +1208,9 @@ mod tests {
         assert!(prefix.ends_with("  "));
     }
 
-    // ── Pure formatters (665-806) ────────────────────────────────────────────
-    //
-    // Every `disc-info` line the user reads is one of these functions' return
-    // value. They are pure string builders — no drive, no key — but nothing
-    // exercised their branches, so a mutant that swapped "DD+" for "DD" or
-    // dropped the verbose `[PID …]` tail passed CI. Tested as the values they
-    // are, with the locale pinned so the `strings::get` tags read predictably.
+    // Pure formatters (665-806): every `disc-info` line is one of these functions'
+    // return value. Pure string builders, but nothing exercised their branches, so a
+    // mutant swapping "DD+" for "DD" or dropping `[PID …]` passed CI. Locale pinned here.
 
     fn video(codec: Codec, resolution: Resolution) -> VideoStream {
         VideoStream {

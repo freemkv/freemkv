@@ -222,10 +222,9 @@ fn every_title_is_distinguishable_and_indices_are_canonical() {
 
 #[test]
 fn decrypted_folder_extraction_guards_a_populated_subdir() {
-    // A decrypted-folder rip extracts into a per-disc SUBDIR of the destination
-    // (never the raw dest_dir — that once made it collide with everything in
-    // ~/Movies). The --force gate applies to that subdir: a populated one needs
-    // force, a fresh one is always fine, and ordinary file output is never gated.
+    // A decrypted-folder rip extracts into a per-disc SUBDIR (never dest_dir
+    // itself, which once collided with ~/Movies). --force gates that subdir
+    // only when populated; ordinary file output is never gated.
     let base = std::env::temp_dir().join(format!("fmkv_force_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
 
