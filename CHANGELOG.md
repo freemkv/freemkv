@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.6.12] — UNRELEASED
+
+### Fixed
+
+- macOS: the disc no longer unmounts mid-rip with error E1000 — freemkv now holds a DiskArbitration claim for the whole rip so the OS can't remount the disc out from under the read.
+- A drive whose media state changes mid-rip (remount, disc swap, bus reset) now reacquires and re-verifies the disc instead of skipping the affected sectors as if they were damage.
+
+### Changed
+
+- Internal comment and documentation cleanup.
+
 ## [1.6.11] — 2026-08-26
 
 ### Changed
