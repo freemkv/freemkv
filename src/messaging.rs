@@ -1,16 +1,9 @@
 // freemkv — messaging standard (Level + Code + Message)
 // MIT — freemkv project
-//
-// WS2: every user-visible error line renders as `Error: E<code> <message>`.
-// The three-level vocabulary is closed here: `Warn`/`Info` are the
-// tracing-log levels (file sink only), `Error` is the terminal failure
-// render. Every libfreemkv `Error` variant is a terminal-renderable failure,
-// so `level_for` returns `Error` for every current code.
-//
-// This is the single authority for the Level↔code mapping. The CLI render
-// path (`pipe::render_error` / `main::fatal`), the contract test
-// (`tests/messaging_contract.rs`), and the docs Codes page generator all read
-// `level_for` — do NOT scatter level logic.
+
+// WS2: `Error: E<code> <message>`. Single authority for the Level↔code
+// mapping; `pipe::render_error`, `main::fatal`, the contract test, and the
+// docs generator all read `level_for` — do NOT scatter level logic.
 
 /// The closed set of message levels. `Warn`/`Info` belong to the tracing-log
 /// channel (file sink); `Error` is the terminal failure render.

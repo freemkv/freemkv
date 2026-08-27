@@ -111,11 +111,9 @@ fn map_ureq_err(url: &str, e: &ureq::Error) -> Error {
     match e {
         // A non-2xx HTTP status (the server answered, but not 200-ish).
         ureq::Error::StatusCode(code) => Error::KeydbHttp { status: *code },
-        // Everything else is transport-level (DNS, connect, TLS, timeout,
-        // dropped conn). ureq 3 splits these across several variants and the
-        // enum is non_exhaustive, so a catch-all is what stays correct — and
-        // the distinction the CLI renders is only "answered" vs "never got
-        // there", which the status arm above already draws.
+        // Everything else is transport-level (DNS, connect, TLS, timeout, dropped
+        // conn). ureq 3 splits these across several non_exhaustive variants, so a
+        // catch-all stays correct; the CLI only distinguishes "answered" (above).
         _ => Error::KeydbConnect { host: host_of(url) },
     }
 }
@@ -176,30 +174,23 @@ fn hardened_agent(pinned: Vec<SocketAddr>) -> ureq::Agent {
         .max_redirects(0)
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_recv_response(Some(READ_TIMEOUT))
-        // ureq 3's `timeout_recv_response` bounds the response HEADERS only.
-        // Without this the keydb BODY had no deadline at all, so a mirror that
-        // answered 200 and then trickled bytes parked the caller forever: the
-        // CLI's `update-keys` hung with no output, and the GUI left "Update
-        // keydb now" disabled for the life of the process, since the button is
-        // only re-enabled when the worker posts a result it never posts.
-        // ROLLING, so a slow-but-progressing link still completes.
+        // `timeout_recv_response` bounds only the response HEADERS. Without this
+        // the BODY had no deadline, so a mirror trickling bytes after a 200 could
+        // hang `update-keys` forever. This deadline is ROLLING, so a slow link completes.
         .timeout_recv_body(Some(READ_TIMEOUT))
         .build();
     // `with_parts`, never `new_with_config` — see [`PinnedResolver`].
     ureq::Agent::with_parts(config, DefaultConnector::new(), PinnedResolver(pinned))
 }
 
-// ── SSRF guard (mirrors freemkv-keysources::online) ─────────────────────────
-//
-// The keydb URL is operator-supplied. An attacker who controls its DNS could
-// rebind the host to 169.254.169.254 (cloud metadata) or an RFC1918 host. We
-// resolve once just before the request, reject any blocked IP, and pin the
-// validated addresses into the agent so a later DNS flip can't redirect the
-// request; redirects(0) blocks a 30x to an internal host.
+// SSRF guard (mirrors freemkv-keysources::online): the keydb URL is operator-
+// supplied, and an attacker controlling its DNS could rebind to 169.254.169.254
+// (cloud metadata) or RFC1918. Resolve once, reject blocked IPs, pin addresses.
 
 /// True when `ip` must never be the target of an outbound keydb fetch. Blocks
 /// loopback, link-local (incl. 169.254.0.0/16 cloud metadata), RFC1918, CGNAT,
-/// multicast, unspecified, reserved, and the IPv4-mapped equivalents.
+/// broadcast, documentation/TEST-NET, multicast, unspecified, reserved, and
+/// the IPv4-mapped equivalents.
 fn is_blocked_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -264,20 +255,9 @@ fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, String> 
     if host.is_empty() {
         return Err("URL has no host".into());
     }
-    // Bounded DNS: `to_socket_addrs` is a blocking lookup that can hang for the
-    // OS resolver timeout, so it runs on its own thread and we stop WAITING
-    // after `DNS_TIMEOUT`.
-    //
-    // We do NOT join it. There is no way to cancel a thread parked inside the
-    // system resolver, so on timeout the thread is abandoned and exits whenever
-    // the resolver finally returns. (The comment here used to claim we "join
-    // with a deadline"; we never did, and could not.)
-    //
-    // Abandoning is fine once. It is not fine unbounded: the GUI spawns a fresh
-    // worker per "Update keydb" click, so a user clicking through a DNS outage
-    // parks one more thread each time, each holding a resolver slot. Cap the
-    // number in flight — beyond the cap the answer is the same timeout error
-    // the caller would have got anyway, just immediately.
+    // Bounded DNS: resolution runs on its own thread; we stop WAITING after
+    // `DNS_TIMEOUT` without joining (can't cancel a parked resolver thread). Cap
+    // threads in flight so repeated GUI clicks in an outage can't leak them.
     static DNS_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     const MAX_DNS_IN_FLIGHT: usize = 4;
 

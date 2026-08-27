@@ -49,19 +49,13 @@ pub mod strings;
 /// is exactly how they came to disagree.
 pub mod title_identity;
 pub mod ui;
-// The Windows shell's DPI→geometry arithmetic. Pure, Win32-free and therefore
-// deliberately NOT `cfg(windows)`: gating it would make its unit tests
-// unrunnable anywhere but Windows, and the arithmetic is the part most likely
-// to be wrong.
+// The Windows shell's DPI→geometry arithmetic. Not `cfg(windows)` on purpose:
+// gating it would make its unit tests unrunnable anywhere but Windows.
 pub mod win_layout;
 
 // ── Win32 shell — WINDOWS ONLY ──────────────────────────────────────────────
-// The shell itself lives here rather than in `src/main.rs` for one structural
-// reason: `freemkv-gui.exe` is a *second binary*, and one bin cannot call
-// another's modules. Hosting it in the lib gives both images the same shell
-// from one compilation — `main.rs` deliberately no longer declares
-// `mod windows`, so `windows.rs` (4.4k lines + winsafe) is built exactly once
-// per target, not once per binary.
+// Lives here so `freemkv-gui.exe` can reach the same shell from one
+// compilation; `main.rs` builds it once per target, not per binary.
 #[cfg(target_os = "windows")]
 pub mod win_app;
 #[cfg(target_os = "windows")]

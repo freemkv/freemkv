@@ -1,0 +1,15 @@
+name: comment-guard
+
+# Fails if any inline `//` comment block runs longer than 3 lines. Rustdoc
+# (`///`, `//!`) is exempt. Keeps explanatory comments terse; long rationale
+# belongs in a doc comment or a design note, not an inline wall.
+
+on: [push, pull_request]
+
+jobs:
+  comment-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run comment-guard
+        run: python3 ci/comment-guard.py
