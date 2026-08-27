@@ -96,14 +96,22 @@ jobs:
           git config --global user.email "dev@getbusbar.com"
           git config --global url."https://x-access-token:${{ secrets.ORG_DISPATCH_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
+      # The inputs come in as ENV, not ${{ }} inside the run block: a run block
+      # that contains any ${{ }} is compiled as ONE template expression and the
+      # whole block counts toward Actions' 21000-char expression cap. Env keeps
+      # this ~1700-line block a plain literal (bash substitutes $VERSION_INPUT).
       - name: Release cascade (INLINE — no .sh; qa is the gate; mechanics only)
         env:
           FMKV_ROOT: ${{ github.workspace }}/ws
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
           WORK_BRANCH: qa
+          VERSION_INPUT: ${{ inputs.version }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          set -- ${{ inputs.dry_run && '--dry-run' || '' }} "${{ inputs.version }}"
+          args=()
+          [ "$DRY_RUN_INPUT" = "true" ] && args+=(--dry-run)
+          set -- ${args[@]+"${args[@]}"} "$VERSION_INPUT"
           #!/usr/bin/env bash
           #
           # release.sh — unified, cross-repo, GIT-TAG-ONLY release for the freemkv crates.
