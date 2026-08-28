@@ -1,6 +1,6 @@
 [package]
 name = "freemkv"
-version = "1.6.12"
+version = "1.6.13"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"

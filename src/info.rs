@@ -335,6 +335,17 @@ pub fn run(device: Option<&str>, args: &[String]) {
         save_bin(&profile_dir, "rb_mode6.bin", data, &mut written);
     }
 
+    // Save READ_BUFFER 0xB0 / WRITE_BUFFER 0x41 (Renesas signature)
+    if let Some(ref data) = capture.rb_b0_04 {
+        save_bin(&profile_dir, "rb_b0_04.bin", data, &mut written);
+    }
+    if let Some(ref data) = capture.wb_41 {
+        save_bin(&profile_dir, "wb_41.bin", data, &mut written);
+    }
+    if let Some(ref data) = capture.rb_b0_500000 {
+        save_bin(&profile_dir, "rb_b0_500000.bin", data, &mut written);
+    }
+
     // Save RPC state
     if let Some(ref data) = capture.rpc_state {
         save_bin(&profile_dir, "rpc_state.bin", data, &mut written);
@@ -372,13 +383,27 @@ pub fn run(device: Option<&str>, args: &[String]) {
         toml.push_str(line);
         toml.push('\n');
     }
-    if capture.rb_f1.is_some() || capture.rb_mode6.is_some() {
+    if capture.rb_f1.is_some()
+        || capture.rb_mode6.is_some()
+        || capture.rb_b0_04.is_some()
+        || capture.wb_41.is_some()
+        || capture.rb_b0_500000.is_some()
+    {
         toml.push_str("\n[read_buffer]\n");
         if capture.rb_f1.is_some() {
             toml.push_str("0xF1 = \"rb_f1.bin\"\n");
         }
         if capture.rb_mode6.is_some() {
             toml.push_str("mode6 = \"rb_mode6.bin\"\n");
+        }
+        if capture.rb_b0_04.is_some() {
+            toml.push_str("0xB0_04 = \"rb_b0_04.bin\"\n");
+        }
+        if capture.wb_41.is_some() {
+            toml.push_str("0x41 = \"wb_41.bin\"\n");
+        }
+        if capture.rb_b0_500000.is_some() {
+            toml.push_str("0xB0_500000 = \"rb_b0_500000.bin\"\n");
         }
     }
     let toml_path = profile_dir.join("drive.toml");
