@@ -85,13 +85,24 @@ jobs:
           [ "$fail" = "0" ] || { echo "::error::refusing to release — qa not green / main not coherent across the set"; exit 1; }
 
           # real-media EVIDENCE (F5): the qa 'green' above counts a SKIPPED media
-          # matrix as green. A release must be backed by a real-disc run at the
+          # matrix as green. A release is normally backed by a real-disc run at the
           # exact freemkv qa sha — both cli-matrix legs SUCCEEDED (not skipped).
-          # Bypass for a genuine emergency: MEDIA_EVIDENCE_SKIP=1 (logged loud).
-          if [ "${MEDIA_EVIDENCE_SKIP:-0}" = "1" ]; then
+          #
+          # WAIVERS (either one skips this gate; both logged loud):
+          #   - [skip-media] on the freemkv qa TIP commit. This is the SAME marker
+          #     qa.yml honours to skip the matrix for a change that cannot touch the
+          #     rip engine (--share capture, workflows, docs). It MUST waive the
+          #     matrix and this evidence requirement TOGETHER — otherwise the two
+          #     disagree: qa skips the run, yet the release still blocks on evidence
+          #     that was skipped by design. That mismatch was the bug.
+          #   - MEDIA_EVIDENCE_SKIP=1 — env emergency hatch for anything else.
+          fsha=$(gh api repos/freemkv/freemkv/git/ref/heads/qa -q .object.sha)
+          fmsg=$(gh api "repos/freemkv/freemkv/commits/$fsha" -q .commit.message 2>/dev/null || echo "")
+          if printf '%s' "$fmsg" | grep -qiE '\[skip[- ]media\]'; then
+            echo "::warning::MEDIA_EVIDENCE gate WAIVED — [skip-media] on freemkv qa ${fsha:0:7}: the matrix was skipped by design (change cannot affect a rip); releasing without a real-disc run"
+          elif [ "${MEDIA_EVIDENCE_SKIP:-0}" = "1" ]; then
             echo "::warning::MEDIA_EVIDENCE gate BYPASSED (MEDIA_EVIDENCE_SKIP=1) — releasing without a real-disc run"
           else
-            fsha=$(gh api repos/freemkv/freemkv/git/ref/heads/qa -q .object.sha)
             rid=$(gh api "repos/freemkv/freemkv/actions/runs?head_sha=$fsha&per_page=50" \
                     -q '[.workflow_runs[]|select(.name=="qa")][0].databaseId' 2>/dev/null || echo "")
             legs=$(gh api "repos/freemkv/freemkv/actions/runs/$rid/jobs" \
@@ -100,7 +111,7 @@ jobs:
             if [ "${n:-0}" -ge 2 ] && [ "$n" = "$good" ]; then
               echo "  ok real-media: both cli-matrix legs green at freemkv ${fsha:0:7} (run $rid)"
             else
-              echo "::error::no real-media evidence at freemkv ${fsha:0:7}: cli-matrix legs=$legs (need >=2 all success). Push to qa so the media matrix runs, or MEDIA_EVIDENCE_SKIP=1."
+              echo "::error::no real-media evidence at freemkv ${fsha:0:7}: cli-matrix legs=$legs (need >=2 all success). Push to qa so the media matrix runs, mark the commit [skip-media], or MEDIA_EVIDENCE_SKIP=1."
               exit 1
             fi
           fi
