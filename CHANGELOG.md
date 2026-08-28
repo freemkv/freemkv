@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.6.13] — 2026-08-28
+
+### Added
+
+- `info --share` collects a few additional drive-buffer responses on supported drives.
+
 ## [1.6.12] — 2026-08-27
 
 ### Fixed
