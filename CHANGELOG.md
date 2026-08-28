@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.6.12] — UNRELEASED
+## [1.6.12] — 2026-08-27
 
 ### Fixed
 
