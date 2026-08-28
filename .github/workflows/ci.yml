@@ -696,7 +696,7 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
       - run: cargo llvm-cov --workspace --ignore-run-fail --lcov --output-path lcov.info
         working-directory: freemkv
-      - uses: codecov/codecov-action@v5
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: freemkv/lcov.info
