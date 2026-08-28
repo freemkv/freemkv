@@ -1536,15 +1536,18 @@ jobs:
           open(site, "w", encoding="utf-8").write(out)
           PYEOF
 
-            local site_branch; site_branch="$(git -C "$WEBSITE_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+            # STAGE ONLY — commit_and_push_site() (below) commits this together with
+            # the download-version bump as ONE commit, so a SINGLE Pages deploy
+            # carries the changelog. Two separate site pushes produced two deploys
+            # seconds apart; the site's cancel-in-progress cancelled the changelog
+            # deploy, and the announce (which only fires on a successful deploy whose
+            # tip touched the changelog) was lost. One commit removes the race.
             git -C "$WEBSITE_DIR" add "$WEBSITE_CHANGELOG_REL"
             if git -C "$WEBSITE_DIR" diff --cached --quiet -- "$WEBSITE_CHANGELOG_REL"; then
-              ok "site changelog already current — nothing to commit"; return 0
+              ok "site changelog already current — nothing to stage"
+            else
+              ok "site changelog staged: ## $VERSION (committed with the download bump below)"
             fi
-            git -C "$WEBSITE_DIR" commit -m "changelog: $VERSION" -- "$WEBSITE_CHANGELOG_REL"
-            git -C "$WEBSITE_DIR" push origin "$site_branch" \
-              || { git -C "$WEBSITE_DIR" pull --rebase origin "$site_branch" && git -C "$WEBSITE_DIR" push origin "$site_branch"; }
-            ok "site changelog published: ## $VERSION (release announced now — after tags + main)"
           }
 
           # Set the download page's STATIC default version (`data-latest-version`) to the
@@ -1592,18 +1595,40 @@ jobs:
             else
               err "WARN: could not bake data-latest-date (marker or python3 missing) — version still updated"
             fi
+            # STAGE ONLY — commit_and_push_site() commits this with the changelog
+            # as one commit (see publish_site_changelog for why).
             git -C "$dir" add "$WEBSITE_DOWNLOAD_REL"
             if git -C "$dir" diff --cached --quiet -- "$WEBSITE_DOWNLOAD_REL"; then
-              ok "website download version already at v$VERSION — nothing to commit"
+              ok "website download version already at v$VERSION — nothing to stage"
+            else
+              ok "website download default version set to v$VERSION (staged)"
+            fi
+          }
+
+          # Commit whatever the two site functions STAGED (changelog + download page)
+          # as ONE commit and push ONCE — so the release produces a single Pages
+          # deploy whose tip touches the changelog, and the auto-announce fires
+          # reliably (no cancelled-duplicate-deploy race). Runs after both stage,
+          # before verify. Idempotent: nothing staged → nothing to push.
+          commit_and_push_site() {
+            say "step 8b: commit staged site changes (changelog + download) as one commit → push"
+            local dir="$WEBSITE_DIR"
+            [ -d "$dir/.git" ] || { err "WARN: no site checkout — skipping site commit"; return 0; }
+            local site_branch; site_branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+            if $DRY_RUN; then
+              printf '  [dry-run] commit staged site changes as "release: v%s" + push %s\n' "$VERSION" "$site_branch"
               return 0
             fi
-            git -C "$dir" commit -m "download: default version → v$VERSION" -- "$WEBSITE_DOWNLOAD_REL"
+            if git -C "$dir" diff --cached --quiet; then
+              ok "no staged site changes — nothing to publish (idempotent)"; return 0
+            fi
+            git -C "$dir" commit -m "release: v$VERSION (changelog + download version)"
             if ! git -C "$dir" push origin "$site_branch"; then
-              say "website download: push rejected, attempting rebase + retry"
+              say "site push rejected — rebase + retry"
               git -C "$dir" pull --rebase origin "$site_branch"
               git -C "$dir" push origin "$site_branch"
             fi
-            ok "website download default version set to v$VERSION + pushed"
+            ok "site published in one commit: v$VERSION (single deploy → reliable announce)"
           }
 
           # Runs LAST, after the site updates + pushes. A release must not report success
@@ -1956,8 +1981,9 @@ jobs:
           # to freemkv.github.io main deploys the site and fires RSS→Discord. It runs only
           # after every tag AND every main pointer is done, so users are never notified of
           # a release that has not fully landed (the 1.6.12 premature-announce failure).
-          publish_site_changelog
-          update_website_download_version
+          publish_site_changelog          # stage the changelog entry
+          update_website_download_version  # stage the download-page version
+          commit_and_push_site            # ONE commit + ONE push → single deploy → reliable announce
           verify_website_in_sync
 
           if $DRY_RUN; then
