@@ -55,6 +55,10 @@ jobs:
           if [ "${{ github.event_name }}" != "push" ]; then
             echo "media=false" >> "$GITHUB_OUTPUT"; echo "dispatch — media only via run_media input"; exit 0
           fi
+          # Manual bypass: the author certifies this change cannot affect a rip.
+          if git log -1 --format=%B '${{ github.sha }}' | grep -qiE '\[skip[- ]media\]'; then
+            echo "media=false" >> "$GITHUB_OUTPUT"; echo "[skip-media] in commit → media SKIPPED (manual bypass)"; exit 0
+          fi
           before='${{ github.event.before }}'
           if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
             echo "media=true" >> "$GITHUB_OUTPUT"; echo "no usable base sha — media ON (safe default)"; exit 0
