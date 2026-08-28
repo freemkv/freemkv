@@ -34,6 +34,41 @@ on:
         default: false
 
 jobs:
+  # ── Does this candidate warrant the media matrix? ─────────────────────────
+  #
+  # The full-size media matrix (cli-matrix, ~2h on EC2, real money) proves the
+  # RIP ENGINE on real discs. A push that changes only workflows, docs, or
+  # markdown cannot change a rip, so it must not burn that run. `media=true`
+  # only when the push touched something outside {.github/, docs/, *.md}. A
+  # dispatch uses the run_media input instead. Safe default: if the diff can't
+  # be computed (first push / force-push / missing base), media=true.
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      media: ${{ steps.decide.outputs.media }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { fetch-depth: 0 }
+      - id: decide
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "media=false" >> "$GITHUB_OUTPUT"; echo "dispatch — media only via run_media input"; exit 0
+          fi
+          before='${{ github.event.before }}'
+          if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            echo "media=true" >> "$GITHUB_OUTPUT"; echo "no usable base sha — media ON (safe default)"; exit 0
+          fi
+          core=$(git diff --name-only "$before" "${{ github.sha }}" \
+                   | grep -vE '^(\.github/|docs/|[^/]*\.md$|.*/[^/]*\.md$)' || true)
+          if [ -n "$core" ]; then
+            echo "media=true" >> "$GITHUB_OUTPUT"
+            echo "core code changed → media ON:"; printf '  %s\n' $core
+          else
+            echo "media=false" >> "$GITHUB_OUTPUT"
+            echo "only workflows/docs/markdown changed → media SKIPPED"
+          fi
+
   # ── Name the candidate ────────────────────────────────────────────────
   #
   # Every push to `qa` is a release candidate, so every push gets a tag:
@@ -334,8 +369,8 @@ jobs:
   # test, the synthetic CLI matrix and the 6 GB real DVD — full-size media on
   # macOS is a known, accepted gap rather than a silent one.
   launch-runners:
-    needs: [release-tests, cross-lint, windows-build, cli-integration]
-    if: github.event_name == 'push' || inputs.run_media
+    needs: [detect, release-tests, cross-lint, windows-build, cli-integration]
+    if: inputs.run_media || (github.event_name == 'push' && needs.detect.outputs.media == 'true')
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -402,8 +437,8 @@ jobs:
   # lint, the unit suites, the cross-lint, the Windows build and the synthetic
   # CLI matrix are all green. A typo cannot burn a two-hour rip.
   cli-matrix:
-    needs: launch-runners
-    if: github.event_name == 'push' || inputs.run_media
+    needs: [detect, launch-runners]
+    if: inputs.run_media || (github.event_name == 'push' && needs.detect.outputs.media == 'true')
     strategy:
       fail-fast: false
       matrix:
@@ -702,8 +737,8 @@ jobs:
           path: "suite-${{ matrix.os }}.log"
 
   compare-cli-matrix:
-    needs: cli-matrix
-    if: always() && (github.event_name == 'push' || inputs.run_media)
+    needs: [detect, cli-matrix]
+    if: always() && (inputs.run_media || (github.event_name == 'push' && needs.detect.outputs.media == 'true'))
     runs-on: ubuntu-latest
     steps:
       # continue-on-error: with no matching artifact this action FAILS, which
