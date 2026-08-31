@@ -335,12 +335,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
         save_bin(&profile_dir, "rb_mode6.bin", data, &mut written);
     }
 
-    // Save the Renesas/Pioneer vendor buffers — the before/knock/after
-    // experiment. `rb_b0_04` / `rb_b0_500000` are the two vendor windows read
-    // BEFORE the knock; `wb_41` is the universal enable knock (issued
-    // unconditionally); the `*_postknock` pair are the same two windows read
-    // AFTER. `rb_f4` is the 0xF4 firmware window. Diff before-vs-after to see
-    // which window the knock unlocks.
+    // Renesas/Pioneer vendor buffers, before/knock/after: rb_b0_* are the two
+    // windows read pre-knock, wb_41 is the enable knock, *_postknock are those
+    // windows post-knock (rb_f4 = 0xF4 window). Diff to see what the knock frees.
     if let Some(ref data) = capture.rb_b0_04 {
         save_bin(&profile_dir, "rb_b0_04.bin", data, &mut written);
     }
