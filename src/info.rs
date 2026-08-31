@@ -69,7 +69,7 @@ impl DriveIdentity {
     /// masking is applied to the SANITISED value, never the raw one.
     fn serial_display(&self, mask: bool) -> String {
         if mask {
-            libfreemkv::mask_string(&self.serial)
+            freemkv_engine::mask_string(&self.serial)
         } else {
             self.serial.clone()
         }
@@ -241,7 +241,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
 
     // ── Capture raw drive data via library ─────────────────────────────────
 
-    let capture = match libfreemkv::capture_drive_data(&mut session) {
+    let capture = match freemkv_engine::capture_drive_data(&mut session) {
         Ok(c) => c,
         Err(e) => {
             eprintln!(
@@ -295,7 +295,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
 
         // Mask serial in GET_CONFIG 0108
         if feat.code == 0x0108 && mask && feat_data.len() > 4 {
-            let masked = libfreemkv::mask_bytes(&feat_data[4..]);
+            let masked = freemkv_engine::mask_bytes(&feat_data[4..]);
             feat_data[4..4 + masked.len()].copy_from_slice(&masked);
         }
 
@@ -324,7 +324,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
     if let Some(ref data) = capture.rb_f1 {
         let mut data = data.clone();
         if mask && data.len() >= 12 {
-            let masked = libfreemkv::mask_bytes(&data[0..12]);
+            let masked = freemkv_engine::mask_bytes(&data[0..12]);
             data[0..12].copy_from_slice(&masked);
         }
         save_bin(&profile_dir, "rb_f1.bin", &data, &mut written);
@@ -335,15 +335,34 @@ pub fn run(device: Option<&str>, args: &[String]) {
         save_bin(&profile_dir, "rb_mode6.bin", data, &mut written);
     }
 
-    // Save READ_BUFFER 0xB0 / WRITE_BUFFER 0x41 (Renesas signature)
+    // Save the Renesas/Pioneer vendor buffers — the before/knock/after
+    // experiment. `rb_b0_04` / `rb_b0_500000` are the two vendor windows read
+    // BEFORE the knock; `wb_41` is the universal enable knock (issued
+    // unconditionally); the `*_postknock` pair are the same two windows read
+    // AFTER. `rb_f4` is the 0xF4 firmware window. Diff before-vs-after to see
+    // which window the knock unlocks.
     if let Some(ref data) = capture.rb_b0_04 {
         save_bin(&profile_dir, "rb_b0_04.bin", data, &mut written);
+    }
+    if let Some(ref data) = capture.rb_b0_500000 {
+        save_bin(&profile_dir, "rb_b0_500000.bin", data, &mut written);
+    }
+    if let Some(ref data) = capture.rb_f4 {
+        save_bin(&profile_dir, "rb_f4.bin", data, &mut written);
     }
     if let Some(ref data) = capture.wb_41 {
         save_bin(&profile_dir, "wb_41.bin", data, &mut written);
     }
-    if let Some(ref data) = capture.rb_b0_500000 {
-        save_bin(&profile_dir, "rb_b0_500000.bin", data, &mut written);
+    if let Some(ref data) = capture.rb_b0_04_postknock {
+        save_bin(&profile_dir, "rb_b0_04_postknock.bin", data, &mut written);
+    }
+    if let Some(ref data) = capture.rb_b0_500000_postknock {
+        save_bin(
+            &profile_dir,
+            "rb_b0_500000_postknock.bin",
+            data,
+            &mut written,
+        );
     }
 
     // Save RPC state
@@ -386,8 +405,11 @@ pub fn run(device: Option<&str>, args: &[String]) {
     if capture.rb_f1.is_some()
         || capture.rb_mode6.is_some()
         || capture.rb_b0_04.is_some()
-        || capture.wb_41.is_some()
         || capture.rb_b0_500000.is_some()
+        || capture.wb_41.is_some()
+        || capture.rb_b0_04_postknock.is_some()
+        || capture.rb_b0_500000_postknock.is_some()
+        || capture.rb_f4.is_some()
     {
         toml.push_str("\n[read_buffer]\n");
         if capture.rb_f1.is_some() {
@@ -399,11 +421,20 @@ pub fn run(device: Option<&str>, args: &[String]) {
         if capture.rb_b0_04.is_some() {
             toml.push_str("0xB0_04 = \"rb_b0_04.bin\"\n");
         }
+        if capture.rb_b0_500000.is_some() {
+            toml.push_str("0xB0_500000 = \"rb_b0_500000.bin\"\n");
+        }
         if capture.wb_41.is_some() {
             toml.push_str("0x41 = \"wb_41.bin\"\n");
         }
-        if capture.rb_b0_500000.is_some() {
-            toml.push_str("0xB0_500000 = \"rb_b0_500000.bin\"\n");
+        if capture.rb_b0_04_postknock.is_some() {
+            toml.push_str("0xB0_04_postknock = \"rb_b0_04_postknock.bin\"\n");
+        }
+        if capture.rb_b0_500000_postknock.is_some() {
+            toml.push_str("0xB0_500000_postknock = \"rb_b0_500000_postknock.bin\"\n");
+        }
+        if capture.rb_f4.is_some() {
+            toml.push_str("0xF4 = \"rb_f4.bin\"\n");
         }
     }
     let toml_path = profile_dir.join("drive.toml");
