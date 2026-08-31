@@ -264,7 +264,7 @@ jobs:
           #   Emergency hatches, both loud in the log: RELEASE_CI_SKIP=1,
           #   MEDIA_EVIDENCE_SKIP=1 (PRERELEASE_SKIP still honoured).
           #
-          # See also: freemkv-private/memory/RELEASE_CHECKLIST.md — the operator checklist
+          # See also: the internal release checklist — the operator checklist
           # this script automates, kept in step with what the code above actually does.
 
           set -euo pipefail
@@ -328,7 +328,7 @@ jobs:
           # additionally swaps its freemkv-unlock path dep → git tag. No crates.io publish;
           # each tag triggers a CI binary build (autorip → GHCR).
           # (freemkv-tools was retired from the public release 2026-06-23 — it now lives
-          # inside freemkv-private as an internal debug crate, not version-locked here.)
+          # in an internal debug crate, not version-locked here.)
           BINARY_CRATES=(bdemu freemkv autorip)
           # Nothing publishes to crates.io anymore (libfreemkv left crates.io when it began
           # git-deping the firmware crate; keysources followed since it deps libfreemkv).
