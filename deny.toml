@@ -36,3 +36,7 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# The freemkv siblings are first-party git-tag deps; allow git sources from
+# our own org only (CI resolves them as git, not the local path override).
+[sources.allow-org]
+github = ["freemkv"]
