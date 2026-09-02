@@ -160,7 +160,7 @@ jobs:
           freemkv-engine = { path = "../freemkv-engine" }
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: freemkv
@@ -213,7 +213,7 @@ jobs:
           freemkv-engine = { path = "../freemkv-engine" }
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -270,7 +270,7 @@ jobs:
           freemkv-engine = { path = "../freemkv-engine" }
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: freemkv
@@ -324,7 +324,7 @@ jobs:
           freemkv-engine = { path = "../freemkv-engine" }
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: freemkv
