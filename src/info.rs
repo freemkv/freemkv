@@ -7,30 +7,13 @@ use libfreemkv::Drive;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 
-/// The invocation that produces a drive profile, as printed into artifacts that
-/// LEAVE this machine: the profile TOML header and the auto-filed GitHub issue
-/// body. It shipped as `freemkv drive-info`, a subcommand the dispatcher has
-/// never accepted — so every filed drive-support issue told the next reader to
-/// run a command that does not exist. Named once here, and pinned against the
-/// real dispatcher by `capture_command_is_a_real_subcommand`.
+// The invocation printed into artifacts that leave this machine (TOML header,
+// issue body). See docs/info.md — CAPTURE_COMMAND.
 const CAPTURE_COMMAND: &str = "freemkv info disc://";
 
-/// The drive identity, as it is safe to put in front of a human.
-///
-/// Every field is an INQUIRY / GET CONFIGURATION string: raw bytes under drive
-/// FIRMWARE control, decoded `from_utf8_lossy`. They reach a real terminal, a
-/// `drive.toml` on disk, and — with `--share` — the body of a GitHub issue on a
-/// public tracker. `disc_info.rs` runs the identical class of field through
-/// `sanitize` before printing; this module printed all of them verbatim, so a
-/// drive whose vendor string carries ESC could colour or overwrite the profile
-/// block a user is about to publish, and one carrying a newline could forge a
-/// whole line of it (including the `# … — freemkv info disc://` TOML header
-/// comment, where a newline ends the comment and starts a key).
-///
-/// Sanitising ONCE here, at the point the strings enter this module, is what
-/// makes that unrepeatable: `run` never holds the raw `DriveId`, so there is no
-/// site left that could print an unsanitised field. The raw bytes are still
-/// captured verbatim into `inquiry.bin` — that file is evidence, not display.
+// The drive identity, as it is safe to put in front of a human: fields are
+// sanitised ONCE here so no later site can print a raw firmware string.
+// See docs/info.md — DriveIdentity.
 struct DriveIdentity {
     vendor: String,
     product: String,
@@ -76,11 +59,8 @@ impl DriveIdentity {
     }
 }
 
-/// The drive-identity block `freemkv info disc://` prints, as lines.
-///
-/// Takes the raw [`libfreemkv::DriveId`] and sanitises it itself, so the block
-/// cannot be produced from unsanitised fields by mistake — pinned by
-/// `the_printed_drive_block_carries_no_firmware_escape_sequences`.
+// The drive-identity block `freemkv info disc://` prints, as lines. Sanitises
+// the raw `DriveId` itself. See docs/info.md — drive_identity_lines.
 fn drive_identity_lines(raw: &libfreemkv::DriveId, device: &str, mask: bool) -> Vec<String> {
     let id = DriveIdentity::from_drive(raw);
     vec![
@@ -117,14 +97,9 @@ fn drive_identity_lines(raw: &libfreemkv::DriveId, device: &str, mask: bool) -> 
     ]
 }
 
-/// The `drive.toml` header comment, and the blank line after it.
-///
-/// The one place in the file where a firmware string is NOT `toml_escape`d,
-/// because a comment needs no escaping — except that a comment ends at a
-/// newline, so an embedded one would end the comment and let the rest of the
-/// vendor string be read as TOML. It is safe only because [`DriveIdentity`]
-/// has already removed every control character; that is what
-/// `the_toml_header_comment_is_one_line_whatever_the_firmware_says` pins.
+// The `drive.toml` header comment, and the blank line after it. NOT
+// `toml_escape`d (a comment needs no escaping), safe only because
+// `DriveIdentity` already stripped control chars. See docs/info.md.
 fn toml_header_comment(id: &DriveIdentity) -> String {
     format!(
         "# {} {} {} — {CAPTURE_COMMAND}\n\n",
@@ -584,11 +559,8 @@ pub fn run(device: Option<&str>, args: &[String]) {
     // attach/paste them when filing the issue. Do NOT remove the dir.
 }
 
-/// Print everything the user needs to file the drive-profile issue by hand.
-///
-/// We print the issue title, the pre-filled new-issue URL, and the full issue
-/// body, and point at the saved zip. The user pastes it into the issue. This
-/// always exits cleanly — the artifact is on disk.
+// Print everything needed to file the drive-profile issue by hand: title,
+// pre-filled URL, full body, and the saved zip path. Always exits cleanly.
 fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body: &str) {
     println!();
     println!(
@@ -685,48 +657,23 @@ fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body
     println!("────────────────────────────────────────");
 }
 
-/// Whether to offer the auto-submit prompt at all.
-///
-/// Both channels have to be a terminal, and that is the correction. The gate
-/// used to test stdin only while the question itself is printed to STDERR, so
-/// `freemkv info disc:// --share 2>/dev/null` passed the gate, asked nothing
-/// the user could see, and blocked on a read. A bare Enter — pressed to
-/// unstick an apparently hung command — is the \[Y\] default, and the posted
-/// profile carries the drive serial unless `--mask` was given. That is
-/// publishing identifying hardware data to a public tracker without the user
-/// having been asked a question they could read.
-///
-/// A non-interactive stdin (a CI runner, cron, `--share </dev/null`) cannot
-/// give informed consent either, and EOF there must never be read as yes.
-/// With no compiled-in token there is nothing to submit with, so no prompt.
+// Whether to offer the auto-submit prompt at all: both stdin and stderr must
+// be a terminal, or the question could go unseen while blocking on a read.
+// See docs/info.md — may_prompt_for_consent.
 fn may_prompt_for_consent(token: &str, stdin_is_tty: bool, stderr_is_tty: bool) -> bool {
     !token.is_empty() && stdin_is_tty && stderr_is_tty
 }
 
-/// Whether the user EXPLICITLY consented to submit the profile.
-///
-/// `n` is `read_line`'s byte count (0 == EOF), `answer` is the trimmed reply,
-/// `affirmative` is the locale's yes-token (from the SAME catalog as the
-/// prompt). Split out from the submit flow so the consent rule is unit-testable
-/// without a real stdin, and so the exfil-relevant decision lives in exactly
-/// one place.
-///
-/// Three things are deliberately NOT consent, because this posts identifying
-/// hardware data (the drive serial, unless `--mask`) to a public tracker:
-///   * EOF (`n == 0`) — a closed/redirected stdin cannot agree to anything.
-///   * A bare Enter (empty answer) — a machine-controlled `de.json` can render
-///     the prompt as "[j/N]" (default NO), so treating Enter as YES would post
-///     against a hint the user reasonably read as "no". Opt-in, never opt-out.
-///   * Anything that is not the locale's affirmative token.
+// Whether the user EXPLICITLY consented to submit the profile: EOF (n == 0),
+// a bare Enter, and anything but the locale's affirmative token all fail
+// closed. See docs/info.md — consent_granted.
 fn consent_granted(n: usize, answer: &str, affirmative: &str) -> bool {
     n > 0 && !answer.is_empty() && answer.eq_ignore_ascii_case(affirmative)
 }
 
-/// POST a drive-profile issue to `freemkv/bdemu` via the GitHub Issues API.
-///
-/// Returns the issue's `html_url` on success, `None` on any failure (the caller
-/// falls back to the manual print path). Uses `curl` to avoid pulling an HTTP
-/// stack into the CLI, matching the original 0.1-era implementation.
+// POST a drive-profile issue to `freemkv/bdemu` via the GitHub Issues API.
+// Returns the `html_url` on success, `None` on any failure (caller falls
+// back to the manual print path). Uses `curl` to avoid an HTTP stack dep.
 fn submit_issue(token: &str, title: &str, body: &str) -> Option<String> {
     let payload = format!(
         r#"{{"title":"{}","body":"{}","labels":["drive-profile"]}}"#,
@@ -761,11 +708,9 @@ const SUBMIT_REPO: &str = "freemkv/bdemu";
 /// already been shown.
 const SUBMIT_CONNECT_TIMEOUT_SECS: u32 = 10;
 
-/// Whole-operation timeout for the auto-submit POST, in seconds. Generous
-/// because the body carries a base64 zip on whatever uplink the user has, but
-/// FINITE: a stalled peer that trickles a byte a minute would otherwise hold
-/// the process open indefinitely, with no progress shown and no way out but
-/// Ctrl-C.
+// Whole-operation timeout for the auto-submit POST, in seconds. Generous
+// (body carries a base64 zip) but FINITE, so a trickling peer can't hold
+// the process open with no way out but Ctrl-C.
 const SUBMIT_MAX_TIME_SECS: u32 = 120;
 
 /// Cap on the response body. The reply is a GitHub issue JSON of a few KiB;
@@ -773,18 +718,9 @@ const SUBMIT_MAX_TIME_SECS: u32 = 120;
 /// scanning it for `html_url`.
 const SUBMIT_MAX_FILESIZE_BYTES: u32 = 1024 * 1024;
 
-/// Which `curl` to run.
-///
-/// A bare program name is resolved by the OS. On Windows that search starts
-/// with the launching executable's own directory and the current working
-/// directory, BEFORE the system directories — so a `curl.exe` sitting in the
-/// folder the user unzipped freemkv into, or simply the folder they happened
-/// to run it from, is preferred over the real one (CWE-427). Windows has
-/// shipped curl in System32 since 1803, so name it outright and leave nothing
-/// for the search order to decide.
-///
-/// Unix keeps the bare name: its `PATH` is the user's own, and it does not
-/// implicitly include the program's directory or the CWD.
+// Which `curl` to run: named absolutely on Windows (CWE-427, a bare name
+// there searches the app dir and CWD before System32); bare on Unix, where
+// PATH doesn't. See docs/info.md — curl_program.
 fn curl_program() -> String {
     // `SystemRoot` is set by the OS on every Windows session; if something has
     // unset it there is no trustworthy absolute path to build, so fall back to
@@ -806,14 +742,9 @@ fn curl_program_from(system_root: Option<&str>) -> String {
     }
 }
 
-/// The exact `curl` argv the auto-submit POST runs.
-///
-/// Split out of [`submit_issue`] because inside it it was untestable — the only
-/// way to observe the argv was to make a real request to GitHub. It shipped
-/// with no `--connect-timeout`, no `--max-time` and no `--max-filesize`, so the
-/// last step of `freemkv info disc:// --share` could hang forever on a stalled
-/// peer, after the profile was already safely on disk. `-f` is deliberately NOT
-/// passed: the caller reads the response body to recover the issue URL.
+// The exact `curl` argv the auto-submit POST runs, split out of
+// `submit_issue` so it's testable without a real GitHub request. `-f` is
+// deliberately NOT passed. See docs/info.md — curl_submit_args.
 fn curl_submit_args(token: &str, payload: &str) -> Vec<String> {
     [
         "-s",
@@ -865,19 +796,9 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-/// Archive exactly the named files from `dir`.
-///
-/// It takes a manifest rather than walking the directory, and that is the whole
-/// point. `profile_dir` is derived from firmware-controlled INQUIRY strings and
-/// `create_dir_all` succeeds on a directory that ALREADY EXISTS, so a
-/// directory-walking archive published whatever else happened to be in there —
-/// unrelated local files, or a previous unmasked run's `gc_*.bin` that this
-/// capture did not overwrite. The archive is then base64'd into a GitHub issue
-/// body and can be posted to a public tracker, so "everything in this
-/// directory" is not a safe bound. "Everything this run wrote" is.
-///
-/// A name in the manifest that is missing on disk is skipped rather than
-/// failing the whole submission.
+// Archive exactly the named files from `dir` — a manifest, not a directory
+// walk, since the archive can reach a public tracker. A missing name is
+// skipped rather than failing the submission. See docs/info.md — zip_files.
 fn zip_files(
     dir: &std::path::Path,
     names: &[String],
@@ -908,10 +829,8 @@ fn zip_files(
     Ok(cursor.into_inner())
 }
 
-/// Write one capture file and RECORD its name in `written`.
-///
-/// The manifest is not bookkeeping — it is what bounds the archive. See
-/// `zip_files`.
+// Write one capture file and RECORD its name in `written`: the manifest is
+// not bookkeeping, it's what bounds the archive. See `zip_files`.
 fn save_bin(dir: &std::path::Path, name: &str, data: &[u8], written: &mut Vec<String>) {
     let path = dir.join(name);
     if let Err(e) = std::fs::write(&path, data) {
@@ -946,11 +865,9 @@ fn hex_dump(data: &[u8]) -> String {
         .join("\n  ")
 }
 
-/// Reduce an untrusted firmware-derived string to a safe single path component:
-/// lowercase ASCII alphanumerics, `-`, and `_` only; every other byte (spaces,
-/// `/`, `\`, `.`, NUL, multibyte) becomes `-`; runs of `-` collapse to one; and
-/// leading/trailing `-` are trimmed. The result can never be `.`, `..`, contain
-/// a separator, or escape the working directory. Falls back to `drive` if empty.
+// Reduce an untrusted firmware-derived string to a safe single path
+// component (lowercase alnum/-/_ only; never `.`, `..`, or a separator).
+// Falls back to `drive` if empty. See docs/info.md — sanitize_component.
 fn sanitize_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_dash = false;
@@ -981,15 +898,9 @@ fn sanitize_component(s: &str) -> String {
     }
 }
 
-/// Escape a string for embedding inside a TOML basic (double-quoted) string.
-///
-/// The drive identity fields come from raw INQUIRY / GET_CONFIG bytes under
-/// firmware control, so a value can legitimately contain a `"`, `\`, or a
-/// control character (newline, NUL, etc.). Embedded verbatim those break the
-/// `key = "..."` line and make `drive.toml` unparseable. Backslash and quote
-/// are backslash-escaped; the TOML-defined control escapes (`\n`, `\r`, `\t`)
-/// are emitted by name; every other C0 control / DEL becomes a `\uXXXX` escape.
-/// Ordinary printable text passes through unchanged.
+// Escape a string for embedding inside a TOML basic (double-quoted) string:
+// drive identity fields are raw firmware bytes and can contain `"`, `\`, or
+// control chars that would break `key = "..."`. See docs/info.md.
 fn toml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -1072,11 +983,9 @@ fn base64_decode(input: &str) -> Vec<u8> {
     out
 }
 
-/// Decode a TOML basic (double-quoted) string body — the inverse of
-/// [`toml_escape`]. Test-only: it exists to prove the encoder's output is a
-/// well-formed basic string that round-trips, without pulling in a full TOML
-/// parser dependency. Panics on a malformed escape (which would mean the
-/// encoder emitted something a real TOML parser would also reject).
+// Decode a TOML basic string body, the inverse of `toml_escape`. Test-only:
+// proves the encoder round-trips without a full TOML parser dependency.
+// Panics on a malformed escape (the encoder must never emit one).
 #[cfg(test)]
 fn toml_basic_unescape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -1158,12 +1067,8 @@ mod tests {
         assert_eq!(parsed["v"], "he said \"hi\"\npath: C:\\x");
     }
 
-    /// A drive whose firmware answers INQUIRY with terminal escapes.
-    ///
-    /// Nothing exotic: these are `from_utf8_lossy` of device-supplied bytes, and
-    /// a wedged USB-SATA bridge produces junk here routinely. The interesting
-    /// part is where the junk GOES — a terminal, `drive.toml`, and the body of a
-    /// public GitHub issue.
+    // A drive whose firmware answers INQUIRY with terminal escapes — junk a
+    // wedged USB-SATA bridge produces routinely. See docs/info.md.
     fn hostile_drive_id() -> libfreemkv::DriveId {
         libfreemkv::DriveId {
             vendor_id: " HL-DT-ST\u{1b}[31m ".into(),
@@ -1236,17 +1141,9 @@ mod tests {
         assert!(header.ends_with("\n\n"), "{header:?}");
     }
 
-    /// On Windows the program to run must be named absolutely.
-    ///
-    /// Windows resolves a bare program name by searching the launching
-    /// executable's own directory and the current working directory before the
-    /// system directories — so `freemkv info disc:// --share`, run from a
-    /// folder containing a hostile `curl.exe` (an unzipped download, say),
-    /// would run that one with the submit token on its command line. Naming
-    /// System32's curl outright leaves nothing for the search order to pick.
-    ///
-    /// Testable off Windows because the platform decision lives in
-    /// `curl_program` and the string building lives here.
+    // On Windows the program to run must be named absolutely, or a hostile
+    // `curl.exe` on the app dir/CWD wins the search over System32's.
+    // See docs/info.md — the_submit_curl_is_named_absolutely....
     #[test]
     fn the_submit_curl_is_named_absolutely_where_the_search_order_is_unsafe() {
         assert_eq!(
@@ -1259,11 +1156,9 @@ mod tests {
         assert_eq!(super::curl_program_from(None), "curl");
     }
 
-    /// The auto-submit POST is the one network call this module makes, and it
-    /// is the LAST thing `--share` does: the profile and its zip are already on
-    /// disk, and the manual instructions print either way. It shipped with no
-    /// bound at all on connect, total time, or response size, so a stalled peer
-    /// hung the command after the work was done.
+    // The auto-submit POST is the LAST thing `--share` does; it shipped with
+    // no bound on connect/total time/response size, so a stalled peer hung
+    // the command after the work was already on disk. See docs/info.md.
     #[test]
     fn the_auto_submit_post_is_bounded_in_time_and_size() {
         let args = super::curl_submit_args("tok", "{}");
@@ -1433,19 +1328,9 @@ mod tests {
 mod share_safety_tests {
     use super::{consent_granted, may_prompt_for_consent, zip_files};
 
-    /// Submitting the drive profile requires EXPLICIT consent, and the accept
-    /// token comes from the locale — never a hard-coded ASCII "y" against a
-    /// machine-controlled prompt.
-    ///
-    /// The prompt string loads from the catalog (`./locales`), so a crafted
-    /// `de.json` can render "[j/N]" (default NO). The old parser treated a bare
-    /// Enter as YES and eq_ignore_ascii_case("y"), so a German user pressing
-    /// Enter — reasonably reading it as "no" — POSTed the profile (with the
-    /// drive serial unless `--mask`) to a public tracker. This pins the two
-    /// rules that close it.
-    ///
-    /// Mutation caught: bringing back `ans.is_empty()` as an accept (default-yes
-    /// on Enter), or hard-coding "y" instead of the locale's affirmative token.
+    // Submitting requires EXPLICIT consent with the locale's accept token,
+    // never a hard-coded ASCII "y" — a crafted `de.json` can render "[j/N]"
+    // (default NO), so a bare Enter must not post. See docs/info.md.
     #[test]
     fn submitting_requires_an_explicit_locale_matched_yes() {
         // A bare Enter is NOT consent — it declines, whatever the prompt hinted.
@@ -1476,14 +1361,9 @@ mod share_safety_tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    /// A scratch directory unique to this process and call.
-    ///
-    /// These tests populate a directory, assert on exactly what is in it, and
-    /// `remove_dir_all` it at both ends. A fixed name is shared state: two
-    /// `cargo test` processes running against the same checkout delete each
-    /// other's fixtures mid-assertion, which reads as a share-safety failure —
-    /// the most alarming possible false alarm, since a red here means an
-    /// unrelated local file was published.
+    // A scratch directory unique to this process and call — a fixed name is
+    // shared state, and two `cargo test` processes deleting each other's
+    // fixtures mid-assertion reads as a (false) share-safety failure.
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
@@ -1498,15 +1378,9 @@ mod share_safety_tests {
             .collect()
     }
 
-    /// The archive is bounded by what this run WROTE, not by what happens to be
-    /// in the directory.
-    ///
-    /// `profile_dir` is named from firmware-controlled INQUIRY strings and
-    /// `create_dir_all` succeeds on an existing directory, so a directory walk
-    /// published two things it should not: unrelated local files that were
-    /// already there, and a previous UNMASKED run's capture files that this
-    /// masked run did not happen to overwrite. The archive goes into a GitHub
-    /// issue body that can be posted to a public tracker.
+    // The archive is bounded by what this run WROTE, not what happens to be
+    // in the directory (which could include a previous UNMASKED run's
+    // capture, or unrelated local files). See docs/info.md.
     #[test]
     fn the_archive_carries_only_the_files_this_run_wrote() {
         let dir = scratch_dir("zip-manifest-test");
@@ -1581,12 +1455,9 @@ mod share_safety_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The consent prompt is only offered when the user can actually READ it.
-    ///
-    /// The question goes to stderr, so testing stdin alone let
-    /// `--share 2>/dev/null` reach a blocking read with nothing on screen —
-    /// and bare Enter is the [Y] default, which posts the drive serial to a
-    /// public tracker.
+    // The consent prompt is only offered when the user can actually READ it:
+    // testing stdin alone let `--share 2>/dev/null` block on a read with
+    // nothing on screen, and bare Enter is the [Y] default. See docs/info.md.
     #[test]
     fn consent_is_only_offered_when_the_question_is_visible_and_answerable() {
         // Both channels interactive: ask.

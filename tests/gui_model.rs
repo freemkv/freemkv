@@ -1,15 +1,12 @@
 //! The decisions the desktop shells make, with NO shell and NO disc attached.
 //!
-//! `windows.rs` and `mac.rs` are 7,700 lines between them, and almost none of
-//! it is drawing: what is selectable, what a tri-state checkbox shows, which
-//! titles are ticked, what the output file is called, what the log line says,
-//! which rows hang off which. Every one of those is a decision, and a decision
-//! belongs in `ui`, where BOTH shells read it and one test covers both.
+//! `windows.rs` and `mac.rs` are 7,700 lines of mostly non-drawing decisions:
+//! what is selectable, checkbox state, ticked titles, the output file name,
+//! log lines, row nesting. Those decisions belong in `ui`, where both shells
+//! read them and one test covers both.
 //!
-//! Everything here is driven from a SYNTHETIC scan built in this file, so these
-//! run on any host, in CI, with no drive, no disc image and no window server —
-//! unlike `tests/app_core.rs`'s tri-state coverage, which is gated behind an
-//! `FMKV_TEST_ISO` fixture and therefore does not run in CI today.
+//! Everything here runs from a SYNTHETIC scan built in this file, so it runs
+//! on any host, in CI, with no drive, no disc image, and no window server.
 
 use freemkv::engine::{Row as ScanRow, Scanned};
 use freemkv::ui::*;
@@ -1355,15 +1352,9 @@ fn raw_on_a_non_iso_output_says_it_was_ignored() {
     );
 }
 
-/// The result heading is read from the TYPED verdict, never from the summary
-/// text.
-///
-/// This is the regression that shipped once already: the heading was chosen by
-/// substring-matching the engine's English summary, a message was reworded so
-/// it read "fail" rather than "failed", and an undecryptable disc rendered
-/// under the success heading. A failed run must never share a heading with a
-/// completed one, whatever the summary happens to say — including when the
-/// summary contains the word "finished" or nothing at all.
+// The result heading must come from the TYPED verdict, never from the summary
+// text: a past regression substring-matched the summary and broke when a
+// message was reworded, rendering a failed disc under the success heading.
 #[test]
 fn the_result_heading_comes_from_the_verdict_not_the_summary_text() {
     use freemkv::engine::RunOutcome;
@@ -1406,17 +1397,9 @@ fn the_result_heading_comes_from_the_verdict_not_the_summary_text() {
     }
 }
 
-/// The whole GUI→engine seam, end to end, with no disc.
-///
-/// `start_rip` could be replaced with `()` and nothing in the suite noticed:
-/// nothing observed that the worker ran, that `finished` was ever set, or that
-/// a summary was filed. A `finished` that never arrives is not a cosmetic
-/// failure — `ui::tick` polls it, so the window shows a rip in progress
-/// FOREVER with no error, which is the exact hang the `SignalDone` guard was
-/// written to contain (its doc records two hand-rolled copies of the pattern
-/// that both had the bug).
-///
-/// A nonexistent source fails fast, so no fixture is needed.
+// The whole GUI→engine seam, end to end, with no disc: `start_rip` could be
+// replaced with `()` unnoticed if `finished` never arrived, which is the
+// permanent in-progress hang the `SignalDone` guard exists to prevent.
 #[test]
 fn a_failed_run_always_finishes_and_is_reported_as_failed() {
     use freemkv::engine::{KeyConfig, RipRequest, RunOutcome, RunState, start_rip};
@@ -1475,16 +1458,8 @@ fn a_failed_run_always_finishes_and_is_reported_as_failed() {
 
 // ── policies the two shells used to own separately ─────────────────────────
 
-/// Clicking a partly-ticked title selects ALL of it, and clicking again clears
-/// it.
-///
-/// The direction is core policy. Both shells carried a comment saying "the core
-/// owns cascade + tri-state; the shell only reports which row was clicked" and
-/// both were wrong: each computed its own answer and the two disagreed. Windows
-/// read `Off | Mixed` as "turn on"; macOS read the NSButton's mixed state
-/// (`-1`) as "turn off". Same disc, same click, opposite results. The Win32
-/// self-test harness implemented the rule a third time, so it could never have
-/// caught the divergence.
+// Clicking a partly-ticked title selects ALL of it; clicking again clears it —
+// Windows and macOS each computed this differently and disagreed.
 #[test]
 fn clicking_a_partly_ticked_title_selects_all_of_it() {
     let t = tree(&two_title_disc(), "All titles", 0.0);
@@ -1523,15 +1498,9 @@ fn clicking_a_partly_ticked_title_selects_all_of_it() {
     assert_eq!(t.check_state(title), Check::On);
 }
 
-/// Opening a source that cannot offer the current format moves the MODEL, not
-/// just the dropdown.
-///
-/// `View` publishes `format` and `formats` as two independent fields and
-/// nothing kept them in agreement. Pick MP4 on an H.264 disc, then open an
-/// MPEG-2 DVD: MP4 leaves the offered list, and the Win32 shell reconciled by
-/// snapping its dropdown to the first entry and leaving the model alone. The
-/// user READ "MKV", pressed Run, and the engine was handed MP4 — which fails at
-/// mux time with E9048, after the drive has already been read.
+// Opening a source that cannot offer the current format must move the MODEL,
+// not just the dropdown: the Win32 shell used to reconcile only its dropdown,
+// so the user read "MKV" while the engine still got MP4 (fails at mux, E9048).
 #[test]
 fn a_format_the_source_cannot_offer_is_never_left_selected() {
     // Pure rule first.
@@ -1648,10 +1617,9 @@ fn the_audio_preference_keeps_several_languages_at_once() {
     assert_eq!(t.check_state(nth(&t, "Title", 0)), Check::Mixed);
 }
 
-/// The forced-subtitle set is its OWN set, not a filter applied on top of the
-/// subtitle set. "Only German subtitles, and forced only if in English" keeps
-/// the German non-forced subtitle and the ENGLISH forced one — a German forced
-/// subtitle is not wanted, and an English full subtitle is not either.
+// The forced-subtitle set is its OWN set, not a filter on the subtitle set:
+// "German subtitles, forced only if English" keeps the German non-forced
+// subtitle AND the English forced one, dropping German-forced and English-full.
 #[test]
 fn the_forced_subtitle_set_is_honoured_independently_of_the_subtitle_set() {
     let sc = tagged_disc(&[
@@ -1683,10 +1651,9 @@ fn the_forced_subtitle_set_is_honoured_independently_of_the_subtitle_set() {
     assert_eq!(sw, vec![spid(1), spid(2)]);
 }
 
-/// A disc that simply does not carry the preferred language falls back to
-/// today's behaviour FOR THAT CATEGORY — never to an empty class. A rip that
-/// silently ships without audio because the disc is Japanese-only is the worst
-/// possible outcome of a convenience default.
+// A disc lacking the preferred language falls back to today's behaviour FOR
+// THAT CATEGORY, never to an empty class — a rip silently shipping without
+// audio because the disc is Japanese-only is the worst possible default.
 #[test]
 fn a_language_the_disc_lacks_falls_back_to_keeping_that_whole_class() {
     let sc = tagged_disc(&[
@@ -1824,10 +1791,9 @@ fn a_video_only_titles_checkbox_can_actually_be_cleared() {
     );
 }
 
-/// A title whose stream rows the user cleared ENTIRELY still gets an entry —
-/// an empty one. Dropping it left `stream_selection_for` unable to tell "the
-/// user kept nothing here" from "this caller has no per-title data", and it
-/// guessed the latter and applied the union.
+// A title whose rows the user cleared ENTIRELY still gets an entry — an empty
+// one. Dropping it left `stream_selection_for` unable to tell "kept nothing"
+// from "no per-title data", and it guessed the latter and applied the union.
 #[test]
 fn a_title_whose_rows_are_all_cleared_still_gets_an_empty_entry() {
     use freemkv::engine::TitleStreams;
@@ -1866,14 +1832,7 @@ fn no_breakdown_and_an_empty_breakdown_are_different_values() {
 
 // ── A title's box and the rip must be the same answer ───────────────────────
 // `check_state` DRAWS by folding children; `ticked_titles` RIPS via the
-// title's own `checked` flag, untouched by a child's `set_checked`.
-
-/// Every reachable combination of ticks on a title with two audio tracks, and
-/// what the user is entitled to read off the box for each. The table is written
-/// from the TICKS — it is not derived from `check_state` or `ticked_titles`.
-///
-/// Title's own box, then its two tracks, then the glyph drawn and whether it
-/// is ripped.
+// title's own `checked` flag. This table enumerates every tick combination.
 struct TickCase {
     own: bool,
     tracks: [bool; 2],
@@ -1903,13 +1862,9 @@ const TITLE_TICKS: &[TickCase] = &[
     case(true, [true, true], Check::On, true),
 ];
 
-/// The box and the rip are one answer, in every direction.
-///
-/// `check_state` folded ONLY the children while `ticked_titles` read only the
-/// title's own flag, and `set_checked` on a child never writes its parent — so
-/// the drawing and the behaviour were two independent computations. Unticking
-/// a title's tracks one at a time drew the box empty and ripped it anyway;
-/// ticking an unselected title's tracks drew the box full and ripped nothing.
+// The box and the rip are one answer, in every direction: `check_state` used
+// to fold only the children while `ticked_titles` read only the title's own
+// flag, so unticking tracks drew the box empty yet still ripped it.
 #[test]
 fn what_a_titles_box_draws_is_what_gets_ripped() {
     for &TickCase {

@@ -42,15 +42,8 @@ fn outcome_is_typed_not_parsed_from_prose() {
 }
 
 // ── A disc volume label reached the output path almost unsanitised. ─────────
-
-/// The DEFAULT output template is the empty one, and it was the branch the
-/// original fix missed.
-///
-/// `title_basename` sanitised only inside its `{title}` substitution, so the
-/// test below (which passes a `"{title}"` template) proved the traversal
-/// closed while the branch most users are actually on --
-/// `format!("{label}_t{n}")` with the raw label -- was still open. A class of
-/// bug is not closed by covering one of its branches.
+// The DEFAULT template is the empty one, the branch the original fix missed.
+// See docs/audit-round1-fixes.md — default-template traversal gap.
 #[test]
 fn the_default_template_sanitises_the_label_too() {
     for evil in [
@@ -70,10 +63,9 @@ fn the_default_template_sanitises_the_label_too() {
     }
 }
 
-/// The whole-disc sinks join the label into a path too, and neither went
-/// through the sanitiser: `extract_target` (the decrypted-folder
-/// destination) built `dest_dir.join(label)` raw, so a crafted label walked
-/// straight out of the folder the user chose.
+// The whole-disc sinks join the label into a path too: `extract_target`
+// (the decrypted-folder destination) built `dest_dir.join(label)` raw, so
+// a crafted label walked straight out of the chosen folder.
 #[test]
 fn the_extract_destination_cannot_escape_the_chosen_folder() {
     for evil in [
@@ -114,13 +106,9 @@ fn the_extract_destination_cannot_escape_the_chosen_folder() {
     }
 }
 
-/// Every seam that turns a disc label into a path, enumerated.
-///
-/// Round 1 fixed three and missed the fourth -- the ordinary drive->ISO rip --
-/// because the fix was driven from the findings rather than from the list of
-/// places the label lands. This states the invariant once, over the exported
-/// helpers, so the next seam added is measured against it: whatever the label
-/// contains, what reaches the filesystem is a single component.
+// Every seam that turns a disc label into a path, enumerated. See
+// docs/audit-round1-fixes.md — why this invariant is stated once over all
+// exported helpers instead of per finding.
 #[test]
 fn every_label_derived_name_stays_one_component() {
     let evil = r"..\..\..\Users\victim\AppData\Roaming\evil";

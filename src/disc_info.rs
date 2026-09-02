@@ -9,10 +9,9 @@ use libfreemkv::{
     ScanOptions, Stream, SubtitleStream, VideoStream,
 };
 
-/// Strip control/escape characters from untrusted on-disc metadata (title,
-/// volume label, playlist name, stream labels) before printing it to the
-/// terminal, so a crafted or corrupt disc cannot inject terminal escape
-/// sequences (color/cursor/OSC) via those fields.
+// Strip control/escape chars from untrusted on-disc metadata (title, volume
+// label, stream labels) so a crafted disc can't inject terminal escapes
+// (color/cursor/OSC) via those fields.
 pub(crate) fn sanitize(s: &str) -> String {
     // One implementation, two targets: this was declared only by `main.rs`, so
     // desktop shells (lib target) couldn't call it and went unsanitised. Now lives
@@ -41,12 +40,9 @@ pub(crate) enum InfoParse {
     Unknown(String),
 }
 
-/// Parse `freemkv info <url>` flags. ONE parser for every scheme: the `iso://`
-/// route used to read `--full` out of the argument list and ignore everything
-/// else, so `freemkv info iso://x.iso --fulll` (or `--quiet`, or any typo)
-/// silently produced output that had quietly dropped what the user asked for,
-/// while the same typo on `disc://` exited 1. Same vocabulary, same rejection,
-/// whatever the URL.
+// One parser for every scheme: `iso://` used to scan args for `--full` and
+// ignore everything else, so a typo there silently dropped the request
+// instead of exiting 1 like `disc://`. Same vocabulary, same rejection.
 pub(crate) fn parse_info_flags(args: &[String]) -> InfoParse {
     let mut f = InfoFlags::default();
     let mut i = 0;
@@ -343,22 +339,17 @@ pub fn print_disc_titles(disc: &Disc, flags: &InfoFlags) {
     print_titles(&out, disc, full, flags.verbose, flags.basic);
 }
 
-/// Shared title-list renderer. Used by both `run` (drive scan, honoring its
-/// verbose/basic flags) and `print_disc_titles` (ISO scan, plain Normal output).
-/// Builds the lines via [`title_lines`] then emits them through `out` at
-/// `Normal` level (so `--quiet` still suppresses them, `--verbose` shows them).
+// Shared renderer for `run` (drive scan) and `print_disc_titles` (ISO scan):
+// builds lines via `title_lines` then emits them through `out` at `Normal`.
 fn print_titles(out: &Output, disc: &Disc, full: bool, verbose: bool, basic: bool) {
     for line in title_lines(disc, full, verbose, basic) {
         out.raw(Normal, &line);
     }
 }
 
-/// Pure formatter: build the full, localized title-list output as a vector of
-/// lines (empty strings are blank separators). No I/O — kept side-effect-free
-/// so it can be unit-tested against a synthetic `Disc` without capturing stdout.
-///
-/// This is the single source of truth for the per-title layout shared by the
-/// `disc://` (drive) and `iso://` (keyless ISO) info paths.
+// Pure formatter: builds the localized title-list as lines (empty = blank
+// separator), no I/O, so it's unit-testable against a synthetic `Disc`. The
+// single source of truth for `disc://` and `iso://` per-title layout.
 fn title_lines(disc: &Disc, full: bool, verbose: bool, basic: bool) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
@@ -506,12 +497,9 @@ fn title_lines(disc: &Disc, full: bool, verbose: bool, basic: bool) -> Vec<Strin
     lines
 }
 
-/// Column at which a stream's value text should start, given its label: the
-/// 6-space lead + the (localized) label + the colon + a 2-space gap. Taking the
-/// max of these across the Video/Audio/Subtitle labels reproduces the historical
-/// English layout (`Subtitle` is the widest at 8 chars → column 17) while
-/// staying correct for longer localized labels (e.g. `Untertitel`,
-/// `Sottotitoli`) that previously overran the hardcoded 17-space indent.
+// Column where a stream's value starts: 6-space lead + label + colon + gap.
+// Max across Video/Audio/Subtitle labels reproduces the old hardcoded English
+// layout (col 17) while staying correct for wider localized labels.
 fn label_indent(label: &str) -> usize {
     6 + label.chars().count() + 1 + 2
 }
@@ -596,10 +584,9 @@ fn format_subtitle(s: &SubtitleStream, verbose: bool) -> String {
     line
 }
 
-/// AACS generation label ("AACS 1.0" / "AACS 2.0" / "AACS 2.1"). The 2.1
-/// discriminator is the FMTS content-protection format (`DiscFormat::Fmts`); UHD
-/// is 2.0; every other format renders `AACS {aacs.version}.0`, defaulting to
-/// 1.0 only when no `aacs` struct is present.
+// AACS generation label ("AACS 1.0"/"2.0"/"2.1"): FMTS is 2.1, UHD is 2.0,
+// everything else renders `AACS {aacs.version}.0`, defaulting to 1.0 when no
+// `aacs` struct is present.
 fn aacs_generation(disc: &Disc) -> String {
     match disc.format {
         DiscFormat::Fmts => "AACS 2.1".to_string(),
@@ -632,17 +619,8 @@ enum EncLabel {
     GenericAacs,
 }
 
-/// Emit the one-line encryption/generation label ("AACS 2.0 encrypted",
-/// "CSS encrypted", …) for a scanned disc, returning whether a line was printed
-/// (so a caller can follow it with a blank). Shared by the drive (`disc://`) and
-/// keyless ISO (`iso://`) info paths so the generation line renders identically
-/// for both — one renderer, no duplicated match.
-///
-/// The generation label is the informative part (a non-translated proper noun).
-/// The word "encrypted" is app-layer English here rather than the i18n table,
-/// deliberately: localizing it would require adding a string to freemkv-i18n (a
-/// versioned crate we keep frozen), and a stale i18n pin would then print the
-/// raw key.
+// See docs/disc-info.md — emit_encryption_line: one-line "<gen> encrypted"
+// label shared by disc:// and iso://; why "encrypted" stays app-layer English.
 fn emit_encryption_line(out: &Output, disc: &Disc) -> bool {
     match encryption_label(disc) {
         Some(EncLabel::Css) => out.print(Normal, "disc.css_encrypted"),
@@ -653,10 +631,9 @@ fn emit_encryption_line(out: &Output, disc: &Disc) -> bool {
     true
 }
 
-/// Decide which encryption line to show. `None` for an unencrypted disc. CSS
-/// wins whenever any CSS signal is present (resolved state OR a recorded
-/// css_error from a failed crack) — a failed-CSS DVD must never be mislabeled as
-/// AACS; the AACS generation is used only for a real AACS carrier / state.
+// `None` for an unencrypted disc. CSS wins whenever any CSS signal is present
+// (resolved state OR a recorded css_error from a failed crack) — a
+// failed-CSS DVD must never be mislabeled as AACS.
 fn encryption_label(disc: &Disc) -> Option<EncLabel> {
     if !disc.encrypted {
         return None;
@@ -842,13 +819,9 @@ mod tests {
         assert!(f.full && f.quiet && f.verbose && f.basic);
     }
 
-    /// A value-flag must not eat the NEXT FLAG as its value.
-    ///
-    /// All three value-taking flags here consumed the following token
-    /// unconditionally, so `freemkv info --keydb --full disc://` set the keydb
-    /// path to "--full" and dropped the `--full` the user asked for: a request
-    /// silently answered with something else, from a typo or a missing value.
-    /// A token that starts with `-` is another flag, never a value.
+    // Regression: value-taking flags used to consume the following token
+    // unconditionally, so `--keydb --full` set the keydb path to "--full"
+    // and dropped `--full`. A token starting with `-` is a flag, not a value.
     #[test]
     fn a_value_flag_does_not_swallow_the_flag_that_follows_it() {
         let InfoParse::Ok(f) = parse_info_flags(&args(&["--keydb", "--full"])) else {
@@ -910,10 +883,8 @@ mod tests {
         LabelPurpose, LabelQualifier, Resolution, SampleRate,
     };
 
-    /// A minimal synthetic encrypted disc with one rich title (video + audio +
-    /// subtitle). Mirrors what a keyless ISO scan yields for `info iso://` —
-    /// titles are populated, but no AACS key is resolved (`aacs: None`,
-    /// `encrypted: true`). Listing must work all the same.
+    // A minimal synthetic encrypted disc with one rich title, mirroring a
+    // keyless ISO scan: titles populated, no AACS key resolved.
     fn synthetic_disc() -> Disc {
         let video = Stream::Video(VideoStream {
             pid: 0x1011,
