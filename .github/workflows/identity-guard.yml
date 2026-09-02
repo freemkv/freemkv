@@ -1,0 +1,41 @@
+name: identity-guard
+# Prevention: no commit may carry an unrelated-business or non-canonical author/
+# committer email. dev@getbusbar.com (a dead corp address) once slipped onto the
+# release cascade + a batch of local commits; this fails the build if it recurs.
+on:
+  push:
+    branches: [dev, qa, main]
+  pull_request:
+jobs:
+  identity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject banned author/committer emails
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Unrelated business domains + a personal address normalized to the
+          # GitHub noreply. Real external contributors are unaffected.
+          BANNED='@getbusbar\.com|@pq\.io|mattjackson86@gmail\.com'
+          if [ "$EVENT" = "pull_request" ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE" 2>/dev/null; then
+            range="$BEFORE..$AFTER"
+          else
+            range="$AFTER~1..$AFTER"
+          fi
+          bad=$(git log --format='%an <%ae>%n%cn <%ce>' "$range" 2>/dev/null | sort -u | grep -iE "$BANNED" || true)
+          if [ -n "$bad" ]; then
+            echo "::error::commit(s) carry a banned author/committer identity:"; echo "$bad" | sed 's/^/  /'
+            echo "::error::Commit as your GitHub noreply (1085847+MattJackson@users.noreply.github.com). Fix: git config user.email <noreply>; git commit --amend --reset-author."
+            exit 1
+          fi
+          echo "identity-guard: clean"
