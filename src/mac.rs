@@ -5173,7 +5173,7 @@ mod tests {
         let start = src.find(&helper).expect("the shared confirm_quit is gone");
         let end = start
             + src[start..]
-                .find("\n    /// Save `Settings` to disk")
+                .find("\n    // Save `Settings` to disk")
                 .expect("the next item still ends confirm_quit");
         let body = &src[start..end];
         let cancel = format!("{}{}", "self.act(crate::ui::Cmd::", "Cancel);");
