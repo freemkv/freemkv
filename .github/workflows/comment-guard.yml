@@ -1,8 +1,10 @@
 name: comment-guard
 
-# Fails if any inline `//` comment block runs longer than 3 lines. Rustdoc
-# (`///`, `//!`) is exempt. Keeps explanatory comments terse; long rationale
-# belongs in a doc comment or a design note, not an inline wall.
+# Caps explanatory prose by COMMENT INTENT (not visibility):
+#   //! / /*! module docs  — unbounded (module-scoped, can't hide per-item text)
+#   ///  / /** */ item docs — 8 prose lines (fenced ``` examples excluded)
+#   //   / /* */  asides    — 3 lines (single-blank-separated runs count as one)
+# Overflow belongs in the module //! or docs/<topic>.md with a one-line // pointer.
 
 on: [push, pull_request]
 

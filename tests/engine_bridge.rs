@@ -1,21 +1,15 @@
 //! Engine-bridge tests. The scan/rip tests need a real disc image, so they are
 //! gated on FMKV_TEST_ISO / FMKV_TEST_MKV / FMKV_TEST_AACS_ISO pointing at one.
 //!
-//! They are `#[ignore]`, NOT early-returning. An early `return` makes an
-//! unrunnable test report as PASSED, which is indistinguishable from a test
-//! that ran and proved something — and three of these used to return with no
-//! message at all. A mutation run over this crate scored 55% largely because
-//! nine tests here were reporting green while executing nothing.
-//!
-//! `cargo test` now reports them as `ignored`, which is the truth. Run them
-//! with a fixture:
+//! They are `#[ignore]`, NOT early-returning, so `cargo test` reports them as
+//! `ignored` rather than a falsely-passing green. Run them with a fixture:
 //!
 //! ```sh
 //! FMKV_TEST_ISO=/path/to.iso cargo test --test engine_bridge -- --ignored
 //! ```
 //!
-//! Each still keeps its `else` guard so that running it WITHOUT the fixture
-//! fails loudly rather than silently passing.
+//! Each still keeps its `else` guard so running it WITHOUT the fixture fails
+//! loudly rather than silently passing.
 
 use freemkv::engine;
 
@@ -255,12 +249,9 @@ fn decrypted_folder_extraction_guards_a_populated_subdir() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// The key strip must never claim a key the disc does not have.
-///
-/// `scan_aacs_vid_only` stamps `KeyOrigin::ExternalUk` as a PLACEHOLDER before
-/// any source is consulted, with `unit_keys` empty — so the engine's
-/// `resolve_keys` reports `resolved: true` / `"resolved-online"` for a disc
-/// that has no key and never touched the network. Gate on real material.
+// The key strip must never claim a key the disc doesn't have: a VID-only
+// scan stamps a PLACEHOLDER key origin with `unit_keys` empty, which can
+// make `resolve_keys` falsely report resolved. Gate on real key material.
 #[test]
 #[ignore = "needs a real disc fixture; run with --ignored"]
 fn unkeyed_aacs_disc_is_not_reported_as_resolved() {
@@ -281,12 +272,9 @@ fn unkeyed_aacs_disc_is_not_reported_as_resolved() {
     );
 }
 
-/// Start must not be enabled for a disc we cannot decrypt.
-///
-/// The engine's `preflight` decrypt gate is satisfied by `disc.aacs.is_some()`,
-/// but a VID-only scan leaves a placeholder AACS state with no key material —
-/// so it answers `Ready` for a disc whose mux then fails at E7022. We resolve
-/// keys first and gate on `resolve_keys`, which is the honest signal.
+// Start must not be enabled for a disc we can't decrypt: `preflight`'s
+// decrypt gate is satisfied by `disc.aacs.is_some()`, which a VID-only
+// scan sets with no key material. Resolve keys first and gate on that.
 #[test]
 #[ignore = "needs a real disc fixture; run with --ignored"]
 fn an_undecryptable_disc_blocks_the_run() {

@@ -121,11 +121,9 @@ fn settings_path() -> PathBuf {
     support_dir().join("gui-settings.json")
 }
 
-/// Write a brand-new file with mode 0600 before any bytes land in it, so a
-/// secret (the settings file's `keyserver_token`) is never briefly readable
-/// at the process umask (typically 0644) between creation and a follow-up
-/// `set_permissions` call. `create_new` also refuses to reuse an existing
-/// path — this is only ever called on a fresh per-process temp filename.
+// Create with mode 0600 up front so the `keyserver_token` secret is never
+// briefly readable at the process umask before a follow-up chmod.
+// `create_new` refuses to reuse a path; only called on a fresh temp filename.
 fn write_new_file_0600(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
@@ -195,11 +193,9 @@ impl LoadOutcome {
     }
 }
 
-/// Move an unusable settings file aside, returning where it went.
-///
-/// Never clobbers an earlier preserved copy: the first `.bad` is the one most
-/// likely to hold real values (a later corruption may only be corrupting the
-/// defaults this fallback just wrote), so it is the one that must survive.
+// Move an unusable settings file aside, returning where it went. Never
+// clobbers an earlier preserved copy: the first `.bad` is likeliest to hold
+// real values, so it must survive later corruption of the fallback defaults.
 fn preserve_unreadable(path: &std::path::Path) -> Option<PathBuf> {
     let candidates = std::iter::once(path.with_extension("json.bad"))
         .chain((2..10).map(|n| path.with_extension(format!("json.bad.{n}"))));
@@ -352,14 +348,9 @@ impl Settings {
         }
     }
 
-    /// Every setting must carry a value the popup can select and the engine can
-    /// match on. `#[serde(default)]` fills fields missing from the file; this
-    /// additionally snaps an enum-valued field back to its default when the
-    /// persisted string is not one of the recognized options (a stale file from
-    /// an older build, or a hand-edit). `dest_dir` and `keydb_path` get the
-    /// same fallback-to-default treatment when they aren't usable (a
-    /// non-absolute destination, an empty keydb path) — every other free-form
-    /// field (URLs, numbers) is left as-is.
+    // Snap enum-valued and path fields back to defaults when unusable so the
+    // popup and engine always have a value to select/match on.
+    // See docs/settings-normalize.md — full field-by-field rationale.
     fn normalize(&mut self) {
         let d = Settings::default();
         let snap = |cur: &mut String, opts: &[&str], def: &str| {
@@ -587,10 +578,8 @@ mod normalize_tests {
         dir
     }
 
-    /// The three cases `load()` must tell apart. Before this fix all three
-    /// were the same code path — `unwrap_or_default()` — so a user whose
-    /// settings had just been discarded got exactly what a first-run user
-    /// gets, with nothing anywhere saying otherwise.
+    // The three cases `load()` must tell apart; they used to collapse into
+    // one `unwrap_or_default()` path, hiding discarded settings from the user.
     #[test]
     fn load_distinguishes_no_file_from_a_good_file_from_an_unreadable_one() {
         let dir = scratch("outcome");
@@ -640,10 +629,9 @@ mod normalize_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Preserving must never overwrite an already-preserved copy. The first
-    /// `.bad` is the one likely to hold the real keyserver token; a second
-    /// corruption is probably a corruption of the defaults written after the
-    /// first, and must not be allowed to replace it.
+    // Preserving must never overwrite an already-preserved copy: the first
+    // `.bad` likely holds the real token; a second corruption is probably
+    // just the defaults written after the first, and must not replace it.
     #[test]
     fn a_second_corruption_does_not_clobber_the_first_preserved_copy() {
         let dir = scratch("twice");
@@ -675,16 +663,9 @@ mod normalize_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Running out of `.bad` slots must not leave the corrupt file where the
-    /// next `save()` will write over it.
-    ///
-    /// The whole point of moving it aside is that `load()` runs at startup and
-    /// the next `save()` — opening Settings, a window resize — writes defaults
-    /// straight onto that path. With every numbered slot taken, preservation
-    /// gave up and left the file exactly there, so the copy still holding the
-    /// user's keyserver token, output folder and keydb path was destroyed by
-    /// the first save of the session. Losing the tenth-oldest preserved copy
-    /// is the only alternative, and it is the cheaper one.
+    // Running out of `.bad` slots must not leave the corrupt file where the
+    // next `save()` overwrites it with defaults.
+    // See docs/settings-preserve-overflow.md — why the oldest copy must win.
     #[test]
     fn a_full_set_of_bad_slots_still_moves_the_corrupt_file_out_of_harms_way() {
         let dir = scratch("overflow");
@@ -725,13 +706,9 @@ mod normalize_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `normalize()` is private, called only from `load()`, and `load()` had no
-    /// test — so the exact bug class its doc comment describes had ZERO
-    /// coverage, and the whole function could be replaced with `()`.
-    ///
-    /// Each snapped field is a value the popup must be able to select and the
-    /// engine must be able to match on. A stale string from an older build
-    /// leaves the control rendering blank and the setting silently inert.
+    // `normalize()` was previously untested via `load()`, leaving it able to
+    // be replaced with `()`. A stale enum string from an older build must
+    // snap back to default, not leave the popup control rendering blank.
     #[test]
     fn normalize_snaps_every_stale_enum_back_to_its_default() {
         let d = Settings::default();
@@ -769,10 +746,9 @@ mod normalize_tests {
         assert_eq!(s.log_level, "Debug");
     }
 
-    /// A relative destination cannot be written to and renders blank. This is
-    /// the fallback that catches an empty base directory — the exact shape of
-    /// the unset-`HOME` bug, where `default_dest_dir()` came back as `"Movies"`
-    /// and rips landed next to the process CWD.
+    // A relative destination cannot be written to and renders blank; this
+    // catches an empty base dir — the unset-`HOME` bug where
+    // `default_dest_dir()` came back as `"Movies"` and rips landed at CWD.
     #[test]
     fn a_relative_destination_falls_back_and_an_absolute_one_does_not() {
         let d = Settings::default();
@@ -821,10 +797,9 @@ mod normalize_tests {
         assert_eq!(kept.keydb_path, "~/keys/keydb.cfg");
     }
 
-    /// The four `settings::*` path wrappers forward to `platform::*`. They are
-    /// separate functions from the ones `platform.rs`'s own tests exercise, so
-    /// each could be replaced with `Default::default()` independently — and an
-    /// empty `settings_path()` means the settings file is written to `""`.
+    // The four `settings::*` path wrappers forward to `platform::*` but are
+    // separate functions from what `platform.rs`'s own tests exercise, so
+    // each could regress to `Default::default()` (e.g. `settings_path()` == "").
     #[test]
     fn the_derived_paths_are_absolute_and_distinct() {
         let support = support_dir();
@@ -850,11 +825,9 @@ mod normalize_tests {
         assert_ne!(movies, support.to_string_lossy());
     }
 
-    /// Every key `get`/`set` names must round-trip, including the ones the
-    /// external suite's key lists happened to omit — `log_level` for `get`,
-    /// `raw` and `force` for `get_bool`. Those three match arms were dead to
-    /// the whole test suite: `cli_parity_flags_persist` sets the fields but
-    /// reads them back through the struct, not through the accessor.
+    // Every key `get`/`set` name must round-trip, including ones the external
+    // suite's key lists omit (`log_level`, `raw`, `force`) — those match arms
+    // were dead: `cli_parity_flags_persist` reads the struct, not the accessor.
     #[test]
     fn every_accessor_key_round_trips_including_the_ones_the_suite_missed() {
         let mut s = Settings::default();
@@ -908,15 +881,9 @@ mod normalize_tests {
         assert!(u.force && !u.raw && !u.keep_iso);
     }
 
-    /// `check_for_update`'s GitHub API URL must name the same `owner/repo`
-    /// that releases are actually published to — not some other repo that
-    /// happens to share a similar name. Rather than hardcoding the expected
-    /// repo path a second time (which would just restate the constant and
-    /// prove nothing if both copies were wrong the same way), this pulls the
-    /// URL out of this file's own source via `include_str!` — the same
-    /// self-inspection pattern `mac.rs`/`windows.rs`/`engine.rs`/`pipe.rs`
-    /// use — and cross-checks the `owner/repo` it names against the release
-    /// download links baked into the repo's own README.
+    // The update-check URL's `owner/repo` must match where releases are
+    // actually published; pulled via `include_str!` and cross-checked
+    // against the README. See docs/settings-update-check-url.md for why.
     #[test]
     fn update_check_url_names_the_repo_releases_are_actually_published_to() {
         let src = include_str!("settings.rs");

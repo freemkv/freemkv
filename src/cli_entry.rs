@@ -13,52 +13,14 @@ static LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuar
 /// hint ("re-run with --log-level 3 (writes ./log.txt)").
 const DEFAULT_LOG_FILE: &str = "log.txt";
 
-/// Initialise tracing.
-///
-/// Two-channel design: the **terminal** (Channel 1) is always clean — curated
-/// progress, status, and the final result block only. **Zero `tracing`
-/// DEBUG/TRACE (or any tracing level) ever reaches the terminal.** Tracing is a
-/// diagnostic stream that only exists when the user explicitly asks for it, and
-/// it goes to a **file** (Channel 2), never stdout/stderr.
-///
-/// A file log is written only when one of these is set:
-///   * `--log-level N` — N maps 1→warn, 2→info, 3→debug, 4→trace for the
-///     `freemkv` / `libfreemkv` targets (everything else stays at error).
-///   * `--log-file PATH` — write to PATH (default level 3/debug if `--log-level`
-///     is absent, so a lone `--log-file` still captures useful detail).
-///   * `RUST_LOG` — power-user override of the filter; still file-only.
-///
-/// With none of these set, no subscriber is installed at all: the library's
-/// `tracing` events are dropped and the terminal stays pristine. The file
-/// destination defaults to `./log.txt`; ANSI is off and timestamps are on so
-/// the log is clean and copy-pasteable for a bug report.
-/// A startup diagnostic that cannot be RENDERED yet, only recorded.
-///
-/// Everything `run()` does before `strings::init()` is trapped between two
-/// hard constraints:
-///
-///   * `--language` has to be read out of argv before the catalog is chosen,
-///     because it is what chooses it; and
-///   * `freemkv_i18n::get` LAZILY installs the environment-derived catalog on
-///     its first call, after which `set_language` refuses to change it — it
-///     `debug_assert!`s, prints "warning: --language ignored", and returns.
-///
-/// So a `strings::get(..)` anywhere in the argv pre-pass does not localize the
-/// message: it silently disables `--language` for the whole process. The old
-/// code took the other horn and hard-coded English, with a comment calling it
-/// "plain English by necessity" — true of the RENDERING, not of the decision.
-/// Deciding and rendering are separate steps, so the pre-pass now decides and
-/// records, and `run()` renders once the catalog is up. Same messages, same
-/// order, now in the user's language.
-///
-/// Owns its arguments (`String`, not `&str`) because the argv slice these are
-/// derived from is rebuilt by `strip_language_flag` before they are printed.
+// Tracing has two channels (terminal + optional file log, see
+// docs/cli-entry.md § "Tracing / logging channels"); PendingDiag holds a
+// startup diagnostic that can't render yet — see § "PendingDiag" below.
 struct PendingDiag {
     key: &'static str,
-    /// English to print while the pinned `freemkv-i18n` tag does not ship
-    /// `key`. See [`crate::strings::get_or`]: a missing key renders as its own
-    /// dotted path, and `error.log_level_needs_value` on the terminal is worse
-    /// than the English this replaced, not better.
+    // English fallback while the pinned freemkv-i18n tag doesn't ship `key`.
+    // See crate::strings::get_or — a missing key renders as its own dotted
+    // path, worse than this English on the terminal.
     english: &'static str,
     args: Vec<(&'static str, String)>,
 }
@@ -77,35 +39,23 @@ impl PendingDiag {
         self
     }
 
-    /// The localized text. Separate from [`Self::emit`] so a test can read it:
-    /// the whole point of deferring is that these go through the catalog, and
-    /// a key with a typo in it renders as the literal dotted path — which is
-    /// exactly as untranslated as the hard-coded English this replaced, only
-    /// less readable.
+    // The localized text, separate from emit() so a test can read it. See
+    // docs/cli-entry.md § "PendingDiag" for why a typo'd key is worse than
+    // the hard-coded English this replaced.
     fn render(&self) -> String {
         let args: Vec<(&str, &str)> = self.args.iter().map(|(k, v)| (*k, v.as_str())).collect();
         crate::strings::fmt_or(self.key, self.english, &args)
     }
 
-    /// Print to stderr. Must not be called before `strings::init()`.
+    // Print to stderr. Must not be called before `strings::init()`.
     fn emit(&self) {
         eprintln!("{}", self.render());
     }
 }
 
-/// The two logging flags, parsed out of the raw argv.
-///
-/// Split from `init_logging` because that function installs a PROCESS-GLOBAL
-/// `tracing_subscriber` — it can only run once per test binary, so nothing ever
-/// called it and every one of its parse decisions was unconstrained.
-///
-/// Returns `(level, file, diagnostics)`. An out-of-range or non-numeric
-/// `--log-level` is reported and IGNORED rather than silently clamped, so a
-/// typo does not quietly hand the user a different verbosity than they asked
-/// for. The reports are RETURNED rather than printed: this runs before the
-/// locale is resolved, and printing here would mean hard-coded English —
-/// see [`PendingDiag`] for why touching `strings` any earlier is worse than
-/// that.
+// The two logging flags, parsed out of the raw argv. Split from
+// init_logging so it's unit-testable (that fn installs a process-global
+// subscriber). See docs/cli-entry.md § "parse_logging_flags".
 fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>, Vec<PendingDiag>) {
     let mut level_num: Option<u8> = None;
     let mut log_file: Option<String> = None;
@@ -155,10 +105,9 @@ fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>, Vec<Pend
     (level_num, log_file, diags)
 }
 
-/// Split a `--log-file` value into the `(directory, filename)` pair the rolling
-/// appender needs. A bare filename logs into the current directory; a path with
-/// no filename component at all (`""`, `"/"`) is invalid and returns `None`, so
-/// the caller reports it instead of writing somewhere unintended.
+// Split a --log-file value into (directory, filename). A bare filename
+// logs into the current directory; a path with no filename component
+// (`""`, `"/"`) is invalid and returns None, so the caller reports it.
 fn split_log_path(path: &str) -> Option<(std::path::PathBuf, std::ffi::OsString)> {
     let p = std::path::Path::new(path);
     let name = p.file_name()?.to_os_string();
@@ -169,10 +118,9 @@ fn split_log_path(path: &str) -> Option<(std::path::PathBuf, std::ffi::OsString)
     Some((dir, name))
 }
 
-/// Returns the diagnostics it could not render — see [`PendingDiag`]. The
-/// subscriber is still installed HERE, first thing in `run()`, so no tracing
-/// event can be emitted before there is somewhere for it to go; only the
-/// human-facing complaints are deferred.
+// Returns the diagnostics it could not render (see PendingDiag). The
+// subscriber is installed HERE, first thing in run(), so no tracing event
+// can be emitted before there's somewhere for it to go.
 #[must_use = "these diagnostics are never shown unless run() emits them"]
 fn init_logging(args: &[String]) -> Vec<PendingDiag> {
     use tracing_subscriber::layer::SubscriberExt;
@@ -234,15 +182,9 @@ fn init_logging(args: &[String]) -> Vec<PendingDiag> {
     diags
 }
 
-/// Every word a dispatcher matches `args[1]` against. Note "gui" is NOT matched
-/// in [`run`]: `app_entry::wants_gui` intercepts it before the CLI shell is
-/// reached at all, so looking for it in `run`'s match arms finds nothing and
-/// makes this list look stale when it is correct. Anything NOT
-/// here falls through to the source→destination URL grammar, so a string that
-/// tells the user to run `freemkv <word>` for some other `<word>` is telling
-/// them to run a command that does not exist — which is exactly how
-/// `drive-info`, `disc-info`, `remux` and `verify` shipped in the catalogues.
-/// Kept in step with the match arms by `every_command_named_in_a_locale_exists`.
+// Every word the dispatcher matches args[1] against ("gui" is intercepted
+// earlier by app_entry::wants_gui, so it's deliberately absent). See
+// docs/cli-entry.md § "SUBCOMMANDS" for why this list matters.
 #[cfg(test)]
 pub(crate) const SUBCOMMANDS: &[&str] = &["info", "update-keys", "version", "help", "gui"];
 
@@ -344,20 +286,9 @@ fn is_url(s: &str) -> bool {
     s.contains("://")
 }
 
-/// Pull `--language`/`--lang` and its value out of the argument list.
-///
-/// Returns the remaining arguments and the requested language code. The value
-/// guard is the same one `collect_urls` applies, and for the same reason: a
-/// value-flag must not swallow a following positional stream URL.
-/// `freemkv --language disc:// mkv://out.mkv` would otherwise eat `disc://` as
-/// the "language", leaving a single URL that silently degrades into an
-/// info/usage no-op. A leading `-` means the value is missing too, not a
-/// language code.
-///
-/// Extracted from `run()`'s inline loop, which no `cargo test` invocation ever
-/// reached — this is exactly the "add a flag, forget the test" shape the
-/// `collect_urls` comments warn about, applied to the one flag that never got
-/// the same treatment.
+// Pull --language/--lang and its value out of the argument list, with the
+// same URL-value guard as collect_urls. See docs/cli-entry.md §
+// "strip_language_flag".
 fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>, Vec<PendingDiag>) {
     let mut filtered = Vec::new();
     let mut language = None;
@@ -392,23 +323,9 @@ fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>, Vec<Pen
     (filtered, language, diags)
 }
 
-/// Print the curated fatal-error block and exit non-zero.
-///
-/// This is the single terminal-facing error path (Channel 1). It prints a
-/// clean, localized block — never a raw error code, never a tracing event:
-/// ```text
-/// ✗ <operation> failed: <clean cause>.
-///   For a diagnostic log, re-run with --log-level 3 (writes ./log.txt).
-/// ```
-/// `op_key` is a locale key for the operation name (`error.op_rip`, etc.);
-/// `cause` is the already-localized, human-readable cause (typically from
-/// [`crate::pipe::fmt_err`], which renders `E<code>` → a plain-English message with
-/// its own remediation). The diagnostic-log hint tells the user how to capture
-/// a file log for a bug report — without ever spilling tracing onto the
-/// terminal by default.
-///
-/// The block goes to STDERR so stdout stays pipe-clean for `mkv://`/`m2ts://`
-/// streaming; the leading mark is ANSI-free when stderr is redirected.
+// Print the curated fatal-error block (Channel 1, STDERR, never a raw
+// error code or tracing event) and exit non-zero. See docs/cli-entry.md §
+// "fatal" for the block format and why it's ANSI-free on redirect.
 fn fatal(op_key: &str, cause: &str) -> ! {
     let op = crate::strings::get(op_key);
     // WS2: `Error:` is rendered from the translatable `error.level_error` key so
@@ -439,26 +356,9 @@ fn fail_mark() -> &'static str {
     }
 }
 
-/// Split positional stream URLs out of an argument list, accounting for
-/// value-taking flags (`-t`, `--keydb`, …).
-///
-/// A value-flag normally consumes the following token as its value, but it must
-/// NOT swallow a positional stream URL (`scheme://...`): `freemkv --keydb
-/// disc:// mkv://out.mkv` would otherwise let `--keydb` eat `disc://`, leaving a
-/// single URL that silently routes to `info` instead of ripping. So if a
-/// value-flag is followed by a URL token, the URL is kept as positional and the
-/// flag's value is treated as absent (crate::pipe::run then reports the missing
-/// value).
-///
-/// Every flag that consumes the following token as its value. This is the ONE
-/// source of truth for flag arity, shared by `collect_urls` (below) and asserted
-/// against `parse_flags` by `pipe::tests::value_flag_set_matches_parser` — so
-/// adding a value-flag to the parser without listing it here fails a test rather
-/// than silently mis-parsing (the `-a`/`-s` bug). Boolean flags (`--raw`,
-/// `--multipass`, `-q`) are deliberately absent — and so is `-k`: it is a
-/// RETIRED flag (`--keydb` is the only spelling), and while it sat here the
-/// table claimed an arity for a token the parser rejects, so `freemkv -k
-/// keydb.cfg …` had its path quietly eaten before the rejection was reached.
+// Every flag that consumes the following token as its value — the ONE
+// source of truth for flag arity, shared by collect_urls and asserted
+// against parse_flags by a test. See docs/cli-entry.md § "VALUE_FLAGS".
 pub(crate) const VALUE_FLAGS: &[&str] = &[
     "-t",
     "--title",
@@ -473,24 +373,9 @@ pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--log-level",
 ];
 
-/// Whether a token is another FLAG, and so can never be a flag's value.
-///
-/// The companion to the `scheme://` rule above, and the other half of the same
-/// question: a value-flag that blindly takes the next token also takes the next
-/// *flag*. `freemkv --keydb --raw disc:// mkv://out.mkv` set the keydb path to
-/// "--raw" and dropped the `--raw`, and `freemkv info --keydb --full disc://`
-/// dropped the `--full` — in both cases the user was answered with something
-/// they did not ask for, silently.
-///
-/// ONE definition, used by both parsers (`pipe::parse_flags` and
-/// `disc_info::parse_info_flags`), because two spellings of one rule is how
-/// they came to disagree in the first place.
-///
-/// A lone `-` is not a flag (it is the conventional stdin/stdout name), and a
-/// leading dash followed by a DIGIT is a negative number, so `--log-level -1`
-/// still reaches the parser that reports it as out of range rather than being
-/// re-reported as a missing value. Deliberately NOT applied to `--key-auth`:
-/// a bearer token is opaque and may legitimately begin with `-`.
+// Whether a token is another FLAG, and so can never be a flag's value.
+// The companion to the scheme:// rule; ONE definition shared by both
+// parsers. See docs/cli-entry.md § "is_flag_token".
 pub(crate) fn is_flag_token(s: &str) -> bool {
     let mut rest = s.strip_prefix('-').unwrap_or("").chars();
     match rest.next() {
@@ -499,22 +384,9 @@ pub(crate) fn is_flag_token(s: &str) -> bool {
     }
 }
 
-/// Flags this CLI no longer accepts, but which DID take a value.
-///
-/// They are not flag arity in the `VALUE_FLAGS` sense — `parse_flags` consumes
-/// nothing for them, it rejects them — but `collect_urls` still has to step
-/// over the value, or the value counts as a third positional and the whole
-/// invocation collapses into the bare usage hint. The user is then told
-/// nothing about the flag that is actually gone. Stepping over it leaves
-/// exactly two URLs, the rip route runs, and `parse_flags` delivers the
-/// precise "unknown flag '-k' — try 'freemkv help'".
-///
-/// Kept honest by `pipe::tests::retired_value_flags_are_rejected_by_the_parser`:
-/// every entry must be one the parser REJECTS, and must not also appear in
-/// `VALUE_FLAGS`. `-k` used to sit in `VALUE_FLAGS` itself, which claimed an
-/// arity for a token no parser arm names.
-/// `-k` was dropped in rc.6 (`--keydb` is the only spelling); `--device`/`-d`
-/// were dropped when the device moved into the source URL (`disc:///dev/sgN`).
+// Flags this CLI no longer accepts but which DID take a value; collect_urls
+// still steps over the value so it doesn't collapse into a bogus third
+// positional. See docs/cli-entry.md § "RETIRED_VALUE_FLAGS".
 pub(crate) const RETIRED_VALUE_FLAGS: &[&str] = &["-k", "--device", "-d"];
 
 fn collect_urls(args: &[String]) -> Vec<String> {
@@ -549,15 +421,9 @@ fn collect_urls(args: &[String]) -> Vec<String> {
     urls
 }
 
-/// Format the per-stream summary lines for `info mkv://` / `info m2ts://`.
-///
-/// `v.label`, `a.label`, `a.language`, and `s.language` are disc-derived
-/// strings (an MKV/m2ts track name or a raw MPLS/IFO language tag) and go
-/// straight to the real terminal, so each is run through
-/// `disc_info::sanitize` before printing — the same treatment `disc_info.rs`
-/// and `pipe.rs` give the identical fields, so a crafted file can't inject
-/// terminal escapes here. `a.codec` and `a.channels` are the library's own
-/// enums, not disc bytes, so they are not sanitized.
+// Format the per-stream summary lines for `info mkv://` / `info m2ts://`.
+// v.label/a.label/a.language/s.language are disc-derived strings, so each
+// is sanitized before printing. See docs/cli-entry.md § "stream_info_lines".
 fn stream_info_lines(streams: &[libfreemkv::Stream]) -> Vec<String> {
     let mut lines = Vec::with_capacity(streams.len());
     for s in streams {
@@ -723,18 +589,9 @@ fn info_cmd(args: &[String]) {
     }
 }
 
-/// Destination-only schemes, with the English text to print until the pinned
-/// `freemkv-i18n` tag ships their keys — see [`crate::strings::get_or`].
-///
-/// Every line here was verified against `libfreemkv`'s `parse_url` and its
-/// `input()`/`output()` match arms, NOT against the README — the README is
-/// where these nine schemes were documented while `--help` named none of them,
-/// so it is the thing being checked, not the source of truth.
-///
-/// Their own block because the direction is load-bearing, not decoration: each
-/// one's `input()` arm is `StreamWriteOnly`, so offering them as a SOURCE is an
-/// error the user would otherwise only discover by hitting it. `mp4://` and
-/// `dir://` read and write, so they stay inline with the rest above.
+// Destination-only schemes, with English fallback text (crate::strings::
+// get_or) until freemkv-i18n ships their keys. See docs/cli-entry.md §
+// "TRACK_SINK_URL_LINES".
 const TRACK_SINK_URL_LINES: &[(&str, &str)] = &[
     (
         "usage.url.demux",
@@ -910,11 +767,9 @@ fn help_update_keys() {
     println!("{}", crate::strings::get("help.update_keys.flag_url"));
 }
 
-/// Resolve where `update-keys` saves the downloaded keydb: `--keydb <path>`
-/// wins, else the standard location (first existing search path, else the
-/// default). Factored out so the "`--keydb` is honored" behaviour is unit
-/// testable without a network fetch — the prior bug was this flag being ignored
-/// and the keydb always landing at the default location.
+// Resolve where update-keys saves the downloaded keydb: --keydb <path>
+// wins, else the standard search/default location. See docs/cli-entry.md §
+// "update_keys_dest".
 fn update_keys_dest(args: &[String]) -> std::path::PathBuf {
     let mut keydb: Option<String> = None;
     let mut i = 0;
@@ -981,18 +836,9 @@ fn update_keys(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    /// A value-taking logging flag must not swallow the NEXT FLAG as its value.
-    ///
-    /// `--log-file` took `it.next()` unconditionally, so
-    /// `freemkv --log-file --raw disc:// iso:///out/d.iso` set the log path to
-    /// "--raw" and consumed the flag — the rip then ran WITHOUT `--raw` and
-    /// silently wrote a decrypted image. `--log-level` has the same shape: it
-    /// consumes the token, fails to parse it as a number, prints "ignored",
-    /// and the flag is gone either way.
-    ///
-    /// A sibling fix guarded `--keydb` in `pipe::parse_flags` and its commit
-    /// message claimed both parsers were covered under one rule. They were
-    /// not: this file DEFINES `is_flag_token` and used it nowhere.
+    // A value-taking logging flag must not swallow the NEXT FLAG as its
+    // value (e.g. --log-file --raw would eat --raw and run without it).
+    // See docs/cli-entry.md § "a_logging_flag_does_not_swallow...".
     #[test]
     fn a_logging_flag_does_not_swallow_the_following_flag() {
         for flag in ["--log-file", "--log-level"] {
@@ -1032,13 +878,9 @@ mod tests {
 
     use super::{SUBCOMMANDS, collect_urls, stream_info_lines, update_keys_dest};
 
-    /// The `info mkv://` / `info m2ts://` stream lines carry the localized
-    /// PURPOSE / secondary / label tags for an audio track, and a video label —
-    /// the tag-assembly arms of `stream_info_lines` that the escape-stripping
-    /// test above never reaches (it uses `LabelPurpose::Normal`, no secondary,
-    /// no tags). Each purpose maps to its own locale key, so every arm of the
-    /// `purpose_key` match must render; a mutant that dropped the `secondary`
-    /// tag or collapsed two purposes would otherwise pass CI.
+    // Covers the tag-assembly arms of stream_info_lines (purpose/secondary/
+    // label) that the escape-stripping test below never reaches. See
+    // docs/cli-entry.md § "stream_info_lines_render_purpose...".
     #[test]
     fn stream_info_lines_render_purpose_secondary_and_label_tags() {
         use libfreemkv::{
@@ -1123,12 +965,9 @@ mod tests {
 
     use libfreemkv::SampleRate;
 
-    /// `info mkv://` / `info m2ts://` prints `v.label`, `a.label`,
-    /// `a.language`, and `s.language` straight from the file's own track
-    /// metadata. Each is disc/file-controlled (an MKV track name or a raw
-    /// MPLS/IFO language tag), so a crafted file carrying a terminal escape
-    /// sequence in any of those four fields must not have it survive to the
-    /// terminal — mirroring `disc_info::sanitize_strips_terminal_escape_sequences`.
+    // v.label/a.label/a.language/s.language are disc/file-controlled; a
+    // crafted terminal escape in any must not survive to the terminal. See
+    // docs/cli-entry.md § "stream_info_lines_strip_terminal_escapes...".
     #[test]
     fn stream_info_lines_strip_terminal_escapes_from_every_disc_controlled_field() {
         use libfreemkv::{
@@ -1193,12 +1032,9 @@ mod tests {
         }
     }
 
-    /// Subcommand names a string tells the user to TYPE, as opposed to the many
-    /// places "freemkv" is just the product name in a sentence ("Quit freemkv",
-    /// "Wordt van kracht nadat u freemkv opnieuw start"). A command claim is a
-    /// `freemkv <word>` whose `<word>` is followed by something argument-shaped:
-    /// a flag, a `<placeholder>`, an `[optional]`, a `scheme://` URL, the
-    /// description column of a usage example, or a closing quote.
+    // Subcommand names a string tells the user to TYPE, as opposed to
+    // "freemkv" just naming the product in a sentence. See
+    // docs/cli-entry.md § "commands_named_in" for the exact heuristic.
     fn commands_named_in(value: &str) -> std::collections::BTreeSet<String> {
         let mut out = std::collections::BTreeSet::new();
         let mut from = 0;
@@ -1439,10 +1275,9 @@ mod tests {
     }
 }
 
-/// The argv decisions `run()` and `init_logging()` make before anything else
-/// happens — each of them previously unreachable from `cargo test`, either
-/// because it was inline in a 400-line dispatcher or because installing a
-/// process-global subscriber can only be done once per binary.
+// The argv decisions run() and init_logging() make before anything else
+// happens; previously unreachable from cargo test. See docs/cli-entry.md
+// § "mod arg_tests".
 #[cfg(test)]
 mod arg_tests {
     use super::{
@@ -1454,10 +1289,9 @@ mod arg_tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
-    /// The predicate that keeps a value-flag from eating a following flag, and
-    /// its one deliberate exception: a leading `-` on a NEGATIVE NUMBER is a
-    /// value, not a flag, so `--log-level -1` still reaches the range check
-    /// instead of being read as the flag `-1`.
+    // The one deliberate exception: a leading `-` on a NEGATIVE NUMBER is a
+    // value, not a flag, so `--log-level -1` reaches the range check. See
+    // docs/cli-entry.md § "is_flag_token_treats_negative_numbers...".
     #[test]
     fn is_flag_token_treats_negative_numbers_as_values_not_flags() {
         assert!(is_flag_token("--raw"));
@@ -1483,10 +1317,8 @@ mod arg_tests {
         assert!(!is_url("3"));
     }
 
-    /// Just the two REQUESTS, for the assertions that are about what the user
-    /// asked for. The diagnostics are a separate axis and get their own tests
-    /// below — folding them into every tuple comparison would have made the
-    /// interesting assertions unreadable.
+    // Just the two REQUESTS; diagnostics are a separate axis with their own
+    // tests. See docs/cli-entry.md § "flags(...) test helper".
     fn flags(args: &[String]) -> (Option<u8>, Option<String>) {
         let (level, file, _) = parse_logging_flags(args);
         (level, file)
@@ -1522,10 +1354,8 @@ mod arg_tests {
         assert_eq!(parse_logging_flags(&v(&["--log-level", "255"])).0, Some(4));
     }
 
-    /// Bad input is reported and IGNORED — never silently clamped up to 1, and
-    /// never treated as "a log was requested". `0` is out of range and a typo
-    /// must not quietly give the user a different verbosity than they asked
-    /// for.
+    // Bad input is reported and IGNORED, never clamped up to 1. See
+    // docs/cli-entry.md § "a_bad_log_level_is_ignored_rather_than_guessed_at".
     #[test]
     fn a_bad_log_level_is_ignored_rather_than_guessed_at() {
         assert_eq!(parse_logging_flags(&v(&["--log-level", "0"])).0, None);
@@ -1555,17 +1385,9 @@ mod arg_tests {
         assert_eq!(flags(&v(&["--log-file"])), (None, None));
     }
 
-    /// A refused `--log-file` value must be REPORTED, not swallowed silently.
-    ///
-    /// The `--log-level` arm records a `PendingDiag` for every failure mode
-    /// (missing value, out of range, not a number). The `--log-file` arm
-    /// recorded NONE: `freemkv --log-file --raw disc:// …` refused "--raw" as
-    /// the path (correctly, per the value guard) and then said nothing — no
-    /// diagnostic, no log written, the rip ran anyway. The user asked for a log
-    /// and got neither a log nor a word why. Absence of a log is itself a bug.
-    ///
-    /// Mutation caught: dropping the `None =>` diagnostic from the `--log-file`
-    /// arm (which reverts it to the silent `if let Some(..)` form).
+    // A refused --log-file value must be REPORTED, not swallowed silently —
+    // absence of a log is itself a bug. See docs/cli-entry.md §
+    // "a_refused_log_file_value_records_a_diagnostic".
     #[test]
     fn a_refused_log_file_value_records_a_diagnostic() {
         // Next token is a flag: value refused, so the path is None AND a
@@ -1647,29 +1469,9 @@ mod arg_tests {
         assert_eq!(args, original);
     }
 
-    /// Every deferred startup diagnostic must survive the round trip through
-    /// the catalog: real key, real translation, placeholders filled in.
-    ///
-    /// The defect this closes is subtle. These messages were hard-coded
-    /// English, and the fix was to route them through `strings::fmt` — but a
-    /// key that is not in the catalog renders as its own dotted path
-    /// (`freemkv_i18n::get`'s documented miss behaviour, "makes missing
-    /// translations visible"). So a typo turns
-    /// "--log-level: requires a value…" into "error.log_level_needs_value",
-    /// which is not a fix, it is a worse bug: still not localized AND no
-    /// longer readable. Nothing else in the suite can see that, because these
-    /// run before `strings::init()` and are printed from `run()`.
-    ///
-    /// The check MUST go against the raw catalog (`strings::get`), never through
-    /// `PendingDiag::render`. `render` calls `get_or`/`fmt_or`, whose whole job
-    /// is to substitute compiled-in English for a missing key — so a
-    /// `render() != key` assertion can never fail whether or not the key is
-    /// really translated. That was the previous version of this test, and it
-    /// was vacuous in precisely the way it claimed to catch. `get(key) != key`
-    /// holds only when the catalog actually carries a string for the key.
-    ///
-    /// Mutation caught: misspelling any of these keys, dropping one from the
-    /// locale catalogs, or renaming a `{placeholder}` on either side.
+    // Every deferred diagnostic must round-trip through the real catalog
+    // (checked against strings::get, never PendingDiag::render, whose
+    // English fallback would make the check vacuous). See docs/cli-entry.md.
     #[test]
     fn every_deferred_startup_diagnostic_resolves_to_real_localized_text() {
         let cases = [
@@ -1738,21 +1540,9 @@ mod arg_tests {
         }
     }
 
-    /// The argv pre-pass must not print anything ITSELF.
-    ///
-    /// This is the constraint that makes the whole `PendingDiag` detour
-    /// necessary, and it is invisible at every call site. `freemkv_i18n::get`
-    /// LAZILY installs the environment-derived catalog on first use, and
-    /// `set_language` then refuses to change it. So a `strings::get` in the
-    /// pre-pass does not localize the message — it silently disables
-    /// `--language` for the whole process — and a bare `eprintln!` there is
-    /// the hard-coded English this change removed. Both regressions look
-    /// completely reasonable in a diff, and neither one fails any other test:
-    /// the message still appears, just in the wrong language or off the wrong
-    /// catalog.
-    ///
-    /// Mutation caught: putting an `eprintln!`/`println!`/`print!` back into
-    /// `parse_logging_flags`, `init_logging` or `strip_language_flag`.
+    // The argv pre-pass must not print anything ITSELF — a strings::get or
+    // eprintln! here runs before locale is resolved. See docs/cli-entry.md
+    // § "the_pre_locale_argv_pass_prints_nothing_of_its_own".
     #[test]
     fn the_pre_locale_argv_pass_prints_nothing_of_its_own() {
         let src = include_str!("cli_entry.rs").replace("\r\n", "\n");
@@ -1770,14 +1560,14 @@ mod arg_tests {
                 "parse_logging_flags",
                 slice(
                     "fn parse_logging_flags(args: &[String])",
-                    "\n/// Every word a dispatcher matches",
+                    "\n// Every word the dispatcher matches",
                 ),
             ),
             (
                 "strip_language_flag",
                 slice(
                     "fn strip_language_flag(args: &[String])",
-                    "\n/// Print the curated fatal-error block",
+                    "\n// Print the curated fatal-error block",
                 ),
             ),
         ];
@@ -1799,24 +1589,9 @@ mod arg_tests {
         }
     }
 
-    /// The `info` subcommand must speak ONE language, whatever the URL.
-    ///
-    /// `freemkv info disc://` was fully localized and `freemkv info
-    /// mkv://Movie.mkv` — the same subcommand, one match arm away — printed
-    /// `File:` / `Duration:` / `Streams:` in English in all 29 locales. The
-    /// `--share` consent flow had the same split: its manual-fallback
-    /// instructions came from `drive.submit_manual` while the question that
-    /// gates them, the thank-you and both refusal lines were hard-coded.
-    ///
-    /// A source pin because neither path is reachable from a test: the
-    /// container arm needs a real media file open through `libfreemkv::input`,
-    /// and the consent flow needs an interactive stdin AND a live drive
-    /// capture. The cli-parity goldens do not cover them either — `info_iso`
-    /// is operator-run and there is no `info mkv://` case at all — so without
-    /// this the English could come straight back with the whole suite green.
-    ///
-    /// Mutation caught: replacing any of these `strings::get`/`get_or` calls
-    /// with the literal it renders.
+    // The `info` subcommand must speak ONE language, whatever the URL —
+    // source-pinned since neither the container arm nor --share is
+    // reachable from a test. See docs/cli-entry.md § "the_info_surface...".
     #[test]
     fn the_info_surface_never_prints_english_of_its_own() {
         // CRLF-normalized: Windows CI checks the tree out with CRLF.
