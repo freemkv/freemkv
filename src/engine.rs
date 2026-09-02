@@ -91,13 +91,9 @@ fn purpose_label(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
     }
 }
 
-/// Rows for one title's streams. Shared by the disc and stream-source paths
-/// so an MKV shows the same track detail a disc title does.
-///
-/// Uses the `Display` impls (`HEVC`, `5.1`, `2160p`) rather than `Debug`
-/// (`Hevc`, `Surround51`, `R2160p`), and carries the `label` / `purpose` /
-/// `secondary` fields the CLI shows — those are what make a commentary track
-/// distinguishable from the feature audio.
+// Rows for one title's streams, shared by the disc and stream-source paths
+// so an MKV shows the same track detail a disc title does. Uses the
+// `Display` impls, and carries label/purpose/secondary like the CLI.
 fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
     t.streams
         .iter()
@@ -542,11 +538,9 @@ fn disc_target(source: &str) -> libfreemkv::DeviceTarget {
     }
 }
 
-/// Eject the disc in `device` — the GUI analogue of autorip's `eject_drive`:
-/// reopen the drive by its resolved device path and eject, surfacing a failure
-/// to the log rather than silently doing nothing (the "auto_eject is on but the
-/// disc stayed put, no idea why" symptom autorip hit). Called once, after the
-/// rip is done reading the drive, when the `auto_eject` setting is on.
+// Eject the disc in `device` — GUI analogue of autorip's `eject_drive`.
+// Surfaces failure to the log rather than failing silently (the "auto_eject
+// is on but disc stayed put" symptom autorip hit). Called once after rip.
 fn eject_disc(device: &str, sink: &UiSink) {
     use freemkv_engine::Sink as _;
     match libfreemkv::Drive::open(std::path::Path::new(device)) {
@@ -569,13 +563,9 @@ fn session_credentials(keys: &KeyConfig) -> Option<libfreemkv::DriveCredentials>
     (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs })
 }
 
-/// Normalize the GUI's settings-derived [`KeyConfig`] into the engine's
-/// `KeyParams`, preserving the GUI's `shellexpand` of the configured keydb
-/// path and its EXPLICIT `online_only` toggle — both stay GUI-boundary
-/// concerns; the engine only sees the already-resolved result. An empty
-/// `keydb_path` / `keyserver_url` setting (the GUI's "not configured"
-/// sentinel) maps to `None`, dropping that source entirely — never a
-/// default-location fallback (that's the CLI's policy, not the GUI's).
+// Normalize the GUI's KeyConfig into the engine's KeyParams. Preserves the
+// GUI's shellexpand of keydb_path and explicit online_only toggle; empty
+// keydb_path/keyserver_url maps to None (no default-location fallback).
 fn key_params(keys: &KeyConfig) -> freemkv_engine::KeyParams {
     let keydb_path = (!keys.keydb_path.trim().is_empty())
         .then(|| crate::settings::shellexpand(&keys.keydb_path));
@@ -726,29 +716,14 @@ pub struct RunState {
 }
 
 impl RunState {
-    /// The run's verdict, RECOVERING from a poisoned lock.
+    // See docs/engine.md — RunState::outcome_now poison recovery.
+    /// The run's verdict, recovering from a poisoned lock rather than
+    /// defaulting.
     ///
-    /// `outcome.lock().map(|o| *o).unwrap_or_default()` looks harmless and is
-    /// not: `RunOutcome`'s `#[default]` is `Completed`, so a worker that
-    /// PANICKED — which is precisely when the verdict matters — poisoned the
-    /// mutex and the UI rendered "Finished" over it. That is the exact defect
-    /// this enum's own doc says it exists to prevent: the verdict is carried
-    /// rather than parsed BECAUSE both abort-for-loss paths once rendered as
-    /// success.
-    ///
-    /// A poisoned mutex still holds the last value written to it, and that
-    /// value is the truth we want. Recover and read it, matching the
-    /// poison-recovering convention used across this ecosystem.
-    /// The same poison-recovery is applied to every `lines` lock in the crate.
-    /// A worker that panicked mid-run poisons the log buffer too, and an
-    /// `unwrap()` there turns one dead thread into a second panic on the next
-    /// line written — losing the diagnostic that would have explained the
-    /// first. That claim used to be false: the CANCELLED arm of
-    /// `run_stream` and both drain loops in `main.rs` still used `unwrap()`,
-    /// and the poison pin below covered `outcome` and `summary` ONLY, so
-    /// nothing enforced the sentence you are reading.
-    /// `every_lines_lock_recovers_from_poison` now reads both files and fails
-    /// on any `lines` lock that does not recover.
+    /// A poisoned mutex still holds the last value written to it; recovering
+    /// and reading it preserves that value instead of silently reporting
+    /// `RunOutcome::Completed` after a worker panic. The same poison-recovery
+    /// is applied to every `lines` lock in the crate.
     pub fn outcome_now(&self) -> RunOutcome {
         *self.outcome.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -774,22 +749,15 @@ impl RunState {
 /// lose regardless.
 pub const QUIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+// See docs/engine.md — await_worker_exit and why a quit must wait.
 /// Wait (up to `grace`) for a cancelled worker to finish. `true` if it did.
 ///
-/// `Cmd::Cancel` only SIGNALS: it flips `RunState::cancel` and returns, and the
-/// worker notices at its next boundary, unwinds the mux and drops the sink —
-/// which is what actually closes and finalises the partial file. A quit that
-/// does not wait for that lets AppKit `exit()` the process mid-write, so the
-/// file on disk is whatever the OS write cursor happened to reach rather than
-/// the deliberate "cancelled — partial output kept" artefact the GUI reports.
-///
-/// Polls `finished` rather than joining the thread: the worker publishes state
-/// through `RunState` and nothing hands the UI a `JoinHandle`. `finished` is
-/// set by the worker's own drop guard, after the mux has returned and its sink
-/// has been dropped, so it is exactly the "output is on disk and closed" edge
-/// this needs. Safe to call from the main thread with no borrows held: the
-/// worker touches only atomics and mutexes on `RunState` and never calls back
-/// into the UI.
+/// Polls `finished` rather than joining the thread — the worker publishes
+/// state through `RunState` and nothing hands the UI a `JoinHandle`.
+/// `finished` is set only after the worker's drop guard has closed and
+/// finalized the output file, so this is exactly the "output is on disk and
+/// closed" edge callers need. Safe to call from the main thread: the worker
+/// touches only atomics/mutexes on `RunState` and never calls back into the UI.
 pub fn await_worker_exit(run: &RunState, grace: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + grace;
     loop {
@@ -807,18 +775,9 @@ pub fn await_worker_exit(run: &RunState, grace: std::time::Duration) -> bool {
 
 struct UiSink(Arc<RunState>);
 
-/// The GUI core's ONLY `Sink`, so every line and every progress frame the
-/// library emits reaches the user through these two methods.
-///
-/// Both recover a poisoned lock rather than skipping the write. `if let Ok(..)`
-/// reads like defensive coding and is the opposite: a poisoned `lines` mutex
-/// means a worker panicked, which is precisely when the log is the only record
-/// of what happened — and the silent `else` branch threw away every subsequent
-/// line, so the run went quiet at the exact moment it became interesting.
-/// Dropping progress frames is milder but the same mistake: the bar freezes
-/// mid-rip with no explanation. A poisoned mutex still holds its last value and
-/// the data behind it is a plain `Vec`/`Prog` with no invariant a panic could
-/// have broken halfway, so recovering is safe as well as correct.
+// The GUI core's ONLY `Sink`; both methods recover a poisoned lock rather
+// than skip the write — a poisoned `lines` mutex means a worker panicked,
+// exactly when the log matters most. See docs/engine.md for detail.
 impl fe::Sink for UiSink {
     fn log(&self, _level: fe::Level, msg: &str) {
         self.0
@@ -856,13 +815,9 @@ pub fn resolve_disc_keys(
     freemkv_engine::resolve_disc_keys(disc, reader, &key_params(keys))
 }
 
-/// Describe the disc's key state honestly.
-///
-/// The engine's `resolve_keys` reports `resolved: true` / `"resolved-online"`
-/// off `KeyOrigin::ExternalUk` alone — but `scan_aacs_vid_only` stamps exactly
-/// that origin as a PLACEHOLDER before any source is consulted, with
-/// `unit_keys` empty. So an unkeyed disc claims to be resolved and to have
-/// come from the network. Gate on real key material instead.
+// Describe the disc's key state honestly. `resolve_keys` reports resolved
+// off `KeyOrigin::ExternalUk` alone, but that origin is stamped as a
+// placeholder before any source runs — gate on real key material instead.
 pub(crate) fn key_summary(disc: &libfreemkv::Disc, won: Option<&str>) -> String {
     if !disc.encrypted {
         return "unencrypted".into();
@@ -882,20 +837,14 @@ pub(crate) fn key_summary(disc: &libfreemkv::Disc, won: Option<&str>) -> String 
     }
 }
 
+// See docs/engine.md — error_code regression history.
 /// Recover the library's numeric error code from a muxed `std::io::Error`.
 ///
-/// The library's `Display` is `E<code>` OR `E<code>: <data>` (it carries zero
-/// English by design), so parse the leading digit run rather than the whole
-/// string. libfreemkv has `io_error_code` internally but does not export it —
-/// when it does, delete this and call it.
-///
-/// Regression: this used to be `trim_start_matches('E').parse()`, which parses
-/// only the bare form. Every code that carries data — `E7022: <disc hash>`,
-/// `E8005: <keydb path>`, `E6000: <sector> <sense>`, `E6014: <pid>` — returned
-/// 0, so `explain(0)` produced "Mux failed (E0)." for the single most common
-/// real failure (an AACS disc with no key), and the dedicated message for that
-/// code was unreachable from the desktop app. The CLI was unaffected: it uses
-/// `pipe::parse_error_code`, which already parses the digit run.
+/// The library's `Display` is `E<code>` or `E<code>: <data>` (no English by
+/// design), so this parses the leading digit run rather than the whole
+/// string. Returns `0` if the string does not start with `E<digits>`.
+/// libfreemkv has `io_error_code` internally but does not export it — when
+/// it does, delete this and call it instead.
 pub fn error_code(e: &std::io::Error) -> u16 {
     let s = e.to_string();
     let Some(rest) = s.strip_prefix('E') else {
@@ -907,19 +856,9 @@ pub fn error_code(e: &std::io::Error) -> u16 {
     rest[..digits_end].parse().unwrap_or(0)
 }
 
-/// Map a recovery sweep's terminal flags to the run's result, BEFORE the ISO is
-/// muxed — or `None` when the sweep is not terminal and the write/mux path
-/// should proceed.
-///
-/// This is the engine-side twin of the CLI's `pipe::copy_verdict`: the halt /
-/// loss-abort / continue grading used to be inline `if`s in `run_disc` with no
-/// test, while the identical CLI decision is a pure, unit-tested function. The
-/// case that matters most is `aborted_for_loss`, which returns `Err`, NOT `Ok`:
-/// a title muxed from an image this damaged would be missing footage, and
-/// returning `Ok` here once exited 0 and rendered the abort as a completed rip
-/// (the silent-loss failure the gate exists to prevent). A halt outranks a loss
-/// abort — "you stopped it" is the more useful thing to say, and the partial
-/// image is kept in every case, so an abort never throws away the read.
+// Map a recovery sweep's terminal flags to the run's result before the ISO
+// is muxed, or None to proceed. Twin of the CLI's pipe::copy_verdict:
+// aborted_for_loss returns Err — Ok here once hid a loss as a completed rip.
 fn recovery_terminal_result(
     halted: bool,
     aborted_for_loss: bool,
@@ -947,18 +886,14 @@ fn recovery_terminal_result(
     }
 }
 
+// See docs/engine.md — explain: catalog routing rationale.
 /// Turn a library error code into something a person can act on.
 ///
-/// The library carries no English by design, so a front-end that just prints
-/// `E9048` has told the user nothing. This ROUTES THROUGH THE CATALOG — the
-/// same `error.E<code>` keys the CLI renders via `strings::error_message` — so
-/// a desktop-app failure is localized in all 29 locales instead of the
-/// hard-coded English it used to be (GUI/CLI parity). A code whose catalog
-/// string needs runtime data the GUI does not have here (E7022's `{hash}`,
-/// E8005's `{detail}`) would render with an unfilled `{…}`, so those map to the
-/// placeholder-free `error.E7018` ("No key source has a decryption key for this
-/// disc."), which the catalog already localizes. A code with no string at all
-/// keeps its number for a bug report, via a last-resort localizable wrapper.
+/// Routes through the catalog (`error.E<code>`) so failures are localized in
+/// all 29 locales instead of hard-coded English. Codes whose catalog string
+/// needs runtime data unavailable here (E7022's `{hash}`, E8005's `{detail}`)
+/// map to the placeholder-free `error.E7018`. A code with no catalog string
+/// keeps its number for a bug report, via a localizable wrapper.
 pub fn explain(code: u16) -> String {
     // E7022 needs `{hash}`, which isn't available here; E8005 likewise
     // needs `{detail}`. Both map to the argument-free no-key sibling so
@@ -981,14 +916,9 @@ pub fn explain(code: u16) -> String {
     )
 }
 
-/// Explain why a title died, from the two halves of the cause
-/// [`fe::RipOutcome::Failed`] carries.
-///
-/// A typed library failure stringifies as `E<code>: …`, so it arrives with a
-/// code and [`explain`] handles it. A genuine OS error is passed through
-/// unwrapped by libfreemkv — the full disk has NO `E<code>` to parse, arrives
-/// as `code: None`, and keeps its whole meaning in `kind`. Reading only the
-/// code rendered "Mux failed (E0)." for it.
+// Explain why a title died, from RipOutcome::Failed's two-part cause. A
+// typed library failure has a code and `explain` handles it; a genuine OS
+// error has no E<code> (code: None) and keeps its meaning in `kind`.
 fn describe_failure(code: Option<u16>, kind: std::io::ErrorKind) -> String {
     if let Some(c) = code {
         return explain(c);
@@ -1005,18 +935,15 @@ fn describe_failure(code: Option<u16>, kind: std::io::ErrorKind) -> String {
     }
 }
 
+// See docs/engine.md — summarize_outcome: why Err carries partial success.
 /// Render a finished title loop as the run summary.
 ///
-/// `Err` is not decoration: `start_rip` files an `Ok` string as the summary and
-/// nothing else, so an outcome returned as `Ok` reads to the user as a rip that
-/// worked. Only [`fe::RipOutcome::Ok`] and a cancel are successes; `NoKey` and
-/// `Failed` are not, and a `Failed` that arrives after some titles already
-/// wrote must still say it failed — reporting "2 title(s) written" for a rip
-/// the engine stopped on a full disk is the same silent-success bug the
-/// `code`/`kind` pair was added to make impossible.
-///
-/// Pure so the mapping is testable without a disc; both title-loop call sites
-/// (staged-ISO and single-pass) share it so they cannot drift apart.
+/// `Err` is not decoration: only [`fe::RipOutcome::Ok`] and a cancel are
+/// successes, so `NoKey` and `Failed` must return `Err` even after some
+/// titles already wrote — otherwise a rip the engine stopped mid-way reports
+/// as if it worked. Pure so the mapping is testable without a disc; both
+/// title-loop call sites (staged-ISO and single-pass) share it so they
+/// cannot drift apart.
 pub fn summarize_outcome(
     outcome: &fe::RipOutcome,
     written: usize,
@@ -1068,28 +995,15 @@ pub fn summarize_outcome(
     }
 }
 
+// See docs/engine.md — summarize_stream: outcome grading rationale.
 /// Render a finished single-file/container mux (`run_stream`'s `mkv://` /
 /// `m2ts://` / `mp4://` source path) as the run summary.
 ///
-/// The `mkv://`/`m2ts://` analogue of `summarize_outcome`'s `o.completed`
-/// check in the disc/ISO title loop: `completed` is `libfreemkv::MuxOutcome`'s
-/// own signal for "drained to a natural EOF and finalised cleanly" (`false`
-/// on an interrupt/halt). `run_stream` used to discard the whole
-/// `MuxOutcome` via a bare `?`, so a Cancel that landed mid-conversion left a
-/// truncated file on disk while still reporting "Written to <dir>" — the same
-/// silent-success-on-cancel shape the title loop was already hardened
-/// against via `o.completed`, just never applied to this path.
-///
-/// `completed` is NOT the whole verdict, and neither is `undelivered_streams`.
-/// It takes the OUTCOME rather than two of its fields for exactly that reason:
-/// grading on a hand-picked subset is how `errors`/`lost_bytes` — the bytes an
-/// `mkv://` → `mkv://` re-mux of a 3D rip drops, with no whole stream missing —
-/// came to be read nowhere at all, and a 3 MB hole rendered as a clean
-/// "Written to <dir>". [`crate::lossy::is_lossy`] is the single question, asked
-/// here and by the CLI. The header is appended, not substituted: the file IS
-/// written, it is simply not everything the user asked for.
-///
-/// Pure so the mapping is unit-testable without driving a real mux.
+/// Grades on `outcome.completed` (Cancel mid-conversion must not read as
+/// success) and on [`crate::lossy::is_lossy`] for a lossy-but-complete mux.
+/// The excluded/lossy header is appended, not substituted: the file IS
+/// written, it is simply not everything the user asked for. Pure so the
+/// mapping is unit-testable without driving a real mux.
 pub fn summarize_stream(outcome: &libfreemkv::MuxOutcome, target: &str, dest_dir: &str) -> String {
     if !outcome.completed {
         return format!("Cancelled — partial output kept: {target}");
@@ -1113,54 +1027,26 @@ pub fn summarize_stream(outcome: &libfreemkv::MuxOutcome, target: &str, dest_dir
     }
 }
 
-/// The lines a GUI run must add when a COMPLETED mux did not deliver
+// See docs/engine.md — lossy_lines: why one renderer replaced two.
+/// The lines a GUI run must add when a completed mux did not deliver
 /// everything — the front-end twin of the CLI's `pipe::print_lossy_outcome`,
-/// and now literally the same renderer ([`crate::lossy::lossy_lines`]).
+/// sharing the same renderer ([`crate::lossy::lossy_lines`]).
 ///
-/// It used to be a second, narrower one: this file reported
-/// `undelivered_streams` and nothing else, exactly as the CLI's copy did, so
-/// the loss NEITHER of them reported (`errors`/`lost_bytes` — a Blu-ray 3D
-/// dependent view dropped by an `mkv://` → `mkv://` re-mux) reached no user
-/// through either shell. Two half-answers to one question is the shape this
-/// crate keeps having to un-write; there is one answer now.
-///
-/// A warning on a still-successful rip, not a failure: the file is finalised,
-/// structurally valid and playable, and the per-title failure arm below DELETES
-/// the output file — escalating would destroy the bytes this is warning about.
-///
-/// Returns a `Vec` rather than pushing, so the formatting is testable without a
-/// `RipState`: reaching the real call sites needs a live drive or a real disc
-/// image.
+/// A warning on a still-successful rip, not a failure: the file is
+/// finalised, structurally valid and playable. Returns a `Vec` rather than
+/// pushing, so the formatting is testable without a `RipState`.
 pub fn lossy_lines(outcome: &libfreemkv::MuxOutcome, target: &str) -> Vec<String> {
     crate::lossy::lossy_lines(outcome, target)
 }
 
-/// Render a finished image decrypt (`iso://` -> `iso://`, the drive-free
-/// `OutKind::IsoImage` path) as the run summary — the third sibling of
-/// [`summarize_stream`] and [`summarize_extract`].
+// See docs/engine.md — summarize_image_decrypt: CopyResult regression.
+/// Render a finished image decrypt (`iso://` -> `iso://`, drive-free) as the
+/// run summary — sibling of [`summarize_stream`] and [`summarize_extract`].
 ///
-/// This path reported "Decrypted image written" whenever ANY bytes were
-/// recovered, consulting neither `halted` nor `bytes_unreadable`. Cancel a
-/// decrypt halfway and it claimed success; decrypt an image with unreadable
-/// sectors and it said nothing about them. `CopyResult` carries both signals
-/// precisely so a call site cannot re-derive completion and get it wrong —
-/// see its doc, which names "reporting a lossy or cancelled rip as complete"
-/// as the bug it exists to prevent.
-///
-/// Branches on `halted` FIRST, like `summarize_extract`, and then on
-/// `complete` — never on a re-derivation of it. `complete` is "nothing pending
-/// AND nothing lost AND not interrupted", so `halted` has to be taken off the
-/// table before it is asked, or "you cancelled" and "the disc is damaged"
-/// collapse into one message; but with `halted` already handled, `complete` is
-/// exactly the question left. Reading `bytes_unreadable > 0` in its place was
-/// the re-derivation this type exists to prevent, and it dropped the third
-/// term: a decrypt that ends with bytes still PENDING (attempted-and-skipped
-/// sectors, `recovery::copy`'s terminal-result paths) is not complete, and
-/// reported as a clean write. Both shortfalls are now named in the message.
-/// The partial image is KEPT in every case, matching the disc->ISO path's
-/// stated policy that an abort never throws away the read.
-///
-/// Pure so the mapping is unit-testable without running a decrypt.
+/// Branches on `halted` first, then on `complete` — never a re-derivation of
+/// either (see [`fe::CopyResult`]'s doc). `complete` means "nothing pending
+/// AND nothing lost AND not interrupted"; both shortfalls are named in the
+/// message when it is false. The partial image is kept in every case.
 pub fn summarize_image_decrypt(result: &fe::CopyResult, dest: &std::path::Path) -> String {
     let gib = result.bytes_good as f64 / 1_073_741_824.0;
     let mib = |b: u64| b as f64 / 1_048_576.0;
@@ -1202,17 +1088,13 @@ pub fn summarize_image_decrypt(result: &fe::CopyResult, dest: &std::path::Path) 
     )
 }
 
-/// Render a finished decrypted-folder extraction (`run_extract_folder`) as the
-/// run summary — the `dir://` analogue of `summarize_outcome`.
+/// Render a finished decrypted-folder extraction (`run_extract_folder`) as
+/// the run summary — the `dir://` analogue of `summarize_outcome`.
 ///
-/// `res.halted` is exactly the signal `pipe.rs`'s `extract_succeeded`
-/// (`!halted && complete`) already gates the CLI's exit code on for this same
-/// `libfreemkv::ExtractResult`; this GUI path never consulted it, so a Cancel
-/// mid-extraction (a real in-progress halt, not a partial-then-retried run)
-/// still reported "Decrypted file tree written to <dir> — N file(s)" as if
-/// the whole tree had landed.
-///
-/// Pure so the mapping is unit-testable without a real disc/extraction.
+/// Grades on `res.halted`, the same signal `pipe.rs`'s `extract_succeeded`
+/// gates the CLI's exit code on for this `libfreemkv::ExtractResult`, so a
+/// Cancel mid-extraction cannot read as a complete write. Pure so the
+/// mapping is unit-testable without a real disc/extraction.
 pub fn summarize_extract(res: &libfreemkv::ExtractResult, dest: &std::path::Path) -> String {
     let n = res.files.len();
     if res.halted {
@@ -1270,20 +1152,15 @@ impl KeyConfig {
     }
 }
 
+// See docs/engine.md — TitleStreams: the ambiguity it replaces.
 /// Whether a request carries a per-title stream breakdown at all.
 ///
-/// This exists because ONE representation was carrying TWO meanings. The field
-/// used to be a bare `Vec<(usize, Vec<u16>, Vec<u16>)>` in which a title's
-/// absence meant *either* "this caller has no per-title data, use the union in
-/// `audio_pids`/`sub_pids`" (the CLI and the container path) *or* "the user
-/// deliberately kept nothing under this title". Those want opposite answers,
-/// and the union won both: a title the user emptied was handed its sibling's
-/// tracks. Blu-ray playlists of one feature routinely share PIDs, so the
-/// sibling's tracks are usually exactly the ones just unticked.
-///
-/// Splitting the two apart into variants makes the ambiguity unrepresentable:
-/// a caller that has no breakdown says so, and a caller that has one is
-/// believed, empty entries included.
+/// One representation used to carry two meanings: a title's absence in a
+/// bare `Vec<(usize, Vec<u16>, Vec<u16>)>` meant either "no per-title data,
+/// use the `audio_pids`/`sub_pids` union" or "the user emptied this title" —
+/// and the union won both, handing an emptied title its sibling's tracks.
+/// Splitting the two into variants makes the ambiguity unrepresentable: a
+/// caller with no breakdown says so, one with a breakdown is believed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum TitleStreams {
     /// No per-title breakdown exists — the CLI's shape, and a container source.
@@ -1384,15 +1261,9 @@ pub struct RipRequest {
 /// Run the real rip on a worker thread: engine title loop + per-title mux.
 /// Returns immediately.
 pub fn start_rip(req: RipRequest, state: Arc<RunState>) {
-    /// Sets `finished` on EVERY exit from the worker — normal return, an early
-    /// `?` someone adds later, or a panic unwinding through it.
-    ///
-    /// It used to be the closure's last statement, so a panic anywhere in the
-    /// scan/mux/recovery chain (all of which run on disc-derived input) skipped
-    /// it, `ui::tick` polled `finished` forever, and the window showed a rip in
-    /// progress permanently with no error. Mirrors `freemkv-engine`'s
-    /// `SignalDone`, whose doc records that two hand-rolled copies of this
-    /// pattern both had the bug.
+    // Sets `finished` on EVERY exit — normal return, an early `?`, or a panic
+    // unwinding through. Used to be the closure's last statement, so a panic
+    // left `finished` unset and `ui::tick` polled forever. See docs/engine.md.
     struct SignalDone(Arc<RunState>);
     impl Drop for SignalDone {
         fn drop(&mut self) {
@@ -1476,10 +1347,9 @@ pub fn folder_writable(dest: &std::path::Path, force: bool) -> Result<(), String
     Ok(())
 }
 
-/// Extract the disc's decrypted UDF file tree to a per-disc SUBDIRECTORY of the
-/// destination (`<dest_dir>/<label>/`) — the CLI's `dir://` → `Disc::extract_tree`.
-/// Targeting a subdir (never the raw dest_dir) is what stops it dumping into
-/// ~/Movies and colliding with everything already there — the reported bug.
+// Extract the disc's decrypted UDF file tree to a per-disc SUBDIRECTORY of
+// the destination (the CLI's `dir://` -> `Disc::extract_tree`). Targeting a
+// subdir (never the raw dest_dir) stops it dumping into ~/Movies.
 fn run_extract_folder(
     req: &RipRequest,
     disc: &libfreemkv::Disc,
@@ -1533,17 +1403,9 @@ fn is_stream_source(path: &str) -> bool {
     )
 }
 
-/// The URL scheme for a source that has already been established as neither a
-/// drive nor a stream container: a FOLDER is `dir://`, anything else is an
-/// image (`iso://`).
-///
-/// Deliberately NOT `source_scheme`. That function classifies by file
-/// extension and falls through to `m2ts` for anything it does not recognise,
-/// which is right for its own caller (`convert_container`, guarded by
-/// `is_stream_source`) and wrong here: a disc image saved as `Disc.img`,
-/// `Disc.bin` or with no extension would be handed to the mux as
-/// `m2ts://Disc.img` and re-opened as a single elementary stream. Reusing it
-/// here regressed every image not named `.iso`.
+// The URL scheme for a source already established as neither a drive nor a
+// stream container: a FOLDER is dir://, anything else is an image (iso://).
+// Deliberately NOT source_scheme — see docs/engine.md for why.
 fn image_or_dir_scheme(source: &str) -> &'static str {
     if std::path::Path::new(source).is_dir() {
         "dir"
@@ -1567,10 +1429,9 @@ fn source_scheme(path: &str) -> &'static str {
     }
 }
 
-/// What real operation an output format maps to. The picker offers twelve
-/// format strings; six of them used to fall through to a per-title MKV mux.
-/// Each now resolves to its true sink so the file the user gets matches what
-/// they chose.
+// What real operation an output format maps to. The picker offers twelve
+// format strings; six of them used to fall through to a per-title MKV mux.
+// Each now resolves to its true sink so the file matches what was chosen.
 #[derive(Clone, Copy)]
 enum OutKind {
     /// A per-title file produced through the mux pipeline. The `&str` is BOTH
@@ -1595,10 +1456,9 @@ enum OutKind {
     IsoImage,
 }
 
-/// Map a picker format string to its real output kind. Order matters only in
-/// that each branch's marker is unique across the twelve format strings — note
-/// `"video tracks"` is lower-case and two words, so it cannot be confused with
-/// `"Video index → .fvi"`.
+// Map a picker format string to its real output kind. Order matters only in
+// that each branch's marker is unique across the twelve format strings —
+// `"video tracks"` (lower-case) cannot be confused with `"Video index → .fvi"`.
 fn out_kind(format: &str) -> OutKind {
     if format.contains("decrypted folder") {
         OutKind::DecryptedFolder
@@ -1627,20 +1487,14 @@ fn out_kind(format: &str) -> OutKind {
     }
 }
 
-/// The path this request will actually write, decided the way the RIP decides
-/// it rather than guessed alongside it.
+// See docs/engine.md — planned_output_name: the bug this replaced.
+/// The path this request will actually write, decided the way the RIP
+/// decides it rather than guessed alongside it.
 ///
-/// The GUI shows this in the Information panel for the duration of the run, so
-/// every difference from the real thing is a lie on screen for hours. It used
-/// to be an independent `format!("{dir}/{stem}_t{n}.{ext}")` in `ui.rs` that
-/// knew about neither the filename template (a shipped setting the engine
-/// applies to every title) nor the disc label (what `run_disc` names titles
-/// after — the source file's stem is only used for a CONTAINER source), and
-/// spelled every whole-disc sink as `_t1.mkv`.
-///
-/// Structured as the mirror of `run_blocking`'s dispatch (stream source →
-/// `run_stream`, everything else → `run_disc`/the image path) and `out_kind`'s
-/// arms, so a new sink cannot be added without this seeing it.
+/// The GUI shows this in the Information panel for the run's duration, so
+/// any difference from the real thing is a lie on screen for hours. Mirrors
+/// `run_blocking`'s dispatch and `out_kind`'s arms, so a new sink cannot be
+/// added without this seeing it.
 pub fn planned_output_name(
     source: &str,
     dest_dir: &str,
@@ -1715,20 +1569,16 @@ pub fn container_word(format: &str) -> &'static str {
 /// disc-bytes-to-UI boundary lives.
 pub use crate::strings::sanitize_display;
 
+// See docs/engine.md — sanitize_label vs sanitize_name.
 /// Make a disc-supplied label safe to use as ONE filename component.
 ///
-/// The volume label is disc bytes — untrusted. It reached the destination path
-/// through `title_basename`, which stripped only `/`, so a label containing
-/// `..\\..\\` escaped the destination directory on Windows. The CLI has always
-/// defended against this (`pipe::sanitize_name`, whose own test spells out the
-/// escape), but the GUI never called it.
+/// The volume label is disc bytes — untrusted; a label containing `..\..\`
+/// could escape the destination directory on Windows via `title_basename`.
 ///
-/// This is deliberately NARROWER than the CLI's helper. `sanitize_name` is an
-/// ASCII allow-list built for CLI filename cosmetics: it also drops apostrophes,
-/// colons and periods, and collapses any non-Latin label to `"disc"`. Reusing
-/// it here would rename every Japanese, Cyrillic or accented disc — which the
-/// GUI renders correctly today, on every platform — in order to close a Windows
-/// traversal. So: reject the path-y and the unrepresentable, keep the letters.
+/// Deliberately NARROWER than the CLI's `sanitize_name`: that ASCII
+/// allow-list also drops apostrophes/colons/periods and collapses any
+/// non-Latin label to `"disc"`. This rejects only the path-y and the
+/// unrepresentable, keeping the letters (including non-Latin ones).
 pub fn sanitize_label(label: &str) -> String {
     // Whole-name `.` / `..` are path navigation, not names.
     if label == "." || label == ".." {
@@ -1791,20 +1641,9 @@ pub fn title_basename(template: &str, label: &str, n: usize) -> String {
     name
 }
 
-/// The audio/subtitle selection for this request. It goes on `InputOptions`,
-/// NOT `MuxOptions`: our mux uses a URL source (`iso://…`), and `mux_stream`'s
-/// Url arm prunes via `InputOptions.selection` — `MuxOptions.selection` is only
-/// consulted on the File/Session (live-drive) arms. Putting it on MuxOptions
-/// silently kept every track. Empty PID lists = keep none of that class.
-/// The stream filter for one title, or for the whole request when no title is
-/// in play.
-///
-/// `title` is the CANONICAL disc title index. When the request carries a
-/// per-title breakdown, that title's own ticked PIDs are used — INCLUDING an
-/// empty one, which is the user clearing every row under that title. Only
-/// [`TitleStreams::Unspecified`] falls back to the union in
-/// `audio_pids`/`sub_pids`, which is the CLI's shape and the behaviour every
-/// caller had before the breakdown existed.
+// The stream filter for one title (or the whole request with no title).
+// Selection lives on InputOptions, not MuxOptions — MuxOptions.selection is
+// read only by the Session/live-drive arm. See docs/engine.md for detail.
 fn stream_selection_for(req: &RipRequest, title: Option<usize>) -> libfreemkv::StreamSelection {
     if !req.explicit_streams {
         return libfreemkv::StreamSelection::default();
@@ -1832,15 +1671,9 @@ fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
     }
 }
 
-/// The mux options for ONE title of a live-drive (single-pass) rip.
-///
-/// The Session mux arm reads its selection from `MuxOptions`, not from
-/// `InputOptions` the way the Url/ISO arm does, so the drive path needs its
-/// own per-title options. It used to build one `MuxOptions` from the UNION of
-/// every title's ticked PIDs before the loop and clone it for each title —
-/// exactly the defect the ISO path already had: two playlists of one feature
-/// routinely share PIDs, so unticking a commentary under title 1 wrote it
-/// anyway whenever title 2 still had it ticked.
+// Mux options for ONE title of a live-drive rip. The Session arm reads
+// selection from MuxOptions (not InputOptions like the Url/ISO arm), so each
+// title needs its own — a once-shared union leaked unticked tracks back in.
 fn title_session_mux_opts(req: &RipRequest, idx: usize) -> libfreemkv::MuxOptions {
     libfreemkv::MuxOptions {
         selection: stream_selection_for(req, Some(idx)),
@@ -1848,13 +1681,9 @@ fn title_session_mux_opts(req: &RipRequest, idx: usize) -> libfreemkv::MuxOption
     }
 }
 
-/// A container source is a single title — no scan, straight to the mux.
-///
-/// NOTE: `MuxOptions.selection` is only applied on the disc/ISO input paths
-/// (`resolve.rs` iso://, and the two disc paths in `driver.rs`). The container
-/// path builds the stream directly, so per-track ticks are NOT honoured here
-/// yet — verified empirically, not assumed. The caller warns the user rather
-/// than silently writing tracks they deselected.
+// A container source is a single title — no scan, straight to the mux.
+// NOTE: per-track ticks are NOT honoured here yet (verified empirically);
+// the caller warns the user rather than silently writing deselected tracks.
 fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
     let name = std::path::Path::new(&req.source)
@@ -1922,31 +1751,16 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
     Ok(summarize_stream(&o, &target, &req.dest_dir))
 }
 
-/// Whether a demux rip must give each title its own subdirectory.
-///
-/// A demux sink fans a title out into one file per elementary track, named by
-/// track — NOT by title. Two titles written to the same directory therefore
-/// overwrite each other's tracks. One title can go straight into the dest dir;
-/// more than one cannot. Extracted so the boundary is assertable: as an inline
-/// `indices.len() > 1` the off-by-one was invisible to every test.
+// Whether a demux rip must give each title its own subdirectory. A demux
+// sink names files by TRACK not title, so two titles in one dir overwrite
+// each other's tracks. Extracted so the `> 1` boundary is testable alone.
 fn demux_needs_subdirs(title_count: usize) -> bool {
     title_count > 1
 }
 
-/// The per-title mux input for `idx`.
-///
-/// Three fields, each of which fails silently and differently if it goes
-/// missing, which is why this is a named function rather than a struct literal
-/// buried in a closure:
-///
-/// - `title_index` — without it the library defaults to `None` and muxes the
-///   WRONG TITLE, under the filename the user asked for. Nothing downstream can
-///   tell.
-/// - `unit_keys` — the scan resolving a disc's AACS keys is not enough; they
-///   have to reach the mux or every encrypted title fails E7022. Mirrors the
-///   engine's own wiring in `run.rs`.
-/// - `selection` — the ticked audio/subtitle tracks, applied by the Url mux
-///   path. Dropped, the user gets every track they deselected.
+// The per-title mux input for `idx`. Named function (not a struct literal in
+// a closure) because three fields fail silently if missing: title_index
+// (wrong title muxed), unit_keys (E7022), selection (wrong tracks kept).
 fn title_input_options(
     disc: &libfreemkv::Disc,
     req: &RipRequest,
@@ -1964,12 +1778,9 @@ fn title_input_options(
     }
 }
 
-/// Mux the selected titles from `source_url` (an `iso://<path>` — either the
-/// original ISO source, or a staging ISO a multipass recovery just produced)
-/// into the sinks the request's format maps to. Shared by `run_blocking`'s
-/// ISO-source path and the title-multipass staging-ISO path in `run_disc` —
-/// both need exactly the same per-title mux loop, they differ only in which
-/// ISO the titles come from.
+// Mux the selected titles from `source_url` (original ISO or a staging ISO
+// multipass just produced) into the sinks the format maps to. Shared by
+// run_blocking's ISO path and run_disc's staging-ISO path — same loop.
 fn mux_selected_titles(
     disc: &libfreemkv::Disc,
     source_url: &str,
@@ -2075,11 +1886,9 @@ fn mux_selected_titles(
     )
 }
 
-/// Human time for a lost-playback duration, e.g. `4m` or `12.4s`. A tiny local
-/// copy of the CLI's `pipe::fmt_damage_time` — that function lives in
-/// `pipe.rs`, which is CLI-only and not part of this crate's `lib` target (the
-/// GUI shells build against `freemkv::engine`, not `freemkv::pipe`), so it
-/// cannot be reused directly without restructuring which crate owns it.
+// Human time for a lost-playback duration, e.g. "4m" or "12.4s". A tiny
+// local copy of the CLI's pipe::fmt_damage_time — pipe.rs is CLI-only and
+// not part of this crate's lib target, so it can't be reused directly.
 fn fmt_damage_time(secs: f64) -> String {
     if secs >= 3600.0 {
         format!("{:.1}h", secs / 3600.0)
@@ -2094,16 +1903,9 @@ fn fmt_damage_time(secs: f64) -> String {
     }
 }
 
-/// A trailing note for a multipass result that finished (not halted, not
-/// aborted for loss) but still has residual damage under the configured
-/// tolerance — empty string when the recovery was clean.
-///
-/// Without this, a disc that recovers with real unreadable sectors UNDER
-/// `abort_lost_secs` reports a plain "ISO image written to …" / "N title(s)
-/// written to …", identical to a perfect rip: the CLI's own `disc_to_iso`
-/// prints exactly this figure (`rip.mapfile_summary` / `rip.damage_lost_movie`)
-/// for the same condition, so the GUI was hiding damage the CLI discloses.
-/// Reuses those two existing i18n keys rather than adding new ones.
+// See docs/engine.md — damage_note: the disclosure gap it closes.
+// Trailing note for a multipass result with residual damage under the
+// configured tolerance (empty string when the recovery was clean).
 fn damage_note(result: &fe::MultipassResult) -> String {
     if result.unreadable_bytes == 0 && result.pending_bytes == 0 {
         return String::new();
@@ -2266,14 +2068,9 @@ enum DiscPlan {
     PerTitle,
 }
 
-/// Which of those two a request wants.
-///
-/// This is `want_iso || multipass` and both halves matter. As `&&` a
-/// `--multipass` title rip silently loses its recovery passes — no patch
-/// passes, and the abort-for-loss gate below never runs, so a damaged disc
-/// muxes to a hole-ridden file reported as written. And a "whole disc → ISO
-/// image" request without multipass would fall through to the per-title loop
-/// and hit the `unreachable!()` in its dest match, i.e. panic the rip worker.
+// Which of those two a request wants: want_iso || multipass (not &&). As &&
+// a --multipass title rip silently loses recovery passes; an ISO request
+// without multipass would panic in the per-title unreachable!().
 fn recovery_plan(kind: OutKind, multipass: bool) -> DiscPlan {
     let deliver_iso = matches!(kind, OutKind::IsoImage);
     if deliver_iso || multipass {
@@ -2283,25 +2080,9 @@ fn recovery_plan(kind: OutKind, multipass: bool) -> DiscPlan {
     }
 }
 
-/// The `raw` flag a recovery job must carry, or the reason it cannot run.
-///
-/// `multipass_rip` REFUSES a real sweep-plus-patch plan with `raw = false`
-/// ("multipass implies raw"): a whole-disc image recovery reads sectors it
-/// cannot attribute to a title, so it cannot decrypt them. The GUI was handing
-/// it `req.raw`, which `ui::raw_applies` forces to false for any title output —
-/// so with the SHIPPED DEFAULTS (rip mode "Multi-pass", 5 passes, raw off) every
-/// live-drive rip died before reading a sector, with the engine's own refusal as
-/// the error text. The ISO-output path failed the same way whenever the user had
-/// not ticked "keep encrypted".
-///
-/// The staged image for a title mux is therefore RAW, and the decrypt happens
-/// where it always could: the mux re-opens the staged ISO on the ordinary
-/// `iso://` path, with the same `KeyConfig`, and resolves keys from it.
-///
-/// The one case with no answer is "whole disc → ISO image", multipass, raw off:
-/// the user asked for a decrypted image and a multipass recovery cannot produce
-/// one. That is refused HERE, before the drive is staged, with something the
-/// user can act on — rather than after, in the engine's vocabulary.
+// The `raw` flag a recovery job must carry, or the reason it cannot run.
+// multipass_rip refuses raw=false for a real sweep; staged title-mux images
+// are RAW, decrypted on the ordinary iso:// re-open. See docs/engine.md.
 fn recovery_raw(multipass: bool, want_iso: bool, user_raw: bool) -> Result<bool, String> {
     if !multipass {
         // Single-pass: an ordinary decrypting copy, and `raw` means what the
@@ -2324,44 +2105,20 @@ fn recovery_raw(multipass: bool, want_iso: bool, user_raw: bool) -> Result<bool,
     )
 }
 
-/// What a title NUMBER actually referred to, so a selection survives a rescan.
+// See docs/engine.md — TitleIdentity: why duration alone was not enough.
+/// What a title NUMBER actually referred to, so a selection survives a
+/// rescan. Lives in [`crate::title_identity`] because the CLI's
+/// `pipe::resolve_scanned_title` asks the identical question one scan later.
 ///
-/// The type is [`crate::title_identity::TitleIdentity`] and lives there because
-/// the CLI's `pipe::resolve_scanned_title` asks the identical question one scan
-/// later. This module used to carry its OWN answer — playlist name plus
-/// duration — which cannot separate the case the project's rules name outright:
-/// "titles legitimately carry duplicate playlists with identical duration and
-/// size". Duration is precisely the field that legitimately collides. The
-/// shared identity keys on the playlist name, its numeric id, and the EXTENTS,
-/// and the sectors are what make it safe: two titles reading the same sectors
-/// from the same playlist produce byte-identical rips, so there is nothing left
-/// to confuse.
-///
-/// Re-exported under this path rather than aliased so `engine`'s call sites and
-/// its tests keep naming one type, and so nobody adds a second definition here
-/// again.
+/// Keys on playlist name, numeric id, and EXTENTS/sectors — the fields that
+/// stay unique even when duplicate playlists share identical duration and
+/// size. Re-exported here (not aliased) so callers and tests keep naming one
+/// type.
 pub use crate::title_identity::TitleIdentity;
 
-/// Translate a selection made against the DRIVE scan into indices valid for a
-/// scan of the staged image.
-///
-/// A multipass recovery can leave a playlist unreadable, and the rescan then
-/// yields a SHORTER title list — at which point every number past the gap
-/// addresses a different title, and the mux writes the wrong one under the
-/// name the user asked for, reporting "1 title(s) written". Positions are not
-/// identity; this is the same lesson the audit's identity lens keeps finding.
-///
-/// `ids` is indexed by CANONICAL title number, not by position in `titles` —
-/// the same shape `picked_ids` uses in the live-drive loop. That is what keeps
-/// the fallback honest: "no identity for title 3" is `ids.get(3) == None`, a
-/// per-title answer, so a title nobody captured costs only itself. Keyed by
-/// selection position instead, a list that came up one entry short (an
-/// out-of-range number dropped on the way in) made this return every raw
-/// position unchanged, putting the WHOLE batch back on the stale-position path
-/// this exists to close — silently, and for titles whose identity was known.
-///
-/// A title that CANNOT be found is a hard error: muxing the remaining ones
-/// silently would deliver a subset under the same summary.
+// Translate a selection made against the DRIVE scan into indices valid for
+// the staged image's scan. Position is not identity: a multipass recovery
+// can shorten the title list. See docs/engine.md for the ids-keying detail.
 fn remap_titles_by_identity(
     iso_path: &str,
     titles: &[usize],
@@ -2375,12 +2132,9 @@ fn remap_titles_by_identity(
     remap_against(titles, ids, &scan_titles(iso_path)?)
 }
 
-/// The decision half of [`remap_titles_by_identity`], without the scan.
-///
-/// Separate so it is TESTABLE: reaching the real call site needs a live drive
-/// and a completed multipass recovery, and a test that re-implemented this
-/// logic beside it would pass whatever the code did — which is the failure
-/// mode this audit keeps finding in its own tests.
+// The decision half of remap_titles_by_identity, without the scan. Kept
+// separate so it's testable — the real call site needs a live drive and a
+// completed multipass recovery.
 fn remap_against(
     titles: &[usize],
     ids: &[TitleIdentity],
@@ -2409,23 +2163,9 @@ fn remap_against(
     Ok(out)
 }
 
-/// Confirm the title at `idx` in a FRESH scan is still the one the selection
-/// meant, before it is muxed under that number.
-///
-/// The single-pass drive path is the same "position is not identity" shape
-/// `remap_titles_by_identity` handles for the recovery path, one scan later:
-/// `run_disc` scans once to resolve the selection, then EVERY title in the loop
-/// re-opens the drive and scans again, carrying only an integer. A second scan
-/// that lists the titles in a different order, or drops one before the selected
-/// index, still resolves that integer — to a different title, muxed under the
-/// name the user asked for.
-///
-/// It VERIFIES rather than remaps: a live drive whose title list moved between
-/// two scans of the same disc is a disc/drive problem, not the orderly
-/// short-list a recovery produces, so the honest answer is to stop.
-///
-/// `expected` is `None` when nothing was recorded for that index, which leaves
-/// the pre-existing behaviour untouched.
+// Confirm the title at `idx` in a FRESH scan is still the one the selection
+// meant, before it is muxed under that number. Verifies rather than remaps:
+// a moved title list between two scans is a disc/drive problem — see docs/engine.md.
 fn verify_title_identity(
     expected: Option<&TitleIdentity>,
     scanned: &[TitleIdentity],
@@ -2452,21 +2192,9 @@ fn verify_title_identity(
     }
 }
 
-/// Confirm a whole SELECTION still means what it meant when it was made.
-///
-/// The window this closes is the one the per-title check cannot see: the user
-/// ticks titles against the scan on screen and then reviews streams, format and
-/// destination before pressing Start. `run_disc` takes a brand-new scan at that
-/// point, and the ticked numbers were resolved against it with nothing to say
-/// they still refer to the same titles — swap the disc (or let the drive
-/// enumerate differently) and the wrong film is muxed and reported as success
-/// under the name the first disc earned.
-///
-/// `picked` is indexed by canonical title number, so an entry that was never
-/// captured is `None` and leaves that title exactly as it behaved before; an
-/// empty `picked` (a caller that saw no scan) disables the check entirely.
-/// Every decision is [`verify_title_identity`]'s — one definition of "is this
-/// still the same title?", not a second one beside this call site.
+// Confirm a whole SELECTION still means what it meant when it was made — the
+// window between ticking titles and pressing Start, which run_disc's
+// fresh pre-mux scan can't see on its own. See docs/engine.md for detail.
 fn verify_selection_identity(
     titles: &[usize],
     picked: &[TitleIdentity],
@@ -2495,35 +2223,16 @@ fn recovery_produced_no_data(good_bytes: u64) -> bool {
     good_bytes == 0
 }
 
-/// Whether the staging ISO is removed after the title mux.
-///
-/// Three conditions, not one. `keep_iso` alone deleted the image on paths the
-/// same function's own policy says never throw away the read: the mux reports a
-/// CANCEL as `Ok("Cancelled — …")`, so a user who stopped the mux lost the
-/// multi-hour recovery behind it and could only get it back by re-reading the
-/// disc; a mux that failed outright (no space, a missing key, the destination
-/// removed) deleted the one artefact that would have let the user retry the mux
-/// alone.
-///
-/// Cancellation is read as a FLAG, never from the summary text — the same rule
-/// `RunOutcome` exists to enforce. Deleting a recovered image on a wording
-/// change would be the worst possible version of that defect.
-///
-/// Inverted, this deletes a multi-hour recovery the user explicitly asked to
-/// keep — which is why it is a named function with its own tests.
+// Whether the staging ISO is removed after the title mux. Three conditions,
+// not one: keep_iso alone would delete the image on a cancel or failed mux,
+// destroying the one artefact that lets the user retry. See docs/engine.md.
 fn should_delete_staging_iso(keep_iso: bool, mux_succeeded: bool, cancelled: bool) -> bool {
     !keep_iso && mux_succeeded && !cancelled
 }
 
-/// Rip from a live optical drive (`disc://`). Scans once to resolve titles and
-/// keys, then runs the chosen sink. Title/metadata/demux sinks mux each selected
-/// title off a fresh session (`fe::mux_title_session`, driven through
-/// `fe::run_titles` for the shared fail-fast/skip/halt policy — the exact loop
-/// the ISO path uses); decrypted-folder extracts the UDF tree to a per-disc
-/// subdir. Whole-disc ISO image is flagged as not yet wired for the GUI (needs
-/// the mapfile copy path — see below).
-///
-/// NEEDS HARDWARE VALIDATION end-to-end.
+// Rip from a live optical drive (disc://). Scans once to resolve titles and
+// keys, then runs the chosen sink via fe::run_titles (same loop the ISO path
+// uses). NEEDS HARDWARE VALIDATION end-to-end. See docs/engine.md.
 fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
     if req.decrypt_threads > 0 {
         libfreemkv::set_decrypt_threads(req.decrypt_threads);
@@ -2838,28 +2547,14 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
     )
 }
 
-/// The engine→front-end outcome contract.
-///
-/// `run_titles` is in freemkv-engine and these renderings are here, so no
-/// single-repo test covers the seam: the engine proves it *emits* `NoKey` /
-/// `Failed`, and nothing proved this crate does anything with them. It didn't —
-/// every variant fell through to an `Ok` string, and `start_rip` files an `Ok`
-/// as the run summary, so a rip the engine stopped on a full disk was reported
-/// as "2 title(s) written".
+// The engine→front-end outcome contract: run_titles emits NoKey/Failed in
+// freemkv-engine, but nothing proved this crate does anything with them —
+// every variant fell through to an Ok string reported as a success.
 #[cfg(test)]
 mod run_state_poison_tests {
-    /// A panicking worker must not turn its verdict into "Completed".
-    ///
-    /// The UI read the verdict with `unwrap_or_default()`. `RunOutcome`'s
-    /// `#[default]` is `Completed`, so a worker that panicked — poisoning the
-    /// mutex, and precisely the case where the verdict matters — rendered the
-    /// "Finished" heading over a run whose real outcome was lost, along with
-    /// an empty summary line.
-    ///
-    /// That is the same defect `RunOutcome`'s own doc says it exists to
-    /// prevent: the verdict is carried rather than parsed BECAUSE both
-    /// abort-for-loss paths once rendered as success. The expectation here
-    /// comes from that rule, not from what the accessor happens to do.
+    // A panicking worker must not turn its verdict into "Completed" — this
+    // pins RunState::outcome_now's poison recovery (see docs/engine.md), not
+    // just what the accessor happens to do today.
     #[test]
     fn a_poisoned_lock_does_not_turn_a_failure_into_a_completion() {
         use super::{RunOutcome, RunState};
@@ -2895,19 +2590,9 @@ mod run_state_poison_tests {
         );
     }
 
-    /// The GUI core's only `Sink` must still deliver after a worker panics.
-    ///
-    /// `UiSink::log` was `if let Ok(mut v) = ..lock() { v.push(..) }`, which
-    /// reads as caution and behaves as censorship: `UiSink` is the ONE `Sink`
-    /// the shared GUI core installs, so every library log line reaches the user
-    /// through it. Once any thread panicked holding the buffer the `else` arm
-    /// swallowed every line from then on — the run went silent at exactly the
-    /// moment the log became the only evidence of what happened. `progress` had
-    /// the same shape and froze the bar.
-    ///
-    /// Mutation caught: putting either method's `unwrap_or_else` back to
-    /// `if let Ok(..)`/`unwrap()` — the first drops the line, the second panics
-    /// the worker that was trying to report the first panic.
+    // The GUI core's only Sink must still deliver lines/progress after a
+    // worker panics — UiSink recovers the poisoned lock rather than silently
+    // dropping data. See docs/engine.md for the regression this pins.
     #[test]
     fn the_ui_sink_still_delivers_lines_and_progress_through_a_poisoned_lock() {
         use super::{Prog, RunState, UiSink};
@@ -2963,23 +2648,9 @@ mod run_state_poison_tests {
         );
     }
 
-    /// Makes `outcome_now`'s doc claim true instead of merely written down.
-    ///
-    /// That doc says the poison-recovering form is applied to EVERY `lines`
-    /// lock, and that "the source-inspection pins below" enforce it. They did
-    /// not: the pin above covers `outcome` and `summary` only. Meanwhile the
-    /// CANCELLED arm of `run_stream` and both drain loops in `main.rs` used
-    /// a bare `unwrap()`, so a rip cancelled after an earlier worker panic
-    /// re-panicked while writing the line naming the partial file it had kept.
-    ///
-    /// A source pin because the log buffer is written from paths that need a
-    /// live drive or a real disc image; `main.rs`'s drain loop needs a whole
-    /// process. Reading the text is the only thing that can see all of them at
-    /// once. Both needles are built with `concat!` so this test's own body
-    /// cannot match itself.
-    ///
-    /// Mutation caught: any `lines` lock anywhere in these two files reverting
-    /// to `unwrap()`, `if let Ok(..)`, or `unwrap_or_default()`.
+    // Makes outcome_now's doc claim true instead of merely written down:
+    // every `lines` lock in engine.rs/main.rs must recover from poison,
+    // verified by source scan. See docs/engine.md for the regression closed.
     #[test]
     fn every_lines_lock_recovers_from_poison() {
         let needle = concat!("lines", ".lock()");
@@ -3192,14 +2863,9 @@ mod outcome_summary_tests {
         );
     }
 
-    /// A mux that dropped PAYLOAD BYTES is lossy too, and `completed` is true
-    /// for it.
-    ///
-    /// `MuxOutcome::lost_bytes`/`errors` count bytes the library read and could
-    /// not carry — an `mkv://` → `mkv://` re-mux of a 3D rip drops the whole
-    /// dependent-view (right-eye) payload into them, with an EMPTY
-    /// `undelivered_streams` because no whole stream was lost. Grading on
-    /// `undelivered_streams` alone renders that as a clean "Written to <dir>".
+    // A mux that dropped PAYLOAD BYTES is lossy too, and `completed` is true.
+    // lost_bytes/errors count bytes read but not carried — a 3D re-mux drops
+    // the dependent-view payload with undelivered_streams still empty.
     fn byte_lossy_outcome() -> libfreemkv::MuxOutcome {
         libfreemkv::MuxOutcome {
             undelivered_streams: Vec::new(),
@@ -3288,14 +2954,9 @@ mod outcome_summary_tests {
         }
     }
 
-    /// The image-decrypt summariser's three branches, matching the coverage
-    /// its two siblings already had. It shipped with a doc claiming "Pure so
-    /// the mapping is unit-testable" and no test — the exact gap that let the
-    /// arm it replaced report a cancelled decrypt as a clean write.
-    ///
-    /// `complete` is derived here exactly as `CopyResult::new` derives it —
-    /// pending included — so a fixture cannot present a combination the engine
-    /// never produces and make the summariser look right on it.
+    // Covers the image-decrypt summariser's three branches, matching its two
+    // siblings. `complete` is derived exactly as `CopyResult::new` derives it
+    // (pending included) so a fixture can't fake a combo the engine can't emit.
     fn copy_result(halted: bool, good: u64, unreadable: u64) -> fe::CopyResult {
         copy_result_pending(halted, good, unreadable, 0)
     }
@@ -3430,14 +3091,9 @@ mod outcome_summary_tests {
 mod verdict_and_explain_tests {
     use super::{explain, recovery_terminal_result};
 
-    /// A recovery that aborted for loss is an ERROR, never a completed rip —
-    /// for BOTH output kinds — while a halt is an `Ok` cancel and a clean sweep
-    /// proceeds. This is the engine-side twin of `pipe::copy_verdict`, which was
-    /// unit-tested while this decision was inline and untested.
-    ///
-    /// Mutation caught: returning `Ok` for `aborted_for_loss` (which exits 0 and
-    /// renders a too-damaged recovery as a completed rip), or dropping the
-    /// halt-outranks-loss precedence.
+    // A recovery aborted for loss is an ERROR, never a completed rip, for
+    // both output kinds; a halt is an Ok cancel. Mutation caught: returning
+    // Ok for aborted_for_loss, or dropping halt-outranks-loss precedence.
     #[test]
     fn a_loss_abort_is_an_error_not_a_completed_rip() {
         // Halt → Ok cancel, image kept, both output kinds.
@@ -3468,15 +3124,9 @@ mod verdict_and_explain_tests {
         ));
     }
 
-    /// A desktop-app failure code is LOCALIZED through the catalog, not
-    /// hard-coded English. `explain` must equal what the CLI renders for the
-    /// same `error.E<code>` key, so both shells give one answer in all 29
-    /// locales (GUI/CLI parity).
-    ///
-    /// Mutation caught: reverting `explain` to its hard-coded English arms — the
-    /// old `9048 => "…Choose MKV…"` differs from the catalog's E9048, so the
-    /// equality below fails the moment the routing is removed. Also pins that no
-    /// placeholder-carrying code (E7022's `{hash}`) ever leaks a literal `{…}`.
+    // explain must equal what the CLI renders for the same error.E<code> key
+    // (GUI/CLI parity). Mutation caught: reverting to hard-coded English
+    // arms, or a placeholder-carrying code (E7022's {hash}) leaking `{…}`.
     #[test]
     fn explain_localizes_through_the_catalog() {
         // Routed codes equal the catalog string the CLI uses for the same key.
@@ -3599,12 +3249,9 @@ mod key_summary_tests {
         assert_eq!(key_summary(&d, Some("keydb")), "unlocked via keydb");
     }
 
-    /// `error_code` must parse the digit run, not the whole Display string.
-    ///
-    /// Regression: `trim_start_matches('E').parse()` returned 0 for every error
-    /// that carries data after the code, so the desktop app rendered "Mux failed
-    /// (E0)." for an AACS disc with no key (E7022 carries the disc hash) and
-    /// never reached the dedicated message for it.
+    // error_code must parse the digit run, not the whole Display string.
+    // Regression: trim_start_matches('E').parse() returned 0 for every
+    // error that carries data after the code (E7022's disc hash, etc).
     #[test]
     fn error_code_parses_codes_that_carry_data() {
         let c = |s: &str| error_code(&std::io::Error::other(s.to_string()));
@@ -3621,12 +3268,9 @@ mod key_summary_tests {
         assert_eq!(c("Eabc"), 0);
     }
 
-    /// All three `key_source` values must produce distinct key sources.
-    ///
-    /// Regression: `key_url` was derived only from "is the URL non-empty", so
-    /// "Local keydb only" and "keydb, then online" were identical — choosing
-    /// local-only for privacy still sent disc ciphertext to the configured key
-    /// service on every keydb miss.
+    // All three key_source values must produce distinct key sources.
+    // Regression: key_url was derived only from "is the URL non-empty", so
+    // "Local keydb only" leaked disc ciphertext to the configured key service.
     #[test]
     fn key_source_setting_controls_whether_the_online_service_is_used() {
         let cfg = |src: &str| super::KeyConfig {
@@ -3658,11 +3302,9 @@ mod key_summary_tests {
     }
 }
 
-/// `disc_details` builds the multi-line disc summary the GUI log pane shows and
-/// the CLI mirrors. Every branch (capacity, each region shape, the AACS MKB /
-/// hash / VID block, and the verbose key reveal) is reachable only behind a
-/// scanned disc, so a mutant that dropped the VID line or the bus-encryption
-/// suffix passed. Tested against a synthetic disc as the lines it returns.
+// disc_details builds the multi-line disc summary the log pane/CLI show.
+// Every branch is reachable only behind a scanned disc, so a mutant that
+// dropped the VID line passed; tested against a synthetic disc instead.
 #[cfg(test)]
 mod disc_details_tests {
     use super::disc_details;
@@ -3806,16 +3448,9 @@ mod disc_details_tests {
     }
 }
 
-/// The routing and per-title wiring decisions a rip makes before it touches a
-/// drive.
-///
-/// Every function below is pure over a `&str` or a `&RipRequest`, and every one
-/// of them could be replaced wholesale — `-> true`, `-> ""`,
-/// `-> Default::default()` — with the whole suite still green. The consequences
-/// are not cosmetic: `is_disc_source` forced false sends a live-drive rip down
-/// the ISO path, `stream_selection_for` defaulted discards every track the user
-/// ticked, and a missing `title_index` muxes the wrong title under the right
-/// filename.
+// The routing and per-title wiring decisions a rip makes before it touches
+// a drive: is_disc_source, stream_selection_for, title_index and friends —
+// pure over &str/&RipRequest, but wrong in ways that are not cosmetic.
 #[cfg(test)]
 mod routing_tests {
     use super::{
@@ -3854,17 +3489,9 @@ mod routing_tests {
         );
     }
 
-    /// The three seams inside `run_disc` / `run_blocking` that no test can
-    /// reach: both need a live drive or a real disc image, and they are
-    /// private. Round 1 fixed the label-into-a-path defect at four seams and
-    /// pinned only the three exported helpers, so reverting either of the two
-    /// destination lines below left `cargo test --tests` fully green — and the
-    /// same was true of the `raw` flag whose absence broke every default rip.
-    ///
-    /// Source pins, in the shape `autorip`'s handler pin uses. Each anchor is
-    /// `expect`ed, never defaulted: an anchor that stopped matching would
-    /// otherwise silently widen the slice and start reading a neighbouring
-    /// function.
+    // The three seams inside run_disc/run_blocking that no test can reach
+    // directly (need a live drive/disc image). Source pins, `expect`ed never
+    // defaulted, so a stale anchor fails loud instead of silently widening.
     #[test]
     fn the_private_disc_seams_still_go_through_their_guards() {
         let src = include_str!("engine.rs").replace("\r\n", "\n");
@@ -4034,13 +3661,9 @@ mod routing_tests {
         );
     }
 
-    /// The selection the user made is checked against the scan the RIP takes.
-    ///
-    /// `run_disc` opens a brand-new session and reads `disc.titles` again, then
-    /// feeds the ticked NUMBERS straight into `resolve_selection`. Every LATER
-    /// re-scan in this file is identity-checked; this first one — the one with
-    /// the longest window, an operator reviewing the tree before pressing
-    /// Start — was not. A source pin because reaching it needs a live drive.
+    // The selection the user made is checked against the scan the RIP takes.
+    // This is the first (longest-window) re-scan in the file; every LATER
+    // one is identity-checked already. Source pin: needs a live drive.
     #[test]
     fn the_drive_rip_checks_the_selection_against_the_scan_it_was_made_on() {
         let src = include_str!("engine.rs").replace("\r\n", "\n");
@@ -4060,13 +3683,9 @@ mod routing_tests {
         );
     }
 
-    /// The IMAGE path re-scans too, and the same selection has to survive it.
-    ///
-    /// `run_blocking` is `run_disc`'s sibling for `iso://`/folder sources: the
-    /// tree the user ticked came from `Ui::open`'s scan, and this function
-    /// scans the source again at Run time. A file can be replaced, re-authored
-    /// or re-mounted in between, and the ticked integers would be resolved
-    /// against the new list with nothing comparing the two.
+    // The IMAGE path re-scans too, and the same selection has to survive it.
+    // run_blocking scans the iso://folder source again at Run time; the file
+    // could be replaced/re-authored/re-mounted between the UI scan and this.
     #[test]
     fn the_image_rip_checks_the_selection_against_the_scan_it_was_made_on() {
         let src = include_str!("engine.rs").replace("\r\n", "\n");
@@ -4089,18 +3708,9 @@ mod routing_tests {
         );
     }
 
-    /// The GUI's image decrypt must ask the SAME "is the destination the
-    /// source?" question the CLI asks, through the ONE definition of it.
-    ///
-    /// This arm answered it with canonical-path equality alone, which cannot
-    /// see a HARDLINK: two names for one inode are each already canonical, so
-    /// the paths differ while the bytes are shared, the guard stays silent, and
-    /// `recover_to_iso` truncates the user's only copy while the scan is still
-    /// reading it. The CLI's `pipe::same_file` was hardened against exactly
-    /// that; a second, narrower definition beside this call site is the bug.
-    ///
-    /// A source pin because the arm needs a real image and a real destination
-    /// to reach — the same reason the seams above are pinned this way.
+    // The GUI's image decrypt must ask the SAME "is the destination the
+    // source?" question the CLI asks, through the ONE same_file definition —
+    // a canonical-path check alone misses a hardlink. Source pin: real files.
     #[test]
     fn the_gui_image_decrypt_asks_the_shared_same_file_question() {
         let src = include_str!("engine.rs").replace("\r\n", "\n");
@@ -4124,21 +3734,9 @@ mod routing_tests {
         );
     }
 
-    /// Every GUI site that grades a finished mux must grade the LOSS too.
-    ///
-    /// `MuxOutcome::completed` is not the whole answer: the library's contract
-    /// on `undelivered_streams` is explicit that a non-empty list means the
-    /// file does not match the pre-mux plan **even with `completed = true`**,
-    /// and that a caller reporting a successful export must report these too.
-    /// The CLI does, and both now render through the shared `lossy::lossy_lines`
-    /// (the CLI's own `print_undelivered_streams` was folded into it, which is
-    /// what `lossy.rs`'s module doc records). These four sites did
-    /// not, so a GUI MP4 export missing an audio track read as "Finished".
-    ///
-    /// A source pin because all four sit inside closures that need a live
-    /// drive or a real disc image: `lossy_lines` is unit-tested on its own, but
-    /// nothing else can see whether these arms ever call it — and each one that
-    /// stopped calling it would leave every other test green.
+    // Every GUI site that grades a finished mux must grade the LOSS too:
+    // MuxOutcome::completed alone is not enough (undelivered_streams can be
+    // non-empty). Source pin: all four sit in closures needing a live drive.
     #[test]
     fn every_gui_mux_site_reports_the_streams_it_could_not_deliver() {
         let src = include_str!("engine.rs").replace("\r\n", "\n");
@@ -4233,18 +3831,9 @@ mod routing_tests {
         );
     }
 
-    /// The same defect on the LIVE-DRIVE path, which the ISO fix did not
-    /// reach: that path muxes from a `DiscSession`, and the Session arm takes
-    /// its selection from `MuxOptions` rather than `InputOptions`, so it built
-    /// one `MuxOptions` from the union before the loop and reused it for every
-    /// title.
-    ///
-    /// The expectation below is the user's TICKS written out by hand — 0x1101
-    /// is ticked under title 0 and unticked under title 1 — not anything
-    /// `stream_selection*` returns. (`per_title_input_options_…` compared
-    /// `input.selection` against the union (`stream_selection` as it then was),
-    /// i.e. the union against the
-    /// union, and so passed for as long as the defect shipped.)
+    // Same defect on the LIVE-DRIVE path, unreached by the ISO fix: the
+    // Session arm takes selection from MuxOptions, built once from the union
+    // before the loop. Expectation below is the user's ticks written by hand.
     #[test]
     fn a_live_drive_rip_applies_each_title_s_own_ticks() {
         let r = req_with_title_pids(vec![
@@ -4277,12 +3866,9 @@ mod routing_tests {
         assert_eq!(o.send_deadline, base.send_deadline);
     }
 
-    /// A request that says it has no per-title breakdown — the CLI, the
-    /// container path, the `FMKV_APIDS` harness — falls back to the union for
-    /// EVERY title, which is exactly what those callers did before the
-    /// breakdown existed. This is the regression the per-title fix could
-    /// plausibly cause, so it is asserted directly against
-    /// `TitleStreams::Unspecified` rather than against an empty list.
+    // A request with no per-title breakdown (CLI, container path,
+    // FMKV_APIDS) falls back to the union for EVERY title — the pre-
+    // breakdown behaviour. Asserted against TitleStreams::Unspecified.
     #[test]
     fn without_a_per_title_breakdown_the_union_still_applies() {
         let r = RipRequest {
@@ -4301,13 +3887,9 @@ mod routing_tests {
         }
     }
 
-    /// MEANING CHANGED by the absence/empty split. This used to read "a title
-    /// absent from the breakdown is one the user emptied, so fall back to the
-    /// union" — which was the defect itself. Under `TitleStreams::PerTitle` an
-    /// emptied title carries an EMPTY ENTRY, so the only titles still absent
-    /// are ones with no selectable stream rows at all (a video-only title) or
-    /// ones that do not exist. Those genuinely say nothing, and the union — a
-    /// filter over PIDs such a title does not have — is the harmless answer.
+    // MEANING CHANGED by the absence/empty split: absence used to mean "the
+    // user emptied it" (the defect). Now only titles with no selectable rows
+    // are absent; an EMPTY entry means the user kept nothing.
     #[test]
     fn a_title_the_breakdown_never_mentions_falls_back_to_the_union() {
         let r = req_with_title_pids(vec![(0, vec![0x1100], vec![])]);
@@ -4327,13 +3909,9 @@ mod routing_tests {
         }
     }
 
-    /// Two titles of one feature that SHARE their PIDs — the ordinary Blu-ray
-    /// shape (a feature and its extended cut). Title 0 keeps everything; the
-    /// user unticks EVERY stream row under title 1.
-    ///
-    /// Every expectation below is the user's ticks written out as a literal.
-    /// Nothing here asks `ticked_streams_by_title` or `stream_selection_for`
-    /// what it thinks the answer is.
+    // Two titles of one feature that SHARE PIDs — the ordinary Blu-ray shape.
+    // Title 0 keeps everything; title 1 has every row unticked. Expectations
+    // are the user's ticks written as literals, not derived from the code.
     fn shared_pid_disc() -> crate::engine::Scanned {
         use crate::engine::{Row, Scanned};
         let mk = |ty: &str, ti: usize, pid: Option<u16>| Row {
@@ -4375,11 +3953,9 @@ mod routing_tests {
         }
     }
 
-    /// The hole commit 8f9a31c left: `ticked_streams_by_title` skipped an
-    /// unticked row BEFORE creating its title's slot, so a title the user
-    /// emptied never appeared in the breakdown at all — and
-    /// `stream_selection_for` then fell back to the UNION, writing the sibling
-    /// title's tracks into the very title the user had cleared.
+    // The hole commit 8f9a31c left: ticked_streams_by_title skipped an
+    // unticked row BEFORE creating its title's slot, so an emptied title
+    // fell back to the UNION, writing the sibling's tracks into it anyway.
     #[test]
     fn a_title_the_user_emptied_rips_no_streams_at_all() {
         let sc = shared_pid_disc();
@@ -4449,16 +4025,9 @@ mod routing_tests {
         assert!(stream_selection_for(&r, None).is_all());
     }
 
-    // ── A selection is titles, not numbers ── the multipass path re-scans a
-    // RECOVERED image; damage can shorten the list, shifting numbers past the
-    // gap. `remap_titles_by_identity` re-resolves what the numbers meant.
-
-    /// One scanned title, addressed by its playlist name and the SECTORS it is
-    /// read from. `duration_secs` and `size_bytes` are deliberately IDENTICAL
-    /// across every fixture here: titles legitimately carry duplicate playlists
-    /// with identical duration and size, so neither may be part of the
-    /// identity, and a fixture that varied them would let a name+duration
-    /// identity pass these tests.
+    // One scanned title by playlist name + SECTORS read. duration/size are
+    // IDENTICAL across fixtures (duplicate playlists share them), so identity
+    // uses neither — multipass re-scan can shift numbers; remap re-resolves.
     fn id(playlist: &str, start_lba: u32) -> TitleIdentity {
         TitleIdentity::of(&libfreemkv::DiscTitle {
             playlist: playlist.to_string(),
@@ -4501,10 +4070,9 @@ mod routing_tests {
         );
     }
 
-    /// Duplicate playlist names are legitimate on real discs, and so are
-    /// duplicate DURATIONS — the project's rules say so outright. What tells
-    /// the pair apart is the sectors each is read from; matching on the name
-    /// alone would pick the first of the pair.
+    // Duplicate playlist names are legitimate on real discs, and so are
+    // duplicate DURATIONS. What tells the pair apart is the sectors each is
+    // read from; matching on the name alone would pick the first of the pair.
     #[test]
     fn duplicate_playlist_names_are_told_apart_by_their_sectors() {
         let picked = vec![1usize];
@@ -4676,14 +4244,9 @@ mod routing_tests {
         assert_eq!(remap_against(&[], &[], &[]), Ok(vec![]));
     }
 
-    /// A title with NO captured identity must cost only itself.
-    ///
-    /// The identities are indexed by canonical title number, exactly like
-    /// `picked_ids` in the live-drive loop, so "nothing recorded for title 3"
-    /// is `ids.get(3) == None` — a per-title answer. Keyed by SELECTION
-    /// position instead, a list that was one entry short made the function
-    /// return every raw position unchanged, so ONE unknown title silently put
-    /// the whole batch back on the stale-position path this exists to close.
+    // A title with NO captured identity must cost only itself. Indexed by
+    // canonical title number, so "nothing recorded for title 3" is a
+    // per-title answer, not a disarm of the whole selection. See docs/engine.md.
     #[test]
     fn an_uncaptured_title_does_not_disarm_the_rest_of_the_selection() {
         // The user picked all three titles; identities are known for the first
@@ -4847,14 +4410,9 @@ mod routing_tests {
         assert_eq!(source_scheme(""), "m2ts");
     }
 
-    /// `source_scheme` and `image_or_dir_scheme` answer DIFFERENT questions and
-    /// were conflated twice while fixing folder support.
-    ///
-    /// `source_scheme` classifies a STREAM container by extension and falls
-    /// through to m2ts, which is right only because its caller is guarded by
-    /// `is_stream_source`. Using it for a disc image sent `Disc.img` to the mux
-    /// as `m2ts://Disc.img`; using `image_or_dir_scheme` for a container would
-    /// call an `.mkv` an ISO.
+    // source_scheme and image_or_dir_scheme answer DIFFERENT questions and
+    // were conflated twice while fixing folder support — source_scheme's
+    // m2ts fallback is right only for a container guarded by is_stream_source.
     #[test]
     fn image_or_dir_scheme_is_not_source_scheme() {
         // An image whose extension is not `.iso` must still be an image.
@@ -4909,11 +4467,9 @@ mod routing_tests {
         }
     }
 
-    /// The CANONICAL picker strings — the exact `&'static str`s the shells put
-    /// in the dropdown — each map to a distinct sink. The table above uses
-    /// paraphrases, so it could not have caught a picker entry whose wording
-    /// misses every `out_kind` branch and silently becomes an MKV mux. That is
-    /// precisely how the three per-track-kind sinks would have failed.
+    // The CANONICAL picker strings — exact &'static strs the shells put in
+    // the dropdown. The table above uses paraphrases, so it couldn't catch
+    // an entry whose wording misses every out_kind branch and becomes MKV.
     #[test]
     fn the_real_picker_strings_each_reach_their_own_sink() {
         let want: &[(&str, &str)] = &[
@@ -4972,10 +4528,9 @@ mod routing_tests {
         }
     }
 
-    /// The dest-URL SCHEME a picker string produces, as libfreemkv would parse
-    /// it. `sink_marker` is an internal label; this is the thing the CLI would
-    /// have been given on the command line, which is what parity is measured
-    /// against. Only `folder` differs: it is the CLI's `dir://`.
+    // The dest-URL SCHEME a picker string produces, as libfreemkv would parse
+    // it (sink_marker is only an internal label) — what CLI parity is
+    // measured against. Only `folder` differs: it is the CLI's dir://.
     fn dest_scheme(format: &str) -> String {
         match sink_marker(out_kind(format)).as_str() {
             "folder" => "dir".to_string(),
@@ -4983,14 +4538,9 @@ mod routing_tests {
         }
     }
 
-    /// PARITY: for each source kind, the picker offers exactly the sinks the
-    /// CLI supports for that source — no more, no fewer.
-    ///
-    /// This is the invariant, not the row count: the GUI mirrors the CLI per
-    /// source kind. It failed silently for three sinks (`video://`, `audio://`,
-    /// `sub://`) because nothing compared the two lists — the picker was only
-    /// ever checked against itself. Extending the CLI without extending the
-    /// picker now trips here rather than leaving a library sink with no GUI.
+    // PARITY: for each source kind, the picker offers exactly the sinks the
+    // CLI supports — no more, no fewer. Failed silently for three sinks
+    // (video/audio/sub) because nothing compared the two lists before this.
     #[test]
     fn the_picker_offers_exactly_the_cli_sinks_for_each_source_kind() {
         use std::collections::BTreeSet;
@@ -5149,10 +4699,9 @@ mod routing_tests {
         assert!(!demux_needs_subdirs(0));
     }
 
-    /// `--multipass` on a title output must still recover, and a whole-disc ISO
-    /// must recover even without it. As `&&` the first silently loses its
-    /// recovery passes; the second falls into the per-title loop and panics on
-    /// the `unreachable!()` in its destination match.
+    // --multipass on a title output must still recover, and a whole-disc ISO
+    // must recover even without it. As && the first loses recovery passes,
+    // the second panics on the per-title loop's unreachable!().
     #[test]
     fn multipass_and_iso_output_both_route_through_recovery() {
         assert_eq!(
@@ -5273,12 +4822,9 @@ mod routing_tests {
         assert_eq!(damage_note(&clean_result()), "");
     }
 
-    /// This is the regression `engine.rs`'s success path shipped: a disc that
-    /// recovers with real unreadable/pending bytes UNDER `abort_lost_secs`
-    /// (so neither `halted` nor `aborted_for_loss` fires) used to report a
-    /// plain "ISO image written to …" — identical to a perfect rip. The CLI's
-    /// own `disc_to_iso` prints this exact figure for the same condition
-    /// (`rip.mapfile_summary`); the GUI was hiding damage the CLI discloses.
+    // The regression engine.rs's success path shipped: a disc with real
+    // unreadable/pending bytes UNDER abort_lost_secs used to report a plain
+    // success line, identical to a perfect rip — hiding damage the CLI shows.
     #[test]
     fn residual_damage_under_tolerance_is_named_in_the_note() {
         let result = fe::MultipassResult {
@@ -5416,14 +4962,9 @@ mod display_sanitisation_tests {
         }
     }
 
-    /// Row text carrying a character that must never reach the screen.
-    ///
-    /// `info` is the multi-line tooltip, so its own template newlines are
-    /// legitimate and are not counted here — newline INJECTION into it is
-    /// caught by the line-count check in `tooltips_keep_their_own_shape`
-    /// instead, which is the assertion that can actually tell the two apart.
-    /// The same disc with a harmless payload, as the control for the
-    /// line-count comparison above.
+    // The same disc with a harmless payload, as the control for the
+    // line-count comparison in tooltips_keep_their_own_shape — newline
+    // injection into `info` is caught there since its own newlines are legit.
     fn benign_disc() -> Disc {
         let mut d = hostile_disc();
         d.volume_id = BENIGN.to_string();

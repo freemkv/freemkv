@@ -1,7 +1,5 @@
-//! Windows Win32 shell — the second shell over the shared `ui`/`engine`/
-//! `settings` core.
-//!
-//! ## The contract — three steps, no fourth
+//! Windows Win32 shell over the shared `ui`/`engine`/`settings` core.
+//! See docs/windows-shell.md for full design rationale.
 //!
 //! ```text
 //! 1. render   App::view() -> View     assign strings/flags to widgets
@@ -9,35 +7,9 @@
 //! 3. perform  the returned Effects    the platform-only actions
 //! ```
 //!
-//! **The invariant:** if a change to `ui.rs` would need mirroring here, the
-//! split is wrong. Fix the split, do not mirror. This shell writes NO logic:
-//! every decision — which formats exist, which rows carry a checkbox, what the
-//! progress caption says, whether Run is enabled — comes from `ui.rs`, so a bug
-//! fixed on macOS is fixed here at the same time.
-//!
-//! The shell also holds no state that duplicates `App`. On macOS six such
-//! fields existed and one of them went stale, silently disabling the
-//! menu-disabling logic during a rip. The only cached values here are *render
-//! memos* (`rows`, `formats`, `log_len`): a signature of what was last painted,
-//! used purely to avoid rebuilding a control that has not changed. Rebuilding a
-//! tree or a dropdown unconditionally on a 100 ms tick would flicker and drop
-//! the user's expansion state mid-rip.
-//!
-//! ## Toolkit
-//!
-//! `winsafe` (safe Win32) with stock common controls, so the scrollbars, focus
-//! rings, keyboard navigation, high-contrast mode and screen-reader support are
-//! all the real Windows ones rather than a drawn imitation. The
-//! Common-Controls v6 manifest in `res/freemkv.manifest` (embedded by
-//! `build.rs`) is what makes them render themed rather than as Windows-95 grey
-//! boxes.
-//!
-//! ## Windows conventions this deliberately does NOT copy from macOS
-//!
-//! * Menus mount **in-window** (`SetMenu`) — there is no global menu bar.
-//! * **Settings lives under File**, not an app menu: Windows has no app menu.
-//! * Accelerators are **Ctrl**, not Cmd; `Alt+F4` quits; `F1` opens the docs.
-//! * "Show in Finder" becomes "Show in Explorer".
+//! Writes no logic and holds no state duplicating `App`; the only cache is
+//! render memos to skip rebuilding unchanged controls. Uses `winsafe` with
+//! stock common controls and Windows-native conventions, not macOS's.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -112,12 +84,9 @@ const IDM_DOCS: u16 = 2016;
 const IDM_CHECK_UPDATES: u16 = 2017;
 const IDM_ABOUT: u16 = 2018;
 
-/// First command id of a language checklist popup; entry *i* is `+ i`.
-///
-/// Well clear of the `IDM_*` block even though it cannot collide with it: the
-/// checklist is tracked with `TPM::RETURNCMD`, which hands the chosen id back
-/// as the call's return value and posts no `WM_COMMAND` at all. A reader
-/// checking "does 3000 mean two things?" should not have to work that out.
+// First command id of a language checklist popup; entry *i* is `+ i`. Well
+// clear of the `IDM_*` block: the checklist uses `TPM::RETURNCMD`, which
+// returns the chosen id directly and posts no `WM_COMMAND`.
 const IDM_LANG_BASE: u16 = 3000;
 
 /// Every menu id that maps to a core command, in menu order — so the
@@ -142,11 +111,9 @@ const MENU_CMD_IDS: &[u16] = &[
     IDM_ABOUT,
 ];
 
-/// Map a menu id to a core command.
-///
-/// The RULE about what is available mid-rip lives in the core
-/// (`ui::blocked_while_running`); this shell only says which id means which
-/// command, so macOS and Windows cannot disagree about it.
+// Map a menu id to a core command. The RULE about what is available mid-rip
+// lives in the core (`ui::blocked_while_running`); this shell only says
+// which id means which command.
 fn cmd_for(id: u16) -> Option<Cmd> {
     Some(match id {
         // Opening a disc is an Open for menu-enable purposes (blocked mid-rip).
@@ -199,13 +166,9 @@ fn dev_env(key: &str) -> Result<String, std::env::VarError> {
     }
 }
 
-/// Whether the launch probe (a disc already in the drive at startup) should
-/// run at all.
-///
-/// Off under `cargo test`: the in-process harness window builds the real shell,
-/// and a unit test must never enumerate — let alone spin up — real hardware.
-/// Off in every debug harness mode too: those already load a fixture or are
-/// mid-screenshot, and a probe would fight them for the page.
+// Whether the launch probe (a disc already in the drive at startup) should
+// run at all. Off under `cargo test` and every debug harness mode: those
+// already load a fixture, mid-screenshot, or must never touch real hardware.
 fn launch_probe_enabled() -> bool {
     !cfg!(test)
         && [
@@ -266,15 +229,9 @@ mod extra {
     pub const DFCS_BUTTON3STATE: u32 = 0x0000_0008;
 }
 
-// DPI: every physical length in this shell comes from one of these three calls.
-// `win_layout` does the arithmetic; this is the only place that asks Windows
-// what the DPI *is*.
-
-/// The DPI of the monitor `hwnd` is currently on.
-///
-/// `GetDpiForWindow` answers 0 for a window that does not exist yet, which
-/// happens for real: `WM_GETMINMAXINFO` is delivered during `CreateWindowEx`,
-/// before the handle is stored. The system DPI is the right answer then.
+// DPI: every physical length in this shell comes from `window_dpi`/`system_dpi`
+// (`win_layout` does the arithmetic). `GetDpiForWindow` answers 0 for a window
+// that does not exist yet — happens during `WM_GETMINMAXINFO` — so fall back.
 #[must_use]
 fn window_dpi(hwnd: &w::HWND) -> u32 {
     match hwnd.GetDpiForWindow() {
@@ -283,9 +240,8 @@ fn window_dpi(hwnd: &w::HWND) -> u32 {
     }
 }
 
-/// The primary monitor's DPI — the only figure available before any window
-/// exists, which is when the shell has to pick its initial size and build the
-/// Settings and About forms.
+// The primary monitor's DPI — the only figure available before any window
+// exists, needed to pick the initial size and build the Settings/About forms.
 #[must_use]
 fn system_dpi() -> u32 {
     match unsafe { extra::GetDpiForSystem() } {
@@ -295,23 +251,15 @@ fn system_dpi() -> u32 {
 }
 
 thread_local! {
-    /// The UI font per DPI, kept alive for the life of the GUI thread.
-    ///
-    /// A control keeps only a borrowed `HFONT`; deleting the object while it is
-    /// still selected paints garbage. Caching also means dragging back and
-    /// forth between two monitors creates two fonts, not one per crossing.
+    // The UI font per DPI, kept alive for the life of the GUI thread. A
+    // control keeps only a borrowed `HFONT`; deleting it while still
+    // selected paints garbage, so ownership lives here instead.
     static UI_FONTS: RefCell<Vec<(u32, w::guard::DeleteObjectGuard<w::HFONT>)>> =
         const { RefCell::new(Vec::new()) };
 }
 
-/// The shell UI font at `dpi`.
-///
-/// winsafe builds its own global UI font exactly once, from the plain
-/// `SystemParametersInfo` — that is, at the DPI of the primary monitor — and
-/// sends it to each control as the control is created. Under PerMonitorV2 that
-/// font is right only on the monitor the process started on, and never changes
-/// again. A layout that scales under a font that does not is arguably worse
-/// than neither, so the shell creates its own.
+// The shell UI font at `dpi`. See docs/windows-shell.md — why this shell
+// builds its own per-DPI font instead of using winsafe's single global one.
 #[must_use]
 fn ui_font(dpi: u32) -> Option<w::HFONT> {
     UI_FONTS.with(|cache| {
@@ -358,11 +306,9 @@ fn ui_font(dpi: u32) -> Option<w::HFONT> {
     })
 }
 
-/// Put the DPI-correct UI font on a window and every control under it.
-///
-/// The tree view is included deliberately: winsafe sets no font on it at all,
-/// so it inherits the stock system font, which is a fixed-size relic that does
-/// not scale with anything.
+// Put the DPI-correct UI font on a window and every control under it. The
+// tree view is included deliberately: winsafe sets no font on it at all, so
+// it inherits the stock system font, which does not scale.
 fn apply_ui_font(hwnd: &w::HWND, dpi: u32) {
     let Some(font) = ui_font(dpi) else { return };
     let set = |h: &w::HWND| {
@@ -404,25 +350,8 @@ pub fn system_locale_code() -> Option<String> {
 
 // ── window icon ───────────────────────────────────────────────────────────
 
-/// Attach the embedded application icon to the window itself.
-///
-/// The executable's icon resource and the *window's* icon are two separate
-/// mechanisms: the resource is what Explorer shows for the file, while the
-/// title bar, Alt-Tab and the taskbar read the window's own `WM_SETICON` pair.
-/// Setting only the class icon leaves the title bar with a blurry downscale,
-/// because winsafe derives `hIconSm` from `LoadIcon`, which ignores the small
-/// size and always hands back the 32 px frame.
-///
-/// So load each slot explicitly with `LoadImage` at the size Windows actually
-/// wants, which makes it select the matching frame out of the icon group — the
-/// purpose-drawn 16 px artwork for the title bar, the full-detail 32 px one for
-/// Alt-Tab. Sizes come from `GetSystemMetricsForDpi` at the window's own DPI
-/// rather than `GetSystemMetrics`: the manifest declares PerMonitorV2, so on a
-/// 200% display the small-icon metric is 32, not 16, and the un-scaled call
-/// would pick a frame half the size the title bar is about to draw.
-///
-/// Best-effort throughout: a missing or unreadable icon costs the default
-/// Windows glyph, which is never worth failing a launch over.
+// Attach the embedded icon to the window (title bar/Alt-Tab/taskbar), not
+// just the class icon. Best-effort; see docs/windows-shell.md for the why.
 fn set_icons(hwnd: &w::HWND) {
     let Ok(hinst) = w::HINSTANCE::GetModuleHandle(None) else {
         return;
@@ -460,22 +389,8 @@ fn set_icons(hwnd: &w::HWND) {
 
 // ── tri-state checkboxes ──────────────────────────────────────────────────
 
-/// Fill the tree's STATE image list with unchecked / checked / mixed glyphs.
-///
-/// `TVS_CHECKBOXES` gives only two states, so a title whose streams are partly
-/// ticked could not be drawn — and getting that wrong is invisible until a user
-/// unticks one audio track. The fix is a state image list with a third image,
-/// selected per row through `TVIS_STATEIMAGEMASK`.
-///
-/// The glyphs are drawn by the **theme engine** (`DrawThemeBackground` with the
-/// real `BUTTON`/checkbox parts), so they are pixel-identical to every other
-/// checkbox on the system rather than hand-painted approximations.
-///
-/// The list is built at the size the OS reports for a small icon **at this
-/// window's DPI** (`GetSystemMetricsForDpi`, not `GetSystemMetrics` — the
-/// latter always answers for the primary monitor), and rebuilt when the DPI
-/// changes. winsafe's `TreeView::image_list` helper cannot be used: it creates
-/// its list hard-coded at 16 × 16, which is a half-size tick at 200%.
+// Fill the tree's STATE image list with unchecked/checked/mixed glyphs,
+// theme-drawn and sized/rebuilt per DPI. See docs/windows-shell.md.
 fn build_check_images<T: 'static>(tree: &gui::TreeView<T>, dpi: u32) -> w::AnyResult<()> {
     let side =
         w::GetSystemMetricsForDpi(co::SM::CXSMICON, dpi).unwrap_or(lay::Scale::new(dpi).px(16));
@@ -558,12 +473,8 @@ fn build_check_images<T: 'static>(tree: &gui::TreeView<T>, dpi: u32) -> w::AnyRe
 
 // ── render memos ──────────────────────────────────────────────────────────
 
-/// Signatures of what was last painted.
-///
-/// NOT a copy of `App` state — purely a "has this changed?" note, so a 200 ms
-/// tick does not rebuild the tree (destroying the user's expansion state) or the
-/// format dropdown (dismissing it mid-click) when nothing about them moved. The
-/// macOS shell does the same for its format popup (`sync_formats`).
+// Signatures of what was last painted, NOT a copy of `App` state — a "has
+// this changed?" note so an idle tick does not rebuild the tree/dropdown.
 #[derive(Default)]
 struct Memo {
     rows: String,
@@ -580,11 +491,9 @@ fn rows_sig(rows: &[Row]) -> String {
         .join("\n")
 }
 
-/// The text one tree row shows.
-///
-/// `SysTreeView32` has no real multi-column mode, so the macOS outline's Type
-/// and Description columns are joined into the single item label. The disc root
-/// carries no type worth repeating.
+// The text one tree row shows. `SysTreeView32` has no real multi-column
+// mode, so the macOS outline's Type/Description columns are joined into
+// one item label; the disc root carries no type worth repeating.
 fn row_text(r: &Row) -> String {
     if r.depth == 0 || r.type_s.is_empty() {
         r.desc.clone()
@@ -1006,20 +915,15 @@ impl Shell {
 
 // ── menus ─────────────────────────────────────────────────────────────────
 
-/// The View ▸ log item's full menu text — the core's state-dependent label
-/// (`ui::log_menu_label`) plus this shell's accelerator hint. One function so
-/// the build and the live re-title cannot produce different strings, which is
-/// what makes the "already right, skip the redraw" comparison reliable.
+// The View > log item's full text: core state-dependent label plus this
+// shell's accelerator hint, so build and re-title can't diverge.
 fn log_menu_text(label: &str) -> String {
     format!("{label}\tCtrl+L")
 }
 
-/// Build the in-window menu bar.
-///
-/// Windows has no global menu bar and no app menu, so **Settings lives under
-/// File** and **About under Help** — copying the macOS placement (Settings in an
-/// app menu at ⌘,) would put them somewhere a Windows user never looks. The
-/// accelerator hints in the labels are Ctrl-based for the same reason.
+// Build the in-window menu bar. Windows has no global menu bar or app menu,
+// so Settings lives under File and About under Help (not macOS's app-menu
+// placement), and accelerator hints are Ctrl-based to match.
 fn build_menu() -> w::SysResult<w::HMENU> {
     let g = crate::strings::get;
 
@@ -1223,15 +1127,9 @@ fn show(c: &impl GuiWindow, visible: bool) {
 }
 
 impl Shell {
-    /// Reposition everything for the current client size.
-    ///
-    /// Single source of geometry truth, so the layout is identical at every
-    /// window size — and deliberately the same proportions as the macOS shell,
-    /// expressed top-down (Win32 y grows downward, AppKit's grows upward).
-    ///
-    /// The numbers come from `win_layout::main_layout`, which takes the DPI of
-    /// the monitor the window is on. `cw`/`ch` are physical pixels, as `WM_SIZE`
-    /// reports them, and so are the rectangles that come back.
+    // Reposition everything for the current client size. `win_layout::main_layout`
+    // is the single source of geometry truth, using the window's monitor DPI;
+    // `cw`/`ch` and the returned rects are physical pixels, as `WM_SIZE` reports.
     fn relayout(&self, cw: i32, ch: i32) {
         let v = self.app.borrow().view();
         let hidden = v.log_hidden;
@@ -1416,11 +1314,9 @@ impl Shell {
         }
     }
 
-    /// Which row the user just clicked the tick box of, if any.
-    ///
-    /// `nm_click` on a tree view carries no hit information, so the position has
-    /// to be resolved by hand. `msg::TvmHitTest` in winsafe 0.0.28 passes a
-    /// pointer-to-a-pointer (a crate bug), so the raw message is sent instead.
+    // Which row the user just clicked the tick box of, if any. `nm_click` carries
+    // no hit info, so it's resolved by hand; `msg::TvmHitTest` in winsafe 0.0.28
+    // passes a pointer-to-a-pointer (a crate bug), so the raw message is sent.
     fn hit_state_icon(&self) -> Option<usize> {
         let pt = self
             .tree
@@ -1449,25 +1345,17 @@ impl Shell {
 // ── render ────────────────────────────────────────────────────────────────
 
 impl Shell {
-    /// Mutate the core model and REPAINT.
-    ///
-    /// The single choke-point for every state change, so no event handler can
-    /// mutate state and forget to redraw (the "I said something but the log
-    /// didn't update" class of bug). The mutable borrow is released before
-    /// `render`, which takes its own immutable borrow.
+    // Mutate the core model and REPAINT — the choke-point so no handler can
+    // mutate and forget to redraw. Mutable borrow drops before `render`'s own.
     fn app_mut<R>(&self, f: impl FnOnce(&mut App) -> R) -> R {
         let r = f(&mut self.app.borrow_mut());
         self.render();
         r
     }
 
-    /// Ask before quitting mid-rip. `true` means go ahead.
-    ///
-    /// Shared by the window's X (`WM_CLOSE`) and File > Exit, which used to
-    /// disagree: the X asked, cancelled and tore down, while the menu item
-    /// went straight to `PostQuitMessage` and skipped all three. One question,
-    /// one place — a second copy of this decision beside a call site is the
-    /// bug, which this crate has now proved three separate times.
+    // Ask before quitting mid-rip; `true` means go ahead. Shared by the window's
+    // X and File > Exit, which used to disagree (see docs/windows-shell.md) —
+    // one question, one place, not a copy beside each call site.
     fn confirm_quit_mid_rip(&self) -> bool {
         if !self.app.borrow().running() {
             return true;
@@ -1484,17 +1372,9 @@ impl Shell {
         answer.map(|a| a == co::DLGID::YES).unwrap_or(false)
     }
 
-    /// Signal the worker to stop, then WAIT (bounded) for it to put its output
-    /// down.
-    ///
-    /// `Cmd::Cancel` only signals: the worker notices at its next boundary and
-    /// unwinds the mux, and it is that unwind which closes and finalises the
-    /// partial file. Quitting without waiting lets the process exit mid-write,
-    /// so what lands on disk is wherever the OS write cursor happened to be
-    /// rather than the deliberate "cancelled — partial output kept" artefact
-    /// the GUI claims. `mac.rs` was given exactly this wait; this shell was
-    /// not. Bounded by `QUIT_GRACE`, so a wedged drive cannot turn quit into a
-    /// hang — and expiring is no worse than the behaviour it replaces.
+    // Signal the worker to stop, then WAIT (bounded by `QUIT_GRACE`) for it to
+    // put its output down, so the partial file is closed/finalised rather than
+    // left mid-write. See docs/windows-shell.md for the incident this fixed.
     fn cancel_and_drain(&self) {
         self.act(Cmd::Cancel);
         let run = self.app.borrow().run.clone();
@@ -1624,11 +1504,9 @@ impl Shell {
         self.relayout_now();
     }
 
-    /// Grey out everything that must be unavailable while a rip is in flight.
-    ///
-    /// The RULE comes from the core (`ui::blocked_while_running`), consulted per
-    /// id — never a second hardcoded list, which is how macOS and Windows would
-    /// drift. Cancel is deliberately never blocked.
+    // Grey out everything unavailable while a rip is in flight. The RULE comes
+    // from the core (`ui::blocked_while_running`), consulted per id — never a
+    // second hardcoded list. Cancel is deliberately never blocked.
     fn sync_menu_enabled(&self) {
         let Some(bar) = self.wnd.hwnd().GetMenu() else {
             return;
@@ -1641,12 +1519,9 @@ impl Shell {
         }
     }
 
-    /// Apply the core's format list to the dropdown, preserving the current pick
-    /// when it survives. Called from `render`, so the shell never holds an
-    /// opinion about which formats exist.
-    ///
-    /// A combo box has no separators, so the core's groups are flattened; the
-    /// grouping order is preserved so the ordinary case is still first.
+    // Apply the core's format list to the dropdown, preserving the current pick
+    // when it survives. A combo box has no separators, so the core's groups
+    // are flattened, keeping their order so the ordinary case stays first.
     fn sync_formats(&self, v: &View) {
         let wanted: Vec<String> = v
             .formats
@@ -1675,13 +1550,9 @@ fn crlf(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
-/// The exact text the log pane shows for a set of log lines.
-///
-/// A plain EDIT control cannot colour individual lines, which is how the macOS
-/// shell shows severity. Rather than drop the information, notices carry a
-/// one-character gutter so a problem is still visible in a monochrome control.
-/// (Per-line colour would need a RichEdit.) Pulled out of `render` so the
-/// gutter rule can be checked without a window.
+// The exact text the log pane shows. A plain EDIT control can't colour lines
+// (unlike macOS), so notices get a one-character gutter instead; pulled out
+// of `render` so the gutter rule can be checked without a window.
 fn log_text(log: &[LogLine]) -> String {
     log.iter()
         .map(|l| match l.kind {
@@ -1811,16 +1682,9 @@ impl Shell {
         self.render();
     }
 
-    /// `SetTimer` can fail (Windows caps live timers per process/session). If
-    /// the poller never starts, nothing ever observes `RunState.finished`: the
-    /// worker thread runs the rip to completion in the background while this
-    /// window sits on the Progress page forever, with Cancel and every menu
-    /// command still disabled by `blocked_while_running` and no way for the
-    /// operator to learn anything is wrong short of a force-quit. A `let _ =`
-    /// here is the same "never die silently" gap `run_main`'s own error path
-    /// (below) exists to close — so it gets the same fix: a `MessageBox`,
-    /// since the timer that would carry a localized in-window notice is
-    /// exactly the one that failed to start.
+    // `SetTimer` can fail; if the poller never starts the rip finishes silently
+    // in the background forever. See docs/windows-shell.md — same "never die
+    // silently" fix as `run_main`'s own error path: a `MessageBox`.
     fn report_timer_failure(wnd: &gui::WindowMain, id: usize, elapse_ms: u32) {
         if let Err(e) = wnd.hwnd().SetTimer(id, elapse_ms, None) {
             let _ = wnd.hwnd().MessageBox(
@@ -2154,11 +2018,9 @@ impl Shell {
         self.about.events(self);
     }
 
-    /// Choose an output format from the dropdown's visible text.
-    ///
-    /// The label is resolved against the core's list rather than trusted, so an
-    /// unknown title can never enter the model — and so selection works in every
-    /// locale, since the dropdown shows `format_label`, not the canonical string.
+    // Choose an output format from the dropdown's visible text, resolved
+    // against the core's list (not trusted directly) so an unknown value can
+    // never enter the model, and selection works in every locale.
     fn on_format_pick(&self) {
         let Ok(Some(label)) = self.cmb_format.items().selected_text() else {
             return;
@@ -2172,14 +2034,9 @@ impl Shell {
         }
     }
 
-    /// Re-title the View ▸ log menu item to whatever the `View` says it should
-    /// read now (`ui::log_menu_label` + this shell's accelerator hint).
-    ///
-    /// The item is located by walking the bar's submenus and matching the
-    /// COMMAND ID, then set by position within the submenu it was found in —
-    /// not by `IdPos::Id` on the bar (whose by-command recursion into submenus
-    /// is not documented for `SetMenuItemInfo`) and not by a hardcoded
-    /// position (the menu is rebuilt on a live language change).
+    // Re-title the View > log menu item. Located by walking submenus and
+    // matching the command id, set by position — not `IdPos::Id` (undocumented
+    // submenu recursion) or a hardcoded position (menu rebuilds on language change).
     fn sync_log_menu_title(&self, label: &str) {
         let Some(bar) = self.wnd.hwnd().GetMenu() else {
             return;
@@ -2219,16 +2076,9 @@ impl Shell {
         }
     }
 
-    /// Open the disc in the drive. The decision (which drive, what to log) is
-    /// the core's — see `ui::App::disc_source`; this is only the two-step
-    /// sequencing the scan needs.
-    ///
-    /// Two `app_mut` calls, not one, ON PURPOSE: `app_mut` repaints, so the
-    /// "Opening …" line reaches the log pane BEFORE `open` starts the scan,
-    /// which blocks the UI thread for as long as the drive takes to spin up
-    /// and the keys take to resolve.
-    ///
-    /// `announce_missing` is false for the launch probe — see `wm_create`.
+    // Open the disc in the drive; the decision (which drive, what to log) is
+    // the core's (`ui::App::disc_source`). Two `app_mut` calls ON PURPOSE: each
+    // repaints, so "Opening …" reaches the log BEFORE `open`'s blocking scan.
     fn open_disc(&self, announce_missing: bool) {
         let Some(url) = self.app_mut(|a| a.disc_source(announce_missing)) else {
             return;
@@ -2272,14 +2122,8 @@ impl Shell {
 
 // ── Settings ──────────────────────────────────────────────────────────────
 
-/// The option table for a settings dropdown: `(canonical, localized_label)`
-/// pairs in menu order.
-///
-/// The canonical value is what persists and what the engine matches on (e.g.
-/// `key_source.starts_with("Online")`); the label is what the localized combo
-/// shows. So a combo displays translated text but stores a stable, English
-/// identifier — the same decoupling the format dropdown uses. An empty result
-/// means "not an enum combo".
+// The option table for a settings dropdown: `(canonical, localized_label)`
+// pairs. Canonical value persists; label is shown. Empty = not an enum combo.
 fn enum_options(key: &str) -> Vec<(&'static str, String)> {
     match key {
         // Output container, localized. Windows-only: this combo is FLAT with no
@@ -2296,24 +2140,9 @@ fn enum_options(key: &str) -> Vec<(&'static str, String)> {
     }
 }
 
-/// A multi-select language picker: a button that shows the chosen languages,
-/// and a checkable popup menu behind it.
-///
-/// **Why a button-plus-menu and not a dropdown.** Win32 has no checked-list
-/// combo box. `CBS_DROPDOWNLIST` is single-select, and a listbox with
-/// `LBS_MULTIPLESEL` is not a dropdown at all — it would need permanent
-/// vertical space for a 38-row list, three times over, on a Settings page that
-/// already has none. A button opening a `TrackPopupMenu` of `MF::CHECKED`
-/// entries is the native Windows idiom for "tick several from a long list" —
-/// it is what the Explorer and Task Manager column choosers do — it costs one
-/// row of height like the text box it replaces, and it draws the ticks with
-/// the system's own check bitmaps rather than an imitation of them.
-///
-/// **Why the string is held here.** The button's title is a SUMMARY
-/// ("English, German"); recovering codes from it would mean a second parser in
-/// this file, and the whole point of `ui::lang_*` is that both shells share one
-/// rule. So the stored preference lives alongside the control and the title is
-/// only ever written *from* it: the shell renders, `ui` decides.
+// A multi-select language picker: a button showing the chosen languages plus
+// a checkable popup menu behind it (Win32 has no checked-list combo box).
+// See docs/windows-shell.md for why, and why the string is stored here.
 #[derive(Clone)]
 struct LangPicker {
     btn: gui::Button,
@@ -2334,14 +2163,9 @@ impl LangPicker {
         self.stored.borrow().clone()
     }
 
-    /// Show the checklist under the button and apply each tick.
-    ///
-    /// The menu is re-opened after every tick instead of closing on the first.
-    /// A Win32 menu normally closes when an item is chosen, but this one is a
-    /// multi-select list: closing after one language would make a typical
-    /// two-or-three-language preference three separate trips through a 38-entry
-    /// menu. Escape or a click outside returns no command and ends the loop, so
-    /// it is no harder to dismiss than any other menu.
+    // Show the checklist under the button and apply each tick. Re-opened after
+    // every tick instead of closing on the first (this is multi-select), so
+    // Escape/click-outside is still the only way to dismiss it.
     fn popup(&self, owner: &w::HWND) {
         // Anchored to the button's own rectangle, not the cursor: the menu then
         // lines up under the control it belongs to however it was invoked
@@ -2416,13 +2240,9 @@ impl LangPicker {
     }
 }
 
-/// Builds one labelled row per call, walking a y-cursor down a tab page — the
-/// right-aligned label / control-to-its-right layout the macOS Settings uses.
-///
-/// Every step and every control size is DPI-scaled. The `wd` widths the callers
-/// pass are 96-DPI baselines, scaled here rather than at each of the twenty-odd
-/// call sites — so a row reads the same as it always did and still comes out
-/// the right physical size at 150%.
+// Builds one labelled row per call, walking a y-cursor down a tab page — the
+// right-aligned label / control-to-its-right layout macOS Settings uses. The
+// `wd` widths callers pass are 96-DPI baselines, scaled here once.
 struct Rows<'a> {
     page: &'a gui::TabPage,
     s: lay::Scale,
@@ -2475,12 +2295,9 @@ impl<'a> Rows<'a> {
         e
     }
 
-    /// Same contract as `field`, but for a secret (the keyserver bearer
-    /// token): `ES::PASSWORD` masks keystrokes with the system bullet
-    /// character, like every password box in Windows. Without this,
-    /// `keyserver_token` sat in a plain edit control — fully legible during
-    /// screen-sharing, presenting, or a screen recording, and the macOS shell
-    /// has the identical gap in its own plain `NSTextField`.
+    // Same contract as `field`, but for a secret (keyserver bearer token):
+    // `ES::PASSWORD` masks keystrokes with the system bullet character, fixing
+    // a plain-text field legible during screen-sharing/recording.
     fn field_secure(&mut self, text: &str, val: &str, wd: i32) -> gui::Edit {
         self.label(text);
         let e = gui::Edit::new(
@@ -2498,16 +2315,9 @@ impl<'a> Rows<'a> {
         e
     }
 
-    /// A language checklist row — see [`LangPicker`].
-    ///
-    /// Deliberately the same `row_step` and `field_h` as `field`: this replaced
-    /// three text boxes, and a taller control would have pushed the Selection
-    /// page past the bottom of the Settings window (which is what
-    /// `win_layout`'s page-height test measures).
-    ///
-    /// The title is set here rather than left to `populate`, because winsafe
-    /// creates its controls with the parent window and `hwnd()` is still null
-    /// at this point — a `SetWindowText` now would be silently dropped.
+    // A language checklist row — see `LangPicker`. Same `row_step`/`field_h`
+    // as `field` (a taller control overflows the Settings window). Title is
+    // set here, not in `populate`: `hwnd()` is still null until after `new`.
     fn lang(&mut self, text: &str, val: &str, wd: i32) -> LangPicker {
         self.label(text);
         let title = crate::ui::lang_summary(val);
@@ -2625,11 +2435,9 @@ impl<'a> Rows<'a> {
     }
 }
 
-/// The Settings window: five tabs, every control mapping to something the engine
-/// or the key layer actually consumes.
-///
-/// Anything that could not reach real code was left out rather than shown as a
-/// switch that does nothing — a control that lies is worse than no control.
+// The Settings window: five tabs, every control mapping to something the
+// engine or key layer actually consumes. Anything that couldn't reach real
+// code was left out rather than shown as a switch that does nothing.
 #[derive(Clone)]
 struct Prefs {
     wnd: gui::WindowModeless,
@@ -2875,10 +2683,9 @@ impl Prefs {
         self.wnd.hwnd().SetForegroundWindow();
     }
 
-    /// Fit the tab control and the button row to the real client area.
-    ///
-    /// `WindowModelessOpts::size` is the OUTER window size, so laying the button
-    /// row out against it puts it under the title bar and off the bottom edge.
+    // Fit the tab control and button row to the real client area.
+    // `WindowModelessOpts::size` is the OUTER size, so laying out against it
+    // would put the button row under the title bar and off the bottom edge.
     fn relayout(&self) {
         let Ok(rc) = self.wnd.hwnd().GetClientRect() else {
             return;
@@ -2950,10 +2757,9 @@ impl Prefs {
         let _ = self.wnd.hwnd().ShowWindow(co::SW::HIDE);
     }
 
-    /// Select a tab programmatically (the screenshot harness needs this).
-    ///
-    /// `TCM_SETCURSEL` moves the tab strip but raises no notification, so the
-    /// page swap that winsafe normally does on a click has to be done here too.
+    // Select a tab programmatically (the screenshot harness needs this).
+    // `TCM_SETCURSEL` moves the tab strip but raises no notification, so the
+    // page swap winsafe normally does on a click has to be done here too.
     fn select_tab(&self, index: u32) {
         unsafe { self.tab.hwnd().SendMessage(msg::TcmSetCurSel { index }) };
         // The page also has to be POSITIONED and SIZED, not just shown: winsafe
@@ -3011,10 +2817,9 @@ struct About {
     lbl_vals: Vec<gui::Label>,
 }
 
-/// The four (label, value) rows the About box shows, in the current locale.
-///
-/// A function, not a literal built inline, because the window is created ONCE
-/// and reused: `relocalize` needs the same rows again in the new language.
+// The four (label, value) rows the About box shows, in the current locale.
+// A function, not an inline literal, because the window is created ONCE and
+// reused: `relocalize` needs the same rows again in the new language.
 fn about_rows() -> [(String, String); 4] {
     let g = crate::strings::get;
     [
@@ -3134,14 +2939,9 @@ impl About {
         }
     }
 
-    /// Re-text everything localized here, for a live language change.
-    ///
-    /// The macOS shell drops its cached About window on relocalize so the next
-    /// open rebuilds it in the new language; this shell builds its About ONCE
-    /// (winsafe cannot create controls after the window exists) and reused the
-    /// old one forever — so About stayed in the language the app started in,
-    /// no matter what the operator picked. Same policy, two shells; only one
-    /// of them applied it.
+    // Re-text everything localized here, for a live language change. Needed
+    // because this shell builds its About window ONCE and reuses it (unlike
+    // macOS, which drops its cache): see docs/windows-shell.md.
     fn relocalize(&self) {
         let g = crate::strings::get;
         let _ = self.wnd.hwnd().SetWindowText(&g("gui.menu.app_about"));
@@ -3204,16 +3004,9 @@ impl About {
     }
 }
 
-/// Save `Settings` to disk and tell the operator whether it worked.
-///
-/// This crate's dominant defect this round was exactly this policy
-/// implemented twice: the OK button reported a failed save
-/// (`gui.log.settings_save_error`), and the language-dropdown path saved the
-/// SAME struct a few lines away with a bare `let _ =` that dropped the error
-/// on the floor. A disk-full or permissions failure there looked identical to
-/// success — the operator picks a language, sees the UI relocalize, and has
-/// no way to know the keydb path/keyserver token/dest dir edited in the same
-/// session never reached `gui-settings.json`. One policy, one call site now.
+// Save `Settings` to disk and tell the operator whether it worked. The ONE
+// call site for this policy — see docs/windows-shell.md for the bug where a
+// second, silent-`let _ =` copy of it used to exist.
 fn save_settings_reporting_error(sh: &Shell) {
     match sh.settings.borrow().save() {
         Ok(()) => sh.app_mut(|a| {
@@ -3423,12 +3216,9 @@ impl Prefs {
             .unwrap_or_default()
     }
 
-    /// Re-text every label, tab and combo after a language change.
-    ///
-    /// The macOS shell rebuilds its windows instead; winsafe cannot create
-    /// controls after a window exists, so this re-texts in place. The result is
-    /// the same and it is cheaper — but it does mean every new control must be
-    /// added here as well as in `new`.
+    // Re-text every label, tab and combo after a language change. macOS
+    // rebuilds its windows instead; winsafe cannot create controls after a
+    // window exists, so every new control must be added here too, not just `new`.
     fn relocalize(&self, st: &crate::settings::Settings) {
         let g = crate::strings::get;
         let _ = self.wnd.hwnd().SetWindowText(&g("gui.win.settings"));
@@ -3466,12 +3256,9 @@ impl Prefs {
 }
 
 impl Shell {
-    /// Apply a language change live, in the newly-active locale (the caller has
-    /// already swapped the catalog via `strings::set_locale`).
-    ///
-    /// The menu bar is genuinely rebuilt (an `HMENU` can be replaced after the
-    /// window exists); everything else is re-texted in place, because winsafe
-    /// cannot create controls post-creation.
+    // Apply a language change live (caller already swapped the catalog via
+    // `strings::set_locale`). The menu bar is genuinely rebuilt (`HMENU` can
+    // be replaced post-creation); everything else is re-texted in place.
     fn relocalize(&self) {
         let g = crate::strings::get;
         if let Ok(bar) = build_menu() {
@@ -3522,15 +3309,10 @@ impl Shell {
     }
 }
 
-// Self-screenshot: `PrintWindow` renders the window into a memory DC (Win32's
-// counterpart to macOS's `cacheDisplayInRect:`), no capture permission needed.
-// Written as BMP (no encoder dep); macOS writes PNG, so captures aren't byte-comparable.
+// Self-screenshot: `PrintWindow` renders into a memory DC (Win32's counterpart
+// to `cacheDisplayInRect:`); BMP output (no encoder dep), unlike macOS's PNG.
 
-/// True when every byte is identical — i.e. the capture produced nothing.
-///
-/// Worth checking because the obvious capture call can "succeed" and still
-/// return a blank plate, and a screenshot harness that silently writes black
-/// images is worse than no harness: it looks like evidence.
+// True when every byte is identical: capture "succeeded" but is a blank plate.
 fn is_blank(buf: &[u8]) -> bool {
     buf.first()
         .is_some_and(|first| buf.iter().all(|b| b == first))
@@ -3637,11 +3419,9 @@ fn snapshot(hwnd: &w::HWND, path: &str) -> w::AnyResult<()> {
     Ok(())
 }
 
-/// Let Windows actually lay out and paint before capturing.
-///
-/// Controls create and draw their content lazily during the message loop, so
-/// capturing immediately yields an empty tree and the screenshots become
-/// worthless as evidence — the same lesson the macOS harness records.
+// Let Windows actually lay out and paint before capturing. Controls create
+// and draw lazily during the message loop, so capturing immediately yields
+// an empty tree — the same lesson the macOS harness records.
 fn pump(ms: u64) {
     let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
     while std::time::Instant::now() < until {
@@ -3688,10 +3468,9 @@ impl Shell {
         true
     }
 
-    /// The state-image index the TREE CONTROL is actually showing for a row.
-    ///
-    /// Read back out of the widget, not the model: the missing-checkbox bug on
-    /// macOS lived exactly here — the `View` was right and the cell was wrong.
+    // The state-image index the TREE CONTROL is actually showing for a row.
+    // Read back from the widget, not the model: the missing-checkbox bug on
+    // macOS lived exactly here — `View` was right, the cell was wrong.
     fn widget_state(&self, row: usize) -> Option<u32> {
         fn find<'a>(
             it: impl Iterator<Item = w::gui::TreeViewItem<'a, usize>>,
@@ -3726,11 +3505,9 @@ impl Shell {
         self.app_mut(|a| a.tree.set_checked(row, on));
     }
 
-    /// Choose an output format in the REAL dropdown and fire the same handler
-    /// the selection change fires. Selecting programmatically does not raise
-    /// `CBN_SELCHANGE`, and without this the driver would prove only that the
-    /// combo changed appearance — which is how the "picked MP4, got MKV" bug
-    /// survived on macOS.
+    // Choose an output format in the REAL dropdown and fire the same handler
+    // selection fires. Programmatic selection doesn't raise `CBN_SELCHANGE`;
+    // without this the driver only proves appearance changed, not behavior.
     fn drive_pick_format(&self, canonical: &str) -> bool {
         let label = crate::ui::format_label(canonical);
         let titles = self.combo_titles();
@@ -3767,16 +3544,9 @@ impl Shell {
     }
 }
 
-/// The WIDGET-level assertions: what the controls are actually showing, versus
-/// what the core's `View` said they should show.
-///
-/// These are the checks a model test can never make — the missing-checkbox bug
-/// on macOS lived exactly here, with a correct `View` and a wrong cell. They
-/// depend only on whatever source is currently loaded (including none), so both
-/// the interactive `self_test` and the `#[test]` in this file's test module run
-/// the same code against the same real window. Returns `(passed, description)`
-/// per check rather than panicking, so the interactive mode can print a full
-/// report instead of dying on the first failure.
+// The WIDGET-level assertions: what controls actually show vs what the
+// core's `View` said they should. See docs/windows-shell.md for why these
+// exist and how `self_test`/`#[test]` share them.
 #[cfg(any(test, debug_assertions))]
 impl Shell {
     fn widget_checks(&self) -> Vec<(bool, String)> {
@@ -4888,16 +4658,8 @@ mod tests {
 
     // ── the real window ───────────────────────────────────────────────────
 
-    /// Builds the real window, loads a synthetic disc into it, renders, and
-    /// runs the SAME widget sweep the interactive `FMKV_SELFTEST` mode runs.
-    ///
-    /// This is the test that makes `self_test`'s widget assertions reachable
-    /// from `cargo test`: no disc, no drive and no screenshots, but real
-    /// controls, driven through the real message loop (which is the only place
-    /// the window exists and the controls have handles).
-    ///
-    /// One test, not several: the shell registers a window class by name, so a
-    /// second window in the same process would collide.
+    // Builds the real window and runs the SAME widget sweep `FMKV_SELFTEST`
+    // runs, through the real message loop. One test: the window class name would collide.
     #[test]
     fn the_real_controls_show_what_the_core_decided() {
         let _com = w::CoInitializeEx(co::COINIT::APARTMENTTHREADED | co::COINIT::DISABLE_OLE1DDE);
@@ -4992,16 +4754,9 @@ mod tests {
         );
     }
 
-    // Timer failure is reported, not swallowed. STOPGAP, NOT COVERAGE: no
-    // Windows toolchain here to force a real SetTimer failure, so this is
-    // source inspection only — can't prove the MessageBox fires; needs Windows CI.
-    /// This file's own text, with CRLF folded to LF.
-    ///
-    /// The source-inspection stopgaps below match multi-line needles against
-    /// it. Windows CI checks the tree out with CRLF, so a raw `include_str!`
-    /// carries `\r\n` and every needle written with `\n` misses — passing on
-    /// Unix and failing only on the Windows runner, which is precisely where
-    /// nobody can reproduce it locally. Normalise once, here.
+    // This file's own text, CRLF folded to LF: used by the STOPGAP-NOT-COVERAGE
+    // source-inspection tests below (no Windows toolchain here to force a real
+    // SetTimer failure). CRLF fold avoids `\n`-needles missing on Windows CI.
     fn own_source() -> String {
         include_str!("windows.rs").replace("\r\n", "\n")
     }

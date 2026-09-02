@@ -1,9 +1,6 @@
 //! `freemkv-gui.exe` — the image a Windows user double-clicks.
 //!
-//! Windows has no `.app` bundle, so "run the desktop app" cannot be a property
-//! of *how* `freemkv.exe` was started — an Explorer double-click and a `cmd`
-//! invocation look identical to the process. It has to be a property of *which
-//! image* was started. Hence two binaries from one crate:
+//! Two binaries from one crate, distinguished by PE subsystem:
 //!
 //! ```text
 //! freemkv.exe      console subsystem   the CLI contract, unchanged
@@ -11,20 +8,12 @@
 //! freemkv-gui.exe  windows subsystem   double-click → the window, no console
 //! ```
 //!
-//! `#![windows_subsystem = "windows"]` is the whole reason this file exists as
-//! a separate binary rather than a flag on the other one: the subsystem is a PE
-//! header field chosen at link time, so it cannot be decided at runtime. Without
-//! it, double-clicking flashes a console window behind the app and leaves it
-//! there for the session.
+//! No argument parsing here — the CLI lives in `freemkv.exe`. The window
+//! shell lives in `freemkv::win_app` / `freemkv::windows`, shared with
+//! `freemkv gui`, so the two entry points can't drift. On non-Windows
+//! targets this compiles to an empty `main`.
 //!
-//! The shell itself is NOT duplicated here — it lives in the lib
-//! (`freemkv::win_app` → `freemkv::windows`), which is also what `freemkv gui`
-//! calls, so the two entry points can never drift.
-//!
-//! Cargo cannot make a `[[bin]]` target-conditional (there is no
-//! `[target.'cfg(windows)'.bin]`), so the *contents* carry the gate: on macOS
-//! and Linux this compiles to an empty `main` and links nothing platform
-//! specific. Only the Windows build produces a real program.
+//! See docs/freemkv-gui-bin.md for why this is a separate binary at all.
 #![windows_subsystem = "windows"]
 
 // Match `freemkv.exe`: the GUI does the same large, highly concurrent buffer

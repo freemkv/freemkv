@@ -169,12 +169,9 @@ mod tests {
         );
     }
 
-    /// `is_absolute` had no test at all, direct or indirect — its only caller
-    /// is `Settings::normalize`, which was itself untested. It exists because
-    /// `starts_with('/')` called every valid Windows path relative and reset
-    /// the user's destination folder on every load; forced to a constant it
-    /// either resets a good folder or accepts a relative one, and a relative
-    /// destination is how a rip ends up written next to the process CWD.
+    // `is_absolute` was untested; `starts_with('/')` called Windows paths
+    // relative, resetting the user's destination on load to a relative
+    // path — which writes rips next to the process CWD.
     #[test]
     fn is_absolute_rejects_empty_blank_and_relative_paths() {
         assert!(!super::is_absolute(""));
@@ -186,10 +183,9 @@ mod tests {
         assert!(!super::is_absolute("Library/Application Support/freemkv"));
     }
 
-    /// The positive side, in each OS's own native form. Both are asserted on
-    /// both platforms where the answer is unambiguous: a `C:\…` path is not
-    /// absolute on Unix, and a bare `/x` is not absolute on Windows (it is
-    /// drive-relative), so a single shared rule would be wrong somewhere.
+    // The positive side, in each OS's native form: `C:\…` is not absolute
+    // on Unix, and a bare `/x` is not absolute on Windows (drive-relative),
+    // so a single shared rule would be wrong somewhere.
     #[test]
     fn is_absolute_accepts_the_platform_native_absolute_form() {
         #[cfg(unix)]
@@ -207,20 +203,8 @@ mod tests {
         }
     }
 
-    /// Every derived path stays ABSOLUTE with no home variable set.
-    ///
-    /// This is the regression test for the real bug the mutation runner found:
-    /// `unwrap_or_default()` produced an EMPTY base, so `support_dir()` became
-    /// `"Library/Application Support/freemkv"` and the settings file, the
-    /// downloaded keydb and the rip output all landed relative to the process
-    /// CWD. Unset `HOME` is not exotic — a container, a systemd unit or `env
-    /// -i` all produce it, and autorip ships in Docker.
-    ///
-    /// `tests/settings.rs` covers the Unix side by removing `HOME`; on Windows
-    /// the `imp` module reads `USERPROFILE` and `APPDATA` instead, so that test
-    /// compiles there but observes whatever the environment happens to hold.
-    /// This is the Windows counterpart. It cannot be run from a Mac, but it did
-    /// not exist at all, so there was nothing accidentally passing.
+    // See docs/platform-derived-paths.md — Windows regression test for
+    // paths going relative when USERPROFILE/APPDATA are unset.
     #[cfg(windows)]
     #[test]
     fn derived_paths_stay_absolute_without_userprofile_or_appdata() {

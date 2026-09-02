@@ -1,29 +1,22 @@
 //! The launch decision and the two steps every desktop launch performs first.
 //!
-//! This module is deliberately **portable and Win32/AppKit-free**: it deals in
-//! `&str` and closures, never in a platform handle. That is what lets both
-//! shells share it *and* lets the routing be unit-tested on any machine —
-//! `wants_gui` is a pure function of the argument vector, which is the only
-//! part of the launch path that can be wrong without a window to look at.
+//! Deliberately portable and Win32/AppKit-free: it deals in `&str` and
+//! closures, never a platform handle, so both shells can share it and
+//! `wants_gui` stays unit-testable on any machine. Callers pass the two
+//! settings *values* (`language`, `log_level`) rather than a `Settings`, so
+//! the binary and the lib never have to agree on a struct identity.
 //!
-//! It also keeps the `settings`/`engine` "must build anywhere" rule intact: no
-//! type from a platform shell crosses this boundary. Callers pass the two
-//! settings *values* (`language`, `log_level`) rather than a `Settings`, so the
-//! binary and the lib never have to agree on a struct identity.
+//! See docs/app-entry.md for the full portability and testability rationale.
 
 /// True when this invocation should open the desktop UI rather than the CLI.
 ///
-/// Two ways in, and only two:
-///
-/// * an explicit `freemkv gui` (works on every desktop platform), or
-/// * a bare launch of a *windowed* image — a macOS `.app` double-click, which
-///   passes no arguments. `windowed` is the caller's answer to "was I started
-///   as a window?"; on Windows the answer for `freemkv.exe` is always `false`,
-///   because the windowed image there is the separate `freemkv-gui.exe`, which
-///   does not route through here at all.
-///
-/// A bare launch from a terminal therefore falls through to the CLI, so
-/// `freemkv` alone still prints usage and exits 2 — the CLI contract, intact.
+/// Two ways in, and only two: an explicit `freemkv gui`, or a bare launch of
+/// a *windowed* image (e.g. a macOS `.app` double-click) with no arguments.
+/// `windowed` is the caller's answer to "was I started as a window?"; on
+/// Windows it is always `false`, since `freemkv-gui.exe` is a separate image
+/// that does not route through here. A bare terminal launch therefore falls
+/// through to the CLI, so `freemkv` alone still prints usage and exits 2.
+/// See docs/app-entry.md for more detail.
 pub fn wants_gui(args: &[String], windowed: bool) -> bool {
     if args.get(1).map(String::as_str) == Some("gui") {
         return true;
@@ -53,24 +46,13 @@ pub fn apply_locale(language: &str, system_locale: impl FnOnce() -> Option<Strin
 /// The GUI's diagnostic log, in the app-support dir.
 const GUI_LOG_NAME: &str = "log.txt";
 
-/// How large that log may already be at startup before it is started over.
-///
-/// `rolling::never` appends and never rotates, so without this the file is
-/// bounded by nothing but how long the user leaves Verbose/Debug on — every
-/// rip of every session, forever, in a directory they never look in.
+// How large that log may already be at startup before it is started over.
+// `rolling::never` never rotates on its own; see docs/app-entry.md.
 const GUI_LOG_CAP_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Start a fresh diagnostic log when the existing one has already grown past
-/// `cap`, instead of appending to it for another session.
-///
-/// This bounds growth ACROSS sessions, which is the unbounded part: a single
-/// session is still limited only by its own length, and `tracing-appender`
-/// offers no size-triggered rotation to fix that without hand-rolling a
-/// `Write` wrapper. The log is a debugging aid the user opted into and can
-/// delete, so the cheap bound is the proportionate one.
-///
-/// Best-effort by design: a log that cannot be removed must not stop the app
-/// from starting, or from logging.
+// Start a fresh diagnostic log when the existing one has already grown past
+// `cap`, instead of appending to it for another session. Best-effort: a log
+// that can't be removed must not stop the app. See docs/app-entry.md.
 fn trim_oversized_log(path: &std::path::Path, cap: u64) {
     if std::fs::metadata(path).is_ok_and(|m| m.len() > cap) {
         let _ = std::fs::remove_file(path);
@@ -117,11 +99,8 @@ pub fn init_gui_logging(log_level: &str) {
 mod tests {
     use super::{GUI_LOG_CAP_BYTES, trim_oversized_log, wants_gui};
 
-    /// The GUI's diagnostic log must not grow without end.
-    ///
-    /// `rolling::never` appends and never rotates, and nothing else truncated
-    /// the file, so leaving Verbose/Debug on accumulated every line of every
-    /// rip of every session in the app-support dir indefinitely.
+    // The GUI's diagnostic log must not grow without end; `rolling::never`
+    // never rotates on its own. See docs/app-entry.md.
     #[test]
     fn a_diagnostic_log_past_the_cap_is_started_over_not_appended_to() {
         let dir = std::env::temp_dir().join(format!(
