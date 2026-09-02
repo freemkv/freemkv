@@ -1,21 +1,14 @@
 //! TLS-capable keydb fetch for `freemkv update-keys`.
 //!
-//! Keydb save/update lives in `freemkv-keysources` (`KeydbSource::save` /
-//! `KeydbSource::update`), and the verify + atomic-write path is
-//! transport-agnostic: it takes the fetched bytes (or an injected fetch
-//! closure) and never speaks HTTP itself.
+//! `fetch(url)` retrieves keydb bytes over `http://` or `https://` via
+//! `ureq` and returns the raw response body; hand it to
+//! `freemkv_keysources::KeydbSource::save` for verify + atomic save.
 //!
-//! The CLI already depends on `ureq` (for the online key service), so the
-//! `update-keys` command supplies THIS module's `fetch` as the transport —
-//! handling BOTH `http://` and `https://` — and `KeydbSource::update` then
-//! verifies + atomically saves the raw bytes to the resolved keydb path. No new
-//! dependency.
+//! Hardened like the online key service: resolves + SSRF-guards the host,
+//! pins the validated addresses into the agent, follows zero redirects,
+//! and bounds the connect/read timeouts and the response body size.
 //!
-//! The fetch is hardened the same way as the online key service
-//! (`freemkv-keysources::online`): resolve + SSRF-guard the host immediately
-//! before the request and pin the validated addresses into the agent, follow
-//! zero redirects (so a public URL can't 30x to an internal host), and bound
-//! the connect/read timeouts and the response body size.
+//! See docs/keydb-fetch.md for the full design rationale.
 
 use libfreemkv::{Error, Result};
 use std::io::Read;
@@ -54,16 +47,9 @@ pub fn fetch(url: &str) -> Result<Vec<u8>> {
     read_capped(resp.into_body().into_reader(), MAX_BODY_BYTES).map_err(|e| cap_error(&e, url))
 }
 
-/// Which keydb error a capped read's failure is.
-///
-/// The two cases are not the same story: an over-large body is a statement
-/// about what the server sent (E8002 "empty or invalid — re-download it"),
-/// while a dead socket is a statement about the network (E8000 "cannot
-/// connect", i.e. retry). `read_capped` used to return the same value for
-/// both, and `fetch` forwarded it, so every mid-download drop was reported as
-/// corrupt content.
-///
-/// Separate from `fetch` because `fetch` needs the network and this does not.
+// Which keydb error a capped read's failure is: an over-large body is
+// E8002 (content), a dead socket is E8000 (network, retry). See
+// docs/keydb-fetch.md#cap_error.
 fn cap_error(e: &CapError, url: &str) -> Error {
     match e {
         CapError::TooLarge => Error::KeydbInvalid,
@@ -71,11 +57,8 @@ fn cap_error(e: &CapError, url: &str) -> Error {
     }
 }
 
-/// Why a capped read did not produce a body.
-///
-/// Two outcomes that a shared `Error::KeydbInvalid` could not tell apart —
-/// see [`cap_error`], which is the only place that turns them into the errors
-/// the user sees.
+// Why a capped read did not produce a body — the two outcomes [`cap_error`]
+// tells apart. See docs/keydb-fetch.md#caperror.
 #[derive(Debug)]
 enum CapError {
     /// The body ran past the cap. A statement about the response.
@@ -84,14 +67,9 @@ enum CapError {
     Io,
 }
 
-/// Read at most `cap` bytes, rejecting anything larger.
-///
-/// Split out of [`fetch`] because inside it this was untestable: `fetch` does
-/// real network I/O, and the module's own SSRF guard blocks every address a
-/// local test server could bind to (127.0.0.1, ::1), so no test could reach the
-/// cap end-to-end. The whole decompression-bomb defence was therefore
-/// unexercised — every mutant of the limit and its comparison survived. As a
-/// transport-free function it is directly testable with a `Cursor`.
+// Read at most `cap` bytes, rejecting anything larger. Split out of
+// [`fetch`] so the cap is directly testable without real network I/O — see
+// docs/keydb-fetch.md#read_capped.
 fn read_capped(r: impl std::io::Read, cap: u64) -> std::result::Result<Vec<u8>, CapError> {
     let mut buf = Vec::new();
     // One byte past the cap, so an over-cap body is DETECTABLE rather than
@@ -129,23 +107,14 @@ fn host_of(url: &str) -> String {
     authority.to_string()
 }
 
-/// Build a ureq agent that follows zero redirects (so a public URL can't
-/// 30x-redirect to an internal host) and pins DNS resolution to `pinned`
-/// (the addresses already validated by [`resolve_and_guard`]).
-/// ureq's `ResolvedSocketAddrs` is a fixed 16-slot array whose `push` writes
-/// straight into it, so a 17th address is an out-of-bounds panic. Keep the
-/// first 16 — all of them were validated by [`resolve_and_guard`].
+// Build a ureq agent that follows zero redirects and pins DNS resolution
+// to `pinned` (addresses already validated by [`resolve_and_guard`]).
+// `ResolvedSocketAddrs` is a fixed 16-slot array; keep only the first 16.
 const MAX_PINNED_ADDRS: usize = 16;
 
-/// The pinned-address resolver behind [`hardened_agent`], mirroring the one in
-/// `freemkv-keysources::online` (as this module's SSRF guard already mirrors
-/// that module's).
-///
-/// The agent MUST be built with `Agent::with_parts`: `Agent::new_with_config`
-/// compiles just as happily and then silently uses the DEFAULT resolver, which
-/// sends the request to live DNS and reopens the rebinding window. That fault
-/// has no symptom short of an actual attack, so it is pinned by
-/// `hardened_agent_connects_to_the_pinned_address_not_dns` below.
+// The pinned-address resolver behind [`hardened_agent`], mirroring the one
+// in `freemkv-keysources::online`. Must be wired via `Agent::with_parts`,
+// never `new_with_config` — see docs/keydb-fetch.md#hardened_agent.
 #[derive(Debug)]
 struct PinnedResolver(Vec<SocketAddr>);
 
@@ -183,14 +152,9 @@ fn hardened_agent(pinned: Vec<SocketAddr>) -> ureq::Agent {
     ureq::Agent::with_parts(config, DefaultConnector::new(), PinnedResolver(pinned))
 }
 
-// SSRF guard (mirrors freemkv-keysources::online): the keydb URL is operator-
-// supplied, and an attacker controlling its DNS could rebind to 169.254.169.254
-// (cloud metadata) or RFC1918. Resolve once, reject blocked IPs, pin addresses.
-
-/// True when `ip` must never be the target of an outbound keydb fetch. Blocks
-/// loopback, link-local (incl. 169.254.0.0/16 cloud metadata), RFC1918, CGNAT,
-/// broadcast, documentation/TEST-NET, multicast, unspecified, reserved, and
-/// the IPv4-mapped equivalents.
+// SSRF guard (mirrors freemkv-keysources::online): resolve once, reject
+// blocked IPs, pin addresses. `is_blocked_ip` covers loopback, link-local
+// (incl. cloud metadata), RFC1918, CGNAT, broadcast, TEST-NET, multicast.
 fn is_blocked_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -305,18 +269,9 @@ mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
-    /// The keydb BODY is bounded, not just its headers.
-    ///
-    /// The ureq 2 -> 3 port replaced `timeout_read` — which bounded every
-    /// socket read — with `timeout_recv_response`, which in ureq 3 bounds the
-    /// response HEADERS only. Nothing bounded the body, so a mirror that
-    /// answered 200 and then trickled bytes parked the caller forever: the
-    /// CLI's `update-keys` hung silently, and the GUI left "Update keydb now"
-    /// disabled for the life of the process, because the button is re-enabled
-    /// only when the worker posts a result it never posts.
-    ///
-    /// Read off the built config rather than pinned to source text, so it
-    /// asserts the value ureq will actually use.
+    // The keydb BODY is bounded, not just its headers (ureq 3's
+    // `timeout_recv_response` covers headers only). See
+    // docs/keydb-fetch.md#test-the_keydb_body_read_is_bounded_not_only_the_headers.
     #[test]
     fn the_keydb_body_read_is_bounded_not_only_the_headers() {
         let agent = hardened_agent(Vec::new());
@@ -357,12 +312,9 @@ mod tests {
         assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
     }
 
-    /// Each disjunct of the SSRF guard, isolated.
-    ///
-    /// The existing cases all trip SEVERAL disjuncts at once (a private address
-    /// is also not-public, a metadata address is also link-local), so mutating
-    /// any single `||` to `&&` still read true and survived. These addresses are
-    /// each blocked by EXACTLY ONE clause, so a broken clause shows up.
+    // Each disjunct of the SSRF guard, isolated — each case here trips
+    // exactly one clause, so a broken clause shows up. See
+    // docs/keydb-fetch.md#test-every_ssrf_disjunct_blocks_on_its_own.
     #[test]
     fn every_ssrf_disjunct_blocks_on_its_own() {
         let cases: &[(&str, &str)] = &[
@@ -383,11 +335,8 @@ mod tests {
         }
     }
 
-    /// The body-size cap — the decompression-bomb defence.
-    ///
-    /// Untestable while it lived inside `fetch`, which needs the network and
-    /// whose own SSRF guard blocks any address a test server could bind to. So
-    /// every mutant of the limit and its comparison survived the run.
+    // The body-size cap — the decompression-bomb defence. See
+    // docs/keydb-fetch.md#test-read_capped_admits_up_to_the_cap_and_rejects_past_it.
     #[test]
     fn read_capped_admits_up_to_the_cap_and_rejects_past_it() {
         // Exactly at the cap is fine — an off-by-one here would reject valid
@@ -426,15 +375,9 @@ mod tests {
         );
     }
 
-    /// A connection that dies mid-body is a TRANSPORT failure, not a verdict
-    /// about the content.
-    ///
-    /// Both outcomes used to leave `read_capped` as the same error, and `fetch`
-    /// forwards that one specially — so a reset, a read timeout or a dropped
-    /// socket told the user "the key database is empty or invalid, re-download
-    /// it" (E8002), a claim about the server's content, when the right answer
-    /// was "could not connect" (E8000) and "try again". The two cases must not
-    /// be the same value.
+    // A connection that dies mid-body is a TRANSPORT failure (E8000), not a
+    // verdict about the content (E8002) — the two must not collapse into
+    // one value. See docs/keydb-fetch.md#test-a_connection_that_dies_mid_body_is_not_an_invalid_keydb.
     #[test]
     fn a_connection_that_dies_mid_body_is_not_an_invalid_keydb() {
         struct Reset;
@@ -469,12 +412,9 @@ mod tests {
         }
     }
 
-    /// The CGNAT clause must not become over-broad.
-    ///
-    /// `octets[0] == 100 && (octets[1] & 0xc0) == 0x40` — mutating that `&&` to
-    /// `||` survived, because no test used a PUBLIC address whose second octet
-    /// happens to sit in the 64-127 range while the first octet is not 100.
-    /// Under `||` those ordinary addresses would silently start being refused.
+    // The CGNAT clause must not become over-broad — mutating its `&&` to
+    // `||` must not silently start blocking ordinary public addresses. See
+    // docs/keydb-fetch.md#test-the_cgnat_clause_does_not_block_ordinary_public_addresses.
     #[test]
     fn the_cgnat_clause_does_not_block_ordinary_public_addresses() {
         for ip in ["8.65.0.1", "1.100.0.1", "203.0.100.7"] {
@@ -529,15 +469,9 @@ mod tests {
         assert_eq!(host_of("https://user@example.org/k"), "example.org");
     }
 
-    /// The guard tests above prove which addresses are REJECTED. None of them
-    /// makes a connection, so all of them pass even if `hardened_agent` ignores
-    /// the pinned addresses entirely and resolves through live DNS — which is
-    /// precisely how a rebind gets back in, with no visible symptom.
-    ///
-    /// Pin the agent at a loopback listener this test owns, then ask for a host
-    /// that cannot resolve (`.test`, reserved by RFC 6761). Only a consulted
-    /// resolver can turn that name into a connection. Touches no network, and
-    /// bypasses `fetch` (whose guard blocks loopback by design).
+    // Proves `hardened_agent` actually consults the pinned resolver rather
+    // than falling back to live DNS (which would reopen the rebind window).
+    // See docs/keydb-fetch.md#test-hardened_agent_connects_to_the_pinned_address_not_dns.
     #[test]
     fn hardened_agent_connects_to_the_pinned_address_not_dns() {
         use std::io::Write as _;

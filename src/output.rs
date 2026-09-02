@@ -62,13 +62,9 @@ impl Output {
         self
     }
 
-    /// Whether a line tagged `level` prints at the configured verbosity.
-    ///
-    /// THE verbosity gate — `print`, `raw`, `raw_inline` and `blank` all
-    /// delegate here rather than each re-stating `self.level >= level`, so
-    /// there is one comparison to get right instead of four. `--quiet` is a
-    /// contract (a `stdio://` rip pipes the data on stdout and must not have
-    /// log lines interleaved), not a preference.
+    // Whether a line tagged `level` prints at the configured verbosity.
+    // THE single verbosity gate — `print`, `raw`, `raw_inline` and `blank` all
+    // delegate here instead of each re-stating `self.level >= level`.
     pub(crate) fn should_print(&self, level: Level) -> bool {
         self.level >= level
     }
@@ -181,10 +177,8 @@ fn intercept(_text: &str, _newline: bool) -> bool {
 mod tests {
     use super::{Level, Output};
 
-    /// `output.rs` is not formatting — it is the gate that decides whether a
-    /// line prints at all, which is the quiet/normal/verbose contract. It had
-    /// no tests of its own; the only external check exercised ONE point of the
-    /// 3×3 grid through a whole subprocess.
+    // Exercises the full quiet/normal/verbose 3x3 grid directly; previously
+    // only one point of it was checked, and only via a whole subprocess.
     #[test]
     fn the_verbosity_grid_is_exactly_configured_greater_or_equal_to_line() {
         // (configured Output, line Level, prints?)

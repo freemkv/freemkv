@@ -111,22 +111,8 @@ fn r(x: f64, y: f64, w: f64, h: f64) -> NSRect {
 
 // ── stub disc model (stands in for engine::scan) ──────────────────────────
 
-/// The IDENTITY of a full row list — not its tick state — so `render` can tell
-/// "did the tree actually change?" without a full `reloadData`.
-///
-/// Mirrors `windows.rs`'s `rows_sig`, which the Windows shell already uses to
-/// skip `rebuild_tree` on an unchanged 200 ms tick; this shell had no such
-/// guard at all, so a running rip (which ticks the Progress page at 5 Hz)
-/// forced a full outline reload and re-expand of every root every 200 ms for
-/// the life of the rip, even though the titles tree is not the page on
-/// screen and its rows never move while a rip is in flight.
-///
-/// Tick state is deliberately EXCLUDED, exactly as on Windows. A rebuild is
-/// `reloadData` + re-expand + `scrollPoint(first_visible_row)`, so folding
-/// `r.check` in here made every checkbox click throw the outline back to the
-/// top of the list — deselecting extras on a 100-title disc meant re-finding
-/// your place after each click. A tick change is applied in place instead, by
-/// [`TitlesSource::sync_check_states`].
+// Row-list identity (excludes tick state) so render() can detect a real
+// tree change vs. a tick-only update. See docs/mac-shell.md — rows_sig
 fn rows_sig(rows: &[crate::ui::Row]) -> String {
     rows.iter()
         .map(|r| format!("{}|{}|{}|{}", r.index, r.depth, r.type_s, r.desc))
@@ -147,14 +133,9 @@ enum QuitChoice {
     Stay,
 }
 
-/// Does this close/quit have to ask first?
-///
-/// `already_confirmed` is what keeps ONE alert per departure. The window-close
-/// button and ⌘Q now share this path, and closing the last window is itself a
-/// quit — without the latch, "Stop & Quit" would be answered, the window would
-/// close, and the SAME question would be asked again by
-/// `applicationShouldTerminate:`, because `Cmd::Cancel` only signals the worker
-/// and `running()` stays true until it winds down.
+// `already_confirmed` keeps ONE alert per departure: window-close and
+// Cmd+Q share this path, and closing the last window is itself a quit,
+// so without the latch the same question would be asked twice.
 fn needs_rip_confirmation(running: bool, already_confirmed: bool) -> bool {
     running && !already_confirmed
 }
@@ -170,13 +151,9 @@ fn quit_choice(response: isize) -> QuitChoice {
     }
 }
 
-/// Put one tick box in a given state.
-///
-/// One place, because the checkbox is now written twice: once when a cell is
-/// built (`cell_for`) and once when an existing cell is refreshed without a
-/// rebuild (`sync_check_states`). `allowsMixedState` has to move with the
-/// state — an NSButton that no longer allows mixed silently clamps -1 to 1.
-///
+// One place to set a tick box: written by both `cell_for` and
+// `sync_check_states`. `allowsMixedState` must move with the state, or
+// an NSButton that no longer allows mixed silently clamps -1 to 1.
 fn set_check(b: &NSButton, state: crate::ui::Check) {
     b.setAllowsMixedState(state == crate::ui::Check::Mixed);
     b.setState(match state {
@@ -359,15 +336,9 @@ impl TitlesSource {
         Some(unsafe { Retained::cast_unchecked(tf) })
     }
 
-    /// Repaint the tick boxes in place, leaving the rows — and therefore the
-    /// user's expansion, selection and SCROLL POSITION — untouched.
-    ///
-    /// This is what runs on an ordinary redraw, including the one that follows
-    /// every checkbox click: the row identities did not change, only their
-    /// ticks, so there is nothing to reload. The Windows shell has had this
-    /// split since it grew `rows_sig` (`sync_tree_states`); this shell instead
-    /// folded the tick state into its signature and rebuilt, which meant
-    /// `scrollPoint(first_visible_row)` on every click.
+    // Repaint the tick boxes in place, leaving the rows — and therefore the
+    // user's expansion, selection and scroll position — untouched. Runs on
+    // every ordinary redraw; see docs/mac-shell.md — sync_check_states.
     fn sync_check_states(&self, rows: &[crate::ui::Row]) {
         // The data source must serve the CURRENT ticks even when no reload
         // happens: a row scrolled into view after this point is built by
@@ -714,12 +685,9 @@ define_class!(
             self.act(crate::ui::Cmd::Settings);
         }
 
-        /// Cancel: close the Settings window and keep NOTHING.
-        ///
-        /// Deliberately does not call `read_prefs_form`, does not touch the
-        /// running `App`, and does not save. `settings` is only mutated by
-        /// `read_prefs_form`, so simply not calling it leaves the stored copy
-        /// exactly as the window found it.
+        // Cancel: close Settings and keep NOTHING. Deliberately skips
+        // `read_prefs_form` (the only mutator of `settings`), so the stored
+        // copy is left exactly as the window found it.
         #[unsafe(method(onCancelPrefs:))]
         fn on_cancel_prefs(&self, _s: Option<&AnyObject>) {
             if let Some(w) = self.ivars().win_prefs.borrow().as_ref() {
@@ -754,12 +722,9 @@ define_class!(
             }
         }
 
-        /// One language ticked or unticked in a preferred-languages picker.
-        ///
-        /// The whole set mutation is `ui::lang_toggle`, so a click means the
-        /// same thing here as on Windows and neither shell owns the rule. The
-        /// picker is not committed to `settings` yet — Cancel must still be
-        /// able to throw the edit away.
+        // One language ticked/unticked in a preferred-languages picker. The
+        // set mutation is `ui::lang_toggle`, shared with Windows; the picker
+        // is not yet committed to `settings`, so Cancel can still discard it.
         #[unsafe(method(onToggleLang:))]
         fn on_toggle_lang(&self, s: Option<&AnyObject>) {
             let mtm = MainThreadMarker::new().unwrap();
@@ -783,10 +748,9 @@ define_class!(
             }
         }
 
-        /// The interface-language dropdown fires this the instant a language is
-        /// picked. The actual switch (which rebuilds — and so destroys — this
-        /// very Settings window) is deferred one runloop tick, because tearing
-        /// down the popup mid-action would crash AppKit.
+        // Fires the instant a language is picked. The actual switch (which
+        // rebuilds, and so destroys, this Settings window) is deferred one
+        // runloop tick, because tearing down the popup mid-action crashes AppKit.
         #[unsafe(method(onPickLanguage:))]
         fn on_pick_language(&self, _s: Option<&AnyObject>) {
             let mtm = MainThreadMarker::new().unwrap();
@@ -1165,26 +1129,18 @@ define_class!(
 );
 
 impl Controller {
-    /// Borrow the model mutably. Every mutation goes through the core.
-    /// Mutate the core model and REPAINT. This is the single choke-point for
-    /// every state change, so rendering here means no event handler can ever
-    /// mutate state and forget to redraw (the "I said something but the log
-    /// didn't update" class of bug). The mutable borrow is released before
-    /// `render()` (which takes its own immutable borrow), so there's no
-    /// re-entrancy — and `render()` never calls back into `app_mut`.
+    // Mutate the core model and REPAINT. Single choke-point for every state
+    // change, so no handler can mutate state and forget to redraw. The
+    // mutable borrow is released before `render()`'s own immutable borrow.
     fn app_mut<R>(&self, f: impl FnOnce(&mut crate::ui::App) -> R) -> R {
         let r = f(&mut self.ivars().app.borrow_mut());
         self.render();
         r
     }
 
-    /// The one place this shell asks "a rip is running — really quit?".
-    ///
-    /// Shared by the window's close button (`windowShouldClose:`) and by every
-    /// route into `terminate:` — ⌘Q, File ▸ Quit, the Dock menu, a logout —
-    /// through `applicationShouldTerminate:`. Answering here rather than at
-    /// each call site is the point: the confirmation used to live only on the
-    /// close path, so ⌘Q killed a rip without a word.
+    // The one place this shell asks "a rip is running — really quit?".
+    // Shared by the window close button and every route into `terminate:`
+    // (Cmd+Q, File > Quit, Dock, logout) via `applicationShouldTerminate:`.
     fn confirm_quit(&self) -> QuitChoice {
         let running = self.ivars().app.borrow().running();
         if !needs_rip_confirmation(running, self.ivars().quit_confirmed.get()) {
@@ -1224,17 +1180,9 @@ impl Controller {
         choice
     }
 
-    /// Save `Settings` to disk and tell the operator whether it worked.
-    ///
-    /// This crate's dominant defect this round was exactly this policy
-    /// implemented twice: OK (`onClosePrefs:`) reported a failed save
-    /// (`gui.log.settings_save_error`), and the language-dropdown path
-    /// (`onApplyLanguage:`) saved the SAME struct a few lines away with a bare
-    /// `let _ =` that dropped the error on the floor. A disk-full or
-    /// permissions failure there looked identical to success — the operator
-    /// picks a language, watches the UI relocalize, and has no way to know
-    /// the keydb path/keyserver token/dest dir edited in the same session
-    /// never reached gui-settings.json. One policy, one call site now.
+    // Save `Settings` to disk and tell the operator whether it worked.
+    // One policy, one call site — see docs/mac-shell.md —
+    // save_settings_reporting_error.
     fn save_settings_reporting_error(&self) {
         match self.ivars().settings.borrow().save() {
             Ok(()) => self.app_mut(|a| {
@@ -1252,23 +1200,16 @@ impl Controller {
         };
     }
 
-    /// The shell's entire job: hand the command to the core, perform the
-    /// platform effects it asks for, redraw. No decisions here.
+    // The shell's entire job: hand the command to the core, perform the
+    // platform effects it asks for, redraw. No decisions here.
     fn act(&self, cmd: crate::ui::Cmd) {
         let effects = self.app_mut(|a| a.dispatch(cmd));
         self.perform(effects);
     }
 
-    /// Open the disc in the drive. The decision (which drive, what to log) is
-    /// the core's — see `ui::App::disc_source`; this is only the two-step
-    /// sequencing the scan needs.
-    ///
-    /// Two `app_mut` calls, not one, ON PURPOSE: `app_mut` repaints, so the
-    /// "Opening …" line reaches the log pane BEFORE `open` starts the scan,
-    /// which blocks the main thread for as long as the drive takes to spin up
-    /// and the keys take to resolve.
-    ///
-    /// `announce_missing` is false for the launch probe — see `run`.
+    // Open the disc; drive/log decisions live in `ui::App::disc_source`. Two
+    // `app_mut` calls ON PURPOSE: it repaints, so "Opening …" reaches the log
+    // before `open` blocks scanning. `announce_missing` is false for the probe.
     fn open_disc(&self, announce_missing: bool) {
         let Some(url) = self.app_mut(|a| a.disc_source(announce_missing)) else {
             return;
@@ -1366,15 +1307,9 @@ impl Controller {
         }
     }
 
-    /// Record that a keydb download is (or is no longer) in flight, and reflect
-    /// it on the "Update keydb now" button.
-    ///
-    /// The FLAG is the guard; the disabled button is only how the guard is
-    /// shown. It used to be the other way round — the button's enabled state
-    /// was the only record that a download was running, so closing Settings
-    /// and reopening it (`build_prefs` builds a fresh, enabled button) handed
-    /// the operator a live button back and a second click spawned a second
-    /// thread writing the same keydb file as the first.
+    // Record that a keydb download is (or isn't) in flight, and reflect it on
+    // the button. The FLAG is the guard; the disabled button is only how it's
+    // shown — see docs/mac-shell.md — set_keydb_updating.
     fn set_keydb_updating(&self, updating: bool) {
         self.ivars().keydb_updating.set(updating);
         if let Some(b) = self.ivars().keydb_btn.borrow().as_ref() {
@@ -1691,10 +1626,9 @@ impl Controller {
         }
     }
 
-    /// Apply a language change live: rebuild the menu bar and the main window's
-    /// content in the newly-active locale (which the caller has already swapped
-    /// in via `strings::set_locale`), then re-render from the core so the open
-    /// disc, log, and selection all come back — just in the new language.
+    // Apply a language change live: rebuild the menu bar and window content
+    // in the newly-active locale (already swapped via `strings::set_locale`),
+    // then re-render so the open disc, log, and selection come back.
     fn relocalize(&self, mtm: MainThreadMarker) {
         // Menu bar: build_menus installs a fresh main menu, replacing the old.
         let app = NSApplication::sharedApplication(mtm);
@@ -1753,12 +1687,9 @@ impl Controller {
         *self.ivars().drain.borrow_mut() = Some(t);
     }
 
-    /// Re-title the View ▸ log menu item to whatever the `View` says it should
-    /// read now.
-    ///
-    /// Found by SELECTOR, not by position or by its current title: the menu is
-    /// rebuilt on a live language change, and matching on the English text
-    /// would silently stop working in every other locale.
+    // Re-title the View > log menu item. Found by SELECTOR, not position or
+    // current title: the menu is rebuilt on a live language change, so
+    // matching English text would silently stop working in other locales.
     fn sync_log_menu_title(&self, title: &str) {
         let mtm = MainThreadMarker::new().unwrap();
         let app = NSApplication::sharedApplication(mtm);
@@ -1829,11 +1760,9 @@ impl Controller {
     }
 }
 
-/// The item titles the format popup's menu WILL report once it is built from
-/// `groups`, in order.
-///
-/// Pure, so the one thing `sync_formats`' rebuild guard depends on can be
-/// checked without a window server.
+// Item titles the format popup's menu WILL report once built from `groups`,
+// in order. Pure, so `sync_formats`' rebuild guard can be checked without a
+// window server.
 fn popup_item_titles(groups: &[Vec<&'static str>]) -> Vec<String> {
     let mut titles = Vec::new();
     for (gi, g) in groups.iter().enumerate() {
@@ -1849,11 +1778,8 @@ fn popup_item_titles(groups: &[Vec<&'static str>]) -> Vec<String> {
 
 // ── widget helpers ────────────────────────────────────────────────────────
 
-/// Which colour bucket a log line belongs in: 0 = notice, 1 = detail,
-/// 2 = result. A separate function from `log_append` so the mapping can be
-/// checked without a window server — the point is that a Notice never shares a
-/// bucket with an ordinary line, since colour is the only thing marking a
-/// problem in this shell.
+// Colour bucket a log line belongs in: 0 notice, 1 detail, 2 result.
+// Separate from `log_append` so the mapping is checkable headlessly.
 fn log_colour(kind: crate::ui::LogKind) -> u8 {
     match kind {
         crate::ui::LogKind::Notice => 0,
@@ -1862,13 +1788,9 @@ fn log_colour(kind: crate::ui::LogKind) -> u8 {
     }
 }
 
-/// Append one colour-coded line to a log text view.
-///
-/// kind: 0 = notice (system red), 1 = detail (system green), 2 = result
-/// (label colour — black on a light appearance, white on a dark one). These
-/// are the semantic system colours, which follow the user's appearance and
-/// accessibility settings; the fixed maroon/olive/black this comment used to
-/// name were replaced precisely because they did not.
+// Append one colour-coded line. kind: 0 notice (system red), 1 detail
+// (system green), 2 result (label colour). Semantic system colours follow
+// appearance/accessibility settings — fixed maroon/olive/black did not.
 fn log_append(tv: &NSTextView, line: &str, kind: u8) {
     unsafe {
         let Some(store) = tv.textStorage() else {
@@ -3083,10 +3005,8 @@ pub fn run() {
 
 // ── Preferences ───────────────────────────────────────────────────────────
 
-/// The option table for a settings dropdown — see [`crate::ui::enum_options`],
-/// which owns it so the two shells cannot offer different option sets. An empty
-/// result means "not an enum popup" (a free-form field, or the format popup,
-/// which carries separator rows and so maps by title rather than by index).
+// Option table for a settings dropdown, owned by `crate::ui::enum_options`
+// so the two shells can't drift apart. Empty means "not an enum popup".
 use crate::ui::enum_options;
 
 /// One tickable language row. `representedObject` carries the ISO code, so the
@@ -3108,11 +3028,9 @@ fn lang_menu_item(mtm: MainThreadMarker, code: &str, c: &Controller) -> Retained
     mi
 }
 
-/// The stored preference a picker currently holds, kept on its title item.
-///
-/// The control IS the state, exactly as a text field was: nothing shadows it in
-/// Rust, so there is no second copy to fall out of step, and Cancel discards
-/// the edits for free because nothing outside the window was ever touched.
+// Stored preference a picker currently holds, kept on its title item. The
+// control IS the state: nothing shadows it in Rust, so Cancel discards
+// edits for free because nothing outside the window was ever touched.
 fn lang_picker_value(p: &NSPopUpButton) -> String {
     p.menu()
         .and_then(|m| m.itemAtIndex(0))
@@ -3122,12 +3040,9 @@ fn lang_picker_value(p: &NSPopUpButton) -> String {
         .unwrap_or_default()
 }
 
-/// Show `stored` in a picker: button title, checkmarks, and the value the next
-/// toggle (and OK) will read back.
-///
-/// Codes that are not on the offered list get a row appended — a language the
-/// user already had stored must stay visible AND removable, not become a value
-/// they can see in the title but never untick.
+// Show `stored` in a picker: title, checkmarks, and the value the next
+// toggle (and OK) reads back. Codes not on the offered list get a row
+// appended, so a stored language stays visible AND removable.
 fn set_lang_picker(mtm: MainThreadMarker, p: &NSPopUpButton, stored: &str, c: &Controller) {
     let Some(menu) = p.menu() else { return };
     let selection = crate::ui::lang_selection(stored);
@@ -3255,16 +3170,9 @@ impl Rows {
         self.y -= 30.0;
     }
 
-    /// A multi-select language row: one pull-down listing every offered
-    /// language with a checkmark against the chosen ones.
-    ///
-    /// Registered in `self.langs`, NOT `self.popups` — see the `pf_langs`
-    /// comment on `Ivars`. It carries the whole stored preference string, not
-    /// a single selected row, so `read_prefs_form` must treat it differently.
-    ///
-    /// It replaced a free-text box that asked the user to know ISO codes; the
-    /// list is the only place the codes are spelled, so a typo can no longer
-    /// silently disable a language preference.
+    // Multi-select language row: pull-down listing every offered language
+    // with checkmarks. Registered in `self.langs`, not `self.popups` — see
+    // docs/mac-shell.md — Rows::langs.
     fn langs(&mut self, mtm: MainThreadMarker, key: &str, s: &str, w: f64, c: &Controller) {
         self.label(mtm, s);
         // Pull-down, not pop-up: a pop-up's title tracks the selected row, but
@@ -3294,18 +3202,9 @@ impl Rows {
         self.langs.push((key.to_string(), p));
         self.y -= 30.0;
     }
-    /// A plain text row.
-    ///
-    /// It MUST register `(key, control)` in `self.fields`, exactly as `path`
-    /// below does. That list is the only thing `read_prefs_form` iterates and
-    /// the only thing the populate loop writes into, so a row missing from it
-    /// is write-only in both directions: it displays the hardcoded literal
-    /// passed at the call site rather than what is on disk, and OK discards
-    /// whatever the user typed. The key used to be `_key` here while `path`
-    /// pushed it — one form-row policy, two implementations, one of them
-    /// hardened — which silently dropped every free-form setting on this shell,
-    /// including `abort_lost_secs` (the abort-for-loss threshold) and
-    /// `max_passes` (which decides whether recovery runs at all).
+    // A plain text row. MUST register `(key, control)` in `self.fields`: it
+    // is the only thing `read_prefs_form` and the populate loop use, so a
+    // row missing from it is write-only. See docs/mac-shell.md — Rows::field.
     fn field(&mut self, mtm: MainThreadMarker, key: &str, s: &str, val: &str, w: f64) {
         self.label(mtm, s);
         let f = {
@@ -3323,13 +3222,9 @@ impl Rows {
         self.y -= 30.0;
     }
 
-    /// Same contract as `field`, but for a secret (the keyserver bearer
-    /// token): an `NSSecureTextField` masks its contents with dots, like every
-    /// password field in the OS. Without this, `keyserver_token` sat in a
-    /// plain `NSTextField` — fully legible during screen-sharing, presenting,
-    /// or a screen recording. `NSSecureTextField` subclasses `NSTextField`, so
-    /// it slots into the same `self.fields` list `read_prefs_form` and the
-    /// populate loop already drive.
+    // Same contract as `field`, but for a secret (keyserver bearer token):
+    // an `NSSecureTextField` masks its contents, unlike the plain
+    // `NSTextField` this used to be. See docs/mac-shell.md — field_secure.
     fn field_secure(&mut self, mtm: MainThreadMarker, key: &str, s: &str, val: &str, w: f64) {
         self.label(mtm, s);
         let f = {
@@ -3482,8 +3377,7 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
     };
 
     // Every control below maps to something the engine or key layer actually
-    // consumes. Anything that could not reach real code was removed rather
-    // than left as a switch that does nothing.
+    // consumes; dead switches were removed rather than left as no-ops.
 
     // ── Output ── engine Job.dest + the GUI's own naming
     let mut t = Rows::new(mtm, tw, th, 250.0);
@@ -4742,24 +4636,8 @@ mod tests {
         assert_eq!(cmd_for(sel!(onPickLanguage:)), None);
     }
 
-    /// The drag-and-drop overlay must not be leaked once per language switch.
-    ///
-    /// `install_drop_view` ended with `std::mem::forget`, which was defensible
-    /// only while it ran once at launch. It is also called by `relocalize`,
-    /// which re-adds the overlay after tearing the window content down — so
-    /// every language switch built a fresh `DropView`, handed AppKit its own
-    /// retain via `addSubview`, and then withheld ours forever. `relocalize`'s
-    /// teardown releases AppKit's retain and not that one, so each switch left
-    /// a whole detached view alive for the life of the process.
-    ///
-    /// Nothing needs the forgotten handle: the superview's retain keeps the
-    /// view alive exactly as long as it is installed, which is the lifetime
-    /// that was wanted. Parking it in an ivar instead would build a reference
-    /// cycle — `DropView` holds a `Retained<Controller>`.
-    ///
-    /// Scoped to this function: the two `mem::forget`s before `app.run()` are
-    /// deliberate (nothing returns from `run`), so a file-wide ban would be
-    /// wrong. Needle assembled at run time so it cannot match itself.
+    // The drag-and-drop overlay must not be leaked once per language switch.
+    // See docs/mac-shell.md — drop overlay leak test.
     #[test]
     fn the_drop_overlay_is_not_leaked_on_every_language_switch() {
         let src = include_str!("mac.rs");
@@ -4778,21 +4656,8 @@ mod tests {
         );
     }
 
-    /// A widget list `build_ui` PUSHES into must be emptied by `build_ui`.
-    ///
-    /// `build_ui` runs twice: once at launch, and again on every language
-    /// switch, where `relocalize` tears the window content down and rebuilds
-    /// it. Every other widget ivar is ASSIGNED (`*…borrow_mut() = Some(x)`), so
-    /// a rebuild replaces it. `bar2_row` is the one that is `push`ed, and
-    /// nothing cleared it — so each language switch appended three more handles
-    /// to views already removed from the window, keeping them alive for the
-    /// life of the process and growing the list `render()` walks at 5 Hz.
-    ///
-    /// `relocalize` already resets `tree_sig` for exactly this reason. The
-    /// clear belongs in `build_ui`, next to the pushes, so a future third
-    /// caller is correct without knowing to do it.
-    ///
-    /// Needles assembled at run time so this cannot match its own text.
+    // A widget list `build_ui` PUSHES into must be emptied by `build_ui`.
+    // See docs/mac-shell.md — widget-list clear test.
     #[test]
     fn every_widget_list_build_ui_pushes_into_is_cleared_there_first() {
         let src = include_str!("mac.rs");
@@ -4834,23 +4699,8 @@ mod tests {
         }
     }
 
-    /// Every action this shell defines must be reachable from the UI.
-    ///
-    /// The complement of `the_menu_reaches_every_command_the_core_defines`,
-    /// which checks that every core command has a selector. This checks the
-    /// other direction: a selector nothing targets is a handler that cannot
-    /// run. `onOpenFolder:` sat here fully implemented and wired to no menu
-    /// item, button or timer — and, being absent from `cmd_for`, it would also
-    /// have had NO rip-in-progress guard the moment anyone did wire it.
-    ///
-    /// Restricted to the `on…:` actions this file owns. AppKit's own callbacks
-    /// (`applicationDidFinishLaunching:`, `outlineView:…`, `draggingEntered:`)
-    /// are invoked by the framework and named by no `sel!` of ours.
-    ///
-    /// The needle is assembled at run time: written out whole it would match
-    /// this test's own text through `include_str!`, and a source-inspection
-    /// test that can only ever find itself is the tautology this crate has
-    /// already shipped once.
+    // Every action this shell defines must be reachable from the UI.
+    // See docs/mac-shell.md — orphaned-selector test.
     #[test]
     fn every_action_selector_this_shell_defines_is_wired_to_something() {
         let src = include_str!("mac.rs");
@@ -4881,22 +4731,8 @@ mod tests {
         );
     }
 
-    /// The format popup's rebuild guard has to compare like with like.
-    ///
-    /// `sync_formats` asks whether the popup already shows the wanted formats
-    /// and returns early if so, because rebuilding drops an open menu under the
-    /// user's cursor mid-click. It compared `NSPopUpButton::itemTitles()` —
-    /// which INCLUDES the separator items, each reporting an empty title —
-    /// against a flat list of the group labels with no separators in it. With
-    /// two groups the lengths can never match, and `output_formats` returns two
-    /// groups at minimum (`[titles, meta]`) and three for a disc. So the guard
-    /// never once fired: every `render()`, five times a second for a whole rip,
-    /// rebuilt the menu it exists to protect.
-    ///
-    /// The empty-string expectation is not read off our own builder — it is
-    /// what AppKit reports. A separator item's `title` is `""`, so a menu of
-    /// [item, separator, item] answers `itemTitles` with three entries, the
-    /// middle one empty.
+    // The format popup's rebuild guard has to compare like with like.
+    // See docs/mac-shell.md — format popup rebuild-guard test.
     #[test]
     fn the_format_popup_comparison_counts_the_separators_appkit_reports() {
         let titles = vec!["Selected titles → MKV", "Selected titles → M2TS"];
@@ -5282,22 +5118,8 @@ mod tests {
         }
     }
 
-    // STOPGAP, NOT COVERAGE: whether AppKit calls back on ⌘Q needs a live
-    // `NSApplication`, which this crate cannot stand up in a unit test.
-    // Source inspection only; fails if any of the three delegate pieces is removed.
-    /// The AppKit language pickers own no parsing of their own.
-    ///
-    /// The Win32 shell has had this pin since the pickers were unified
-    /// (`windows.rs::the_language_pickers_own_no_parsing_source_inspection_only`);
-    /// this shell, which implements the same three pickers against the same
-    /// `ui::lang_*` rules, had nothing at all — so a hand-rolled second parser
-    /// here would compile, pass every test, and drift from the other shell
-    /// exactly as the two halves of this feature did before `ui::lang_*`
-    /// existed.
-    ///
-    /// Source inspection: proving the menu really ticks needs a live
-    /// `NSPopUpButton` and a run loop. What can be checked is the thing most
-    /// likely to go wrong — the set logic being reimplemented in this file.
+    // The AppKit language pickers own no parsing of their own.
+    // See docs/mac-shell.md — language-picker parsing test.
     #[test]
     fn the_language_pickers_own_no_parsing_source_inspection_only() {
         let src = include_str!("mac.rs");
@@ -5340,20 +5162,8 @@ mod tests {
         }
     }
 
-    /// "Stop & Quit" has to STOP before it quits.
-    ///
-    /// `Cmd::Cancel` only SIGNALS the worker — the flag is read at the next
-    /// frame boundary — and `applicationShouldTerminate:` answered
-    /// `TerminateNow` the instant the alert was dismissed. AppKit then calls
-    /// `exit()`, so a worker that was mid-write (flushing a cluster, writing
-    /// the MKV trailer) was killed by the process teardown instead of reaching
-    /// the graceful "cancelled — partial output kept" path that CLOSES the
-    /// sink. The confirmation dialog exists to protect a rip in progress, and
-    /// it raced its own protection.
-    ///
-    /// Source inspection: driving `confirm_quit` needs a live `NSAlert` and a
-    /// real run loop. The waiting itself is unit-tested in
-    /// `engine::await_worker_exit`.
+    // "Stop & Quit" has to STOP before it quits.
+    // See docs/mac-shell.md — stop-and-quit worker-wait test.
     #[test]
     fn stop_and_quit_waits_for_the_worker_before_letting_the_process_go() {
         let src = include_str!("mac.rs");
@@ -5380,6 +5190,9 @@ mod tests {
         );
     }
 
+    // STOPGAP, NOT COVERAGE: whether AppKit calls back on ⌘Q needs a live
+    // `NSApplication`, which this crate cannot stand up in a unit test.
+    // Source inspection only; fails if any of the three delegate pieces is removed.
     #[test]
     fn the_app_has_a_delegate_that_gates_quit_and_ends_the_process_source_inspection_only() {
         let src = include_str!("mac.rs");

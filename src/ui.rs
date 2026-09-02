@@ -105,13 +105,9 @@ fn lang_filter(tags: &[String]) -> freemkv_engine::StreamFilter {
     }
 }
 
-/// Resolve one class's PIDs, falling back to "keep everything in this class"
-/// when the preference matched nothing that IS there.
-///
-/// `all` is every PID of the class present on the title. `Only([])` from the
-/// engine means the requested languages are not on this disc for this class —
-/// the user's chosen rule is to fall back to today's behaviour for that
-/// category rather than ship a file missing the whole track class.
+// Resolve one class's PIDs, falling back to "keep everything in this class"
+// when the preference matched nothing that IS there.
+// See docs/ui.md — class_or_fallback fallback rule
 fn class_or_fallback(f: freemkv_engine::PidFilter, all: &[u16]) -> Vec<u16> {
     match f {
         freemkv_engine::PidFilter::All => all.to_vec(),
@@ -120,16 +116,9 @@ fn class_or_fallback(f: freemkv_engine::PidFilter, all: &[u16]) -> Vec<u16> {
     }
 }
 
-/// Which of ONE title's stream PIDs the preferences keep.
-///
-/// The language matching is `freemkv-engine`'s: the rows are folded back into a
-/// synthetic `DiscTitle` and handed to `resolve_stream_selection_forced`, so the
-/// GUI has no second language matcher to drift from the one the rip uses — name
-/// and 639-1/2T/2B/3 forms all resolve exactly as `-a`/`-s` do on the CLI.
-///
-/// The three classes are resolved in three calls, one per set, so each falls
-/// back independently: German audio missing must not drag the subtitle choice
-/// down with it, and an unparseable tag in one box cannot disturb the other two.
+// Which of ONE title's stream PIDs the preferences keep.
+// Reuses freemkv-engine's language matcher via resolve_stream_selection_forced.
+// See docs/ui.md — preferred_pids per-class fallback
 fn preferred_pids(
     rows: &[&crate::engine::Row],
     prefs: &LangPrefs,
@@ -240,44 +229,23 @@ pub struct Tree {
     pub roots: Vec<usize>,
 }
 
-/// Does the minimum-title-length filter keep this title?
-///
-/// ONE predicate, used both to decide which rows the tree shows and which
-/// titles the "Default selection" setting may tick. They were two expressions
-/// before (`d > 0.0 && d < min_eff` for the rows, `d >= min_eff` for the
-/// selection) and disagreed in both directions: a title of unknown length
-/// (`0.0` — "not timed", not "zero seconds") was shown but could not be
-/// ticked, and a filtered-out short title could be ticked but not shown.
-///
-/// `min_eff` is the EFFECTIVE minimum: `from_scan` drops it to 0 when no title
-/// clears it, because hiding every title is never right.
+// Does the minimum-title-length filter keep this title? ONE predicate shared
+// by row display and "Default selection" ticking, so they can't disagree.
+// See docs/ui.md — title_visible
 fn title_visible(duration_secs: f64, min_eff: f64) -> bool {
     !(duration_secs > 0.0 && duration_secs < min_eff)
 }
 
 impl Tree {
-    /// Build from an engine scan. An empty scan yields an empty tree — the
-    /// shell shows its empty page rather than inventing rows.
+    /// Build from an engine scan. An empty scan yields an empty tree.
     ///
-    /// `sel_mode` is the "Default selection" setting ("Main film only" / "All
-    /// titles" / "Longest title") — it decides which titles start checked.
-    /// `min_secs` is the "Minimum title length" setting: titles shorter than it
-    /// (with a known, non-zero duration) are hidden from the list, since they
-    /// are almost always menus and stings — but never so aggressively that the
-    /// list would be empty. Canonical `title_idx` values are preserved on the
-    /// rows that survive; the engine selects by those, not by tree position.
-    ///
-    /// `prefs` are the user's preferred-language defaults: `sel_mode` decides
-    /// which TITLES start checked, and `prefs` then narrows which of a checked
-    /// title's STREAM rows start checked. Nothing else changes — the rip request
-    /// is still built from the checkboxes, so every choice made here is visible
-    /// in the tree and can be overridden by hand.
-    ///
-    /// An empty `prefs` ([`LangPrefs::default`]) is exactly the pre-preference
-    /// behaviour (every stream of a checked title checked), and so is a category
-    /// whose languages match nothing on this title — see [`preferred_pids`]. A
-    /// disc must never rip silently without audio because the preferred language
-    /// is not on it.
+    /// `sel_mode` is the "Default selection" setting; it decides which
+    /// titles start checked. `min_secs` hides titles shorter than it (known,
+    /// non-zero duration), but never so aggressively the list is empty.
+    /// `prefs` narrows which of a checked title's STREAM rows start checked;
+    /// empty `prefs` or a category matching nothing on this title keeps
+    /// every stream checked — see [`preferred_pids`].
+    /// See docs/ui.md — Tree::from_scan.
     pub fn from_scan(sc: &Scanned, sel_mode: &str, min_secs: f64, prefs: &LangPrefs) -> Self {
         // Titles present in the scan, with durations, for the filter + defaults.
         let titles: Vec<(usize, f64)> = sc
@@ -388,22 +356,12 @@ impl Tree {
     /// Tick state for a row: the row's OWN flag decides `Off`, its checkable
     /// children decide `On` vs `Mixed`.
     ///
-    /// The two halves answer two different questions, and the box must not let
-    /// one answer the other's. For a title the own flag is "rip this title" —
-    /// it is literally what [`Tree::ticked_titles`] collects — while the
-    /// children are "which of its tracks". Folding ONLY the children made the
-    /// glyph and the rip independent answers, and since [`Tree::set_checked`]
-    /// on a child never writes its parent, they disagreed in both directions:
-    ///
-    /// * clear every stream row under a ticked title, one row at a time, and
-    ///   the box drew empty while the title was still ripped — a video-only
-    ///   extract, which is a supported outcome (see `is_video_only_selection`),
-    ///   drawn as "not selected";
-    /// * tick the streams of an unticked title back on and the box drew full
-    ///   while the rip skipped the title entirely.
-    ///
-    /// Off now means, exactly, "this will not be ripped". A ticked title with
-    /// no ticked tracks is `Mixed`: it IS being ripped, and not all of it.
+    /// The two halves answer two different questions: for a title the own
+    /// flag is "rip this title" (what [`Tree::ticked_titles`] collects),
+    /// while the children are "which of its tracks". `Off` means, exactly,
+    /// "this will not be ripped". A ticked title with no ticked tracks is
+    /// `Mixed`: it IS being ripped, and not all of it.
+    /// See docs/ui.md — Tree::check_state.
     pub fn check_state(&self, i: usize) -> Check {
         let n = &self.arena[i];
         if !*n.checked.borrow() {
@@ -422,16 +380,11 @@ impl Tree {
 
     /// What a CLICK on row `i`'s tick box does.
     ///
-    /// This is a decision, so it lives here and not in a shell. Both shells
-    /// carried a comment saying "the core owns cascade + tri-state; the shell
-    /// only reports which row was clicked" while each in fact computed its own
-    /// answer, and the two answers disagreed: Windows read `Off | Mixed` as
-    /// "turn on", macOS read the NSButton's mixed state (`-1`) as "turn off".
-    /// So clicking a partly-ticked title selected all of it on one platform and
-    /// deselected all of it on the other.
-    ///
-    /// A partly-ticked title becomes fully ticked. Clicking again clears it —
-    /// which is the only reading that makes a second click undo the first.
+    /// This is a decision, so it lives here and not in a shell — both shells
+    /// previously computed their own answer and disagreed on what a mixed
+    /// state means. A partly-ticked title becomes fully ticked; clicking
+    /// again clears it, the only reading that makes a second click undo the
+    /// first. See docs/ui.md — Tree::toggle.
     pub fn toggle(&self, i: usize) {
         let on = matches!(self.check_state(i), Check::Off | Check::Mixed);
         self.set_checked(i, on);
@@ -466,15 +419,9 @@ impl Tree {
     /// wants. Tree position is not the index once a disc is listed in full.
     ///
     /// A title is ripped when its BOX is not empty, i.e. `check_state` — the
-    /// same fold that draws it — reports anything but [`Check::Off`]. Reading
-    /// the title node's own `checked` flag instead made the drawing and the
-    /// rip two independent answers, and `set_checked` on a child never writes
-    /// its parent, so they disagreed in both directions: clear every stream row
-    /// under a title one at a time and the box drew empty while the stale
-    /// parent flag still ripped it; tick a cleared title's streams back one at
-    /// a time and the box drew full while the rip skipped it. `Mixed` is
-    /// ripped — some tracks are still ticked, which is exactly what the partial
-    /// glyph promises.
+    /// same fold that draws it — reports anything but [`Check::Off`]. `Mixed`
+    /// is ripped — some tracks are still ticked, which is exactly what the
+    /// partial glyph promises. See docs/ui.md — Tree::ticked_titles.
     pub fn ticked_titles(&self) -> Vec<usize> {
         self.arena
             .iter()
@@ -517,25 +464,12 @@ impl Tree {
 
     /// The ticked PIDs of each title, keyed by CANONICAL title index.
     ///
-    /// [`Tree::ticked_streams`] unions every title's PIDs into one list, and
-    /// the engine applied that one list to every title. Blu-ray playlists of
-    /// the same feature routinely share PIDs — a feature and its extended cut,
-    /// say — so unticking a commentary under title 1 did nothing whenever the
-    /// same PID stayed ticked under title 2: the track was written to BOTH
-    /// outputs, and the tree said otherwise. The model could always express the
-    /// per-title decision; only the request could not carry it.
-    ///
-    /// The union is still what decides `explicit_streams` (did the user narrow
-    /// anything at all), and remains the fallback for a source with no title
-    /// rows at all — a case the returned [`TitleStreams`] now names explicitly
-    /// instead of leaving it to be inferred from an absence.
-    ///
-    /// A title's slot is created as soon as it is seen to HAVE a stream row,
-    /// before the row's tick is read. Skipping unticked rows first meant a
-    /// title whose rows the user cleared entirely never reached the list, and
-    /// `stream_selection_for` read that absence as "no data" and applied the
-    /// union — handing the emptied title its sibling's tracks, which on a
-    /// shared-PID disc are the very ones just unticked.
+    /// Unlike [`Tree::ticked_streams`], which unions every title's PIDs into
+    /// one list, this keeps each title's selection separate — needed because
+    /// Blu-ray playlists of the same feature routinely share PIDs. The union
+    /// still decides `explicit_streams`, and is the fallback for a source
+    /// with no title rows at all.
+    /// See docs/ui.md — Tree::ticked_streams_by_title.
     pub fn ticked_streams_by_title(&self) -> TitleStreams {
         let mut out: Vec<(usize, Vec<u16>, Vec<u16>)> = Vec::new();
         for n in &self.arena {
@@ -691,13 +625,9 @@ pub fn canonical_lang_code(tag: &str) -> Option<String> {
         .map(|l| l.to_639_3().to_string())
 }
 
-/// The ISO 639-2/B (bibliographic) codes that differ from 639-2/T (= 639-3),
-/// mapped to their /T form.
-///
-/// Deliberately a second copy of `freemkv_engine::streams`' table: that one is
-/// private to the engine, and this crate's copy exists to keep a GUI setting
-/// readable, not to select streams. `every_bibliographic_code_the_doc_promises_
-/// resolves` (tests/gui_model.rs) pins the inputs; the engine pins its own.
+// The ISO 639-2/B codes that differ from 639-2/T (= 639-3), mapped to /T.
+// Deliberately a second copy of freemkv_engine::streams' private table.
+// See docs/ui.md — bib_to_terminologic.
 fn bib_to_terminologic(code: &str) -> Option<&'static str> {
     Some(match code {
         "alb" => "sqi",
@@ -801,15 +731,12 @@ pub fn lang_is_selected(stored: &str, code: &str) -> bool {
 /// The output sinks offered for a given source kind. Whole-disc sinks make no
 /// sense for a container, so they are omitted rather than offered and failed.
 /// `mp4_ok` is false when the source's video cannot go in an MP4 at all (a
-/// DVD's MPEG-2, an HD DVD's VC-1). The option is then REMOVED rather than
-/// offered-and-refused: a choice that always fails is worse than no choice.
-/// Pass true when the codecs are unknown — never block on missing information.
+/// DVD's MPEG-2, an HD DVD's VC-1); the option is then REMOVED rather than
+/// offered-and-refused. Pass true when the codecs are unknown.
 ///
-/// `disc_source` is "not a container" — it is true for a physical disc AND for
-/// an ISO file, because both carry a whole disc to unpack. That is why
-/// "Whole disc → decrypted folder" (the CLI's `dir://`) is offered for an ISO:
-/// `freemkv iso://Disc.iso dir://out/` is a supported CLI pipeline and the
-/// engine's ISO path runs it (`engine::run_blocking` → `run_extract_folder`).
+/// `disc_source` is "not a container": true for a physical disc AND an ISO
+/// file, since both carry a whole disc to unpack.
+/// See docs/ui.md — output_formats.
 pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>> {
     let mut titles = vec!["Selected titles → MKV"];
     if mp4_ok {
@@ -832,14 +759,9 @@ pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>>
     }
 }
 
-/// Video codecs MP4 can actually carry. Anything else — MPEG-2 from a DVD,
-/// VC-1 from an HD DVD, AV1 — has no MP4 mapping, so the mux fails with E9048
-/// after the user has already waited; say it up front instead.
-///
-/// This list MUST match the mux gate in `libfreemkv::mux::mp4`, which admits
-/// exactly `Codec::Hevc | Codec::H264`. It previously also listed AV1, so the
-/// desktop app offered MP4 for an AV1 title, suppressed the pre-rip warning,
-/// and then failed at mux time with a message naming AV1 as supported.
+// Video codecs MP4 can actually carry; anything else has no MP4 mapping, so
+// warn up front rather than fail at mux time. MUST match the mux gate in
+// `libfreemkv::mux::mp4`. See docs/ui.md — MP4_VIDEO.
 const MP4_VIDEO: &[&str] = &["H.264", "HEVC"];
 
 /// Resolve a popup's visible text back to the canonical format string.
@@ -1069,17 +991,14 @@ pub fn format_label(canonical: &str) -> String {
     }
 }
 
-/// Inverse of [`format_label`]: resolve a LOCALIZED popup label back to the
-/// canonical format string. The shell shows `format_label(canonical)`, so a
-/// non-English selection reads back as translated text — `format_by_title`
-/// only matches the English canonical list, so it would fail in every other
-/// locale. Match on the localized display instead.
+// Inverse of format_label: resolve a LOCALIZED popup label back to the
+// canonical format string, since format_by_title only matches English.
+// See docs/ui.md — missing_key_fallback_tests.
 #[cfg(test)]
 mod missing_key_fallback_tests {
-    /// A key this crate knows but the pinned i18n tag does not ship must render
-    /// as readable English, never as the dotted path. Without the guard in
-    /// `format_label` the picker would show `gui.format.video_only` to every
-    /// user of a CI build made between wiring a new row and re-tagging i18n.
+    // A key this crate knows but the pinned i18n tag does not ship must
+    // render as readable English, never as the dotted path.
+    // See docs/ui.md — missing_key_fallback_tests.
     #[test]
     fn a_key_absent_from_the_pinned_catalog_falls_back_to_the_canonical_text() {
         // `strings::get` echoes the path for an unknown key; that echo is the
@@ -1180,25 +1099,14 @@ pub fn overall_pct(titles_done: usize, total: usize, current_pct: f64) -> f64 {
 // ── settings dropdowns ────────────────────────────────────────────────────
 
 /// The option table for a settings dropdown: `(canonical, localized_label)`
-/// pairs in menu order.
+/// pairs in menu order. The canonical value is what persists and what the
+/// engine matches on; the label is the localized dropdown text. An empty
+/// result means "not an enum dropdown".
 ///
-/// The canonical value is what persists and what the engine matches on (e.g.
-/// `key_source.starts_with("Online")`); the label is what the localized
-/// dropdown shows. So a dropdown displays translated text but stores a stable,
-/// English identifier — the same decoupling the format picker uses. An empty
-/// result means "not an enum dropdown" (a free-form field, or the format
-/// picker, which each shell builds for itself).
-///
-/// Lives here, not in a shell: this table was duplicated verbatim in
-/// `windows.rs` and `mac.rs` and had already drifted (Windows had grown an
-/// extra arm). A shell that renders a different option set from the other is
-/// a bug by construction, so there is one table and both read it.
-///
-/// NOTE for shells: the returned order is the menu order, and callers are
-/// entitled to map a selected INDEX back to `opts[i].0`. Do not add a key here
-/// whose control interleaves separators or is otherwise not 1:1 with this list
-/// — `"container"` is deliberately absent for exactly that reason (the macOS
-/// format popup carries separator rows, so it maps by title, not by index).
+/// The returned order is the menu order, and callers may map a selected
+/// INDEX back to `opts[i].0`; `"container"` is deliberately absent since
+/// the macOS format popup carries separator rows and maps by title.
+/// See docs/ui.md — enum_options.
 pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
     let g = crate::strings::get;
     match key {
@@ -1235,18 +1143,14 @@ pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
 
 // ── tree shape ────────────────────────────────────────────────────────────
 
-/// The parent of every row, derived from the `depth` column alone.
+/// The parent of every row, derived from the `depth` column alone: depth 0
+/// starts a new root, depth 1 hangs off the most recent root, anything
+/// deeper hangs off the most recent depth-1 row.
 ///
-/// Both shells rebuild a hierarchical control (an `NSOutlineView`, a
-/// `SysTreeView32`) from the flat `Vec<Row>` the core hands them, and both were
-/// walking the depths themselves. The walk is the same decision on both, so it
-/// lives here: depth 0 starts a new root, depth 1 hangs off the most recent
-/// root, anything deeper hangs off the most recent depth-1 row.
-///
-/// A row that arrives before its parent has no parent to hang from. It becomes
-/// a root rather than being dropped — a row the core decided to show must
-/// always be reachable, and a silently-vanishing title is far worse than one
-/// shown at the wrong indent.
+/// A row that arrives before its parent has no parent to hang from. It
+/// becomes a root rather than being dropped — a row the core decided to
+/// show must always be reachable.
+/// See docs/ui.md — row_parents.
 pub fn row_parents(rows: &[Row]) -> Vec<Option<usize>> {
     let (mut last_root, mut last_title) = (None, None);
     let mut out = Vec::with_capacity(rows.len());
@@ -1269,15 +1173,12 @@ pub fn row_parents(rows: &[Row]) -> Vec<Option<usize>> {
 
 /// Which row a freshly-rebuilt tree should leave sitting at the top.
 ///
-/// A shell that opens every title to match the other shell scrolls the list as
-/// it goes, so the last row expanded — the last title on the disc — is where
-/// the user is left standing. That is never what they came to see.
-///
-/// The answer is not simply "row 0": under the default "Main film only" the
-/// single ticked title can be anywhere in the disc's order, and that title is
-/// the point of the screen. So it is the first TICKED row, which under "All
-/// titles" is row 0 anyway. Nothing ticked (an empty disc, or a preset that
-/// selected nothing) falls back to the first row.
+/// Not simply "row 0": under the default "Main film only" the single
+/// ticked title can be anywhere in the disc's order, and that title is
+/// the point of the screen. So it is the first TICKED row, which under
+/// "All titles" is row 0 anyway. Nothing ticked (an empty disc, or a
+/// preset that selected nothing) falls back to the first row.
+/// See docs/ui.md — first_visible_row.
 pub fn first_visible_row(rows: &[Row]) -> Option<usize> {
     rows.iter()
         .position(|r| matches!(r.check, Some(Check::On) | Some(Check::Mixed)))
@@ -1286,21 +1187,14 @@ pub fn first_visible_row(rows: &[Row]) -> Option<usize> {
 
 // ── output naming ─────────────────────────────────────────────────────────
 
-/// The path the Information panel shows as "Output file".
-///
-/// Named the way the engine will name it, so the row matches what actually
-/// lands on disk: `<dir>/<source stem>_t<N>.<ext>`, where `N` is the 1-based
-/// number of the first ticked title. Extracted from `start_run` so it can be
-/// checked without launching a rip.
 /// Whether `format` is one of the options `formats` currently offers.
 ///
-/// `View` publishes the chosen format and the offered list as two independent
-/// fields, and nothing kept them in agreement. Opening a source that withdraws
-/// an option — an MPEG-2 DVD after an H.264 Blu-ray withdraws MP4 — left the
-/// model holding a format no longer on the list. A shell then has to invent a
-/// reconciliation policy, and the Win32 one snapped its dropdown to the first
-/// entry without telling the model: the user READ "MKV", pressed Run, and the
-/// engine was handed MP4, which fails at mux time with E9048.
+/// `View` publishes the chosen format and the offered list as two
+/// independent fields, and nothing kept them in agreement. Opening a
+/// source that withdraws an option — an MPEG-2 DVD after an H.264
+/// Blu-ray withdraws MP4 — left the model holding a format no longer on
+/// the list.
+/// See docs/ui.md — format_is_offered.
 pub fn format_is_offered(format: &str, formats: &[Vec<&'static str>]) -> bool {
     formats.iter().any(|g| g.contains(&format))
 }
@@ -1419,10 +1313,9 @@ pub enum LogKind {
     Result,
 }
 
-/// Scan a source by its kind. The ONE dispatch from a URL to a scan, shared
-/// by the synchronous open and the launch probe's worker thread — so the probe
-/// cannot end up scanning a source differently from the way opening it would.
-/// Free-standing rather than a method because the worker holds no `App`.
+// Scan a source by its kind. The ONE dispatch from a URL to a scan, shared
+// by the synchronous open and the launch probe's worker thread. Free-standing
+// rather than a method because the worker holds no `App`.
 fn scan_source(path: &str, keys: &KeyConfig, verbose: bool) -> Result<Scanned, String> {
     if is_container(path) {
         crate::engine::scan_stream(path)
@@ -1433,10 +1326,9 @@ fn scan_source(path: &str, keys: &KeyConfig, verbose: bool) -> Result<Scanned, S
     }
 }
 
-/// The autodetect disc URL: try every drive, take the one holding media.
-/// Named because the launch probe passes it through three places (the source
-/// resolver, the worker, and the tick that applies the result) and a typo in
-/// any of them would scan the wrong thing.
+// The autodetect disc URL: try every drive, take the one holding media.
+// Named because the launch probe passes it through three places and a
+// typo in any of them would scan the wrong thing.
 const PROBE_SOURCE: &str = "disc://";
 
 /// Everything the app knows. No widgets, no platform types.
@@ -1564,12 +1456,9 @@ impl App {
         app
     }
 
-    /// Newest lines kept on screen. A multi-hour rip of a damaged disc emits a
-    /// line per bad-sector retry, and nothing bounded this during a run — the
-    /// two `log.clear()` sites are Clear-log and opening a new source, neither
-    /// of which fires mid-rip. Unbounded growth is not just memory: every tick
-    /// the shells join, re-read and re-set the WHOLE buffer, so the app got
-    /// slower the longer it ran, worst at the end of the longest jobs.
+    // Newest lines kept on screen: unbounded growth during a multi-hour rip
+    // both eats memory and slows every tick, since shells re-read the WHOLE
+    // buffer each time. See docs/ui.md — App::LOG_MAX.
     const LOG_MAX: usize = 5_000;
     /// Dropped per trim, so a long rip pays the O(n) drain rarely instead of
     /// once per line.
@@ -1603,20 +1492,13 @@ impl App {
 
     /// The format this rip will ACTUALLY use.
     ///
-    /// `self.format` is the user's standing preference and outlives the source
-    /// it was chosen for — `open()` deliberately does not reset it, so a choice
-    /// survives closing and reopening the same disc. But a new source may not
-    /// offer it: pick MP4 on an H.264 Blu-ray, then open an MPEG-2 DVD and MP4
-    /// leaves the list.
-    ///
-    /// Every consumer — the view, the progress captions, the output filename
-    /// and the `RipRequest` — reads the format through here, so there is one
-    /// answer instead of one per caller. Previously `view()` published the raw
-    /// preference alongside a list that no longer contained it, and the Win32
-    /// shell resolved the contradiction by snapping its dropdown to the first
-    /// entry and leaving the model alone: the user read "MKV", pressed Run, and
-    /// the engine was handed MP4, failing at mux time with E9048 after the
-    /// drive had already been read.
+    /// `self.format` is the user's standing preference and outlives the
+    /// source it was chosen for — `open()` deliberately does not reset it.
+    /// But a new source may not offer it, so every consumer (the view, the
+    /// progress captions, the output filename, the `RipRequest`) reads the
+    /// format through here rather than the raw preference, giving one
+    /// answer instead of one per caller.
+    /// See docs/ui.md — App::effective_format.
     pub fn effective_format(&self) -> String {
         let offered = self.offered_formats();
         reconcile_format(&self.format, &offered).to_string()
@@ -1731,31 +1613,15 @@ impl App {
         }
     }
 
-    /// Decide which `disc://` source "open the disc in the drive" should open,
-    /// and log what was found. `None` means there is nothing to open.
+    /// Decide which `disc://` source "open the disc in the drive" should
+    /// open, and log what was found. `None` means there is nothing to open.
+    /// The WHOLE decision behind File ▸ Open disc, the empty state's "Open
+    /// disc" button and the launch probe — one copy, so the shells cannot
+    /// drift. Split from [`App::open`], which BLOCKS for the scan; this
+    /// lets the shell repaint first.
     ///
-    /// This is the WHOLE decision behind File ▸ Open disc, the empty state's
-    /// "Open disc" button and the launch probe — one copy, so the two shells
-    /// cannot drift (they had drifted already: the AppKit shell logged three
-    /// hardcoded English sentences where the Win32 one used `gui.log.*`).
-    ///
-    /// Deliberately split from [`App::open`] rather than doing both: `open`
-    /// scans the drive and BLOCKS the calling thread for as long as that takes.
-    /// Returning here lets the shell repaint first, so the "Opening …" line is
-    /// on screen before the window goes quiet, instead of appearing with the
-    /// finished title list.
-    ///
-    /// `announce_missing` separates the two callers. True for the menu item and
-    /// the button, where a human asked and deserves an answer either way. False
-    /// for the launch probe, where NOBODY asked: it must open a disc that
-    /// happens to be there and otherwise leave no trace.
-    ///
-    /// "No trace" covers more than an absent drive. A drive with an empty tray
-    /// is the ordinary case on a machine that has one, and enumerating drives
-    /// says nothing about whether media is loaded — so the probe used to pick
-    /// that drive, announce it, fail to scan it, and put an error on screen at
-    /// every launch. That is worse than the silence it replaced. When nobody
-    /// asked, a drive is only worth opening if it actually holds something.
+    /// `announce_missing` is true for the menu item/button (a human asked),
+    /// false for the launch probe, which must leave no trace — docs/ui.md.
     pub fn disc_source(&mut self, announce_missing: bool) -> Option<String> {
         // A probe nobody asked for must not GUESS: bare `disc://` autodetects the
         // drive with media, vs. naming drives[0] and risking an empty tray. Not
@@ -1816,23 +1682,12 @@ impl App {
     }
 
     /// Open something NOBODY asked to open, leaving no trace if it is not
-    /// there. Used by the launch probe: a disc already in the drive should just
-    /// appear, and an empty tray should look exactly like the app did before
-    /// the probe existed.
+    /// there. Used by the launch probe: a disc already in the drive should
+    /// just appear, an empty tray should look like before the probe existed.
     ///
-    /// OFF THE UI THREAD, unlike [`App::open`]. The work behind it is a drive
-    /// enumeration, a SCSI scan and an AACS key resolution; on the UI thread
-    /// that froze the window at every launch for as long as the drive took to
-    /// answer — seconds on a spun-down drive, and the whole timeout on a drive
-    /// that never does. `open` is a direct answer to something the user just
-    /// clicked and keeps its synchronous shape; the probe is not, and had no
-    /// business blocking the first paint.
-    ///
-    /// Returns immediately with `StartTicking`, the seam BOTH shells already
-    /// implement for a running job, so this change lands entirely in the
-    /// portable model: `mac.rs` and `windows.rs` are untouched, and
-    /// `windows.rs` compiles on no machine available here.
-    /// [`App::tick`] applies the result.
+    /// OFF THE UI THREAD, unlike [`App::open`] — see docs/ui.md. Returns
+    /// immediately with `StartTicking`, the seam both shells already
+    /// implement for a running job; [`App::tick`] applies the result.
     pub fn open_probe(&mut self, path: &str) -> Vec<Effect> {
         // A second probe cannot help and could clobber the first one's result.
         if self.probe.is_some() {
@@ -1892,10 +1747,9 @@ impl App {
         self.apply_scan(path, scanned, quiet)
     }
 
-    /// Turn a finished scan into model state. Split out of [`App::open_inner`]
-    /// so the launch probe's asynchronous result lands through EXACTLY the
-    /// same code as a synchronous open — a second copy of this would be two
-    /// definitions of what opening a disc means, and they would drift.
+    // Turn a finished scan into model state. Split out of App::open_inner so
+    // the launch probe's async result lands through the same code as a sync
+    // open, rather than a second, drift-prone definition.
     fn apply_scan(
         &mut self,
         path: &str,
@@ -2104,10 +1958,9 @@ impl App {
         vec![Effect::Redraw, Effect::StartTicking]
     }
 
-    /// Collect the launch probe's result if it has finished.
-    ///
-    /// Runs on the UI thread, from [`App::tick`], and is where every model
-    /// mutation the probe implies happens — see [`ProbeState`].
+    // Collect the launch probe's result if it has finished. Runs on the UI
+    // thread, from App::tick, and is where every model mutation the probe
+    // implies happens — see ProbeState.
     fn poll_probe(&mut self) -> Vec<Effect> {
         let Some(p) = self.probe.clone() else {
             return Vec::new();
@@ -2357,14 +2210,9 @@ pub struct View {
 mod tests {
     use super::*;
 
-    /// A ticked title is a NUMBER against the scan on screen, and the rip
-    /// re-scans before it uses it. The request therefore has to carry what
-    /// those numbers referred to, or the engine has nothing to check the fresh
-    /// scan against — the disc can be swapped while the operator reviews the
-    /// tree, and title 3 of the new disc is muxed under the old one's name.
-    ///
-    /// A source pin: `start_run` spawns a real rip thread, so no test can
-    /// observe the `RipRequest` it builds.
+    // A source pin: the disc can be swapped while the operator reviews the
+    // tree, so the request must carry title identities to check against.
+    // See docs/ui.md — the_rip_request_carries_the_identities test.
     #[test]
     fn the_rip_request_carries_the_identities_the_ticked_numbers_referred_to() {
         let src = include_str!("ui.rs").replace("\r\n", "\n");
@@ -2399,18 +2247,9 @@ mod tests {
         }
     }
 
-    /// A forced-subtitle preference that matches nothing must keep NOTHING.
-    ///
-    /// The real case: a UHD feature carrying forced subtitles in French,
-    /// German, Spanish and Portuguese, but none in English. Asking for forced
-    /// subtitles in English ticked ALL FIVE of them, because this class fell
-    /// back to "keep everything" the way audio does when a language is absent.
-    ///
-    /// For audio that fallback is right — a rip with no audio is broken. For
-    /// forced subtitles it is actively harmful: they display by themselves
-    /// during playback, so the user who asked for English forced subs and has
-    /// none gets four languages of unwanted text burned over the picture. A
-    /// file with no forced subtitles is, by contrast, entirely normal.
+    // A forced-subtitle preference that matches nothing must keep NOTHING —
+    // unlike audio, a forced track with no match must not fall back to "keep
+    // everything": it displays over the picture unasked. See docs/ui.md.
     #[test]
     fn a_forced_preference_matching_nothing_keeps_nothing() {
         let rows = [
@@ -2443,10 +2282,9 @@ mod tests {
         assert!(!keep.contains(&1101), "French audio was not asked for");
     }
 
-    /// The other half of the same rule: no preference is NOT an unmatched
-    /// preference. An empty box means "no opinion", and must go on keeping
-    /// every forced track — otherwise this fix would silently strip forced
-    /// subtitles from every rip that never expressed a preference at all.
+    // The other half of the same rule: no preference is NOT an unmatched
+    // preference. An empty box means "no opinion" and keeps every forced
+    // track, or this fix would silently strip forced subs from every rip.
     #[test]
     fn an_empty_forced_preference_still_keeps_every_forced_track() {
         let rows = [
@@ -2477,20 +2315,9 @@ mod tests {
         assert!(!keep.contains(&1301) && !keep.contains(&1302));
     }
 
-    /// Neither About box may hard-code what it reports.
-    ///
-    /// The macOS one did, for all three derived rows, and nothing noticed for
-    /// three releases: it read "1.6.0 (macOS)" while the log line beside it
-    /// read 1.6.2, and it told every user "keydb ✓ 3 971 entries" — a real
-    /// count belonging to whichever machine it was copied from, shown even
-    /// with no keydb present. Windows derived all three correctly the whole
-    /// time, so this is exactly the kind of drift a shared test catches and
-    /// two separately-maintained shells do not.
-    ///
-    /// Source inspection rather than a UI test: neither shell can be
-    /// instantiated off its own platform, but both files can be read from
-    /// anywhere — which is the point, since this must fail on whichever
-    /// machine runs the suite.
+    // Neither About box may hard-code what it reports (macOS once did).
+    // Source inspection, not a UI test: neither shell instantiates off
+    // its own platform. See docs/ui.md — neither_about_box test.
     #[test]
     fn neither_about_box_hard_codes_its_version_or_key_count() {
         // CRLF-normalized: Windows CI checks the tree out with CRLF.
@@ -2526,20 +2353,9 @@ mod tests {
         }
     }
 
-    /// Both log panes must keep the NEWEST line in view.
-    ///
-    /// A rip's log only grows, and the interesting line is always the last one
-    /// — a warning, a lossy-export note, the failure. `windows.rs` scrolls to
-    /// it and says in a comment that it is doing what the macOS log does;
-    /// `mac.rs` did no such thing, and had no scroll call anywhere in the file,
-    /// so the AppKit user watched a viewport frozen at the top while the run
-    /// wrote lines below the fold. The comment described behaviour only one
-    /// shell had.
-    ///
-    /// Source inspection for the same reason as the About-box test above:
-    /// neither shell can be instantiated off its own platform, but both files
-    /// read fine from anywhere — which is the point, since this has to fail on
-    /// whichever machine runs the suite.
+    // Both log panes must keep the NEWEST line in view (mac.rs once had no
+    // scroll call at all, despite a comment claiming parity with windows.rs).
+    // Source inspection, same reason as the test above. See docs/ui.md.
     #[test]
     fn both_log_panes_keep_the_newest_line_in_view() {
         // CRLF-normalized: Windows CI checks the tree out with CRLF.
@@ -2557,25 +2373,9 @@ mod tests {
         );
     }
 
-    /// Neither shell's worker-message drain may bail out on a poisoned inbox.
-    ///
-    /// Both were `match self.inbox.lock() { Ok(v) => .., Err(_) => return }`.
-    /// The early return reads as caution and is a hang: the drain is also what
-    /// clears the keydb "busy" flag (the Update button stays disabled forever),
-    /// what writes the result into the Settings note, and — critically — what
-    /// STOPS the 5 Hz drain timer. Returning skipped all three, so a poisoned
-    /// inbox left a timer re-firing for the life of the process, taking the
-    /// same poisoned lock and returning again every 200 ms, while the messages
-    /// explaining why the worker died sat unread inside it. A poisoned
-    /// `Vec<String>` is still a perfectly good `Vec<String>`.
-    ///
-    /// Source inspection for the same reason as the two tests above: neither
-    /// shell can be instantiated off its own platform, but both files read
-    /// fine from anywhere — which is the point, since this has to fail on
-    /// whichever machine runs the suite.
-    ///
-    /// Mutation caught: restoring `Err(_) => return` (or any `if let Ok(..)`)
-    /// around either inbox lock.
+    // Neither shell's worker-message drain may bail out on a poisoned inbox:
+    // an early return there also skips clearing the "busy" flag and stopping
+    // the drain timer, hanging the process. See docs/ui.md — neither_shell_drain.
     #[test]
     fn neither_shell_drain_gives_up_on_a_poisoned_inbox() {
         // CRLF-normalized: Windows CI checks the tree out with CRLF.
@@ -2629,14 +2429,9 @@ mod tests {
         assert_eq!(fmt_bytes(64_424_509_440), "60.00 GB");
     }
 
-    /// The launch probe opens a drive nobody asked it to open. A drive with an
-    /// empty tray is the ORDINARY state of a machine that has one, and
-    /// enumerating drives says nothing about whether media is loaded — so a
-    /// failed probe is the common case at startup, not the rare one.
-    ///
-    /// It must look exactly like the app did before the probe existed: no
-    /// notice, no log line, and the empty page still showing. A prompted open
-    /// of the same bad source must still report, because a human asked.
+    // A failed probe (common case: empty tray) must look exactly like the
+    // app did before the probe existed — no notice, no log line — while a
+    // prompted open of the same bad source must still report. See docs/ui.md.
     #[test]
     fn a_failed_probe_says_nothing_but_a_failed_open_still_reports() {
         const BAD: &str = "iso:///nonexistent/definitely-not-here.iso";
@@ -2734,15 +2529,9 @@ mod tests {
         );
     }
 
-    /// A probe the drive never answers must be abandoned, not waited on for
-    /// the life of the process.
-    ///
-    /// `ProbeState` had no deadline and no cancel: while `probe` stayed
-    /// `Some`, every tick pushed a `Redraw` and refused to stop the timer, so a
-    /// drive wedged inside its SCSI timeouts left the window repainting at
-    /// 5 Hz forever with nothing on screen to say why and no way to stop it.
-    /// The worker thread cannot be killed — it is blocked in the driver — but
-    /// the UI must stop waiting for it.
+    // A probe the drive never answers must be abandoned, not waited on for
+    // the life of the process: the worker thread can't be killed (blocked in
+    // the driver), but the UI must stop waiting for it. See docs/ui.md.
     #[test]
     fn a_probe_that_never_answers_is_abandoned_instead_of_ticking_forever() {
         let mut app = App::new();
@@ -2918,15 +2707,9 @@ mod tests {
         assert!(t.arena.is_empty());
     }
 
-    /// Every string the picker can offer must have a `gui.format.*` key, and
-    /// that key must exist in en.json carrying exactly the canonical text.
-    ///
-    /// `format_label`'s catch-all returns the canonical string unchanged, so a
-    /// row with no key renders correctly under `en` and is invisible in
-    /// testing — but it is untranslatable in the other 28 locales forever.
-    /// That is how the three per-track-kind rows shipped keyless. Asserting on
-    /// `format_key` (not on the rendered label) is what makes the gap visible:
-    /// the label is identical either way.
+    // Every string the picker can offer must have a gui.format.* key present
+    // in en.json: format_label's catch-all otherwise renders correctly under
+    // en while staying untranslatable elsewhere. See docs/ui.md.
     #[test]
     fn every_offered_format_has_a_translation_key_present_in_english() {
         let en: serde_json::Value =
@@ -2968,15 +2751,9 @@ mod tests {
         }
     }
 
-    /// A canonical format's localized label must resolve back to that exact
-    /// canonical string. The shells persist and the engine matches the
-    /// canonical form, so a one-way label is a setting that silently reverts.
-    ///
-    /// REGRESSION PIN, not a fix: this already passed before the keys were
-    /// added, because `format_label`'s catch-all round-trips a keyless row
-    /// through the `format_by_title` fast path. It is here so that WIRING a
-    /// key (which routes the row through `strings::get`) cannot break the
-    /// round-trip — the failure mode the key change introduces.
+    // A canonical format's localized label must resolve back to that exact
+    // canonical string, or a one-way label is a setting that silently
+    // reverts. REGRESSION PIN — see docs/ui.md.
     #[test]
     fn every_offered_format_round_trips_through_its_label() {
         for (disc, mp4) in [(true, true), (true, false), (false, true), (false, false)] {

@@ -6,17 +6,8 @@
 //!   (`freemkv::windows`) on Windows — over the shared `ui`/`engine`/`settings`
 //!   core.
 //!
-//! The dispatcher routes a CLI-style invocation (any args, or a bare launch
-//! from a terminal) to the CLI shell — byte-for-byte identical to the old
-//! `freemkv` binary — and a windowed launch (a `.app` double-click, or an
-//! explicit `freemkv gui`) to the desktop shell. The decision itself is
-//! `freemkv::app_entry::wants_gui`, where it can be unit-tested.
-//!
-//! **Windows note.** This image is console-subsystem and stays the CLI on a
-//! bare launch, because there is nothing to distinguish an Explorer
-//! double-click from a `cmd` invocation. The double-clickable image on Windows
-//! is the sibling binary `freemkv-gui.exe` (`src/bin/freemkv-gui.rs`), which is
-//! windows-subsystem and opens the same shell directly.
+//! The dispatcher routes a CLI-style invocation to the CLI shell and a
+//! windowed launch to the desktop shell; see `freemkv::app_entry::wants_gui` and docs/main.md.
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -72,11 +63,9 @@ fn main() {
     cli_entry::run(args);
 }
 
-/// Launch the desktop shell for this platform.
-///
-/// macOS builds it here (the AppKit shell is a module of this binary); Windows
-/// hands off to the lib, which is where the Win32 shell lives so that
-/// `freemkv-gui.exe` can open the very same window.
+// Launch the desktop shell: macOS builds it here (AppKit is a module of
+// this binary); Windows hands off to the lib, so `freemkv-gui.exe` can
+// open the very same window.
 #[cfg(target_os = "macos")]
 fn run_gui() {
     let (cfg, loaded) = settings::Settings::load_reporting();
@@ -109,10 +98,9 @@ fn run_gui() {
     freemkv::win_app::run();
 }
 
-/// Was this image started *as a window*, with no argument to say so?
-///
-/// macOS: a Finder double-click runs the binary from inside the `.app` bundle
-/// and passes no arguments, so the path is the only evidence there is.
+// Was this image started as a window, with no argument to say so? A Finder
+// double-click runs the binary from inside the `.app` bundle and passes no
+// arguments, so the path is the only evidence there is.
 #[cfg(target_os = "macos")]
 fn launched_windowed() -> bool {
     std::env::current_exe()
@@ -121,13 +109,8 @@ fn launched_windowed() -> bool {
         .unwrap_or(false)
 }
 
-/// Whether an executable path sits inside a macOS `.app` bundle.
-///
-/// The whole launch decision reduces to this string test, so it is separated
-/// from `current_exe()` — which cannot be steered from a test — and asserted
-/// directly. Forced `true`, `freemkv --help` in a terminal opens a window
-/// instead of printing; forced `false`, a Finder double-click runs the CLI
-/// with no arguments and exits immediately.
+// Whether an executable path sits inside a macOS `.app` bundle.
+// See docs/main.md — is_app_bundle_path, why this is separated and tested.
 #[cfg(target_os = "macos")]
 fn is_app_bundle_path(p: &str) -> bool {
     p.contains(".app/Contents/MacOS/")
@@ -163,11 +146,9 @@ mod launch_tests {
     }
 }
 
-/// Windows: never. This image is console-subsystem, and an Explorer
-/// double-click of it is indistinguishable from a `cmd` invocation — guessing
-/// (parent process, console ownership) would make the CLI contract depend on
-/// how the terminal spawned it. The windowed image is the separate
-/// `freemkv-gui.exe`, which does not come through this dispatcher at all.
+// Windows: never. An Explorer double-click is indistinguishable from a
+// `cmd` invocation; the windowed image is the separate `freemkv-gui.exe`.
+// See docs/main.md — launched_windowed (Windows).
 #[cfg(target_os = "windows")]
 fn launched_windowed() -> bool {
     false

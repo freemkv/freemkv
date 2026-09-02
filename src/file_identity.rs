@@ -1,26 +1,22 @@
 //! Whether two paths name the SAME file — the one definition both shells use.
 //!
-//! Every sink here opens its destination for writing before (or while) the
-//! source is read, so "the destination IS the source" has to be answered
-//! before a byte moves. It was answered twice: the CLI's `pipe` compared
-//! canonical paths AND filesystem identity, while the GUI's `engine` compared
-//! canonical paths alone — and the narrower copy is the one that misses a
-//! hardlink, so the desktop app would truncate the user's only copy on a rip
-//! the CLI refuses. Same shape as `title_identity`: one question, one answer,
-//! declared by both crate roots.
+//! Every sink opens its destination for writing before (or while) the source
+//! is read, so "the destination IS the source" must be answered before a byte
+//! moves. Canonical-path comparison alone misses a hardlink; see
+//! [`same_file`] for the full check. Same shape as `title_identity`: one
+//! question, one answer, declared by both crate roots.
+//!
+//! See docs/file_identity.md for why this was answered twice and diverged.
 
 /// Whether two paths name the same existing file.
 ///
 /// Canonicalised, so `./Disc.iso`, `Disc.iso`, `sub/../Disc.iso`, an absolute
-/// path to it and a symlink to it are all one file. A destination that does not
-/// exist yet cannot be the source, so a failed canonicalize on either side is
-/// "not the same file" — the guard must never refuse an ordinary rip because a
-/// path could not be resolved.
+/// path to it, and a symlink to it are all one file. A destination that does
+/// not exist yet cannot be the source, so a failed canonicalize on either
+/// side answers `false` rather than refusing the rip.
 ///
-/// Canonical equality is not sufficient on its own: a HARDLINK gives one file
-/// two names that are each already canonical, so the paths differ while the
-/// bytes are shared and writing either one destroys the other. Compare the
-/// identity the filesystem actually uses as well.
+/// Canonical equality alone misses a hardlink — two canonical names sharing
+/// one file — so filesystem identity ([`file_id`]) is compared too.
 pub fn same_file(source: Option<&std::path::Path>, dest: &std::path::Path) -> bool {
     let Some(source) = source else { return false };
     let (Ok(a), Ok(b)) = (std::fs::canonicalize(source), std::fs::canonicalize(dest)) else {
@@ -56,25 +52,15 @@ pub fn file_id(_path: &std::path::Path) -> Option<(u64, u64)> {
 }
 
 /// Windows: `(volume serial, file index)` from `GetFileInformationByHandle`,
-/// which is what NTFS itself uses to tell two names for one file apart. `std`
-/// exposes the same numbers only behind an unstable feature, so the call is
-/// declared here rather than pulling in a crate.
+/// the numbers NTFS itself uses to tell two names for one file apart. `std`
+/// exposes them only behind an unstable feature, so the call is declared here.
 ///
-/// The handle is opened with no access rights and `FILE_FLAG_BACKUP_SEMANTICS`
-/// deliberately: attribute-only access does not fight a sharing mode the sink
-/// may already hold, and without the backup flag a DIRECTORY cannot be opened
-/// at all — and this guard is asked about directories (`dir://` sources and
-/// destinations), not only files. Any failure answers `None`, which leaves the
-/// canonical-path comparison standing, so the guard can never refuse a rip
-/// because a handle could not be opened.
+/// Opened with no access rights and `FILE_FLAG_BACKUP_SEMANTICS`, so it never
+/// fights a sharing mode the sink may hold and can still open a directory
+/// (`dir://` sources and destinations go through this guard too). Any
+/// failure answers `None`, leaving the canonical-path comparison to stand.
 ///
-/// This used to carry a note saying it was type-checked but never RUN, because
-/// the one test that exercises the whole point of this module — two names, one
-/// file — was `#[cfg(unix)]`. CI runs `windows-latest` and NTFS has had hard
-/// links since it shipped, so the cfg bought nothing and cost the only
-/// coverage this `unsafe` FFI block could ever have had. The test is now
-/// unconditional: `GetFileInformationByHandle` and the hand-checked
-/// `ByHandleFileInformation` layout are executed on every Windows CI run.
+/// See docs/file_identity.md for why this is now tested unconditionally.
 #[cfg(windows)]
 pub fn file_id(path: &std::path::Path) -> Option<(u64, u64)> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -152,10 +138,9 @@ mod tests {
         }
     }
 
-    /// The same file under two spellings is one file — the case a path
-    /// comparison misses. The detour goes through `..` deliberately: `Path`'s
-    /// own `==` normalises a `.` away, so a `./Disc.iso` fixture would pass
-    /// even with the canonicalize deleted.
+    // The same file under two spellings is one file — the case a path
+    // comparison misses. Detour via `..` because `Path`'s own `==` normalises
+    // `.` away, so a `./Disc.iso` fixture would pass even without canonicalize.
     #[test]
     fn the_same_file_under_two_spellings_is_recognised() {
         let t = Tmp::new("spellings");
@@ -174,24 +159,9 @@ mod tests {
         );
     }
 
-    /// A HARDLINK: both names canonicalize to themselves, so only filesystem
-    /// identity can see that writing either one destroys the other.
-    ///
-    /// Runs on WINDOWS TOO. It was `#[cfg(unix)]`, which meant the single test
-    /// covering this module's reason to exist never touched the Windows
-    /// `file_id` — an `unsafe extern "system"` call whose own doc admitted it
-    /// was type-checked but not run. `std::fs::hard_link` is cross-platform,
-    /// NTFS has always supported hard links, they need no elevation (unlike
-    /// symlinks), and CI runs `windows-latest`. So the cfg bought nothing and
-    /// left the only `unsafe` in the crate untested on the only platform it
-    /// compiles for.
-    ///
-    /// Mutation caught on Windows: a wrong field order in
-    /// `ByHandleFileInformation` (the volume serial and both index halves are
-    /// read by byte offset), or a `GetFileInformationByHandle` that always
-    /// answers `None` — either makes `same_file` blind to the case where the
-    /// destination is the source under another name, and the rip overwrites
-    /// its own input.
+    // A HARDLINK: both names canonicalize to themselves, so only filesystem
+    // identity sees that writing either one destroys the other. Runs on
+    // Windows too — see docs/file_identity.md for why that used to not be true.
     #[test]
     fn a_hardlink_is_the_same_file_even_though_the_paths_differ() {
         let t = Tmp::new("hardlink");

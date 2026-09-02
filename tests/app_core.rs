@@ -379,11 +379,9 @@ fn output_formats_depend_on_the_source_kind() {
     }
 }
 
-/// The three per-track-kind sinks the CLI exposes as `video://`, `audio://`
-/// and `sub://` must be reachable from the GUI too — they were the only sinks
-/// with no picker entry at all. They are narrowed forms of `demux://`, which
-/// applies to any source, so they are offered for a container as well as a
-/// disc/ISO.
+// The `video://`/`audio://`/`sub://` per-track-kind sinks must be reachable
+// from the GUI too. They narrow `demux://`, which applies to any source, so
+// they're offered for a container as well as a disc/ISO.
 #[test]
 fn per_track_kind_exports_are_offered_for_every_source_kind() {
     for disc_source in [true, false] {
@@ -425,12 +423,9 @@ fn per_track_kind_exports_sit_with_the_other_title_sinks() {
     }
 }
 
-/// `dir://` works from an ISO source (`freemkv iso://Disc.iso dir://out/`), and
-/// the GUI's `disc_source` flag is "not a container", so an ISO gets the
-/// decrypted-folder row. This pins that, and — critically — pins that the ISO
-/// IMAGE row does NOT follow it into a container source: `iso://` as a
-/// destination needs a physical disc, so offering it where it always fails
-/// would be worse than not offering it.
+// An ISO source sets `disc_source` = "not a container", so it gets the
+// decrypted-folder row. Pins that the ISO IMAGE row does NOT follow into a
+// container: `iso://` as a destination needs a physical disc.
 #[test]
 fn the_decrypted_folder_row_is_offered_for_a_disc_or_iso_but_never_a_container() {
     // An ISO path is not a container, so this is the flag an ISO source sets.
@@ -570,11 +565,9 @@ fn choosing_a_format_changes_the_output_extension() {
     }
 }
 
-/// MP4 must not be offered for a source whose video it cannot hold.
-///
-/// A DVD is MPEG-2, which has no MP4 mapping — the mux fails with E9048 after
-/// the user has already waited. Offering the option and then refusing it is
-/// exactly the "control that lies" pattern; remove it instead.
+// MP4 must not be offered for a source whose video it cannot hold. A DVD
+// is MPEG-2, which has no MP4 mapping — the mux fails with E9048 after the
+// user has already waited, so the impossible entry is removed, not just refused.
 #[test]
 fn mp4_is_not_offered_when_the_video_cannot_go_in_one() {
     let f = output_formats(true, false).concat().join(" | ");
@@ -600,10 +593,9 @@ fn a_dvd_hides_mp4_end_to_end() {
     assert!(App::new().mp4_possible());
 }
 
-/// The GUI language picker must list exactly the locales the i18n crate ships —
-/// no dead row that resolves to English, no shipped locale the user can't pick.
-/// `ui::LOCALES` carries an extra "auto" row (system locale); every other code
-/// must be a real locale file, and every shipped file must have a picker row.
+// The GUI language picker must list exactly the locales the i18n crate
+// ships. `ui::LOCALES` carries an extra "auto" row (system locale); every
+// other code must be a real locale file, and vice versa.
 #[test]
 fn locale_picker_matches_shipped_catalogs() {
     use std::collections::BTreeSet;
