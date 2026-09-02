@@ -27,6 +27,10 @@ on:
         description: Run every mechanic in print-only mode, change nothing
         type: boolean
         default: true
+      prerelease:
+        description: Prerelease (rc) — cut -rc tags only; do NOT push qa, advance main, or publish the site
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -175,10 +179,12 @@ jobs:
           WORK_BRANCH: qa
           VERSION_INPUT: ${{ inputs.version }}
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          PRERELEASE_INPUT: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
           args=()
           [ "$DRY_RUN_INPUT" = "true" ] && args+=(--dry-run)
+          [ "$PRERELEASE_INPUT" = "true" ] && args+=(--prerelease)
           set -- ${args[@]+"${args[@]}"} "$VERSION_INPUT"
           #!/usr/bin/env bash
           #
@@ -348,6 +354,10 @@ jobs:
 
           DRY_RUN=false
           SKIP_LIBS=false
+          # Prerelease (rc) mode: cut -rc tags on ephemeral commits (tag-only, the
+          # branch is never pushed), skip advance_main + the site publish, and skip
+          # the changelog/consumer-notes gate. Real releases never set this.
+          PRERELEASE=false
           VERSION=""
 
           # Track which .cargo/config.toml files we have temporarily disabled so
@@ -397,6 +407,7 @@ jobs:
             case "$arg" in
               --dry-run)   DRY_RUN=true ;;
               --skip-libs) SKIP_LIBS=true ;;
+              --prerelease) PRERELEASE=true ;;
               --help|-h)
                 # Through the "MANUAL pre-release gate" block: the range stopped at 40,
                 # which cut off the Usage lines themselves — `--help` printed the design
@@ -464,8 +475,12 @@ jobs:
             done
 
             # Release notes must exist (cheap, file-only; NOT code verification).
-            if [ "${CHANGELOG_GATE_SKIP:-0}" = "1" ]; then
-              warn "CHANGELOG GATE BYPASSED (CHANGELOG_GATE_SKIP=1)"
+            # A prerelease (rc) reuses the base version's notes — there is no
+            # `[X.Y.Z-rcN]` heading or consumer-notes file — so skip this gate.
+            if [ "${CHANGELOG_GATE_SKIP:-0}" = "1" ] || $PRERELEASE; then
+              $PRERELEASE \
+                && warn "prerelease (rc): skipping the [$VERSION] CHANGELOG + consumer-notes gate" \
+                || warn "CHANGELOG GATE BYPASSED (CHANGELOG_GATE_SKIP=1)"
             else
               local cl_repos=("$LIBFREEMKV_DIR" "$FREEMKV_UNLOCK_DIR" "$FREEMKV_I18N_DIR" "$CANONICAL_ROOT/freemkv-engine")
               for c in "${LIB_CRATES[@]}" "${BINARY_CRATES[@]}"; do
@@ -1119,6 +1134,10 @@ jobs:
               printf '  [dry-run] %s: restore %s path dep on branch tip (commit + push $WORK_BRANCH)\n' "$name" "$UNLOCK_DEP"
               return 0
             fi
+            if $PRERELEASE; then
+              say "$name: prerelease — skipping branch-tip path-dep restore (qa not pushed)"
+              return 0
+            fi
             [ "$stage_lock" = true ] && regenerate_lockfile "$dir"
             git -C "$dir" add Cargo.toml
             [ "$stage_lock" = true ] && git -C "$dir" add Cargo.lock 2>/dev/null || true
@@ -1212,6 +1231,13 @@ jobs:
             if git -C "$dir" diff --cached --quiet; then
               say "$name: no changes to commit (already at v$VERSION on this commit)"
               sha=$(git -C "$dir" rev-parse HEAD)
+            elif $PRERELEASE; then
+              # Prerelease: keep the rc bump commit LOCAL. The tag (pushed below)
+              # carries the commit object; the qa branch is never pushed, so qa is
+              # untouched and a qa-push never re-triggers the rc cascade.
+              git -C "$dir" commit -m "$msg"
+              sha=$(git -C "$dir" rev-parse HEAD)
+              say "$name: prerelease — bump commit kept local; only the tag is pushed"
             else
               git -C "$dir" commit -m "$msg"
               sha=$(git -C "$dir" rev-parse HEAD)
@@ -1952,6 +1978,12 @@ jobs:
           # the releases actually carry. Runs after tags are pushed (structural limit):
           # it cannot prevent a bad release, only refuse to call it good. It fails the run
           # rather than warn — a release shipping dead download buttons is not complete.
+          # Steps 6-8 are RELEASE-ONLY. A prerelease (rc) publishes the -rc tags and
+          # their prerelease artifacts and stops there: it does NOT update the download
+          # page, advance main, or announce on the public site.
+          if $PRERELEASE; then
+            say "prerelease (rc): tags pushed + prerelease builds triggered — skipping download-asset verify, main advance, and site announcement"
+          else
           verify_release_assets || {
             err "release v$VERSION is TAGGED and PUBLISHED but incomplete — fix the assets above before announcing it"
             exit 1
@@ -1981,6 +2013,7 @@ jobs:
           update_website_download_version  # stage the download-page version
           commit_and_push_site            # ONE commit + ONE push → single deploy → reliable announce
           verify_website_in_sync
+          fi
 
           if $DRY_RUN; then
             say "DRY RUN complete — nothing changed."
