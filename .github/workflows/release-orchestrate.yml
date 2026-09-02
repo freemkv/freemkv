@@ -162,10 +162,13 @@ jobs:
           echo "TOOLCHAIN=$V" >> "$GITHUB_ENV"
           echo "release toolchain pinned to $V (from ws/freemkv/Cargo.toml)"
 
-      - name: Identify as the release bot
+      # Commit + tag as the repo owner. dev@getbusbar.com maps to NO GitHub
+      # account, so every cascade commit/annotated tag it made (v1.6.10/12/13/14)
+      # attributes to nobody. Use the owner's GitHub noreply so releases are his.
+      - name: Identify as the release author
         run: |
-          git config --global user.name  "freemkv release"
-          git config --global user.email "dev@getbusbar.com"
+          git config --global user.name  "Matthew Jackson"
+          git config --global user.email "1085847+MattJackson@users.noreply.github.com"
           git config --global url."https://x-access-token:${{ secrets.ORG_DISPATCH_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       # The inputs come in as ENV, not ${{ }} inside the run block: a run block
