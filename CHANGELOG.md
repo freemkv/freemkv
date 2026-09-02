@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.6.15] — 2026-09-02
+
+### Changed
+
+- Version aligned to 1.6.15 for the unified release. Internal CI/lint hardening (stable build + clippy, cargo-deny dependency-audit gate, audience-based comment-guard); no user-facing changes.
+
 ## [1.6.14] — 2026-08-31
 
 ### Changed
