@@ -3,7 +3,8 @@
 //! Every sink opens its destination for writing before (or while) the source
 //! is read, so "the destination IS the source" must be answered before a byte
 //! moves. Canonical-path comparison alone misses a hardlink; see
-//! [`same_file`] for the full check. Same shape as `title_identity`: one
+//! [`same_file`](crate::file_identity::same_file) for the full check. Same
+//! shape as `title_identity`: one
 //! question, one answer, declared by both crate roots.
 //!
 //! See docs/file_identity.md for why this was answered twice and diverged.
