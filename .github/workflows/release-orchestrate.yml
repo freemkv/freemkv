@@ -787,8 +787,11 @@ jobs:
               open(path, "w", encoding="utf-8").write(out)
           PY
 
+            # Match the FULL version incl. an optional prerelease suffix (e.g.
+            # 1.7.0-rc5); the bare X.Y.Z pattern would re-read "1.7.0" out of
+            # "1.7.0-rc5" and wrongly report the (successful) bump as failed.
             local updated
-            updated=$(grep -oE "\b$name [0-9]+\.[0-9]+\.[0-9]+" "$readme" | head -1 | awk '{print $2}')
+            updated=$(grep -oE "\b$name [0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?" "$readme" | head -1 | awk '{print $2}')
             [ "$updated" = "$newver" ] || die "README bump failed: still '$updated' in $readme"
             ok "$(basename "$dir"): README $current → $newver"
           }
