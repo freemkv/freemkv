@@ -31,6 +31,10 @@ on:
         description: Prerelease (rc) — cut -rc tags only; do NOT push qa, advance main, or publish the site
         type: boolean
         default: false
+      media_evidence_skip:
+        description: Bypass the real-media evidence gate (MEDIA_EVIDENCE_SKIP=1) — for an rc verified on real hardware instead of the CI matrix
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -53,6 +57,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
           NON_GATING: '^(Dependabot Updates|CodeQL|pages-build-deployment|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
+          MEDIA_EVIDENCE_SKIP: ${{ inputs.media_evidence_skip && '1' || '0' }}
         run: |
           set -uo pipefail
           fail=0
