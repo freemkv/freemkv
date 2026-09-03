@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.6.14"
+version = "1.7.0-rc5"
 dependencies = [
  "freemkv-engine",
  "freemkv-i18n",
@@ -370,8 +370,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.6.14"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.14#69eb82d07cb1bb95f5b2c46651914d376fe60f6c"
+version = "1.7.0-rc5"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.7.0-rc5#e5b622395cee27416a6beef183da5073fe61204a"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -383,16 +383,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.6.14"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.14#db24425a7697bf706a8ada5d74262be13fd22965"
+version = "1.7.0-rc5"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.7.0-rc5#be012fb78e66e95206d851a472bbd6cc2dbf90de"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.6.14"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.14#a070287dc60352f51aebcdc01bfba284ef130001"
+version = "1.7.0-rc5"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.7.0-rc5#750dd5c6dec4b62fdaffae9e260b876add4b355c"
 dependencies = [
  "base64",
  "flate2",
@@ -405,8 +405,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.6.14"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.14#99d63cb20b5f3100181a83cf2eecbf071c762afc"
+version = "1.7.0-rc5"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.7.0-rc5#a1c7ba5864a130d1280b95566b47e609384adf7c"
 dependencies = [
  "aes",
  "base64",
@@ -636,8 +636,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.6.14"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.14#1ed0612c995c4828d7d2ce420acade24c5518c98"
+version = "1.7.0-rc5"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.7.0-rc5#1e908a70c996925a4a1698e4420b0c3d2aca2e07"
 dependencies = [
  "aes",
  "base64",
@@ -1189,9 +1189,9 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "smallvec"
-version = "1.15.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
 name = "stable_deref_trait"
