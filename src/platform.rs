@@ -80,10 +80,16 @@ mod imp {
             .output()
             .ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
-        // `df` wraps long device names onto a second line, so the available
-        // column is not reliably on line 2 — take the last non-empty line.
-        let line = text.lines().rev().find(|l| !l.trim().is_empty())?;
-        let kb: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
+        // `df` wraps a long device name onto its own line, pushing the data
+        // columns onto the next — joining every line after the header back
+        // into one restores the normal column order before indexing into it.
+        let merged = text
+            .lines()
+            .skip(1)
+            .filter(|l| !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let kb: u64 = merged.split_whitespace().nth(3)?.parse().ok()?;
         Some(kb.saturating_mul(1024))
     }
 }
