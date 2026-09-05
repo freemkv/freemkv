@@ -228,12 +228,14 @@ fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, String> 
     let addrs: Vec<SocketAddr> = {
         use std::sync::atomic::Ordering;
         use std::sync::mpsc;
-        if DNS_IN_FLIGHT.load(Ordering::Relaxed) >= MAX_DNS_IN_FLIGHT {
+        // Check-and-increment in one atomic op — a separate load-then-add left a
+        // window where concurrent callers could all pass the check together.
+        if DNS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed) >= MAX_DNS_IN_FLIGHT {
+            DNS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
             return Err("DNS resolution timed out".into());
         }
         let host = host.clone();
         let (tx, rx) = mpsc::channel();
-        DNS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
         std::thread::spawn(move || {
             let res = (host.as_str(), port)
                 .to_socket_addrs()

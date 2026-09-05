@@ -27,6 +27,9 @@ pub(crate) struct InfoFlags {
     pub full: bool,
     pub basic: bool,
     pub keydb: Option<String>,
+    /// The raw `--log-level` value when it failed to parse, so `run` can
+    /// report it instead of the value silently becoming level 1.
+    pub bad_log_level: Option<String>,
 }
 
 /// Outcome of parsing an `info` flag list. `Help` and `Unknown` are returned
@@ -73,8 +76,10 @@ pub(crate) fn parse_info_flags(args: &[String]) -> InfoParse {
                     .get(i + 1)
                     .filter(|v| !crate::cli_entry::is_flag_token(v))
                 {
-                    if v.parse::<u8>().ok().unwrap_or(1) >= 2 {
-                        f.verbose = true;
+                    match v.parse::<u8>() {
+                        Ok(n) if n >= 2 => f.verbose = true,
+                        Ok(_) => {}
+                        Err(_) => f.bad_log_level = Some(v.clone()),
                     }
                     i += 1;
                 }
@@ -127,10 +132,21 @@ pub fn run(device: Option<&str>, args: &[String]) {
         full,
         basic,
         keydb,
+        bad_log_level,
     } = *flags;
 
     let out = Output::new(verbose, quiet);
 
+    if let Some(v) = &bad_log_level {
+        out.raw(
+            Normal,
+            &strings::fmt_or(
+                "cli.log_level_not_a_number",
+                "--log-level: expected a number 1-4, got '{value}', ignored",
+                &[("value", v)],
+            ),
+        );
+    }
     out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
     out.blank(Normal);
     out.print(Normal, "disc.scanning");

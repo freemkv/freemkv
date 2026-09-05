@@ -480,6 +480,9 @@ struct Memo {
     rows: String,
     formats: String,
     log_len: usize,
+    /// Character count of the log already painted, so appending needs no
+    /// `text()` read-back (which would be O(n) again, defeating the point).
+    log_chars: i32,
 }
 
 /// One row signature: the identity of the row, not its tick state (tick state
@@ -1486,12 +1489,25 @@ impl Shell {
         let _ = self.lbl_result_line.hwnd().SetWindowText(&v.result_summary);
 
         // ── log ──
-        // Rewritten only when it grew, so selection survives an ordinary tick.
-        if self.memo.borrow().log_len != v.log.len() {
+        // Append-only: a multi-hour rip must not re-render thousands of lines
+        // every tick. Only a shrink (Clear) rewrites the whole control.
+        let prev_len = self.memo.borrow().log_len;
+        if v.log.len() < prev_len {
             let text = log_text(&v.log);
             let _ = self.log.set_text(&text);
+            self.memo.borrow_mut().log_chars = text.chars().count() as i32;
+        } else if v.log.len() > prev_len {
+            let mut suffix = log_text(&v.log[prev_len..]);
+            if prev_len > 0 {
+                suffix.insert_str(0, "\r\n");
+            }
+            self.log.set_selection(-1, -1);
+            self.log.replace_selection(&suffix);
+            self.memo.borrow_mut().log_chars += suffix.chars().count() as i32;
+        }
+        if v.log.len() != prev_len {
             // Keep the newest line in view, as the macOS log does.
-            let n = text.chars().count() as i32;
+            let n = self.memo.borrow().log_chars;
             self.log.set_selection(n, n);
             self.memo.borrow_mut().log_len = v.log.len();
         }

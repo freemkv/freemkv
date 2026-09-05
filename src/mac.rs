@@ -440,6 +440,9 @@ struct Ivars {
     /// titles outline when nothing about the title list moved — the same
     /// policy the Windows shell's `Memo::rows`/`rows_sig` already apply.
     tree_sig: RefCell<String>,
+    /// Count of log lines already painted, so a 200 ms tick appends only the
+    /// new lines instead of re-rendering the whole (up to 5000-line) log.
+    log_len: RefCell<usize>,
     /// The operator has already answered the rip-in-progress question for this
     /// departure — see `confirm_quit`.
     quit_confirmed: std::cell::Cell<bool>,
@@ -1441,25 +1444,26 @@ impl Controller {
             }
         }
 
-        // log
+        // log — append-only: a multi-hour rip must not re-render thousands of
+        // lines every tick. Only a shrink (Clear, or a fresh disc) rebuilds.
         if let Some(tv) = iv.log.borrow().as_ref() {
-            let want: String = v
-                .log
-                .iter()
-                .map(|l| l.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let cur = { tv.string() }.to_string();
-            if cur.trim_end() != want {
+            let prev_len = *iv.log_len.borrow();
+            if v.log.len() < prev_len {
                 tv.setString(&NSString::from_str(""));
                 for l in &v.log {
                     log_append(tv, &l.text, log_colour(l.kind));
                 }
+            } else if v.log.len() > prev_len {
+                for l in &v.log[prev_len..] {
+                    log_append(tv, &l.text, log_colour(l.kind));
+                }
+            }
+            if v.log.len() != prev_len {
                 // Keep the newest line in view — the log only grows and the
-                // line worth reading is always the last one. Only inside this
-                // branch, so an ordinary progress tick never yanks the view.
+                // line worth reading is always the last one.
                 let end = { tv.string() }.length();
                 tv.scrollRangeToVisible(objc2_foundation::NSRange::new(end, 0));
+                *iv.log_len.borrow_mut() = v.log.len();
             }
         }
         if let Some(sv) = iv.log_scroll.borrow().as_ref() {
@@ -1655,6 +1659,9 @@ impl Controller {
         // still describes the OLD one's rows. Left alone, `render()` below
         // finds them equal, skips `apply`, and the disc comes back empty.
         self.ivars().tree_sig.borrow_mut().clear();
+        // Same reasoning: `build_ui` also installed a brand new, empty log
+        // NSTextView, so the old line count must not suppress its refill.
+        *self.ivars().log_len.borrow_mut() = 0;
 
         // Settings and About are cached, built once and reused on reopen — but
         // in the old language, so drop them; next open rebuilds them fresh.
