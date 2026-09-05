@@ -83,8 +83,11 @@ fn scan_maps_a_real_disc_into_rows() {
 }
 
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn every_title_row_has_a_duration_and_size() {
-    let Some(iso) = test_iso() else { return };
+    let Some(iso) = test_iso() else {
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
+    };
     let sc = engine::scan(&iso).unwrap();
     for r in sc.rows.iter().filter(|r| r.depth == 1) {
         assert!(r.desc.contains("chapter(s)"), "got {}", r.desc);
@@ -94,15 +97,21 @@ fn every_title_row_has_a_duration_and_size() {
 }
 
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn preflight_accepts_a_real_disc() {
-    let Some(iso) = test_iso() else { return };
+    let Some(iso) = test_iso() else {
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
+    };
     let blocked = engine::preflight(&iso, "/tmp", &[]).unwrap();
     assert!(blocked.is_empty(), "unexpectedly blocked: {blocked:?}");
 }
 
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn preflight_blocks_an_out_of_range_title() {
-    let Some(iso) = test_iso() else { return };
+    let Some(iso) = test_iso() else {
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
+    };
     let blocked = engine::preflight(&iso, "/tmp", &[9999]).unwrap();
     assert!(!blocked.is_empty(), "a bogus title index must be blocked");
     // Reasons are stable keys to localize, never English prose.
@@ -161,8 +170,11 @@ fn stream_scan_exposes_real_tracks() {
 }
 
 #[test]
+#[ignore = "needs a real MKV fixture; run with --ignored"]
 fn stream_scan_reports_a_duration() {
-    let Some(m) = test_mkv() else { return };
+    let Some(m) = test_mkv() else {
+        panic!("set FMKV_TEST_MKV to a real container to run this test");
+    };
     let sc = engine::scan_stream(&m).unwrap();
     let title = sc.rows.iter().find(|r| r.depth == 1).unwrap();
     assert!(title.desc.contains("track(s)"), "got {}", title.desc);
@@ -174,8 +186,11 @@ fn stream_scan_reports_a_duration() {
 }
 
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn every_title_is_distinguishable_and_indices_are_canonical() {
-    let Some(iso) = test_iso() else { return };
+    let Some(iso) = test_iso() else {
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
+    };
     let sc = engine::scan(&iso).unwrap();
 
     // Like the CLI, every title is listed — discs legitimately carry duplicate
