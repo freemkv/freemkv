@@ -21,8 +21,11 @@ fn starts_empty_with_a_ready_line() {
 }
 
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn open_and_close_move_between_pages() {
-    let Some(p) = iso() else { return };
+    let Some(p) = iso() else {
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
+    };
     let mut app = App::new();
     app.open(&p);
     assert_eq!(app.page, Page::Titles);
@@ -41,8 +44,11 @@ fn a_bad_source_reports_and_stays_empty() {
 }
 
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn selection_commands_all_go_through_dispatch() {
-    let Some(p) = iso() else { return };
+    let Some(p) = iso() else {
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
+    };
     let mut app = App::new();
     app.open(&p);
     let n = app.tree.title_count();
@@ -112,8 +118,11 @@ fn destructive_commands_are_blocked_while_running_but_cancel_is_not() {
 }
 
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn the_view_describes_the_whole_screen() {
-    let Some(p) = iso() else { return };
+    let Some(p) = iso() else {
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
+    };
     let mut app = App::new();
     app.open(&p);
     let v = app.view();
@@ -143,8 +152,11 @@ fn output_formats_follow_the_source_kind() {
 }
 
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn tri_state_reflects_partial_stream_selection() {
-    let Some(p) = iso() else { return };
+    let Some(p) = iso() else {
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
+    };
     let mut app = App::new();
     app.open(&p);
     let title = app
