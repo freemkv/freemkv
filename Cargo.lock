@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.6.14"
+version = "1.7.0"
 dependencies = [
  "freemkv-engine",
  "freemkv-i18n",
@@ -1584,9 +1584,9 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "winsafe"
-version = "0.0.28"
+version = "0.0.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d3922ac07e168376bc6799e7896fc737ddb9538be7533ca44bc3463091db1ad"
+checksum = "9ef0ffc427f045c0cc9ebffd6f4f91153dcd2a1547b5c3c29ee3f541e16e95c6"
 
 [[package]]
 name = "writeable"

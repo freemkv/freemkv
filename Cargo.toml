@@ -52,7 +52,7 @@ mimalloc = "0.1"
 # PINNED with `=`: winsafe is pre-1.0 and moves on a quarterly cadence, so it
 # reserves the right to break the API. Upgrade deliberately, never implicitly.
 [target.'cfg(target_os = "windows")'.dependencies]
-winsafe = { version = "=0.0.28", features = ["gui", "shell"] }
+winsafe = { version = "=0.0.29", features = ["gui", "shell"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
