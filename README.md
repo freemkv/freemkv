@@ -1,3 +1,5 @@
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/MattJackson)
+
 [![Website](https://img.shields.io/badge/website-freemkv.org-2ea44f)](https://freemkv.org)
 [![Discord](https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/yu7xMGTyek)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
