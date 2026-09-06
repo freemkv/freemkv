@@ -112,15 +112,27 @@ jobs:
           elif [ "${MEDIA_EVIDENCE_SKIP:-0}" = "1" ]; then
             echo "::warning::MEDIA_EVIDENCE gate BYPASSED (MEDIA_EVIDENCE_SKIP=1) — releasing without a real-disc run"
           else
-            rid=$(gh api "repos/freemkv/freemkv/actions/runs?head_sha=$fsha&per_page=50" \
-                    -q '[.workflow_runs[]|select(.name=="qa")][0].databaseId' 2>/dev/null || echo "")
-            legs=$(gh api "repos/freemkv/freemkv/actions/runs/$rid/jobs" \
+            # `gh api ... -q` runs jq over the RAW REST JSON: the run id field is
+            # `.id`, NOT `.databaseId` (that alias only exists in `gh run --json`
+            # output). Using the wrong name yielded an empty id, which turned the
+            # jobs call below into `actions/runs//jobs` — a 404 whose JSON body then
+            # misparsed as "0 green legs", failing a release whose matrix WAS green.
+            # `// empty` returns "" (not the string "null") when no qa run matches.
+            rid=$(gh api "repos/freemkv/freemkv/actions/runs?head_sha=$fsha&per_page=100" \
+                    -q 'first(.workflow_runs[]|select(.name=="qa")).id // empty' 2>/dev/null || echo "")
+            if [ -z "$rid" ]; then
+              echo "::error::no qa workflow run found at freemkv ${fsha:0:7} — cannot confirm real-media evidence. Push to qa so the matrix runs, mark the commit [skip-media], or set MEDIA_EVIDENCE_SKIP=1."
+              exit 1
+            fi
+            # per_page=100 so a qa run with >30 jobs can't paginate the cli-matrix
+            # legs off page 1 and read as "missing".
+            legs=$(gh api "repos/freemkv/freemkv/actions/runs/$rid/jobs?per_page=100" \
                     -q '[.jobs[]|select(.name|startswith("cli-matrix ("))|.conclusion]' 2>/dev/null || echo "[]")
             n=$(echo "$legs" | jq 'length'); good=$(echo "$legs" | jq '[.[]|select(.=="success")]|length')
             if [ "${n:-0}" -ge 2 ] && [ "$n" = "$good" ]; then
               echo "  ok real-media: both cli-matrix legs green at freemkv ${fsha:0:7} (run $rid)"
             else
-              echo "::error::no real-media evidence at freemkv ${fsha:0:7}: cli-matrix legs=$legs (need >=2 all success). Push to qa so the media matrix runs, mark the commit [skip-media], or MEDIA_EVIDENCE_SKIP=1."
+              echo "::error::no real-media evidence at freemkv ${fsha:0:7} (qa run $rid): cli-matrix legs=$legs (need >=2 all success). Push to qa so the matrix runs, mark the commit [skip-media], or MEDIA_EVIDENCE_SKIP=1."
               exit 1
             fi
           fi
