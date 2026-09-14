@@ -59,9 +59,22 @@ jobs:
           set -uo pipefail
           fail=0
           : > /tmp/shas
+          : > /tmp/versions
           for r in $REPOS; do
             dev=$(gh api "repos/freemkv/$r/git/ref/heads/dev" -q .object.sha 2>/dev/null || echo "")
             if [ -z "$dev" ]; then echo "::error::$r: no dev branch"; fail=1; continue; fi
+
+            # UNIFIED-VERSION PARITY: all eight ship the SAME version. Capture the
+            # root Cargo.toml version at dev's SHA now, for every repo (even a
+            # red one, so the parity error still names it), and cross-check after
+            # the loop. release-orchestrate re-bumps all eight to its `version`
+            # input at release time, so a drift here never reaches a tag — but it
+            # makes qa a combination that will never ship (siblings resolve at qa),
+            # so a green qa on mixed versions is misleading evidence. Catch it here.
+            ver=$(gh api "repos/freemkv/$r/contents/Cargo.toml?ref=$dev" -q .content 2>/dev/null \
+                    | base64 -d 2>/dev/null | grep -m1 '^version' | sed -E 's/^version *= *"([^"]+)".*/\1/')
+            if [ -z "$ver" ]; then echo "::error::$r: could not read Cargo.toml version at dev ${dev:0:7}"; fail=1; else echo "$r $ver" >> /tmp/versions; fi
+
             qa=$(gh api "repos/freemkv/$r/git/ref/heads/qa" -q .object.sha 2>/dev/null || echo "")
 
             if [ "$dev" = "$qa" ]; then
@@ -115,6 +128,16 @@ jobs:
             echo "  ✓ $r: dev ${dev:0:7} green, ready"
             echo "$r $dev ready" >> /tmp/shas
           done
+          # Cross-check the captured versions: every repo must be at the SAME
+          # version. Distinct values => drift; name every repo and its version so
+          # the fix is a one-line bump per outlier, then re-promote.
+          distinct=$(awk '{print $2}' /tmp/versions | sort -u | wc -l | tr -d ' ')
+          if [ "$distinct" -gt 1 ]; then
+            echo "::error::version drift across the unified set — all eight must match. Bump the outliers to the target version, then re-promote:"
+            sort -k2 /tmp/versions | awk '{printf "    %-20s %s\n", $1, $2}'
+            fail=1
+          fi
+
           [ "$fail" = "0" ] || { echo "::error::refusing to promote — fix the above first"; exit 1; }
 
       - name: Promote dev → qa, in dependency order
