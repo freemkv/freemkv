@@ -370,8 +370,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.6.14"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.6.14#69eb82d07cb1bb95f5b2c46651914d376fe60f6c"
+version = "1.7.1"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -383,16 +382,14 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.6.14"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.6.14#db24425a7697bf706a8ada5d74262be13fd22965"
+version = "1.7.1"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.6.14"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.6.14#a070287dc60352f51aebcdc01bfba284ef130001"
+version = "1.7.1"
 dependencies = [
  "base64",
  "flate2",
@@ -405,8 +402,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.6.14"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.6.14#99d63cb20b5f3100181a83cf2eecbf071c762afc"
+version = "1.7.1"
 dependencies = [
  "aes",
  "base64",
@@ -636,8 +632,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.6.14"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.6.14#1ed0612c995c4828d7d2ce420acade24c5518c98"
+version = "1.7.1"
 dependencies = [
  "aes",
  "base64",
@@ -1413,9 +1408,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "ureq"
-version = "3.4.0"
+version = "3.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "972d7902c8735f2695410b8aed7df6ed12a47394aa1c8d7af49f0497b731a94d"
+checksum = "af5546be8f5378d5414f83733f5c9a2526f4645829edbc1c41790aeef1b38e8b"
 dependencies = [
  "base64",
  "cookie_store",
@@ -1433,9 +1428,9 @@ dependencies = [
 
 [[package]]
 name = "ureq-proto"
-version = "0.6.1"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da5f78b09e6941e1a0f2e30e695e4b120377b54d5e0aec11b594bb57b3971613"
+checksum = "5b0809a01d1ca5a51ca70db32bb2a19157582a526505ef3c19e3b343a59aa5ad"
 dependencies = [
  "base64",
  "http",
@@ -1584,9 +1579,9 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "winsafe"
-version = "0.0.28"
+version = "0.0.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d3922ac07e168376bc6799e7896fc737ddb9538be7533ca44bc3463091db1ad"
+checksum = "9ef0ffc427f045c0cc9ebffd6f4f91153dcd2a1547b5c3c29ee3f541e16e95c6"
 
 [[package]]
 name = "writeable"
