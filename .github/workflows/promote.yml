@@ -45,7 +45,11 @@ env:
   REPOS: >-
     freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n
     freemkv-engine bdemu freemkv autorip
-  NON_GATING: '^(Dependabot Updates|CodeQL|pages-build-deployment)$'
+  # Exclude the orchestration/bot workflows from the green-gate: a repo's own
+  # promote/release/runner runs (and their dry-runs) must not gate the NEXT
+  # promote — otherwise a failed promote dry-run on a dev SHA blocks promotion of
+  # that same SHA. Mirrors release-orchestrate's NON_GATING.
+  NON_GATING: '^(Dependabot Updates|CodeQL|pages-build-deployment|promote|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
 
 jobs:
   promote:
