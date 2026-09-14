@@ -71,8 +71,12 @@ jobs:
             # input at release time, so a drift here never reaches a tag — but it
             # makes qa a combination that will never ship (siblings resolve at qa),
             # so a green qa on mixed versions is misleading evidence. Catch it here.
-            ver=$(gh api "repos/freemkv/$r/contents/Cargo.toml?ref=$dev" -q .content 2>/dev/null \
-                    | base64 -d 2>/dev/null | grep -m1 '^version' | sed -E 's/^version *= *"([^"]+)".*/\1/')
+            # NB: this job runs under `bash -e`. Keep the fetch out of a pipe that
+            # an early-exiting reader could SIGPIPE (a `... | base64 -d | grep -m1`
+            # aborted the whole step, nondeterministically). Fetch into a var
+            # (|| tolerate failure), then parse with a here-string — no pipe.
+            raw=$(gh api "repos/freemkv/$r/contents/Cargo.toml?ref=$dev" -q .content 2>/dev/null | base64 -d 2>/dev/null) || raw=""
+            ver=$(awk -F'"' '/^version *=/{print $2; exit}' <<<"$raw")
             if [ -z "$ver" ]; then echo "::error::$r: could not read Cargo.toml version at dev ${dev:0:7}"; fail=1; else echo "$r $ver" >> /tmp/versions; fi
 
             qa=$(gh api "repos/freemkv/$r/git/ref/heads/qa" -q .object.sha 2>/dev/null || echo "")
