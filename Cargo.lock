@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.6.14"
+version = "1.7.1"
 dependencies = [
  "freemkv-engine",
  "freemkv-i18n",
