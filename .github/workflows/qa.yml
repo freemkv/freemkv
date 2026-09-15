@@ -33,6 +33,12 @@ on:
         type: boolean
         default: false
 
+# Least privilege by default. Jobs that need more elevate themselves: rc-tag
+# pushes the candidate tag (contents: write), and launch-runners / cli-matrix
+# assume an AWS role over OIDC (id-token: write).
+permissions:
+  contents: read
+
 jobs:
   # ── Does this candidate warrant the media matrix? ─────────────────────────
   #
@@ -92,7 +98,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - name: Stamp the next rc
@@ -120,30 +126,30 @@ jobs:
         os: ['ubuntu-latest', 'macos-latest']
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: qa
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: qa
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: qa
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: qa
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: qa
@@ -161,7 +167,7 @@ jobs:
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - run: cargo test --release --tests
@@ -173,30 +179,30 @@ jobs:
   cross-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: qa
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: qa
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: qa
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: qa
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: qa
@@ -216,7 +222,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - run: rustup target add x86_64-unknown-linux-gnu
@@ -230,30 +236,30 @@ jobs:
   windows-build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: qa
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: qa
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: qa
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: qa
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: qa
@@ -271,7 +277,7 @@ jobs:
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - run: cargo build --release --tests
@@ -284,30 +290,30 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: qa
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: qa
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: qa
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: qa
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: qa
@@ -325,7 +331,7 @@ jobs:
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - name: Install ffmpeg and python
@@ -383,11 +389,11 @@ jobs:
       matrix:
         os: [linux, windows]
     steps:
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
           aws-region: us-west-2
-      - name: Mint a single-use registration token
+      - name: Mint a registration token and stash it in SSM (SecureString)
         id: reg
         env:
           # GITHUB_TOKEN cannot mint runner registration tokens: that needs
@@ -397,7 +403,17 @@ jobs:
           set -euo pipefail
           tok=$(gh api -X POST "repos/${{ github.repository }}/actions/runners/registration-token" -q .token)
           echo "::add-mask::$tok"
-          echo "token=$tok" >> "$GITHUB_OUTPUT"
+          # A GitHub registration token is valid for REPEATED registrations for
+          # its whole 60-minute life, and an EC2 tag is readable by any principal
+          # with ec2:DescribeTags/DescribeInstances — so the token is NEVER put in
+          # a tag. It goes into SSM Parameter Store as a KMS-encrypted SecureString
+          # (ssm:GetParameter + kms:Decrypt to read — far narrower than DescribeTags),
+          # keyed per launch; only the non-secret PARAMETER NAME is tagged, and the
+          # instance reads-then-deletes it at boot (see user-data-linux.sh). This
+          # mirrors ci-runner-launch.yml.
+          param="/freemkv-ci/runner-reg/${{ github.run_id }}-${{ matrix.os }}"
+          aws ssm put-parameter --name "$param" --type SecureString --value "$tok" --overwrite >/dev/null
+          echo "param=$param" >> "$GITHUB_OUTPUT"
       - name: Launch the ephemeral runner
         run: |
           set -euo pipefail
@@ -408,7 +424,7 @@ jobs:
             --subnet-id "$subnet" \
             --tag-specifications "ResourceType=instance,Tags=[
                 {Key=freemkv-ci,Value=runner},
-                {Key=runner-token,Value=${{ steps.reg.outputs.token }}},
+                {Key=runner-token-param,Value=${{ steps.reg.outputs.param }}},
                 {Key=runner-repo,Value=${{ github.repository }}},
                 {Key=launched-by,Value=${{ github.run_id }}}]" \
             --query 'Instances[0].InstanceId' --output text
@@ -453,24 +469,24 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { path: freemkv }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/libfreemkv,         ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-engine,     ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-engine }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-keysources, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-keysources }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-i18n,       ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-unlock,     ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
       # The acceptance suite is not in this public repo — it names fixtures and
       # key sources. It lives in the private `freemkv-ci` repo, which exists
       # because Actions runners cannot reach the LAN Gitea host the scripts
       # used to live on. That unreachability is the whole reason the LAN job
       # this replaces could not be moved to EC2 before.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-ci
           token: ${{ secrets.ORG_DISPATCH_TOKEN }}
@@ -727,14 +743,14 @@ jobs:
       # `always()`: a leg that FAILED still produced artifacts, and those are
       # exactly the ones worth comparing — "windows diverged" is the more
       # useful sentence when windows is also the leg that went red.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: "cli-matrix-${{ matrix.os }}"
           path: "cli-${{ matrix.os }}.txt"
       # Separate artifact, always: this is the one thing that makes a failed
       # leg diagnosable while the other leg is still running.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: "cli-suite-log-${{ matrix.os }}"
@@ -749,7 +765,7 @@ jobs:
       # would replace the diagnostic below ("neither leg uploaded a hash file,
       # check whether the runners registered") with a generic download error —
       # burying the actual cause in exactly the case it matters most.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { pattern: "cli-matrix-*", path: hashes }
         continue-on-error: true
       - name: Linux and Windows must produce identical bytes

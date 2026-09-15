@@ -119,11 +119,10 @@ impl Output {
     /// Print a blank line.
     pub fn blank(&self, level: Level) {
         if self.should_print(level) {
-            if self.stderr {
-                eprintln!();
-            } else {
-                println!();
-            }
+            // Route through the same seam as every other line (`line`), so a
+            // blank is captured/diverted by the test intercept identically — a
+            // direct `println!()` here wrote straight past it.
+            self.line("");
         }
     }
 }

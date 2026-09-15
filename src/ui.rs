@@ -474,6 +474,13 @@ impl Tree {
         let mut out: Vec<(usize, Vec<u16>, Vec<u16>)> = Vec::new();
         for n in &self.arena {
             let Some(pid) = n.pid else { continue };
+            // The disc/file header row carries the `usize::MAX` sentinel, not a
+            // real title index; never let it become a phantom per-title entry
+            // (the engine's `Selection` would try to rip title usize::MAX),
+            // exactly as `ticked_titles` guards it.
+            if n.title_idx == usize::MAX {
+                continue;
+            }
             let slot = match out.iter().position(|(t, _, _)| *t == n.title_idx) {
                 Some(i) => i,
                 None => {
@@ -621,7 +628,13 @@ pub fn canonical_lang_code(tag: &str) -> Option<String> {
         // `isolang` only knows /T; without this, e.g. `ger` fell through to the
         // verbatim fallback, adding an unofferable duplicate row instead of ticking German.
         .or_else(|| bib_to_terminologic(&lower).and_then(isolang::Language::from_639_3))
-        .or_else(|| isolang::Language::from_name(t))
+        // English name, matched case-insensitively: `from_name` is exact-case
+        // (`from_name("german")` misses), so a lowercased settings value or a
+        // name outside PICKER_LANGUAGES would otherwise fall through.
+        .or_else(|| {
+            let needle = lower.clone();
+            isolang::Language::match_names(move |name| name.eq_ignore_ascii_case(&needle)).next()
+        })
         .map(|l| l.to_639_3().to_string())
 }
 
@@ -684,7 +697,7 @@ pub fn lang_selection_to_string(codes: &[String]) -> String {
 pub fn lang_summary(stored: &str) -> String {
     let codes = lang_selection(stored);
     if codes.is_empty() {
-        return crate::strings::get("gui.set.lang_any");
+        return crate::strings::get_or("gui.set.lang_any", "Any");
     }
     codes
         .iter()
@@ -803,11 +816,11 @@ pub fn is_container(path: &str) -> bool {
 /// the only way macOS and Windows can be guaranteed to say the same thing.
 #[must_use]
 pub fn log_menu_label(log_hidden: bool) -> String {
-    crate::strings::get(if log_hidden {
-        "gui.menu.show_log"
+    if log_hidden {
+        crate::strings::get_or("gui.menu.show_log", "Show log")
     } else {
-        "gui.menu.hide_log"
-    })
+        crate::strings::get_or("gui.menu.hide_log", "Hide log")
+    }
 }
 
 pub fn blocked_while_running(cmd: Cmd) -> bool {
@@ -1631,27 +1644,35 @@ impl App {
         }
         let drives = crate::engine::list_optical_drives();
         if drives.is_empty() {
-            self.say(LogKind::Notice, &crate::strings::get("gui.log.no_drive"));
+            self.say(
+                LogKind::Notice,
+                &crate::strings::get_or(
+                    "gui.log.no_drive",
+                    "No optical drive found. Connect a Blu-ray/DVD drive with a disc.",
+                ),
+            );
             return None;
         }
         // One drive → that device; several → autodetect the one with media,
         // and log what was found so the user knows which drives are present.
         if drives.len() == 1 {
-            if announce_missing {
-                self.say(
-                    LogKind::Detail,
-                    &crate::strings::fmt(
-                        "gui.log.opening_drive",
-                        // The label is the drive's own vendor/model string,
-                        // i.e. bytes the hardware supplies — sanitized like
-                        // every other externally-sourced string in this pane.
-                        &[
-                            ("label", &crate::strings::sanitize_display(&drives[0].label)),
-                            ("device", &drives[0].device),
-                        ],
-                    ),
-                );
-            }
+            // `announce_missing` is necessarily true here: the probe path
+            // (`!announce_missing`) returned at the top of this function, so an
+            // inner re-test could never be false — it was dead.
+            self.say(
+                LogKind::Detail,
+                &crate::strings::fmt_or(
+                    "gui.log.opening_drive",
+                    "Opening {label} ({device})",
+                    // The label is the drive's own vendor/model string,
+                    // i.e. bytes the hardware supplies — sanitized like
+                    // every other externally-sourced string in this pane.
+                    &[
+                        ("label", &crate::strings::sanitize_display(&drives[0].label)),
+                        ("device", &drives[0].device),
+                    ],
+                ),
+            );
             Some(format!("disc://{}", drives[0].device))
         } else {
             let list = drives
@@ -1667,8 +1688,9 @@ impl App {
                 .join(", ");
             self.say(
                 LogKind::Detail,
-                &crate::strings::fmt(
+                &crate::strings::fmt_or(
                     "gui.log.drives_found",
+                    "{n} drives found: {list} — using the one with a disc",
                     &[("n", &drives.len().to_string()), ("list", &list)],
                 ),
             );
@@ -2331,7 +2353,10 @@ mod tests {
         for (name, src) in &shells {
             for (key, must_contain) in [
                 ("gui.about.version", "CARGO_PKG_VERSION"),
-                ("gui.about.engine", "CARGO_PKG_VERSION"),
+                // The engine row must derive from the LINKED engine's version,
+                // not the wrapper's `CARGO_PKG_VERSION` — the two diverge when
+                // libfreemkv is pinned to an older tag than this crate.
+                ("gui.about.engine", "libfreemkv::VERSION_LABEL"),
                 ("gui.about.keys", "keydb_status"),
             ] {
                 let at = src.find(key).unwrap_or_else(|| {

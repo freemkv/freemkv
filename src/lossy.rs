@@ -13,15 +13,23 @@
 ///
 /// `target` is the destination as the user asked for it, because the loss
 /// line names the file it happened to. This is a warning on a
-/// still-successful rip, not a failure, and reuses existing locale strings
-/// (`mp4.excluded_header`, `dir.file_lossy`) rather than adding new ones.
+/// still-successful rip, not a failure. The dropped-bytes line reuses the
+/// existing `dir.file_lossy` string; the undelivered-streams header uses a
+/// container-agnostic `mux.undelivered_header` (English fallback until the
+/// catalog ships it), since the loss is not mp4-specific.
 ///
 /// See docs/lossy.md for the full rationale.
 pub fn lossy_lines(outcome: &libfreemkv::MuxOutcome, target: &str) -> Vec<String> {
     let mut lines = Vec::new();
     if !outcome.undelivered_streams.is_empty() {
-        lines.push(crate::strings::fmt(
-            "mp4.excluded_header",
+        // Container-agnostic wording: `undelivered_streams` can come from ANY
+        // sink (mkv/m2ts/mp4), so the `mp4.excluded_header` string's "can't be
+        // stored in an MP4" phrasing would be wrong for a non-mp4 target. Use a
+        // generic header (English fallback until the catalog ships the key), the
+        // twin of `engine::summarize_stream`.
+        lines.push(crate::strings::fmt_or(
+            "mux.undelivered_header",
+            "Note: {count} stream(s) could not be delivered and were left out:",
             &[("count", &outcome.undelivered_streams.len().to_string())],
         ));
         lines.extend(
@@ -29,7 +37,13 @@ pub fn lossy_lines(outcome: &libfreemkv::MuxOutcome, target: &str) -> Vec<String
                 .undelivered_streams
                 .iter()
                 // 1-based, matching the CLI, the GUI and the `info` listing.
-                .map(|idx| format!("    - {} {}", crate::strings::get("stream.track"), idx + 1)),
+                .map(|idx| {
+                    format!(
+                        "    - {} {}",
+                        crate::strings::get("stream.track"),
+                        idx.saturating_add(1)
+                    )
+                }),
         );
     }
     if outcome.lost_bytes > 0 || outcome.errors > 0 {

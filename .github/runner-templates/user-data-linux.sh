@@ -7,7 +7,11 @@
 #                       launch template, so the instance DELETES itself.
 # A third, the scheduled sweeper, catches the case where this script dies
 # before reaching the shutdown.
-set -euxo pipefail
+# NOTE: no `x` (no `set -x`). The decrypted registration token is expanded on
+# the `config.sh --token $REG` command line (and in the `$REG` guard below), and
+# an execution trace would echo it straight into the tee'd log. `-euo pipefail`
+# keeps the fail-fast behaviour without ever printing the token.
+set -euo pipefail
 exec > >(tee /var/log/freemkv-runner.log) 2>&1
 
 # Hard deadline: terminate no matter what, even if the job hangs and the

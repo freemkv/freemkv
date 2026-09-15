@@ -20,11 +20,16 @@ on:
     branches: [qa]
   workflow_dispatch:
 
+# Least privilege by default; the real-media job elevates itself to id-token:
+# write for the OIDC role it assumes to read the fixture bucket.
+permissions:
+  contents: read
+
 jobs:
   media:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # ubuntu-latest does not ship ffmpeg preinstalled.
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -38,7 +43,7 @@ jobs:
             -map 0:v -map 1:a -map 2:a -c:v libx264 -pix_fmt yuv420p -c:a ac3 -b:a 192k \
             -metadata:s:a:0 language=eng -metadata:s:a:1 language=spa master.mkv
           sha256sum master.mkv
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: matrix-master-media, path: master.mkv }
 
   suite:
@@ -49,20 +54,20 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { path: freemkv }
       # Siblings are path deps and must sit BESIDE freemkv: the committed
       # Cargo.toml patches them to git tags and the .cargo/config.toml that
       # redirects to paths is gitignored, so a bare checkout cannot resolve them.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/libfreemkv, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-engine, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-engine }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-keysources, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-keysources }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-i18n, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-unlock, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
       - name: Point the patches at the sibling checkouts
         shell: bash
@@ -97,11 +102,11 @@ jobs:
             windows-*) choco install ffmpeg -y --no-progress ;;
           esac
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with: { workspaces: freemkv }
       - run: cargo build --release --bin freemkv
         working-directory: freemkv
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: matrix-master-media, path: shared }
       - name: Run the CLI suite against the shared media
         shell: bash
@@ -121,7 +126,7 @@ jobs:
       # if: always() -- a suite that FAILED still produced artifacts, and those
       # are the ones worth comparing: "windows diverged" is the more useful
       # sentence when the windows run is also the one that went red.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: "matrix-hashes-${{ matrix.os }}"
@@ -132,7 +137,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { pattern: "matrix-hashes-*", merge-multiple: true, path: hashes }
       - name: Every platform must produce the same bytes
         shell: bash
@@ -238,17 +243,17 @@ jobs:
       id-token: write   # OIDC; nothing else is needed
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { path: freemkv }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/libfreemkv, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-engine, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-engine }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-keysources, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-keysources }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-i18n, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/freemkv-unlock, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
       - name: Point the patches at the sibling checkouts
         shell: bash
@@ -273,14 +278,18 @@ jobs:
       - name: Are the fixture credentials available?
         id: creds
         shell: bash
+        # Secrets flow through env, never interpolated into the script body.
+        env:
+          FMKV_FIXTURES_ROLE: ${{ secrets.FMKV_FIXTURES_ROLE }}
+          FMKV_FIXTURES_S3: ${{ secrets.FMKV_FIXTURES_S3 }}
         run: |
-          if [ -n "${{ secrets.FMKV_FIXTURES_ROLE }}" ] && [ -n "${{ secrets.FMKV_FIXTURES_S3 }}" ]; then
+          if [ -n "$FMKV_FIXTURES_ROLE" ] && [ -n "$FMKV_FIXTURES_S3" ]; then
             echo "have=true" >> "$GITHUB_OUTPUT"
           else
             echo "have=false" >> "$GITHUB_OUTPUT"
             echo "No fixture credentials -- real-media parity skipped." >> "$GITHUB_STEP_SUMMARY"
           fi
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         if: steps.creds.outputs.have == 'true'
         with:
           role-to-assume: ${{ secrets.FMKV_FIXTURES_ROLE }}
@@ -288,10 +297,13 @@ jobs:
       - name: Fetch the disc fixture
         if: steps.creds.outputs.have == 'true'
         shell: bash
-        run: aws s3 cp "${{ secrets.FMKV_FIXTURES_S3 }}/dvd.iso" dvd.iso --quiet && ls -l dvd.iso
+        # Secret bucket path via env, not interpolated into the command.
+        env:
+          FMKV_FIXTURES_S3: ${{ secrets.FMKV_FIXTURES_S3 }}
+        run: aws s3 cp "$FMKV_FIXTURES_S3/dvd.iso" dvd.iso --quiet && ls -l dvd.iso
       - uses: dtolnay/rust-toolchain@stable
         if: steps.creds.outputs.have == 'true'
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: steps.creds.outputs.have == 'true'
         with: { workspaces: freemkv }
       - run: cargo build --release --bin freemkv
@@ -311,7 +323,7 @@ jobs:
           else H=$(shasum -a 256 dvd-out.mkv | cut -d' ' -f1); fi
           printf '%s  dvd-out.mkv\nlibfreemkv=%s\n' "$H" "$LF_SHA" > "real-${{ matrix.os }}.txt"
           cat "real-${{ matrix.os }}.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always() && steps.creds.outputs.have == 'true'
         with:
           name: "matrix-real-${{ matrix.os }}"
@@ -322,7 +334,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { pattern: "matrix-real-*", merge-multiple: true, path: real }
         continue-on-error: true
       - name: Every platform must rip the disc identically

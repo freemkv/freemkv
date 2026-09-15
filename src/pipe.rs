@@ -650,12 +650,13 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                 }
             }
             // `--key-auth TOKEN` — bearer token for the key service. A token is an
-            // opaque string, not a URL; reject only a missing value (a following
-            // stream-URL token means the token was omitted).
+            // opaque string, not a URL; reject a missing value — a following
+            // stream-URL token means the token was omitted, and a following FLAG
+            // (`--key-auth --raw`) must not be swallowed as the token either.
             "--key-auth" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
-                    Some(t) if !is_url_token(t) => {
+                    Some(t) if !is_url_token(t) && !crate::cli_entry::is_flag_token(t) => {
                         i += 1;
                         f.key_auth = Some(t.clone());
                     }
@@ -1346,12 +1347,23 @@ fn disc_title_identities(
         }
         _ => libfreemkv::DeviceTarget::Autodetect,
     };
-    let (session, _trace) = freemkv_engine::open_scan_resolve(
+    let (session, _trace) = match freemkv_engine::open_scan_resolve(
         target,
         drive_credentials(keys.keydb_path()),
         key_source_factory(keys, out),
-    )
-    .ok()?;
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            // `-t all` needs the disc's title list; a scan failure here must be
+            // reported, not silently turned into "no titles" (which used to
+            // masquerade as an empty selection). Surface the cause, then decline.
+            out.raw(
+                Normal,
+                &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
+            );
+            return None;
+        }
+    };
     let ids: Vec<TitleIdentity> = session
         .disc()
         .map(|d| d.titles.iter().map(TitleIdentity::of).collect())?;
@@ -2134,6 +2146,18 @@ fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> boo
     });
 
     match result {
+        Ok(0) => {
+            // Wrote ZERO bytes: nothing was recovered, so the ISO on disk is
+            // unusable. Don't print "Complete" over it — fail like the disc→ISO
+            // path's NoData guard so a scripted caller's `$?` sees the failure.
+            let mb_bad =
+                (total_sectors as u64 * libfreemkv::consts::SECTOR_BYTES_U64) as f64 / 1_048_576.0;
+            out.raw(
+                Normal,
+                &strings::fmt("rip.no_data", &[("unreadable", &format!("{mb_bad:.1}"))]),
+            );
+            false
+        }
         Ok(bytes) => {
             let elapsed = start.elapsed().as_secs_f64();
             let mb = bytes as f64 / (1024.0 * 1024.0);
@@ -2335,21 +2359,11 @@ fn disc_to_iso(
             let elapsed = start.elapsed().as_secs_f64();
             let mb = r.bytes_total as f64 / (1024.0 * 1024.0);
             let speed = if elapsed > 0.0 { mb / elapsed } else { 0.0 };
-            out.raw(
-                Normal,
-                &strings::fmt(
-                    "rip.complete",
-                    &[
-                        ("size", &format!("{:.1}", mb / 1024.0)),
-                        ("unit", "GB"),
-                        ("time", &format!("{elapsed:.0}")),
-                        ("speed", &format!("{speed:.0}")),
-                    ],
-                ),
-            );
             // Report the LOSS whenever there is any, not only when recovery was
             // requested. Gated on `multipass`, a single-pass rip of a scratched
             // disc printed completion and nothing else — never produce that.
+            // Printed BEFORE the completion line so "Complete" is the last word,
+            // not buried above the loss the user actually needs to read.
             if !disc_copy_succeeded(verdict) {
                 let gb_good = r.bytes_good as f64 / 1_073_741_824.0;
                 let mb_bad = r.bytes_unreadable as f64 / 1_048_576.0;
@@ -2386,6 +2400,18 @@ fn disc_to_iso(
                     );
                 }
             }
+            out.raw(
+                Normal,
+                &strings::fmt(
+                    "rip.complete",
+                    &[
+                        ("size", &format!("{:.1}", mb / 1024.0)),
+                        ("unit", "GB"),
+                        ("time", &format!("{elapsed:.0}")),
+                        ("speed", &format!("{speed:.0}")),
+                    ],
+                ),
+            );
             // The verdict IS the exit code. Returning a bare `true` here is
             // what let a holed image exit 0.
             disc_copy_succeeded(verdict)

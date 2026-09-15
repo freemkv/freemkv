@@ -306,6 +306,10 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
 }
 
 /// Scan a source (ISO path today) and flatten it into display rows.
+// Consumed by the library's integration tests (`tests/engine_bridge.rs`) and
+// the platform unit tests, not by the binary — which compiles this module too
+// (`main.rs` has its own `mod engine`), so the bin build sees it as dead.
+#[allow(dead_code)]
 pub fn scan(path: &str) -> Result<Scanned, String> {
     scan_with_keys(path, &KeyConfig::default(), false)
 }
@@ -621,6 +625,8 @@ pub fn scan_disc_with_keys(
 }
 
 /// Ask the engine whether a job can run, without executing it.
+// See `scan` above: used by the integration/platform tests, dead in the bin.
+#[allow(dead_code)]
 pub fn preflight(path: &str, dest: &str, titles: &[usize]) -> Result<Vec<String>, String> {
     preflight_with_keys(path, dest, titles, &KeyConfig::default())
 }
@@ -853,7 +859,18 @@ pub fn error_code(e: &std::io::Error) -> u16 {
     let digits_end = rest
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(rest.len());
-    rest[..digits_end].parse().unwrap_or(0)
+    let digits = &rest[..digits_end];
+    if digits.is_empty() {
+        return 0;
+    }
+    // The digit run is ASCII-digit-only by construction, so a parse failure
+    // here means the value exceeds the type — a code above `u16::MAX` still
+    // names a real error, so saturate rather than collapsing it to `0` (which
+    // reads as "no error"). Parse wide, then clamp into the u16 return.
+    digits
+        .parse::<u32>()
+        .map(|v| v.min(u16::MAX as u32) as u16)
+        .unwrap_or(u16::MAX)
 }
 
 // Map a recovery sweep's terminal flags to the run's result before the ISO
@@ -1015,15 +1032,27 @@ pub fn summarize_stream(outcome: &libfreemkv::MuxOutcome, target: &str, dest_dir
     if n > 0 {
         format!(
             "Written to {dest_dir} — {}",
-            crate::strings::fmt("mp4.excluded_header", &[("count", &n.to_string())])
+            // Container-agnostic wording, consistent with the CLI's
+            // `lossy_lines`: an undelivered stream is not mp4-specific, so the
+            // `mp4.excluded_header` "can't be stored in an MP4" phrasing is wrong
+            // for an mkv/m2ts target. English fallback until the catalog ships.
+            crate::strings::fmt_or(
+                "mux.undelivered_header",
+                "Note: {count} stream(s) could not be delivered and were left out:",
+                &[("count", &n.to_string())]
+            )
         )
     } else {
         // Bytes lost inside the tracks: no stream is missing, so the
         // excluded-tracks wording would be wrong. Name the loss itself.
-        format!(
-            "Written to {dest_dir} —{}",
-            crate::lossy::lossy_lines(outcome, target).join(" ")
-        )
+        let lines = crate::lossy::lossy_lines(outcome, target);
+        if lines.is_empty() {
+            // `is_lossy` was true but produced no describable line — append
+            // nothing rather than leaving a dangling " —" on the message.
+            format!("Written to {dest_dir}")
+        } else {
+            format!("Written to {dest_dir} — {}", lines.join(" "))
+        }
     }
 }
 
@@ -1638,7 +1667,11 @@ pub fn title_basename(template: &str, label: &str, n: usize) -> String {
     } else {
         name = format!("{name}_t{n}");
     }
-    name
+    // The `{title}` label was sanitised, but the template TEXT itself can carry
+    // separators (`../`, `foo/bar`) a user typed straight into the setting —
+    // those would escape the output folder. Sanitise the assembled name so the
+    // doc's "kept in-folder" promise holds for every branch, not just `{title}`.
+    sanitize_label(&name)
 }
 
 // The stream filter for one title (or the whole request with no title).
@@ -2163,6 +2196,29 @@ fn remap_against(
     Ok(out)
 }
 
+// Re-key a per-title stream selection from the old (drive-scan) canonical
+// indices to the new (staged-image) ones, using the same old->new mapping the
+// title list was remapped through. `title_pids` is keyed by canonical title
+// index (see [`RipRequest::title_pids`]); leaving it keyed by the drive-scan
+// index while the titles are remapped to staged-image indices makes
+// `stream_selection_for` miss and fall back to the union, muxing a deselected
+// track on a damaged-disc multipass rip. Entries whose old index has no
+// mapping (a title not in the remapped selection) are dropped: they describe a
+// title that will not be muxed.
+fn remap_title_pids(
+    pids: &TitleStreams,
+    map: &std::collections::HashMap<usize, usize>,
+) -> TitleStreams {
+    match pids {
+        TitleStreams::PerTitle(per) => TitleStreams::PerTitle(
+            per.iter()
+                .filter_map(|(ti, a, s)| map.get(ti).map(|&now| (now, a.clone(), s.clone())))
+                .collect(),
+        ),
+        TitleStreams::Unspecified => TitleStreams::Unspecified,
+    }
+}
+
 // Confirm the title at `idx` in a FRESH scan is still the one the selection
 // meant, before it is muxed under that number. Verifies rather than remaps:
 // a moved title list between two scans is a disc/drive problem — see docs/engine.md.
@@ -2362,9 +2418,22 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
                 return Err(format!("{e} The recovered image is kept: {iso_path}"));
             }
         };
+        // `title_pids` is keyed by the drive-scan's canonical index; the titles
+        // were just remapped to staged-image indices, so re-key the per-title
+        // selection through the same old->new mapping or `stream_selection_for`
+        // misses and muxes a deselected track. The mapping is positional:
+        // req.titles[i] (old) -> titles[i] (new).
+        let pid_map: std::collections::HashMap<usize, usize> = req
+            .titles
+            .iter()
+            .copied()
+            .zip(titles.iter().copied())
+            .collect();
+        let title_pids = remap_title_pids(&req.title_pids, &pid_map);
         let iso_req = RipRequest {
             source: iso_path.clone(),
             titles,
+            title_pids,
             // The numbers above were just resolved BY IDENTITY against the
             // staged image, so the drive scan's identities no longer apply —
             // carrying them on would compare against the wrong title.
@@ -3456,7 +3525,7 @@ mod routing_tests {
     use super::{
         DiscPlan, KeyConfig, OutKind, RipRequest, TitleIdentity, damage_note, demux_needs_subdirs,
         disc_device, fe, image_or_dir_scheme, is_disc_source, is_stream_source, mux_opts, out_kind,
-        recovery_plan, recovery_produced_no_data, recovery_raw, remap_against,
+        recovery_plan, recovery_produced_no_data, recovery_raw, remap_against, remap_title_pids,
         should_delete_staging_iso, source_scheme, stream_selection_for, title_input_options,
         title_session_mux_opts, verify_selection_identity, verify_title_identity, won_from_trace,
     };
@@ -4264,6 +4333,71 @@ mod routing_tests {
             Ok(vec![1, 0, 2]),
             "the two titles WITH an identity must be followed to their new \
              positions; only the one with no identity falls back to its number"
+        );
+    }
+
+    // The multipass-recovery defect: `titles` were remapped by identity to the
+    // staged image's indices, but `title_pids` stayed keyed by the drive-scan
+    // index. `stream_selection_for` then missed and fell back to the union,
+    // muxing a track the user had unticked. `remap_title_pids` re-keys through
+    // the same old->new mapping so the per-title selection follows its title.
+    #[test]
+    fn per_title_pids_follow_their_title_through_the_remap() {
+        use std::collections::HashMap;
+        // Drive scan had titles [0,1,2]; the staged image reordered them so
+        // old 0->new 2, old 1->new 0, old 2->new 1.
+        let map: HashMap<usize, usize> = [(0usize, 2usize), (1, 0), (2, 1)].into_iter().collect();
+        let pids = crate::engine::TitleStreams::PerTitle(vec![
+            (0, vec![0x1100u16], vec![0x1200u16]),
+            (1, vec![], vec![]),
+            (2, vec![0x1101], vec![]),
+        ]);
+        let remapped = remap_title_pids(&pids, &map);
+        assert_eq!(
+            remapped.for_title(Some(2)),
+            Some(([0x1100u16].as_slice(), [0x1200u16].as_slice())),
+            "old title 0's selection must now answer under new index 2"
+        );
+        // The unticked title (empty lists) must stay an authoritative empty
+        // selection under its new index, NOT vanish into the union.
+        assert_eq!(
+            remapped.for_title(Some(0)),
+            Some(([].as_slice(), [].as_slice())),
+            "old title 1 kept nothing; that must survive the remap under new index 0"
+        );
+        assert_eq!(
+            remapped.for_title(Some(1)),
+            Some(([0x1101u16].as_slice(), [].as_slice()))
+        );
+    }
+
+    // An entry whose old index is not in the remapped selection describes a
+    // title that will not be muxed, and is dropped rather than mis-keyed.
+    #[test]
+    fn per_title_pids_for_a_dropped_title_are_discarded() {
+        use std::collections::HashMap;
+        let map: HashMap<usize, usize> = [(0usize, 0usize)].into_iter().collect();
+        let pids = crate::engine::TitleStreams::PerTitle(vec![
+            (0, vec![0x1100u16], vec![]),
+            (5, vec![0x9999], vec![]),
+        ]);
+        let remapped = remap_title_pids(&pids, &map);
+        match remapped {
+            crate::engine::TitleStreams::PerTitle(per) => {
+                assert_eq!(per, vec![(0usize, vec![0x1100u16], vec![])]);
+            }
+            _ => panic!("expected PerTitle"),
+        }
+    }
+
+    // Unspecified carries no per-title breakdown, so the remap is a no-op.
+    #[test]
+    fn remapping_an_unspecified_selection_is_a_no_op() {
+        use std::collections::HashMap;
+        let map: HashMap<usize, usize> = [(0usize, 1usize)].into_iter().collect();
+        assert_eq!(
+            remap_title_pids(&crate::engine::TitleStreams::Unspecified, &map),
+            crate::engine::TitleStreams::Unspecified
         );
     }
 

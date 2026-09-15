@@ -8,10 +8,15 @@ name: comment-guard
 
 on: [push, pull_request]
 
+# Read-only: this is a lint (it caps comment prose) — it runs a local script and
+# does NOT post PR comments, so no pull-requests: write is needed.
+permissions:
+  contents: read
+
 jobs:
   comment-guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run comment-guard
         run: python3 ci/comment-guard.py

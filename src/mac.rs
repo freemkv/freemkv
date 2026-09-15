@@ -340,6 +340,20 @@ impl TitlesSource {
     // user's expansion, selection and scroll position — untouched. Runs on
     // every ordinary redraw; see docs/mac-shell.md — sync_check_states.
     fn sync_check_states(&self, rows: &[crate::ui::Row]) {
+        // Early-out when nothing about the ticks moved. This runs on every
+        // ordinary redraw (5 Hz during a rip), and the caller only reaches it
+        // when `rows_sig` matched — so index/depth/type/desc are already known
+        // identical to the stored Vec, and the checkbox state is the only field
+        // that can still differ. If even that is unchanged, the stored Vec is a
+        // byte-for-byte match and the clone + repaint loop below are pure waste.
+        {
+            let cur = self.ivars().rows.borrow();
+            if cur.len() == rows.len()
+                && cur.iter().zip(rows.iter()).all(|(a, b)| a.check == b.check)
+            {
+                return;
+            }
+        }
         // The data source must serve the CURRENT ticks even when no reload
         // happens: a row scrolled into view after this point is built by
         // `cell_for` from exactly this Vec.
@@ -490,6 +504,10 @@ struct Ivars {
     lbl_saving_all: RefCell<Option<Retained<NSTextField>>>,
     fields: RefCell<Vec<Retained<NSTextField>>>,
     timer: RefCell<Option<Retained<NSTimer>>>,
+    /// The View ▸ log menu item, cached so the 5 Hz `sync_log_menu_title` tick
+    /// does not re-walk the entire menu bar every time. Cleared on a language
+    /// switch, which rebuilds the menu bar and so invalidates this handle.
+    log_menu_item: RefCell<Option<Retained<NSMenuItem>>>,
 }
 
 // Window-wide drop target. Accepts a single .iso/.mkv/.m2ts/.mp4 dragged
@@ -893,13 +911,19 @@ define_class!(
             self.set_keydb_updating(true);
             let inbox = self.ivars().inbox.clone();
             std::thread::spawn(move || {
-                let msg = match crate::settings::update_keydb(&url, &path) {
-                    Ok(m) => m,
-                    Err(e) => e,
-                };
-                // RECOVER rather than skip the push: this is the ONLY message
-                // the keydb worker sends, and dropping it would wedge the
-                // Update button disabled forever, per `start_drain`'s comment.
+                // A panic inside update_keydb (or anything it calls) must NOT
+                // strand the drain: catch it so a terminal message is pushed
+                // either way. This is the ONLY message the keydb worker sends,
+                // and dropping it would wedge the Update button disabled forever,
+                // per `start_drain`'s comment.
+                let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match crate::settings::update_keydb(&url, &path) {
+                        Ok(m) => m,
+                        Err(e) => e,
+                    }
+                }))
+                .unwrap_or_else(|_| "keydb update failed — internal error".to_string());
+                // RECOVER rather than skip the push.
                 inbox
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -1633,6 +1657,9 @@ impl Controller {
         // Menu bar: build_menus installs a fresh main menu, replacing the old.
         let app = NSApplication::sharedApplication(mtm);
         build_menus(mtm, &app, self);
+        // The old View ▸ log item just went away with the old menu; drop the
+        // cached handle so `sync_log_menu_title` re-finds it in the new menu.
+        *self.ivars().log_menu_item.borrow_mut() = None;
 
         let Some(win) = self.ivars().win_main.borrow().clone() else {
             return;
@@ -1687,10 +1714,23 @@ impl Controller {
         *self.ivars().drain.borrow_mut() = Some(t);
     }
 
-    // Re-title the View > log menu item. Found by SELECTOR, not position or
-    // current title: the menu is rebuilt on a live language change, so
-    // matching English text would silently stop working in other locales.
+    // Re-title the View > log menu item, cached after the first lookup so this
+    // 5 Hz tick does not re-walk the whole menu bar every time.
     fn sync_log_menu_title(&self, title: &str) {
+        // Fast path: the item was located on an earlier tick. Re-title in place
+        // without touching the rest of the menu bar. The cache is cleared by
+        // `relocalize`, the only thing that rebuilds the menu, so a live handle
+        // here always belongs to the current menu.
+        if let Some(mi) = self.ivars().log_menu_item.borrow().as_ref() {
+            if { mi.title() }.to_string() != title {
+                mi.setTitle(&NSString::from_str(title));
+            }
+            return;
+        }
+        // Cold path: walk the menu once to find the item by SELECTOR (not
+        // position or current title: the menu is rebuilt on a live language
+        // change, so matching English text would silently stop working in other
+        // locales), then cache it for every subsequent tick.
         let mtm = MainThreadMarker::new().unwrap();
         let app = NSApplication::sharedApplication(mtm);
         let Some(main) = app.mainMenu() else {
@@ -1711,6 +1751,7 @@ impl Controller {
                     if { mi.title() }.to_string() != title {
                         mi.setTitle(&NSString::from_str(title));
                     }
+                    *self.ivars().log_menu_item.borrow_mut() = Some(mi);
                     return;
                 }
             }
@@ -3723,7 +3764,7 @@ fn build_about(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         ),
         (
             crate::strings::get("gui.about.engine"),
-            format!("libfreemkv {}", env!("CARGO_PKG_VERSION")),
+            format!("libfreemkv {}", libfreemkv::VERSION_LABEL),
         ),
         (crate::strings::get("gui.about.licence"), "MIT".to_string()),
         (
@@ -3798,6 +3839,7 @@ impl Controller {
     /// Click the actual checkbox in row `row` — builds the real cell and sends
     /// it `performClick:`, so `setTag`/`setTarget`/`setAction` wiring is
     /// exercised. A direct model mutation would not catch a mis-wired cell.
+    #[allow(dead_code)] // test-only UI-driver; the bin compiles this module but never calls it
     pub fn drive_click_checkbox(&self, row: usize) -> bool {
         let Some(src) = self.ivars().src.borrow().clone() else {
             return false;
@@ -3825,6 +3867,7 @@ impl Controller {
 
     /// Invoke a menu item by title, through its own target/action — the same
     /// path a user picking it takes. Returns false if it is disabled.
+    #[allow(dead_code)] // test-only UI-driver; the bin compiles this module but never calls it
     pub fn drive_menu(&self, menu_title: &str, item_title: &str) -> bool {
         let mtm = MainThreadMarker::new().unwrap();
         let app = NSApplication::sharedApplication(mtm);
@@ -3877,6 +3920,7 @@ impl Controller {
     }
 
     /// Click a button found by its title anywhere in the window.
+    #[allow(dead_code)] // test-only UI-driver; the bin compiles this module but never calls it
     pub fn drive_click_button(&self, title: &str) -> bool {
         fn walk(v: &NSView, title: &str) -> Option<Retained<NSButton>> {
             for sub in { v.subviews() }.iter() {
@@ -3955,6 +3999,7 @@ impl Controller {
         }
     }
 
+    #[allow(dead_code)] // test-only UI-driver; the bin compiles this module but never calls it
     pub fn drive_log(&self) -> String {
         self.ivars()
             .log
