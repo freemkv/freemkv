@@ -147,7 +147,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
             ),
         );
     }
-    out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
+    out.raw(Normal, &format!("freemkv {}", libfreemkv::VERSION_LABEL));
     out.blank(Normal);
     out.print(Normal, "disc.scanning");
     out.blank(Normal);
