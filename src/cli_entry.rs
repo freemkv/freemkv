@@ -270,8 +270,20 @@ pub fn run(args: Vec<String>) {
                 // Single URL, no dest — show info. `info_cmd` expects `args[0]` to be
                 // the URL, but a preceding flag (e.g. `--verbose disc://`) would land
                 // there instead; put the resolved URL first, then the remaining flags.
-                let mut info_args = vec![urls[0].clone()];
-                info_args.extend(args[1..].iter().filter(|a| **a != urls[0]).cloned());
+                // Drop the URL from its original position exactly ONCE, matched
+                // canonically (scheme case / trailing slash) rather than by raw
+                // string equality, so an equivalent-but-differently-spelled token
+                // (`DISC://` vs `disc://`) is still removed and never passed twice.
+                let url = urls[0].clone();
+                let mut info_args = vec![url.clone()];
+                let mut removed = false;
+                for a in &args[1..] {
+                    if !removed && same_stream_url(a, &url) {
+                        removed = true;
+                        continue;
+                    }
+                    info_args.push(a.clone());
+                }
                 info_cmd(&info_args);
             } else {
                 eprintln!("{}", crate::strings::get("error.usage_hint"));
@@ -286,6 +298,32 @@ fn is_url(s: &str) -> bool {
     s.contains("://")
 }
 
+/// Whether two argv tokens name the SAME stream URL. Exact byte-equality first
+/// (the common case, and the only comparison schemeless tokens support), then a
+/// canonical comparison — scheme lowercased, a trailing `/` ignored — so
+/// `DISC://` and `disc://`, or `disc://dev/sr0` and `disc://dev/sr0/`, match.
+fn same_stream_url(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (canon_url(a), canon_url(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Canonical form of a `scheme://rest` URL for equivalence checks: scheme
+/// lowercased, one trailing slash trimmed off the remainder. `None` for a
+/// schemeless token, which has no canonical form to compare.
+fn canon_url(s: &str) -> Option<String> {
+    let (scheme, rest) = s.split_once("://")?;
+    Some(format!(
+        "{}://{}",
+        scheme.to_ascii_lowercase(),
+        rest.trim_end_matches('/')
+    ))
+}
+
 // Pull --language/--lang and its value out of the argument list, with the
 // same URL-value guard as collect_urls. See docs/cli-entry.md §
 // "strip_language_flag".
@@ -297,7 +335,12 @@ fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>, Vec<Pen
     while i < args.len() {
         if args[i] == "--language" || args[i] == "--lang" {
             match args.get(i + 1) {
-                Some(v) if !is_url(v) && !v.starts_with('-') => {
+                // Same value-guard shape as `pipe::parse_flags`: a value is
+                // neither a stream URL nor another flag. Uses the shared
+                // `is_flag_token` (a negative number is a value, not a flag)
+                // instead of a bare `starts_with('-')`, so flag detection is
+                // ONE rule across every parser.
+                Some(v) if !is_url(v) && !is_flag_token(v) => {
                     language = Some(v.clone());
                     i += 2;
                 }
@@ -409,7 +452,10 @@ fn collect_urls(args: &[String]) -> Vec<String> {
             }
             continue;
         }
-        if arg.starts_with('-') {
+        // Shared `is_flag_token` (a negative number is a value, not a flag),
+        // the SAME flag detection `pipe::parse_flags` and `strip_language_flag`
+        // use — one rule, not a bare `starts_with('-')` here and a helper there.
+        if is_flag_token(arg) {
             if VALUE_FLAGS.contains(&arg.as_str()) || RETIRED_VALUE_FLAGS.contains(&arg.as_str()) {
                 skip_next = true;
                 skip_is_key_url = arg == "--key-url";

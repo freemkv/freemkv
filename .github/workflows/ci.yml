@@ -10,6 +10,12 @@ on:
     branches: [main, dev, qa]
   pull_request:
 
+# Least privilege by default: every job here only reads the repo (checkout,
+# build, lint, test). No job publishes a release, writes to the repo, or needs
+# OIDC, so nothing elevates this.
+permissions:
+  contents: read
+
 # WHY THE SIBLING CHECKOUTS — this is NOT a monorepo.
 #
 # The committed Cargo.toml resolves every freemkv crate from a git TAG, and one
@@ -59,7 +65,7 @@ jobs:
   changelog:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Require a CHANGELOG entry for the crate version on main
         shell: bash
         run: |
@@ -94,30 +100,30 @@ jobs:
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
@@ -137,7 +143,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - run: cargo fmt --check
@@ -163,30 +169,30 @@ jobs:
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
@@ -204,7 +210,7 @@ jobs:
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - run: cargo test --tests
@@ -232,30 +238,30 @@ jobs:
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
@@ -275,7 +281,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - run: cargo fmt --check
@@ -302,30 +308,30 @@ jobs:
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
@@ -343,7 +349,7 @@ jobs:
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - run: cargo test --tests
@@ -369,30 +375,30 @@ jobs:
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
@@ -410,7 +416,7 @@ jobs:
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - run: cargo build --release
@@ -437,30 +443,30 @@ jobs:
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
@@ -480,7 +486,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - run: cargo build --release --target x86_64-apple-darwin
@@ -493,30 +499,30 @@ jobs:
   cli-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
@@ -536,7 +542,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - run: cargo clippy --all-targets -- -D warnings
@@ -555,30 +561,30 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
@@ -596,7 +602,7 @@ jobs:
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
       - uses: dtolnay/rust-toolchain@stable
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check advisories bans licenses sources
           manifest-path: freemkv/Cargo.toml
@@ -607,30 +613,30 @@ jobs:
   core-is-portable:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
@@ -648,7 +654,7 @@ jobs:
           freemkv-i18n = { path = "../freemkv-i18n" }
           EOF
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - run: cargo check --lib
@@ -667,7 +673,7 @@ jobs:
   version-consistency:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Cargo.toml and Info.plist must agree
         shell: bash
         run: |
@@ -702,30 +708,30 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: freemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/libfreemkv
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: libfreemkv
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-keysources
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-keysources
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-engine
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-engine
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-i18n
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
           path: freemkv-i18n
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: "${{ github.ref_name == 'qa' && 'qa' || 'dev' }}"
@@ -745,13 +751,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - uses: taiki-e/install-action@cargo-llvm-cov
       - run: cargo llvm-cov --workspace --ignore-run-fail --lcov --output-path lcov.info
         working-directory: freemkv
-      - uses: codecov/codecov-action@v7
+      - uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: freemkv/lcov.info

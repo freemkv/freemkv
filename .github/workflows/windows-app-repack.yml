@@ -23,18 +23,12 @@ name: windows-app-repack
 # The permanent fix is in `release.yml`, so no future tag needs this.
 
 on:
-  # `workflow_dispatch` is the intended way in, but GitHub only offers it for
-  # workflows present on the DEFAULT branch — which here is `main`, the release
-  # pointer that sits exactly on the newest tag. Pushing a workflow there to
-  # make a button appear would move `main` off the tag and break that
-  # invariant, so dispatch only becomes available once this file reaches `main`
-  # through a normal release.
-  #
-  # Until then, pushing the branch below runs it. `REPACK_TAG` says which
-  # release to repack, so the branch carries the argument the dispatch input
-  # would have.
-  push:
-    branches: [ci/windows-app-repack]
+  # `workflow_dispatch` only. The former `push:` trigger (superseded by
+  # release.yml, which now packages the desktop app correctly) is removed: a
+  # push trigger on a release-repack workflow is an easy way to clobber a
+  # published release's assets by accident. Dispatch with an explicit `tag`
+  # input is the deliberate, auditable way in. `REPACK_TAG` remains only as the
+  # default the dispatch input falls back to.
   workflow_dispatch:
     inputs:
       tag:
@@ -51,13 +45,13 @@ jobs:
   repack:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag || env.REPACK_TAG }}
           path: freemkv
       # The tag's manifest path-deps its sibling, exactly as the release build
       # did; check out the matching tag so this is the same code that shipped.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: freemkv/freemkv-unlock
           ref: ${{ inputs.tag || env.REPACK_TAG }}
@@ -69,9 +63,12 @@ jobs:
       - name: Confirm the tag really does contain the desktop app
         shell: pwsh
         working-directory: freemkv
+        # Free-text tag passed via env, not interpolated into the script body.
+        env:
+          TAG: ${{ inputs.tag || env.REPACK_TAG }}
         run: |
           if (-not (Test-Path "src/bin/freemkv-gui.rs")) {
-            Write-Output "::error::${{ inputs.tag || env.REPACK_TAG }} has no freemkv-gui.rs — this is not a packaging omission, it needs a release"
+            Write-Output "::error::$env:TAG has no freemkv-gui.rs — this is not a packaging omission, it needs a release"
             exit 1
           }
 
@@ -82,12 +79,15 @@ jobs:
       - name: Repack the desktop app
         shell: pwsh
         working-directory: freemkv
+        # Free-text tag passed via env, not interpolated into the script body.
+        env:
+          TAG: ${{ inputs.tag || env.REPACK_TAG }}
         run: |
           $gui = "target/x86_64-pc-windows-msvc/release/freemkv-gui.exe"
           if (-not (Test-Path $gui)) { throw "freemkv-gui.exe was not built" }
           $a = "freemkv-x86_64-windows"
           Compress-Archive -Path $gui -DestinationPath "$a.zip" -Force
-          Compress-Archive -Path $gui -DestinationPath "freemkv-${{ inputs.tag || env.REPACK_TAG }}-x86_64-pc-windows-msvc.zip" -Force
+          Compress-Archive -Path $gui -DestinationPath "freemkv-$env:TAG-x86_64-pc-windows-msvc.zip" -Force
           $h = Get-FileHash -Algorithm SHA256 "$a.zip"
           "$($h.Hash.ToLower())  $a.zip" | Out-File -Encoding ascii "$a.zip.sha256"
           $names = [IO.Compression.ZipFile]::OpenRead((Resolve-Path "$a.zip").Path).Entries.FullName
@@ -100,10 +100,14 @@ jobs:
         working-directory: freemkv
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Free-text / context values passed via env, not interpolated into the
+          # script body.
+          TAG: ${{ inputs.tag || env.REPACK_TAG }}
+          REPO: ${{ github.repository }}
         run: |
           # --clobber replaces the asset in place. The tag is not touched.
-          gh release upload "${{ inputs.tag || env.REPACK_TAG }}" `
+          gh release upload "$env:TAG" `
             "freemkv-x86_64-windows.zip" `
             "freemkv-x86_64-windows.zip.sha256" `
-            "freemkv-${{ inputs.tag || env.REPACK_TAG }}-x86_64-pc-windows-msvc.zip" `
-            --clobber --repo ${{ github.repository }}
+            "freemkv-$env:TAG-x86_64-pc-windows-msvc.zip" `
+            --clobber --repo $env:REPO

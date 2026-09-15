@@ -50,6 +50,13 @@ pub struct Settings {
     // Window
     pub win_w: f64,
     pub win_h: f64,
+    // Any keys this build does not know — a newer version's fields, or a
+    // hand-added one. Without this, `save()` would round-trip through the
+    // named fields only and silently drop them; `#[serde(flatten)]` captures
+    // them here so they survive load→save unchanged. An empty map flattens to
+    // no keys, so an ordinary settings file gains nothing.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Default for Settings {
@@ -89,6 +96,7 @@ impl Default for Settings {
             decrypt_threads: "0".into(),
             win_w: 1180.0,
             win_h: 760.0,
+            extra: serde_json::Map::new(),
         }
     }
 }

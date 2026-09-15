@@ -681,12 +681,37 @@ fn submit_issue(token: &str, title: &str, body: &str) -> Option<String> {
         json_escape(body)
     );
 
-    let output = std::process::Command::new(curl_program())
-        .args(curl_submit_args(token, &payload))
-        .output()
+    let mut child = std::process::Command::new(curl_program())
+        .args(curl_submit_args(&payload))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
 
-    let response = String::from_utf8_lossy(&output.stdout);
+    // Hand curl the Authorization header via a config file on stdin, so the
+    // bearer token never lands in the argv (`ps`). curl config syntax is
+    // `header = "…"`; a GitHub token is opaque ASCII with no quotes, so no
+    // escaping is needed. Dropping the handle closes stdin so curl proceeds.
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take()?;
+        let _ = writeln!(stdin, r#"header = "Authorization: token {token}""#);
+    }
+
+    // Bounded read: never buffer more than the response cap, even if curl (or a
+    // hostile endpoint) streams past `--max-filesize`. The reply is a few-KiB
+    // issue JSON, so this only guards against a misbehaving peer.
+    let mut stdout_bytes = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        use std::io::Read;
+        let _ = stdout
+            .take(u64::from(SUBMIT_MAX_FILESIZE_BYTES))
+            .read_to_end(&mut stdout_bytes);
+    }
+    let _ = child.wait();
+
+    let response = String::from_utf8_lossy(&stdout_bytes);
     // Pull out "html_url":"…/issues/N" (skip the repo/user html_url fields).
     for (idx, _) in response.match_indices("\"html_url\":\"") {
         let rest = &response[idx + "\"html_url\":\"".len()..];
@@ -744,8 +769,10 @@ fn curl_program_from(system_root: Option<&str>) -> String {
 
 // The exact `curl` argv the auto-submit POST runs, split out of
 // `submit_issue` so it's testable without a real GitHub request. `-f` is
-// deliberately NOT passed. See docs/info.md — curl_submit_args.
-fn curl_submit_args(token: &str, payload: &str) -> Vec<String> {
+// deliberately NOT passed. The bearer token is deliberately NOT here: it is
+// fed to curl as a config file on STDIN (see `submit_issue`) so it never
+// appears in this process's argv (visible in `ps`). See docs/info.md.
+fn curl_submit_args(payload: &str) -> Vec<String> {
     [
         "-s",
         "-X",
@@ -762,9 +789,11 @@ fn curl_submit_args(token: &str, payload: &str) -> Vec<String> {
         // The endpoint is https and fixed; refuse to be redirected off it.
         "--proto",
         "=https",
+        // Read the Authorization header from a config file on stdin — keeps the
+        // token out of argv. `-` is stdin; `submit_issue` writes the header there.
+        "--config",
+        "-",
         &format!("https://api.github.com/repos/{SUBMIT_REPO}/issues"),
-        "-H",
-        &format!("Authorization: token {token}"),
         "-H",
         "Accept: application/vnd.github+json",
         "-H",
@@ -1161,7 +1190,7 @@ mod tests {
     // the command after the work was already on disk. See docs/info.md.
     #[test]
     fn the_auto_submit_post_is_bounded_in_time_and_size() {
-        let args = super::curl_submit_args("tok", "{}");
+        let args = super::curl_submit_args("{}");
         let pair = |flag: &str| -> String {
             let i = args
                 .iter()
@@ -1177,15 +1206,19 @@ mod tests {
         assert_eq!(pair("--max-time"), "120");
         assert_eq!(pair("--max-filesize"), "1048576");
         assert_eq!(pair("--proto"), "=https");
+        // The auth header is read from stdin config (`--config -`), never argv.
+        assert_eq!(pair("--config"), "-");
         // Still the same request it always was.
         assert!(args.contains(&"POST".to_string()), "{args:?}");
         assert!(
             args.contains(&"https://api.github.com/repos/freemkv/bdemu/issues".to_string()),
             "{args:?}"
         );
+        // The bearer token must NOT be in the argv (visible in `ps`): it goes to
+        // curl via the stdin config file instead.
         assert!(
-            args.contains(&"Authorization: token tok".to_string()),
-            "{args:?}"
+            !args.iter().any(|a| a.contains("Authorization")),
+            "the Authorization header must not appear in the argv: {args:?}"
         );
         assert!(args.contains(&"{}".to_string()), "the payload: {args:?}");
         // Redirect-following is off (curl's default) and must stay off — the

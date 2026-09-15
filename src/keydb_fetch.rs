@@ -154,7 +154,8 @@ fn hardened_agent(pinned: Vec<SocketAddr>) -> ureq::Agent {
 
 // SSRF guard (mirrors freemkv-keysources::online): resolve once, reject
 // blocked IPs, pin addresses. `is_blocked_ip` covers loopback, link-local
-// (incl. cloud metadata), RFC1918, CGNAT, broadcast, TEST-NET, multicast.
+// (incl. cloud metadata), RFC1918, CGNAT, broadcast, TEST-NET, multicast,
+// the 198.18.0.0/15 benchmarking range and 192.0.0.0/24 IETF assignments.
 fn is_blocked_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -166,6 +167,10 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
                 || v4.is_unspecified()
                 || v4.is_multicast()
                 || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40)
+                // 198.18.0.0/15 — RFC 2544 benchmarking range.
+                || (v4.octets()[0] == 198 && (v4.octets()[1] & 0xfe) == 18)
+                // 192.0.0.0/24 — IETF protocol assignments (RFC 6890).
+                || (v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 0)
                 || v4.octets()[0] == 0
                 || v4.octets()[0] >= 240
         }
@@ -324,6 +329,9 @@ mod tests {
             ("224.0.0.1", "multicast"),
             ("245.0.0.1", "reserved (>= 240), not broadcast"),
             ("100.64.0.1", "CGNAT"),
+            ("198.18.0.1", "benchmarking 198.18.0.0/15 (low half)"),
+            ("198.19.255.254", "benchmarking 198.18.0.0/15 (high half)"),
+            ("192.0.0.1", "IETF protocol assignments 192.0.0.0/24"),
             ("0.1.2.3", "leading zero octet"),
             ("fe80::1", "IPv6 link-local"),
             ("fc00::1", "IPv6 unique-local"),

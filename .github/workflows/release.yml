@@ -10,14 +10,18 @@ on:
       # every candidate, including the red ones.
       - '!v*-rc*'
 
+# Least privilege at the top; only the jobs that create/upload the GitHub
+# release (build, build-windows, cli-binaries) elevate to contents: write. The
+# tap and homepage jobs write to OTHER repos via a PAT (ORG_DISPATCH_TOKEN), so
+# they need no write on GITHUB_TOKEN here.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Verify Cargo.toml version matches tag
         run: |
           CARGO_VER="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
@@ -44,14 +48,17 @@ jobs:
     needs: verify
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test --tests
 
   build:
     # NOTE: deliberately does NOT `needs: test` — see the test job above.
     needs: verify
+    # Uploads assets to the GitHub release.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -68,11 +75,11 @@ jobs:
 
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
 
@@ -194,7 +201,7 @@ jobs:
           fi
 
       - name: Upload
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: |
             ${{ matrix.asset }}.dmg
@@ -226,6 +233,9 @@ jobs:
   build-windows:
     # Same rationale as `build`: does NOT `needs: test` (parallel tripwire).
     needs: verify
+    # Uploads assets to the GitHub release.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -238,11 +248,11 @@ jobs:
 
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}-app
 
@@ -317,7 +327,7 @@ jobs:
           }
 
       - name: Upload
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: |
             ${{ matrix.asset }}.zip
@@ -331,6 +341,9 @@ jobs:
   # `build-windows` (.zip) and `build` (.dmg) respectively.
   cli-binaries:
     needs: verify
+    # Uploads assets to the GitHub release.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -365,11 +378,11 @@ jobs:
             ext: '.exe'
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
       - name: Install musl tools
@@ -449,7 +462,7 @@ jobs:
             sha256sum "$A$E" "$A-$VER$E" > "$A$E.sha256"
           fi
       - name: Upload
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: |
             ${{ matrix.asset }}${{ matrix.ext }}
@@ -476,6 +489,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
           VER: ${{ github.ref_name }}
+          # Free-text actor passed via env, not interpolated into the run script.
+          ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
           [ -n "${GH_TOKEN:-}" ] || {
@@ -491,8 +506,8 @@ jobs:
             echo "tap already at ${VER#v} — nothing to do"
             exit 0
           fi
-          git config user.name  "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git config user.name  "$ACTOR"
+          git config user.email "$ACTOR@users.noreply.github.com"
           git commit -aqm "freemkv ${VER#v}"
           git push
           echo "tap updated to ${VER#v}" >> "$GITHUB_STEP_SUMMARY"
@@ -509,7 +524,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Update org README with new version
-        uses: peter-evans/repository-dispatch@v4
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4
         with:
           token: ${{ secrets.ORG_DISPATCH_TOKEN }}
           repository: freemkv/.github

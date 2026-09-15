@@ -871,7 +871,7 @@ impl Shell {
         );
 
         let prefs = Prefs::new(&wnd, &settings);
-        let about = About::new(&wnd);
+        let about = About::new(&wnd, &settings);
 
         Self {
             wnd,
@@ -1491,7 +1491,7 @@ impl Shell {
             let text = log_text(&v.log);
             let _ = self.log.set_text(&text);
             // Keep the newest line in view, as the macOS log does.
-            let n = text.chars().count() as i32;
+            let n = text.encode_utf16().count() as i32;
             self.log.set_selection(n, n);
             self.memo.borrow_mut().log_len = v.log.len();
         }
@@ -2820,7 +2820,7 @@ struct About {
 // The four (label, value) rows the About box shows, in the current locale.
 // A function, not an inline literal, because the window is created ONCE and
 // reused: `relocalize` needs the same rows again in the new language.
-fn about_rows() -> [(String, String); 4] {
+fn about_rows(st: &crate::settings::Settings) -> [(String, String); 4] {
     let g = crate::strings::get;
     [
         (
@@ -2829,18 +2829,15 @@ fn about_rows() -> [(String, String); 4] {
         ),
         (
             g("gui.about.engine"),
-            format!("libfreemkv {}", env!("CARGO_PKG_VERSION")),
+            format!("libfreemkv {}", libfreemkv::VERSION_LABEL),
         ),
         (g("gui.about.licence"), "MIT".to_string()),
-        (
-            g("gui.about.keys"),
-            crate::settings::Settings::load().keydb_status(),
-        ),
+        (g("gui.about.keys"), st.keydb_status()),
     ]
 }
 
 impl About {
-    fn new(parent: &gui::WindowMain) -> Self {
+    fn new(parent: &gui::WindowMain, st: &crate::settings::Settings) -> Self {
         let g = crate::strings::get;
         // As with Settings: built before the main window exists, so the system
         // DPI is the only one on offer, and it is the DPI this form stays at.
@@ -2871,7 +2868,7 @@ impl About {
         let mut lbl_keys: Vec<gui::Label> = Vec::new();
         let mut lbl_vals: Vec<gui::Label> = Vec::new();
         let mut y = s.px(62);
-        for (k, v) in about_rows() {
+        for (k, v) in about_rows(st) {
             lbl_keys.push(gui::Label::new(
                 &wnd,
                 gui::LabelOpts {
@@ -2942,10 +2939,10 @@ impl About {
     // Re-text everything localized here, for a live language change. Needed
     // because this shell builds its About window ONCE and reuses it (unlike
     // macOS, which drops its cache): see docs/windows-shell.md.
-    fn relocalize(&self) {
+    fn relocalize(&self, st: &crate::settings::Settings) {
         let g = crate::strings::get;
         let _ = self.wnd.hwnd().SetWindowText(&g("gui.menu.app_about"));
-        let rows = about_rows();
+        let rows = about_rows(st);
         for (l, (k, _)) in self.lbl_keys.iter().zip(rows.iter()) {
             let _ = l.hwnd().SetWindowText(k);
         }
@@ -3155,13 +3152,19 @@ impl Prefs {
             me.set_keydb_updating(true);
             let inbox = sh.inbox.clone();
             std::thread::spawn(move || {
-                let msg = match crate::settings::update_keydb(&url, &path) {
-                    Ok(m) => m,
-                    Err(e) => e,
-                };
-                // RECOVER rather than skip the push (see macOS's identical worker):
-                // dropping this message leaves the Update button disabled and
-                // TIMER_DRAIN firing forever, since drain() stops it only on a batch.
+                // A panic inside update_keydb (or anything it calls) must NOT
+                // strand the drain: catch it so a terminal message is pushed
+                // either way. Dropping the push leaves the Update button disabled
+                // and TIMER_DRAIN firing forever, since drain() stops it only on
+                // a batch.
+                let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match crate::settings::update_keydb(&url, &path) {
+                        Ok(m) => m,
+                        Err(e) => e,
+                    }
+                }))
+                .unwrap_or_else(|_| "keydb update failed — internal error".to_string());
+                // RECOVER rather than skip the push (see macOS's identical worker).
                 inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
             });
             sh.start_drain();
@@ -3261,9 +3264,16 @@ impl Shell {
     // be replaced post-creation); everything else is re-texted in place.
     fn relocalize(&self) {
         let g = crate::strings::get;
+        // Grab the menu the window currently owns BEFORE replacing it: `SetMenu`
+        // does not free the old `HMENU`, so it must be destroyed by hand or it
+        // leaks on every language change.
+        let old_bar = self.wnd.hwnd().GetMenu();
         if let Ok(bar) = build_menu() {
             let _ = self.wnd.hwnd().SetMenu(&bar);
             let _ = self.wnd.hwnd().DrawMenuBar();
+            if let Some(mut old) = old_bar {
+                let _ = old.DestroyMenu();
+            }
         }
         let _ = self
             .lbl_empty_head
@@ -3304,7 +3314,7 @@ impl Shell {
         self.prefs.relocalize(&self.settings.borrow());
         // The About box too: it is built once and cached, so nothing else ever
         // re-texts it.
-        self.about.relocalize();
+        self.about.relocalize(&self.settings.borrow());
         self.render();
     }
 }
@@ -4490,7 +4500,10 @@ mod tests {
     fn the_language_switch_re_texts_the_cached_about_box_source_inspection_only() {
         let src = include_str!("windows.rs");
         // Concatenated so these needles cannot match this test's own text.
-        let call = format!("{}{}", "self.about.relocal", "ize();");
+        let call = format!(
+            "{}{}",
+            "self.about.relocal", "ize(&self.settings.borrow());"
+        );
         assert!(
             src.contains(&call),
             "Shell::relocalize no longer re-texts the About box — it is built \
@@ -4508,7 +4521,10 @@ mod tests {
             "About::relocalize is gone — the About box would keep the launch \
              language's labels and its old keydb status line"
         );
-        let rows_fn = format!("{}{}", "fn about_rows() -> ", "[(String, String); 4] {");
+        let rows_fn = format!(
+            "{}{}",
+            "fn about_rows(st: &crate::settings::Settings) -> ", "[(String, String); 4] {"
+        );
         assert!(
             src.contains(&rows_fn),
             "about_rows is gone, so the About rows can only be built once"
