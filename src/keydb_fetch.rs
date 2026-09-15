@@ -175,12 +175,26 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
                 || v4.octets()[0] >= 240
         }
         IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            // 6to4 (2002::/16) embeds an IPv4 in segments[1..3]; Teredo
+            // (2001:0000::/32) embeds the client IPv4 in the last two segments,
+            // each XOR 0xffff. Both must be re-checked as their embedded IPv4 or
+            // an internal target slips through the tunnel.
+            let sixtofour = (seg[0] == 0x2002)
+                .then(|| std::net::Ipv4Addr::from(((seg[1] as u32) << 16) | (seg[2] as u32)));
+            let teredo = (seg[0] == 0x2001 && seg[1] == 0x0000).then(|| {
+                std::net::Ipv4Addr::from(
+                    (((seg[6] ^ 0xffff) as u32) << 16) | ((seg[7] ^ 0xffff) as u32),
+                )
+            });
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || (seg[0] & 0xfe00) == 0xfc00
+                || (seg[0] & 0xffc0) == 0xfe80
                 || v6.to_ipv4().map(|m| is_blocked_ip(&IpAddr::V4(m))) == Some(true)
+                || sixtofour.is_some_and(|v4| is_blocked_ip(&IpAddr::V4(v4)))
+                || teredo.is_some_and(|v4| is_blocked_ip(&IpAddr::V4(v4)))
         }
     }
 }
@@ -343,6 +357,30 @@ mod tests {
                 "{ip} ({why}) must be blocked on its own"
             );
         }
+    }
+
+    // 6to4 (2002::/16) and Teredo (2001:0000::/32) tunnel an IPv4 inside an
+    // IPv6 address; the guard must decode and re-check that embedded IPv4 or an
+    // internal target slips through the tunnel — parity with keysources.
+    #[test]
+    fn ssrf_guard_blocks_embedded_ipv4_via_6to4_and_teredo() {
+        // 6to4 for 127.0.0.1: 2002:7f00:0001:: (embedded in segments[1..3]).
+        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
+            0x2002, 0x7f00, 0x0001, 0, 0, 0, 0, 0
+        ))));
+        // 6to4 for 169.254.169.254 (cloud metadata): 2002:a9fe:a9fe::.
+        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
+            0x2002, 0xa9fe, 0xa9fe, 0, 0, 0, 0, 0
+        ))));
+        // Teredo for 127.0.0.1: client IPv4 lives in the last two segments XOR
+        // 0xffff, so 0x7f00^0xffff=0x80ff and 0x0001^0xffff=0xfffe.
+        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0x0000, 0, 0, 0, 0, 0x80ff, 0xfffe
+        ))));
+        // A 6to4 wrapping a PUBLIC IPv4 (8.8.8.8 → 2002:0808:0808::) is allowed.
+        assert!(!is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
+            0x2002, 0x0808, 0x0808, 0, 0, 0, 0, 0
+        ))));
     }
 
     // The body-size cap — the decompression-bomb defence. See
