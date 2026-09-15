@@ -1464,7 +1464,7 @@ impl App {
         };
         app.say(
             LogKind::Result,
-            &crate::strings::fmt("gui.log.ready", &[("version", env!("CARGO_PKG_VERSION"))]),
+            &crate::strings::fmt("gui.log.ready", &[("version", libfreemkv::VERSION_LABEL)]),
         );
         app
     }
@@ -1787,7 +1787,7 @@ impl App {
                     LogKind::Result,
                     &crate::strings::fmt(
                         "gui.log.opened_version",
-                        &[("version", env!("CARGO_PKG_VERSION"))],
+                        &[("version", libfreemkv::VERSION_LABEL)],
                     ),
                 );
                 self.say(

@@ -743,7 +743,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         out = out.to_stderr();
     }
 
-    out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
+    out.raw(Normal, &format!("freemkv {}", libfreemkv::VERSION_LABEL));
     out.blank(Normal);
 
     // Fail loud and EARLY: validate the whole invocation before any drive
