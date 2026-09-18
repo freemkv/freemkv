@@ -3152,11 +3152,9 @@ impl Prefs {
             me.set_keydb_updating(true);
             let inbox = sh.inbox.clone();
             std::thread::spawn(move || {
-                // A panic inside update_keydb (or anything it calls) must NOT
-                // strand the drain: catch it so a terminal message is pushed
-                // either way. Dropping the push leaves the Update button disabled
-                // and TIMER_DRAIN firing forever, since drain() stops it only on
-                // a batch.
+                // A panic in `update_keydb` must NOT strand the drain: catch it so
+                // a terminal message is pushed either way. Dropping it leaves Update
+                // disabled and TIMER_DRAIN firing forever (`drain()` stops on batch).
                 let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     match crate::settings::update_keydb(&url, &path) {
                         Ok(m) => m,

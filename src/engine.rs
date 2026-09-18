@@ -863,10 +863,9 @@ pub fn error_code(e: &std::io::Error) -> u16 {
     if digits.is_empty() {
         return 0;
     }
-    // The digit run is ASCII-digit-only by construction, so a parse failure
-    // here means the value exceeds the type — a code above `u16::MAX` still
-    // names a real error, so saturate rather than collapsing it to `0` (which
-    // reads as "no error"). Parse wide, then clamp into the u16 return.
+    // The run is ASCII digits only, so a parse failure means the value exceeds
+    // the type — a code above `u16::MAX` still names a real error, so parse wide
+    // then saturate into the u16 rather than collapsing to `0` ("no error").
     digits
         .parse::<u32>()
         .map(|v| v.min(u16::MAX as u32) as u16)
@@ -1032,10 +1031,9 @@ pub fn summarize_stream(outcome: &libfreemkv::MuxOutcome, target: &str, dest_dir
     if n > 0 {
         format!(
             "Written to {dest_dir} — {}",
-            // Container-agnostic wording, consistent with the CLI's
-            // `lossy_lines`: an undelivered stream is not mp4-specific, so the
-            // `mp4.excluded_header` "can't be stored in an MP4" phrasing is wrong
-            // for an mkv/m2ts target. English fallback until the catalog ships.
+            // Container-agnostic wording (like the CLI's `lossy_lines`): an
+            // undelivered stream isn't mp4-specific, so `mp4.excluded_header`'s
+            // "in an MP4" phrasing is wrong for mkv/m2ts. English until catalog.
             crate::strings::fmt_or(
                 "mux.undelivered_header",
                 "Note: {count} stream(s) could not be delivered and were left out:",
@@ -1667,10 +1665,9 @@ pub fn title_basename(template: &str, label: &str, n: usize) -> String {
     } else {
         name = format!("{name}_t{n}");
     }
-    // The `{title}` label was sanitised, but the template TEXT itself can carry
-    // separators (`../`, `foo/bar`) a user typed straight into the setting —
-    // those would escape the output folder. Sanitise the assembled name so the
-    // doc's "kept in-folder" promise holds for every branch, not just `{title}`.
+    // `{title}` was sanitised, but the template TEXT itself can carry separators
+    // (`../`, `foo/bar`) from the setting, which would escape the folder. Sanitise
+    // the assembled name so the "kept in-folder" promise holds on every branch.
     sanitize_label(&name)
 }
 
@@ -2196,15 +2193,14 @@ fn remap_against(
     Ok(out)
 }
 
-// Re-key a per-title stream selection from the old (drive-scan) canonical
-// indices to the new (staged-image) ones, using the same old->new mapping the
-// title list was remapped through. `title_pids` is keyed by canonical title
-// index (see [`RipRequest::title_pids`]); leaving it keyed by the drive-scan
-// index while the titles are remapped to staged-image indices makes
-// `stream_selection_for` miss and fall back to the union, muxing a deselected
-// track on a damaged-disc multipass rip. Entries whose old index has no
-// mapping (a title not in the remapped selection) are dropped: they describe a
-// title that will not be muxed.
+/// Re-key a per-title stream selection from the old (drive-scan) canonical
+/// indices to the new (staged-image) ones, via the same old->new mapping the
+/// title list was remapped through. `title_pids` is keyed by canonical title
+/// index; leaving it keyed by the drive-scan index while the titles are
+/// remapped to staged-image indices makes `stream_selection_for` miss and fall
+/// back to the union, muxing a deselected track on a damaged-disc multipass
+/// rip. Entries whose old index has no mapping (a title not in the remapped
+/// selection) are dropped: they describe a title that will not be muxed.
 fn remap_title_pids(
     pids: &TitleStreams,
     map: &std::collections::HashMap<usize, usize>,
@@ -2418,11 +2414,9 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
                 return Err(format!("{e} The recovered image is kept: {iso_path}"));
             }
         };
-        // `title_pids` is keyed by the drive-scan's canonical index; the titles
-        // were just remapped to staged-image indices, so re-key the per-title
-        // selection through the same old->new mapping or `stream_selection_for`
-        // misses and muxes a deselected track. The mapping is positional:
-        // req.titles[i] (old) -> titles[i] (new).
+        // `title_pids` is keyed by the drive-scan canonical index, but the titles
+        // were just remapped to staged-image indices — re-key through the same
+        // positional old->new map (req.titles[i] -> titles[i]) or a track is lost.
         let pid_map: std::collections::HashMap<usize, usize> = req
             .titles
             .iter()
