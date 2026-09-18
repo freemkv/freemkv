@@ -244,7 +244,7 @@ impl Tree {
     /// non-zero duration), but never so aggressively the list is empty.
     /// `prefs` narrows which of a checked title's STREAM rows start checked;
     /// empty `prefs` or a category matching nothing on this title keeps
-    /// every stream checked — see [`preferred_pids`].
+    /// every stream checked — see `preferred_pids`.
     /// See docs/ui.md — Tree::from_scan.
     pub fn from_scan(sc: &Scanned, sel_mode: &str, min_secs: f64, prefs: &LangPrefs) -> Self {
         // Titles present in the scan, with durations, for the filter + defaults.
@@ -2204,10 +2204,10 @@ pub struct View {
     pub bar_overall: f64,
     pub caption_current: String,
     pub caption_overall: String,
-    /// "Saving to <container> file" — the per-title bar label, format-aware so
+    /// "Saving to `<container>` file" — the per-title bar label, format-aware so
     /// it reads "MP4" when MP4 is chosen (never a hardcoded "MKV").
     pub saving_current: String,
-    /// "Saving all titles to <container> files" — the overall-bar label.
+    /// "Saving all titles to `<container>` files" — the overall-bar label.
     pub saving_overall: String,
     pub show_overall_bar: bool,
     pub output_dir: String,

@@ -1566,7 +1566,7 @@ pub fn planned_output_name(
 /// The word the progress caption uses for what a format actually writes
 /// ("Saving to {container} file").
 ///
-/// Derived from [`out_kind`], deliberately: the caption and the sink then
+/// Derived from `out_kind`, deliberately: the caption and the sink then
 /// cannot disagree, because they are the same decision read twice. The UI's
 /// own version tested for MP4, then M2TS, then said MKV — so nine of the
 /// twelve offered formats, ISO and JSON and .fvi among them, were captioned
