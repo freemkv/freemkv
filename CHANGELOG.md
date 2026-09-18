@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.7.2] — UNRELEASED
+## [1.7.2] — 2026-09-18
 
 ### Changed
 
