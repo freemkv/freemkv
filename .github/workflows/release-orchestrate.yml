@@ -454,6 +454,22 @@ jobs:
             die "version '$VERSION' does not look like semver (e.g. 0.18.99)"
           fi
 
+          # GUARD (never-ship-an-rc-as-latest): --prerelease and an -rc version MUST
+          # agree. release.yml's tag trigger is `v*` MINUS `!v*-rc*`, so a plain
+          # `vX.Y.Z` tag publishes a LATEST production release while a `vX.Y.Z-rcN`
+          # tag publishes nothing. --prerelease does NOT synthesize the suffix — it
+          # only skips qa-push/main-advance/site. So `--prerelease` + a plain version
+          # cuts a plain tag that release.yml turns into a LATEST release: exactly the
+          # accident that shipped v1.7.2 to prod. Bind the two so it cannot recur.
+          case "$VERSION" in
+            *-rc*|*-RC*)
+              $PRERELEASE || die "version '$VERSION' carries an -rc suffix but --prerelease was not set — an rc must be a prerelease (add --prerelease / prerelease=true)"
+              ;;
+            *)
+              ! $PRERELEASE || die "--prerelease needs an -rc version (e.g. ${VERSION}-rc1) — a plain 'v${VERSION}' tag triggers release.yml and publishes a LATEST production release, not an rc"
+              ;;
+          esac
+
           if $DRY_RUN; then
             say "DRY RUN — no commits, no pushes, no file edits."
           fi
