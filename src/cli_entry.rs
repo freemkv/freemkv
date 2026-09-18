@@ -267,13 +267,9 @@ pub fn run(args: Vec<String>) {
                     std::process::exit(1);
                 }
             } else if urls.len() == 1 {
-                // Single URL, no dest — show info. `info_cmd` expects `args[0]` to be
-                // the URL, but a preceding flag (e.g. `--verbose disc://`) would land
-                // there instead; put the resolved URL first, then the remaining flags.
-                // Drop the URL from its original position exactly ONCE, matched
-                // canonically (scheme case / trailing slash) rather than by raw
-                // string equality, so an equivalent-but-differently-spelled token
-                // (`DISC://` vs `disc://`) is still removed and never passed twice.
+                // Single URL, no dest — show info. `info_cmd` wants the URL at
+                // `args[0]`, so prepend it, then drop it from its original slot
+                // ONCE, matched canonically (scheme case / slash), so no dup/miss.
                 let url = urls[0].clone();
                 let mut info_args = vec![url.clone()];
                 let mut removed = false;
@@ -335,11 +331,9 @@ fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>, Vec<Pen
     while i < args.len() {
         if args[i] == "--language" || args[i] == "--lang" {
             match args.get(i + 1) {
-                // Same value-guard shape as `pipe::parse_flags`: a value is
-                // neither a stream URL nor another flag. Uses the shared
-                // `is_flag_token` (a negative number is a value, not a flag)
-                // instead of a bare `starts_with('-')`, so flag detection is
-                // ONE rule across every parser.
+                // Same value-guard as `pipe::parse_flags`: a value is neither a
+                // URL nor a flag. Uses shared `is_flag_token` (a negative number
+                // is a value) not bare `starts_with('-')` — ONE rule everywhere.
                 Some(v) if !is_url(v) && !is_flag_token(v) => {
                     language = Some(v.clone());
                     i += 2;

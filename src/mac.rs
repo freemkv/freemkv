@@ -340,12 +340,9 @@ impl TitlesSource {
     // user's expansion, selection and scroll position — untouched. Runs on
     // every ordinary redraw; see docs/mac-shell.md — sync_check_states.
     fn sync_check_states(&self, rows: &[crate::ui::Row]) {
-        // Early-out when nothing about the ticks moved. This runs on every
-        // ordinary redraw (5 Hz during a rip), and the caller only reaches it
-        // when `rows_sig` matched — so index/depth/type/desc are already known
-        // identical to the stored Vec, and the checkbox state is the only field
-        // that can still differ. If even that is unchanged, the stored Vec is a
-        // byte-for-byte match and the clone + repaint loop below are pure waste.
+        // Early-out when nothing about the ticks moved. The caller only reaches
+        // here when `rows_sig` matched, so only checkbox state can still differ;
+        // if even that is unchanged, the clone + repaint loop below is pure waste.
         {
             let cur = self.ivars().rows.borrow();
             if cur.len() == rows.len()
@@ -911,11 +908,9 @@ define_class!(
             self.set_keydb_updating(true);
             let inbox = self.ivars().inbox.clone();
             std::thread::spawn(move || {
-                // A panic inside update_keydb (or anything it calls) must NOT
-                // strand the drain: catch it so a terminal message is pushed
-                // either way. This is the ONLY message the keydb worker sends,
-                // and dropping it would wedge the Update button disabled forever,
-                // per `start_drain`'s comment.
+                // A panic in `update_keydb` must NOT strand the drain: catch it so
+                // a terminal message is pushed either way. It's the ONLY message
+                // the keydb worker sends; dropping it wedges Update off forever.
                 let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     match crate::settings::update_keydb(&url, &path) {
                         Ok(m) => m,

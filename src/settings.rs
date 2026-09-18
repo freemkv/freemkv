@@ -50,11 +50,11 @@ pub struct Settings {
     // Window
     pub win_w: f64,
     pub win_h: f64,
-    // Any keys this build does not know — a newer version's fields, or a
-    // hand-added one. Without this, `save()` would round-trip through the
-    // named fields only and silently drop them; `#[serde(flatten)]` captures
-    // them here so they survive load→save unchanged. An empty map flattens to
-    // no keys, so an ordinary settings file gains nothing.
+    /// Any keys this build does not know — a newer version's fields, or a
+    /// hand-added one. Without this, `save()` would round-trip through the
+    /// named fields only and silently drop them; `#[serde(flatten)]` captures
+    /// them here so they survive load→save unchanged. An empty map flattens to
+    /// no keys, so an ordinary settings file gains nothing.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }

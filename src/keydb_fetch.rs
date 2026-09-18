@@ -152,10 +152,10 @@ fn hardened_agent(pinned: Vec<SocketAddr>) -> ureq::Agent {
     ureq::Agent::with_parts(config, DefaultConnector::new(), PinnedResolver(pinned))
 }
 
-// SSRF guard (mirrors freemkv-keysources::online): resolve once, reject
-// blocked IPs, pin addresses. `is_blocked_ip` covers loopback, link-local
-// (incl. cloud metadata), RFC1918, CGNAT, broadcast, TEST-NET, multicast,
-// the 198.18.0.0/15 benchmarking range and 192.0.0.0/24 IETF assignments.
+/// SSRF guard (mirrors freemkv-keysources::online): resolve once, reject
+/// blocked IPs, pin addresses. `is_blocked_ip` covers loopback, link-local
+/// (incl. cloud metadata), RFC1918, CGNAT, broadcast, TEST-NET, multicast,
+/// the 198.18.0.0/15 benchmarking range and 192.0.0.0/24 IETF assignments.
 fn is_blocked_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -178,8 +178,7 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
             let seg = v6.segments();
             // 6to4 (2002::/16) embeds an IPv4 in segments[1..3]; Teredo
             // (2001:0000::/32) embeds the client IPv4 in the last two segments,
-            // each XOR 0xffff. Both must be re-checked as their embedded IPv4 or
-            // an internal target slips through the tunnel.
+            // each XOR 0xffff — re-check both, or an internal target tunnels in.
             let sixtofour = (seg[0] == 0x2002)
                 .then(|| std::net::Ipv4Addr::from(((seg[1] as u32) << 16) | (seg[2] as u32)));
             let teredo = (seg[0] == 0x2001 && seg[1] == 0x0000).then(|| {

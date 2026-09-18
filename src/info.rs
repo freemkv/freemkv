@@ -689,10 +689,9 @@ fn submit_issue(token: &str, title: &str, body: &str) -> Option<String> {
         .spawn()
         .ok()?;
 
-    // Hand curl the Authorization header via a config file on stdin, so the
-    // bearer token never lands in the argv (`ps`). curl config syntax is
-    // `header = "…"`; a GitHub token is opaque ASCII with no quotes, so no
-    // escaping is needed. Dropping the handle closes stdin so curl proceeds.
+    // Feed curl the Authorization header via a config file on stdin, so the
+    // bearer token never lands in argv (`ps`). Syntax is `header = "…"`; the
+    // token is opaque ASCII with no quotes, so no escaping. Handle drop ends it.
     {
         use std::io::Write;
         let mut stdin = child.stdin.take()?;
@@ -767,11 +766,11 @@ fn curl_program_from(system_root: Option<&str>) -> String {
     }
 }
 
-// The exact `curl` argv the auto-submit POST runs, split out of
-// `submit_issue` so it's testable without a real GitHub request. `-f` is
-// deliberately NOT passed. The bearer token is deliberately NOT here: it is
-// fed to curl as a config file on STDIN (see `submit_issue`) so it never
-// appears in this process's argv (visible in `ps`). See docs/info.md.
+/// The exact `curl` argv the auto-submit POST runs, split out of
+/// `submit_issue` so it's testable without a real GitHub request. `-f` is
+/// deliberately NOT passed. The bearer token is deliberately NOT here: it is
+/// fed to curl as a config file on STDIN (see `submit_issue`) so it never
+/// appears in this process's argv (visible in `ps`). See docs/info.md.
 fn curl_submit_args(payload: &str) -> Vec<String> {
     [
         "-s",

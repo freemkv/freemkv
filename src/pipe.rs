@@ -649,10 +649,9 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                     }
                 }
             }
-            // `--key-auth TOKEN` — bearer token for the key service. A token is an
-            // opaque string, not a URL; reject a missing value — a following
-            // stream-URL token means the token was omitted, and a following FLAG
-            // (`--key-auth --raw`) must not be swallowed as the token either.
+            // `--key-auth TOKEN` — bearer token for the key service, an opaque
+            // string (not a URL). Reject a missing value: a following stream-URL
+            // or FLAG (`--key-auth --raw`) means it was omitted; don't swallow it.
             "--key-auth" => {
                 let flag = &args[i];
                 match args.get(i + 1) {
@@ -2359,11 +2358,9 @@ fn disc_to_iso(
             let elapsed = start.elapsed().as_secs_f64();
             let mb = r.bytes_total as f64 / (1024.0 * 1024.0);
             let speed = if elapsed > 0.0 { mb / elapsed } else { 0.0 };
-            // Report the LOSS whenever there is any, not only when recovery was
-            // requested. Gated on `multipass`, a single-pass rip of a scratched
-            // disc printed completion and nothing else — never produce that.
-            // Printed BEFORE the completion line so "Complete" is the last word,
-            // not buried above the loss the user actually needs to read.
+            // Report the LOSS whenever there is any, not only on requested
+            // recovery: gated on `multipass`, a single-pass rip of a scratched
+            // disc printed only completion. Printed BEFORE so "Complete" is last.
             if !disc_copy_succeeded(verdict) {
                 let gb_good = r.bytes_good as f64 / 1_073_741_824.0;
                 let mb_bad = r.bytes_unreadable as f64 / 1_048_576.0;

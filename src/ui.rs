@@ -475,9 +475,8 @@ impl Tree {
         for n in &self.arena {
             let Some(pid) = n.pid else { continue };
             // The disc/file header row carries the `usize::MAX` sentinel, not a
-            // real title index; never let it become a phantom per-title entry
-            // (the engine's `Selection` would try to rip title usize::MAX),
-            // exactly as `ticked_titles` guards it.
+            // real title index; never let it become a phantom per-title entry (the
+            // engine would rip title usize::MAX), as `ticked_titles` guards it.
             if n.title_idx == usize::MAX {
                 continue;
             }
