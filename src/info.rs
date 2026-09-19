@@ -425,6 +425,12 @@ pub fn run(device: Option<&str>, args: &[String]) {
     }
     written.push("drive.toml".to_string());
 
+    // Also fold in the disc's structure metadata when media is present (issue #45
+    // repros from the playlists, not the drive). Best-effort — no disc/unreadable
+    // tree just yields a drive-only profile, as before.
+    let disc_summary =
+        crate::disc_capture::fold_structure(&profile_dir, &mut written, &mut session);
+
     // ── Summarize captured profile ─────────────────────────────────────────
 
     println!();
@@ -537,6 +543,21 @@ pub fn run(device: Option<&str>, args: &[String]) {
     }
     body.push_str("```\n\n");
 
+    // Disc structure, when media was present and readable — the selection-bug
+    // repro surface (issue #45). The raw files ride in the same zip below.
+    if let Some(ref ds) = disc_summary {
+        body.push_str("### Disc structure\n\n```\n");
+        body.push_str(&format!(
+            "Structure files: {} ({} bytes)\n",
+            ds.file_count, ds.total_bytes
+        ));
+        body.push_str("```\n\n");
+        body.push_str(
+            "Disc metadata only (playlists / clip info / nav) — no audio/video \
+             essence, no AACS keys.\n\n",
+        );
+    }
+
     body.push_str("<details><summary>Profile data (base64 zip)</summary>\n\n");
     body.push_str("```\n");
     for chunk in zip_b64.as_bytes().chunks(76) {
@@ -561,7 +582,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
 
 // Print everything needed to file the drive-profile issue by hand: title,
 // pre-filled URL, full body, and the saved zip path. Always exits cleanly.
-fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body: &str) {
+pub(crate) fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body: &str) {
     println!();
     println!(
         "{}",
@@ -827,7 +848,7 @@ fn json_escape(s: &str) -> String {
 // Archive exactly the named files from `dir` — a manifest, not a directory
 // walk, since the archive can reach a public tracker. A missing name is
 // skipped rather than failing the submission. See docs/info.md — zip_files.
-fn zip_files(
+pub(crate) fn zip_files(
     dir: &std::path::Path,
     names: &[String],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -859,8 +880,14 @@ fn zip_files(
 
 // Write one capture file and RECORD its name in `written`: the manifest is
 // not bookkeeping, it's what bounds the archive. See `zip_files`.
-fn save_bin(dir: &std::path::Path, name: &str, data: &[u8], written: &mut Vec<String>) {
+pub(crate) fn save_bin(dir: &std::path::Path, name: &str, data: &[u8], written: &mut Vec<String>) {
     let path = dir.join(name);
+    // `name` may be a nested path (e.g. `BDMV/PLAYLIST/00800.mpls` from the disc
+    // structure capture); create its parent chain so the write can't fail on a
+    // missing directory. Flat names (the drive capture) have no parent to make.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Err(e) = std::fs::write(&path, data) {
         // `error.cannot_write` already exists and already carries exactly
         // this pair — a second, English-only phrasing of the same failure is
@@ -896,7 +923,7 @@ fn hex_dump(data: &[u8]) -> String {
 // Reduce an untrusted firmware-derived string to a safe single path
 // component (lowercase alnum/-/_ only; never `.`, `..`, or a separator).
 // Falls back to `drive` if empty. See docs/info.md — sanitize_component.
-fn sanitize_component(s: &str) -> String {
+pub(crate) fn sanitize_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_dash = false;
     for c in s.chars() {
@@ -959,7 +986,7 @@ fn format_date(fw_date: &str) -> String {
     }
 }
 
-fn base64_encode(input: &[u8]) -> String {
+pub(crate) fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in input.chunks(3) {

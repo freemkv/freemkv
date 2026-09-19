@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.7.3] — UNRELEASED
+
+### Added
+
+- `info --share`: capture a shareable, context-aware diagnostic profile for bug reports. On a drive it bundles the drive profile plus, when media is present, the disc's **structure metadata** (BDMV `index.bdmv`/`MovieObject.bdmv`/`PLAYLIST`/`CLIPINF`/`BDJO`/`META`, DVD `VIDEO_TS/*.IFO`); on an ISO or `dir://` it captures just the disc structure. No audio/video essence and no AACS keys are included, so a reporter can reproduce a title-selection issue (e.g. issue #45) without shipping the full ISO. Release builds prompt `[Y/n]` before anything leaves the machine; `--mask` redacts identifiers. See the [Sharing a profile](https://freemkv.org/docs/troubleshooting/#sharing-a-profile---share) guide.
+
+### Fixed
+
+- Multi-angle UHD title selection (via libfreemkv 1.7.3): the MPLS STN table of a multi-angle first PlayItem is now parsed at the correct offset, so autorip/CLI no longer pick the wrong (or no) main feature on affected seamless-branch UHD discs (issue #45).
+
 ## [1.7.2] — UNRELEASED
 
 ### Changed

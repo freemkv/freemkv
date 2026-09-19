@@ -544,6 +544,36 @@ fn info_cmd(args: &[String]) {
         // synthesizes a UDF volume and returns the same pair as `scan_iso`. `info`
         // was the one place that never learned this, so a folder used to fail here.
         libfreemkv::StreamUrl::Dir { path } | libfreemkv::StreamUrl::Iso { path } => {
+            // `--share` on an image/folder captures the disc STRUCTURE profile
+            // (there is no drive here) — intercepted before the listing-flag
+            // parser, mirroring how `disc://` routes `--share` to `info::run`.
+            let share = args[1..].iter().any(|a| a == "--share" || a == "-s");
+
+            // A folder needs scan_dir (which additionally decides the
+            // encryption verdict from CONTENT rather than from whether an
+            // AACS/ directory survived the copy); an image needs scan_iso.
+            let scan = if matches!(parsed, libfreemkv::StreamUrl::Dir { .. }) {
+                libfreemkv::scan_dir
+            } else {
+                libfreemkv::scan_iso
+            };
+
+            if share {
+                let (disc, mut reader) = match scan(
+                    std::path::Path::new(path),
+                    libfreemkv::ScanOptions::default(),
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => fatal("error.op_info", &crate::pipe::fmt_err(&e)),
+                };
+                let label = std::path::Path::new(path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("disc");
+                crate::disc_capture::run(&disc, reader.as_mut(), label);
+                return;
+            }
+
             // Listing titles needs NO AACS key — scan keylessly and reuse disc_info's
             // full title list; the key-gated `input()` would hit E7022 on an encrypted
             // disc. Flags use the SAME parser as `disc://`, so an unknown one exits 1.
@@ -556,14 +586,6 @@ fn info_cmd(args: &[String]) {
                 crate::disc_info::InfoParse::Unknown(opt) => {
                     crate::disc_info::reject_unknown_option(&opt)
                 }
-            };
-            // A folder needs scan_dir (which additionally decides the
-            // encryption verdict from CONTENT rather than from whether an
-            // AACS/ directory survived the copy); an image needs scan_iso.
-            let scan = if matches!(parsed, libfreemkv::StreamUrl::Dir { .. }) {
-                libfreemkv::scan_dir
-            } else {
-                libfreemkv::scan_iso
             };
             let (disc, _reader) = match scan(
                 std::path::Path::new(path),

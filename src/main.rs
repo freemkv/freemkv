@@ -14,6 +14,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 // ── CLI shell (the gold-standard freemkv CLI, replicated verbatim) ──────────
 mod cli_entry;
+mod disc_capture;
 mod disc_info;
 // Also declared in `lib.rs`: both shells must refuse a rip whose destination
 // IS its source, and comparing paths alone (instead of this) missed hardlinks.
