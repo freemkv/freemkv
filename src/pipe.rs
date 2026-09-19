@@ -5782,7 +5782,6 @@ mod iso_key_tests {
             key_source: libfreemkv::KeyOrigin::ExternalUk,
             vuk: None,
             unit_keys,
-            read_data_key: None,
             volume_id: [0u8; 16],
             uk_ro: Vec::new(),
             mkb: Vec::new(),
