@@ -332,7 +332,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.7.4"
+version = "1.7.3"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.7.3#7d42ffb44f0ad11909b2c25ec41d5fb971249a45"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -344,14 +345,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.7.4"
+version = "1.7.3"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.7.3#d81d339c70246c63c4fedc52892f42a2a1574512"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.7.4"
+version = "1.7.3"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.7.3#b76f2036546a5ac08d62e9b0cc3c99018154b8a6"
 dependencies = [
  "base64",
  "flate2",
@@ -364,7 +367,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.7.4"
+version = "1.7.3"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.7.3#221575e8e90cb095e495155f49c692598b51a385"
 dependencies = [
  "aes",
  "base64",
@@ -585,7 +589,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.7.4"
+version = "1.7.3"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.7.3#25ec33c6638e25b748a3cd6cf891fed11a38f20c"
 dependencies = [
  "aes",
  "base64",
@@ -1360,9 +1365,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "ureq"
-version = "3.4.0"
+version = "3.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "972d7902c8735f2695410b8aed7df6ed12a47394aa1c8d7af49f0497b731a94d"
+checksum = "9a7ac20be9b7726e0bbdbf974c059676d9acb1cd414961f570a4e8231cacd7fc"
 dependencies = [
  "base64",
  "cookie_store",
