@@ -1,22 +1,12 @@
 name: comment-guard
 
-# Caps explanatory prose by COMMENT INTENT (not visibility):
-#   //! / /*! module docs  — unbounded (module-scoped, can't hide per-item text)
-#   ///  / /** */ item docs — 8 prose lines (fenced ``` examples excluded)
-#   //   / /* */  asides    — 3 lines (single-blank-separated runs count as one)
-# Overflow belongs in the module //! or docs/<topic>.md with a one-line // pointer.
-
+# Thin caller → the canonical reusable guard in freemkv/.github (one definition
+# for every repo). Fork PRs still run it; same-repo pushes aren't double-run.
 on: [push, pull_request]
-
-# Read-only: this is a lint (it caps comment prose) — it runs a local script and
-# does NOT post PR comments, so no pull-requests: write is needed.
-permissions:
-  contents: read
-
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   comment-guard:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Run comment-guard
-        run: python3 ci/comment-guard.py
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
+    uses: freemkv/.github/.github/workflows/guard-comment.yml@v1

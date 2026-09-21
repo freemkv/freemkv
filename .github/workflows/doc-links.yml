@@ -1,22 +1,19 @@
 name: doc-links
 
-# Fails on broken intra-doc links in `///`/`//!` doc comments (e.g. a `[Type]`
-# link to a renamed/removed item). Catches doc drift that `cargo build` misses.
-
+# Thin caller → the canonical reusable doc-links gate in freemkv/.github.
+# The old per-repo copy documented freemkv alone with a plain checkout: it needs
+# no sibling checkout because the committed [patch.crates-io] git tags in
+# Cargo.toml already resolve the four freemkv deps for a `cargo doc` build. So no
+# `checkout`/`patch` here — only `self`. The reusable gate resolves the toolchain
+# from Cargo.toml's rust-version and keeps the same default doc args
+# (--no-deps --document-private-items --lib --bins).
 on: [push, pull_request]
-
-# Read-only: builds docs to check intra-doc links; writes nothing.
-permissions:
-  contents: read
-
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   doc-links:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@1.98.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: cargo doc (deny broken intra-doc links)
-        env:
-          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links"
-        run: cargo doc --no-deps --document-private-items --lib --bins
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
+    uses: freemkv/.github/.github/workflows/guard-doclinks.yml@v1
+    with:
+      self: freemkv
