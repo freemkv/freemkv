@@ -1,0 +1,41 @@
+version = 1
+
+# REUSE (https://reuse.software) machine-readable licensing for the whole repo.
+#
+# Licensing is declared here in the manifest rather than as per-file inline
+# headers: the project's comment-guard lint caps stacked `//` comment blocks, so
+# a two-line SPDX header prepended above an existing top-of-file comment would
+# trip it. REUSE explicitly supports manifest-based annotation, so every file —
+# Rust sources, documentation, configuration, workflows, scripts, binary assets,
+# and the byte-exact `.golden` test fixtures — is covered here instead.
+#
+# The whole repository is the project's own work under the MIT licence; there is
+# no third-party vendored source here.
+
+[[annotations]]
+path = [
+    "**/*.rs",
+    "**/*.md",
+    "**/*.toml",
+    "**/*.lock",
+    "**/*.yml",
+    "**/*.yaml",
+    "**/*.json",
+    "**/*.sh",
+    "**/*.py",
+    "**/*.ps1",
+    "**/*.golden",
+    "**/*.svg",
+    "**/*.png",
+    "**/*.ico",
+    "**/*.plist",
+    "**/*.manifest",
+    "**/.gitignore",
+    ".gitignore",
+    "Makefile",
+    "LICENSE",
+    "build.rs",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Matthew Jackson & Contributors"
+SPDX-License-Identifier = "MIT"
