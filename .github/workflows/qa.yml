@@ -274,17 +274,108 @@ jobs:
       - name: Launch the ephemeral runner
         run: |
           set -euo pipefail
+
+          # ── Windows: UNCHANGED. The windows runner launches cleanly today; the
+          # only leg hitting Spot InsufficientInstanceCapacity is the linux
+          # real-media runner, so this path is left exactly as it was — one
+          # instance type, Subnets[0], inheriting everything from the template.
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            vpc=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
+            subnet=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" --query 'Subnets[0].SubnetId' --output text)
+            aws ec2 run-instances \
+              --launch-template LaunchTemplateName=freemkv-runner-${{ matrix.os }} \
+              --subnet-id "$subnet" \
+              --tag-specifications "ResourceType=instance,Tags=[
+                  {Key=freemkv-ci,Value=runner},
+                  {Key=runner-token-param,Value=${{ steps.reg.outputs.param }}},
+                  {Key=runner-repo,Value=${{ github.repository }}},
+                  {Key=launched-by,Value=${{ github.run_id }}}]" \
+              --query 'Instances[0].InstanceId' --output text
+            exit 0
+          fi
+
+          # ── Linux real-media runner: resilient placement in us-west-2 ────────
+          # A single (instance type, subnet) request in one AZ turns a transient
+          # Spot "InsufficientInstanceCapacity" into a hard qa failure. Stay in
+          # us-west-2 — the fixture ISOs live in the us-west-2 bucket and must
+          # NOT move — but sweep EVERY default-VPC subnet (all AZs) across a
+          # small list of equivalent instance types, first as Spot, then, if
+          # every Spot attempt is capacity-starved, as On-Demand. On-Demand for
+          # a ~15-minute ephemeral runner is a few cents and kills the flake.
+          #
+          # Everything else — AMI, security group, IAM instance profile,
+          # user-data / runner-registration script, tags — stays in the
+          # freemkv-runner-linux launch template and is inherited unchanged;
+          # only the placement (subnet/type) and the market type are chosen here.
+
           vpc=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
-          subnet=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" --query 'Subnets[0].SubnetId' --output text)
-          aws ec2 run-instances \
-            --launch-template LaunchTemplateName=freemkv-runner-${{ matrix.os }} \
-            --subnet-id "$subnet" \
-            --tag-specifications "ResourceType=instance,Tags=[
-                {Key=freemkv-ci,Value=runner},
-                {Key=runner-token-param,Value=${{ steps.reg.outputs.param }}},
-                {Key=runner-repo,Value=${{ github.repository }}},
-                {Key=launched-by,Value=${{ github.run_id }}}]" \
-            --query 'Instances[0].InstanceId' --output text
+          # ALL subnets, not Subnets[0]: each maps to a different AZ, and Spot
+          # capacity is per-AZ, so a second AZ is the cheapest possible retry.
+          subnets=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" \
+                      --query 'Subnets[].SubnetId' --output text)
+          [ -n "$subnets" ] || { echo "no subnets in default VPC $vpc" >&2; exit 1; }
+
+          # Same arch/size class as the launch template's c7i.4xlarge (x86_64,
+          # 16 vCPU): keep it FIRST, then two comparable Intel fallbacks so a
+          # capacity hole in one family does not stall the whole run.
+          types="c7i.4xlarge c6i.4xlarge m7i.4xlarge"
+
+          tags="ResourceType=instance,Tags=[
+              {Key=freemkv-ci,Value=runner},
+              {Key=runner-token-param,Value=${{ steps.reg.outputs.param }}},
+              {Key=runner-repo,Value=${{ github.repository }}},
+              {Key=launched-by,Value=${{ github.run_id }}}]"
+
+          # $1 = market label (for logs); remaining args are passed to
+          # run-instances (the market-options flag). Returns: 0 launched,
+          # 1 every attempt was capacity-starved, 2 a non-capacity hard error
+          # (bad template / IAM) that must fail fast rather than burn the grid.
+          try_launch() {
+            local market="$1"; shift
+            local t s id
+            for t in $types; do
+              for s in $subnets; do
+                echo "attempt: type=$t subnet=$s market=$market"
+                if id=$(aws ec2 run-instances \
+                          --launch-template LaunchTemplateName=freemkv-runner-linux \
+                          --instance-type "$t" \
+                          --subnet-id "$s" \
+                          "$@" \
+                          --tag-specifications "$tags" \
+                          --query 'Instances[0].InstanceId' --output text 2>launch.err); then
+                  # The instance-id downstream consumers expect, echoed as before.
+                  echo "$id"
+                  echo "launched $id (linux, type=$t subnet=$s market=$market)"
+                  return 0
+                fi
+                echo "  failed ($t/$s/$market): $(cat launch.err)"
+                if ! grep -qiE 'InsufficientInstanceCapacity|Unsupported|InsufficientHostCapacity|capacity|SpotMaxPriceTooLow' launch.err; then
+                  echo "non-capacity error — not retrying further" >&2
+                  return 2
+                fi
+              done
+            done
+            return 1
+          }
+
+          # 1) Spot across every type × subnet.
+          rc=0
+          try_launch spot --instance-market-options 'MarketType=spot' || rc=$?
+          [ "$rc" = 0 ] && exit 0
+          if [ "$rc" = 2 ]; then
+            echo "::error title=Runner launch failed::a non-capacity error launching the linux media runner — see the failure above" >&2
+            exit 1
+          fi
+
+          # 2) Every Spot attempt was capacity-starved — same sweep On-Demand.
+          # '{}' clears the launch template's Spot market options, so the request
+          # is a plain On-Demand instance.
+          echo "all Spot attempts hit capacity — falling back to On-Demand"
+          rc=0
+          try_launch on-demand --instance-market-options '{}' || rc=$?
+          [ "$rc" = 0 ] && exit 0
+          echo "::error title=No capacity::every instance type × subnet failed as both Spot and On-Demand in us-west-2 — check service quotas / capacity in the region" >&2
+          exit 1
 
   # ── The CLI matrix: every feature, both platforms, byte-identical ─────────
   #
