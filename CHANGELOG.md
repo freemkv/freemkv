@@ -1,7 +1,6 @@
 # Changelog
 
-## [1.7.4]
-
+## [1.7.4] — UNRELEASED
 ### Added
 
 - `info … --share` now bundles non-secret AACS diagnostics (disc hash, AACS version, VID-availability) alongside the disc structure, so a keydb "no key" report carries enough to triage the lookup without shipping the disc (#46).
