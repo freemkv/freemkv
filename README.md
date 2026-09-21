@@ -5,6 +5,7 @@
 [![CI](https://github.com/freemkv/freemkv/actions/workflows/ci.yml/badge.svg)](https://github.com/freemkv/freemkv/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/freemkv/freemkv?label=latest&color=brightgreen)](https://github.com/freemkv/freemkv/releases/latest)
 [![codecov](https://codecov.io/gh/freemkv/freemkv/branch/dev/graph/badge.svg)](https://codecov.io/gh/freemkv/freemkv)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14740/badge)](https://www.bestpractices.dev/projects/14740)
 
 # freemkv
 
@@ -287,6 +288,16 @@ Works with LG, ASUS, HP, and other MediaTek-based BD-RE drives on Linux, macOS, 
 ## Contributing
 
 Run `freemkv info disc:// --share` to submit your drive's profile and help expand hardware support.
+
+## Project quality
+
+freemkv pursues the [OpenSSF Best Practices](https://www.bestpractices.dev/projects/14740)
+badge. Quality is enforced in CI on every change: `cargo fmt --check`,
+`cargo clippy --all-targets -D warnings`, the test suite, `cargo-deny` dependency
+scanning, and code coverage via [Codecov](https://codecov.io/gh/freemkv/freemkv).
+Releases are code-signed with SHA-256 checksums. See
+[CONTRIBUTING.md](CONTRIBUTING.md), [GOVERNANCE.md](GOVERNANCE.md),
+[ROADMAP.md](ROADMAP.md), and [SECURITY.md](SECURITY.md).
 
 ## License
 
