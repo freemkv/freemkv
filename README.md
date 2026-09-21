@@ -6,6 +6,9 @@
 [![Latest Release](https://img.shields.io/github/v/release/freemkv/freemkv?label=latest&color=brightgreen)](https://github.com/freemkv/freemkv/releases/latest)
 [![codecov](https://codecov.io/gh/freemkv/freemkv/branch/dev/graph/badge.svg)](https://codecov.io/gh/freemkv/freemkv)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14740/badge)](https://www.bestpractices.dev/projects/14740)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/freemkv/freemkv/badge)](https://scorecard.dev/viewer/?uri=github.com/freemkv/freemkv)
+[![REUSE status](https://api.reuse.software/badge/github.com/freemkv/freemkv)](https://api.reuse.software/info/github.com/freemkv/freemkv)
+[![MSRV](https://img.shields.io/badge/MSRV-1.98-blue.svg)](#minimum-supported-rust-version)
 
 # freemkv
 
@@ -298,6 +301,11 @@ scanning, and code coverage via [Codecov](https://codecov.io/gh/freemkv/freemkv)
 Releases are code-signed with SHA-256 checksums. See
 [CONTRIBUTING.md](CONTRIBUTING.md), [GOVERNANCE.md](GOVERNANCE.md),
 [ROADMAP.md](ROADMAP.md), and [SECURITY.md](SECURITY.md).
+
+## Minimum Supported Rust Version
+
+The minimum supported Rust version (MSRV) is **1.98**, declared as
+`rust-version` in [`Cargo.toml`](Cargo.toml) and enforced in CI on every change.
 
 ## License
 
