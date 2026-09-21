@@ -4904,6 +4904,7 @@ mod routing_tests {
             path: vec![],
             outcome,
             matched_entry: None,
+            store_entries: None,
         };
 
         let won = ResolutionTrace {
