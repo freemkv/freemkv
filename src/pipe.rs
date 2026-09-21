@@ -6745,12 +6745,14 @@ mod formatter_tests {
             ],
             outcome: KeyOutcome::Resolved,
             matched_entry: None,
+            store_entries: None,
         });
         trace.keys.push(KeyStep {
             who: "online".into(),
             path: vec![KeyNode::NoEntry],
             outcome: KeyOutcome::NoKey,
             matched_entry: None,
+            store_entries: None,
         });
 
         let lines = render_resolution_trace(&trace);
