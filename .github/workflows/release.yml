@@ -43,7 +43,7 @@ jobs:
 
   # Parallel tripwire, exactly as the CLI does it: fails the run, but `build`
   # does NOT `needs:` it, so packaging starts as soon as `verify` passes. The
-  # tag decision was already gated by the local precommit on the same stable Rust.
+  # tag decision was already gated by CI (ci.yml on dev, then a green qa.yml) on the same stable Rust.
   test:
     needs: verify
     runs-on: macos-latest
