@@ -7,6 +7,13 @@
 //! essence, no AACS keys) plus freemkv's own title-selection view, so a reporter
 //! can reproduce a wrong-title / selection bug (e.g. issue #45) without shipping
 //! the whole disc. Reuses the same zip + base64 + submit flow as the drive path.
+//!
+//! It also bundles `aacs.json` — non-secret AACS diagnostics for keydb / AACS
+//! resolution triage (issue #46): the computed disc hash (the keydb lookup key),
+//! AACS generation, MKB version, bus-encryption flag, and a vid-available
+//! boolean. NEVER any key material — no VUK, unit keys, MKB bytes, or raw VID.
+//! On a keyless scan (no AACS handshake) the disc may carry no AACS state, so
+//! the profile records a clear "not captured — run with -v" marker instead.
 
 use crate::info::{base64_encode, present_for_submission, save_bin, zip_files};
 use crate::strings;
@@ -42,20 +49,120 @@ pub(crate) fn fold_structure(
     })
 }
 
+// Minimal JSON string escaper for the machine-artifact profiles below.
+fn json_esc(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            '"' => vec!['\\', '"'],
+            '\\' => vec!['\\', '\\'],
+            c if (c as u32) < 0x20 => format!("\\u{:04x}", c as u32).chars().collect(),
+            c => vec![c],
+        })
+        .collect()
+}
+
+/// Non-secret AACS diagnostics distilled from a scanned disc, for keydb / AACS
+/// resolution triage (issue #46). Deliberately omits EVERY secret: no VUK, no
+/// unit keys, no raw Volume ID, no MKB / Unit_Key_RO bytes — only crypto *shape*
+/// plus the disc hash, which is the public keydb lookup key (SHA-1 of
+/// `Unit_Key_RO.inf`, the same value a maintainer matches against keydb rows).
+pub(crate) struct AacsDiag {
+    // Whether the scan carried any AACS state at all. A plain (keyless) ISO /
+    // folder scan may leave `disc.aacs == None`, so this is `false` and the
+    // profile records the "run with -v" marker instead of crypto shape.
+    pub captured: bool,
+    // 40-hex keydb lookup key (no `0x` prefix), when the scan read the disc's
+    // `Unit_Key_RO.inf`. `None` when uncaptured or the hash was blank.
+    pub disc_hash: Option<String>,
+    // AACS generation / major version (1 = BD, 2 = UHD).
+    pub generation: Option<u8>,
+    pub mkb_version: Option<u32>,
+    pub bus_encryption: Option<bool>,
+    // Whether the SCSI AACS handshake yielded a Volume ID. The raw VID is
+    // NEVER emitted — only this boolean.
+    pub vid_available: bool,
+}
+
+// Distil the non-secret AACS diagnostics from a scanned disc. Reads only
+// `disc.aacs` shape; never touches vuk / unit_keys / uk_ro / mkb bytes.
+pub(crate) fn aacs_diag(disc: &Disc) -> AacsDiag {
+    match disc.aacs.as_ref() {
+        Some(a) => {
+            // `disc_hash` is stored with an `0x` prefix; keydb rows are keyed by
+            // the bare 40-hex, so strip it to the comparable lookup form.
+            let hash = libfreemkv::hex::strip_hex_prefix(a.disc_hash.trim()).trim();
+            AacsDiag {
+                captured: true,
+                disc_hash: (!hash.is_empty()).then(|| hash.to_string()),
+                generation: Some(a.version),
+                mkb_version: a.mkb_version,
+                bus_encryption: Some(a.bus_encryption),
+                // Raw VID stays private — report only whether one was obtained.
+                vid_available: a.volume_id.iter().any(|&b| b != 0),
+            }
+        }
+        None => AacsDiag {
+            captured: false,
+            disc_hash: None,
+            generation: None,
+            mkb_version: None,
+            bus_encryption: None,
+            vid_available: false,
+        },
+    }
+}
+
+// Guidance shown when a keyless scan left no AACS data — tells a reporter how
+// to include the disc hash next time. Shared by the profile note + on-run line.
+const AACS_ABSENT_HINT: &str = "AACS diagnostics not captured — this was a keyless scan (no AACS handshake). \
+     Re-run `freemkv info <disc> -v --share` (verbose runs the handshake) to include \
+     disc_hash, the keydb lookup key, for keydb/AACS triage.";
+
+/// The `aacs.json` profile member: non-secret AACS diagnostics for keydb triage.
+/// When the scan carried no AACS state, records a clear "not captured" marker
+/// with the `-v` hint. NEVER emits key material, VUK, unit keys, MKB bytes, or
+/// the raw Volume ID — only shape + the public disc hash. Literal English/JSON.
+pub(crate) fn aacs_json(disc: &Disc) -> String {
+    let d = aacs_diag(disc);
+    let mut s = String::new();
+    s.push_str("{\n");
+    s.push_str(&format!("  \"aacs_captured\": {},\n", d.captured));
+    if d.captured {
+        match &d.disc_hash {
+            Some(h) => s.push_str(&format!("  \"disc_hash\": \"{}\",\n", json_esc(h))),
+            None => s.push_str("  \"disc_hash\": null,\n"),
+        }
+        match d.generation {
+            Some(g) => s.push_str(&format!("  \"aacs_generation\": {g},\n")),
+            None => s.push_str("  \"aacs_generation\": null,\n"),
+        }
+        match d.mkb_version {
+            Some(v) => s.push_str(&format!("  \"mkb_version\": {v},\n")),
+            None => s.push_str("  \"mkb_version\": null,\n"),
+        }
+        s.push_str(&format!(
+            "  \"bus_encryption\": {},\n",
+            d.bus_encryption.unwrap_or(false)
+        ));
+        s.push_str(&format!("  \"vid_available\": {},\n", d.vid_available));
+        s.push_str(
+            "  \"note\": \"disc_hash is the AACS keydb lookup key (SHA-1 of Unit_Key_RO.inf); \
+             compare it against keydb rows. Present only when the scan read the disc's AACS data. \
+             No key material, VUK, unit keys, MKB bytes, or raw Volume ID is included — \
+             vid_available only reports whether the SCSI handshake yielded a Volume ID.\"\n",
+        );
+    } else {
+        s.push_str(&format!("  \"note\": \"{}\"\n", json_esc(AACS_ABSENT_HINT)));
+    }
+    s.push_str("}\n");
+    s
+}
+
 // A JSON view of freemkv's decision so a maintainer sees the selection without
 // re-running: picked title first (`titles[0]`), then every title's shape.
 // Literal English/JSON — a machine artifact, not localized UI.
 pub(crate) fn selection_json(disc: &Disc) -> String {
-    fn esc(s: &str) -> String {
-        s.chars()
-            .flat_map(|c| match c {
-                '"' => vec!['\\', '"'],
-                '\\' => vec!['\\', '\\'],
-                c if (c as u32) < 0x20 => format!("\\u{:04x}", c as u32).chars().collect(),
-                c => vec![c],
-            })
-            .collect()
-    }
+    let esc = json_esc;
     let pick = disc.titles.first().map(|t| t.playlist_id).unwrap_or(0);
     let mut s = String::new();
     s.push_str("{\n");
@@ -122,6 +229,16 @@ pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str) {
         &mut written,
     );
 
+    // Non-secret AACS diagnostics for keydb / AACS resolution triage (issue #46):
+    // the computed disc hash (keydb lookup key) + crypto shape, or a "run with
+    // -v" marker on a keyless scan. Never carries key material — see `aacs_json`.
+    save_bin(
+        &profile_dir,
+        "aacs.json",
+        aacs_json(disc).as_bytes(),
+        &mut written,
+    );
+
     // Raw structure files. If none are readable there is nothing to report.
     let summary = match fold_structure(&profile_dir, &mut written, reader) {
         Some(s) => s,
@@ -148,6 +265,25 @@ pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str) {
             ],
         )
     );
+
+    // AACS triage guidance (issue #46): confirm the disc hash was bundled, or —
+    // on a keyless scan that yielded no AACS state — tell the reporter to re-run
+    // with `-v` so the keydb lookup key ends up in the profile next time.
+    let diag = aacs_diag(disc);
+    match diag.disc_hash {
+        Some(hash) => println!(
+            "{}",
+            strings::fmt_or(
+                "disc.capture_aacs_hash",
+                "AACS diagnostics: disc hash {hash} (keydb lookup key) recorded in aacs.json.",
+                &[("hash", &hash)],
+            )
+        ),
+        None => println!(
+            "{}",
+            strings::get_or("disc.capture_aacs_absent", AACS_ABSENT_HINT)
+        ),
+    }
 
     // Zip + base64, same helpers as the drive path.
     let zip_data = match zip_files(&profile_dir, &written) {
@@ -211,9 +347,43 @@ pub(crate) fn issue_body(disc: &Disc, summary: &DiscSummary, zip_b64: &str) -> S
         summary.file_count, summary.total_bytes
     ));
     body.push_str("```\n\n");
+
+    // AACS diagnostics (issue #46): the disc hash (keydb lookup key) + crypto
+    // shape a maintainer needs to compare against keydb rows — or a "run with
+    // -v" marker when this was a keyless scan. Non-secret only; see `aacs_json`.
+    let diag = aacs_diag(disc);
+    body.push_str("## AACS diagnostics\n\n```\n");
+    if diag.captured {
+        match &diag.disc_hash {
+            Some(h) => body.push_str(&format!("Disc hash:       {h}  (keydb lookup key)\n")),
+            None => body.push_str("Disc hash:       (unavailable)\n"),
+        }
+        if let Some(g) = diag.generation {
+            body.push_str(&format!("AACS generation: {g}\n"));
+        }
+        match diag.mkb_version {
+            Some(v) => body.push_str(&format!("MKB version:     {v}\n")),
+            None => body.push_str("MKB version:     (unknown)\n"),
+        }
+        body.push_str(&format!(
+            "Bus encryption:  {}\n",
+            diag.bus_encryption.unwrap_or(false)
+        ));
+        body.push_str(&format!("VID available:   {}\n", diag.vid_available));
+    } else {
+        body.push_str("Not captured — keyless scan (no AACS handshake).\n");
+    }
+    body.push_str("```\n\n");
+    if !diag.captured {
+        body.push_str(AACS_ABSENT_HINT);
+        body.push_str("\n\n");
+    }
+
     body.push_str(
-        "Metadata only — no audio/video essence, no AACS keys. `selection.json` in \
-         the zip shows freemkv's full title ranking.\n\n",
+        "Metadata only — no audio/video essence, no AACS keys (no VUK, unit keys, MKB \
+         bytes, or raw Volume ID). `selection.json` in the zip shows freemkv's full \
+         title ranking; `aacs.json` carries the non-secret AACS diagnostics above \
+         (disc hash, version, vid-available) for keydb triage.\n\n",
     );
     body.push_str("<details><summary>Disc structure (base64 zip)</summary>\n\n```\n");
     for chunk in zip_b64.as_bytes().chunks(76) {
@@ -223,4 +393,149 @@ pub(crate) fn issue_body(disc: &Disc, summary: &DiscSummary, zip_b64: &str) -> S
     body.push_str("```\n\n</details>\n\n");
     body.push_str("---\n*Captured by `freemkv info … --share`*\n");
     body
+}
+
+#[cfg(test)]
+mod aacs_diag_tests {
+    use super::*;
+    use libfreemkv::disc::DiscRegion;
+    use libfreemkv::{AacsState, Disc, DiscFormat, KeyOrigin};
+
+    // Distinctive secret byte fills — if any leak into a profile artifact the
+    // no-key-material assertions below will catch their hex.
+    const SECRET_VUK: [u8; 16] = [0xAB; 16];
+    const SECRET_UNIT_KEY: [u8; 16] = [0xCD; 16];
+    const SECRET_VID: [u8; 16] = [0xEF; 16];
+
+    fn disc_with(aacs: Option<AacsState>) -> Disc {
+        Disc {
+            volume_id: "TEST_DISC".to_string(),
+            meta_title: None,
+            format: DiscFormat::Uhd,
+            capacity_sectors: 0,
+            capacity_bytes: 0,
+            layers: 1,
+            titles: Vec::new(),
+            region: DiscRegion::Free,
+            aacs,
+            css: None,
+            encrypted: true,
+            aacs_error: None,
+            css_error: None,
+            content_format: libfreemkv::ContentFormat::BdTs,
+        }
+    }
+
+    // An AACS state carrying a real disc hash AND every secret field populated,
+    // so profile output can be checked to leak the hash but none of the secrets.
+    fn aacs_with_secrets(disc_hash: &str) -> AacsState {
+        AacsState {
+            version: 2,
+            bus_encryption: true,
+            mkb_version: Some(77),
+            disc_hash: disc_hash.to_string(),
+            key_source: KeyOrigin::ExternalUk,
+            vuk: Some(SECRET_VUK),
+            unit_keys: vec![(0, SECRET_UNIT_KEY)],
+            volume_id: SECRET_VID,
+            uk_ro: vec![0x12, 0x34, 0x56],
+            mkb: vec![0x78, 0x9a],
+        }
+    }
+
+    #[test]
+    fn aacs_present_puts_disc_hash_into_profile() {
+        // Stored with the `0x` prefix; the profile must record the bare 40-hex
+        // keydb lookup key.
+        let raw = "0xaabbccddeeff00112233445566778899aabbccdd";
+        let bare = "aabbccddeeff00112233445566778899aabbccdd";
+        let disc = disc_with(Some(aacs_with_secrets(raw)));
+
+        let json = aacs_json(&disc);
+        assert!(json.contains("\"aacs_captured\": true"), "{json}");
+        assert!(
+            json.contains(&format!("\"disc_hash\": \"{bare}\"")),
+            "disc hash must be the bare keydb lookup key: {json}"
+        );
+        assert!(json.contains("\"aacs_generation\": 2"), "{json}");
+        assert!(json.contains("\"mkb_version\": 77"), "{json}");
+        assert!(json.contains("\"bus_encryption\": true"), "{json}");
+        // volume_id is non-zero, so a VID was available — but only the boolean.
+        assert!(json.contains("\"vid_available\": true"), "{json}");
+
+        let body = issue_body(
+            &disc,
+            &DiscSummary {
+                file_count: 3,
+                total_bytes: 100,
+            },
+            "QUJD",
+        );
+        assert!(body.contains("## AACS diagnostics"), "{body}");
+        assert!(
+            body.contains(bare),
+            "issue body must name the disc hash: {body}"
+        );
+    }
+
+    #[test]
+    fn keyless_disc_records_not_captured_marker() {
+        let disc = disc_with(None);
+        let json = aacs_json(&disc);
+        assert!(json.contains("\"aacs_captured\": false"), "{json}");
+        assert!(json.contains("-v"), "hint must point at verbose: {json}");
+        // No crypto-shape fields when nothing was captured (the note prose may
+        // still mention disc_hash — assert on the JSON key form only).
+        assert!(!json.contains("\"disc_hash\""), "{json}");
+        assert!(!json.contains("\"vid_available\""), "{json}");
+
+        let body = issue_body(
+            &disc,
+            &DiscSummary {
+                file_count: 1,
+                total_bytes: 10,
+            },
+            "QUJD",
+        );
+        assert!(
+            body.contains("Not captured — keyless scan"),
+            "issue body must flag the keyless case: {body}"
+        );
+    }
+
+    #[test]
+    fn no_key_material_is_ever_emitted() {
+        let raw = "0x1111111111111111111111111111111111111111";
+        let disc = disc_with(Some(aacs_with_secrets(raw)));
+
+        // Every artifact a reporter could paste to a public issue.
+        let json = aacs_json(&disc);
+        let sel = selection_json(&disc);
+        let body = issue_body(
+            &disc,
+            &DiscSummary {
+                file_count: 1,
+                total_bytes: 1,
+            },
+            "QUJD",
+        );
+
+        // Hex of each secret fill and the raw uk_ro / mkb bytes.
+        let leaks = [
+            "abababab", // VUK
+            "cdcdcdcd", // unit key
+            "efefefef", // raw Volume ID
+            "123456",   // uk_ro bytes
+            "789a",     // mkb bytes
+        ];
+        for artifact in [&json, &sel, &body] {
+            let lower = artifact.to_ascii_lowercase();
+            for needle in leaks {
+                assert!(
+                    !lower.contains(needle),
+                    "secret material {needle:?} leaked into a shared artifact:\n{artifact}"
+                );
+            }
+        }
+    }
 }
