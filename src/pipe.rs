@@ -1778,6 +1778,7 @@ fn render_resolution_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> 
             .map(|n| match n {
                 KeyNode::MatchedDisc => "matched disc",
                 KeyNode::NoEntry => "no entry",
+                KeyNode::NoDerivableKey => "no derivable key",
                 KeyNode::FoundUnitKeys => "found unit keys",
                 KeyNode::FoundVuk => "found VUK",
                 KeyNode::FoundMediaKey => "found media key",
@@ -6743,11 +6744,13 @@ mod formatter_tests {
                 KeyNode::DerivedUnitKeys,
             ],
             outcome: KeyOutcome::Resolved,
+            matched_entry: None,
         });
         trace.keys.push(KeyStep {
             who: "online".into(),
             path: vec![KeyNode::NoEntry],
             outcome: KeyOutcome::NoKey,
+            matched_entry: None,
         });
 
         let lines = render_resolution_trace(&trace);

@@ -4903,6 +4903,7 @@ mod routing_tests {
             who: who.to_string(),
             path: vec![],
             outcome,
+            matched_entry: None,
         };
 
         let won = ResolutionTrace {
