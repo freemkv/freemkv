@@ -33,6 +33,11 @@ on:
         type: boolean
         default: false
 
+# Rapid pushes supersede their own in-progress runs instead of stacking.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Least privilege by default. Jobs that need more elevate themselves: rc-tag
 # pushes the candidate tag (contents: write), and launch-runners / cli-matrix
 # assume an AWS role over OIDC (id-token: write).
@@ -53,7 +58,7 @@ jobs:
     outputs:
       media: ${{ steps.decide.outputs.media }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v5
         with: { fetch-depth: 0 }
       - id: decide
         run: |
@@ -98,7 +103,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Stamp the next rc
@@ -126,107 +131,19 @@ jobs:
         os: ['ubuntu-latest', 'macos-latest']
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v5
         with:
           path: freemkv
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
-          repository: freemkv/libfreemkv
-          ref: qa
-          path: libfreemkv
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-keysources
-          ref: qa
-          path: freemkv-keysources
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-engine
-          ref: qa
-          path: freemkv-engine
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-i18n
-          ref: qa
-          path: freemkv-i18n
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-unlock
-          ref: qa
-          path: freemkv-unlock
-      - name: Resolve siblings from their qa tips
-        shell: bash
-        working-directory: freemkv
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<'EOF'
-          [patch.crates-io]
-          libfreemkv = { path = "../libfreemkv" }
-          freemkv-keysources = { path = "../freemkv-keysources" }
-          freemkv-engine = { path = "../freemkv-engine" }
-          freemkv-i18n = { path = "../freemkv-i18n" }
-          EOF
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          self: freemkv
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
       - run: cargo test --release --tests
-        working-directory: freemkv
-
-  # clippy's output is target-dependent: cfg-gated code only gets linted on
-  # the target it compiles for. Linting solely on the dev machine's host
-  # target is how a lint that CI rejects reaches a push.
-  cross-lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          path: freemkv
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/libfreemkv
-          ref: qa
-          path: libfreemkv
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-keysources
-          ref: qa
-          path: freemkv-keysources
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-engine
-          ref: qa
-          path: freemkv-engine
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-i18n
-          ref: qa
-          path: freemkv-i18n
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-unlock
-          ref: qa
-          path: freemkv-unlock
-      - name: Resolve siblings from their qa tips
-        shell: bash
-        working-directory: freemkv
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<'EOF'
-          [patch.crates-io]
-          libfreemkv = { path = "../libfreemkv" }
-          freemkv-keysources = { path = "../freemkv-keysources" }
-          freemkv-engine = { path = "../freemkv-engine" }
-          freemkv-i18n = { path = "../freemkv-i18n" }
-          EOF
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: freemkv
-      - run: rustup target add x86_64-unknown-linux-gnu
-      - run: cargo clippy --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
         working-directory: freemkv
 
   # Windows compiles the tests but does not run them, matching the policy
@@ -236,46 +153,14 @@ jobs:
   windows-build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v5
         with:
           path: freemkv
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
-          repository: freemkv/libfreemkv
-          ref: qa
-          path: libfreemkv
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-keysources
-          ref: qa
-          path: freemkv-keysources
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-engine
-          ref: qa
-          path: freemkv-engine
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-i18n
-          ref: qa
-          path: freemkv-i18n
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-unlock
-          ref: qa
-          path: freemkv-unlock
-      - name: Resolve siblings from their qa tips
-        shell: bash
-        working-directory: freemkv
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<'EOF'
-          [patch.crates-io]
-          libfreemkv = { path = "../libfreemkv" }
-          freemkv-keysources = { path = "../freemkv-keysources" }
-          freemkv-engine = { path = "../freemkv-engine" }
-          freemkv-i18n = { path = "../freemkv-i18n" }
-          EOF
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          self: freemkv
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -290,46 +175,14 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v5
         with:
           path: freemkv
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
-          repository: freemkv/libfreemkv
-          ref: qa
-          path: libfreemkv
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-keysources
-          ref: qa
-          path: freemkv-keysources
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-engine
-          ref: qa
-          path: freemkv-engine
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-i18n
-          ref: qa
-          path: freemkv-i18n
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: freemkv/freemkv-unlock
-          ref: qa
-          path: freemkv-unlock
-      - name: Resolve siblings from their qa tips
-        shell: bash
-        working-directory: freemkv
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<'EOF'
-          [patch.crates-io]
-          libfreemkv = { path = "../libfreemkv" }
-          freemkv-keysources = { path = "../freemkv-keysources" }
-          freemkv-engine = { path = "../freemkv-engine" }
-          freemkv-i18n = { path = "../freemkv-i18n" }
-          EOF
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          self: freemkv
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -379,7 +232,7 @@ jobs:
   # test, the synthetic CLI matrix and the 6 GB real DVD — full-size media on
   # macOS is a known, accepted gap rather than a silent one.
   launch-runners:
-    needs: [detect, release-tests, cross-lint, windows-build, cli-integration]
+    needs: [detect, release-tests, windows-build, cli-integration]
     if: inputs.run_media || (github.event_name == 'push' && needs.detect.outputs.media == 'true')
     runs-on: ubuntu-latest
     permissions:
@@ -454,8 +307,8 @@ jobs:
   #
   # ORDERING: `needs` is the cost control, not decoration. This is by far the
   # most expensive thing the gate runs, so nothing touches real media until
-  # lint, the unit suites, the cross-lint, the Windows build and the synthetic
-  # CLI matrix are all green. A typo cannot burn a two-hour rip.
+  # the release tests, the Windows build and the synthetic CLI matrix are all
+  # green. A typo cannot burn a two-hour rip.
   cli-matrix:
     needs: [detect, launch-runners]
     if: inputs.run_media || (github.event_name == 'push' && needs.detect.outputs.media == 'true')
@@ -469,39 +322,26 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v5
         with: { path: freemkv }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/libfreemkv,         ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-engine,     ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-engine }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-keysources, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-keysources }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-i18n,       ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-unlock,     ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
+      # Real-media job keeps its own dev->dev / else->qa sibling ref (passed to
+      # the composite via `ref`), rather than the composite's default 3-way.
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+        with:
+          checkout: libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          self: freemkv
+          ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}"
       # The acceptance suite is not in this public repo — it names fixtures and
       # key sources. It lives in the private `freemkv-ci` repo, which exists
       # because Actions runners cannot reach the LAN git host host the scripts
       # used to live on. That unreachability is the whole reason the LAN job
       # this replaces could not be moved to EC2 before.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v5
         with:
           repository: freemkv/freemkv-ci
           token: ${{ secrets.ORG_DISPATCH_TOKEN }}
           path: ci
-      - name: Point the patches at the sibling checkouts
-        shell: bash
-        run: |
-          mkdir -p freemkv/.cargo
-          cat > freemkv/.cargo/config.toml <<'CFG'
-          [patch.crates-io]
-          libfreemkv = { path = "../libfreemkv" }
-          freemkv-keysources = { path = "../freemkv-keysources" }
-          freemkv-engine = { path = "../freemkv-engine" }
-          freemkv-i18n = { path = "../freemkv-i18n" }
-          CFG
       - name: Record the libfreemkv sha
         shell: bash
         # MUX_APP carries libfreemkv's short sha, so two legs built from

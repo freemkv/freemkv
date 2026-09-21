@@ -1,39 +1,11 @@
 name: leak-guard
 
-# Self-contained public-repo leak gate. Public CI cannot reach the private
-# tooling, so this encodes only the generic net: internal-infra references,
-# tracked CLAUDE.md/.claude paths, and AI-attribution in commit messages.
-# No project-specific reverse-engineering vocabulary lives here.
-
+# Thin caller → the canonical reusable guard in freemkv/.github.
 on: [push, pull_request]
-
-# Read-only: this gate only inspects the commit range.
-permissions:
-  contents: read
-
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   leak-guard:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-      - name: Compute commit range
-        id: range
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.event.pull_request.base.sha }}"
-            head="${{ github.event.pull_request.head.sha }}"
-            echo "range=$base..$head" >> "$GITHUB_OUTPUT"
-          else
-            before="${{ github.event.before }}"
-            after="${{ github.sha }}"
-            # New branch / first push: github.event.before is all-zeros.
-            if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
-              echo "range=$after" >> "$GITHUB_OUTPUT"
-            else
-              echo "range=$before..$after" >> "$GITHUB_OUTPUT"
-            fi
-          fi
-      - name: Run leak-guard
-        run: bash ci/leak-guard.sh "${{ steps.range.outputs.range }}"
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
+    uses: freemkv/.github/.github/workflows/guard-leak.yml@v1
