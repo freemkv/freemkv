@@ -22,8 +22,17 @@ use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 /// Connect timeout — a dead mirror must fail fast, not hang the CLI.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Read timeout — the keydb body is a few MiB; allow a slow link.
+/// Header timeout — how long to wait for the response head to arrive.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Rolling idle/stall bound on body reads, re-armed per read by
+/// [`IdleReCapConnector`] since ureq 3 exposes no such knob. A genuine stall
+/// trips it; a slow-but-progressing body does not.
+const STALL_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Total-transfer ceiling on the keydb body once headers are in — sized to a
+/// real few-MiB keydb over a slow link, not a per-read bound.
+const BODY_TRANSFER_BUDGET: Duration = Duration::from_secs(120);
 
 /// Bounded DNS resolution so a wedged resolver can't hang the CLI.
 const DNS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -138,18 +147,132 @@ impl Resolver for PinnedResolver {
     }
 }
 
+// Chained after DefaultConnector to re-arm a ROLLING per-read idle bound on
+// every body read, restoring the stall detection ureq 3.4.1 removed (#1194).
+// See docs/keydb-fetch.md#hardened_agent.
+#[derive(Debug)]
+struct IdleReCapConnector {
+    idle: Duration,
+}
+
+impl<In: ureq::unversioned::transport::Transport> ureq::unversioned::transport::Connector<In>
+    for IdleReCapConnector
+{
+    type Out = IdleReCapTransport<In>;
+
+    fn connect(
+        &self,
+        _details: &ureq::unversioned::transport::ConnectionDetails,
+        chained: Option<In>,
+    ) -> std::result::Result<Option<Self::Out>, ureq::Error> {
+        Ok(chained.map(|inner| IdleReCapTransport {
+            inner,
+            idle: self.idle,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct IdleReCapTransport<In> {
+    inner: In,
+    idle: Duration,
+}
+
+impl<In> IdleReCapTransport<In> {
+    // Cap only BODY reads (reason RecvBody) at the idle bound; connect and
+    // header phases keep ureq's own timeouts. min keeps the tighter of a small
+    // total-body budget and idle.
+    fn cap(
+        &self,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> ureq::unversioned::transport::NextTimeout {
+        use ureq::unversioned::transport::time::Duration as UreqDuration;
+        if timeout.reason != ureq::Timeout::RecvBody {
+            return timeout;
+        }
+        let idle = UreqDuration::from_millis(self.idle.as_millis() as u64);
+        let after = if timeout.after < idle {
+            timeout.after
+        } else {
+            idle
+        };
+        ureq::unversioned::transport::NextTimeout {
+            after,
+            reason: ureq::Timeout::RecvBody,
+        }
+    }
+}
+
+impl<In: ureq::unversioned::transport::Transport> ureq::unversioned::transport::Transport
+    for IdleReCapTransport<In>
+{
+    fn buffers(&mut self) -> &mut dyn ureq::unversioned::transport::Buffers {
+        self.inner.buffers()
+    }
+
+    fn transmit_output(
+        &mut self,
+        amount: usize,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> std::result::Result<(), ureq::Error> {
+        self.inner.transmit_output(amount, timeout)
+    }
+
+    fn await_input(
+        &mut self,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> std::result::Result<bool, ureq::Error> {
+        let capped = self.cap(timeout);
+        self.inner.await_input(capped)
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.inner.is_open()
+    }
+
+    fn is_tls(&self) -> bool {
+        self.inner.is_tls()
+    }
+}
+
 fn hardened_agent(pinned: Vec<SocketAddr>) -> ureq::Agent {
+    hardened_agent_with_timeouts(
+        pinned,
+        CONNECT_TIMEOUT,
+        READ_TIMEOUT,
+        BODY_TRANSFER_BUDGET,
+        STALL_TIMEOUT,
+    )
+}
+
+// The agent builder with caller-chosen timeouts so the rolling-idle behaviour
+// is testable with short bounds. `response` bounds header arrival; `budget` is
+// the TOTAL body ceiling; `idle` is the rolling stall bound via IdleReCapConnector.
+fn hardened_agent_with_timeouts(
+    pinned: Vec<SocketAddr>,
+    connect: Duration,
+    response: Duration,
+    budget: Duration,
+    idle: Duration,
+) -> ureq::Agent {
+    // Since ureq 3.4.1 (#1194) timeout_recv_body is an ABSOLUTE total-body
+    // deadline that no longer re-arms, and recv_response no longer caps the
+    // body. Set the total ceiling here; layer rolling idle via the connector.
     let config = Config::builder()
         .max_redirects(0)
-        .timeout_connect(Some(CONNECT_TIMEOUT))
-        .timeout_recv_response(Some(READ_TIMEOUT))
-        // `timeout_recv_response` bounds only the response HEADERS. Without this
-        // the BODY had no deadline, so a mirror trickling bytes after a 200 could
-        // hang `update-keys` forever. This deadline is ROLLING, so a slow link completes.
-        .timeout_recv_body(Some(READ_TIMEOUT))
+        .timeout_connect(Some(connect))
+        .timeout_recv_response(Some(response))
+        .timeout_recv_body(Some(budget))
         .build();
     // `with_parts`, never `new_with_config` — see [`PinnedResolver`].
-    ureq::Agent::with_parts(config, DefaultConnector::new(), PinnedResolver(pinned))
+    // DefaultConnector opens the (TLS) socket; IdleReCapConnector wraps its
+    // transport to re-arm the rolling idle bound on every body read.
+    use ureq::unversioned::transport::Connector as _;
+    ureq::Agent::with_parts(
+        config,
+        DefaultConnector::new().chain(IdleReCapConnector { idle }),
+        PinnedResolver(pinned),
+    )
 }
 
 /// SSRF guard (mirrors freemkv-keysources::online): resolve once, reject
@@ -304,12 +427,126 @@ mod tests {
         let t = agent.config().timeouts();
         assert_eq!(
             t.recv_body,
-            Some(READ_TIMEOUT),
-            "ureq 3's recv_response covers headers only; without recv_body the \
-             body read has no deadline at all"
+            Some(BODY_TRANSFER_BUDGET),
+            "ureq 3.4.1+ recv_response covers headers only and recv_body is the \
+             TOTAL body deadline; without it the body read has no deadline at all"
         );
         assert_eq!(t.recv_response, Some(READ_TIMEOUT));
         assert_eq!(t.connect, Some(CONNECT_TIMEOUT));
+    }
+
+    // A KEYDB body that is SLOW but PROGRESSING must finish. ureq 3.4.1 (#1194)
+    // made timeout_recv_body a TOTAL deadline that no longer re-arms; the idle
+    // re-cap restores the rolling bound so a steady body is not killed.
+    #[test]
+    fn a_slow_but_progressing_keydb_body_is_not_killed_by_the_idle_bound() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind stub listener");
+        let pinned = listener.local_addr().expect("stub listener address");
+
+        let server = std::thread::spawn(move || {
+            let (mut sock, _peer) = listener.accept().expect("accept failed");
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                match sock.read(&mut byte) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => head.push(byte[0]),
+                }
+            }
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\n");
+            let _ = sock.flush();
+            // Forty bytes, 100 ms apart: ~4 s of body, no single gap near the
+            // idle bound. A ROLLING bound survives; a TOTAL interpretation fails.
+            for _ in 0..40 {
+                if sock.write_all(b"k").is_err() {
+                    return;
+                }
+                let _ = sock.flush();
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        // 100ms per-gap vs 1s idle bound (10x margin), ~4s total vs 1s (4x, so a
+        // rolling bound passes and a total interpretation of idle fails).
+        let agent = hardened_agent_with_timeouts(
+            vec![pinned],
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+        );
+        let resp = agent
+            .get("http://keydb-mirror.test/keydb.zip")
+            .call()
+            .expect("headers must arrive");
+        let mut body = Vec::new();
+        let read = resp.into_body().into_reader().read_to_end(&mut body);
+        let _ = server.join();
+
+        assert!(
+            read.is_ok(),
+            "a steadily-progressing body was aborted: {:?}",
+            read.err()
+        );
+        assert_eq!(body, vec![b'k'; 40], "the whole body must arrive");
+    }
+
+    // The other half: a peer sending headers then NOTHING must be cut off by the
+    // rolling idle bound, not held for the whole total budget.
+    #[test]
+    fn a_stalled_keydb_body_is_cut_off_by_the_idle_bound_not_the_total_budget() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind stub listener");
+        let pinned = listener.local_addr().expect("stub listener address");
+
+        let server = std::thread::spawn(move || {
+            let (mut sock, _peer) = listener.accept().expect("accept failed");
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                match sock.read(&mut byte) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => head.push(byte[0]),
+                }
+            }
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n");
+            let _ = sock.flush();
+            // Promise a megabyte and send none of it; block on a read so the
+            // stub ends the moment the client drops, not on a sleep.
+            let mut sink = [0u8; 1];
+            let _ = sock.read(&mut sink);
+        });
+
+        let idle = Duration::from_secs(1);
+        let agent = hardened_agent_with_timeouts(
+            vec![pinned],
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            // A total budget far larger than the idle bound, so only the idle
+            // bound can be what ends this.
+            Duration::from_secs(120),
+            idle,
+        );
+        let started = std::time::Instant::now();
+        let resp = agent
+            .get("http://keydb-mirror.test/keydb.zip")
+            .call()
+            .expect("headers must arrive");
+        let mut body = Vec::new();
+        let read = resp.into_body().into_reader().read_to_end(&mut body);
+        let elapsed = started.elapsed();
+
+        assert!(read.is_err(), "a stalled body must not read as success");
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "a stalled peer was held for {elapsed:?} — the idle bound did not fire"
+        );
+        let _ = server.join();
     }
 
     #[test]
