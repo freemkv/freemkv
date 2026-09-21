@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.7.4]
+
+### Added
+
+- `info … --share` now bundles non-secret AACS diagnostics (disc hash, AACS version, VID-availability) alongside the disc structure, so a keydb "no key" report carries enough to triage the lookup without shipping the disc (#46).
+
+### Fixed
+
+- keydb fetch uses ureq 3.4.2 with a restored rolling-idle body timeout, so a slow-but-progressing download is no longer killed by an absolute deadline.
+
+### Maintenance
+
+- OpenSSF Scorecard / REUSE / MSRV badges; CI moved to the central reusable workflows.
+
 ## [1.7.3] — 2026-09-19
 
 ### Added
