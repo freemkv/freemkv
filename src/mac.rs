@@ -1712,20 +1712,18 @@ impl Controller {
     // Re-title the View > log menu item, cached after the first lookup so this
     // 5 Hz tick does not re-walk the whole menu bar every time.
     fn sync_log_menu_title(&self, title: &str) {
-        // Fast path: the item was located on an earlier tick. Re-title in place
-        // without touching the rest of the menu bar. The cache is cleared by
-        // `relocalize`, the only thing that rebuilds the menu, so a live handle
-        // here always belongs to the current menu.
+        // Fast path: item located on an earlier tick — re-title in place without
+        // walking the menu bar. `relocalize` (the only menu rebuild) clears the
+        // cache, so a live handle here always belongs to the current menu.
         if let Some(mi) = self.ivars().log_menu_item.borrow().as_ref() {
             if { mi.title() }.to_string() != title {
                 mi.setTitle(&NSString::from_str(title));
             }
             return;
         }
-        // Cold path: walk the menu once to find the item by SELECTOR (not
-        // position or current title: the menu is rebuilt on a live language
-        // change, so matching English text would silently stop working in other
-        // locales), then cache it for every subsequent tick.
+        // Cold path: walk the menu once to find the item by SELECTOR (not position
+        // or title — the menu is rebuilt on a live language change, so matching
+        // English text would silently break in other locales), then cache it.
         let mtm = MainThreadMarker::new().unwrap();
         let app = NSApplication::sharedApplication(mtm);
         let Some(main) = app.mainMenu() else {
