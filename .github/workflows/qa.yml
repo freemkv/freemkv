@@ -74,8 +74,12 @@ jobs:
           if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
             echo "media=true" >> "$GITHUB_OUTPUT"; echo "no usable base sha — media ON (safe default)"; exit 0
           fi
+          # "core" = anything that could change a rip. Exclude workflows, docs,
+          # any *.md, and licensing/metadata (REUSE.toml, LICENSE, LICENSES/,
+          # .reuse/, .gitignore) — none of which can affect a produced file.
+          # Manual bypass ([skip-media]) and run_media dispatch remain above.
           core=$(git diff --name-only "$before" "${{ github.sha }}" \
-                   | grep -vE '^(\.github/|docs/|[^/]*\.md$|.*/[^/]*\.md$)' || true)
+                   | grep -vE '^(\.github/|docs/|LICENSES?/|\.reuse/|[^/]*\.md$|.*/[^/]*\.md$|REUSE\.toml$|LICENSE$|\.gitignore$)' || true)
           if [ -n "$core" ]; then
             echo "media=true" >> "$GITHUB_OUTPUT"
             echo "core code changed → media ON:"; printf '  %s\n' $core
