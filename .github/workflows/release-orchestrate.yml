@@ -56,7 +56,7 @@ jobs:
       - name: Preflight — qa green on all eight, main coherent, real-media evidence
         env:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
-          NON_GATING: '^(Dependabot Updates|CodeQL|pages-build-deployment|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
+          NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
           MEDIA_EVIDENCE_SKIP: ${{ inputs.media_evidence_skip && '1' || '0' }}
         run: |
           set -uo pipefail

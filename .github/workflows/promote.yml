@@ -49,7 +49,14 @@ env:
   # promote/release/runner runs (and their dry-runs) must not gate the NEXT
   # promote — otherwise a failed promote dry-run on a dev SHA blocks promotion of
   # that same SHA. Mirrors release-orchestrate's NON_GATING.
-  NON_GATING: '^(Dependabot Updates|CodeQL|pages-build-deployment|promote|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
+  #
+  # Scorecard is here for a different reason: it reports security posture to the
+  # OpenSSF API and builds nothing, so it cannot tell us whether the code is
+  # releasable. It is also externally broken — the action runs out of
+  # gcr.io/openssf/scorecard-action, whose Google project has billing disabled,
+  # so every run fails on `docker pull` regardless of the commit. Gating on it
+  # would block every release on someone else's billing page.
+  NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|promote|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
 
 jobs:
   promote:
