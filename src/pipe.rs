@@ -2071,6 +2071,40 @@ fn source_path_of(source: &str) -> Option<std::path::PathBuf> {
 /// grew a narrower copy of it that a hardlink walks straight through.
 use crate::file_identity::same_file;
 
+/// Wire the decrypting reader for a WHOLE-IMAGE walk (`iso:// → iso://`).
+///
+/// Both decorations, never one or the other:
+///
+/// - the AACS key map, because AACS decrypts only through a resolved map;
+/// - the disc's encrypted-content extents, because this reader walks the UDF
+///   filesystem and BDMV nav as well as the title extents, and those are clear.
+///
+/// The map is NOT a content gate. A unit in no mapped range is only *probably*
+/// clear, and `apply_aacs_map` refuses one carrying the AACS CPI bits as an
+/// un-keyable orphan clip — which arbitrary filesystem bytes do about three
+/// times in four (`byte0 & 0xC0`). Installing only the map is what made
+/// decrypting a perfectly good encrypted ISO die partway through
+/// (freemkv/freemkv#55).
+///
+/// `content_ranges` empty (no parsed titles) leaves the gate OFF on purpose: an
+/// empty gate marks the whole image clear and would write ciphertext under a
+/// name that promises plaintext.
+fn whole_image_decrypting_source<S: libfreemkv::SectorSource>(
+    inner: S,
+    keys: libfreemkv::decrypt::DecryptKeys,
+    key_map: Option<std::sync::Arc<libfreemkv::decrypt::AacsKeyMap>>,
+    content_ranges: Vec<(u32, u32)>,
+) -> libfreemkv::DecryptingSectorSource<S> {
+    let mut src = libfreemkv::DecryptingSectorSource::new(inner, keys);
+    if let Some(map) = key_map {
+        src = src.with_key_map(map);
+    }
+    if !content_ranges.is_empty() {
+        src = src.with_content_ranges(std::sync::Arc::from(content_ranges));
+    }
+    src
+}
+
 // See docs/pipe.md#image_to_iso — `<image source> → iso://` — write a decrypted…
 fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
     let iso_path = match libfreemkv::parse_url(dest) {
@@ -2128,13 +2162,8 @@ fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> boo
     } else {
         None
     };
-    let content_ranges = disc.encrypted_content_ranges();
-    let mut src = libfreemkv::DecryptingSectorSource::new(reader, keys);
-    if let Some(map) = key_map {
-        src = src.with_key_map(map);
-    } else if !content_ranges.is_empty() {
-        src = src.with_content_ranges(std::sync::Arc::from(content_ranges));
-    }
+    let mut src =
+        whole_image_decrypting_source(reader, keys, key_map, disc.encrypted_content_ranges());
 
     let result = libfreemkv::write_image(&mut src, &iso_path, total_sectors, &halt, |_| {
         // `write_image` checks `halt` once per batch and this runs at the end of
@@ -3081,8 +3110,67 @@ mod tests {
         fmt_err_str, is_keyserver_url, is_metadata_sink, is_scheme_only_sink, is_url_token,
         mp4_skip_reason_key, parse_error_code, parse_flags, parse_stream_spec, preflight_validate,
         render_error, resolved_keydb_path, sanitize_name, title_in_range, validate_dir_input,
-        validate_file_dest, validate_iso_input,
+        validate_file_dest, validate_iso_input, whole_image_decrypting_source,
     };
+
+    /// freemkv#55: an `iso:// → iso://` decrypt walks the WHOLE image, so the
+    /// clear UDF/BDMV sectors outside every title extent must pass through the
+    /// decrypting reader untouched — including one whose first byte happens to
+    /// carry the AACS CPI bits (`0xC0`), which ~3 of every 4 arbitrary bytes do.
+    ///
+    /// Wired with the key map ALONE (the old shape), that unit is refused as an
+    /// un-keyable orphan clip and the whole decrypt dies with `DecryptFailed` —
+    /// which the disc path then reported as "E6000 … the disc may be dirty".
+    #[test]
+    fn a_whole_image_decrypt_passes_clear_flagged_looking_sectors_through() {
+        use libfreemkv::SectorSource as _;
+        const UNIT: usize = 6144; // 3 sectors
+
+        // A clear filesystem unit that LOOKS AACS-flagged.
+        struct FlaggedClearUnit;
+        impl libfreemkv::SectorSource for FlaggedClearUnit {
+            fn read_sectors(
+                &mut self,
+                _lba: u32,
+                count: u16,
+                buf: &mut [u8],
+                _recovery: bool,
+            ) -> libfreemkv::error::Result<usize> {
+                let n = count as usize * 2048;
+                for (i, b) in buf[..n].iter_mut().enumerate() {
+                    *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+                }
+                buf[0] = 0xC0; // CPI bits set on the unit's first byte
+                Ok(n)
+            }
+        }
+
+        let mut expected = vec![0u8; UNIT];
+        FlaggedClearUnit
+            .read_sectors(0, 3, &mut expected, false)
+            .expect("the fixture source always succeeds");
+
+        // Content lives at LBA 300..303; LBA 0 is filesystem, in no range.
+        let keys = libfreemkv::decrypt::DecryptKeys::Aacs {
+            unit_keys: vec![(300, [0x5A; 16])],
+            format: libfreemkv::ContentFormat::BdTs,
+        };
+        let map = std::sync::Arc::new(libfreemkv::decrypt::AacsKeyMap::from_ranges(vec![(
+            300, 303, 0,
+        )]));
+        let mut src =
+            whole_image_decrypting_source(FlaggedClearUnit, keys, Some(map), vec![(300, 3)]);
+
+        let mut got = vec![0u8; UNIT];
+        let n = src
+            .read_sectors(0, 3, &mut got, false)
+            .expect("a clear filesystem unit outside every content extent must not fail the read");
+        assert_eq!(n, UNIT);
+        assert_eq!(
+            got, expected,
+            "clear filesystem bytes must reach the ISO untouched"
+        );
+    }
 
     // See docs/pipe.md#a_dir_source_must_exist_and_be_a_directory — `dir://` source validation, which had no test at…
     #[test]
