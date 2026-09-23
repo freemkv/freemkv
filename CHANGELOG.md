@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.7.5] — UNRELEASED
+
+### Changed
+
+- freemkv-unlock mirrors the freemkv-firmware 0.9.0 ABI: the drive's `Ake` (`0x06`) and `Bus` (`0x07`) feature levers are retired into a single `Encryption` (`0x06`) lever, so the firmware unlock recipe sets one flag instead of two. Drives on firmware 0.9.0 need this; older firmware is unaffected.
+
 ## [1.7.4] — 2026-09-21
 ### Added
 
