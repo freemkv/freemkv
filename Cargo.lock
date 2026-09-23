@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "freemkv"
-version = "1.7.4"
+version = "1.7.5"
 dependencies = [
  "freemkv-engine",
  "freemkv-i18n",
@@ -332,8 +332,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.7.4"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.7.4#b4842476649a637476e649c89afc0cb30ff826ca"
+version = "1.7.5"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.7.5#e85a75b8467aa4192e501d0c717e61ec6f280039"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -345,16 +345,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.7.4"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.7.4#7f56ba72ab791090e6a984f87e7e18a3187bcb65"
+version = "1.7.5"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.7.5#8e1c05096131943dda1f5028c619a18a1728f8c4"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.7.4"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.7.4#8a639d5d6c241f35c5694dfa09bcfaa2412fbd06"
+version = "1.7.5"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.7.5#985f1dc0b958969198649daf5f7d590943faf0b3"
 dependencies = [
  "base64",
  "flate2",
@@ -367,8 +367,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.7.4"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.7.4#2da368324f4b08eba5ff012472d7f1309ee8b617"
+version = "1.7.5"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.7.5#81b61524527c7b4ed4f18e6f7887f982ad80f6b8"
 dependencies = [
  "aes",
  "base64",
@@ -589,8 +589,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.7.4"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.7.4#4026c1a5d100250512b7eb5d15d4a2b91f98ce2a"
+version = "1.7.5"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.7.5#bfa49e3983c5b8b3b7c3161b1155f75bdab9069f"
 dependencies = [
  "aes",
  "base64",
