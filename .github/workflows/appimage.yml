@@ -20,12 +20,9 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-    # `ubuntu-22.04` (jammy) is a deliberate choice: the AppImage produced
-    # here must run on distros as old as the runner it was built on, so
-    # picking the OLDEST supported LTS gives the widest glibc/GTK4
-    # compatibility. Building on `ubuntu-latest` (24.04+) would raise
-    # the glibc floor and lock out Ubuntu 22.04 users.
+    # 24.04: the shell needs GTK >= 4.10 and libadwaita >= 1.4 (Cargo features
+    # v4_10 / v1_4), which 22.04 does not ship. Sets the distro floor to 2024+.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
         with:
@@ -72,6 +69,8 @@ jobs:
           cp freemkv/res/freemkv-icon.svg \
              AppDir/usr/share/icons/hicolor/scalable/apps/org.freemkv.FreeMKV.svg
       - name: Build the AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
           set -euo pipefail
           # The gtk plugin bundles GTK4/libadwaita runtime libs so the
