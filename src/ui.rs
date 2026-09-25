@@ -2362,10 +2362,7 @@ impl App {
             let mut fx = vec![Effect::Redraw, Effect::StopTicking];
             if self.settings.notify_when_rip_finished {
                 fx.push(Effect::NotifyRipFinished {
-                    title: crate::strings::get_or(
-                        "gui.notify.rip_finished_title",
-                        "Rip finished",
-                    ),
+                    title: crate::strings::get_or("gui.notify.rip_finished_title", "Rip finished"),
                     body: self.result_summary.clone(),
                     output_dir: self.output_dir.clone(),
                 });

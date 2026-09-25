@@ -17,9 +17,7 @@
 //! exhaustive by design). Adding a new `Effect` variant → this test still
 //! passes; a per-`Cmd` line changes only when its emitted set changes.
 
-use freemkv::ui::{
-    App, Cmd, Effect, MenuAction, MenuEntry, MenuGroupId, menu_layout,
-};
+use freemkv::ui::{App, Cmd, Effect, MenuAction, MenuEntry, MenuGroupId, menu_layout};
 
 /// Structural label for an `Effect`, ignoring payload — the shell contract
 /// pins WHICH effects fire, not the exact strings inside them (which are
@@ -128,7 +126,10 @@ fn every_cmd_from_a_fresh_app_emits_the_same_effect_set_for_every_shell() {
 
     // Quit stands alone: shell reads `Effect::Quit` and terminates.
     let mut app = App::new();
-    assert_eq!(kinds(&mut app, Cmd::Quit), expected_default_kinds(Cmd::Quit));
+    assert_eq!(
+        kinds(&mut app, Cmd::Quit),
+        expected_default_kinds(Cmd::Quit)
+    );
 }
 
 /// The other half of the shell contract: every user-driveable `Cmd` that a

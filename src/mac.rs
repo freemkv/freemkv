@@ -2047,9 +2047,7 @@ fn build_group_menu(
 ) -> Retained<NSMenuItem> {
     let bar_item = NSMenuItem::new(mtm);
     bar_item.setTitle(&NSString::from_str(&group.title));
-    let menu = {
-        NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(&group.title))
-    };
+    let menu = { NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(&group.title)) };
     for entry in &group.entries {
         match entry {
             crate::ui::MenuEntry::Separator => {

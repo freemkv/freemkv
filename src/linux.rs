@@ -5,7 +5,7 @@
 //! app is the same product on all three OSes; only how the widgets are
 //! drawn differs. See docs/linux-shell.md.
 //!
-//! **State of this file (v1.7.5):** the shell FRAMEWORK is complete — the
+//! **State of this file (v1.7.6):** the shell FRAMEWORK is complete — the
 //! window opens with an AdwHeaderBar hamburger menu built from
 //! `ui::menu_layout`, the shared `App` is driven, `Effect`s are handled
 //! (including the new `NotifyRipFinished` toast + XDG-portal desktop
@@ -37,11 +37,11 @@ const APP_ID: &str = "org.freemkv.FreeMKV";
 /// closed. Returns 0 on normal exit, non-zero if the GTK application
 /// couldn't be initialised.
 pub fn run() -> i32 {
-    adw::init().expect("libadwaita init failed — this build was linked against \
-        GTK4 but the runtime shared libraries are not available");
-    let app = adw::Application::builder()
-        .application_id(APP_ID)
-        .build();
+    adw::init().expect(
+        "libadwaita init failed — this build was linked against \
+        GTK4 but the runtime shared libraries are not available",
+    );
+    let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
     app.run().into()
 }
@@ -167,10 +167,7 @@ fn append_group_to_section(section: &gio::Menu, group: &MenuGroup) {
         };
         let item = gio::MenuItem::new(Some(&mi.label), Some(&format!("app.{action_name}")));
         if let Some(accel_str) = accel_string(mi.accel.as_ref()) {
-            item.set_attribute_value(
-                "accel",
-                &glib::Variant::from(&*accel_str),
-            );
+            item.set_attribute_value("accel", &glib::Variant::from(&*accel_str));
         }
         section.append_item(&item);
     }
@@ -324,7 +321,11 @@ fn perform_effects(shell: &Rc<Shell>, effects: Vec<Effect>) {
             }
             Effect::StartTicking => start_tick(shell),
             Effect::StopTicking => stop_tick(shell),
-            Effect::NotifyRipFinished { title, body, output_dir } => {
+            Effect::NotifyRipFinished {
+                title,
+                body,
+                output_dir,
+            } => {
                 // In-window toast: immediate feedback while the window is
                 // focused, and doubles as the fallback when the desktop
                 // portal is unavailable (headless CI, kiosk sessions).
@@ -381,11 +382,7 @@ pub fn system_locale_code() -> Option<String> {
             continue;
         }
         // Trim `.UTF-8`, `@modifier`, and turn `_` into `-`.
-        let tag = v
-            .split(['.', '@'])
-            .next()
-            .unwrap_or("")
-            .replace('_', "-");
+        let tag = v.split(['.', '@']).next().unwrap_or("").replace('_', "-");
         if !tag.is_empty() {
             return Some(tag);
         }

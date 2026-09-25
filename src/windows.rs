@@ -1099,9 +1099,8 @@ fn build_menu() -> w::SysResult<w::HMENU> {
     }
 
     let bar = w::HMENU::CreateMenu()?;
-    let title = |id: MenuGroupId| -> String {
-        group(id).map(|g| g.title.clone()).unwrap_or_default()
-    };
+    let title =
+        |id: MenuGroupId| -> String { group(id).map(|g| g.title.clone()).unwrap_or_default() };
     bar.append_item(&[
         w::MenuItem::Submenu {
             submenu: &file,

@@ -81,7 +81,7 @@
     into a `<release version=…>` block after the changelog is written.
   -->
   <releases>
-    <release version="1.7.5" date="2026-09-24">
+    <release version="1.7.6" date="2026-09-24">
       <description>
         <p>First official Flathub release — Linux desktop shell (GTK4 + libadwaita).</p>
       </description>
