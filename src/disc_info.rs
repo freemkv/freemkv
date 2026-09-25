@@ -287,20 +287,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
 
         if let Some(ref aacs) = disc.aacs {
             out.blank(Normal);
-            // Generation label lives on the normal-level encryption line now; the
-            // crypto block leads with the MKB generation number.
-            out.raw(
-                Normal,
-                &format!(
-                    "MKB v{}{}",
-                    aacs.mkb_version.unwrap_or(0),
-                    if aacs.bus_encryption {
-                        " (bus encryption)"
-                    } else {
-                        ""
-                    }
-                ),
-            );
+            // The crypto block leads with the MKB generation. Bus-encryption
+            // isn't surfaced — `Type: Uhd` already signals AACS 2.0.
+            out.raw(Normal, &format!("MKB v{}", aacs.mkb_version.unwrap_or(0)));
             out.raw(Normal, &format!("Disc hash: {}", aacs.disc_hash));
             // Volume ID (from the SCSI AACS handshake). Absent on an ISO scan
             // (no handshake) — the 16 bytes stay zero there, so only show it
