@@ -1304,6 +1304,12 @@ impl Controller {
                 }
                 E::Quit => NSApplication::sharedApplication(mtm).terminate(None),
                 E::Redraw => {}
+                E::NotifyRipFinished { .. } => {
+                    // TODO(linux-gui): macOS implementation via
+                    // `UNUserNotificationCenter`. Setting-gated in `ui.rs::tick`,
+                    // so simply dropping the effect leaves the app well-behaved
+                    // until the platform hook lands.
+                }
             }
         }
         self.render();
