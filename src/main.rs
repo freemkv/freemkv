@@ -50,9 +50,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     // A windowed launch opens the desktop shell; everything else is the CLI.
-    // Linux joined the club in 1.7.6 — `freemkv gui` on Linux opens the
-    // GTK4 + libadwaita window (the same one the Flathub build ships). The
-    // musl CLI build stays CLI-only (see the `target_env = "gnu"` gate).
+    // Linux joined in 1.7.6 (glibc only — musl CLI stays CLI-only).
     #[cfg(any(
         target_os = "macos",
         target_os = "windows",
@@ -168,10 +166,8 @@ fn launched_windowed() -> bool {
     false
 }
 
-// Linux glibc (musl skips this whole `wants_gui` path — CLI-only build,
-// no GTK4). A `.desktop` launcher runs `freemkv gui`, which goes through
-// the `wants_gui` argv path — there is no separate windowed binary to
-// detect. Flatpak's manifest exec uses the same form.
+// Linux glibc (musl skips the whole `wants_gui` path — CLI-only, no GTK4).
+// A `.desktop` / Flatpak launcher runs `freemkv gui`; no windowed binary.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn launched_windowed() -> bool {
     false
