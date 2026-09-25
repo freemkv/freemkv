@@ -156,8 +156,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/autorip,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/autorip,            fetch-depth: 0 }
       # The public docs site: no dev/qa, it IS the deployed artifact, so main.
+      # Repo was renamed from `freemkv.github.io` (GitHub Pages era) to
+      # `marketing` (Cloudflare era). GitHub redirects the old name, but the
+      # canonical name is `marketing` — same for the local checkout path.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv.github.io,  ref: main, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv.github.io,  fetch-depth: 0 }
+        with: { repository: freemkv/marketing,          ref: main, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/marketing,          fetch-depth: 0 }
 
       - name: Assert the checkouts match the preflight-verified qa shas (F6 TOCTOU)
         run: |
@@ -317,12 +320,14 @@ jobs:
           # binaries re-pin its tag. Ships the unified version even when it has no
           # functional change, so every component reports the same version.
           FREEMKV_I18N_DIR="$CANONICAL_ROOT/freemkv-i18n"
-          # freemkv.github.io — the public docs site (Astro, deploys via GitHub Pages).
-          # Its changelog page is a CURATED, consumer-facing changelog (grouped by
-          # component, terse), authored by hand in that repo — NOT a mirror of any crate
-          # changelog. The release gate requires a `## <version>` entry and
+          # marketing — the public docs site (Astro, deploys via Cloudflare; was
+          # `freemkv.github.io` under GitHub Pages, GitHub still redirects the
+          # old name so external references keep working). Its changelog page is
+          # a CURATED, consumer-facing changelog (grouped by component, terse),
+          # authored by hand in that repo — NOT a mirror of any crate changelog.
+          # The release gate requires a `## <version>` entry and
           # verify_website_in_sync() confirms it; a missing site checkout is now fatal.
-          WEBSITE_DIR="$CANONICAL_ROOT/freemkv.github.io"
+          WEBSITE_DIR="$CANONICAL_ROOT/marketing"
           # NOTE: the docs were restructured under /docs/*, so this is
           # src/content/docs/docs/changelog.md, not src/content/docs/changelog.md. The
           # CHANGELOG gate and verify_website_in_sync() both read THIS path; the old path
@@ -1527,7 +1532,7 @@ jobs:
           # ──────────────── step 4b: mirror the changelog to the website ────────────
           #
           # Single source of truth: libfreemkv/CHANGELOG.md. The public docs site
-          # (freemkv.github.io) carries a changelog PAGE that must mirror it. This step
+          # (marketing) carries a changelog PAGE that must mirror it. This step
           # regenerates that page from the crate changelog so the website can never drift
           # (the bug this replaces: a hand-edited site changelog left at "rc.5.2 upcoming"
           # long after rc.5.2 shipped).
@@ -1547,11 +1552,11 @@ jobs:
           #   - $DRY_RUN-aware: prints the planned action, writes/commits/pushes nothing.
           #   - Idempotent: if the regenerated page is byte-identical to what's committed,
           #     it makes no commit (no empty commit, no push).
-          #   - Graceful: if freemkv.github.io isn't checked out, warn + skip — never fail
+          #   - Graceful: if marketing isn't checked out, warn + skip — never fail
           #     the release over a docs mirror.
           #   - Commits ONLY the changelog page (other uncommitted site docs are left
           #     untouched/unstaged).
-          # The public changelog is CURATED by hand in freemkv.github.io (consumer-
+          # The public changelog is CURATED by hand in marketing (consumer-
           # facing, grouped by component, terse) — it is NOT a mirror of any crate
           # changelog. The CHANGELOG gate requires a `## <version>` entry to exist before
           # tagging, and verify_website_in_sync() confirms it at the end; release.sh no
@@ -1562,7 +1567,7 @@ jobs:
           # consumer notes are authored in the freemkv repo at
           # docs/consumer-changelog/<version>.md (non-public, flows dev→qa); this renders
           # them into a `## <version>` entry, dates it, prepends it above the newest entry
-          # on freemkv.github.io, and pushes — which is the public announcement (Pages
+          # on marketing, and pushes — which is the public announcement (Pages
           # deploy + RSS→Discord). Because nobody hand-pushes the site changelog, a release
           # can never be announced before it exists (the 1.6.12 premature-announce bug).
           # Idempotent: if the site already has `## <version>`, it no-ops (a re-run).
@@ -1631,8 +1636,8 @@ jobs:
                 return 0
               fi
               die "cannot update the download page: $page missing.
-            The release MUST update freemkv.github.io. Check it out at
-            FMKV_ROOT/freemkv.github.io with push creds. Bypass: WEBSITE_SKIP=1 (logged)."
+            The release MUST update marketing. Check it out at
+            FMKV_ROOT/marketing with push creds. Bypass: WEBSITE_SKIP=1 (logged)."
             fi
             if ! grep -Eq '(data-latest-version>)v[^<]*(<)' "$page"; then
               err "WARN: data-latest-version marker not found in $page — skipping"
@@ -1771,7 +1776,7 @@ jobs:
           # hard here would achieve nothing. It prints exactly which links are dead.
           #
           # The expected lists below must stay in step with
-          # freemkv.github.io/src/pages/download.astro. Windows desktop-app note: the
+          # marketing/src/pages/download.astro. Windows desktop-app note: the
           # `.zip` is attached by freemkv's `build-windows` job; the page only *links* it
           # once `windowsAppShipping` is flipped to true there.
           verify_release_assets() {
@@ -2045,7 +2050,7 @@ jobs:
           [ -z "$adv_fail" ] || die "main advance failed for: $adv_fail — the 8 tags are public; re-dispatch to finish (idempotent)."
 
           # Step 8 — the PUBLIC ANNOUNCEMENT, DEAD LAST. Publishing the consumer changelog
-          # to freemkv.github.io main deploys the site and fires RSS→Discord. It runs only
+          # to marketing main deploys the site and fires RSS→Discord. It runs only
           # after every tag AND every main pointer is done, so users are never notified of
           # a release that has not fully landed (the 1.6.12 premature-announce failure).
           publish_site_changelog          # stage the changelog entry
