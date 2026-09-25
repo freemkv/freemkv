@@ -2073,22 +2073,13 @@ use crate::file_identity::same_file;
 
 /// Wire the decrypting reader for a WHOLE-IMAGE walk (`iso:// → iso://`).
 ///
-/// Both decorations, never one or the other:
-///
-/// - the AACS key map, because AACS decrypts only through a resolved map;
-/// - the disc's encrypted-content extents, because this reader walks the UDF
-///   filesystem and BDMV nav as well as the title extents, and those are clear.
-///
-/// The map is NOT a content gate. A unit in no mapped range is only *probably*
-/// clear, and `apply_aacs_map` refuses one carrying the AACS CPI bits as an
-/// un-keyable orphan clip — which arbitrary filesystem bytes do about three
-/// times in four (`byte0 & 0xC0`). Installing only the map is what made
-/// decrypting a perfectly good encrypted ISO die partway through
-/// (freemkv/freemkv#55).
-///
-/// `content_ranges` empty (no parsed titles) leaves the gate OFF on purpose: an
-/// empty gate marks the whole image clear and would write ciphertext under a
-/// name that promises plaintext.
+/// Both decorations, never one or the other: the AACS key map (AACS decrypts
+/// only through a resolved map) AND the disc's encrypted-content extents
+/// (this reader walks UDF and BDMV nav sectors that are clear). See
+/// `docs/whole-image-decrypt.md` for the freemkv#55 background — why the
+/// map alone isn't a content gate, and why an empty `content_ranges` leaves
+/// the gate OFF on purpose (avoids writing ciphertext under a name that
+/// promises plaintext).
 fn whole_image_decrypting_source<S: libfreemkv::SectorSource>(
     inner: S,
     keys: libfreemkv::decrypt::DecryptKeys,
