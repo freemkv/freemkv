@@ -1305,10 +1305,8 @@ impl Controller {
                 E::Quit => NSApplication::sharedApplication(mtm).terminate(None),
                 E::Redraw => {}
                 E::NotifyRipFinished { .. } => {
-                    // TODO(linux-gui): macOS implementation via
-                    // `UNUserNotificationCenter`. Setting-gated in `ui.rs::tick`,
-                    // so simply dropping the effect leaves the app well-behaved
-                    // until the platform hook lands.
+                    // TODO(linux-gui): `UNUserNotificationCenter` hook.
+                    // Setting-gated in `ui.rs::tick`; drop is well-behaved.
                 }
             }
         }
@@ -1953,9 +1951,9 @@ fn group(mtm: MainThreadMarker, title: &str, fr: NSRect) -> Retained<NSBox> {
 // ── menus ─────────────────────────────────────────────────────────────────
 
 /// Map a shared [`crate::ui::MenuAction`] to the AppKit selector that already
-/// dispatches its [`Cmd`]. Standard responder-chain commands (Cut/Copy/…)
-/// return `None` for the target — the responder chain routes them to the
-/// focused view, so Copy in the log Just Works.
+/// dispatches its [`crate::ui::Cmd`]. Standard responder-chain commands
+/// (Cut/Copy/…) return `None` for the target — the responder chain routes
+/// them to the focused view, so Copy in the log Just Works.
 fn selector_for_action(action: &crate::ui::MenuAction) -> Option<(Sel, bool)> {
     use crate::ui::{Cmd, MenuAction};
     // (selector, target_controller). target=false means responder chain (nil).

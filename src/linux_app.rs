@@ -9,9 +9,8 @@ pub fn run() -> i32 {
     let (cfg, loaded) = crate::settings::Settings::load_reporting();
 
     // "Auto" language follows `$LANG` / `$LC_ALL`, same as macOS uses
-    // `NSLocale` and Windows uses `GetUserDefaultLocaleName`. A user who
-    // launched the app from a `.desktop` file still gets `$LANG` inherited
-    // from the session; a Flatpak sandbox forwards it too.
+    // `NSLocale` and Windows uses `GetUserDefaultLocaleName`.
+    // Flatpak sandboxes forward `$LANG` too.
     crate::app_entry::apply_locale(&cfg.language, crate::linux::system_locale_code);
 
     crate::app_entry::init_gui_logging(&cfg.log_level);

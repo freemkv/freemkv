@@ -1,19 +1,54 @@
 name: doc-links
 
-# Thin caller → the canonical reusable doc-links gate in freemkv/.github.
-# The old per-repo copy documented freemkv alone with a plain checkout: it needs
-# no sibling checkout because the committed [patch.crates-io] git tags in
-# Cargo.toml already resolve the four freemkv deps for a `cargo doc` build. So no
-# `checkout`/`patch` here — only `self`. The reusable gate resolves the toolchain
-# from Cargo.toml's rust-version and keeps the same default doc args
-# (--no-deps --document-private-items --lib --bins).
+# Inlined (no longer a thin caller into freemkv/.github's reusable): since
+# 1.7.6 the Linux target compiles the GTK4 + libadwaita desktop shell, and
+# `cargo doc` on ubuntu needs the same libgtk-4-dev/libadwaita-1-dev deps
+# `cli-linux` installs. The shared reusable in `freemkv/.github` is used by
+# 7 other repos that DON'T need GTK4; adding the apt-get there would tax
+# every one of them. Keep the deps installation local.
+#
+# Fails on broken intra-doc links in ///|//! comments (`cargo doc -D
+# rustdoc::broken_intra_doc_links`). Toolchain resolves from `rust-version`
+# in Cargo.toml so a bump moves in lockstep.
 on: [push, pull_request]
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   doc-links:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
-    uses: freemkv/.github/.github/workflows/guard-doclinks.yml@v1
-    with:
-      self: freemkv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+        with:
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          self: freemkv
+      - name: Install GTK4 + libadwaita development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
+      - name: Resolve toolchain from rust-version
+        id: msrv
+        run: |
+          v=$(grep -m1 -E '^[[:space:]]*rust-version[[:space:]]*=' freemkv/Cargo.toml | sed -E 's/.*"([0-9.]+)".*/\1/')
+          echo "v=${v:-stable}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.v }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: freemkv
+      - name: cargo doc (deny broken intra-doc links)
+        working-directory: freemkv
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: cargo doc --no-deps --document-private-items --lib --bins

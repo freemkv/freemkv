@@ -823,18 +823,8 @@ pub fn log_menu_label(log_hidden: bool) -> String {
 }
 
 // ── Menu layout, shared by every shell ────────────────────────────────────
-//
-// Every menu bar on every OS is built by walking [`menu_layout`]. Adding a
-// command means one edit here — the shells then pick it up because their
-// build loops match on `MenuAction` exhaustively. Removing one means the
-// same. This is what stops the "fix on Windows, forget on Mac" drift the
-// project's ONE-DOC-WINS invariant cares about: menu structure is a shared
-// decision, and shared decisions live in `ui.rs`.
-//
-// Where the platforms differ — App menu on macOS holds About/Settings/Quit,
-// while Windows puts Settings under File and About under Help — the shell
-// itself decides how to place a [`MenuGroupId::App`] group. The layout
-// still names the same items with the same actions and accelerators.
+// See docs/menu-layout.md — why the menu structure is a shared decision,
+// how each shell places [`MenuGroupId::App`] per platform convention.
 
 /// A menu-driven action. Almost every entry maps to a plain [`Cmd`] the
 /// shell just dispatches; the exceptions carry no user-facing text (they
@@ -1027,9 +1017,8 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
             title: g("gui.menu.edit", "Edit"),
             entries: vec![
                 // Cut/Paste ship only where the platform wires them — Mac
-                // uses them via the responder chain (Cut/Paste on text
-                // fields), Windows only surfaces Copy today. The layout
-                // still names them; each shell filters what it renders.
+                // via the responder chain, Windows only surfaces Copy today.
+                // Each shell filters what its menu renders.
                 item(
                     MenuAction::StandardCut,
                     g("gui.menu.cut", "Cut"),
@@ -2983,9 +2972,7 @@ mod tests {
     }
 
     // ── menu_layout tests ────────────────────────────────────────────────
-    // Neither shell hand-builds a menu bar any more — both walk
-    // `menu_layout`. Adding an item here (and porting each shell's match)
-    // is what stops the "fixed on Windows, forgotten on Mac" drift.
+    // See docs/menu-layout.md — how these pin the shared menu structure.
 
     #[test]
     fn the_menu_layout_has_the_five_canonical_groups_in_display_order() {
