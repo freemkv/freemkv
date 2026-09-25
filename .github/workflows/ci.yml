@@ -299,8 +299,8 @@ jobs:
       - run: cargo build --release --target x86_64-apple-darwin
         working-directory: freemkv
 
-  # ── Linux: CLI + GTK4 GUI (what Linux ships as of 1.7.5) ──────────────────
-  # Since 1.7.5 the Linux target compiles a GTK4 + libadwaita desktop shell
+  # ── Linux: CLI + GTK4 GUI (what Linux ships as of 1.7.6) ──────────────────
+  # Since 1.7.6 the Linux target compiles a GTK4 + libadwaita desktop shell
   # (`src/linux.rs`) alongside the CLI — same "one product, three shells"
   # model as macOS and Windows. The apt-get step installs the pkg-config
   # deps GTK4/libadwaita link against; without them `cargo build` fails at

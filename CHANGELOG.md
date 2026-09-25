@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.7.5] — UNRELEASED
+## [1.7.6] — UNRELEASED
 
 ### Added
 
@@ -9,9 +9,14 @@
 
 ### Changed
 
-- freemkv-unlock mirrors the freemkv-firmware 0.9.0 ABI: the drive's `Ake` (`0x06`) and `Bus` (`0x07`) feature levers are retired into a single `Encryption` (`0x06`) lever, so the firmware unlock recipe sets one flag instead of two. Drives on firmware 0.9.0 need this; older firmware is unaffected.
 - **Menu bar is one source of truth.** `windows.rs` and `mac.rs` no longer hand-build their menus in-place — both walk the new `ui::menu_layout()` returning a canonical structure of groups, items, and accelerators. Adding or renaming a menu row is now one edit, and a cross-shell contract test in `tests/shell_contract.rs` pins that every user-driveable `Cmd` appears in the layout.
 - **Linux paths honour XDG.** `platform::support_dir` on Linux now returns `$XDG_DATA_HOME/freemkv` (was the Mac-shaped `~/Library/Application Support/freemkv`), and `platform::default_dest_dir` returns `$XDG_VIDEOS_DIR` (was `~/Movies`). Fixes a latent CLI bug where Linux users' settings were written to a Mac-style path.
+
+## [1.7.5] — 2026-09-23
+
+### Changed
+
+- freemkv-unlock mirrors the freemkv-firmware 0.9.0 ABI: the drive's `Ake` (`0x06`) and `Bus` (`0x07`) feature levers are retired into a single `Encryption` (`0x06`) lever, so the firmware unlock recipe sets one flag instead of two. Drives on firmware 0.9.0 need this; older firmware is unaffected.
 
 ## [1.7.4] — 2026-09-21
 ### Added
