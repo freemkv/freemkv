@@ -54,6 +54,18 @@ mimalloc = "0.1"
 [target.'cfg(target_os = "windows")'.dependencies]
 winsafe = { version = "=0.0.29", features = ["gui", "shell"] }
 
+# ── Linux desktop shell (GTK4 + libadwaita) ────────────────────────────────
+# GTK4 is what Flathub reviewers expect and what the GNOME desktop draws
+# natively; libadwaita adds the modern GNOME widgets (AdwApplicationWindow,
+# AdwHeaderBar hamburger menu, AdwToast) so the app looks like a first-class
+# GNOME app rather than a themed port. See docs/linux-shell.md.
+#
+# PINNED with `=`: same rationale as winsafe. GTK4 bindings ship every ~6
+# months with API adjustments; libadwaita is pre-1.0 across upstream too.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk4 = { version = "=0.9", features = ["v4_10"] }
+libadwaita = { version = "=0.7", features = ["v1_4"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
