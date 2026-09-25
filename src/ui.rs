@@ -1308,6 +1308,15 @@ pub enum Effect {
     StartTicking,
     /// Stop it.
     StopTicking,
+    /// Fire a native desktop notification announcing a completed rip. The
+    /// core builds `title` / `body` from `strings::` so all three shells
+    /// present the same wording; `output_dir` is the folder the shell can
+    /// offer to reveal. Gated on `Settings.notify_when_rip_finished`.
+    NotifyRipFinished {
+        title: String,
+        body: String,
+        output_dir: String,
+    },
     Quit,
 }
 
@@ -2067,7 +2076,18 @@ impl App {
             self.result_outcome = st.outcome_now();
             self.run = None;
             self.page = Page::Result;
-            return vec![Effect::Redraw, Effect::StopTicking];
+            let mut fx = vec![Effect::Redraw, Effect::StopTicking];
+            if self.settings.notify_when_rip_finished {
+                fx.push(Effect::NotifyRipFinished {
+                    title: crate::strings::get_or(
+                        "gui.notify.rip_finished_title",
+                        "Rip finished",
+                    ),
+                    body: self.result_summary.clone(),
+                    output_dir: self.output_dir.clone(),
+                });
+            }
+            return fx;
         }
         vec![Effect::Redraw]
     }

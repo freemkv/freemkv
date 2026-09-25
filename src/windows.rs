@@ -1677,6 +1677,12 @@ impl Shell {
                     }
                 }
                 Effect::Redraw => {}
+                Effect::NotifyRipFinished { .. } => {
+                    // TODO(linux-gui): Windows toast implementation via WinRT
+                    // `ToastNotificationManager`. Setting-gated in `ui.rs::tick`,
+                    // so simply dropping the effect leaves the app well-behaved
+                    // until the platform hook lands.
+                }
             }
         }
         self.render();

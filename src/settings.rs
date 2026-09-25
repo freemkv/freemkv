@@ -15,6 +15,11 @@ pub struct Settings {
     /// Eject the disc when the rip finishes reading it (mirrors autorip's
     /// `auto_eject`; default on).
     pub auto_eject: bool,
+    /// Fire a native desktop notification when a rip completes. Default on.
+    /// Absent from older settings files → serde's `default` fills `true` via
+    /// `bool_true()` below so an upgrade doesn't silently disable it.
+    #[serde(default = "bool_true")]
+    pub notify_when_rip_finished: bool,
     // Selection
     pub selection: String,
     pub min_title_secs: String,
@@ -72,6 +77,7 @@ impl Default for Settings {
             // Mirror autorip's auto_eject default (on): pop the disc when the
             // read phase completes so the user can grab it / load the next.
             auto_eject: true,
+            notify_when_rip_finished: true,
             selection: "Main film only".into(),
             min_title_secs: "120".into(),
             // Empty = no preference = exactly the pre-1.6.2 behaviour: a
@@ -103,6 +109,13 @@ impl Default for Settings {
 
 fn home() -> PathBuf {
     crate::platform::home_dir()
+}
+
+/// Serde `default` helper: bool fields that should default to `true` when
+/// missing from an older settings file. `#[serde(default)]` on a bool defaults
+/// to `false`, which would silently opt users out of features they had on.
+fn bool_true() -> bool {
+    true
 }
 
 /// Per-OS writable state directory — see `platform::support_dir`. Kept as a
@@ -808,6 +821,26 @@ mod normalize_tests {
     // The four `settings::*` path wrappers forward to `platform::*` but are
     // separate functions from what `platform.rs`'s own tests exercise, so
     // each could regress to `Default::default()` (e.g. `settings_path()` == "").
+    // The notification opt-out must be a NEW default, so an installed user
+    // whose settings file predates the field doesn't silently lose it. Serde's
+    // `#[serde(default)]` on a bool defaults to `false` — this pins the
+    // `bool_true` helper so a rename or removal can't quietly regress.
+    #[test]
+    fn a_settings_file_from_before_notifications_still_opts_in_after_upgrade() {
+        let s: Settings = serde_json::from_str("{}").expect("empty JSON must parse");
+        assert!(
+            s.notify_when_rip_finished,
+            "missing field must default to on, not off"
+        );
+
+        let default = Settings::default();
+        assert!(default.notify_when_rip_finished);
+
+        // An explicit `false` must survive load — the opt-out must actually opt out.
+        let s: Settings = serde_json::from_str(r#"{"notify_when_rip_finished":false}"#).unwrap();
+        assert!(!s.notify_when_rip_finished);
+    }
+
     #[test]
     fn the_derived_paths_are_absolute_and_distinct() {
         let support = support_dir();
