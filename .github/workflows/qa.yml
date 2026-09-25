@@ -437,11 +437,7 @@ jobs:
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
           ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}"
-      # The acceptance suite is not in this public repo — it names fixtures and
-      # key sources. It lives in the private `freemkv-ci` repo, which exists
-      # because Actions runners cannot reach the LAN git host host the scripts
-      # used to live on. That unreachability is the whole reason the LAN job
-      # this replaces could not be moved to EC2 before.
+      # The acceptance suite is not in this public repo; it lives in a private one.
       - uses: actions/checkout@v5
         with:
           repository: freemkv/freemkv-ci

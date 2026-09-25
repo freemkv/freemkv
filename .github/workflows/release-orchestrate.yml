@@ -182,9 +182,7 @@ jobs:
           echo "TOOLCHAIN=$V" >> "$GITHUB_ENV"
           echo "release toolchain pinned to $V (from ws/freemkv/Cargo.toml)"
 
-      # Commit + tag as the repo owner. dev@example.com maps to NO GitHub
-      # account, so every cascade commit/annotated tag it made (v1.6.10/12/13/14)
-      # attributes to nobody. Use the owner's GitHub noreply so releases are his.
+      # Commit + tag as the repo owner's GitHub noreply so releases attribute to him.
       - name: Identify as the release author
         run: |
           git config --global user.name  "Matthew Jackson"
