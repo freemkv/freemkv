@@ -5,9 +5,10 @@ name: AppImage
 # Flathub (or who prefer a single-file binary) grab this from the release
 # page. Unlike `.deb`, one AppImage runs on every glibc-based distro new
 # enough for GTK4 + libadwaita.
+# Manually-triggered only for now — the linuxdeploy + linuxdeploy-plugin-gtk
+# download step needs debugging on a real Linux dev box. Wired back to
+# `push: [qa, main]` once a smoke-tested run produces a working AppImage.
 on:
-  push:
-    branches: [qa, main]
   workflow_dispatch:
 
 concurrency:

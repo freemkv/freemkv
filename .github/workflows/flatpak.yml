@@ -3,9 +3,11 @@ name: Flatpak
 # Not a fast-path CI check — this builds the Flatpak bundle for the qa/main
 # lanes only, and uploads it as an artifact for the release orchestrator to
 # ship. Every dev push already covers the Linux CLI+GUI compile in ci.yml.
+# Manually-triggered only for now — the current manifest uses `type: dir
+# path: ../..` which suits a local `flatpak-builder` invocation from the
+# repo root but not the sandboxed Flathub base image. A submission-ready
+# manifest that fetches by git tag lands with the Flathub submission PR.
 on:
-  push:
-    branches: [qa, main]
   workflow_dispatch:
 
 concurrency:
