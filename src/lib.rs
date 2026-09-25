@@ -61,9 +61,12 @@ pub mod win_app;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-// ── GTK4 + libadwaita shell — LINUX ONLY ────────────────────────────────────
+// ── GTK4 + libadwaita shell — LINUX GLIBC ONLY ─────────────────────────────
 // Symmetric with the Windows shell above; `main.rs` calls `linux_app::run`.
-#[cfg(target_os = "linux")]
+// Gated on `target_env = "gnu"` — the musl CLI build ships as a single
+// static binary and cannot link the glibc-only GTK4 stack; see the matching
+// gate on the `gtk4`/`libadwaita` deps in Cargo.toml.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub mod linux;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub mod linux_app;

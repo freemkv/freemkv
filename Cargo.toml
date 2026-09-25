@@ -62,7 +62,14 @@ winsafe = { version = "=0.0.29", features = ["gui", "shell"] }
 #
 # PINNED with `=`: same rationale as winsafe. GTK4 bindings ship every ~6
 # months with API adjustments; libadwaita is pre-1.0 across upstream too.
-[target.'cfg(target_os = "linux")'.dependencies]
+#
+# GATED on `target_env = "gnu"` — GTK4/libadwaita depend on the glibc GTK
+# runtime and cannot link statically against musl. The Linux CLI binary
+# ships as `x86_64-unknown-linux-musl` (single static file, no runtime
+# deps), so its build must skip the shell. This condition also skips
+# src/linux.rs / src/linux_app.rs — see the matching cfg in src/lib.rs
+# and src/main.rs.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 gtk4 = { version = "=0.9", features = ["v4_10"] }
 libadwaita = { version = "=0.7", features = ["v1_4"] }
 
