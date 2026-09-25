@@ -1,0 +1,83 @@
+name: AppImage
+
+# Builds a portable AppImage of the Linux GUI. Runs on qa/main lanes (the
+# release orchestrator downloads the artifact). Users on distros without
+# Flathub (or who prefer a single-file binary) grab this from the release
+# page. Unlike `.deb`, one AppImage runs on every glibc-based distro new
+# enough for GTK4 + libadwaita.
+on:
+  push:
+    branches: [qa, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    # `ubuntu-22.04` (jammy) is a deliberate choice: the AppImage produced
+    # here must run on distros as old as the runner it was built on, so
+    # picking the OLDEST supported LTS gives the widest glibc/GTK4
+    # compatibility. Building on `ubuntu-latest` (24.04+) would raise
+    # the glibc floor and lock out Ubuntu 22.04 users.
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+        with:
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          self: freemkv
+      - name: Install GTK4 + libadwaita and AppImage tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            build-essential \
+            desktop-file-utils \
+            wget
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-gtk/releases/download/continuous/linuxdeploy-plugin-gtk.sh
+          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: freemkv
+      - name: Build release binary
+        working-directory: freemkv
+        run: cargo build --release
+      - name: Assemble AppDir
+        run: |
+          set -euo pipefail
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/metainfo \
+                   AppDir/usr/share/icons/hicolor/scalable/apps
+          cp freemkv/target/release/freemkv AppDir/usr/bin/freemkv
+          cp freemkv/packaging/flatpak/org.freemkv.FreeMKV.desktop \
+             AppDir/usr/share/applications/org.freemkv.FreeMKV.desktop
+          cp freemkv/packaging/flatpak/org.freemkv.FreeMKV.metainfo.xml \
+             AppDir/usr/share/metainfo/org.freemkv.FreeMKV.metainfo.xml
+          cp freemkv/res/freemkv-icon.svg \
+             AppDir/usr/share/icons/hicolor/scalable/apps/org.freemkv.FreeMKV.svg
+      - name: Build the AppImage
+        run: |
+          set -euo pipefail
+          # The gtk plugin bundles GTK4/libadwaita runtime libs so the
+          # AppImage doesn't rely on the target distro shipping them.
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --plugin gtk \
+            --output appimage \
+            --desktop-file AppDir/usr/share/applications/org.freemkv.FreeMKV.desktop \
+            --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/org.freemkv.FreeMKV.svg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freemkv-appimage-${{ github.ref_name }}
+          path: freemkv-*.AppImage
+          if-no-files-found: error
