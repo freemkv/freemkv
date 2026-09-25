@@ -50,9 +50,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     // A windowed launch opens the desktop shell; everything else is the CLI.
-    // On Linux there is no desktop shell, so this whole branch is compiled out
-    // and `freemkv` is always the CLI.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    // Linux joined the club in 1.7.5 — `freemkv gui` on Linux opens the
+    // GTK4 + libadwaita window (the same one the Flathub build ships).
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     if freemkv::app_entry::wants_gui(&args, launched_windowed()) {
         run_gui();
         return;
@@ -97,6 +97,14 @@ fn run_gui() {
 #[cfg(target_os = "windows")]
 fn run_gui() {
     freemkv::win_app::run();
+}
+
+#[cfg(target_os = "linux")]
+fn run_gui() {
+    // GTK's application runner returns an i32 status; the process exits
+    // when GTK's main loop does, so nothing to do with the code here — a
+    // normal return from `main` is the success path per the CLI contract.
+    let _ = freemkv::linux_app::run();
 }
 
 // Was this image started as a window, with no argument to say so? A Finder
@@ -151,6 +159,14 @@ mod launch_tests {
 // `cmd` invocation; the windowed image is the separate `freemkv-gui.exe`.
 // See docs/main.md — launched_windowed (Windows).
 #[cfg(target_os = "windows")]
+fn launched_windowed() -> bool {
+    false
+}
+
+// Linux: never (like Windows). A `.desktop` launcher runs `freemkv gui`,
+// which goes through the `wants_gui` argv path — there is no separate
+// windowed binary to detect. Flatpak's manifest exec uses the same form.
+#[cfg(target_os = "linux")]
 fn launched_windowed() -> bool {
     false
 }

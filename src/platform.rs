@@ -60,11 +60,38 @@ mod imp {
     }
 
     pub fn support_dir() -> PathBuf {
-        home_dir().join("Library/Application Support/freemkv")
+        #[cfg(target_os = "macos")]
+        {
+            home_dir().join("Library/Application Support/freemkv")
+        }
+        // Linux (and any other unix that isn't macOS): XDG Base Directory —
+        // state and data live under `$XDG_DATA_HOME` (`~/.local/share` by
+        // default), never in a bundle-shaped `Library/…` path.
+        #[cfg(not(target_os = "macos"))]
+        {
+            std::env::var_os("XDG_DATA_HOME")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home_dir().join(".local").join("share"))
+                .join("freemkv")
+        }
     }
 
     pub fn default_dest_dir() -> PathBuf {
-        home_dir().join("Movies")
+        #[cfg(target_os = "macos")]
+        {
+            home_dir().join("Movies")
+        }
+        // On Linux the equivalent is `~/Videos` — resolved through
+        // `xdg-user-dirs` (`$XDG_VIDEOS_DIR`) so a user who moved it to a
+        // second drive gets that location, not a stale default.
+        #[cfg(not(target_os = "macos"))]
+        {
+            std::env::var_os("XDG_VIDEOS_DIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home_dir().join("Videos"))
+        }
     }
 
     pub fn free_space_bytes(path: &str) -> Option<u64> {
