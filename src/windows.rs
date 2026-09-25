@@ -477,18 +477,51 @@ fn build_check_images<T: 'static>(tree: &gui::TreeView<T>, dpi: u32) -> w::AnyRe
 // this changed?" note so an idle tick does not rebuild the tree/dropdown.
 #[derive(Default)]
 struct Memo {
-    rows: String,
+    rows: Option<u64>,
     formats: String,
-    log_len: usize,
+    /// What the log pane shows; `None` until the first render fills it.
+    log: Option<LogShown>,
+    /// The `running` the menu enable states were last applied for.
+    menu_running: Option<bool>,
 }
 
 /// One row signature: the identity of the row, not its tick state (tick state
-/// is applied separately, without a rebuild).
-fn rows_sig(rows: &[Row]) -> String {
-    rows.iter()
-        .map(|r| format!("{}|{}|{}|{}", r.index, r.depth, r.type_s, r.desc))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// is applied separately, without a rebuild). Hashed in place, no allocation.
+fn rows_sig(rows: &[Row]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    rows.len().hash(&mut h);
+    for r in rows {
+        (r.index, r.depth, &r.type_s, &r.desc).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// How the log pane must change to show `log`, given what it last showed.
+#[derive(Debug, PartialEq, Eq)]
+enum LogPlan {
+    Keep,
+    /// Append `log[n..]`; everything before it is already on screen.
+    Append(usize),
+    Rebuild,
+}
+
+/// What the log pane last showed: the sequence number of its first line
+/// (`View::log_first`, which moves on every clear or front trim) and how many
+/// lines it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogShown {
+    first: u64,
+    len: usize,
+}
+
+// `None` means the pane's content is unknown (fresh view): rebuild.
+fn log_plan(shown: Option<LogShown>, first: u64, len: usize) -> LogPlan {
+    match shown {
+        Some(s) if s.first == first && s.len == len => LogPlan::Keep,
+        Some(s) if s.first == first && s.len < len => LogPlan::Append(s.len),
+        _ => LogPlan::Rebuild,
+    }
 }
 
 // The text one tree row shows. `SysTreeView32` has no real multi-column
@@ -558,6 +591,8 @@ struct Shell {
     about: About,
 
     memo: Rc<RefCell<Memo>>,
+    /// The last rip-finished toast, kept so its click handler outlives `perform`.
+    toast: Rc<RefCell<Option<windows::UI::Notifications::ToastNotification>>>,
     /// Worker threads push user-visible lines here; a main-thread timer drains
     /// it. Win32 windows are owned by the thread that created them, so nothing
     /// else may touch a control.
@@ -908,6 +943,7 @@ impl Shell {
             prefs,
             about,
             memo: Rc::new(RefCell::new(Memo::default())),
+            toast: Rc::new(RefCell::new(None)),
             inbox: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -1368,11 +1404,15 @@ impl Shell {
     /// Refresh only the tick states, leaving the rows (and the user's expansion
     /// and selection) untouched. This is what runs on an ordinary redraw.
     fn sync_tree_states(&self, rows: &[Row]) {
+        let mut by_index = std::collections::HashMap::with_capacity(rows.len());
+        for r in rows {
+            by_index.entry(r.index).or_insert(r.check);
+        }
         for root in self.tree.items().iter_root() {
             let apply = |it: &w::gui::TreeViewItem<'_, usize>| {
                 let idx = *it.data().borrow();
-                if let Some(r) = rows.iter().find(|r| r.index == idx) {
-                    self.set_row_state(it.htreeitem(), state_for(r.check));
+                if let Some(&check) = by_index.get(&idx) {
+                    self.set_row_state(it.htreeitem(), state_for(check));
                 }
             };
             apply(&root);
@@ -1520,7 +1560,7 @@ impl Shell {
         }
 
         // ── tree ──
-        let sig = rows_sig(&v.title_rows);
+        let sig = Some(rows_sig(&v.title_rows));
         let changed = self.memo.borrow().rows != sig;
         if changed {
             self.rebuild_tree(&v.title_rows);
@@ -1557,14 +1597,37 @@ impl Shell {
         let _ = self.lbl_result_line.hwnd().SetWindowText(&v.result_summary);
 
         // ── log ──
-        // Rewritten only when it grew, so selection survives an ordinary tick.
-        if self.memo.borrow().log_len != v.log.len() {
-            let text = log_text(&v.log);
-            let _ = self.log.set_text(&text);
+        // Only new lines are appended, so selection survives an ordinary tick.
+        let plan = log_plan(self.memo.borrow().log, v.log_first, v.log.len());
+        let changed = match plan {
+            LogPlan::Keep => false,
+            LogPlan::Rebuild => {
+                // The EDIT default cap is 32K chars; the log holds far more.
+                self.log.limit_text(None);
+                let _ = self.log.set_text(&log_text(&v.log));
+                let n = self.log.hwnd().GetWindowTextLength().unwrap_or(0);
+                self.log.set_selection(n, n);
+                true
+            }
+            LogPlan::Append(from) => {
+                let n = self.log.hwnd().GetWindowTextLength().unwrap_or(0);
+                self.log.set_selection(n, n);
+                unsafe {
+                    self.log.hwnd().SendMessage(msg::EmReplaceSel {
+                        can_be_undone: false,
+                        replacement_text: w::WString::from_str(log_tail_text(&v.log, from)),
+                    });
+                }
+                true
+            }
+        };
+        if changed {
             // Keep the newest line in view, as the macOS log does.
-            let n = text.encode_utf16().count() as i32;
-            self.log.set_selection(n, n);
-            self.memo.borrow_mut().log_len = v.log.len();
+            unsafe { self.log.hwnd().SendMessage(msg::EmScrollCaret {}) };
+            self.memo.borrow_mut().log = Some(LogShown {
+                first: v.log_first,
+                len: v.log.len(),
+            });
         }
 
         // The View ▸ log item names the action it will PERFORM, so it has to be
@@ -1583,6 +1646,10 @@ impl Shell {
             return;
         };
         let running = self.app.borrow().running();
+        if self.memo.borrow().menu_running == Some(running) {
+            return;
+        }
+        self.memo.borrow_mut().menu_running = Some(running);
         for &id in MENU_CMD_IDS {
             let blocked = cmd_for(id).map(crate::ui::blocked_while_running) == Some(true);
             // EnableMenuItem searches submenus by command id.
@@ -1634,7 +1701,76 @@ fn log_text(log: &[LogLine]) -> String {
         .join("\r\n")
 }
 
+// `log[from..]` as appended after what is already shown: each line gets its
+// own leading break unless it is the pane's very first line.
+fn log_tail_text(log: &[LogLine], from: usize) -> String {
+    let tail = log_text(&log[from..]);
+    if from == 0 || tail.is_empty() {
+        tail
+    } else {
+        format!("\r\n{tail}")
+    }
+}
+
 // ── platform effects ──────────────────────────────────────────────────────
+
+/// `explorer /select,"<path>"` opens the containing folder with the item
+/// highlighted — the Explorer equivalent of macOS's "reveal in Finder".
+fn reveal_in_explorer(p: &str) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt as _;
+    // `raw_arg` bypasses Rust's argument quoting: explorer.exe needs the
+    // literal `/select,"<path>"` form, which normal escaping would mangle.
+    std::process::Command::new("explorer.exe")
+        .raw_arg(format!("/select,\"{p}\""))
+        .spawn()
+        .map(drop)
+}
+
+/// The AppUserModelID the process runs under and toasts are sent as.
+const APP_ID: &str = "org.freemkv.FreeMKV";
+
+// An unpackaged exe can only toast under an AUMID registered here (or on a
+// Start-menu shortcut); `CreateToastNotifierWithId` fails silently otherwise.
+fn register_toast_app_id() -> w::SysResult<()> {
+    let (key, _) = w::HKEY::CURRENT_USER.RegCreateKeyEx(
+        &format!(r"Software\Classes\AppUserModelId\{APP_ID}"),
+        None,
+        co::REG_OPTION::NON_VOLATILE,
+        co::KEY::SET_VALUE,
+        None,
+    )?;
+    key.RegSetValueEx(
+        Some("DisplayName"),
+        w::RegistryValue::Sz("freemkv".to_owned()),
+    )
+}
+
+/// Show the rip-finished toast; clicking it reveals `output_dir`. The caller
+/// keeps the returned toast alive so its `Activated` handler stays wired.
+fn show_rip_toast(
+    title: &str,
+    body: &str,
+    output_dir: &str,
+) -> windows::core::Result<windows::UI::Notifications::ToastNotification> {
+    use windows::UI::Notifications::{
+        ToastNotification, ToastNotificationManager, ToastTemplateType,
+    };
+    use windows::core::HSTRING;
+    let xml = ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastText02)?;
+    let slots = xml.GetElementsByTagName(&HSTRING::from("text"))?;
+    for (i, text) in [title, body].into_iter().enumerate() {
+        let node = xml.CreateTextNode(&HSTRING::from(text))?;
+        slots.Item(i as u32)?.AppendChild(&node)?;
+    }
+    let toast = ToastNotification::CreateToastNotification(&xml)?;
+    let dir = output_dir.to_owned();
+    toast.Activated(&windows::Foundation::TypedEventHandler::new(move |_, _| {
+        let _ = reveal_in_explorer(&dir);
+        Ok(())
+    }))?;
+    ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID))?.Show(&toast)?;
+    Ok(toast)
+}
 
 impl Shell {
     /// Show the real Windows common dialog (`IFileOpenDialog`), so the open
@@ -1698,17 +1834,7 @@ impl Shell {
                     }
                 }
                 Effect::Reveal(p) => {
-                    // `explorer /select,"<path>"` opens the containing folder
-                    // with the item highlighted — the Explorer equivalent of
-                    // macOS's "reveal in Finder".
-                    use std::os::windows::process::CommandExt as _;
-                    // `raw_arg` bypasses Rust's argument quoting: explorer.exe
-                    // needs the literal `/select,"<path>"` form, which normal
-                    // escaping would mangle.
-                    if let Err(e) = std::process::Command::new("explorer.exe")
-                        .raw_arg(format!("/select,\"{p}\""))
-                        .spawn()
-                    {
+                    if let Err(e) = reveal_in_explorer(&p) {
                         // Silent failure is itself a bug: a failed reveal used to
                         // vanish into `let _ =`, leaving a user who clicked "show
                         // in folder" with no clue what went wrong.
@@ -1748,9 +1874,21 @@ impl Shell {
                     }
                 }
                 Effect::Redraw => {}
-                Effect::NotifyRipFinished { .. } => {
-                    // TODO(linux-gui): WinRT `ToastNotificationManager` hook.
-                    // Setting-gated in `ui.rs::tick`; drop is well-behaved.
+                Effect::NotifyRipFinished {
+                    title,
+                    body,
+                    output_dir,
+                } => {
+                    let shown = register_toast_app_id()
+                        .map_err(|e| e.to_string())
+                        .and_then(|()| {
+                            show_rip_toast(&title, &body, &output_dir)
+                                .map_err(|e| e.message().to_string())
+                        });
+                    match shown {
+                        Ok(t) => *self.toast.borrow_mut() = Some(t),
+                        Err(e) => tracing::warn!("rip-finished toast failed: {e}"),
+                    }
                 }
             }
         }
@@ -3383,7 +3521,9 @@ impl Shell {
         }
         // Force the format dropdown and the tree to repaint in the new language.
         self.memo.borrow_mut().formats.clear();
-        self.memo.borrow_mut().rows.clear();
+        self.memo.borrow_mut().rows = None;
+        // The rebuilt menu bar starts all-enabled.
+        self.memo.borrow_mut().menu_running = None;
         self.prefs.relocalize(&self.settings.borrow());
         // The About box too: it is built once and cached, so nothing else ever
         // re-texts it.
@@ -4151,6 +4291,8 @@ pub fn run() {
     // The file dialogs are COM objects, so the apartment must exist for the
     // lifetime of the app. The guard uninitializes on drop.
     let _com = w::CoInitializeEx(co::COINIT::APARTMENTTHREADED | co::COINIT::DISABLE_OLE1DDE);
+    // Before any window exists, so the taskbar and toasts share one identity.
+    let _ = w::SetCurrentProcessExplicitAppUserModelID(APP_ID);
 
     let shell = Shell::new();
     shell.events();
@@ -4497,6 +4639,64 @@ mod tests {
             state_for(Some(Check::Mixed)),
         ] {
             assert!((1..=3).contains(&s), "state image index {s} has no bitmap");
+        }
+    }
+
+    // ── the incremental log pane ──────────────────────────────────────────
+    // `render` used to re-append the whole log whenever a line arrived: O(n)
+    // per line, O(n^2) over a rip. Only a clear or a front trim may rebuild.
+    fn log_of(lines: &[&str]) -> Vec<LogLine> {
+        lines
+            .iter()
+            .map(|t| LogLine {
+                text: (*t).into(),
+                kind: LogKind::Detail,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_new_line_appends_only_the_tail() {
+        let shown = Some(LogShown { first: 0, len: 2 });
+        assert_eq!(
+            log_plan(shown, 0, 4),
+            LogPlan::Append(2),
+            "a grown log must append only the new lines, not rebuild the pane"
+        );
+        assert_eq!(log_plan(shown, 0, 2), LogPlan::Keep);
+        let empty = Some(LogShown { first: 7, len: 0 });
+        assert_eq!(log_plan(empty, 7, 3), LogPlan::Append(0));
+        assert_eq!(log_plan(empty, 7, 0), LogPlan::Keep);
+    }
+
+    #[test]
+    fn a_clear_or_trim_rebuilds_and_a_fresh_pane_rebuilds() {
+        let full = Some(LogShown {
+            first: 0,
+            len: 5_000,
+        });
+        assert_eq!(log_plan(None, 0, 3), LogPlan::Rebuild, "unknown pane");
+        assert_eq!(log_plan(full, 5_000, 0), LogPlan::Rebuild, "cleared");
+        assert_eq!(
+            log_plan(full, 5_000, 2),
+            LogPlan::Rebuild,
+            "cleared, refilled"
+        );
+        assert_eq!(
+            log_plan(full, 1_000, 5_200),
+            LogPlan::Rebuild,
+            "front-trimmed at the cap yet longer than what was shown"
+        );
+    }
+
+    #[test]
+    fn appending_the_tail_reproduces_the_full_log_text() {
+        let mut log = log_of(&["a", "b", "c"]);
+        log[1].kind = LogKind::Notice;
+        assert_eq!(log_tail_text(&log, 0), log_text(&log));
+        for k in 1..log.len() {
+            let joined = format!("{}{}", log_text(&log[..k]), log_tail_text(&log, k));
+            assert_eq!(joined, log_text(&log), "split at {k}");
         }
     }
 

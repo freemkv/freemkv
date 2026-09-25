@@ -23,6 +23,10 @@ use objc2_foundation::{
     MainThreadMarker, NSDate, NSDictionary, NSLocale, NSNumber, NSPoint, NSRect, NSRunLoop, NSSize,
     NSString, NSTimer,
 };
+use objc2_user_notifications::{
+    UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationPresentationOptions,
+    UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+};
 
 /// The macOS preferred UI language as a BCP-47 tag ("en-US", "de-DE", "pt-BR",
 /// "zh-Hans-CN"), or None. A Finder-launched `.app` inherits no `LANG`, so the
@@ -113,11 +117,133 @@ fn r(x: f64, y: f64, w: f64, h: f64) -> NSRect {
 
 // Row-list identity (excludes tick state) so render() can detect a real
 // tree change vs. a tick-only update. See docs/mac-shell.md — rows_sig
-fn rows_sig(rows: &[crate::ui::Row]) -> String {
-    rows.iter()
-        .map(|r| format!("{}|{}|{}|{}", r.index, r.depth, r.type_s, r.desc))
-        .collect::<Vec<_>>()
-        .join("\n")
+fn rows_sig(rows: &[crate::ui::Row]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    rows.len().hash(&mut h);
+    for r in rows {
+        (r.index, r.depth, &r.type_s, &r.desc).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// How the log pane must change to show `log`, given what it last showed.
+#[derive(Debug, PartialEq, Eq)]
+enum LogPlan {
+    Keep,
+    /// Append `log[n..]`; everything before it is already on screen.
+    Append(usize),
+    Rebuild,
+}
+
+/// What the log pane last showed: the sequence number of its first line
+/// (`View::log_first`, which moves on every clear or front trim) and how many
+/// lines it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogShown {
+    first: u64,
+    len: usize,
+}
+
+// `None` means the pane's content is unknown (fresh view): rebuild.
+fn log_plan(shown: Option<LogShown>, first: u64, len: usize) -> LogPlan {
+    match shown {
+        Some(s) if s.first == first && s.len == len => LogPlan::Keep,
+        Some(s) if s.first == first && s.len < len => LogPlan::Append(s.len),
+        _ => LogPlan::Rebuild,
+    }
+}
+
+// ── rip-finished notification ─────────────────────────────────────────────
+
+const NOTIFY_DIR_KEY: &str = "output_dir";
+
+define_class!(
+    // Callbacks may arrive off the main thread; they touch only NSWorkspace.
+    #[unsafe(super(NSObject))]
+    #[name = "FmkNotifyDelegate"]
+    struct NotifyDelegate;
+
+    unsafe impl NSObjectProtocol for NotifyDelegate {}
+
+    unsafe impl UNUserNotificationCenterDelegate for NotifyDelegate {
+        // Without this macOS drops the banner while freemkv is frontmost.
+        #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+        fn will_present(
+            &self,
+            _center: &UNUserNotificationCenter,
+            _n: &objc2_user_notifications::UNNotification,
+            done: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+        ) {
+            done.call((UNNotificationPresentationOptions::Banner
+                | UNNotificationPresentationOptions::List
+                | UNNotificationPresentationOptions::Sound,));
+        }
+
+        #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+        fn did_receive(
+            &self,
+            _center: &UNUserNotificationCenter,
+            response: &objc2_user_notifications::UNNotificationResponse,
+            done: &block2::DynBlock<dyn Fn()>,
+        ) {
+            let info = response.notification().request().content().userInfo();
+            let key = NSString::from_str(NOTIFY_DIR_KEY);
+            if let Some(dir) = info
+                .objectForKey(&key)
+                .and_then(|o| o.downcast::<NSString>().ok())
+            {
+                objc2_app_kit::NSWorkspace::sharedWorkspace()
+                    .selectFile_inFileViewerRootedAtPath(None, &dir);
+            }
+            done.call(());
+        }
+    }
+);
+
+// UNUserNotificationCenter raises (and aborts the process) outside an .app
+// bundle, e.g. `cargo run -- gui`, so every use is gated on this.
+fn notifications_available() -> bool {
+    objc2_foundation::NSBundle::mainBundle()
+        .bundleIdentifier()
+        .is_some()
+}
+
+fn notify_rip_finished(title: &str, body: &str, output_dir: &str) {
+    if !notifications_available() {
+        return;
+    }
+    let (title, body, dir) = (title.to_owned(), body.to_owned(), output_dir.to_owned());
+    // Asking again once decided is a no-op that just reports the answer.
+    let post = block2::RcBlock::new(
+        move |granted: objc2::runtime::Bool, _e: *mut objc2_foundation::NSError| {
+            if !granted.as_bool() {
+                return;
+            }
+            let content = UNMutableNotificationContent::new();
+            content.setTitle(&NSString::from_str(&title));
+            content.setBody(&NSString::from_str(&body));
+            content.setSound(Some(
+                &objc2_user_notifications::UNNotificationSound::defaultSound(),
+            ));
+            let key = NSString::from_str(NOTIFY_DIR_KEY);
+            let val = NSString::from_str(&dir);
+            let info = NSDictionary::from_slices(&[&*key], &[&*val]);
+            unsafe { content.setUserInfo(&Retained::cast_unchecked(info)) };
+            let req = objc2_user_notifications::UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &NSString::from_str("rip-finished"),
+            &content,
+            None,
+        );
+            UNUserNotificationCenter::currentNotificationCenter()
+                .addNotificationRequest_withCompletionHandler(&req, None);
+        },
+    );
+    UNUserNotificationCenter::currentNotificationCenter()
+        .requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+            &post,
+        );
 }
 
 // ── quitting, once, for every route out of the app ────────────────────────
@@ -450,7 +576,11 @@ struct Ivars {
     /// not force a full `reloadData` + re-expand of the (usually hidden)
     /// titles outline when nothing about the title list moved — the same
     /// policy the Windows shell's `Memo::rows`/`rows_sig` already apply.
-    tree_sig: RefCell<String>,
+    tree_sig: std::cell::Cell<Option<u64>>,
+    /// What the log pane shows, so a tick appends only the new tail.
+    log_shown: RefCell<Option<LogShown>>,
+    /// Retained here because `UNUserNotificationCenter.delegate` is weak.
+    notify_delegate: RefCell<Option<Retained<NotifyDelegate>>>,
     /// The operator has already answered the rip-in-progress question for this
     /// departure — see `confirm_quit`.
     quit_confirmed: std::cell::Cell<bool>,
@@ -1304,10 +1434,11 @@ impl Controller {
                 }
                 E::Quit => NSApplication::sharedApplication(mtm).terminate(None),
                 E::Redraw => {}
-                E::NotifyRipFinished { .. } => {
-                    // TODO(linux-gui): `UNUserNotificationCenter` hook.
-                    // Setting-gated in `ui.rs::tick`; drop is well-behaved.
-                }
+                E::NotifyRipFinished {
+                    title,
+                    body,
+                    output_dir,
+                } => notify_rip_finished(&title, &body, &output_dir),
             }
         }
         self.render();
@@ -1398,10 +1529,10 @@ impl Controller {
         if let Some(src) = iv.src.borrow().as_ref() {
             // Skip the full `reloadData` + re-expand when nothing about the
             // title list moved — see `rows_sig`'s doc comment.
-            let sig = rows_sig(&v.title_rows);
-            if *iv.tree_sig.borrow() != sig {
+            let sig = Some(rows_sig(&v.title_rows));
+            if iv.tree_sig.get() != sig {
                 src.apply(&v.title_rows);
-                *iv.tree_sig.borrow_mut() = sig;
+                iv.tree_sig.set(sig);
             } else {
                 src.sync_check_states(&v.title_rows);
             }
@@ -1466,21 +1597,32 @@ impl Controller {
 
         // log
         if let Some(tv) = iv.log.borrow().as_ref() {
-            let want: String = v
-                .log
-                .iter()
-                .map(|l| l.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let cur = { tv.string() }.to_string();
-            if cur.trim_end() != want {
-                tv.setString(&NSString::from_str(""));
-                for l in v.log.iter() {
+            let plan = log_plan(*iv.log_shown.borrow(), v.log_first, v.log.len());
+            let from = match plan {
+                LogPlan::Keep => None,
+                LogPlan::Append(n) => Some(n),
+                LogPlan::Rebuild => {
+                    tv.setString(&NSString::from_str(""));
+                    Some(0)
+                }
+            };
+            if let Some(from) = from {
+                let store = unsafe { tv.textStorage() };
+                if let Some(s) = &store {
+                    s.beginEditing();
+                }
+                for l in &v.log[from..] {
                     log_append(tv, &l.text, log_colour(l.kind));
                 }
-                // Keep the newest line in view — the log only grows and the
-                // line worth reading is always the last one. Only inside this
-                // branch, so an ordinary progress tick never yanks the view.
+                if let Some(s) = &store {
+                    s.endEditing();
+                }
+                *iv.log_shown.borrow_mut() = Some(LogShown {
+                    first: v.log_first,
+                    len: v.log.len(),
+                });
+                // Keep the newest line in view. Only when lines arrived, so an
+                // ordinary progress tick never yanks the view.
                 let end = { tv.string() }.length();
                 tv.scrollRangeToVisible(objc2_foundation::NSRange::new(end, 0));
             }
@@ -1680,7 +1822,9 @@ impl Controller {
         // `build_ui` installed a BRAND NEW, empty `TitlesSource`; `tree_sig`
         // still describes the OLD one's rows. Left alone, `render()` below
         // finds them equal, skips `apply`, and the disc comes back empty.
-        self.ivars().tree_sig.borrow_mut().clear();
+        self.ivars().tree_sig.set(None);
+        // Same for the log: the new text view holds only the build-time line.
+        *self.ivars().log_shown.borrow_mut() = None;
 
         // Settings and About are cached, built once and reused on reopen — but
         // in the old language, so drop them; next open rebuilds them fresh.
@@ -2769,6 +2913,13 @@ pub fn run() {
     // the rip-in-progress confirmation, and closing the window left a headless
     // process behind. See `NSApplicationDelegate for Controller`.
     app.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*c)));
+    // Before launch completes, so a click that relaunched the app is delivered.
+    if notifications_available() {
+        let d: Retained<NotifyDelegate> = unsafe { msg_send![NotifyDelegate::alloc(), init] };
+        UNUserNotificationCenter::currentNotificationCenter()
+            .setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*d)));
+        *c.ivars().notify_delegate.borrow_mut() = Some(d);
+    }
     *c.ivars().win_main.borrow_mut() = Some(window.clone());
     build_menus(mtm, &app, &c);
     let src = build_ui(mtm, &window, &c);
@@ -4917,6 +5068,43 @@ mod tests {
         );
     }
 
+    // ── the incremental log pane ──────────────────────────────────────────
+    // `render` used to re-append the whole log whenever a line arrived: O(n)
+    // per line, O(n^2) over a rip. Only a clear or a front trim may rebuild.
+    #[test]
+    fn a_new_line_appends_only_the_tail() {
+        let shown = Some(LogShown { first: 0, len: 2 });
+        assert_eq!(
+            log_plan(shown, 0, 4),
+            LogPlan::Append(2),
+            "a grown log must append only the new lines, not rebuild the pane"
+        );
+        assert_eq!(log_plan(shown, 0, 2), LogPlan::Keep);
+        let empty = Some(LogShown { first: 7, len: 0 });
+        assert_eq!(log_plan(empty, 7, 3), LogPlan::Append(0));
+        assert_eq!(log_plan(empty, 7, 0), LogPlan::Keep);
+    }
+
+    #[test]
+    fn a_clear_or_trim_rebuilds_and_a_fresh_pane_rebuilds() {
+        let full = Some(LogShown {
+            first: 0,
+            len: 5_000,
+        });
+        assert_eq!(log_plan(None, 0, 3), LogPlan::Rebuild, "unknown pane");
+        assert_eq!(log_plan(full, 5_000, 0), LogPlan::Rebuild, "cleared");
+        assert_eq!(
+            log_plan(full, 5_000, 2),
+            LogPlan::Rebuild,
+            "cleared, refilled"
+        );
+        assert_eq!(
+            log_plan(full, 1_000, 5_200),
+            LogPlan::Rebuild,
+            "front-trimmed at the cap yet longer than what was shown"
+        );
+    }
+
     // ── the tree redraw memo ── `render` used to rebuild the outline on
     // every 5 Hz tick even when rows never moved. Windows already had this
     // guard (`rows_sig`); real coverage since `rows_sig` is a pure function.
@@ -5027,7 +5215,8 @@ mod tests {
         let src = include_str!("mac.rs");
         let guard = format!(
             "{}{}",
-            "let sig = rows_sig(&v.title_rows);\n            if *iv.tree_", "sig.borrow() != sig {"
+            "let sig = Some(rows_sig(&v.title_rows));\n            if iv.tree_",
+            "sig.get() != sig {"
         );
         assert!(
             src.contains(&guard),
@@ -5055,7 +5244,7 @@ mod tests {
     #[test]
     fn a_language_switch_forgets_the_tree_memo_source_inspection_only() {
         let src = include_str!("mac.rs");
-        let reset = format!("{}{}", "self.ivars().tree_sig.borrow_mut()", ".clear();");
+        let reset = format!("{}{}", "self.ivars().tree_sig", ".set(None);");
         assert!(
             src.contains(&reset),
             "relocalize() no longer clears tree_sig — build_ui installs a BRAND \
