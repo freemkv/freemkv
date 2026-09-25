@@ -1475,7 +1475,7 @@ impl Controller {
             let cur = { tv.string() }.to_string();
             if cur.trim_end() != want {
                 tv.setString(&NSString::from_str(""));
-                for l in &v.log {
+                for l in v.log.iter() {
                     log_append(tv, &l.text, log_colour(l.kind));
                 }
                 // Keep the newest line in view — the log only grows and the

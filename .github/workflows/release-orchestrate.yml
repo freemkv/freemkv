@@ -865,6 +865,36 @@ jobs:
             ok "$(basename "$dir"): Info.plist $current → $newver"
           }
 
+          # date_metainfo_release <dir> <version>: the AppStream <release> for this
+          # version must carry the real release date (Flathub reads it), so stamp
+          # RELEASE_DATE into it, adding the entry if the version has none yet.
+          date_metainfo_release() {
+            local dir="$1" ver="$2" mi
+            mi=$(ls "$dir"/packaging/flatpak/*.metainfo.xml 2>/dev/null | head -1)
+            [ -n "$mi" ] || return 0
+            if $DRY_RUN; then
+              printf '  [dry-run] date %s: <release version="%s" date="%s">\n' "$(basename "$mi")" "$ver" "$RELEASE_DATE"
+              return 0
+            fi
+            RELEASE_VER="$ver" RELEASE_DATE="$RELEASE_DATE" python3 - "$mi" <<'PYEOF'
+          import os, re, sys
+          p, ver, date = sys.argv[1], os.environ["RELEASE_VER"], os.environ["RELEASE_DATE"]
+          s = open(p, encoding="utf-8").read()
+          tag = re.compile(r'<release\s+version="' + re.escape(ver) + r'"[^>]*?(/?)>')
+          m = tag.search(s)
+          if m:
+              s = s[:m.start()] + f'<release version="{ver}" date="{date}"{m.group(1)}>' + s[m.end():]
+          elif "<releases>" in s:
+              s = s.replace("<releases>", f'<releases>\n    <release version="{ver}" date="{date}"/>', 1)
+          else:
+              sys.exit(f"{p}: no <releases> block to date")
+          open(p, "w", encoding="utf-8").write(s)
+          PYEOF
+            grep -q "<release version=\"$ver\" date=\"$RELEASE_DATE\"" "$mi" \
+              || die "metainfo release date not stamped in $mi"
+            ok "$(basename "$dir"): metainfo <release $ver> dated $RELEASE_DATE"
+          }
+
           # ─────────────────────── step 1: libfreemkv release ──────────────────────
 
           release_libfreemkv() {
@@ -1501,6 +1531,7 @@ jobs:
             bump_macos_plist_version "$dir" "$VERSION"
             bump_readme_version "$dir" "$name" "$VERSION"
             date_changelog_heading "$dir" "$VERSION"
+            date_metainfo_release "$dir" "$VERSION"
 
             # bdemu directly deps freemkv-unlock by a committed path dep — its tagged
             # commit must carry the git+tag form (and a lock that references it), then the

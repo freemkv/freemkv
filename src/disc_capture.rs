@@ -27,26 +27,26 @@ pub(crate) struct DiscSummary {
 }
 
 // Read the disc's structure files and save them (nested) into `profile_dir`,
-// appending each relative path to `written`. Best-effort: any read failure
-// returns `None` so a drive-path caller with other data still builds a profile.
+// appending each relative path to `written`. `Ok(None)` = no files; `Err`
+// carries the read failure so callers can say why instead of guessing.
 pub(crate) fn fold_structure(
     profile_dir: &Path,
     written: &mut Vec<String>,
     reader: &mut dyn SectorSource,
-) -> Option<DiscSummary> {
-    let files = Disc::read_structure_files(reader).ok()?;
+) -> Result<Option<DiscSummary>, libfreemkv::Error> {
+    let files = Disc::read_structure_files(reader)?;
     if files.is_empty() {
-        return None;
+        return Ok(None);
     }
     let total_bytes = files.iter().map(|(_, b)| b.len()).sum();
     let file_count = files.len();
     for (rel, bytes) in files {
         save_bin(profile_dir, &rel, &bytes, written);
     }
-    Some(DiscSummary {
+    Ok(Some(DiscSummary {
         file_count,
         total_bytes,
-    })
+    }))
 }
 
 // Minimal JSON string escaper for the machine-artifact profiles below.
@@ -241,8 +241,8 @@ pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str) {
 
     // Raw structure files. If none are readable there is nothing to report.
     let summary = match fold_structure(&profile_dir, &mut written, reader) {
-        Some(s) => s,
-        None => {
+        Ok(Some(s)) => s,
+        other => {
             eprintln!(
                 "{}",
                 strings::get_or(
@@ -250,6 +250,9 @@ pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str) {
                     "No readable disc structure (BDMV / VIDEO_TS) was found; nothing to share.",
                 )
             );
+            if let Err(e) = other {
+                eprintln!("  {e}");
+            }
             std::process::exit(1);
         }
     };
@@ -537,5 +540,44 @@ mod aacs_diag_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fold_structure_tests {
+    use super::fold_structure;
+    use libfreemkv::SectorSource;
+
+    struct Blank;
+    impl SectorSource for Blank {
+        fn capacity_sectors(&self) -> u32 {
+            1024
+        }
+        fn read_sectors(
+            &mut self,
+            _lba: u32,
+            count: u16,
+            buf: &mut [u8],
+            _recovery: bool,
+        ) -> libfreemkv::error::Result<usize> {
+            let n = count as usize * 2048;
+            buf[..n].fill(0);
+            Ok(n)
+        }
+    }
+
+    // A read that cannot find a filesystem must surface its cause, not
+    // collapse into the same `None` as an empty-but-valid tree.
+    #[test]
+    fn an_unreadable_structure_reports_the_error_and_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("fmkv-fold-{}", std::process::id()));
+        let mut written = Vec::new();
+        let r = fold_structure(&dir, &mut written, &mut Blank);
+        assert!(
+            r.is_err(),
+            "expected the read error, got {:?}",
+            r.map(|s| s.is_some())
+        );
+        assert!(written.is_empty());
     }
 }

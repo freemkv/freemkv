@@ -1084,7 +1084,7 @@ Each operation name key the fatal block can use (`op_rip`, `op_info`,
 the bare dotted key — otherwise the fatal header reads
 `Error: error.op_rip failed: ...`.
 
-## line5859
+## verdict_tests
 
 (originally at `src/pipe.rs:5859`)
 

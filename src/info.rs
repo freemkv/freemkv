@@ -107,44 +107,81 @@ fn toml_header_comment(id: &DriveIdentity) -> String {
     )
 }
 
-pub fn run(device: Option<&str>, args: &[String]) {
-    let mut share = false;
-    let mut mask = false;
-    let mut quiet = false;
-    let mut verbose = false;
+#[derive(Debug, Default, PartialEq)]
+struct DriveFlags {
+    share: bool,
+    mask: bool,
+    quiet: bool,
+    verbose: bool,
+}
 
+#[derive(Debug, PartialEq)]
+enum DriveParse {
+    Ok(DriveFlags),
+    Help,
+    Unknown(String),
+}
+
+fn next_value(args: &[String], i: usize) -> Option<&String> {
+    args.get(i + 1)
+        .filter(|v| !crate::cli_entry::is_flag_token(v))
+}
+
+fn parse_drive_flags(args: &[String]) -> DriveParse {
+    let mut f = DriveFlags::default();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--share" | "-s" => share = true,
-            "--mask" | "-m" => mask = true,
-            "--quiet" | "-q" => quiet = true,
-            "--verbose" | "-v" => verbose = true,
+            "--share" | "-s" => f.share = true,
+            "--mask" | "-m" => f.mask = true,
+            "--quiet" | "-q" => f.quiet = true,
+            "--verbose" | "-v" => f.verbose = true,
             // Log-level/log-file tokens are handled by main::init_logging;
             // accept them here so they aren't rejected as unknown options.
-            "-vv" | "-vvv" => verbose = true,
+            "-vv" | "-vvv" => f.verbose = true,
+            "--log-level" => {
+                if let Some(v) = next_value(args, i) {
+                    if v.parse::<u8>().is_ok_and(|n| n >= 2) {
+                        f.verbose = true;
+                    }
+                    i += 1;
+                }
+            }
             "--log-file" => {
-                i += 1; // skip the path value
+                if next_value(args, i).is_some() {
+                    i += 1;
+                }
             }
-            "--help" | "-h" => {
-                println!("{}", strings::get("drive.share_usage"));
-                println!();
-                println!("  --share    {}", strings::get("drive.share_desc"));
-                println!("  --mask     {}", strings::get("drive.mask_desc"));
-                println!("  --quiet    {}", strings::get("app.opt_quiet"));
-                println!("  --verbose  {}", strings::get("app.opt_verbose"));
-                return;
-            }
-            _ => {
-                eprintln!(
-                    "{}",
-                    strings::fmt("app.unknown_option", &[("opt", &args[i])])
-                );
-                std::process::exit(1);
-            }
+            "--help" | "-h" => return DriveParse::Help,
+            other => return DriveParse::Unknown(other.to_string()),
         }
         i += 1;
     }
+    DriveParse::Ok(f)
+}
+
+pub fn run(device: Option<&str>, args: &[String]) {
+    let DriveFlags {
+        share,
+        mask,
+        quiet,
+        verbose,
+    } = match parse_drive_flags(args) {
+        DriveParse::Ok(f) => f,
+        DriveParse::Help => {
+            println!("{}", strings::get("drive.share_usage"));
+            println!();
+            println!("  --share    {}", strings::get("drive.share_desc"));
+            println!("  --mask     {}", strings::get("drive.mask_desc"));
+            println!("  --quiet    {}", strings::get("app.opt_quiet"));
+            println!("  --verbose  {}", strings::get("app.opt_verbose"));
+            return;
+        }
+        DriveParse::Unknown(opt) => {
+            eprintln!("{}", strings::fmt("app.unknown_option", &[("opt", &opt)]));
+            std::process::exit(1);
+        }
+    };
 
     let mut session = match device {
         Some(p) => Drive::open(Path::new(p)).unwrap_or_else(|e| {
@@ -429,7 +466,20 @@ pub fn run(device: Option<&str>, args: &[String]) {
     // repros from the playlists, not the drive). Best-effort — no disc/unreadable
     // tree just yields a drive-only profile, as before.
     let disc_summary =
-        crate::disc_capture::fold_structure(&profile_dir, &mut written, &mut session);
+        crate::disc_capture::fold_structure(&profile_dir, &mut written, &mut session)
+            .unwrap_or_else(|e| {
+                if !quiet {
+                    eprintln!(
+                        "{}",
+                        strings::fmt_or(
+                            "drive.structure_unreadable",
+                            "Disc structure not captured: {err}",
+                            &[("err", &e.to_string())],
+                        )
+                    );
+                }
+                None
+            });
 
     // ── Summarize captured profile ─────────────────────────────────────────
 
@@ -1076,8 +1126,9 @@ fn toml_basic_unescape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CAPTURE_COMMAND, base64_decode, base64_encode, format_date, hex_dump, json_escape,
-        sanitize_component, toml_basic_unescape, toml_escape,
+        CAPTURE_COMMAND, DriveFlags, DriveParse, base64_decode, base64_encode, format_date,
+        hex_dump, json_escape, parse_drive_flags, sanitize_component, toml_basic_unescape,
+        toml_escape,
     };
 
     #[test]
@@ -1365,6 +1416,62 @@ mod tests {
     fn format_date_standard_yyyymmdd() {
         assert_eq!(format_date("20211231"), "2021-12-31");
         assert_eq!(format_date("19991009"), "1999-10-09");
+    }
+
+    // LG drives (e.g. BU40N) report a bogus "21" century in the CCYYMMDDHHMI
+    // field; the real date is 20YY. Rendering the raw century gives 2118.
+    #[test]
+    fn format_date_lg_bogus_century_renders_as_20yy() {
+        assert_eq!(format_date("211810241934"), "2018-10-24");
+    }
+
+    fn drive_args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn drive_flags_accept_log_level_and_its_value() {
+        let want = DriveFlags {
+            share: true,
+            verbose: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_drive_flags(&drive_args(&["--log-level", "3", "--share"])),
+            DriveParse::Ok(want)
+        );
+        assert_eq!(
+            parse_drive_flags(&drive_args(&["--log-level", "1"])),
+            DriveParse::Ok(DriveFlags::default())
+        );
+    }
+
+    #[test]
+    fn drive_flags_log_file_without_value_keeps_next_flag() {
+        let want = DriveFlags {
+            share: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_drive_flags(&drive_args(&["--log-file", "--share"])),
+            DriveParse::Ok(want)
+        );
+        assert_eq!(
+            parse_drive_flags(&drive_args(&["--log-file", "/tmp/x.log", "-q"])),
+            DriveParse::Ok(DriveFlags {
+                quiet: true,
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn drive_flags_reject_unknown_and_honour_help() {
+        assert_eq!(
+            parse_drive_flags(&drive_args(&["--bogus"])),
+            DriveParse::Unknown("--bogus".into())
+        );
+        assert_eq!(parse_drive_flags(&drive_args(&["-h"])), DriveParse::Help);
     }
 
     #[test]
