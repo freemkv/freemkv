@@ -203,10 +203,12 @@ impl Form {
     }
 }
 
-fn page(title: &str, icon: &str, groups: &[adw::PreferencesGroup]) -> adw::PreferencesPage {
+/// `name` is the tab's catalog key, not its (translated) title, so a language
+/// switch can reopen the same tab.
+fn page(name: &str, icon: &str, groups: &[adw::PreferencesGroup]) -> adw::PreferencesPage {
     let p = adw::PreferencesPage::builder()
-        .title(title)
-        .name(title)
+        .title(g(name))
+        .name(name)
         .icon_name(icon)
         .build();
     for grp in groups {
@@ -228,7 +230,7 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
         .modal(true)
         .destroy_with_parent(true)
         .search_enabled(false)
-        .default_width(680)
+        .default_width(760)
         .default_height(640)
         .build();
     let mut f = Form::default();
@@ -241,11 +243,7 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     let o2 = group(None);
     f.switch(&o2, "keep_iso", &g("gui.set.keep_iso"));
     f.switch(&o2, "auto_eject", &g("gui.set.auto_eject"));
-    window.add(&page(
-        &g("gui.tab.output"),
-        "folder-videos-symbolic",
-        &[o1, o2],
-    ));
+    window.add(&page("gui.tab.output", "folder-videos-symbolic", &[o1, o2]));
 
     // ── Selection
     let s1 = group(Some(&g("gui.set.min_length_note")));
@@ -256,7 +254,7 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     f.langs(&s2, "sub_langs", &g("gui.set.sub_langs"));
     f.langs(&s2, "forced_sub_langs", &g("gui.set.forced_sub_langs"));
     window.add(&page(
-        &g("gui.tab.selection"),
+        "gui.tab.selection",
         "object-select-symbolic",
         &[s1, s2],
     ));
@@ -271,7 +269,7 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     let r3 = group(Some(&g("gui.set.capture_note")));
     f.switch(&r3, "force", &g("gui.set.overwrite"));
     window.add(&page(
-        &g("gui.tab.recovery"),
+        "gui.tab.recovery",
         "media-optical-symbolic",
         &[r1, r2, r3],
     ));
@@ -303,7 +301,7 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     ));
     k3.add(&test_row);
     window.add(&page(
-        &g("gui.tab.keys"),
+        "gui.tab.keys",
         "dialog-password-symbolic",
         &[k1, k2, k3],
     ));
@@ -316,7 +314,7 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     let a3 = group(None);
     f.combo(&a3, "log_level", &g("gui.set.log_detail"));
     window.add(&page(
-        &g("gui.tab.advanced"),
+        "gui.tab.advanced",
         "preferences-system-symbolic",
         &[a1, a2, a3],
     ));
@@ -428,7 +426,12 @@ impl Prefs {
         let tab = self.window.visible_page_name().map(|s| s.to_string());
         self.commit(shell);
         let lang = shell.settings.borrow().language.clone();
-        crate::app_entry::apply_locale(&lang, super::system_locale_code);
+        // The LIVE switch (`set_locale`); `app_entry::apply_locale` is the
+        // pre-init one and refuses once strings are loaded.
+        match (crate::ui::locale_code(&lang), super::system_locale_code()) {
+            ("auto", Some(sys)) => crate::strings::set_locale(&sys),
+            (code, _) => crate::strings::set_locale(code),
+        }
         self.window.close();
         shell.relocalize();
         show(shell, tab);
