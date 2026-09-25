@@ -823,8 +823,6 @@ pub fn log_menu_label(log_hidden: bool) -> String {
 }
 
 // ── Menu layout, shared by every shell ────────────────────────────────────
-// See docs/menu-layout.md — why the menu structure is a shared decision,
-// how each shell places [`MenuGroupId::App`] per platform convention.
 
 /// A menu-driven action. Almost every entry maps to a plain [`Cmd`] the
 /// shell just dispatches; the exceptions carry no user-facing text (they
@@ -3083,7 +3081,6 @@ mod tests {
     }
 
     // ── menu_layout tests ────────────────────────────────────────────────
-    // See docs/menu-layout.md — how these pin the shared menu structure.
 
     #[test]
     fn the_menu_layout_has_the_five_canonical_groups_in_display_order() {

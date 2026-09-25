@@ -2075,11 +2075,9 @@ use crate::file_identity::same_file;
 ///
 /// Both decorations, never one or the other: the AACS key map (AACS decrypts
 /// only through a resolved map) AND the disc's encrypted-content extents
-/// (this reader walks UDF and BDMV nav sectors that are clear). See
-/// `docs/whole-image-decrypt.md` for the freemkv#55 background — why the
-/// map alone isn't a content gate, and why an empty `content_ranges` leaves
-/// the gate OFF on purpose (avoids writing ciphertext under a name that
-/// promises plaintext).
+/// (this reader walks UDF and BDMV nav sectors that are clear; freemkv#55).
+/// An empty `content_ranges` leaves the gate OFF on purpose, so ciphertext is
+/// never written under a name that promises plaintext.
 fn whole_image_decrypting_source<S: libfreemkv::SectorSource>(
     inner: S,
     keys: libfreemkv::decrypt::DecryptKeys,
