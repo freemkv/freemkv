@@ -76,14 +76,13 @@
   </branding>
 
   <!--
-    Release history. Each new release adds an entry at the top; the
-    orchestrator's `release-linux.yml` promotes the new version's tag
-    into a `<release version=…>` block after the changelog is written.
+    Release history, newest first. release-orchestrate.yml stamps the real
+    release date into the entry for the version it releases.
   -->
   <releases>
-    <release version="1.7.6" date="2026-09-24">
+    <release version="1.7.6" date="2026-09-25">
       <description>
-        <p>First official Flathub release — Linux desktop shell (GTK4 + libadwaita).</p>
+        <p>First Linux desktop release (GTK4 + libadwaita), in beta.</p>
       </description>
     </release>
   </releases>

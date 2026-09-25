@@ -3161,6 +3161,18 @@ mod tests {
             got, expected,
             "clear filesystem bytes must reach the ISO untouched"
         );
+
+        // The complement: a unit INSIDE the content extent is decrypted.
+        let mut inside = vec![0u8; UNIT];
+        let n = src
+            .read_sectors(300, 3, &mut inside, false)
+            .expect("a keyed unit inside the content extent decrypts");
+        assert_eq!(n, UNIT);
+        assert_ne!(
+            inside[16..],
+            expected[16..],
+            "sectors inside the content extent must come out decrypted"
+        );
     }
 
     // See docs/pipe.md#a_dir_source_must_exist_and_be_a_directory — `dir://` source validation, which had no test at…
@@ -5388,7 +5400,7 @@ mod tests {
     }
 }
 
-// See docs/pipe.md#line5859 — The decisions that separate "the rip worked" from…
+// See docs/pipe.md#verdict_tests — The decisions that separate "the rip worked" from…
 #[cfg(test)]
 mod verdict_tests {
     use super::{

@@ -1,18 +1,19 @@
 name: AppImage
 
-# Builds a portable AppImage of the Linux GUI. Runs on qa/main lanes (the
-# release orchestrator downloads the artifact). Users on distros without
-# Flathub (or who prefer a single-file binary) grab this from the release
-# page. Unlike `.deb`, one AppImage runs on every glibc-based distro new
-# enough for GTK4 + libadwaita.
-# Manually-triggered only for now — the linuxdeploy + linuxdeploy-plugin-gtk
-# download step needs debugging on a real Linux dev box. Wired back to
-# `push: [qa, main]` once a smoke-tested run produces a working AppImage.
+# Builds a portable AppImage of the Linux desktop app (bundles GTK4 +
+# libadwaita). On demand for testing; on a version tag release.yml calls it
+# with release: true and it uploads freemkv-x86_64-linux.AppImage.
 on:
   workflow_dispatch:
+  # release.yml calls this with release: true on a version tag.
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: appimage-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -20,17 +21,18 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-    # `ubuntu-22.04` (jammy) is a deliberate choice: the AppImage produced
-    # here must run on distros as old as the runner it was built on, so
-    # picking the OLDEST supported LTS gives the widest glibc/GTK4
-    # compatibility. Building on `ubuntu-latest` (24.04+) would raise
-    # the glibc floor and lock out Ubuntu 22.04 users.
+    permissions:
+      contents: write
+    # 24.04: the shell needs GTK >= 4.10 and libadwaita >= 1.4 (Cargo features
+    # v4_10 / v1_4), which 22.04 does not ship. Sets the distro floor to 2024+.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+      # Dev builds link sibling dev checkouts; a release links the tagged crates.
+      - if: ${{ !inputs.release }}
+        uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
@@ -44,8 +46,13 @@ jobs:
             build-essential \
             desktop-file-utils \
             wget
-          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-gtk/releases/download/continuous/linuxdeploy-plugin-gtk.sh
+          # Pinned + hash-checked: executed in the release build, so never "continuous".
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+          wget -q https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/7a3fbc31a9e5075073ff8790f26effbac5f84453/linuxdeploy-plugin-gtk.sh
+          printf '%s  %s\n' \
+            c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d linuxdeploy-x86_64.AppImage \
+            b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171 linuxdeploy-plugin-gtk.sh \
+            | sha256sum -c -
           chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -67,6 +74,8 @@ jobs:
           cp freemkv/res/freemkv-icon.svg \
              AppDir/usr/share/icons/hicolor/scalable/apps/org.freemkv.FreeMKV.svg
       - name: Build the AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
           set -euo pipefail
           # The gtk plugin bundles GTK4/libadwaita runtime libs so the
@@ -77,8 +86,36 @@ jobs:
             --output appimage \
             --desktop-file AppDir/usr/share/applications/org.freemkv.FreeMKV.desktop \
             --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/org.freemkv.FreeMKV.svg
-      - uses: actions/upload-artifact@v4
+      - name: Smoke-test the AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y xvfb
+          ./freemkv-x86_64.AppImage --version
+          # The GUI must still be running after 10s on a virtual display (124 = timed out, alive).
+          rc=0; xvfb-run -a timeout 10 ./freemkv-x86_64.AppImage gui || rc=$?
+          [ "$rc" = 124 ] || { echo "::error::GUI exited early (rc=$rc)"; exit 1; }
+      - if: ${{ !inputs.release }}
+        uses: actions/upload-artifact@v4
         with:
-          name: freemkv-appimage-${{ github.ref_name }}
+          name: freemkv-appimage-${{ github.run_id }}
           path: freemkv-*.AppImage
           if-no-files-found: error
+      - name: Package for release
+        if: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          VER="${{ github.ref_name }}"
+          A=freemkv-x86_64-linux
+          mv freemkv-x86_64.AppImage "$A.AppImage"
+          cp "$A.AppImage" "$A-$VER.AppImage"
+          sha256sum "$A.AppImage" "$A-$VER.AppImage" > "$A.AppImage.sha256"
+      - name: Upload to the release
+        if: ${{ inputs.release }}
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          files: |
+            freemkv-x86_64-linux.AppImage
+            freemkv-x86_64-linux-*.AppImage
+            freemkv-x86_64-linux.AppImage.sha256

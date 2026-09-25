@@ -52,6 +52,8 @@ pub mod ui;
 // The Windows shell's DPI→geometry arithmetic. Not `cfg(windows)` on purpose:
 // gating it would make its unit tests unrunnable anywhere but Windows.
 pub mod win_layout;
+// The GTK shell's toolkit-free glue, ungated for the same reason.
+pub mod linux_glue;
 
 // ── Win32 shell — WINDOWS ONLY ──────────────────────────────────────────────
 // Lives here so `freemkv-gui.exe` can reach the same shell from one

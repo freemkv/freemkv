@@ -1629,7 +1629,10 @@ pub struct App {
     pub tree: Tree,
     pub settings: Settings,
     pub page: Page,
-    pub log: Vec<LogLine>,
+    pub log: Arc<Vec<LogLine>>,
+    /// Sequence number of `log[0]`; bumps on every trim or clear, so a shell
+    /// that appended incrementally knows its rendered lines went stale.
+    pub log_first: u64,
     pub source: String,
     pub output_dir: String,
     pub format: String,
@@ -1724,7 +1727,8 @@ impl App {
             tree: Tree::default(),
             settings,
             page: Page::Empty,
-            log: Vec::new(),
+            log: Arc::default(),
+            log_first: 0,
             source: String::new(),
             output_dir,
             format,
@@ -1757,16 +1761,23 @@ impl App {
     /// once per line.
     const LOG_TRIM: usize = 1_000;
 
+    fn clear_log(&mut self) {
+        self.log_first += self.log.len() as u64;
+        self.log = Arc::default();
+    }
+
     pub fn say(&mut self, kind: LogKind, text: &str) {
-        self.log.push(LogLine {
+        let log = Arc::make_mut(&mut self.log);
+        log.push(LogLine {
             text: text.into(),
             kind,
         });
-        if self.log.len() > Self::LOG_MAX {
+        if log.len() > Self::LOG_MAX {
             // Oldest first: the tail is where a failure surfaces. No "elided" notice
             // line, since `gui.log.elided` doesn't exist and i18n is pinned to a
             // release tag — the alternative is one untranslated string. Debt recorded.
-            self.log.drain(..Self::LOG_TRIM);
+            log.drain(..Self::LOG_TRIM);
+            self.log_first += Self::LOG_TRIM as u64;
         }
     }
 
@@ -1802,7 +1813,7 @@ impl App {
     /// Answered from the scan, before any rip: a container that will certainly
     /// fail should say so while the user can still change it.
     pub fn container_mismatch(&self) -> Option<String> {
-        if !self.format.contains("MP4") {
+        if !self.effective_format().contains("MP4") {
             return None;
         }
         let ticked = self.tree.ticked_titles();
@@ -1874,7 +1885,7 @@ impl App {
                 vec![Effect::Redraw]
             }
             Cmd::ClearLog => {
-                self.log.clear();
+                self.clear_log();
                 vec![Effect::Redraw]
             }
             Cmd::ToggleLog => {
@@ -2062,7 +2073,7 @@ impl App {
         let disc = crate::engine::is_disc_source(path);
         match scanned {
             Ok(sc) => {
-                self.log.clear();
+                self.clear_log();
                 self.say(
                     LogKind::Result,
                     &crate::strings::fmt(
@@ -2416,7 +2427,8 @@ impl App {
             format: self.effective_format(),
             formats: self.offered_formats(),
             can_run: !self.running() && !self.source.is_empty(),
-            log: self.log.clone(),
+            log: Arc::clone(&self.log),
+            log_first: self.log_first,
             log_hidden: self.log_hidden,
             log_menu_label: log_menu_label(self.log_hidden),
             detail: self
@@ -2503,7 +2515,9 @@ pub struct View {
     pub format: String,
     pub formats: Vec<Vec<&'static str>>,
     pub can_run: bool,
-    pub log: Vec<LogLine>,
+    pub log: Arc<Vec<LogLine>>,
+    /// See [`App::log_first`].
+    pub log_first: u64,
     pub log_hidden: bool,
     /// The View ▸ log menu item's label for the CURRENT state — see
     /// [`log_menu_label`]. Carried on the `View` so a shell only assigns it,
@@ -2969,6 +2983,103 @@ mod tests {
             title_ids: Vec::new(),
             details: Vec::new(),
         }
+    }
+
+    fn app_with_titles(codecs: &[&str]) -> App {
+        let mut sc = probe_scan();
+        sc.rows = (0..codecs.len())
+            .map(|t| {
+                let mut r = sc.rows[0].clone();
+                r.title = t;
+                r
+            })
+            .collect();
+        sc.title_count = codecs.len();
+        sc.video_codecs = codecs.iter().map(|c| c.to_string()).collect();
+        let mut app = App::new();
+        app.video_codecs = sc.video_codecs.clone();
+        app.tree = Tree::from_scan(&sc, "All titles", 0.0, &LangPrefs::default());
+        app.format = "Selected titles → MP4".to_string();
+        app
+    }
+
+    #[test]
+    fn mp4_mismatch_is_reported_when_mp4_is_really_the_format() {
+        let app = app_with_titles(&["MPEG-2", "HEVC"]);
+        assert!(app.effective_format().contains("MP4"));
+        assert!(app.container_mismatch().is_some());
+    }
+
+    // A stale MP4 preference from an earlier source is not what this rip
+    // uses, so it must not raise an MP4 warning.
+    #[test]
+    fn a_stale_mp4_preference_raises_no_mismatch_when_mp4_is_not_offered() {
+        let app = app_with_titles(&["MPEG-2"]);
+        assert!(!app.effective_format().contains("MP4"));
+        assert_eq!(app.container_mismatch(), None);
+    }
+
+    // Shells append the log incrementally keyed on `log_first`; if a trim or a
+    // clear failed to move it, they would append onto stale lines.
+    #[test]
+    fn log_first_moves_on_trim_and_clear_but_not_on_append() {
+        let mut app = App::new();
+        app.clear_log();
+        let base = app.view().log_first;
+        for i in 0..App::LOG_MAX {
+            app.say(LogKind::Detail, &i.to_string());
+        }
+        assert_eq!(app.view().log_first, base, "appends alone keep the front");
+        app.say(LogKind::Detail, "one more");
+        let v = app.view();
+        assert_eq!(v.log_first, base + App::LOG_TRIM as u64);
+        assert_eq!(v.log[0].text, App::LOG_TRIM.to_string());
+        let len = v.log.len() as u64;
+        app.dispatch(Cmd::ClearLog);
+        let v = app.view();
+        assert!(v.log.is_empty());
+        assert_eq!(v.log_first, base + App::LOG_TRIM as u64 + len);
+    }
+
+    fn tick_a_finished_run(notify: bool) -> Vec<Effect> {
+        let mut app = App::new();
+        app.settings.notify_when_rip_finished = notify;
+        app.output_dir = "/out".to_string();
+        let st = Arc::new(RunState::default());
+        *st.summary.lock().unwrap() = "3 titles written".to_string();
+        st.finished
+            .store(true, std::sync::atomic::Ordering::Release);
+        app.run = Some(st);
+        app.tick()
+    }
+
+    #[test]
+    fn a_finished_rip_notifies_when_the_setting_is_on() {
+        let fx = tick_a_finished_run(true);
+        let n: Vec<_> = fx
+            .iter()
+            .filter_map(|e| match e {
+                Effect::NotifyRipFinished {
+                    body, output_dir, ..
+                } => Some((body.as_str(), output_dir.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(n, vec![("3 titles written", "/out")]);
+    }
+
+    #[test]
+    fn a_finished_rip_stays_silent_when_the_setting_is_off() {
+        let fx = tick_a_finished_run(false);
+        assert!(
+            fx.contains(&Effect::StopTicking),
+            "the run must still finish"
+        );
+        assert!(
+            !fx.iter()
+                .any(|e| matches!(e, Effect::NotifyRipFinished { .. })),
+            "got {fx:?}"
+        );
     }
 
     // ── menu_layout tests ────────────────────────────────────────────────

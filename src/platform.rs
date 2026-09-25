@@ -45,6 +45,47 @@ pub fn is_absolute(p: &str) -> bool {
     !p.trim().is_empty() && std::path::Path::new(p.trim()).is_absolute()
 }
 
+/// XDG Base Directory / xdg-user-dirs resolution, kept pure so it is testable
+/// on every host.
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+mod xdg {
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    // The spec says a relative path in an XDG variable is invalid and ignored.
+    fn absolute(v: Option<OsString>) -> Option<PathBuf> {
+        v.map(PathBuf::from).filter(|p| p.is_absolute())
+    }
+
+    pub fn data_home(env: Option<OsString>, home: &Path) -> PathBuf {
+        absolute(env).unwrap_or_else(|| home.join(concat!(".", "local")).join("share"))
+    }
+
+    pub fn config_home(env: Option<OsString>, home: &Path) -> PathBuf {
+        absolute(env).unwrap_or_else(|| home.join(".config"))
+    }
+
+    /// `XDG_VIDEOS_DIR` from the environment, else from `user-dirs.dirs`
+    /// (`XDG_VIDEOS_DIR="$HOME/Videos"` or an absolute path), else `~/Videos`.
+    /// An entry equal to `$HOME` means "disabled" in xdg-user-dirs.
+    pub fn videos_dir(env: Option<OsString>, user_dirs: Option<&str>, home: &Path) -> PathBuf {
+        let from_file = || {
+            user_dirs?.lines().find_map(|l| {
+                let v = l.trim().strip_prefix("XDG_VIDEOS_DIR=")?;
+                let v = v.strip_prefix('"')?.strip_suffix('"')?;
+                match v.strip_prefix("$HOME") {
+                    Some(rest) => Some(home.join(rest.trim_start_matches('/'))),
+                    None => Some(PathBuf::from(v)).filter(|p| p.is_absolute()),
+                }
+            })
+        };
+        absolute(env)
+            .or_else(from_file)
+            .filter(|p| p.as_path() != home)
+            .unwrap_or_else(|| home.join("Videos"))
+    }
+}
+
 #[cfg(unix)]
 mod imp {
     use std::path::PathBuf;
@@ -69,11 +110,7 @@ mod imp {
         // XDG data home under HOME (see the spec), never `Library/…`.
         #[cfg(not(target_os = "macos"))]
         {
-            std::env::var_os("XDG_DATA_HOME")
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home_dir().join(concat!(".", "local")).join("share"))
-                .join("freemkv")
+            super::xdg::data_home(std::env::var_os("XDG_DATA_HOME"), &home_dir()).join("freemkv")
         }
     }
 
@@ -82,15 +119,14 @@ mod imp {
         {
             home_dir().join("Movies")
         }
-        // On Linux the equivalent is `~/Videos` — resolved through
-        // `xdg-user-dirs` (`$XDG_VIDEOS_DIR`) so a user who moved it to a
-        // second drive gets that location, not a stale default.
+        // xdg-user-dirs keeps the (possibly moved or localized) Videos dir in
+        // `user-dirs.dirs`, which is rarely exported into the environment.
         #[cfg(not(target_os = "macos"))]
         {
-            std::env::var_os("XDG_VIDEOS_DIR")
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home_dir().join("Videos"))
+            let home = home_dir();
+            let config = super::xdg::config_home(std::env::var_os("XDG_CONFIG_HOME"), &home);
+            let dirs = std::fs::read_to_string(config.join("user-dirs.dirs")).ok();
+            super::xdg::videos_dir(std::env::var_os("XDG_VIDEOS_DIR"), dirs.as_deref(), &home)
         }
     }
 
@@ -184,6 +220,76 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    use super::xdg;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    const HOME: &str = "/srv/u";
+    const DIRS: &str = "# written by xdg-user-dirs-update\nXDG_DESKTOP_DIR=\"$HOME/Bureau\"\nXDG_VIDEOS_DIR=\"$HOME/Vidéos\"\n";
+
+    fn env(s: &str) -> Option<OsString> {
+        Some(OsString::from(s))
+    }
+
+    #[test]
+    fn data_home_defaults_and_ignores_relative_or_empty() {
+        let h = Path::new(HOME);
+        let dflt = PathBuf::from("/srv/u")
+            .join(concat!(".", "local"))
+            .join("share");
+        assert_eq!(xdg::data_home(None, h), dflt);
+        assert_eq!(xdg::data_home(env(""), h), dflt);
+        assert_eq!(xdg::data_home(env("rel/data"), h), dflt);
+        assert_eq!(xdg::data_home(env("/srv/d"), h), PathBuf::from("/srv/d"));
+    }
+
+    #[test]
+    fn config_home_defaults_and_ignores_relative() {
+        let h = Path::new(HOME);
+        assert_eq!(xdg::config_home(None, h), PathBuf::from("/srv/u/.config"));
+        assert_eq!(
+            xdg::config_home(env("cfg"), h),
+            PathBuf::from("/srv/u/.config")
+        );
+        assert_eq!(xdg::config_home(env("/etc/u"), h), PathBuf::from("/etc/u"));
+    }
+
+    #[test]
+    fn videos_dir_reads_the_localized_entry_from_user_dirs() {
+        let h = Path::new(HOME);
+        assert_eq!(
+            xdg::videos_dir(None, Some(DIRS), h),
+            PathBuf::from("/srv/u/Vidéos")
+        );
+    }
+
+    #[test]
+    fn videos_dir_precedence_and_fallbacks() {
+        let h = Path::new(HOME);
+        assert_eq!(
+            xdg::videos_dir(env("/mnt/v"), Some(DIRS), h),
+            PathBuf::from("/mnt/v"),
+            "the environment wins over the file"
+        );
+        assert_eq!(
+            xdg::videos_dir(None, Some("XDG_VIDEOS_DIR=\"/data/films\"\n"), h),
+            PathBuf::from("/data/films")
+        );
+        assert_eq!(
+            xdg::videos_dir(None, Some("XDG_VIDEOS_DIR=\"$HOME/\"\n"), h),
+            PathBuf::from("/srv/u/Videos"),
+            "an entry equal to $HOME means disabled"
+        );
+        assert_eq!(
+            xdg::videos_dir(None, None, h),
+            PathBuf::from("/srv/u/Videos")
+        );
+        assert_eq!(
+            xdg::videos_dir(env("relative"), None, h),
+            PathBuf::from("/srv/u/Videos")
+        );
+    }
+
     /// The volume holding the temp dir always exists and always reports a
     /// figure — a blank/zero here is the "Information panel is empty" defect.
     #[test]

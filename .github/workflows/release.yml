@@ -469,6 +469,15 @@ jobs:
             ${{ matrix.asset }}-*${{ matrix.ext }}
             ${{ matrix.asset }}${{ matrix.ext }}.sha256
 
+  # ── Linux desktop app (AppImage, bundles GTK4 + libadwaita) ─────────────
+  linux-appimage:
+    needs: verify
+    permissions:
+      contents: write
+    uses: ./.github/workflows/appimage.yml
+    with:
+      release: true
+
   # ── Homebrew tap ────────────────────────────────────────────────────────
   #
   # brew is the install path with no friction on macOS: Homebrew fetches with

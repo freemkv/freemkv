@@ -117,7 +117,7 @@ pub(crate) fn reject_unknown_option(opt: &str) -> ! {
     std::process::exit(1);
 }
 
-pub fn run(device: Option<&str>, args: &[String]) {
+pub(crate) fn run(device: Option<&str>, args: &[String]) {
     let flags = match parse_info_flags(args) {
         InfoParse::Ok(f) => f,
         InfoParse::Help => {
@@ -332,7 +332,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
 /// path produces: duration, size, clip count, and video/audio/subtitle streams.
 ///
 /// `full` shows every title (otherwise the first 5, with a "+N more" footer).
-pub fn print_disc_titles(disc: &Disc, flags: &InfoFlags) {
+pub(crate) fn print_disc_titles(disc: &Disc, flags: &InfoFlags) {
     let out = Output::new(flags.verbose, flags.quiet);
     let full = flags.full;
     // iso:// is keyless, but format/MKB generation are read at scan time, so state

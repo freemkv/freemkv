@@ -4,13 +4,24 @@
 
 ### Added
 
-- **Linux desktop shell (BETA).** freemkv now ships a native GTK4 + libadwaita GUI on Linux, alongside the existing macOS (AppKit) and Windows (winsafe / Win32) shells — every user-facing decision is made by the shared `ui` core, so the app is the same product on all three OSes. Distributed as a Flatpak on Flathub (`org.freemkv.FreeMKV`) and as a portable AppImage on the release page (issue #56). The main-content panels (source picker, title tree, output, progress, log) are currently a placeholder — port lands one panel at a time in follow-up releases; the CLI on Linux is production-quality as it has always been.
-- **Rip-finished desktop notification.** When a rip completes, the app fires a native notification on the OS notification centre — toast on Windows, Notification Center on macOS, XDG Desktop Portal + in-window AdwToast on Linux. Controlled by a new `Settings.notify_when_rip_finished` toggle (default on, upgrade-safe for existing settings files).
+- **Linux desktop app (BETA).** A native GTK4 + libadwaita GUI at feature parity with the macOS and Windows apps: source picker (drive, file, folder), title/track tree, format and output choices, rip/cancel/eject, progress page, log pane, Settings, reveal output, hamburger menu. Every decision is made by the shared `ui` core, so it is the same product on all three OSes (issue #56). Flatpak manifest (`org.freemkv.FreeMKV`) and AppImage workflow included; the Flathub submission follows the release.
+- **Rip-finished desktop notification** on all three OSes: Notification Center on macOS, a toast on Windows, the XDG portal plus an in-window toast on Linux. Clicking it reveals the output. Controlled by the new "Notify when a rip finishes" setting (default on, upgrade-safe).
 
 ### Changed
 
-- **Menu bar is one source of truth.** `windows.rs` and `mac.rs` no longer hand-build their menus in-place — both walk the new `ui::menu_layout()` returning a canonical structure of groups, items, and accelerators. Adding or renaming a menu row is now one edit, and a cross-shell contract test in `tests/shell_contract.rs` pins that every user-driveable `Cmd` appears in the layout.
-- **Linux paths honour XDG.** `platform::support_dir` on Linux now returns `$XDG_DATA_HOME/freemkv` (was the Mac-shaped `~/Library/Application Support/freemkv`), and `platform::default_dest_dir` returns `$XDG_VIDEOS_DIR` (was `~/Movies`). Fixes a latent CLI bug where Linux users' settings were written to a Mac-style path.
+- **One menu definition for every shell.** macOS, Windows and Linux build their menus from `ui::menu_layout()`; a contract test pins that every user-driveable `Cmd` appears in it.
+- **Linux paths follow XDG.** Settings and state live under `$XDG_DATA_HOME/freemkv`; the default output folder is your Videos folder as xdg-user-dirs records it (moved or localized folders are honoured). Relative XDG values are ignored, per the spec.
+- The info panel's MKB line reads `MKB v<n>`; the disc type line already says whether it is UHD.
+
+### Fixed
+
+- `freemkv info disc://` no longer rejects `--log-level N`, and `--log-file` given without a path no longer swallows the next option.
+- The GUI no longer warns that "MP4 can't hold MPEG-2" when an earlier MP4 choice does not apply to the current disc.
+- `info --share` now says why the disc structure could not be captured instead of silently omitting it.
+- The log pane on macOS and Windows appends new lines instead of redrawing the whole log every tick, so long rips no longer slow the window down.
+- ISO-to-ISO decrypt declares its content extents (#55).
+- AppImage tooling is pinned and checksum-verified (the GTK plugin's old download URL no longer existed).
+- The release now stamps the real date into the AppStream metadata.
 
 ## [1.7.5] — 2026-09-23
 
