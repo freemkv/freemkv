@@ -52,7 +52,10 @@ mimalloc = "0.1"
 # PINNED with `=`: winsafe is pre-1.0 and moves on a quarterly cadence, so it
 # reserves the right to break the API. Upgrade deliberately, never implicitly.
 [target.'cfg(target_os = "windows")'.dependencies]
-winsafe = { version = "=0.0.29", features = ["gui", "shell"] }
+winsafe = { version = "=0.0.29", features = ["gui", "shell", "advapi"] }
+# Rip-finished toast (WinRT `ToastNotificationManager`), which winsafe does not
+# wrap. PINNED with `=`, same rationale as winsafe.
+windows = { version = "=0.62", features = ["UI_Notifications", "Data_Xml_Dom", "Foundation"] }
 
 # ── Linux desktop shell (GTK4 + libadwaita) ────────────────────────────────
 # GTK4 is what Flathub reviewers expect and what the GNOME desktop draws
@@ -92,7 +95,15 @@ objc2-foundation = { version = "0.3", features = [
   "NSString", "NSGeometry", "NSArray", "NSObjCRuntime", "NSNotification",
   "NSDate", "NSTimer", "NSRunLoop", "NSURL", "NSValue", "NSDictionary",
   "NSEnumerator", "NSError", "NSRange", "NSAttributedString", "NSDictionary",
+  "NSBundle",
 ] }
+# Rip-finished notification. PINNED with `=`, same rationale as winsafe.
+objc2-user-notifications = { version = "=0.3", default-features = false, features = [
+  "std", "block2", "bitflags", "UNNotification", "UNNotificationContent",
+  "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound",
+  "UNNotificationTrigger", "UNUserNotificationCenter",
+] }
+block2 = "=0.6"
 
 # Resolve the freemkv crates from their GIT TAGS. They are OFF crates.io
 # (libfreemkv git-deps the firmware crate, and keysources deps libfreemkv), so
