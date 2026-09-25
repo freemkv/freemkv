@@ -224,7 +224,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
-    const HOME: &str = "/home/u";
+    const HOME: &str = "/srv/u";
     const DIRS: &str = "# written by xdg-user-dirs-update\nXDG_DESKTOP_DIR=\"$HOME/Bureau\"\nXDG_VIDEOS_DIR=\"$HOME/Vidéos\"\n";
 
     fn env(s: &str) -> Option<OsString> {
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn data_home_defaults_and_ignores_relative_or_empty() {
         let h = Path::new(HOME);
-        let dflt = PathBuf::from("/home/u")
+        let dflt = PathBuf::from("/srv/u")
             .join(concat!(".", "local"))
             .join("share");
         assert_eq!(xdg::data_home(None, h), dflt);
@@ -246,10 +246,10 @@ mod tests {
     #[test]
     fn config_home_defaults_and_ignores_relative() {
         let h = Path::new(HOME);
-        assert_eq!(xdg::config_home(None, h), PathBuf::from("/home/u/.config"));
+        assert_eq!(xdg::config_home(None, h), PathBuf::from("/srv/u/.config"));
         assert_eq!(
             xdg::config_home(env("cfg"), h),
-            PathBuf::from("/home/u/.config")
+            PathBuf::from("/srv/u/.config")
         );
         assert_eq!(xdg::config_home(env("/etc/u"), h), PathBuf::from("/etc/u"));
     }
@@ -259,7 +259,7 @@ mod tests {
         let h = Path::new(HOME);
         assert_eq!(
             xdg::videos_dir(None, Some(DIRS), h),
-            PathBuf::from("/home/u/Vidéos")
+            PathBuf::from("/srv/u/Vidéos")
         );
     }
 
@@ -277,16 +277,16 @@ mod tests {
         );
         assert_eq!(
             xdg::videos_dir(None, Some("XDG_VIDEOS_DIR=\"$HOME/\"\n"), h),
-            PathBuf::from("/home/u/Videos"),
+            PathBuf::from("/srv/u/Videos"),
             "an entry equal to $HOME means disabled"
         );
         assert_eq!(
             xdg::videos_dir(None, None, h),
-            PathBuf::from("/home/u/Videos")
+            PathBuf::from("/srv/u/Videos")
         );
         assert_eq!(
             xdg::videos_dir(env("relative"), None, h),
-            PathBuf::from("/home/u/Videos")
+            PathBuf::from("/srv/u/Videos")
         );
     }
 
