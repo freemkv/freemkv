@@ -377,7 +377,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.7.4"
+version = "1.7.6"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.7.6#e930bbf9ef1c55c9ce2fcddcd5ba8e566febd983"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -389,14 +390,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.7.4"
+version = "1.7.6"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.7.6#ea3495a41cda5f83315b18d579fa758b4de7ac37"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.7.4"
+version = "1.7.6"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.7.6#8af7ae3c0dbd590560d6837a60ac053a9ea3b8b7"
 dependencies = [
  "base64",
  "flate2",
@@ -409,7 +412,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.7.4"
+version = "1.7.6"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.7.6#991e59dfcd100700ab679b2c1ec7c6e7cf918bf6"
 dependencies = [
  "aes",
  "base64",
@@ -593,7 +597,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -977,7 +981,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.7.4"
+version = "1.7.6"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.7.6#f47ac9dfcb251c35e819823fdb232920a8023f9a"
 dependencies = [
  "aes",
  "base64",
@@ -1682,18 +1687,18 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "thiserror"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1998,6 +2003,15 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+dependencies = [
+ "windows-targets",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.59.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets",
 ]
