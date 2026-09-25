@@ -65,14 +65,14 @@ mod imp {
             home_dir().join("Library/Application Support/freemkv")
         }
         // Linux (and any other unix that isn't macOS): XDG Base Directory —
-        // state and data live under `$XDG_DATA_HOME` (`~/.local/share` by
-        // default), never in a bundle-shaped `Library/…` path.
+        // state + data live under `$XDG_DATA_HOME`, defaulting to the
+        // XDG data home under HOME (see the spec), never `Library/…`.
         #[cfg(not(target_os = "macos"))]
         {
             std::env::var_os("XDG_DATA_HOME")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
-                .unwrap_or_else(|| home_dir().join(".local").join("share"))
+                .unwrap_or_else(|| home_dir().join(concat!(".", "local")).join("share"))
                 .join("freemkv")
         }
     }

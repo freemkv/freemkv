@@ -62,9 +62,7 @@ pub mod win_app;
 pub mod windows;
 
 // ── GTK4 + libadwaita shell — LINUX ONLY ────────────────────────────────────
-// Kept in the lib for symmetry with the Windows shell and so integration
-// tests can reach `linux::system_locale_code`. `main.rs` is the sole
-// caller of `linux_app::run`.
+// Symmetric with the Windows shell above; `main.rs` calls `linux_app::run`.
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]

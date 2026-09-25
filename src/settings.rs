@@ -821,10 +821,11 @@ mod normalize_tests {
     // The four `settings::*` path wrappers forward to `platform::*` but are
     // separate functions from what `platform.rs`'s own tests exercise, so
     // each could regress to `Default::default()` (e.g. `settings_path()` == "").
-    // The notification opt-out must be a NEW default, so an installed user
-    // whose settings file predates the field doesn't silently lose it. Serde's
-    // `#[serde(default)]` on a bool defaults to `false` — this pins the
-    // `bool_true` helper so a rename or removal can't quietly regress.
+
+    /// The notification opt-out must be a NEW default, so an upgraded
+    /// settings file doesn't silently lose it. `#[serde(default)]` on a
+    /// bool defaults to `false`; this test pins the `bool_true` helper
+    /// so a rename or removal can't quietly regress it.
     #[test]
     fn a_settings_file_from_before_notifications_still_opts_in_after_upgrade() {
         let s: Settings = serde_json::from_str("{}").expect("empty JSON must parse");

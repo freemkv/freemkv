@@ -167,7 +167,8 @@ fn append_group_to_section(section: &gio::Menu, group: &MenuGroup) {
         };
         let item = gio::MenuItem::new(Some(&mi.label), Some(&format!("app.{action_name}")));
         if let Some(accel_str) = accel_string(mi.accel.as_ref()) {
-            item.set_attribute_value("accel", &glib::Variant::from(&*accel_str));
+            let v = glib::Variant::from(&*accel_str);
+            item.set_attribute_value("accel", Some(&v));
         }
         section.append_item(&item);
     }
@@ -263,10 +264,9 @@ fn install_menu_actions(app: &adw::Application, shell: &Rc<Shell>) {
         app.add_action(&simple(name, cmd, shell.clone()));
     }
 
-    // OpenDisc doesn't map to a `Cmd` directly — the drive-enumeration
-    // logic lives in the shell. TODO(linux-gui): implement a picker over
-    // udisks2 or /sys/block/sr*; for now, fire `Cmd::Open` as a fallback
-    // so the menu item does something rather than nothing.
+    // OpenDisc has no direct `Cmd` — drive enumeration lives here.
+    // TODO(linux-gui): udisks2 / /sys/block/sr* picker; falls back to
+    // `Cmd::Open` so the menu item does SOMETHING today.
     let shell_od = shell.clone();
     let open_disc = gio::SimpleAction::new("open-disc", None);
     open_disc.connect_activate(move |_, _| {
