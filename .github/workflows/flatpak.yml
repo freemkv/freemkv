@@ -1,0 +1,46 @@
+name: Flatpak
+
+# Not a fast-path CI check — this builds the Flatpak bundle for the qa/main
+# lanes only, and uploads it as an artifact for the release orchestrator to
+# ship. Every dev push already covers the Linux CLI+GUI compile in ci.yml.
+on:
+  push:
+    branches: [qa, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # The Flathub base image has flatpak-builder + all Freedesktop runtime
+    # bits pre-installed, so no apt-get dance. Version pinned to the
+    # freedesktop-sdk major that matches the runtime the manifest asks for.
+    container:
+      image: ghcr.io/flathub/flatpak-github-actions:gnome-47
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+        with:
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          self: freemkv
+      - name: Build the Flatpak bundle
+        uses: flathub/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: freemkv.flatpak
+          manifest-path: freemkv/packaging/flatpak/org.freemkv.FreeMKV.yaml
+          cache-key: flatpak-builder-${{ github.sha }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freemkv-flatpak-${{ github.ref_name }}
+          path: freemkv.flatpak
+          if-no-files-found: error

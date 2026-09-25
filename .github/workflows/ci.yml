@@ -299,10 +299,12 @@ jobs:
       - run: cargo build --release --target x86_64-apple-darwin
         working-directory: freemkv
 
-  # ── Linux: the CLI (what Linux ships) ──────────────────────────────────────
-  # The GUI is target-gated off, so this builds the pure CLI. If any GUI code
-  # or OS assumption leaked into the always-compiled path it would fail here
-  # on `-D warnings` (dead code) long before a Linux user hit it.
+  # ── Linux: CLI + GTK4 GUI (what Linux ships as of 1.7.5) ──────────────────
+  # Since 1.7.5 the Linux target compiles a GTK4 + libadwaita desktop shell
+  # (`src/linux.rs`) alongside the CLI — same "one product, three shells"
+  # model as macOS and Windows. The apt-get step installs the pkg-config
+  # deps GTK4/libadwaita link against; without them `cargo build` fails at
+  # the gtk4 crate's build.rs pkg-config probe.
   cli-linux:
     runs-on: ubuntu-latest
     steps:
@@ -314,6 +316,13 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
+      - name: Install GTK4 + libadwaita development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            build-essential
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
