@@ -358,15 +358,10 @@ fn disc_details(disc: &libfreemkv::Disc, key_summary: &str, verbose: bool) -> Ve
         _ => {}
     }
     if let Some(aacs) = &disc.aacs {
-        d.push(format!(
-            "MKB v{}{}",
-            aacs.mkb_version.unwrap_or(0),
-            if aacs.bus_encryption {
-                " (bus encryption)"
-            } else {
-                ""
-            }
-        ));
+        // Per-disc bus-encryption flag isn't surfaced here — Type: Uhd
+        // already signals AACS 2.0, and whether the drive actually applies
+        // bus encryption is an internal detail.
+        d.push(format!("MKB v{}", aacs.mkb_version.unwrap_or(0)));
         d.push(format!("Disc hash: {}", aacs.disc_hash));
         if aacs.volume_id.iter().any(|&b| b != 0) {
             let vid: String = aacs.volume_id.iter().map(|b| format!("{b:02x}")).collect();
@@ -3447,8 +3442,10 @@ mod disc_details_tests {
         d.aacs = Some(a);
 
         let lines = disc_details(&d, "unlocked via keydb", false);
+        assert!(lines.contains(&"MKB v64".to_string()), "{lines:?}");
+        // Bus-encryption flag isn't surfaced any more; Type: Uhd carries it.
         assert!(
-            lines.contains(&"MKB v64 (bus encryption)".to_string()),
+            !lines.iter().any(|l| l.contains("bus encryption")),
             "{lines:?}"
         );
         assert!(
