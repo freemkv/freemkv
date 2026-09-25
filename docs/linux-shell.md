@@ -75,9 +75,9 @@ returns early while it is set, so a repaint is never mistaken for the user.
   `app.reveal-output` carrying that rip's folder, so a notification clicked
   after a later rip still reveals the right place.
 * **Log pane.** Notice lines are red and detail lines green (libadwaita's
-  light/dark shades, following the system style). A redraw appends when what
-  is on screen is still a prefix of the log and rewrites after a clear, a new
-  source or the core's front-trim (`linux_glue::log_delta`).
+  light/dark shades, following the system style). A redraw inserts only the new
+  lines while `View::log_first` is unchanged and rebuilds the buffer when a
+  clear or the core's front-trim moves it (`linux_glue::log_delta`).
 * **Title tree.** The tick box sits in the expander column; a click reports
   only the row index and `Tree::toggle` decides the direction and cascade.
   A tick-only redraw repaints the bound boxes in place, so expansion,

@@ -11,7 +11,7 @@
 //! stack page a `Page` is, whether a log redraw can append instead of rewrite.
 //! Anything that decides what the product DOES stays in `ui.rs`.
 
-use crate::ui::{Accel, Cmd, LogLine, MenuAction, Page, Row};
+use crate::ui::{Accel, Cmd, MenuAction, Page, Row};
 
 /// Every `gio` action the hamburger menu and the accelerators ride on, with
 /// the `MenuAction` it performs. One table so the action map, the menu model
@@ -165,42 +165,30 @@ pub fn rows_sig(rows: &[Row]) -> String {
         .join("\n")
 }
 
-/// What the log pane last showed, enough to tell an append from a rewrite.
-#[derive(Default, Clone, Debug, PartialEq)]
+/// What the log pane last showed: the core's sequence number of its first
+/// line (`View::log_first`) and how many lines it had.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LogMemo {
+    pub first: u64,
     pub len: usize,
-    pub first: String,
-    pub last: String,
-}
-
-impl LogMemo {
-    pub fn of(log: &[LogLine]) -> Self {
-        LogMemo {
-            len: log.len(),
-            first: log.first().map(|l| l.text.clone()).unwrap_or_default(),
-            last: log.last().map(|l| l.text.clone()).unwrap_or_default(),
-        }
-    }
 }
 
 /// How to bring the log pane from `prev` to `now`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum LogDelta {
     Same,
-    /// Append `now[from..]`; everything before it is already on screen.
+    /// Append `log[from..]`; everything before it is already on screen.
     Append(usize),
     Rewrite,
 }
 
-/// The cheapest correct redraw. A rip adds lines every tick; rewriting 5 000
-/// lines five times a second to add one would be pure churn. A clear, a new
-/// source or the core's front-trim all fail the prefix check and rewrite.
-pub fn log_delta(prev: &LogMemo, now: &[LogLine]) -> LogDelta {
-    let prefix_intact = prev.len <= now.len()
-        && (prev.len == 0 || (now[0].text == prev.first && now[prev.len - 1].text == prev.last));
-    if !prefix_intact {
+/// The cheapest correct redraw, keyed on the core's `log_first`: unchanged
+/// means the screen is still a prefix, so only new lines are inserted; a
+/// front-trim or a clear moves it and the pane is rebuilt.
+pub fn log_delta(prev: &LogMemo, now: &LogMemo) -> LogDelta {
+    if now.first != prev.first || now.len < prev.len {
         LogDelta::Rewrite
-    } else if prev.len == now.len() {
+    } else if now.len == prev.len {
         LogDelta::Same
     } else {
         LogDelta::Append(prev.len)
@@ -268,7 +256,7 @@ pub fn lang_picker_codes(stored: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{Check, LogKind, MenuEntry, menu_layout};
+    use crate::ui::{Check, MenuEntry, menu_layout};
 
     #[test]
     fn every_menu_row_the_layout_names_has_an_action_or_is_standard_text() {
@@ -424,38 +412,35 @@ mod tests {
         assert_ne!(rows_sig(&a), rows_sig(&b));
     }
 
-    fn lines(t: &[&str]) -> Vec<LogLine> {
-        t.iter()
-            .map(|s| LogLine {
-                text: (*s).into(),
-                kind: LogKind::Detail,
-            })
-            .collect()
+    #[test]
+    fn the_log_appends_while_log_first_holds_and_rebuilds_when_it_moves() {
+        let m = |first, len| LogMemo { first, len };
+        assert_eq!(log_delta(&m(0, 2), &m(0, 2)), LogDelta::Same);
+        assert_eq!(log_delta(&m(0, 2), &m(0, 5)), LogDelta::Append(2));
+        assert_eq!(
+            log_delta(&LogMemo::default(), &m(0, 1)),
+            LogDelta::Append(0)
+        );
+        // A clear or a front-trim bumps `log_first`: the screen is stale.
+        assert_eq!(log_delta(&m(0, 5), &m(5, 0)), LogDelta::Rewrite);
+        assert_eq!(log_delta(&m(0, 5000), &m(1000, 4001)), LogDelta::Rewrite);
     }
 
     #[test]
-    fn the_log_appends_only_when_what_is_on_screen_is_still_the_prefix() {
-        let before = lines(&["a", "b"]);
-        let memo = LogMemo::of(&before);
-        assert_eq!(log_delta(&memo, &before), LogDelta::Same);
-        assert_eq!(
-            log_delta(&memo, &lines(&["a", "b", "c"])),
-            LogDelta::Append(2)
-        );
-        // Cleared, reopened, or front-trimmed: the screen is stale, redraw it.
-        assert_eq!(log_delta(&memo, &lines(&[])), LogDelta::Rewrite);
-        assert_eq!(
-            log_delta(&memo, &lines(&["x", "b", "c"])),
-            LogDelta::Rewrite
-        );
-        assert_eq!(
-            log_delta(&memo, &lines(&["b", "c", "d"])),
-            LogDelta::Rewrite
-        );
-        assert_eq!(
-            log_delta(&LogMemo::default(), &lines(&["a"])),
-            LogDelta::Append(0)
-        );
+    fn log_first_really_moves_on_clear_so_the_pane_rebuilds() {
+        let mut app = crate::ui::App::new();
+        let before = app.view();
+        let _ = app.dispatch(Cmd::ClearLog);
+        let after = app.view();
+        let prev = LogMemo {
+            first: before.log_first,
+            len: before.log.len(),
+        };
+        let now = LogMemo {
+            first: after.log_first,
+            len: after.log.len(),
+        };
+        assert_eq!(log_delta(&prev, &now), LogDelta::Rewrite);
     }
 
     #[test]

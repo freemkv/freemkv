@@ -416,7 +416,7 @@ impl MainView {
         self.result
             .set_description(Some(&glib::markup_escape_text(&v.result_summary)));
 
-        self.render_log(&v.log, memo);
+        self.render_log(&v.log, v.log_first, memo);
     }
 
     fn append_log(&self, lines: &[LogLine]) {
@@ -431,10 +431,14 @@ impl MainView {
         }
     }
 
-    // Append when the screen is still a prefix of the log, rewrite otherwise,
+    // Append while `log_first` holds, rebuild when a trim or clear moved it,
     // and keep the newest line in view either way.
-    fn render_log(&self, log: &[LogLine], memo: &mut Memo) {
-        match glue::log_delta(&memo.log, log) {
+    fn render_log(&self, log: &[LogLine], log_first: u64, memo: &mut Memo) {
+        let now = LogMemo {
+            first: log_first,
+            len: log.len(),
+        };
+        match glue::log_delta(&memo.log, &now) {
             LogDelta::Same => return,
             LogDelta::Append(from) => self.append_log(&log[from..]),
             LogDelta::Rewrite => {
@@ -442,7 +446,7 @@ impl MainView {
                 self.append_log(log);
             }
         }
-        memo.log = LogMemo::of(log);
+        memo.log = now;
         let tv = self.log_view.clone();
         let mark = self.log_end.clone();
         glib::idle_add_local_once(move || tv.scroll_to_mark(&mark, 0.0, false, 0.0, 1.0));
