@@ -91,13 +91,16 @@ jobs:
           # output BYTES while being functionally identical. The compare job
           # refuses to read anything into a mismatch unless these agree.
           echo "LF_SHA=$(git -C libfreemkv rev-parse --short HEAD)" >> "$GITHUB_ENV"
-      - name: Install ffmpeg
+      - name: Install ffmpeg (all) and GTK4 (Linux — for the freemkv 1.7.6 desktop shell)
         shell: bash
         run: |
           # The suite verifies its outputs with ffprobe throughout, so ffmpeg is
-          # needed even though the media itself now arrives pre-made.
+          # needed even though the media itself now arrives pre-made. On Linux
+          # `cargo build --bin freemkv` also links the GTK4 + libadwaita desktop
+          # shell (added in 1.7.6), so glib-sys / gio-sys / gobject-sys need
+          # libgtk-4-dev + libadwaita-1-dev too.
           case "${{ matrix.os }}" in
-            ubuntu-*)  sudo apt-get update && sudo apt-get install -y ffmpeg ;;
+            ubuntu-*)  sudo apt-get update && sudo apt-get install -y ffmpeg libgtk-4-dev libadwaita-1-dev build-essential ;;
             macos-*)   brew install ffmpeg ;;
             windows-*) choco install ffmpeg -y --no-progress ;;
           esac
@@ -301,6 +304,12 @@ jobs:
         env:
           FMKV_FIXTURES_S3: ${{ secrets.FMKV_FIXTURES_S3 }}
         run: aws s3 cp "$FMKV_FIXTURES_S3/dvd.iso" dvd.iso --quiet && ls -l dvd.iso
+      - name: Install GTK4 + libadwaita (Linux, for the freemkv 1.7.6 desktop shell)
+        if: steps.creds.outputs.have == 'true' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
       - uses: dtolnay/rust-toolchain@stable
         if: steps.creds.outputs.have == 'true'
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
