@@ -1952,197 +1952,145 @@ fn group(mtm: MainThreadMarker, title: &str, fr: NSRect) -> Retained<NSBox> {
 
 // ── menus ─────────────────────────────────────────────────────────────────
 
-/// The Edit menu mixes two kinds of item: standard text commands that must go
-/// to the first responder (so Copy works in the log), and our tree-selection
-/// commands. Binding our commands to ⌘A/⌘C would break text editing.
-fn mk_edit(mtm: MainThreadMarker, c: &Controller) -> Retained<NSMenuItem> {
-    let item = NSMenuItem::new(mtm);
-    let edit = crate::strings::get("gui.menu.edit");
-    item.setTitle(&NSString::from_str(&edit));
-    let menu = { NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(&edit)) };
+/// Map a shared [`crate::ui::MenuAction`] to the AppKit selector that already
+/// dispatches its [`Cmd`]. Standard responder-chain commands (Cut/Copy/…)
+/// return `None` for the target — the responder chain routes them to the
+/// focused view, so Copy in the log Just Works.
+fn selector_for_action(action: &crate::ui::MenuAction) -> Option<(Sel, bool)> {
+    use crate::ui::{Cmd, MenuAction};
+    // (selector, target_controller). target=false means responder chain (nil).
+    Some(match action {
+        MenuAction::Cmd(Cmd::Open) => (sel!(onOpenFiles:), true),
+        MenuAction::OpenDisc => (sel!(onOpenDisc:), true),
+        MenuAction::Cmd(Cmd::Close) => (sel!(onCloseDisc:), true),
+        MenuAction::Cmd(Cmd::SetOutput) => (sel!(onBrowseOutput:), true),
+        MenuAction::Cmd(Cmd::Run) => (sel!(onRip:), true),
+        MenuAction::Cmd(Cmd::Eject) => (sel!(onEject:), true),
+        MenuAction::Cmd(Cmd::SelectAll) => (sel!(onSelectAll:), true),
+        MenuAction::Cmd(Cmd::SelectNone) => (sel!(onSelectNone:), true),
+        MenuAction::Cmd(Cmd::Invert) => (sel!(onInvert:), true),
+        MenuAction::Cmd(Cmd::ToggleLog) => (sel!(onToggleLog:), true),
+        MenuAction::Cmd(Cmd::ClearLog) => (sel!(onClearLog:), true),
+        MenuAction::Cmd(Cmd::Settings) => (sel!(onPrefs:), true),
+        MenuAction::Cmd(Cmd::About) => (sel!(onAbout:), true),
+        MenuAction::Cmd(Cmd::Docs) => (sel!(onDocs:), true),
+        MenuAction::Cmd(Cmd::CheckUpdates) => (sel!(onCheckUpdates:), true),
+        MenuAction::Cmd(Cmd::Quit) => (sel!(onQuit:), true),
+        MenuAction::StandardCut => (sel!(cut:), false),
+        MenuAction::StandardCopy => (sel!(copy:), false),
+        MenuAction::StandardPaste => (sel!(paste:), false),
+        MenuAction::StandardSelectAllText => (sel!(selectAll:), false),
+        // SetFormat / Cancel — not menu-driven.
+        MenuAction::Cmd(_) => return None,
+    })
+}
 
-    // nil target => dispatched down the responder chain to the focused view.
-    for (label, key, sel) in [
-        ("Cut", "x", sel!(cut:)),
-        ("Copy", "c", sel!(copy:)),
-        ("Paste", "v", sel!(paste:)),
-        ("Select All", "a", sel!(selectAll:)),
-    ] {
-        let mi = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str(label),
-                Some(sel),
-                &NSString::from_str(key),
-            )
-        };
-        unsafe { mi.setTarget(None) };
-        menu.addItem(&mi);
+/// Translate a shared [`crate::ui::Accel`] to the AppKit key-equivalent
+/// string. `primary` is ⌘ on macOS; Shift is expressed by upper-casing the
+/// character (AppKit convention). F-keys pass through by name.
+fn key_equivalent(accel: Option<&crate::ui::Accel>) -> String {
+    let Some(a) = accel else { return String::new() };
+    if a.alt {
+        // The current menu bar uses no Alt-modified accelerators on macOS;
+        // if one is added, wire it via NSMenuItem::setKeyEquivalentModifierMask.
+        return String::new();
     }
-    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    if a.key.len() > 1 {
+        // Non-character keys (F1) — AppKit uses NSF1FunctionKey via the
+        // Unicode private area; today's menu never binds a bare F-key on
+        // macOS (Docs is ⌘?), so return empty.
+        return String::new();
+    }
+    if a.shift {
+        a.key.to_ascii_uppercase()
+    } else {
+        a.key.to_ascii_lowercase()
+    }
+}
 
-    // Our tree commands — deliberately without the standard shortcuts.
-    for (label, key, sel) in [
-        (
-            crate::strings::get("gui.menu.select_all_titles"),
-            "A",
-            sel!(onSelectAll:),
-        ),
-        (
-            crate::strings::get("gui.menu.select_no_titles"),
-            "",
-            sel!(onSelectNone:),
-        ),
-        (
-            crate::strings::get("gui.menu.invert_titles"),
-            "",
-            sel!(onInvert:),
-        ),
-    ] {
-        let mi = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str(&label),
-                Some(sel),
-                &NSString::from_str(key),
-            )
-        };
-        unsafe { mi.setTarget(Some(c)) };
-        menu.addItem(&mi);
+fn build_menu_item(
+    mtm: MainThreadMarker,
+    c: &Controller,
+    mi: &crate::ui::MenuItem,
+) -> Option<Retained<NSMenuItem>> {
+    let (sel, tgt_ctrl) = selector_for_action(&mi.action)?;
+    // macOS Help menu uses ⌘? — express that as the shift+/ pair the layout
+    // records as `Accel::bare("F1")` DOES NOT cover. We map Docs → "?"
+    // explicitly so the file's UX matches the pre-refactor menu.
+    let key = if matches!(mi.action, crate::ui::MenuAction::Cmd(crate::ui::Cmd::Docs)) {
+        "?".to_string()
+    } else {
+        key_equivalent(mi.accel.as_ref())
+    };
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(&mi.label),
+            Some(sel),
+            &NSString::from_str(&key),
+        )
+    };
+    unsafe {
+        if tgt_ctrl {
+            item.setTarget(Some(c));
+        } else {
+            item.setTarget(None);
+        }
     }
-    item.setSubmenu(Some(&menu));
-    item
+    Some(item)
+}
+
+fn build_group_menu(
+    mtm: MainThreadMarker,
+    c: &Controller,
+    group: &crate::ui::MenuGroup,
+) -> Retained<NSMenuItem> {
+    let bar_item = NSMenuItem::new(mtm);
+    bar_item.setTitle(&NSString::from_str(&group.title));
+    let menu = {
+        NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(&group.title))
+    };
+    for entry in &group.entries {
+        match entry {
+            crate::ui::MenuEntry::Separator => {
+                menu.addItem(&NSMenuItem::separatorItem(mtm));
+            }
+            crate::ui::MenuEntry::Item(mi) => {
+                if let Some(item) = build_menu_item(mtm, c, mi) {
+                    menu.addItem(&item);
+                }
+            }
+        }
+    }
+    bar_item.setSubmenu(Some(&menu));
+    bar_item
 }
 
 fn build_menus(mtm: MainThreadMarker, app: &NSApplication, c: &Controller) {
+    use crate::ui::MenuGroupId;
     let main = NSMenu::new(mtm);
+    // The log toggle's label follows live state; on menu build we read the
+    // current App state so a language rebuild after "Hide log" still shows
+    // "Show log". Sync stays in `sync_log_menu_title` for later flips.
+    let log_hidden = c.ivars().app.borrow().log_hidden;
+    let layout = crate::ui::menu_layout(log_hidden);
 
-    let mk = |title: &str, items: Vec<(String, &str, Sel)>| -> Retained<NSMenuItem> {
-        let item = NSMenuItem::new(mtm);
-        item.setTitle(&NSString::from_str(title));
-        let menu = { NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title)) };
-        for (label, key, sel) in items {
-            if label == "-" {
-                menu.addItem(&NSMenuItem::separatorItem(mtm));
-                continue;
+    // macOS convention: App menu first, titled "freemkv" (not localized —
+    // macOS's own app menu is always the process name).
+    for group in &layout {
+        match group.id {
+            MenuGroupId::App => {
+                // Force the group title to the process name for the AppKit
+                // convention; contents come from the shared layout.
+                let mut app_group = group.clone();
+                app_group.title = "freemkv".to_string();
+                main.addItem(&build_group_menu(mtm, c, &app_group));
             }
-            let mi = unsafe {
-                NSMenuItem::initWithTitle_action_keyEquivalent(
-                    NSMenuItem::alloc(mtm),
-                    &NSString::from_str(&label),
-                    Some(sel),
-                    &NSString::from_str(key),
-                )
-            };
-            unsafe { mi.setTarget(Some(c)) };
-            menu.addItem(&mi);
+            _ => {
+                main.addItem(&build_group_menu(mtm, c, group));
+            }
         }
-        item.setSubmenu(Some(&menu));
-        item
-    };
-
-    // App menu
-    let app_item = NSMenuItem::new(mtm);
-    app_item.setTitle(&NSString::from_str("freemkv"));
-    let app_menu = { NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("freemkv")) };
-    let about = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
-            NSMenuItem::alloc(mtm),
-            &NSString::from_str(&crate::strings::get("gui.menu.app_about")),
-            Some(sel!(onAbout:)),
-            &NSString::from_str(""),
-        )
-    };
-    unsafe { about.setTarget(Some(c)) };
-    app_menu.addItem(&about);
-    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
-    let prefs = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
-            NSMenuItem::alloc(mtm),
-            &NSString::from_str(&crate::strings::get("gui.menu.settings")),
-            Some(sel!(onPrefs:)),
-            &NSString::from_str(","),
-        )
-    };
-    unsafe { prefs.setTarget(Some(c)) };
-    app_menu.addItem(&prefs);
-    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
-    let quit = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
-            NSMenuItem::alloc(mtm),
-            &NSString::from_str(&crate::strings::get("gui.menu.quit")),
-            Some(sel!(onQuit:)),
-            &NSString::from_str("q"),
-        )
-    };
-    app_menu.addItem(&quit);
-    app_item.setSubmenu(Some(&app_menu));
-    main.addItem(&app_item);
-
-    main.addItem(&mk(
-        &crate::strings::get("gui.menu.file"),
-        vec![
-            (
-                crate::strings::get("gui.menu.open"),
-                "o",
-                sel!(onOpenFiles:),
-            ),
-            // Rip from a live optical drive (disc://). Enumerates drives and
-            // opens the one with media.
-            (
-                crate::strings::get("gui.menu.open_disc"),
-                "d",
-                sel!(onOpenDisc:),
-            ),
-            (
-                crate::strings::get("gui.menu.close"),
-                "w",
-                sel!(onCloseDisc:),
-            ),
-            ("-".to_string(), "", sel!(onNoop:)),
-            (
-                crate::strings::get("gui.menu.set_output"),
-                "",
-                sel!(onBrowseOutput:),
-            ),
-            (crate::strings::get("gui.menu.start_rip"), "r", sel!(onRip:)),
-            ("-".to_string(), "", sel!(onNoop:)),
-            (crate::strings::get("gui.menu.eject"), "e", sel!(onEject:)),
-        ],
-    ));
-    main.addItem(&mk_edit(mtm, c));
-    // Settings lives in the app menu (⌘,) — the macOS convention. Duplicating
-    // it under View is the oddity, not its absence. On Windows there is no app
-    // menu, so the Windows shell puts Settings under File instead.
-    main.addItem(&mk(
-        &crate::strings::get("gui.menu.view"),
-        vec![
-            (
-                // State-dependent: "Show log" only while it is hidden. Built
-                // from the live state (a language rebuild can happen with the
-                // log already hidden) and re-applied on every `render`.
-                crate::ui::log_menu_label(c.ivars().app.borrow().log_hidden),
-                "l",
-                sel!(onToggleLog:),
-            ),
-            (
-                crate::strings::get("gui.menu.clear_log"),
-                "k",
-                sel!(onClearLog:),
-            ),
-        ],
-    ));
-    main.addItem(&mk(
-        &crate::strings::get("gui.menu.help"),
-        vec![
-            (crate::strings::get("gui.menu.docs"), "?", sel!(onDocs:)),
-            (
-                crate::strings::get("gui.menu.check_updates"),
-                "",
-                sel!(onCheckUpdates:),
-            ),
-        ],
-    ));
+    }
 
     app.setMainMenu(Some(&main));
 }

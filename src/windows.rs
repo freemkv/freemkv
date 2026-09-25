@@ -921,131 +921,203 @@ fn log_menu_text(label: &str) -> String {
     format!("{label}\tCtrl+L")
 }
 
-// Build the in-window menu bar. Windows has no global menu bar or app menu,
-// so Settings lives under File and About under Help (not macOS's app-menu
-// placement), and accelerator hints are Ctrl-based to match.
+/// Map a shared [`crate::ui::MenuAction`] to the Windows IDM constant whose
+/// handler already fires the right [`Cmd`]. `None` means "this action isn't
+/// on the Windows menu bar" — Cut/Paste, and any [`MenuAction::Cmd`] variant
+/// the menu bar deliberately never surfaces (SetFormat, Cancel).
+fn idm_for_action(action: &crate::ui::MenuAction) -> Option<u16> {
+    use crate::ui::{Cmd, MenuAction};
+    Some(match action {
+        MenuAction::Cmd(Cmd::Open) => IDM_OPEN,
+        MenuAction::OpenDisc => IDM_OPEN_DISC,
+        MenuAction::Cmd(Cmd::Close) => IDM_CLOSE,
+        MenuAction::Cmd(Cmd::SetOutput) => IDM_SET_OUTPUT,
+        MenuAction::Cmd(Cmd::Run) => IDM_START_RIP,
+        MenuAction::Cmd(Cmd::Eject) => IDM_EJECT,
+        MenuAction::Cmd(Cmd::Settings) => IDM_SETTINGS,
+        MenuAction::Cmd(Cmd::Quit) => IDM_EXIT,
+        MenuAction::StandardCopy => IDM_COPY,
+        MenuAction::StandardSelectAllText => IDM_SELECT_ALL_TEXT,
+        MenuAction::Cmd(Cmd::SelectAll) => IDM_SELECT_ALL,
+        MenuAction::Cmd(Cmd::SelectNone) => IDM_SELECT_NONE,
+        MenuAction::Cmd(Cmd::Invert) => IDM_INVERT,
+        MenuAction::Cmd(Cmd::ToggleLog) => IDM_TOGGLE_LOG,
+        MenuAction::Cmd(Cmd::ClearLog) => IDM_CLEAR_LOG,
+        MenuAction::Cmd(Cmd::Docs) => IDM_DOCS,
+        MenuAction::Cmd(Cmd::CheckUpdates) => IDM_CHECK_UPDATES,
+        MenuAction::Cmd(Cmd::About) => IDM_ABOUT,
+        MenuAction::StandardCut | MenuAction::StandardPaste => return None,
+        MenuAction::Cmd(_) => return None,
+    })
+}
+
+/// Render an [`Accel`] as a Windows menu suffix ("Ctrl+O", "F1", "Alt+F4").
+/// `primary` is Ctrl on Windows.
+fn accel_suffix(a: &crate::ui::Accel) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if a.primary {
+        parts.push("Ctrl");
+    }
+    if a.alt {
+        parts.push("Alt");
+    }
+    if a.shift {
+        parts.push("Shift");
+    }
+    let key = if a.key.len() == 1 {
+        a.key.to_ascii_uppercase()
+    } else {
+        a.key.to_string()
+    };
+    parts.push(&key);
+    parts.join("+")
+}
+
+fn item_text(label: &str, accel: Option<&crate::ui::Accel>) -> String {
+    match accel {
+        Some(a) => format!("{label}\t{}", accel_suffix(a)),
+        None => label.to_string(),
+    }
+}
+
+/// The Windows convention: no App menu — About lives at the bottom of Help,
+/// Settings + Exit at the bottom of File. Everything else follows
+/// [`crate::ui::menu_layout`] as-is, so adding a menu item is one edit in
+/// `ui.rs` and the Windows bar picks it up automatically.
 fn build_menu() -> w::SysResult<w::HMENU> {
-    let g = crate::strings::get;
+    use crate::ui::{Cmd, MenuAction, MenuEntry, MenuGroupId};
 
+    let layout = crate::ui::menu_layout(false);
+    let group = |id: MenuGroupId| layout.iter().find(|g| g.id == id);
+
+    // Convert a MenuEntry to a Windows `MenuItem::Entry` if it has an IDM,
+    // else fall through (skips Cut/Paste and any layout-only decoration).
+    // Separators pass through.
+    fn append_entries(
+        menu: &w::HMENU,
+        entries: &[MenuEntry],
+        skip: &[MenuAction],
+    ) -> w::SysResult<()> {
+        for entry in entries {
+            match entry {
+                MenuEntry::Separator => {
+                    menu.append_item(&[w::MenuItem::Separator])?;
+                }
+                MenuEntry::Item(mi) => {
+                    if skip.contains(&mi.action) {
+                        continue;
+                    }
+                    let Some(idm) = idm_for_action(&mi.action) else {
+                        continue;
+                    };
+                    let text = item_text(&mi.label, mi.accel.as_ref());
+                    menu.append_item(&[w::MenuItem::Entry {
+                        cmd_id: idm,
+                        text: &text,
+                    }])?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // File — base entries, then Sep + Settings + Sep + Exit (App-group items
+    // Windows promotes here per convention). Exit gets its own text/accel
+    // ("gui.menu.exit" + Alt+F4) — the one documented per-platform override.
     let file = w::HMENU::CreatePopupMenu()?;
-    file.append_item(&[
-        w::MenuItem::Entry {
-            cmd_id: IDM_OPEN,
-            text: &format!("{}\tCtrl+O", g("gui.menu.open")),
-        },
-        w::MenuItem::Entry {
-            cmd_id: IDM_OPEN_DISC,
-            text: &format!("{}\tCtrl+D", g("gui.menu.open_disc")),
-        },
-        w::MenuItem::Entry {
-            cmd_id: IDM_CLOSE,
-            text: &format!("{}\tCtrl+W", g("gui.menu.close")),
-        },
-        w::MenuItem::Separator,
-        w::MenuItem::Entry {
-            cmd_id: IDM_SET_OUTPUT,
-            text: &g("gui.menu.set_output"),
-        },
-        w::MenuItem::Entry {
-            cmd_id: IDM_START_RIP,
-            text: &format!("{}\tCtrl+R", g("gui.menu.start_rip")),
-        },
-        w::MenuItem::Separator,
-        w::MenuItem::Entry {
-            cmd_id: IDM_EJECT,
-            text: &format!("{}\tCtrl+E", g("gui.menu.eject")),
-        },
-        w::MenuItem::Separator,
-        // Windows convention: preferences live in File, not an app menu.
-        w::MenuItem::Entry {
-            cmd_id: IDM_SETTINGS,
-            text: &g("gui.menu.settings"),
-        },
-        w::MenuItem::Separator,
-        w::MenuItem::Entry {
-            cmd_id: IDM_EXIT,
-            text: &format!("{}\tAlt+F4", g("gui.menu.exit")),
-        },
-    ])?;
+    let file_grp = group(MenuGroupId::File).expect("File group must be in menu_layout");
+    append_entries(&file, &file_grp.entries, &[])?;
+    file.append_item(&[w::MenuItem::Separator])?;
+    let app_grp = group(MenuGroupId::App).expect("App group must be in menu_layout");
+    for entry in &app_grp.entries {
+        let MenuEntry::Item(mi) = entry else { continue };
+        if mi.action == MenuAction::Cmd(Cmd::Settings) {
+            let text = item_text(&mi.label, mi.accel.as_ref());
+            file.append_item(&[w::MenuItem::Entry {
+                cmd_id: IDM_SETTINGS,
+                text: &text,
+            }])?;
+        }
+    }
+    file.append_item(&[w::MenuItem::Separator])?;
+    file.append_item(&[w::MenuItem::Entry {
+        cmd_id: IDM_EXIT,
+        text: &format!("{}\tAlt+F4", crate::strings::get("gui.menu.exit")),
+    }])?;
 
-    // Edit menu mixes standard text commands (act on the focused control, so
-    // Copy works in the log) with tree-selection commands, which deliberately
-    // skip Ctrl+A/Ctrl+C so they don't break text selection in the log.
+    // Edit — Cut and Paste are skipped on Windows (no wired handler).
     let edit = w::HMENU::CreatePopupMenu()?;
-    edit.append_item(&[
-        w::MenuItem::Entry {
-            cmd_id: IDM_COPY,
-            text: &format!("{}\tCtrl+C", g("gui.menu.copy")),
-        },
-        w::MenuItem::Entry {
-            cmd_id: IDM_SELECT_ALL_TEXT,
-            text: &format!("{}\tCtrl+A", g("gui.menu.select_all_text")),
-        },
-        w::MenuItem::Separator,
-        w::MenuItem::Entry {
-            cmd_id: IDM_SELECT_ALL,
-            text: &g("gui.menu.select_all_titles"),
-        },
-        w::MenuItem::Entry {
-            cmd_id: IDM_SELECT_NONE,
-            text: &g("gui.menu.select_no_titles"),
-        },
-        w::MenuItem::Entry {
-            cmd_id: IDM_INVERT,
-            text: &g("gui.menu.invert_titles"),
-        },
-    ])?;
+    let edit_grp = group(MenuGroupId::Edit).expect("Edit group must be in menu_layout");
+    append_entries(
+        &edit,
+        &edit_grp.entries,
+        &[MenuAction::StandardCut, MenuAction::StandardPaste],
+    )?;
 
+    // View — as-is. The log toggle's text is state-dependent and rebuilt on
+    // toggle by `Shell::sync_log_menu_title`, so the built-once label here
+    // is the initial "Hide log" (log starts visible).
     let view = w::HMENU::CreatePopupMenu()?;
-    view.append_item(&[
-        w::MenuItem::Entry {
-            cmd_id: IDM_TOGGLE_LOG,
-            // State-dependent, and re-applied on every `render` — the log
-            // starts visible, so the item starts as "Hide log". See
-            // `Shell::sync_log_menu_title`.
-            text: &log_menu_text(&crate::ui::log_menu_label(false)),
-        },
-        w::MenuItem::Entry {
-            cmd_id: IDM_CLEAR_LOG,
-            text: &format!("{}\tCtrl+K", g("gui.menu.clear_log")),
-        },
-    ])?;
+    let view_grp = group(MenuGroupId::View).expect("View group must be in menu_layout");
+    for entry in &view_grp.entries {
+        match entry {
+            MenuEntry::Separator => {
+                view.append_item(&[w::MenuItem::Separator])?;
+            }
+            MenuEntry::Item(mi) if mi.action == MenuAction::Cmd(Cmd::ToggleLog) => {
+                view.append_item(&[w::MenuItem::Entry {
+                    cmd_id: IDM_TOGGLE_LOG,
+                    text: &log_menu_text(&crate::ui::log_menu_label(false)),
+                }])?;
+            }
+            MenuEntry::Item(mi) => {
+                if let Some(idm) = idm_for_action(&mi.action) {
+                    let text = item_text(&mi.label, mi.accel.as_ref());
+                    view.append_item(&[w::MenuItem::Entry {
+                        cmd_id: idm,
+                        text: &text,
+                    }])?;
+                }
+            }
+        }
+    }
 
+    // Help — base entries, then Sep + About (promoted from App group).
     let help = w::HMENU::CreatePopupMenu()?;
-    help.append_item(&[
-        w::MenuItem::Entry {
-            cmd_id: IDM_DOCS,
-            text: &format!("{}\tF1", g("gui.menu.docs")),
-        },
-        w::MenuItem::Entry {
-            cmd_id: IDM_CHECK_UPDATES,
-            text: &g("gui.menu.check_updates"),
-        },
-        w::MenuItem::Separator,
-        // Windows convention: About sits at the bottom of Help.
-        w::MenuItem::Entry {
-            cmd_id: IDM_ABOUT,
-            text: &g("gui.menu.app_about"),
-        },
-    ])?;
+    let help_grp = group(MenuGroupId::Help).expect("Help group must be in menu_layout");
+    append_entries(&help, &help_grp.entries, &[])?;
+    help.append_item(&[w::MenuItem::Separator])?;
+    for entry in &app_grp.entries {
+        let MenuEntry::Item(mi) = entry else { continue };
+        if mi.action == MenuAction::Cmd(Cmd::About) {
+            let text = item_text(&mi.label, mi.accel.as_ref());
+            help.append_item(&[w::MenuItem::Entry {
+                cmd_id: IDM_ABOUT,
+                text: &text,
+            }])?;
+        }
+    }
 
     let bar = w::HMENU::CreateMenu()?;
+    let title = |id: MenuGroupId| -> String {
+        group(id).map(|g| g.title.clone()).unwrap_or_default()
+    };
     bar.append_item(&[
         w::MenuItem::Submenu {
             submenu: &file,
-            text: &g("gui.menu.file"),
+            text: &title(MenuGroupId::File),
         },
         w::MenuItem::Submenu {
             submenu: &edit,
-            text: &g("gui.menu.edit"),
+            text: &title(MenuGroupId::Edit),
         },
         w::MenuItem::Submenu {
             submenu: &view,
-            text: &g("gui.menu.view"),
+            text: &title(MenuGroupId::View),
         },
         w::MenuItem::Submenu {
             submenu: &help,
-            text: &g("gui.menu.help"),
+            text: &title(MenuGroupId::Help),
         },
     ])?;
     Ok(bar)

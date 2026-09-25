@@ -822,6 +822,289 @@ pub fn log_menu_label(log_hidden: bool) -> String {
     }
 }
 
+// ── Menu layout, shared by every shell ────────────────────────────────────
+//
+// Every menu bar on every OS is built by walking [`menu_layout`]. Adding a
+// command means one edit here — the shells then pick it up because their
+// build loops match on `MenuAction` exhaustively. Removing one means the
+// same. This is what stops the "fix on Windows, forget on Mac" drift the
+// project's ONE-DOC-WINS invariant cares about: menu structure is a shared
+// decision, and shared decisions live in `ui.rs`.
+//
+// Where the platforms differ — App menu on macOS holds About/Settings/Quit,
+// while Windows puts Settings under File and About under Help — the shell
+// itself decides how to place a [`MenuGroupId::App`] group. The layout
+// still names the same items with the same actions and accelerators.
+
+/// A menu-driven action. Almost every entry maps to a plain [`Cmd`] the
+/// shell just dispatches; the exceptions carry no user-facing text (they
+/// live on the focused control's responder chain / edit-control message
+/// map) so they never round-trip through the model.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum MenuAction {
+    /// Fire this [`Cmd`] on the shared [`App`].
+    Cmd(Cmd),
+    /// The disc source picker: enumerate optical drives and open one. Lives
+    /// per-shell because drive enumeration is OS-specific; `menu_layout`
+    /// only names the item so it appears in the File menu at the same
+    /// position on every OS.
+    OpenDisc,
+    /// Standard text commands. Mac wires them to `nil` (responder chain,
+    /// so Copy in the log Just Works); Windows wires them to `IDM_COPY`
+    /// / `IDM_SELECT_ALL_TEXT` on the focused edit control. Not every
+    /// platform surfaces every one — see [`menu_layout`].
+    StandardCopy,
+    StandardCut,
+    StandardPaste,
+    StandardSelectAllText,
+}
+
+/// Cross-platform accelerator. `primary` is Ctrl on Windows/Linux and ⌘ on
+/// macOS — each shell picks the right modifier when it renders. `key` is
+/// the base character or virtual-key name; F-keys use `"F1"`, `"F4"`, etc.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct Accel {
+    pub key: &'static str,
+    pub primary: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+impl Accel {
+    /// The common case: primary modifier + a single character.
+    pub const fn primary(key: &'static str) -> Self {
+        Accel {
+            key,
+            primary: true,
+            shift: false,
+            alt: false,
+        }
+    }
+    /// Primary + Shift + character (e.g. ⇧⌘A for Select-All-Titles).
+    pub const fn primary_shift(key: &'static str) -> Self {
+        Accel {
+            key,
+            primary: true,
+            shift: true,
+            alt: false,
+        }
+    }
+    /// No modifier (F1 for Help/Docs).
+    pub const fn bare(key: &'static str) -> Self {
+        Accel {
+            key,
+            primary: false,
+            shift: false,
+            alt: false,
+        }
+    }
+}
+
+/// One entry in a menu — a command with an optional accelerator, or a
+/// visual separator.
+#[derive(Clone, Debug)]
+pub enum MenuEntry {
+    Item(MenuItem),
+    Separator,
+}
+
+/// One command in a menu.
+#[derive(Clone, Debug)]
+pub struct MenuItem {
+    pub action: MenuAction,
+    /// Localized label. Precomputed from `strings::` so all shells present
+    /// identical text (the log toggle picks its label from `log_hidden`).
+    pub label: String,
+    pub accel: Option<Accel>,
+}
+
+/// The logical group a menu belongs to. Windows and Linux merge
+/// [`MenuGroupId::App`] into `File` (Settings, Exit/Quit) and `Help`
+/// (About) per their conventions; macOS renders it as the app menu.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum MenuGroupId {
+    App,
+    File,
+    Edit,
+    View,
+    Help,
+}
+
+/// One top-level menu.
+#[derive(Clone, Debug)]
+pub struct MenuGroup {
+    pub id: MenuGroupId,
+    /// Localized group title (e.g. "File", "Edit").
+    pub title: String,
+    pub entries: Vec<MenuEntry>,
+}
+
+/// The canonical menu structure for every shell.
+///
+/// Adding an item = one edit. Removing one = one edit. Reordering items
+/// applies to every OS at once. The three shells then walk this list, map
+/// each `MenuAction` to their native handler, and place [`MenuGroupId::App`]
+/// wherever their platform's convention says.
+///
+/// `log_hidden` selects the live label for the log toggle — "Show log" or
+/// "Hide log" — so a shell can rebuild its menu after the log is toggled
+/// without recomputing the layout itself.
+pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
+    let g = |k: &str, fallback: &str| crate::strings::get_or(k, fallback);
+    let item = |action: MenuAction, label: String, accel: Option<Accel>| {
+        MenuEntry::Item(MenuItem {
+            action,
+            label,
+            accel,
+        })
+    };
+    let sep = || MenuEntry::Separator;
+
+    vec![
+        MenuGroup {
+            id: MenuGroupId::App,
+            title: "freemkv".to_string(),
+            entries: vec![
+                item(
+                    MenuAction::Cmd(Cmd::About),
+                    g("gui.menu.app_about", "About freemkv"),
+                    None,
+                ),
+                sep(),
+                item(
+                    MenuAction::Cmd(Cmd::Settings),
+                    g("gui.menu.settings", "Settings…"),
+                    Some(Accel::primary(",")),
+                ),
+                sep(),
+                item(
+                    MenuAction::Cmd(Cmd::Quit),
+                    g("gui.menu.quit", "Quit freemkv"),
+                    Some(Accel::primary("q")),
+                ),
+            ],
+        },
+        MenuGroup {
+            id: MenuGroupId::File,
+            title: g("gui.menu.file", "File"),
+            entries: vec![
+                item(
+                    MenuAction::Cmd(Cmd::Open),
+                    g("gui.menu.open", "Open…"),
+                    Some(Accel::primary("o")),
+                ),
+                item(
+                    MenuAction::OpenDisc,
+                    g("gui.menu.open_disc", "Open Disc…"),
+                    Some(Accel::primary("d")),
+                ),
+                item(
+                    MenuAction::Cmd(Cmd::Close),
+                    g("gui.menu.close", "Close"),
+                    Some(Accel::primary("w")),
+                ),
+                sep(),
+                item(
+                    MenuAction::Cmd(Cmd::SetOutput),
+                    g("gui.menu.set_output", "Set Output Folder…"),
+                    None,
+                ),
+                item(
+                    MenuAction::Cmd(Cmd::Run),
+                    g("gui.menu.start_rip", "Start Rip"),
+                    Some(Accel::primary("r")),
+                ),
+                sep(),
+                item(
+                    MenuAction::Cmd(Cmd::Eject),
+                    g("gui.menu.eject", "Eject"),
+                    Some(Accel::primary("e")),
+                ),
+            ],
+        },
+        MenuGroup {
+            id: MenuGroupId::Edit,
+            title: g("gui.menu.edit", "Edit"),
+            entries: vec![
+                // Cut/Paste ship only where the platform wires them — Mac
+                // uses them via the responder chain (Cut/Paste on text
+                // fields), Windows only surfaces Copy today. The layout
+                // still names them; each shell filters what it renders.
+                item(
+                    MenuAction::StandardCut,
+                    g("gui.menu.cut", "Cut"),
+                    Some(Accel::primary("x")),
+                ),
+                item(
+                    MenuAction::StandardCopy,
+                    g("gui.menu.copy", "Copy"),
+                    Some(Accel::primary("c")),
+                ),
+                item(
+                    MenuAction::StandardPaste,
+                    g("gui.menu.paste", "Paste"),
+                    Some(Accel::primary("v")),
+                ),
+                item(
+                    MenuAction::StandardSelectAllText,
+                    g("gui.menu.select_all_text", "Select All"),
+                    Some(Accel::primary("a")),
+                ),
+                sep(),
+                item(
+                    MenuAction::Cmd(Cmd::SelectAll),
+                    g("gui.menu.select_all_titles", "Select All Titles"),
+                    Some(Accel::primary_shift("A")),
+                ),
+                item(
+                    MenuAction::Cmd(Cmd::SelectNone),
+                    g("gui.menu.select_no_titles", "Select No Titles"),
+                    None,
+                ),
+                item(
+                    MenuAction::Cmd(Cmd::Invert),
+                    g("gui.menu.invert_titles", "Invert Selection"),
+                    None,
+                ),
+            ],
+        },
+        MenuGroup {
+            id: MenuGroupId::View,
+            title: g("gui.menu.view", "View"),
+            entries: vec![
+                item(
+                    MenuAction::Cmd(Cmd::ToggleLog),
+                    log_menu_label(log_hidden),
+                    Some(Accel::primary("l")),
+                ),
+                item(
+                    MenuAction::Cmd(Cmd::ClearLog),
+                    g("gui.menu.clear_log", "Clear Log"),
+                    Some(Accel::primary("k")),
+                ),
+            ],
+        },
+        MenuGroup {
+            id: MenuGroupId::Help,
+            title: g("gui.menu.help", "Help"),
+            entries: vec![
+                item(
+                    MenuAction::Cmd(Cmd::Docs),
+                    g("gui.menu.docs", "Documentation"),
+                    // macOS uses ⌘? (⇧⌘/ on the responder chain); Windows uses
+                    // F1. Both shells map their own accelerator when rendering.
+                    Some(Accel::bare("F1")),
+                ),
+                item(
+                    MenuAction::Cmd(Cmd::CheckUpdates),
+                    g("gui.menu.check_updates", "Check for Updates…"),
+                    None,
+                ),
+            ],
+        },
+    ]
+}
+
 pub fn blocked_while_running(cmd: Cmd) -> bool {
     !matches!(
         cmd,
@@ -2700,6 +2983,106 @@ mod tests {
             title_ids: Vec::new(),
             details: Vec::new(),
         }
+    }
+
+    // ── menu_layout tests ────────────────────────────────────────────────
+    // Neither shell hand-builds a menu bar any more — both walk
+    // `menu_layout`. Adding an item here (and porting each shell's match)
+    // is what stops the "fixed on Windows, forgotten on Mac" drift.
+
+    #[test]
+    fn the_menu_layout_has_the_five_canonical_groups_in_display_order() {
+        let groups = menu_layout(false);
+        let ids: Vec<MenuGroupId> = groups.iter().map(|g| g.id).collect();
+        // App group ships alongside the others; the Windows/Linux shells fold
+        // it into File+Help when they build their native menu bar.
+        assert_eq!(
+            ids,
+            vec![
+                MenuGroupId::App,
+                MenuGroupId::File,
+                MenuGroupId::Edit,
+                MenuGroupId::View,
+                MenuGroupId::Help,
+            ]
+        );
+        // Every group has at least one entry — an empty menu is always a bug.
+        for group in &groups {
+            assert!(
+                !group.entries.is_empty(),
+                "menu group {:?} is empty",
+                group.id
+            );
+        }
+    }
+
+    #[test]
+    fn every_cmd_the_shells_dispatch_from_a_menu_is_reachable_from_the_layout() {
+        // The set the current menu bar wires up. Adding a Cmd that a menu
+        // fires means listing it here so the layout can be checked against
+        // the shells' expectations.
+        let expected: &[Cmd] = &[
+            Cmd::Open,
+            Cmd::Close,
+            Cmd::SetOutput,
+            Cmd::Run,
+            Cmd::Eject,
+            Cmd::SelectAll,
+            Cmd::SelectNone,
+            Cmd::Invert,
+            Cmd::ToggleLog,
+            Cmd::ClearLog,
+            Cmd::Settings,
+            Cmd::About,
+            Cmd::Docs,
+            Cmd::CheckUpdates,
+            Cmd::Quit,
+        ];
+
+        let mut found: Vec<Cmd> = Vec::new();
+        for group in menu_layout(false) {
+            for entry in group.entries {
+                if let MenuEntry::Item(mi) = entry
+                    && let MenuAction::Cmd(c) = mi.action
+                {
+                    found.push(c);
+                }
+            }
+        }
+        for c in expected {
+            assert!(
+                found.iter().any(|f| f == c),
+                "Cmd::{c:?} is menu-driven on at least one shell but not in menu_layout"
+            );
+        }
+    }
+
+    #[test]
+    fn the_log_toggle_label_follows_the_layout_parameter() {
+        // The whole point of taking `log_hidden` on `menu_layout` is that
+        // a shell rebuilds its menu after the log is toggled and picks up
+        // the new label without an extra "sync the label" call.
+        let with_log_shown = menu_layout(false);
+        let with_log_hidden = menu_layout(true);
+        let toggle_label = |groups: &[MenuGroup]| -> String {
+            for g in groups {
+                for e in &g.entries {
+                    if let MenuEntry::Item(mi) = e
+                        && mi.action == MenuAction::Cmd(Cmd::ToggleLog)
+                    {
+                        return mi.label.clone();
+                    }
+                }
+            }
+            panic!("ToggleLog missing from menu_layout")
+        };
+        assert_eq!(toggle_label(&with_log_shown), log_menu_label(false));
+        assert_eq!(toggle_label(&with_log_hidden), log_menu_label(true));
+        assert_ne!(
+            toggle_label(&with_log_shown),
+            toggle_label(&with_log_hidden),
+            "the log toggle must swap between Show/Hide as the state changes"
+        );
     }
 
     #[test]

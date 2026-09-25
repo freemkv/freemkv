@@ -17,7 +17,9 @@
 //! exhaustive by design). Adding a new `Effect` variant → this test still
 //! passes; a per-`Cmd` line changes only when its emitted set changes.
 
-use freemkv::ui::{App, Cmd, Effect};
+use freemkv::ui::{
+    App, Cmd, Effect, MenuAction, MenuEntry, MenuGroupId, menu_layout,
+};
 
 /// Structural label for an `Effect`, ignoring payload — the shell contract
 /// pins WHICH effects fire, not the exact strings inside them (which are
@@ -127,4 +129,78 @@ fn every_cmd_from_a_fresh_app_emits_the_same_effect_set_for_every_shell() {
     // Quit stands alone: shell reads `Effect::Quit` and terminates.
     let mut app = App::new();
     assert_eq!(kinds(&mut app, Cmd::Quit), expected_default_kinds(Cmd::Quit));
+}
+
+/// The other half of the shell contract: every user-driveable `Cmd` that a
+/// menu bar ought to expose is actually IN `menu_layout`. Add a new `Cmd` and
+/// forget to add it to the layout → this test fails and reminds you before
+/// three shells silently gain a keyboard-only-command-with-no-menu-item.
+///
+/// Exclusions: `Cmd::Cancel` and `Cmd::SetFormat` live in the main window
+/// (Cancel is the progress-page button; SetFormat is the output-format
+/// dropdown), not in the menu bar; both intentionally have no menu row.
+#[test]
+fn every_user_driveable_cmd_that_belongs_in_a_menu_is_in_the_layout() {
+    let must_be_in_layout: &[Cmd] = &[
+        Cmd::Open,
+        Cmd::Close,
+        Cmd::SetOutput,
+        Cmd::Run,
+        Cmd::Eject,
+        Cmd::SelectAll,
+        Cmd::SelectNone,
+        Cmd::Invert,
+        Cmd::ClearLog,
+        Cmd::ToggleLog,
+        Cmd::Settings,
+        Cmd::About,
+        Cmd::Docs,
+        Cmd::CheckUpdates,
+        Cmd::Quit,
+    ];
+
+    let mut in_layout: Vec<Cmd> = Vec::new();
+    for group in menu_layout(false) {
+        for entry in group.entries {
+            if let MenuEntry::Item(mi) = entry
+                && let MenuAction::Cmd(c) = mi.action
+            {
+                in_layout.push(c);
+            }
+        }
+    }
+
+    for c in must_be_in_layout {
+        assert!(
+            in_layout.iter().any(|f| f == c),
+            "Cmd::{c:?} is a user-visible menu command but is missing from \
+             ui::menu_layout — every shell would silently omit its menu row"
+        );
+    }
+}
+
+/// Windows and Linux merge macOS's App group into File+Help; a menu bar with
+/// NO App group would leave Mac without an About/Settings/Quit item at all.
+/// Pin that the group exists and contains the three expected entries.
+#[test]
+fn the_app_group_carries_about_settings_and_quit_for_the_mac_menu() {
+    let groups = menu_layout(false);
+    let app = groups
+        .iter()
+        .find(|g| g.id == MenuGroupId::App)
+        .expect("App group must exist so the Mac shell can populate its app menu");
+    let cmds: Vec<Cmd> = app
+        .entries
+        .iter()
+        .filter_map(|e| match e {
+            MenuEntry::Item(mi) => match mi.action {
+                MenuAction::Cmd(c) => Some(c),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert!(cmds.contains(&Cmd::About), "App group missing About");
+    assert!(cmds.contains(&Cmd::Settings), "App group missing Settings");
+    assert!(cmds.contains(&Cmd::Quit), "App group missing Quit");
 }
