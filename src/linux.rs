@@ -340,9 +340,9 @@ fn perform_effects(shell: &Rc<Shell>, effects: Vec<Effect>) {
                     "app.reveal-output",
                     Some(&glib::Variant::from(&*output_dir)),
                 );
-                gio::Application::default()
-                    .as_ref()
-                    .map(|a| a.send_notification(Some("rip-finished"), &notif));
+                if let Some(a) = gio::Application::default() {
+                    a.send_notification(Some("rip-finished"), &notif);
+                }
             }
             Effect::Quit => shell.window.close(),
         }
