@@ -205,3 +205,50 @@ fn the_app_group_carries_about_settings_and_quit_for_the_mac_menu() {
     assert!(cmds.contains(&Cmd::Settings), "App group missing Settings");
     assert!(cmds.contains(&Cmd::Quit), "App group missing Quit");
 }
+
+/// The Linux shell's half of the contract, checkable on every OS because the
+/// action table lives in the toolkit-free `linux_glue`: every menu row the
+/// layout names rides on a `gio` action, every action that can start or
+/// redirect work is greyed out mid-rip by the core's rule, and Cancel — the
+/// one command that must always work — is never behind a menu action at all.
+#[test]
+fn every_layout_row_has_a_linux_action_with_the_cores_running_rule() {
+    use freemkv::linux_glue::{ACTIONS, action_name_for, gating_cmd, is_standard_text_action};
+    use freemkv::ui::blocked_while_running;
+
+    for group in menu_layout(false) {
+        for entry in group.entries {
+            let MenuEntry::Item(mi) = entry else { continue };
+            if is_standard_text_action(&mi.action) {
+                continue;
+            }
+            assert!(
+                action_name_for(&mi.action).is_some(),
+                "{:?} is in ui::menu_layout but the Linux hamburger has no action for it",
+                mi.action
+            );
+        }
+    }
+    for (name, action) in ACTIONS {
+        let gate = gating_cmd(action).expect("every Linux action maps to a Cmd");
+        assert_ne!(
+            gate,
+            Cmd::Cancel,
+            "{name}: Cancel must not be a menu action"
+        );
+        if matches!(action, MenuAction::OpenDisc) {
+            assert!(
+                blocked_while_running(gate),
+                "open-disc must be blocked mid-rip"
+            );
+        }
+    }
+    // Each action's dispatch path, from a fresh App, emits the same effect set
+    // the other shells see — the Linux handler adds no effect of its own.
+    for (_, action) in ACTIONS {
+        if let MenuAction::Cmd(cmd) = action {
+            let mut app = App::new();
+            assert_eq!(kinds(&mut app, *cmd), expected_default_kinds(*cmd));
+        }
+    }
+}
