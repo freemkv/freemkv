@@ -143,6 +143,11 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
+      - name: Install GTK4 + libadwaita development headers (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -187,6 +192,11 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
+      - name: Install GTK4 + libadwaita development headers (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
