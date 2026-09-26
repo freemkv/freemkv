@@ -1,14 +1,18 @@
 name: Flatpak
 
-# Not a fast-path CI check — this builds the Flatpak bundle for the qa/main
-# lanes only, and uploads it as an artifact for the release orchestrator to
-# ship. Every dev push already covers the Linux CLI+GUI compile in ci.yml.
-# Manually-triggered only for now — the current manifest uses `type: dir
-# path: ../..` which suits a local `flatpak-builder` invocation from the
-# repo root but not the sandboxed Flathub base image. A submission-ready
-# manifest that fetches by git tag lands with the Flathub submission PR.
+# Validates the Flathub submission manifest the same way Flathub's own CI
+# does: build OFFLINE in the current Flathub runtime container, then run
+# flatpak-builder-lint on both the manifest and the built repo, then check
+# the installed GUI starts. Physical drive and interactive testing is manual.
+#
+# Runs alongside qa.yml on pushes to qa in the dev -> qa -> main flow.
+# Manual dispatch remains available for packaging checks on other branches.
+# This checks the release pinned in the manifest, not the current qa sources;
+# ci.yml and qa.yml cover the candidate's application code.
 on:
   workflow_dispatch:
+  push:
+    branches: [qa]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,29 +24,45 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # The Flathub base image has flatpak-builder + all Freedesktop runtime
-    # bits pre-installed, so no apt-get dance. Version pinned to the
-    # freedesktop-sdk major that matches the runtime the manifest asks for.
+    # gnome-51 == org.gnome.Platform/Sdk 51, the current Flathub runtime.
     container:
-      image: ghcr.io/flathub/flatpak-github-actions:gnome-47
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
     steps:
       - uses: actions/checkout@v5
-        with:
-          path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
-        with:
-          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
-          self: freemkv
-      - name: Build the Flatpak bundle
-        uses: flathub/flatpak-github-actions/flatpak-builder@v6
+
+      # Lint the manifest before building (fast fail on structural issues).
+      - name: Lint manifest
+        run: flatpak-builder-lint manifest packaging/flatpak/org.freemkv.FreeMKV.yaml
+
+      # Offline build in the Flathub container. No siblings checkout and no
+      # network `cargo build`: sources come from the pinned git tag and the
+      # vendored cargo-sources.json.
+      - name: Build (offline)
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: freemkv.flatpak
-          manifest-path: freemkv/packaging/flatpak/org.freemkv.FreeMKV.yaml
+          manifest-path: packaging/flatpak/org.freemkv.FreeMKV.yaml
           cache-key: flatpak-builder-${{ github.sha }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: freemkv-flatpak-${{ github.ref_name }}
-          path: freemkv.flatpak
-          if-no-files-found: error
+          mirror-screenshots-url: https://dl.flathub.org/media
+          upload-artifact: true
+
+      # Keep strict lint blocking: no per-app exceptions are needed today.
+      - name: Lint repo
+        run: flatpak-builder-lint repo repo
+
+      - name: Check installed GUI launch
+        shell: bash
+        run: |
+          flatpak install --user --noninteractive ./freemkv.flatpak
+          # A GUI should stay running until timeout; CLI help exits immediately.
+          # This exercises the default manifest command without an explicit gui arg.
+          status=0
+          xvfb-run --auto-servernum dbus-run-session -- \
+            timeout 15s flatpak run --env=GDK_BACKEND=x11 \
+              org.freemkv.FreeMKV > gui-launch.log 2>&1 || status=$?
+          cat gui-launch.log
+          if [ "$status" -ne 124 ]; then
+            echo "Expected a running GUI; launcher exited with status $status"
+            exit 1
+          fi
