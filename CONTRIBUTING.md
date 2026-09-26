@@ -19,8 +19,13 @@ Before you open a pull request, the same gate CI runs must pass locally:
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features gui -- -D warnings
 cargo test
+cargo test --features gui
 ```
+
+The CLI build has no features; the desktop app is `--features gui` (on Linux it
+needs `libgtk-4-dev` and `libadwaita-1-dev`). CI checks both.
 
 Formatting is rustfmt; clippy must be clean with warnings denied. Behavioural
 changes should come with a test.

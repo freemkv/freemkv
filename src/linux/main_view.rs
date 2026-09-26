@@ -51,10 +51,26 @@ fn g(key: &str) -> String {
     crate::strings::get(key)
 }
 
-fn frame(title: &str, child: &impl IsA<gtk::Widget>) -> gtk::Frame {
-    let f = gtk::Frame::new(Some(title));
-    f.set_child(Some(child));
-    f
+/// Round a panel with libadwaita's `card` (12px radius) and clip its child
+/// to it, so a `view`-backed TextView/ColumnView can't square the corners.
+pub(super) fn card(w: &impl IsA<gtk::Widget>) {
+    w.add_css_class("card");
+    w.set_overflow(gtk::Overflow::Hidden);
+}
+
+/// A titled section: `heading` label above a card, the libadwaita idiom
+/// in place of a `GtkFrame` label.
+fn section(title: &str, child: &impl IsA<gtk::Widget>) -> gtk::Box {
+    let head = gtk::Label::new(Some(title));
+    head.set_xalign(0.0);
+    head.add_css_class("heading");
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    body.append(child);
+    card(&body);
+    let b = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    b.append(&head);
+    b.append(&body);
+    b
 }
 
 fn padded_box(orientation: gtk::Orientation, spacing: i32) -> gtk::Box {
@@ -203,10 +219,13 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
         .vexpand(true)
         .build();
 
-    let right = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    right.append(&frame(&g("gui.group.output"), &out_grid));
-    right.append(&frame(&g("gui.group.info"), &detail_scroll));
+    let right = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    right.set_margin_start(6);
+    right.append(&section(&g("gui.group.output"), &out_grid));
+    right.append(&section(&g("gui.group.info"), &detail_scroll));
 
+    // Cards sit in a gap either side of the divider, not butted against it.
+    tree.widget.set_margin_end(6);
     let titles = gtk::Paned::new(gtk::Orientation::Horizontal);
     titles.set_start_child(Some(&tree.widget));
     titles.set_end_child(Some(&right));
@@ -262,7 +281,7 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     let me = shell.clone();
     cancel.connect_clicked(move |_| me.act(Cmd::Cancel));
     let progress = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    progress.append(&frame(&g("gui.group.information"), &info_grid));
+    progress.append(&section(&g("gui.group.information"), &info_grid));
     progress.append(&cur_row);
     progress.append(&all_row);
     progress.append(&cancel);
@@ -318,9 +337,9 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     let log_end = buf.create_mark(None, &buf.end_iter(), false);
     let log_scroll = gtk::ScrolledWindow::builder()
         .child(&log_view)
-        .has_frame(true)
         .min_content_height(200)
         .build();
+    card(&log_scroll);
 
     let root = padded_box(gtk::Orientation::Vertical, 8);
     root.append(&stack);

@@ -1,51 +1,157 @@
-# Installing freemkv (CLI)
+# Installing freemkv
 
-The `freemkv` CLI ships as a **single static binary** — no runtime, no
-container, no shared-library dependencies. Download one file, make it
-executable, run it. Docker is **not** required for the CLI.
+freemkv ships as two builds of the same program, both installed as `freemkv`:
 
-Release assets are attached to every tagged release at
-<https://github.com/freemkv/freemkv/releases/latest>.
+| Build | What you get | `freemkv` with no arguments | `freemkv <args>` |
+|-------|--------------|-----------------------------|------------------|
+| **App** | Desktop window **and** the full CLI | opens the window | the CLI |
+| **CLI** | Command line only, no UI libraries | prints usage (exit 2) | the CLI |
 
-## Asset names
+Pick one. **Install only one build at a time**: both put a `freemkv` command
+on your `PATH`, and the packages replace each other (the Debian packages and
+the Homebrew cask/formula conflict by design).
 
-Each release carries, per platform:
+`freemkv gui` also opens the window in the app build. On Linux, a bare
+`freemkv` from the app build prints usage when no display is available
+(e.g. over SSH).
 
-| Asset | Platform |
-|-------|----------|
-| `freemkv-x86_64-linux` | Linux x86_64 (static musl) |
-| `freemkv-aarch64-linux` | Linux arm64 (static musl) |
-| `freemkv-x86_64-macos` | macOS Intel |
-| `freemkv-aarch64-macos` | macOS Apple Silicon |
-| `freemkv-x86_64-windows.exe` | Windows x86_64 |
+Every release is at <https://github.com/freemkv/freemkv/releases/latest>, and
+each asset has a matching `<asset>.sha256`. Assets use stable names, so
+`https://github.com/freemkv/freemkv/releases/latest/download/<asset>` always
+points at the newest release.
 
-Each binary has a matching `<asset>.sha256` checksum file. The same
-release also still carries the `*.tar.gz` / `*.zip` archives if you
-prefer those.
+## Assets
 
-## Linux / macOS
+| Platform | App | CLI |
+|----------|-----|-----|
+| macOS Apple Silicon | `freemkv-aarch64-macos.dmg` / `.zip` | `freemkv-cli-aarch64-macos` |
+| macOS Intel | `freemkv-x86_64-macos.dmg` / `.zip` | `freemkv-cli-x86_64-macos` |
+| Windows x86_64 | `freemkv-x86_64-windows-setup.exe` (installer), `freemkv-x86_64-windows.zip` (portable) | `freemkv-cli-x86_64-windows.exe` |
+| Linux x86_64 | `freemkv-amd64.deb`, `freemkv-x86_64-linux.AppImage`, `freemkv-x86_64-linux.flatpak` | `freemkv-cli-amd64.deb`, `freemkv-cli-x86_64-linux` |
+| Linux arm64 | — | `freemkv-cli-aarch64-linux` |
+
+The Linux CLI binaries are static (musl) and need no shared libraries. The
+macOS app and CLI are Developer ID signed and notarized.
+
+The CLI binaries are also published under their pre-split names
+(`freemkv-x86_64-linux`, `freemkv-aarch64-linux`, `freemkv-x86_64-macos`,
+`freemkv-aarch64-macos`, `freemkv-x86_64-windows.exe`) for one more release, so
+existing download scripts keep working. Switch to the `freemkv-cli-*` names.
+
+## macOS
+
+**App.** Open the `.dmg` and drag `freemkv.app` to Applications, or:
 
 ```bash
-# Pick the asset for your platform (Linux x86_64 shown).
-ASSET=freemkv-x86_64-linux
+brew install --cask freemkv/tap/freemkv
+```
 
+The cask also links the `freemkv` command. With the `.dmg`, link it yourself:
+
+```bash
+sudo ln -sf /Applications/freemkv.app/Contents/MacOS/freemkv /usr/local/bin/freemkv
+```
+
+**CLI.**
+
+```bash
+brew install freemkv/tap/freemkv-cli
+```
+
+Or download the binary directly (Apple Silicon shown):
+
+```bash
+ASSET=freemkv-cli-aarch64-macos
 curl -sLO "https://github.com/freemkv/freemkv/releases/latest/download/${ASSET}"
 curl -sLO "https://github.com/freemkv/freemkv/releases/latest/download/${ASSET}.sha256"
-
-# Verify (optional but recommended).
-shasum -a 256 -c "${ASSET}.sha256"     # macOS / BSD
-# sha256sum -c "${ASSET}.sha256"       # Linux GNU coreutils
-
+shasum -a 256 -c "${ASSET}.sha256"
 chmod +x "${ASSET}"
 sudo mv "${ASSET}" /usr/local/bin/freemkv
-
 freemkv --version
 ```
 
 ## Windows
 
-Download `freemkv-x86_64-windows.exe` from the releases page, rename to
-`freemkv.exe`, and place it somewhere on your `PATH`.
+**App (installer).** Run `freemkv-x86_64-windows-setup.exe`. It installs for
+the current user (no administrator rights) into
+`%LOCALAPPDATA%\Programs\freemkv`, adds a Start menu shortcut, and puts the
+folder on your user `PATH`. Uninstall from Settings → Apps.
+
+**App (portable).** Unzip `freemkv-x86_64-windows.zip` and keep its two files
+together:
+
+- `freemkv.exe` — double-click to open the window.
+- `freemkv.com` — the console entry point. Typing `freemkv` in cmd or
+  PowerShell runs it (Windows tries `.com` before `.exe`), so commands print
+  to the terminal. A bare `freemkv` opens the window and returns the prompt.
+
+Add the folder to your `PATH` to run `freemkv` from anywhere.
+
+**CLI.** Download `freemkv-cli-x86_64-windows.exe`, rename it to
+`freemkv.exe`, and place it on your `PATH`.
+
+## Linux
+
+**App — Debian/Ubuntu** (Ubuntu 24.04, Linux Mint 22 or newer; needs GTK 4.10+
+and libadwaita 1.4+):
+
+```bash
+curl -sLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-amd64.deb
+sudo apt install ./freemkv-amd64.deb
+```
+
+This installs the package `freemkv` and replaces `freemkv-cli` if present.
+
+**App — AppImage:**
+
+```bash
+curl -sLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86_64-linux.AppImage
+chmod +x freemkv-x86_64-linux.AppImage
+./freemkv-x86_64-linux.AppImage
+```
+
+**App — Flatpak:**
+
+```bash
+curl -sLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86_64-linux.flatpak
+flatpak install --user ./freemkv-x86_64-linux.flatpak
+flatpak run org.freemkv.FreeMKV
+```
+
+**CLI — Debian/Ubuntu:**
+
+```bash
+curl -sLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-cli-amd64.deb
+sudo apt install ./freemkv-cli-amd64.deb
+```
+
+This installs the package `freemkv-cli` (no dependencies) and replaces the
+`freemkv` app package if present.
+
+**CLI — static binary** (x86_64 shown; use `freemkv-cli-aarch64-linux` on arm64):
+
+```bash
+ASSET=freemkv-cli-x86_64-linux
+curl -sLO "https://github.com/freemkv/freemkv/releases/latest/download/${ASSET}"
+curl -sLO "https://github.com/freemkv/freemkv/releases/latest/download/${ASSET}.sha256"
+sha256sum -c "${ASSET}.sha256"
+chmod +x "${ASSET}"
+sudo mv "${ASSET}" /usr/local/bin/freemkv
+freemkv --version
+```
+
+### Reading the optical drive without root
+
+On Linux freemkv reads the drive via SCSI generic (`/dev/sr0` / the matching
+`/dev/sg*`). Membership in the `cdrom` group is normally enough:
+
+```bash
+sudo usermod -aG cdrom "$USER"
+# log out / back in (or `newgrp cdrom`) for the group to take effect
+```
+
+If your distro doesn't grant the `cdrom` group access to the SCSI generic
+node, install a udev rule (see autorip's INSTALL.md for the rule text).
 
 ## Using it
 
@@ -69,24 +175,14 @@ freemkv info disc://                         # Show disc info
   freemkv update-keys --url <keydb-url>
   ```
 
-### Reading the optical drive without root
-
-On Linux the CLI reads the drive via SCSI generic (`/dev/sr0` / the
-matching `/dev/sg*`). Membership in the `cdrom` group is normally enough:
+## Building from source
 
 ```bash
-sudo usermod -aG cdrom "$USER"
-# log out / back in (or `newgrp cdrom`) for the group to take effect
+cargo build --release --bin freemkv                  # CLI
+cargo build --release --bin freemkv --features gui   # app
 ```
 
-If your distro doesn't grant the `cdrom` group access to the SCSI
-generic node, install a udev rule (see autorip's INSTALL.md for the rule
-text — the same rule covers the CLI).
-
-## macOS in CI / note on builds
-
-macOS CLI binaries are produced in CI on `macos-latest` runners for both
-Intel (`x86_64-apple-darwin`) and Apple Silicon
-(`aarch64-apple-darwin`). The CLI is portable across platforms; only
-**autorip** is Linux-only (it talks to the kernel SCSI generic layer and
-udev for live-drive detection), so there is no macOS autorip build.
+The Linux app build needs the GTK4 and libadwaita development packages
+(`libgtk-4-dev libadwaita-1-dev` on Debian/Ubuntu). On Windows, drop
+`--bin freemkv` from the app build to also get `freemkv-gui.exe`: the release
+ships it as `freemkv.exe`, beside the console image renamed to `freemkv.com`.

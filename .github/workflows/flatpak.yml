@@ -130,12 +130,15 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          tar -czf "freemkv-flatpak-package-$RELEASE_TAG.tar.gz" flatpak-package
-          cp binary/freemkv.flatpak freemkv-x86_64.flatpak
+          tar -czf freemkv-flatpak-package.tar.gz flatpak-package
+          cp binary/freemkv.flatpak freemkv-x86_64-linux.flatpak
+          for f in freemkv-x86_64-linux.flatpak freemkv-flatpak-package.tar.gz; do
+            sha256sum "$f" > "$f.sha256"
+          done
           for attempt in $(seq 1 90); do
             if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-              gh release upload "$RELEASE_TAG" freemkv-x86_64.flatpak \
-                "freemkv-flatpak-package-$RELEASE_TAG.tar.gz" --clobber
+              gh release upload "$RELEASE_TAG" freemkv-x86_64-linux.flatpak* \
+                freemkv-flatpak-package.tar.gz* --clobber
               exit 0
             fi
             echo "Waiting for release $RELEASE_TAG ($attempt/90)"

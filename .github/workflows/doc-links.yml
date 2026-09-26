@@ -1,11 +1,8 @@
 name: doc-links
 
-# Inlined (no longer a thin caller into freemkv/.github's reusable): since
-# 1.7.6 the Linux target compiles the GTK4 + libadwaita desktop shell, and
-# `cargo doc` on ubuntu needs the same libgtk-4-dev/libadwaita-1-dev deps
-# `cli-linux` installs. The shared reusable in `freemkv/.github` is used by
-# 7 other repos that DON'T need GTK4; adding the apt-get there would tax
-# every one of them. Keep the deps installation local.
+# Inlined rather than the shared reusable: documenting the app build
+# (`--features gui`) needs the GTK4/libadwaita headers no other repo does.
+# Both builds are documented, since the CLI build compiles the UI modules out.
 #
 # Fails on broken intra-doc links in ///|//! comments (`cargo doc -D
 # rustdoc::broken_intra_doc_links`). Toolchain resolves from `rust-version`
@@ -51,4 +48,6 @@ jobs:
         working-directory: freemkv
         env:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
-        run: cargo doc --no-deps --document-private-items --lib --bins
+        run: |
+          cargo doc --no-deps --document-private-items --lib --bins
+          cargo doc --no-deps --document-private-items --lib --bins --features gui

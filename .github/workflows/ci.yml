@@ -51,15 +51,10 @@ permissions:
 # a release. release-orchestrate.yml regenerates it with the real tags at ship time, which is
 # where the pin has to hold.
 #
-# `freemkv` is one binary with two shells: the CLI (every OS) and the native
-# desktop GUI (macOS + Windows). So CI verifies BOTH halves:
-#   - the macOS jobs build/lint/test the whole crate incl. the AppKit shell —
-#     where the dead-state bugs live;
-#   - the Windows jobs do the same for the winsafe shell, and are the only jobs
-#     that compile the `#[cfg(windows)]` half of platform.rs at all;
-#   - the Linux job builds/lints/tests the CLI, which is what Linux ships (the
-#     GUI is target-gated off, so a Linux build is pure CLI);
-#   - a lib-only check keeps the shared core (ui.rs/engine.rs) portable.
+# `freemkv` ships as two builds of one source: the CLI (no features) and the
+# app (`--features gui`, adds the AppKit / winsafe / GTK4 shell). Every job that
+# compiles the crate on macOS, Windows or Linux-glibc covers BOTH builds;
+# `cli-has-no-ui-deps` proves the CLI build links no UI crate on any target.
 jobs:
   # CI owns the changelog: main may never carry a released version without a
   # CHANGELOG.md entry for it. The release orchestrator dates an existing
@@ -128,6 +123,8 @@ jobs:
         working-directory: freemkv
       - run: cargo clippy --all-targets -- -D warnings
         working-directory: freemkv
+      - run: cargo clippy --all-targets --features gui -- -D warnings
+        working-directory: freemkv
 
   # The disc-backed tests skip themselves when FMKV_TEST_ISO is unset, so
   # this runs the platform-neutral suite without needing media on the runner.
@@ -159,6 +156,8 @@ jobs:
         with:
           workspaces: freemkv
       - run: cargo test --tests
+        working-directory: freemkv
+      - run: cargo test --tests --features gui
         working-directory: freemkv
 
   # ── Windows: the whole crate, the winsafe shell included ───────────────────
@@ -200,6 +199,8 @@ jobs:
         working-directory: freemkv
       - run: cargo clippy --all-targets -- -D warnings
         working-directory: freemkv
+      - run: cargo clippy --all-targets --features gui -- -D warnings
+        working-directory: freemkv
 
   # The suite is platform-neutral by contract (the disc-backed tests skip
   # themselves when FMKV_TEST_ISO is unset). If a test needs editing to pass
@@ -233,9 +234,11 @@ jobs:
           workspaces: freemkv
       - run: cargo test --tests
         working-directory: freemkv
+      - run: cargo test --tests --features gui
+        working-directory: freemkv
 
-  # The shippable Windows product is a release build of the freemkv bins
-  # (CLI + desktop shell). `cargo test` above only builds dev profile, and
+  # The shippable Windows products are release builds of the app (both bins)
+  # and the CLI. `cargo test` above only builds dev profile, and
   # release-only failures are real (LTO, codegen-units, opt-level). Cheap
   # insurance that the artifact the release workflow zips actually links.
   release-build-windows:
@@ -265,7 +268,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
-      - run: cargo build --release
+      - run: cargo build --release --features gui
+        working-directory: freemkv
+      - run: cargo build --release --bin freemkv
         working-directory: freemkv
 
   # ── Intel Mac: a target we SHIP but never otherwise compile ────────────────
@@ -302,15 +307,14 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
-      - run: cargo build --release --target x86_64-apple-darwin
+      - run: cargo build --release --target x86_64-apple-darwin --bin freemkv
+        working-directory: freemkv
+      - run: cargo build --release --target x86_64-apple-darwin --features gui --bin freemkv
         working-directory: freemkv
 
-  # ── Linux: CLI + GTK4 GUI (what Linux ships as of 1.7.6) ──────────────────
-  # Since 1.7.6 the Linux target compiles a GTK4 + libadwaita desktop shell
-  # (`src/linux.rs`) alongside the CLI — same "one product, three shells"
-  # model as macOS and Windows. The apt-get step installs the pkg-config
-  # deps GTK4/libadwaita link against; without them `cargo build` fails at
-  # the gtk4 crate's build.rs pkg-config probe.
+  # ── Linux-glibc: CLI and GTK4 app ─────────────────────────────────────────
+  # The app build's gtk4/libadwaita build.rs probe pkg-config, hence the
+  # apt-get. The musl CLI release binaries are built in release.yml.
   cli-linux:
     runs-on: ubuntu-latest
     steps:
@@ -337,10 +341,48 @@ jobs:
           workspaces: freemkv
       - run: cargo clippy --all-targets -- -D warnings
         working-directory: freemkv
+      - run: cargo clippy --all-targets --features gui -- -D warnings
+        working-directory: freemkv
       - run: cargo test --tests
         working-directory: freemkv
-      - run: cargo build --release
+      - run: cargo test --tests --features gui
         working-directory: freemkv
+      - run: cargo build --release --bin freemkv
+        working-directory: freemkv
+      - run: cargo build --release --features gui --bin freemkv
+        working-directory: freemkv
+
+  # The CLI build must link no UI crate on any target. `--target all` resolves
+  # every platform's deps from one Linux runner.
+  cli-has-no-ui-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: freemkv
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+        with:
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          self: freemkv
+      - uses: dtolnay/rust-toolchain@stable
+      - name: No gtk4/libadwaita/winsafe/objc2-app-kit without the gui feature
+        working-directory: freemkv
+        shell: bash
+        run: |
+          set -euo pipefail
+          ui='^(gtk4|libadwaita|winsafe|objc2-app-kit) '
+          cli=$(cargo tree -e normal --target all --prefix none)
+          app=$(cargo tree -e normal --target all --prefix none --features gui)
+          if grep -E "$ui" <<<"$cli" | sort -u | grep .; then
+            echo "::error::the CLI build (no features) pulls in the UI crates above"
+            exit 1
+          fi
+          # Guard the guard: the app build must still find them.
+          [ "$(grep -E "$ui" <<<"$app" | cut -d' ' -f1 | sort -u | wc -l)" -eq 4 ] || {
+            echo "::error::expected all four UI crates in the gui build's tree"
+            exit 1
+          }
 
   # ── Dependency audit: cargo-deny over the RESOLVED graph ───────────────────
   # Gates the resolved dependency graph against RUSTSEC advisories, a permissive
@@ -363,13 +405,14 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check advisories bans licenses sources
+          # Audit the app build's UI crates too, not just the default CLI graph.
+          arguments: --all-features
           manifest-path: freemkv/Cargo.toml
 
   # The shared core must stay platform-neutral: this checks the LIBRARY on
   # Linux, so if a `df` call or any OS assumption creeps into ui.rs/engine.rs
-  # it fails here long before the Windows shell exists to notice. Since 1.7.6
-  # the Linux target also compiles the GTK4 shell, so this job needs the
-  # GTK4/libadwaita pkg-config deps the linux module links against.
+  # it fails here long before the Windows shell exists to notice. Checked
+  # without the gui feature, so no GTK4 headers are needed.
   core-is-portable:
     runs-on: ubuntu-latest
     steps:
@@ -381,10 +424,6 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - name: Install GTK4 + libadwaita development headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -459,7 +498,7 @@ jobs:
         with:
           workspaces: freemkv
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - run: cargo llvm-cov --workspace --ignore-run-fail --lcov --output-path lcov.info
+      - run: cargo llvm-cov --workspace --features gui --ignore-run-fail --lcov --output-path lcov.info
         working-directory: freemkv
       - uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7
         with:

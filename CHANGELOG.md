@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Separate app and CLI builds on every OS.** Both install the `freemkv` command; install one or the other. The **app** opens its window when run with no arguments and runs the CLI for any command. The **CLI** has no UI libraries (static on Linux) and prints usage when run with no arguments. `freemkv gui` still opens the window in the app. See [INSTALL.md](INSTALL.md).
+- CLI binaries are renamed `freemkv-cli-<arch>-<os>` (e.g. `freemkv-cli-x86_64-linux`, `freemkv-cli-x86_64-windows.exe`). The old names are still published for this release only; update download scripts.
+- Windows app: new per-user installer `freemkv-x86_64-windows-setup.exe` (Start menu entry, adds itself to `PATH`). The portable `.zip` now holds `freemkv.exe` (the window) and `freemkv.com` (so `freemkv` typed in a terminal prints to it).
+- Linux: the `.deb` is split into `freemkv` (app, `freemkv-amd64.deb`) and `freemkv-cli` (`freemkv-cli-amd64.deb`, no dependencies); each replaces the other. The Flatpak download is now `freemkv-x86_64-linux.flatpak`.
+- Homebrew: the cask is now `freemkv` (was `freemkv-app`) and also links the `freemkv` command; the CLI formula is now `freemkv-cli` (was `freemkv`). Existing installs follow the rename.
+- Versioned duplicate assets are no longer published; every asset has a stable name and a `.sha256`.
+
 ## [1.7.7] — 2026-09-26
 
 ### Fixed

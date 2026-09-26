@@ -19,6 +19,8 @@ fn combined_output(out: &std::process::Output) -> String {
 
 // ── No arguments ────────────────────────────────────────────────────────────
 
+// CLI build only: a bare launch of the app build opens the window (see tests/launch.rs).
+#[cfg(not(feature = "gui"))]
 #[test]
 fn no_args_shows_usage() {
     // Bare invocation prints usage but exits non-zero (2) so a scripted

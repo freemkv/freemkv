@@ -45,23 +45,20 @@ def manifest(checksum):
         "app-id": "org.freemkv.FreeMKV", "runtime": "org.gnome.Platform",
         "runtime-version": "51", "sdk": "org.gnome.Sdk",
         "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
-        "command": "freemkv-gui",
+        "command": "freemkv",
         "finish-args": ["--socket=wayland", "--socket=fallback-x11", "--share=ipc",
                         "--device=all", "--filesystem=xdg-videos", "--filesystem=xdg-download",
                         "--share=network"],
         "build-options": {"append-path": "/usr/lib/sdk/rust-stable/bin",
                           "env": {"CARGO_HOME": "/run/build/freemkv/cargo"}},
         "modules": [{"name": "freemkv", "buildsystem": "simple", "build-commands": [
-            "cd freemkv && cargo build --offline --locked --release --bin freemkv",
+            "cd freemkv && cargo build --offline --locked --release --features gui --bin freemkv",
             "install -Dm755 freemkv/target/release/freemkv /app/bin/freemkv",
-            "install -Dm755 freemkv-gui /app/bin/freemkv-gui",
             "install -Dm644 freemkv/packaging/flatpak/org.freemkv.FreeMKV.desktop /app/share/applications/org.freemkv.FreeMKV.desktop",
             "install -Dm644 freemkv/packaging/flatpak/org.freemkv.FreeMKV.metainfo.xml /app/share/metainfo/org.freemkv.FreeMKV.metainfo.xml",
             "install -Dm644 freemkv/res/freemkv-icon.svg /app/share/icons/hicolor/scalable/apps/org.freemkv.FreeMKV.svg",
         ], "sources": [{"type": "archive", "path": "sources.tar.gz", "sha256": checksum,
-                         "strip-components": 0},
-                        {"type": "script", "dest-filename": "freemkv-gui",
-                         "commands": ['exec /app/bin/freemkv gui "$@"']}]}],
+                         "strip-components": 0}]}],
     }
 
 

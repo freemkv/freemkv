@@ -1,4 +1,4 @@
-"""Build the native amd64 package on Ubuntu 24.04 using its library metadata."""
+"""Build the amd64 `freemkv` (app) or `freemkv-cli` (static CLI) package on Ubuntu 24.04."""
 
 import argparse
 from datetime import datetime, timezone
@@ -17,6 +17,35 @@ import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[2]
+MAINTAINER = 'Matthew Jackson <1085847+MattJackson@users.noreply.github.com>'
+DEVICE_NOTE = ('Optical drives use the distribution\'s existing device ACLs and group permissions.\n'
+               'Use an active local desktop session. If access is denied, inspect the device\n'
+               'owner/group and your distribution\'s optical-drive access policy. No device\n'
+               'permissions or group memberships are changed by this package.\n')
+PACKAGES = {
+    'freemkv': {
+        'other': 'freemkv-cli',
+        'summary': 'Rip DVD, Blu-ray and UHD discs without re-encoding',
+        'description': ' Native GTK4 desktop app and command-line interface for selecting titles,\n'
+                       ' audio and subtitle tracks and saving them to MKV, MP4 or M2TS.\n'
+                       ' Running freemkv without arguments opens the desktop app.\n',
+        'readme': 'Built for Ubuntu 24.04 amd64 and compatible derivatives such as Linux Mint 22.\n'
+                  'Launch freemkv from the application menu, or run freemkv with no arguments.\n'
+                  'Any arguments run the command-line interface.\n\n' + DEVICE_NOTE,
+        'usage': 'Run freemkv with no arguments for the desktop app, or freemkv --help for CLI usage.',
+    },
+    'freemkv-cli': {
+        'other': 'freemkv',
+        'summary': 'Rip DVD, Blu-ray and UHD discs without re-encoding (command line)',
+        'description': ' Static command-line build of freemkv for selecting titles, audio and\n'
+                       ' subtitle tracks and saving them to MKV, MP4 or M2TS. It has no desktop\n'
+                       ' interface; install the freemkv package for the desktop app.\n',
+        'readme': 'Static amd64 command-line build with no library dependencies.\n'
+                  'Run freemkv --help for usage. Install the freemkv package for the desktop app.\n\n'
+                  + DEVICE_NOTE,
+        'usage': 'Run freemkv --help for usage.',
+    },
+}
 
 
 def run(*args, cwd=ROOT):
@@ -40,6 +69,13 @@ def dependencies(output):
     return values[0] + ', ca-certificates'
 
 
+def static_binary(program_headers):
+    """True when `readelf -lW` output has no interpreter, i.e. nothing to load at runtime."""
+    if 'Program Headers:' not in program_headers:
+        raise ValueError('readelf returned no program headers')
+    return not re.search(r'^\s*INTERP\b', program_headers, re.MULTILINE)
+
+
 def write(root, path, text, mode=0o644):
     dest = root / path
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -56,9 +92,52 @@ def copy(root, source, path, mode=0o644):
     return dest
 
 
-def stage(binary, root, package_version, depends, epoch, notices):
+def stage(binary, root, package_version, depends, epoch, notices, package='freemkv'):
+    meta = PACKAGES[package]
+    doc = f'usr/share/doc/{package}'
     copy(root, binary, 'usr/bin/freemkv', 0o755)
-    write(root, 'usr/bin/freemkv-gui', '#!/bin/sh\nexec /usr/bin/freemkv gui "$@"\n', 0o755)
+    if package == 'freemkv':
+        stage_desktop(root, package_version, epoch)
+    else:
+        write(root, 'usr/share/lintian/overrides/freemkv-cli',
+              'freemkv-cli: statically-linked-binary [usr/bin/freemkv]\n')
+    copyright_text = ((ROOT / 'LICENSE').read_text()
+                      + '\nUpstream: https://github.com/freemkv/freemkv\n'
+                      + f'Dependency licenses and notices: /{doc}/third-party-notices.gz\n')
+    write(root, f'{doc}/copyright', copyright_text)
+    (root / doc / 'third-party-notices.gz').write_bytes(gzip.compress(notices.encode(), mtime=0))
+    write(root, f'{doc}/README.Debian', meta['readme'])
+    changelog = (f'{package} ({package_version}) unstable; urgency=medium\n\n'
+                 '  * Package the upstream release for Ubuntu 24.04 amd64.\n\n'
+                 f' -- {MAINTAINER}  '
+                 + format_datetime(datetime.fromtimestamp(epoch, timezone.utc)) + '\n')
+    for filename, content in [('changelog.Debian.gz', changelog),
+                               ('changelog.gz', (ROOT / 'CHANGELOG.md').read_text())]:
+        (root / doc / filename).write_bytes(gzip.compress(content.encode(), mtime=0))
+    man = ('.TH FREEMKV 1\n.SH NAME\nfreemkv \\- rip DVD, Blu-ray and UHD discs\n'
+           '.SH SYNOPSIS\n.B freemkv\n[command] [options]\n'
+           '.SH DESCRIPTION\nCopy original media streams without re-encoding.\n'
+           f'.PP\n{meta["usage"]}\n'
+           '.SH SEE ALSO\nhttps://freemkv.org\n')
+    dest = root / 'usr/share/man/man1'
+    dest.mkdir(parents=True)
+    (dest / 'freemkv.1.gz').write_bytes(gzip.compress(man.encode(), mtime=0))
+    installed = sum(p.stat().st_size for p in root.rglob('*') if p.is_file())
+    write(root, 'DEBIAN/control',
+          f'Package: {package}\nVersion: {package_version}\nArchitecture: amd64\n'
+          'Section: video\nPriority: optional\n'
+          f'Maintainer: {MAINTAINER}\n'
+          f'Installed-Size: {(installed + 1023) // 1024}\n'
+          + (f'Depends: {depends}\n' if depends else '')
+          + f'Conflicts: {meta["other"]}\nReplaces: {meta["other"]}\n'
+          'Homepage: https://freemkv.org\n'
+          f'Description: {meta["summary"]}\n' + meta['description'])
+    checksums = ''.join(hashlib.md5(p.read_bytes()).hexdigest() + '  ' + str(p.relative_to(root)) + '\n'
+                        for p in sorted(root.rglob('*')) if p.is_file() and 'DEBIAN' not in p.parts)
+    write(root, 'DEBIAN/md5sums', checksums)
+
+
+def stage_desktop(root, package_version, epoch):
     packaging = ROOT / 'packaging/flatpak'
     copy(root, packaging / 'org.freemkv.FreeMKV.desktop',
          'usr/share/applications/org.freemkv.FreeMKV.desktop')
@@ -76,50 +155,6 @@ def stage(binary, root, package_version, depends, epoch, notices):
                                      date=datetime.fromtimestamp(epoch, timezone.utc).date().isoformat()))
     ET.indent(tree, space='  ')
     tree.write(metainfo, encoding='utf-8', xml_declaration=True)
-    copyright_text = ((ROOT / 'LICENSE').read_text()
-                      + '\nUpstream: https://github.com/freemkv/freemkv\n'
-                      + 'Dependency licenses and notices: /usr/share/doc/freemkv/third-party-notices.gz\n')
-    write(root, 'usr/share/doc/freemkv/copyright', copyright_text)
-    (root / 'usr/share/doc/freemkv/third-party-notices.gz').write_bytes(
-        gzip.compress(notices.encode(), mtime=0))
-    write(root, 'usr/share/doc/freemkv/README.Debian',
-          'Built for Ubuntu 24.04 amd64 and compatible derivatives such as Linux Mint 22.\n'
-          'Launch freemkv from the application menu, or run: freemkv gui\n'
-          'The command-line interface is also available as freemkv.\n\n'
-          'Optical drives use the distribution\'s existing device ACLs and group permissions.\n'
-          'Use an active local desktop session. If access is denied, inspect the device\n'
-          'owner/group and your distribution\'s optical-drive access policy. No device\n'
-          'permissions or group memberships are changed by this package.\n')
-    changelog = (f'freemkv ({package_version}) unstable; urgency=medium\n\n'
-                 '  * Package the upstream release for Ubuntu 24.04 amd64.\n\n'
-                 ' -- Matthew Jackson <1085847+MattJackson@users.noreply.github.com>  '
-                 + format_datetime(datetime.fromtimestamp(epoch, timezone.utc)) + '\n')
-    for filename, content in [('changelog.Debian.gz', changelog),
-                               ('changelog.gz', (ROOT / 'CHANGELOG.md').read_text())]:
-        dest = root / 'usr/share/doc/freemkv' / filename
-        dest.write_bytes(gzip.compress(content.encode(), mtime=0))
-    man = ('.TH FREEMKV 1\n.SH NAME\nfreemkv \\- rip DVD, Blu-ray and UHD discs\n'
-           '.SH SYNOPSIS\n.B freemkv\n[command] [options]\n'
-           '.SH DESCRIPTION\nCopy original media streams without re-encoding.\n'
-           '.PP\nRun freemkv gui for the desktop interface, or freemkv --help for CLI usage.\n'
-           '.SH SEE ALSO\nhttps://freemkv.org\n')
-    dest = root / 'usr/share/man/man1'
-    dest.mkdir(parents=True)
-    (dest / 'freemkv.1.gz').write_bytes(gzip.compress(man.encode(), mtime=0))
-    (dest / 'freemkv-gui.1.gz').write_bytes(gzip.compress(b'.so man1/freemkv.1\n', mtime=0))
-    installed = sum(p.stat().st_size for p in root.rglob('*') if p.is_file())
-    write(root, 'DEBIAN/control',
-          f'Package: freemkv\nVersion: {package_version}\nArchitecture: amd64\n'
-          'Section: video\nPriority: optional\n'
-          'Maintainer: Matthew Jackson <1085847+MattJackson@users.noreply.github.com>\n'
-          f'Installed-Size: {(installed + 1023) // 1024}\nDepends: {depends}\n'
-          'Homepage: https://freemkv.org\n'
-          'Description: Rip DVD, Blu-ray and UHD discs without re-encoding\n'
-          ' Native GTK4 desktop and command-line interfaces for selecting titles,\n'
-          ' audio and subtitle tracks and saving them to MKV, MP4 or M2TS.\n')
-    checksums = ''.join(hashlib.md5(p.read_bytes()).hexdigest() + '  ' + str(p.relative_to(root)) + '\n'
-                        for p in sorted(root.rglob('*')) if p.is_file() and 'DEBIAN' not in p.parts)
-    write(root, 'DEBIAN/md5sums', checksums)
 
 
 def dependency_notices():
@@ -137,7 +172,7 @@ def dependency_notices():
     return '\n'.join(notices)
 
 
-def build(binary, output):
+def build(binary, output, package='freemkv'):
     if run('dpkg', '--print-architecture') != 'amd64':
         raise ValueError('build the native package on Ubuntu 24.04 amd64')
     package_version = version()
@@ -145,28 +180,34 @@ def build(binary, output):
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
-        control = root / 'debian/control'
-        control.parent.mkdir()
-        control.write_text('Source: freemkv\nSection: video\nPriority: optional\n'
-                           'Maintainer: Matthew Jackson <1085847+MattJackson@users.noreply.github.com>\n\n'
-                           'Package: freemkv\nArchitecture: amd64\nDescription: Disc ripper\n')
-        depends = dependencies(run('dpkg-shlibdeps', '-O', str(binary), cwd=root))
+        if package == 'freemkv':
+            control = root / 'debian/control'
+            control.parent.mkdir()
+            control.write_text(f'Source: freemkv\nSection: video\nPriority: optional\n'
+                               f'Maintainer: {MAINTAINER}\n\n'
+                               'Package: freemkv\nArchitecture: amd64\nDescription: Disc ripper\n')
+            depends = dependencies(run('dpkg-shlibdeps', '-O', str(binary), cwd=root))
+        elif static_binary(run('readelf', '-lW', str(binary))):
+            depends = ''
+        else:
+            raise ValueError('freemkv-cli must be a static binary')
         stripped = root / 'stripped'
         shutil.copyfile(binary, stripped)
         subprocess.run(['strip', '--strip-unneeded', str(stripped)], check=True)
-        stage(stripped, root / 'package', package_version, depends, epoch, dependency_notices())
-        artifact = output / f'freemkv-{package_version}-amd64.deb'
+        stage(stripped, root / 'package', package_version, depends, epoch, dependency_notices(), package)
+        artifact = output / f'{package}-amd64.deb'
         subprocess.run(['dpkg-deb', '--root-owner-group', '--build', str(root / 'package'), str(artifact)],
                        check=True, env={**os.environ, 'SOURCE_DATE_EPOCH': str(epoch)})
-        shutil.copyfile(artifact, output / 'freemkv-amd64.deb')
-        (output / 'package.json').write_text(json.dumps({'version': package_version, 'architecture': 'amd64',
-            'baseline': 'Ubuntu 24.04', 'depends': depends, 'source': run('git', 'rev-parse', 'HEAD'),
+        (output / f'{package}.json').write_text(json.dumps({'package': package, 'version': package_version,
+            'architecture': 'amd64', 'baseline': 'Ubuntu 24.04', 'depends': depends,
+            'source': run('git', 'rev-parse', 'HEAD'),
             'sha256': hashlib.sha256(artifact.read_bytes()).hexdigest()}, indent=2) + '\n')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--package', choices=sorted(PACKAGES), default='freemkv')
     parser.add_argument('--binary', type=Path, default=ROOT / 'target/release/freemkv')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    build(args.binary.resolve(), args.output.resolve())
+    build(args.binary.resolve(), args.output.resolve(), args.package)

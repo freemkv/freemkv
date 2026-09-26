@@ -48,6 +48,8 @@ jobs:
       fail-fast: false
       matrix:
         os: ['ubuntu-latest', 'macos-latest']
+        # CLI build, then the app build.
+        features: ['', '--features gui']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -58,8 +60,8 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - name: Install GTK4 + libadwaita development headers (Linux)
-        if: runner.os == 'Linux'
+      - name: Install GTK4 + libadwaita development headers (Linux app)
+        if: runner.os == 'Linux' && matrix.features != ''
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
@@ -67,7 +69,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
-      - run: cargo test --release --tests
+          key: ${{ matrix.features == '' && 'cli' || 'app' }}
+      - run: cargo test --release --tests ${{ matrix.features }}
         working-directory: freemkv
 
   windows-build:
@@ -87,6 +90,8 @@ jobs:
           workspaces: freemkv
       - run: cargo build --release --tests
         working-directory: freemkv
+      - run: cargo build --release --tests --features gui
+        working-directory: freemkv
 
   cli-integration:
     strategy:
@@ -103,11 +108,6 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - name: Install GTK4 + libadwaita development headers (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -120,6 +120,7 @@ jobs:
           else
             brew install ffmpeg
           fi
+      # The CLI build: cli-parity expects a bare `freemkv` to print usage.
       - run: cargo build --release --bin freemkv
         working-directory: freemkv
       - run: tests/cli-parity.sh check
@@ -308,7 +309,7 @@ jobs:
               choco install -y visualstudio2022-workload-vctools --no-progress
             fi
           else
-            sudo apt-get install -y -qq build-essential curl pkg-config libgtk-4-dev libadwaita-1-dev
+            sudo apt-get install -y -qq build-essential curl pkg-config
           fi
           if command -v cargo >/dev/null 2>&1; then
             cargo --version

@@ -6,7 +6,7 @@
 //! The AppKit shell is deliberately absent: `settings` and `engine` must build
 //! and be testable on any platform, which is what keeps the logic out of the
 //! platform-specific half. The Win32 shell below does not break that rule —
-//! it is `cfg(target_os = "windows")`, so everywhere the rule is checked
+//! it is `cfg(all(feature = "gui", target_os = "windows"))`, so everywhere the rule is checked
 //! (macOS, Linux CI's portable-core build) it compiles to nothing at all.
 
 /// The launch decision plus the two steps every desktop launch performs first.
@@ -56,16 +56,16 @@ pub mod win_layout;
 pub mod linux_glue;
 
 // ── Win32 shell — WINDOWS ONLY ──────────────────────────────────────────────
-// Lives here so `freemkv-gui.exe` can reach the same shell from one
+// Lives here so the windowed image can reach the same shell from one
 // compilation; `main.rs` builds it once per target, not per binary.
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "gui", target_os = "windows"))]
 pub mod win_app;
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "gui", target_os = "windows"))]
 pub mod windows;
 
 // ── GTK4 + libadwaita shell — LINUX GLIBC ONLY ───────────────────────────── Symmetric with
 // the Windows shell above; the musl CLI skips (Cargo.toml dep gate matches).
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(all(feature = "gui", target_os = "linux", target_env = "gnu"))]
 pub mod linux;
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(all(feature = "gui", target_os = "linux", target_env = "gnu"))]
 pub mod linux_app;

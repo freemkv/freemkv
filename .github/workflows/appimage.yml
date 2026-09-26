@@ -60,7 +60,7 @@ jobs:
           workspaces: freemkv
       - name: Build release binary
         working-directory: freemkv
-        run: cargo build --release
+        run: cargo build --release --features gui --bin freemkv
       - name: Assemble AppDir
         run: |
           set -euo pipefail
@@ -93,9 +93,11 @@ jobs:
           set -euo pipefail
           sudo apt-get install -y xvfb
           ./freemkv-x86_64.AppImage --version
-          # The GUI must still be running after 10s on a virtual display (124 = timed out, alive).
-          rc=0; xvfb-run -a timeout 10 ./freemkv-x86_64.AppImage gui || rc=$?
-          [ "$rc" = 124 ] || { echo "::error::GUI exited early (rc=$rc)"; exit 1; }
+          # A bare launch and `gui` must both still be running after 10s (124 = timed out, alive).
+          for args in "" gui; do
+            rc=0; xvfb-run -a timeout 10 ./freemkv-x86_64.AppImage $args || rc=$?
+            [ "$rc" = 124 ] || { echo "::error::GUI '$args' exited early (rc=$rc)"; exit 1; }
+          done
       - if: ${{ !inputs.release }}
         uses: actions/upload-artifact@v4
         with:
@@ -106,16 +108,13 @@ jobs:
         if: ${{ inputs.release }}
         run: |
           set -euo pipefail
-          VER="${{ github.ref_name }}"
           A=freemkv-x86_64-linux
           mv freemkv-x86_64.AppImage "$A.AppImage"
-          cp "$A.AppImage" "$A-$VER.AppImage"
-          sha256sum "$A.AppImage" "$A-$VER.AppImage" > "$A.AppImage.sha256"
+          sha256sum "$A.AppImage" > "$A.AppImage.sha256"
       - name: Upload to the release
         if: ${{ inputs.release }}
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: |
             freemkv-x86_64-linux.AppImage
-            freemkv-x86_64-linux-*.AppImage
             freemkv-x86_64-linux.AppImage.sha256

@@ -52,7 +52,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test --tests
+      - run: cargo test --tests --features gui
 
+  # ── macOS app (`gui` build) ─────────────────────────────────────────────────
   build:
     # NOTE: deliberately does NOT `needs: test` — see the test job above.
     needs: verify
@@ -62,11 +64,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two macOS flavors, mirroring the CLI — which ships BOTH, so these
-        # genuinely mirror it. (This comment used to claim the CLI dropped
-        # x86_64-apple-darwin over a linker issue; its own matrix below
-        # contradicted that, and the target builds. Corrected rather than
-        # deleted so nobody re-derives the false constraint from the history.)
+        # One .app per arch, mirroring the CLI's two macOS legs.
         include:
           - target: aarch64-apple-darwin
             asset: freemkv-aarch64-macos
@@ -84,7 +82,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --features gui --bin freemkv
 
       # ── Developer ID signing ──────────────────────────────────────────────
       #
@@ -154,19 +152,12 @@ jobs:
       - name: Finalize artifacts
         run: |
           set -euo pipefail
-          VER="${{ github.ref_name }}"
           A="${{ matrix.asset }}"
           # Built from the (now stapled) .app. The .zip is for scripted
           # installs — brew casks, MDM — that would rather not mount a .dmg.
           ditto -c -k --keepParent target/freemkv.app "$A.zip"
-          # Versioned copies, mirroring the CLI's versioned/unversioned pair.
-          cp "$A.dmg" "freemkv-$VER-${{ matrix.target }}.dmg"
-          cp "$A.zip" "freemkv-$VER-${{ matrix.target }}.zip"
-          shasum -a 256 \
-            "$A.dmg" "$A.zip" \
-            "freemkv-$VER-${{ matrix.target }}.dmg" \
-            "freemkv-$VER-${{ matrix.target }}.zip" \
-            > "$A.dmg.sha256"
+          shasum -a 256 "$A.dmg" > "$A.dmg.sha256"
+          shasum -a 256 "$A.zip" > "$A.zip.sha256"
 
       - name: Verify the bundle
         run: |
@@ -180,6 +171,9 @@ jobs:
           lipo -archs "$BIN"
           lipo -archs "$BIN" | grep -qw "$WANT" \
             || { echo "::error::expected $WANT in $(lipo -archs "$BIN")"; exit 1; }
+          # No AppKit means the CLI build got bundled as the app.
+          otool -L "$BIN" | grep -q AppKit.framework \
+            || { echo "::error::$BIN does not link AppKit — built without --features gui?"; exit 1; }
           # An .app that fails signature validation is one Gatekeeper refuses
           # to open, which users report as "the app is damaged".
           codesign --verify --deep --strict --verbose=2 target/freemkv.app
@@ -207,29 +201,13 @@ jobs:
             ${{ matrix.asset }}.dmg
             ${{ matrix.asset }}.zip
             ${{ matrix.asset }}.dmg.sha256
-            freemkv-*-${{ matrix.target }}.dmg
-            freemkv-*-${{ matrix.target }}.zip
+            ${{ matrix.asset }}.zip.sha256
 
-  # ── Windows desktop app ─────────────────────────────────────────────────────
-  # The peer of the macOS `build` job above. Windows has no bundle format, so
-  # the shippable unit is a .zip holding the single `freemkv.exe` — the same
-  # binary that serves the CLI (`main.rs` routes `freemkv gui` to the desktop
-  # shell), exactly as the macOS .app wraps the same binary. That is why there
-  # is no separate GUI cargo target or feature to select: the desktop shell is
-  # `#[cfg(target_os = "windows")]`-gated inside the one `freemkv` bin.
-  #
-  # This job is deliberately SEPARATE from `cli-binaries` even though both
-  # compile the same target: the CLI leg's product is the bare, runnable
-  # `.exe` asset, and this leg's product is the desktop-app `.zip` (plus, in
-  # future, an icon/manifest/installer, which must not leak into the CLI
-  # asset). Keeping them apart means the download page's two sections point at
-  # two independently-named assets, and neither can silently become the other.
-  #
-  # Asset names (mirroring the macOS leg's unversioned + versioned pair):
-  #   freemkv-x86_64-windows.zip                    ← linked from the site
-  #   freemkv-<tag>-x86_64-pc-windows-msvc.zip
-  #   freemkv-x86_64-windows.zip.sha256
-  # No collision with the CLI leg, which owns `freemkv-x86_64-windows.exe*`.
+  # ── Windows app (`gui` build) ───────────────────────────────────────────────
+  # The build yields two images of one program: console `freemkv.exe` and
+  # windows-subsystem `freemkv-gui.exe`. They ship as `freemkv.com` (CLI; wins
+  # PATHEXT lookup) and `freemkv.exe` (double-click → window), in a portable
+  # .zip and a per-user Inno Setup installer (packaging/windows/freemkv.iss).
   build-windows:
     # Same rationale as `build`: does NOT `needs: test` (parallel tripwire).
     needs: verify
@@ -239,9 +217,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Single leg today. aarch64-pc-windows-msvc is not shipped: there is no
-        # ARM64 Windows runner in the hosted pool, and x64 runs under emulation
-        # on ARM Windows. Add a leg here when that changes.
+        # x64 only: no hosted ARM64 Windows runner; x64 runs emulated there.
         include:
           - target: x86_64-pc-windows-msvc
             asset: freemkv-x86_64-windows
@@ -257,74 +233,83 @@ jobs:
           key: ${{ matrix.target }}-app
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --features gui
 
-      - name: Package
+      - name: Stage and zip
         shell: pwsh
         run: |
-          $ver = "${{ github.ref_name }}"
           $a   = "${{ matrix.asset }}"
-          $bin = "target/${{ matrix.target }}/release/freemkv.exe"
-          # The .zip is the DESKTOP APP, mirroring macOS where the .dmg carries
-          # the app and the bare binary is the CLI. Here the app is
-          # `freemkv-gui.exe` and the CLI ships as its own `freemkv.exe` asset.
-          #
-          # Windows has no .app bundle, so "this is the desktop app" cannot be a
-          # property of how an image was started — an Explorer double-click and a
-          # `cmd` invocation look identical to the process. It has to be which
-          # image was started. `freemkv.exe` is linked console-subsystem, so
-          # double-clicking it opens a console, prints usage and exits; and the
-          # subsystem is a PE header field fixed at link time, not something a
-          # runtime branch can change. `freemkv-gui.exe` is the windows-subsystem
-          # image built from the same crate and the same shell code.
-          #
-          # `cargo build --release` already produced it; only this step decided
-          # whether a user could ever get it. Shipping the console binary as the
-          # "app" is why the download page's Windows card said "in development"
-          # while a working shell sat unshipped.
-          $gui = "target/${{ matrix.target }}/release/freemkv-gui.exe"
-          if (-not (Test-Path $gui)) { throw "freemkv-gui.exe missing — the .zip would ship the console CLI as the desktop app" }
-          # Unversioned .zip is the stable URL the download page links via
-          # `releases/latest/download/<asset>`; the versioned copy mirrors the
-          # macOS leg so a specific release can be pinned.
-          Compress-Archive -Path $gui -DestinationPath "$a.zip" -Force
-          Compress-Archive -Path $gui -DestinationPath "freemkv-$ver-${{ matrix.target }}.zip" -Force
-          $h = Get-FileHash -Algorithm SHA256 "$a.zip"
-          "$($h.Hash.ToLower())  $a.zip" | Out-File -Encoding ascii "$a.zip.sha256"
+          $rel = "target/${{ matrix.target }}/release"
+          New-Item -ItemType Directory -Force stage | Out-Null
+          Copy-Item "$rel/freemkv-gui.exe" stage/freemkv.exe
+          Copy-Item "$rel/freemkv.exe" stage/freemkv.com
+          Compress-Archive -Path stage/* -DestinationPath "$a.zip" -Force
 
-      - name: Verify the binary
+      - name: Build the installer
         shell: pwsh
         run: |
-          # A .zip whose .exe cannot start is indistinguishable from a good one
-          # until a user double-clicks it — so actually run it. `--version` is
-          # the cheapest path that exercises process start + the linked
-          # libfreemkv, and it needs no disc.
-          $out = & "target/${{ matrix.target }}/release/freemkv.exe" --version
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::freemkv.exe --version exited $LASTEXITCODE"
-            exit 1
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --version 6.4.3 -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           }
-          if ([string]::IsNullOrWhiteSpace($out)) {
-            Write-Output "::error::freemkv.exe --version printed nothing"
-            exit 1
+          $ver = "${{ github.ref_name }}".TrimStart('v')
+          & $iscc "/DAppVersion=$ver" "/DBinDir=$((Resolve-Path stage).Path)" "/O$PWD" packaging/windows/freemkv.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc exited $LASTEXITCODE" }
+
+      - name: Verify
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart('v')
+          $a   = "${{ matrix.asset }}"
+          function Get-Subsystem($path) {
+            $b  = [IO.File]::ReadAllBytes($path)
+            $pe = [BitConverter]::ToInt32($b, 0x3C)
+            if ([Text.Encoding]::ASCII.GetString($b, $pe, 4) -ne "PE`0`0") { throw "$path is not a PE image" }
+            # Subsystem sits at optional-header offset 68 in both PE32 and PE32+.
+            [BitConverter]::ToUInt16($b, $pe + 24 + 68)
           }
-          Write-Output "freemkv.exe --version => $out"
-          # The .zip is the DESKTOP APP, so it must contain the windowed image
-          # and NOT the console one. Shipping freemkv.exe here is the specific
-          # regression this guards: it extracts and double-clicks to a console
-          # that prints usage and closes, which reads to a user as a broken
-          # download rather than as "you got the CLI by mistake".
-          $zip = (Resolve-Path "${{ matrix.asset }}.zip").Path
-          $names = [IO.Compression.ZipFile]::OpenRead($zip).Entries.FullName
-          Write-Output "zip contents: $($names -join ', ')"
-          if ($names -notcontains 'freemkv-gui.exe') {
-            Write-Output "::error::freemkv-gui.exe missing from ${{ matrix.asset }}.zip — that archive is the desktop app"
-            exit 1
+          $names = ([IO.Compression.ZipFile]::OpenRead((Resolve-Path "$a.zip").Path).Entries.FullName | Sort-Object) -join ','
+          Write-Output "zip contents: $names"
+          if ($names -ne 'freemkv.com,freemkv.exe') { throw "$a.zip must hold exactly freemkv.com + freemkv.exe" }
+          $gui = Get-Subsystem stage/freemkv.exe
+          $con = Get-Subsystem stage/freemkv.com
+          if ($gui -ne 2) { throw "freemkv.exe subsystem is $gui, want 2 (windows)" }
+          if ($con -ne 3) { throw "freemkv.com subsystem is $con, want 3 (console)" }
+          $out = & ./stage/freemkv.com --version
+          if ($LASTEXITCODE -ne 0) { throw "freemkv.com --version exited $LASTEXITCODE" }
+          Write-Output "freemkv.com --version => $out"
+          if ("$out" -notmatch [regex]::Escape($ver)) { throw "freemkv.com --version does not report $ver" }
+          if (-not (Test-Path "$a-setup.exe")) { throw "$a-setup.exe was not built" }
+
+      # Round-trip the installer: files land, PATH gains the dir, uninstall
+      # removes both.
+      - name: Verify the installer
+        shell: pwsh
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\freemkv"
+          $userPath = { [Environment]::GetEnvironmentVariable('Path', 'User') }
+          Start-Process -Wait "./${{ matrix.asset }}-setup.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
+          foreach ($f in 'freemkv.exe','freemkv.com','unins000.exe') {
+            if (-not (Test-Path "$dir\$f")) { throw "installer did not create $dir\$f" }
           }
-          if ($names -contains 'freemkv.exe') {
-            Write-Output "::error::${{ matrix.asset }}.zip contains the console freemkv.exe; the CLI ships as its own .exe asset"
-            exit 1
-          }
+          if ((& $userPath) -split ';' -notcontains $dir) { throw "installer did not add $dir to the user PATH" }
+          & "$dir\freemkv.com" --version
+          if ($LASTEXITCODE -ne 0) { throw "installed freemkv.com --version exited $LASTEXITCODE" }
+          Start-Process -Wait "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
+          # The uninstaller relaunches itself from %TEMP%, so -Wait can return early.
+          $done = { -not (Test-Path "$dir\freemkv.exe") -and ((& $userPath) -split ';' -notcontains $dir) }
+          for ($i = 0; $i -lt 60 -and -not (& $done); $i++) { Start-Sleep 1 }
+          if (Test-Path "$dir\freemkv.exe") { throw "uninstaller left $dir\freemkv.exe" }
+          if ((& $userPath) -split ';' -contains $dir) { throw "uninstaller left $dir on the user PATH" }
+
+      - name: Checksums
+        shell: bash
+        run: |
+          A="${{ matrix.asset }}"
+          sha256sum "$A.zip" > "$A.zip.sha256"
+          sha256sum "$A-setup.exe" > "$A-setup.exe.sha256"
 
       - name: Upload
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
@@ -332,13 +317,13 @@ jobs:
           files: |
             ${{ matrix.asset }}.zip
             ${{ matrix.asset }}.zip.sha256
-            freemkv-*-${{ matrix.target }}.zip
+            ${{ matrix.asset }}-setup.exe
+            ${{ matrix.asset }}-setup.exe.sha256
 
-  # ── Standalone CLI binaries for the platforms without a desktop app ─────────
-  # The GUI is target-gated off on Linux, so that leg is pure CLI. Linux ships
-  # musl-static (no glibc version coupling). The Windows and macOS legs here are
-  # the BARE binary for scripted installs — the windowed product ships from
-  # `build-windows` (.zip) and `build` (.dmg) respectively.
+  # ── CLI (no features) ───────────────────────────────────────────────────────
+  # Bare binaries, no UI libraries; Linux is static musl. `legacy` re-uploads
+  # the same bytes under the pre-split name so old `releases/latest/download/`
+  # URLs keep working for one release cycle.
   cli-binaries:
     needs: verify
     # Uploads assets to the GitHub release.
@@ -350,31 +335,28 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            asset: freemkv-x86_64-linux
+            asset: freemkv-cli-x86_64-linux
+            legacy: freemkv-x86_64-linux
             ext: ''
-          # arm64 Linux. Dropped by accident in the 1.6.0 workflow unification
-          # and caught before the tag: the asset exists at v1.5.2 and is served
-          # from the stable `releases/latest/download/` URL, so losing it would
-          # 404 every bookmark, script and Dockerfile pinned to that path — and
-          # silently, because no download button links it. autorip never stopped
-          # shipping its arm64 leg, so the two would also have disagreed.
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            asset: freemkv-aarch64-linux
+            asset: freemkv-cli-aarch64-linux
+            legacy: freemkv-aarch64-linux
             ext: ''
-          # Bare macOS CLI binaries (the .dmg already bundles the CLI; these are
-          # for scripted installs / brew formulae that want just the binary).
           - os: macos-latest
             target: aarch64-apple-darwin
-            asset: freemkv-aarch64-macos
+            asset: freemkv-cli-aarch64-macos
+            legacy: freemkv-aarch64-macos
             ext: ''
           - os: macos-latest
             target: x86_64-apple-darwin
-            asset: freemkv-x86_64-macos
+            asset: freemkv-cli-x86_64-macos
+            legacy: freemkv-x86_64-macos
             ext: ''
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset: freemkv-x86_64-windows
+            asset: freemkv-cli-x86_64-windows
+            legacy: freemkv-x86_64-windows
             ext: '.exe'
     runs-on: ${{ matrix.os }}
     steps:
@@ -388,10 +370,8 @@ jobs:
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      # arm64 musl cross-builds through `cross` (a container with the right
-      # sysroot), which is how this leg was built up to v1.5.2. A plain
-      # `cargo build --target` on an x86 runner cannot link it: mimalloc-sys
-      # and ring both compile C.
+      # arm64 musl goes through `cross`: mimalloc-sys and ring compile C, which
+      # a plain x86 `cargo build --target` cannot link.
       - name: Install cross
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
@@ -399,15 +379,32 @@ jobs:
           sudo mv cross /usr/local/bin/
       - name: Build CLI
         if: matrix.target != 'aarch64-unknown-linux-musl'
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --bin freemkv
       - name: Build CLI (cross)
         if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: cross build --release --target ${{ matrix.target }}
-      # The bare macOS CLI binaries need signing and notarizing too. They are
-      # downloaded directly, so they are quarantined exactly like the .app --
-      # and unsigned, they produce the same "Apple could not verify" refusal
-      # that the .dmg was fixed for. Shipping a signed app beside an unsigned
-      # CLI just moves the complaint.
+        run: cross build --release --target ${{ matrix.target }} --bin freemkv
+
+      # The CLI must not pull in UI libraries: none at all on static Linux,
+      # no AppKit/UserNotifications on macOS.
+      - name: Verify no UI libraries are linked
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/freemkv"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            otool -L "$BIN"
+            if otool -L "$BIN" | grep -Eq 'AppKit|UserNotifications'; then
+              echo "::error::the CLI links a UI framework"; exit 1
+            fi
+          else
+            if readelf -d "$BIN" | grep -q NEEDED; then
+              readelf -d "$BIN"
+              echo "::error::the Linux CLI is not static"; exit 1
+            fi
+          fi
+
+      # Downloaded bare binaries are quarantined like the .app, so they need
+      # signing and notarizing too.
       - name: Import the Developer ID certificate
         id: signing
         if: runner.os == 'macOS'
@@ -429,12 +426,8 @@ jobs:
           BIN="target/${{ matrix.target }}/release/freemkv"
           codesign --force --options runtime --timestamp --sign "$IDENTITY" "$BIN"
           codesign --verify --strict --verbose=2 "$BIN"
-          # notarytool only accepts .zip, .dmg and .pkg -- never a bare Mach-O.
-          # Zip it, notarize that, and the binary inside is what gets the
-          # verdict. The ticket CANNOT be stapled to a bare binary, so first
-          # run still needs Apple to be reachable; the .dmg from the build job
-          # is the fully offline-verifiable artifact. Documented on the
-          # download page rather than left for a user to discover.
+          # notarytool takes only .zip/.dmg/.pkg, and a bare Mach-O cannot be
+          # stapled, so first run still needs Apple reachable.
           ditto -c -k "$BIN" "$RUNNER_TEMP/notarize-cli.zip"
           printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
           xcrun notarytool submit "$RUNNER_TEMP/notarize-cli.zip" \
@@ -448,26 +441,24 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          VER="${{ github.ref_name }}"
           A="${{ matrix.asset }}"
+          L="${{ matrix.legacy }}"
           E="${{ matrix.ext }}"
           BIN="target/${{ matrix.target }}/release/freemkv$E"
           cp "$BIN" "$A$E"
-          cp "$BIN" "$A-$VER$E"
-          # Hash AFTER signing: a signature rewrites the binary, so a checksum
-          # taken before it would not match what ships.
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            shasum -a 256 "$A$E" "$A-$VER$E" > "$A$E.sha256"
-          else
-            sha256sum "$A$E" "$A-$VER$E" > "$A$E.sha256"
-          fi
+          cp "$BIN" "$L$E"
+          # Hash AFTER signing: a signature rewrites the binary.
+          if [ "$RUNNER_OS" = "macOS" ]; then SHA="shasum -a 256"; else SHA=sha256sum; fi
+          $SHA "$A$E" > "$A$E.sha256"
+          $SHA "$L$E" > "$L$E.sha256"
       - name: Upload
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: |
             ${{ matrix.asset }}${{ matrix.ext }}
-            ${{ matrix.asset }}-*${{ matrix.ext }}
             ${{ matrix.asset }}${{ matrix.ext }}.sha256
+            ${{ matrix.legacy }}${{ matrix.ext }}
+            ${{ matrix.legacy }}${{ matrix.ext }}.sha256
 
   # ── Linux desktop app (AppImage, bundles GTK4 + libadwaita) ─────────────
   linux-appimage:

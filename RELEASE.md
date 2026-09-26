@@ -149,7 +149,8 @@ CI uses Rust 1.89 pinned in `.github/workflows/ci.yml`. The Mac default toolchai
 # All must pass with zero errors/warnings
 cargo +1.89 clippy --locked -- -D warnings
 cargo +1.89 test --tests
-cargo +1.89 build --release
+cargo +1.89 build --release                      # freemkv: CLI build
+cargo +1.89 build --release --features gui       # freemkv: app build
 ```
 
 Run the Rust 1.89 pre-commit checks (the same fmt + clippy + tests CI runs):

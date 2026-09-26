@@ -6,8 +6,9 @@
 //!   (`freemkv::windows`) on Windows — over the shared `ui`/`engine`/`settings`
 //!   core.
 //!
-//! The dispatcher routes a CLI-style invocation to the CLI shell and a windowed launch to the
-//! desktop shell via `freemkv::app_entry::wants_gui`.
+//! Two builds of this one binary ship, both named `freemkv`. The CLI build has no desktop shell
+//! at all; the app build (`--features gui`) opens the window on a bare launch and runs the CLI for
+//! any arguments, via `freemkv::app_entry::wants_gui`.
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -33,30 +34,33 @@ mod strings;
 mod title_identity;
 
 // ── GUI shell — macOS ───────────────────────────────────────────────────────
-// Compiles into this binary only where AppKit is; Windows' shell lives in
-// the lib (`freemkv::win_app`) instead, reused by `freemkv-gui.exe`.
-#[cfg(target_os = "macos")]
+// Compiles into the app build only where AppKit is; Windows' shell lives in
+// the lib (`freemkv::win_app`) instead, reused by the windowed image.
+#[cfg(all(feature = "gui", target_os = "macos"))]
 mod engine;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "gui", target_os = "macos"))]
 mod mac;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "gui", target_os = "macos"))]
 mod platform;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "gui", target_os = "macos"))]
 mod settings;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "gui", target_os = "macos"))]
 mod ui;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // A windowed launch opens the desktop shell; everything else is the CLI.
-    // Linux joined in 1.7.6 (glibc only — musl CLI stays CLI-only).
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", target_env = "gnu")
+    // App build only: a bare launch opens the desktop shell; everything else
+    // is the CLI. Linux is glibc only (the musl CLI has no GTK4).
+    #[cfg(all(
+        feature = "gui",
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            all(target_os = "linux", target_env = "gnu")
+        )
     ))]
-    if freemkv::app_entry::wants_gui(&args, launched_windowed()) {
+    if freemkv::app_entry::wants_gui(&args, display_available()) {
         run_gui();
         return;
     }
@@ -68,9 +72,8 @@ fn main() {
 }
 
 // Launch the desktop shell: macOS builds it here (AppKit is a module of
-// this binary); Windows hands off to the lib, so `freemkv-gui.exe` can
-// open the very same window.
-#[cfg(target_os = "macos")]
+// this binary); Windows hands off to the windowed image.
+#[cfg(all(feature = "gui", target_os = "macos"))]
 fn run_gui() {
     let (cfg, loaded) = settings::Settings::load_reporting();
 
@@ -97,12 +100,24 @@ fn run_gui() {
     mac::run();
 }
 
-#[cfg(target_os = "windows")]
+// Shipped as `freemkv.com`, which cmd/PowerShell resolve first (PATHEXT). A window from it
+// would keep the console attached, so start the windowed sibling and return the prompt;
+// in-process is the fallback when none is found (see `app_entry::windowed_candidates`).
+#[cfg(all(feature = "gui", target_os = "windows"))]
 fn run_gui() {
-    freemkv::win_app::run();
+    let Ok(me) = std::env::current_exe() else {
+        return freemkv::win_app::run();
+    };
+    let windowed = freemkv::app_entry::windowed_candidates(&me)
+        .into_iter()
+        .find(|p| p.is_file());
+    match windowed {
+        Some(p) if std::process::Command::new(&p).spawn().is_ok() => {}
+        _ => freemkv::win_app::run(),
+    }
 }
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(all(feature = "gui", target_os = "linux", target_env = "gnu"))]
 fn run_gui() {
     // GTK's application runner returns an i32 status; the process exits
     // when GTK's main loop does, so nothing to do with the code here — a
@@ -110,71 +125,22 @@ fn run_gui() {
     let _ = freemkv::linux_app::run();
 }
 
-// Was this image started as a window, with no argument to say so? A Finder
-// double-click runs the binary from inside the `.app` bundle and passes no
-// arguments, so the path is the only evidence there is.
-#[cfg(target_os = "macos")]
-fn launched_windowed() -> bool {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.to_str().map(is_app_bundle_path))
-        .unwrap_or(false)
+// Can a window be drawn? Only Linux can lack one: over SSH, a bare `freemkv`
+// from the app build must print usage like the CLI build, not fail in GTK.
+#[cfg(all(feature = "gui", any(target_os = "macos", target_os = "windows")))]
+fn display_available() -> bool {
+    true
 }
 
-// Whether an executable path sits inside a macOS `.app` bundle.
-#[cfg(target_os = "macos")]
-fn is_app_bundle_path(p: &str) -> bool {
-    p.contains(".app/Contents/MacOS/")
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod launch_tests {
-    #[test]
-    fn only_a_path_inside_an_app_bundle_is_a_windowed_launch() {
-        assert!(super::is_app_bundle_path(
-            "/Applications/freemkv.app/Contents/MacOS/freemkv"
-        ));
-        assert!(super::is_app_bundle_path(
-            "/opt/u/Desktop/My Build.app/Contents/MacOS/freemkv-gui"
-        ));
-
-        // Every one of these is a terminal invocation and must print, not open
-        // a window.
-        for cli in [
-            "/usr/local/bin/freemkv",
-            "/opt/u/Developer/freemkv/target/debug/freemkv",
-            "./freemkv",
-            "",
-            // A bundle NAME in a path is not a bundle layout.
-            "/opt/u/freemkv.app.backup/freemkv",
-            "/opt/u/freemkv/Contents/MacOS/freemkv",
-        ] {
-            assert!(
-                !super::is_app_bundle_path(cli),
-                "{cli:?} is a command-line launch"
-            );
-        }
-    }
-}
-
-// Windows: never. An Explorer double-click is indistinguishable from a `cmd` invocation; the
-// windowed image is the separate `freemkv-gui.exe`.
-#[cfg(target_os = "windows")]
-fn launched_windowed() -> bool {
-    false
-}
-
-// Linux glibc (musl skips the whole `wants_gui` path — CLI-only, no GTK4).
-// A `.desktop` / Flatpak launcher runs `freemkv gui`; no windowed binary.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn launched_windowed() -> bool {
-    false
+#[cfg(all(feature = "gui", target_os = "linux", target_env = "gnu"))]
+fn display_available() -> bool {
+    freemkv::app_entry::display_present(std::env::var_os)
 }
 
 /// Dev-only entry points. Returns true when it handled the invocation.
 /// macOS debug builds only — it drives the GUI core (`engine`/`settings`/`ui`),
 /// which only compiles on desktop targets.
-#[cfg(all(debug_assertions, target_os = "macos"))]
+#[cfg(all(feature = "gui", debug_assertions, target_os = "macos"))]
 fn dev_harness() -> bool {
     // FMKV_FMTS=disc|file lists the output options offered for that source kind.
     if let Ok(k) = std::env::var("FMKV_FMTS") {
