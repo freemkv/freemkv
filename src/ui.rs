@@ -1971,6 +1971,7 @@ impl App {
     }
 
     /// Scan and preflight away from the UI thread; tick applies the result.
+    #[cfg(any(target_os = "linux", test))]
     pub fn open_async(&mut self, path: &str) -> Vec<Effect> {
         if self.running() || self.opening() {
             return vec![];

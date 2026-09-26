@@ -1900,94 +1900,27 @@ jobs:
           #   4.  release each binary (re-pin git tags, regen lock, tag) — builds start the
           #       instant each binary tag lands. bdemu also swaps its freemkv-unlock dep.
 
-          # ── main = the latest tag ────────────────────────────────────────────────────
-          #
-          # Branch policy: work lands on $WORK_BRANCH, and `main` is a RELEASE POINTER —
-          # it always equals the newest tag, nothing else. So after every tag is on the
-          # remote, move each repo's `main` to that tag and push it.
-          #
-          # This is a fast-forward in the normal case (`main` is an ancestor of the tag,
-          # because the tag was cut from $WORK_BRANCH which descends from the last
-          # release). When it is NOT a fast-forward the repo has commits on `main` that
-          # never went through $WORK_BRANCH, which means someone pushed to `main`
-          # directly — that is exactly what this policy exists to stop, so refuse rather
-          # than silently rewriting published history.
+          # Preserve post-tag development dependency restores while aligning all branches.
           advance_main_to_release() {
-            local dir="$1" name tag
+            local dir="$1" name target branch
             name=$(basename "$dir")
-            tag="v$VERSION"
-
             if $DRY_RUN; then
-              printf '  [dry-run] %s: fast-forward main -> %s and push\n' "$name" "$tag"
+              printf '  [dry-run] %s: fast-forward main, qa and dev to the completed release branch\n' "$name"
               return 0
             fi
-
-            # A crate released for the FIRST time has no `main` on the remote yet, and
-            # `git fetch origin main` dies on "couldn't find remote ref main". That is
-            # not an error — `main` is a release pointer, so a crate that has never been
-            # released cannot have one. The push below creates it. This mattered:
-            # freemkv-engine is new in 1.6.0, and this line would have aborted the
-            # cascade at step 7, AFTER all eight tags were pushed and irreversible.
-            #
-            # Distinguish "no main yet" from a genuine fetch failure by asking the
-            # remote directly — a network error must still be fatal, or a release could
-            # silently skip advancing a main that does exist.
-            if ! git -C "$dir" fetch --quiet origin main 2>/dev/null; then
-              if git -C "$dir" ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
-                die "$name: fetch main failed (the remote HAS a main — network or auth problem)"
-              fi
-              say "  $name: no main on the remote yet (first release) — it will be created"
-            fi
-
-            # What actually matters is that `main` CONTAINS the release, not that it
-            # equals it. Three cases, and only one is a problem:
-            #
-            #   * main is an ancestor of the tag  -> fast-forward, the normal path;
-            #   * the tag is an ancestor of main  -> main already contains the release
-            #     and carries something extra. This is routine, not an incident: the
-            #     README bot commits to main on every `release: published`, and a repo
-            #     whose main was merged rather than reset looks exactly the same. The
-            #     old check asked only the first question, so it called this "someone
-            #     pushed to main directly" and aborted the cascade AFTER the tags were
-            #     public -- every release, for any repo with that bot;
-            #   * neither contains the other      -> genuinely diverged, still fatal.
-            if git -C "$dir" rev-parse --verify -q origin/main >/dev/null 2>&1; then
-              if git -C "$dir" merge-base --is-ancestor "$tag" origin/main; then
-                ok "$name: main already contains $tag — leaving it ahead"
-                return 0
-              fi
-              if ! git -C "$dir" merge-base --is-ancestor origin/main "$tag"; then
-                # main diverged. main is a pure RELEASE POINTER — its only valid state is
-                # "equals the newest tag" — so out-of-band commits (a README edit made in
-                # the GitHub web UI, a stray bot push) are anomalies the tag supersedes,
-                # not development to preserve. If the divergent commits touch ONLY
-                # README.md, force-advance the pointer to the tag. If they touch anything
-                # else, someone pushed real work straight to main outside dev→qa — that is
-                # the incident this policy exists to catch, so refuse. This is what broke
-                # the 1.6.12 release at its very last step: a one-line README web edit on
-                # main was enough to abort the whole cascade after all eight tags were
-                # public. A README-only pointer skew must never do that again.
-                local offmain; offmain=$(git -C "$dir" diff --name-only "$tag...origin/main" 2>/dev/null | grep -v '^README\.md$' || true)
-                if [ -n "$offmain" ]; then
-                  die "$name: origin/main diverged from $tag with non-README changes ($(echo "$offmain" | tr '\n' ' ')) — someone pushed to main outside dev→qa. Reconcile before releasing."
-                fi
-                warn "$name: main diverged only by out-of-band README edit(s) — force-advancing the release pointer to $tag"
-                if $DRY_RUN; then
-                  printf '  [dry-run] %s: force-advance main -> %s (README-only divergence discarded)\n' "$name" "$tag"
-                  return 0
-                fi
-                git -C "$dir" push --force-with-lease="refs/heads/main:$(git -C "$dir" rev-parse origin/main)" \
-                  origin "$tag^{commit}:refs/heads/main" || die "$name: could not force-advance main to $tag"
-                ok "$name: main force-advanced -> $tag (README-only out-of-band edit discarded)"
-                return 0
-              fi
-            fi
-
-            # Update the ref without checking it out: the working tree stays on
-            # $WORK_BRANCH, so nothing here can disturb the release in progress.
-            git -C "$dir" push origin "$tag^{commit}:refs/heads/main" \
-              || die "$name: could not advance main to $tag"
-            ok "$name: main -> $tag"
+            git -C "$dir" fetch --quiet origin main qa dev \
+              || die "$name: cannot fetch release branches"
+            target=$(git -C "$dir" rev-parse origin/qa)
+            git -C "$dir" merge-base --is-ancestor "v$VERSION" "$target" \
+              || die "$name: qa does not contain v$VERSION"
+            for branch in main qa dev; do
+              git -C "$dir" merge-base --is-ancestor "origin/$branch" "$target" \
+                || die "$name: $branch advanced outside this release; reconcile without rewriting history"
+            done
+            git -C "$dir" push --atomic origin \
+              "$target:refs/heads/main" "$target:refs/heads/qa" "$target:refs/heads/dev" \
+              || die "$name: could not align release branches"
+            ok "$name: main = qa = dev = $target (contains v$VERSION)"
           }
 
           preflight
@@ -2042,7 +1975,7 @@ jobs:
           # the loop records the repo and keeps going, then aborts at the end if any
           # failed. Preflight already proved main ⊆ qa for all 8, so a failure here is a
           # genuine race, not the normal path; a re-dispatch finishes it idempotently.
-          say "advancing main to v$VERSION in every repo"
+          say "aligning main, qa and dev after v$VERSION in every repo"
           adv_fail=""
           for c in freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n \
                    freemkv-engine "${BINARY_CRATES[@]}"; do

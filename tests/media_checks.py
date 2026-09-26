@@ -42,6 +42,7 @@ def probe(path, packets=False, frames=False):
     if packets:
         entries += ":packet=stream_index,pts_time,duration_time"
     if frames:
+        command += ["-flags2", "+skip_manual"]
         entries += ":frame=stream_index,pts_time,best_effort_timestamp_time,nb_samples"
     result = run(command + ["-show_entries", entries, "-of", "json", str(path)])
     if result.stderr.strip():

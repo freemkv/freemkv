@@ -19,7 +19,7 @@ def digest(data):
 
 
 def decoded(path, index, kind):
-    command = ["ffmpeg", "-nostdin", "-v", "error", "-xerror", "-threads", "1"]
+    command = ["ffmpeg", "-nostdin", "-v", "error", "-xerror", "-flags2", "+skip_manual", "-threads", "1"]
     if kind == "audio":
         command += ["-c:a", "ac3_fixed"]
     command += ["-i", str(path), "-map", f"0:{index}", "-threads", "1"]
@@ -72,6 +72,58 @@ def pgs_answers(path):
     return subtitles
 
 
+def matroska_timing(path):
+    """Read delay/padding independently of decoder-version trimming behavior."""
+    data = path.read_bytes()
+
+    def vint(offset, identifier=False):
+        if offset >= len(data) or data[offset] == 0:
+            raise ValidationError("invalid EBML integer")
+        width = 9 - data[offset].bit_length()
+        if offset + width > len(data):
+            raise ValidationError("truncated EBML integer")
+        value = int.from_bytes(data[offset:offset + width], "big")
+        if not identifier:
+            value &= (1 << (7 * width)) - 1
+        return value, offset + width
+
+    def elements(start, end):
+        while start < end:
+            kind, offset = vint(start, True)
+            size, payload = vint(offset)
+            stop = payload + size
+            if stop > end:
+                # Only the Segment may use an unknown length in these fixtures.
+                if kind != 0x18538067:
+                    raise ValidationError("truncated EBML element")
+                stop = end
+            yield kind, payload, stop
+            start = stop
+
+    tracks, padding = [], []
+
+    def walk(start, end):
+        for kind, payload, stop in elements(start, end):
+            if kind in (0x18538067, 0x1654AE6B, 0x1F43B675):
+                walk(payload, stop)
+            elif kind == 0xAE:
+                values = {k: int.from_bytes(data[a:b], "big") for k, a, b in elements(payload, stop)
+                          if k in (0xD7, 0x56AA, 0x56BB)}
+                tracks.append({"track": values[0xD7], "delay_ns": values.get(0x56AA, 0),
+                               "preroll_ns": values.get(0x56BB, 0)})
+            elif kind == 0xA0:
+                children = {k: (a, b) for k, a, b in elements(payload, stop)}
+                if 0x75A2 in children:
+                    a, b = children[0x75A2]
+                    block, _ = children[0xA1]
+                    track, _ = vint(block)
+                    padding.append({"track": track, "padding_ns": int.from_bytes(data[a:b], "big", signed=True)})
+    walk(0, len(data))
+    if not tracks:
+        raise ValidationError("no Matroska tracks")
+    return {"tracks": tracks, "padding": padding}
+
+
 def matches_streams(actual, expected):
     if len(actual) != len(expected):
         return False
@@ -115,7 +167,8 @@ def generate():
     FIXTURES.mkdir(exist_ok=True)
     manifest = {"schema": 1, "provenance": "Synthetic pixels and PCM authored here; FFmpeg encodes inputs. "
                 "Video hashes and subtitle events come from source values. AC-3 answers use the "
-                "fixed-point reference decoder on committed input, never freemkv output.", "cases": {}}
+                "fixed-point reference decoder on committed input without automatic sample trimming, never freemkv output. "
+                "Container delay/padding is checked separately to avoid decoder-version differences.", "cases": {}}
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
         video = [bytes((x + n * 7) % 220 + 16 for x in range(32 * 32))
@@ -142,7 +195,7 @@ def generate():
                 raise ValidationError("fixture encoding changed authored pixels")
             if answers[0]["pts_us"] != [i * 40000 for i in indices]:
                 raise ValidationError("fixture encoding changed authored video timing")
-            manifest["cases"][name] = {"input_sha256": digest(output.read_bytes()), "streams": answers}
+            manifest["cases"][name] = {"input_sha256": digest(output.read_bytes()), "streams": answers, "timing": matroska_timing(output)}
         forced = [(0, 1), (1, 1), (3, 0), (3600, 1), (3603, 0)]
         ordinary = [(0.5, 1), (2, 0)]
         (root / "forced.sup").write_bytes(sup(forced, True))
@@ -158,7 +211,7 @@ def generate():
                     for language, force, events in [("eng", 1, forced), ("spa", 0, ordinary)]]
         if pgs_answers(output) != expected:
             raise ValidationError("fixture encoding changed authored subtitle events")
-        manifest["cases"]["pgs"] = {"input_sha256": digest(output.read_bytes()), "subtitles": expected, "streams": stream_answers(output)}
+        manifest["cases"]["pgs"] = {"input_sha256": digest(output.read_bytes()), "subtitles": expected, "streams": stream_answers(output), "timing": matroska_timing(output)}
     (FIXTURES / "answers.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
@@ -176,8 +229,9 @@ def validate(binary, artifacts):
             output = artifacts / f"{name}-{attempt}.mkv"
             run([str(binary), f"mkv://{source.resolve()}", f"mkv://{output.resolve()}"],
                 log=artifacts / f"{name}-{attempt}.log")
-            actual = {"streams": stream_answers(output)}
-            agrees = matches_streams(actual["streams"], expected["streams"])
+            actual = {"streams": stream_answers(output), "timing": matroska_timing(output)}
+            agrees = (matches_streams(actual["streams"], expected["streams"])
+                      and actual["timing"] == expected["timing"])
             if name == "pgs":
                 actual["subtitles"] = pgs_answers(output)
                 agrees = agrees and actual["subtitles"] == expected["subtitles"]

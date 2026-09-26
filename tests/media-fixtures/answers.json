@@ -1,9 +1,9 @@
 {
   "schema": 1,
-  "provenance": "Synthetic pixels and PCM authored here; FFmpeg encodes inputs. Video hashes and subtitle events come from source values. AC-3 answers use the fixed-point reference decoder on committed input, never freemkv output.",
+  "provenance": "Synthetic pixels and PCM authored here; FFmpeg encodes inputs. Video hashes and subtitle events come from source values. AC-3 answers use the fixed-point reference decoder on committed input without automatic sample trimming, never freemkv output. Container delay/padding is checked separately to avoid decoder-version differences.",
   "cases": {
     "cfr": {
-      "input_sha256": "8d00a073172529c6789e61a3102779b3f1359f8a7c7be69c52fc2e2343ec3889",
+      "input_sha256": "c1bd8558234a969b38018f313fb17486b14acea9407bdfdbf6d9f44c67014056",
       "streams": [
         {
           "kind": "video",
@@ -58,10 +58,10 @@
             "channels": 1,
             "sample_rate": "48000"
           },
-          "sha256": "289507f3519081b17168fd5522a2ff113adf8fd2abc852dec2abbc6af68d8e4d",
-          "bytes": 115200,
+          "sha256": "e9a148bc9a127be56ad35a3926734a8bd0d1b9cca7671825e0d422725fbbdc1d",
+          "bytes": 116736,
           "pts_us": [
-            100000,
+            95000,
             127000,
             159000,
             191000,
@@ -101,7 +101,7 @@
             1279000
           ],
           "frames": 38,
-          "samples": 57600
+          "samples": 58368
         },
         {
           "kind": "audio",
@@ -111,10 +111,10 @@
             "channels": 1,
             "sample_rate": "48000"
           },
-          "sha256": "d53ed212d8f400c77b8ec1e3385ca3e64d6e136d60628f94243bccc951e68548",
-          "bytes": 115200,
+          "sha256": "b71c8e9837d58345ef95a664110cbc9cccd03abb6ead82b58355d6a9ae0c29ae",
+          "bytes": 116736,
           "pts_us": [
-            100000,
+            95000,
             127000,
             159000,
             191000,
@@ -154,12 +154,41 @@
             1279000
           ],
           "frames": 38,
-          "samples": 57600
+          "samples": 58368
         }
-      ]
+      ],
+      "timing": {
+        "tracks": [
+          {
+            "track": 1,
+            "delay_ns": 0,
+            "preroll_ns": 0
+          },
+          {
+            "track": 2,
+            "delay_ns": 5333333,
+            "preroll_ns": 0
+          },
+          {
+            "track": 3,
+            "delay_ns": 5333333,
+            "preroll_ns": 0
+          }
+        ],
+        "padding": [
+          {
+            "track": 2,
+            "padding_ns": 10666667
+          },
+          {
+            "track": 3,
+            "padding_ns": 10666667
+          }
+        ]
+      }
     },
     "vfr": {
-      "input_sha256": "25e550b706989ddc19c0e6b621448d05cf8e84321a85344ada570d18eb7a6e89",
+      "input_sha256": "0e298e5507719854e473efcdd3fab52f1bbd1873f8d5d24326b9b62e336b2b27",
       "streams": [
         {
           "kind": "video",
@@ -193,10 +222,10 @@
             "channels": 1,
             "sample_rate": "48000"
           },
-          "sha256": "289507f3519081b17168fd5522a2ff113adf8fd2abc852dec2abbc6af68d8e4d",
-          "bytes": 115200,
+          "sha256": "e9a148bc9a127be56ad35a3926734a8bd0d1b9cca7671825e0d422725fbbdc1d",
+          "bytes": 116736,
           "pts_us": [
-            100000,
+            95000,
             127000,
             159000,
             191000,
@@ -236,7 +265,7 @@
             1279000
           ],
           "frames": 38,
-          "samples": 57600
+          "samples": 58368
         },
         {
           "kind": "audio",
@@ -246,10 +275,10 @@
             "channels": 1,
             "sample_rate": "48000"
           },
-          "sha256": "d53ed212d8f400c77b8ec1e3385ca3e64d6e136d60628f94243bccc951e68548",
-          "bytes": 115200,
+          "sha256": "b71c8e9837d58345ef95a664110cbc9cccd03abb6ead82b58355d6a9ae0c29ae",
+          "bytes": 116736,
           "pts_us": [
-            100000,
+            95000,
             127000,
             159000,
             191000,
@@ -289,12 +318,41 @@
             1279000
           ],
           "frames": 38,
-          "samples": 57600
+          "samples": 58368
         }
-      ]
+      ],
+      "timing": {
+        "tracks": [
+          {
+            "track": 1,
+            "delay_ns": 0,
+            "preroll_ns": 0
+          },
+          {
+            "track": 2,
+            "delay_ns": 5333333,
+            "preroll_ns": 0
+          },
+          {
+            "track": 3,
+            "delay_ns": 5333333,
+            "preroll_ns": 0
+          }
+        ],
+        "padding": [
+          {
+            "track": 2,
+            "padding_ns": 10666667
+          },
+          {
+            "track": 3,
+            "padding_ns": 10666667
+          }
+        ]
+      }
     },
     "pgs": {
-      "input_sha256": "9cfd9e00fc5fb8fa69c933cf8479fd0a3031e3fda0d171e28bcd244724f1ea4f",
+      "input_sha256": "c0ced11defca8d21edf5b7c9c38e25ccf1da6664212695b67efeb8d8a30db5e7",
       "subtitles": [
         {
           "language": "eng",
@@ -383,7 +441,27 @@
           "frames": 30,
           "samples": 0
         }
-      ]
+      ],
+      "timing": {
+        "tracks": [
+          {
+            "track": 1,
+            "delay_ns": 0,
+            "preroll_ns": 0
+          },
+          {
+            "track": 2,
+            "delay_ns": 0,
+            "preroll_ns": 0
+          },
+          {
+            "track": 3,
+            "delay_ns": 0,
+            "preroll_ns": 0
+          }
+        ],
+        "padding": []
+      }
     }
   }
 }
