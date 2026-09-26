@@ -34,7 +34,9 @@ class PackageTests(unittest.TestCase):
             self.assertIn('Depends: libc6 (>= 2.38)\n', control)
             self.assertEqual((root / 'usr/bin/freemkv').stat().st_mode & 0o777, 0o755)
             self.assertEqual((root / 'usr/share/doc/freemkv/copyright').stat().st_mode & 0o777, 0o644)
-            self.assertIn('Fixture dependency', (root / 'usr/share/doc/freemkv/copyright').read_text())
+            self.assertIn('third-party-notices.gz', (root / 'usr/share/doc/freemkv/copyright').read_text())
+            self.assertIn(b'Fixture dependency', gzip.decompress(
+                (root / 'usr/share/doc/freemkv/third-party-notices.gz').read_bytes()))
             self.assertTrue((root / 'usr/share/applications/org.freemkv.FreeMKV.desktop').is_file())
             self.assertTrue((root / 'usr/share/icons/hicolor/scalable/apps/org.freemkv.FreeMKV.svg').is_file())
             self.assertIn('freemkv (1.7.7)', gzip.decompress((root / 'usr/share/doc/freemkv/changelog.Debian.gz').read_bytes()).decode())

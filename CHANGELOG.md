@@ -2,23 +2,23 @@
 
 ## [1.7.7] — 2026-09-26
 
-- Validate QA media against independent content, timing and subtitle answers on Linux, macOS and Windows; keep full-disc integration opt-in.
-- Fail media validation on decoder failures, missing timestamps, collapsed audio or missing platform results.
-
-### Maintenance
-
-- Keep Flatpak builds current with QA source snapshots and publish offline packaging bundles with stable releases.
-
-- Replace comment-overflow documentation with concise source contracts and README instructions; enforce the shared comment policy in CI.
-
 ### Fixed
 
-- Keep the Linux interface responsive while opening and scanning sources.
-- Rips preserve subtitle clear events and audio timing through the updated libfreemkv pipeline.
+- Forced PGS subtitles now disappear when their display period ends, instead of remaining until the next subtitle.
+- Preserve PGS clear-event timestamps when remuxing, addressing the reproduced issue in #52. A fresh rip is needed to confirm the fix on affected discs.
+- Improve audio frame handling and preserve opening audio and MKV timing metadata.
+- Keep the Linux desktop interface responsive while opening and scanning sources.
 
-### Changed
+### Linux packages
 
-- Keep consumer release notes alongside release workflows.
+- Add a native `.deb` containing the desktop app and CLI for Ubuntu 24.04 and Linux Mint 22.
+- Publish direct `.flatpak` downloads on GitHub Releases, independently of Flathub acceptance.
+- Add installation instructions and download links for both formats.
+
+### Quality and maintenance
+
+- Expand subtitle regression tests and add FFmpeg checks for subtitle clearing, audio/video content and timing.
+- Add media known-answer tests and Linux/macOS/Windows output comparisons.
 
 ## [1.7.6] — 2026-09-26
 

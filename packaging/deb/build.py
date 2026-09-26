@@ -77,8 +77,11 @@ def stage(binary, root, package_version, depends, epoch, notices):
     ET.indent(tree, space='  ')
     tree.write(metainfo, encoding='utf-8', xml_declaration=True)
     copyright_text = ((ROOT / 'LICENSE').read_text()
-                      + '\nUpstream: https://github.com/freemkv/freemkv\n\n' + notices)
+                      + '\nUpstream: https://github.com/freemkv/freemkv\n'
+                      + 'Dependency licenses and notices: /usr/share/doc/freemkv/third-party-notices.gz\n')
     write(root, 'usr/share/doc/freemkv/copyright', copyright_text)
+    (root / 'usr/share/doc/freemkv/third-party-notices.gz').write_bytes(
+        gzip.compress(notices.encode(), mtime=0))
     write(root, 'usr/share/doc/freemkv/README.Debian',
           'Built for Ubuntu 24.04 amd64 and compatible derivatives such as Linux Mint 22.\n'
           'Launch freemkv from the application menu, or run: freemkv gui\n'
