@@ -176,24 +176,20 @@ impl Shell {
     }
 
     fn open_path(self: &Rc<Self>, path: &str) {
-        let fx = self.app_mut(|a| a.open(path));
+        let fx = self.app_mut(|a| a.open_async(path));
         self.perform(fx);
     }
 
-    /// File ▸ Open disc, the empty page's button and the launch probe. The
-    /// decision is `App::disc_source`; the scan is deferred one beat so the
-    /// "Opening …" line paints before `open` blocks on the drive.
+    /// Drive discovery and indexing run inside the scan worker.
     fn open_disc(self: &Rc<Self>, announce_missing: bool) {
-        let Some(url) = self.app_mut(|a| a.disc_source(announce_missing)) else {
-            return;
-        };
-        if !announce_missing {
-            let fx = self.app_mut(|a| a.open_probe(&url));
-            self.perform(fx);
-            return;
-        }
-        let me = self.clone();
-        glib::timeout_add_local_once(Duration::from_millis(30), move || me.open_path(&url));
+        let fx = self.app_mut(|a| {
+            if announce_missing {
+                a.open_async("disc://")
+            } else {
+                a.open_probe("disc://")
+            }
+        });
+        self.perform(fx);
     }
 
     fn select_row(self: &Rc<Self>, idx: usize) {
@@ -210,10 +206,12 @@ impl Shell {
 
     /// Apply a fully-decided `View`. The only place widgets are written.
     fn render(self: &Rc<Self>) {
-        let (v, running) = {
+        let (v, running, opening) = {
             let a = self.app.borrow();
-            (a.view(), a.running())
+            (a.view(), a.running(), a.opening())
         };
+        self.window
+            .set_cursor_from_name(opening.then_some("progress"));
         let main = self.main.borrow().clone();
         if let Some(m) = main {
             self.painting.set(true);
@@ -229,7 +227,7 @@ impl Shell {
         }
         for (action, gate) in self.actions.borrow().iter() {
             let blocked = gate.is_some_and(crate::ui::blocked_while_running);
-            action.set_enabled(!(running && blocked));
+            action.set_enabled(!(blocked && (running || (opening && *gate != Some(Cmd::Close)))));
         }
     }
 

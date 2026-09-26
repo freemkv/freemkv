@@ -1652,6 +1652,7 @@ pub struct App {
     /// there would show `Page::Progress` for a rip that is not happening, and
     /// a Cancel button wired to nothing.
     probe: Option<Arc<ProbeState>>,
+    opening: Option<std::sync::mpsc::Receiver<OpenedSource>>,
     /// Highest unreadable-sector count already announced, so the notice is
     /// not repeated on every 100 ms tick.
     reported_bad: u64,
@@ -1689,6 +1690,12 @@ pub struct ProbeState {
 /// lands its result.
 pub const PROBE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
+struct OpenedSource {
+    path: String,
+    scanned: Result<Scanned, String>,
+    preflight: Option<Result<Vec<String>, String>>,
+}
+
 impl App {
     pub fn new() -> Self {
         let settings = Settings::load();
@@ -1719,6 +1726,7 @@ impl App {
             title_ids: Vec::new(),
             disc_label: String::new(),
             probe: None,
+            opening: None,
             reported_bad: 0,
         };
         app.say(
@@ -1812,13 +1820,15 @@ impl App {
 
     /// The single entry point for every user action, on every platform.
     pub fn dispatch(&mut self, cmd: Cmd) -> Vec<Effect> {
-        if self.running() && blocked_while_running(cmd) {
+        if blocked_while_running(cmd) && (self.running() || (self.opening() && cmd != Cmd::Close)) {
             return vec![];
         }
         match cmd {
             Cmd::Open => vec![Effect::PickSource],
             Cmd::SetOutput => vec![Effect::PickOutputDir],
             Cmd::Close => {
+                self.opening = None;
+                self.probe = None;
                 self.tree = Tree::default();
                 self.source.clear();
                 self.disc_label.clear();
@@ -1955,7 +1965,47 @@ impl App {
 
     /// Open a source: scan it, rebuild the tree, report honestly on failure.
     pub fn open(&mut self, path: &str) -> Vec<Effect> {
+        self.opening = None;
+        self.probe = None;
         self.open_inner(path, false)
+    }
+
+    /// Scan and preflight away from the UI thread; tick applies the result.
+    pub fn open_async(&mut self, path: &str) -> Vec<Effect> {
+        if self.running() || self.opening() {
+            return vec![];
+        }
+        self.probe = None;
+        let path = path.to_owned();
+        let keys = KeyConfig::from_settings(&self.settings);
+        let verbose = self.verbose_log();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("open-source".into())
+            .spawn(move || {
+                let scanned = scan_source(&path, &keys, verbose);
+                let preflight = (scanned.is_ok()
+                    && !is_container(&path)
+                    && !crate::engine::is_disc_source(&path))
+                .then(|| crate::engine::preflight_with_keys(&path, "/tmp", &[], &keys));
+                let _ = tx.send(OpenedSource {
+                    path,
+                    scanned,
+                    preflight,
+                });
+            });
+        match spawned {
+            Ok(_) => self.opening = Some(rx),
+            Err(e) => {
+                self.say(LogKind::Notice, &e.to_string());
+                return vec![Effect::Redraw];
+            }
+        }
+        vec![Effect::Redraw, Effect::StartTicking]
+    }
+
+    pub fn opening(&self) -> bool {
+        self.opening.is_some()
     }
 
     /// Open something NOBODY asked to open, leaving no trace if it is not
@@ -1965,7 +2015,7 @@ impl App {
     /// OFF THE UI THREAD, unlike [`App::open`].
     pub fn open_probe(&mut self, path: &str) -> Vec<Effect> {
         // A second probe cannot help and could clobber the first one's result.
-        if self.probe.is_some() {
+        if self.probe.is_some() || self.opening() || self.running() {
             return vec![Effect::Redraw];
         }
         let state = Arc::new(ProbeState {
@@ -2031,6 +2081,16 @@ impl App {
         scanned: Result<Scanned, String>,
         quiet: bool,
     ) -> Vec<Effect> {
+        self.apply_opened(path, scanned, quiet, None)
+    }
+
+    fn apply_opened(
+        &mut self,
+        path: &str,
+        scanned: Result<Scanned, String>,
+        quiet: bool,
+        preflight: Option<Result<Vec<String>, String>>,
+    ) -> Vec<Effect> {
         let container = is_container(path);
         let disc = crate::engine::is_disc_source(path);
         match scanned {
@@ -2090,12 +2150,14 @@ impl App {
                     // the rip itself surfaces any missing-key error.
                     self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"));
                 } else {
-                    match crate::engine::preflight_with_keys(
-                        path,
-                        "/tmp",
-                        &[],
-                        &KeyConfig::from_settings(&self.settings),
-                    ) {
+                    match preflight.unwrap_or_else(|| {
+                        crate::engine::preflight_with_keys(
+                            path,
+                            "/tmp",
+                            &[],
+                            &KeyConfig::from_settings(&self.settings),
+                        )
+                    }) {
                         Ok(v) if v.is_empty() => {
                             self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"))
                         }
@@ -2270,12 +2332,34 @@ impl App {
     /// Poll a running job. Called on the shell's timer; returns the effects to
     /// apply. All progress arithmetic is the engine's — never recomputed here.
     pub fn tick(&mut self) -> Vec<Effect> {
-        let probe_fx = self.poll_probe();
+        let mut probe_fx = self.poll_probe();
+        if let Some(rx) = &self.opening {
+            match rx.try_recv() {
+                Ok(opened) => {
+                    self.opening = None;
+                    probe_fx.extend(self.apply_opened(
+                        &opened.path,
+                        opened.scanned,
+                        false,
+                        opened.preflight,
+                    ));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.opening = None;
+                    self.say(
+                        LogKind::Notice,
+                        "Source scan worker stopped before returning a result.",
+                    );
+                    probe_fx.push(Effect::Redraw);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
         let Some(st) = self.run.clone() else {
             // Keep the timer alive while the probe is still out; stopping it
             // here would strand the result with nothing left to collect it.
             let mut fx = probe_fx;
-            if self.probe.is_none() {
+            if self.probe.is_none() && self.opening.is_none() {
                 fx.push(Effect::StopTicking);
             } else if fx.is_empty() {
                 fx.push(Effect::Redraw);
@@ -2388,7 +2472,7 @@ impl App {
             output_dir: self.output_dir.clone(),
             format: self.effective_format(),
             formats: self.offered_formats(),
-            can_run: !self.running() && !self.source.is_empty(),
+            can_run: !self.running() && !self.opening() && !self.source.is_empty(),
             log: Arc::clone(&self.log),
             log_first: self.log_first,
             log_hidden: self.log_hidden,
@@ -2917,6 +3001,103 @@ mod tests {
         app.tick();
         assert!(app.probe.is_none());
         assert_eq!(app.log.len(), before, "a dead probe must say nothing");
+    }
+
+    #[test]
+    fn explicit_async_open_reports_failure_on_tick() {
+        let mut app = App::new();
+        let before = app.log.len();
+        let fx = app.open_async("/nonexistent/freemkv-async-open-test.iso");
+        assert!(fx.contains(&Effect::StartTicking));
+        assert!(app.opening());
+        assert_eq!(app.log.len(), before);
+        for _ in 0..500 {
+            app.tick();
+            if !app.opening() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!app.opening());
+        assert!(app.log.len() > before);
+        assert!(matches!(app.page, Page::Empty));
+    }
+
+    #[test]
+    fn pending_open_keeps_ticks_and_blocks_ripping_until_result_is_applied() {
+        let mut app = App::new();
+        app.source = "previous.iso".into();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.opening = Some(rx);
+        assert!(!app.view().can_run);
+        assert!(app.dispatch(Cmd::Run).is_empty());
+        assert!(!app.tick().contains(&Effect::StopTicking));
+        tx.send(OpenedSource {
+            path: "scanned.iso".into(),
+            scanned: Ok(probe_scan()),
+            preflight: Some(Ok(vec![])),
+        })
+        .unwrap();
+        let fx = app.tick();
+        assert!(fx.contains(&Effect::StopTicking));
+        assert_eq!(app.source, "scanned.iso");
+        assert_eq!(app.tree.title_count(), 1);
+        assert!(app.view().can_run);
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.text == crate::strings::get("gui.log.ready_rip"))
+        );
+    }
+
+    #[test]
+    fn another_open_or_launch_probe_cannot_replace_an_explicit_scan() {
+        let mut app = App::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.opening = Some(rx);
+        assert!(app.open_async("disc://").is_empty());
+        assert_eq!(app.open_probe("disc://"), vec![Effect::Redraw]);
+        assert!(app.probe.is_none());
+        tx.send(OpenedSource {
+            path: "first.mkv".into(),
+            scanned: Ok(probe_scan()),
+            preflight: None,
+        })
+        .unwrap();
+        app.tick();
+        assert_eq!(app.source, "first.mkv");
+    }
+
+    #[test]
+    fn closing_during_open_discards_the_late_result() {
+        let mut app = App::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.opening = Some(rx);
+        app.dispatch(Cmd::Close);
+        assert!(!app.opening());
+        assert!(
+            tx.send(OpenedSource {
+                path: "disc://".into(),
+                scanned: Ok(probe_scan()),
+                preflight: None,
+            })
+            .is_err()
+        );
+        app.tick();
+        assert!(app.source.is_empty());
+        assert!(matches!(app.page, Page::Empty));
+    }
+
+    #[test]
+    fn failed_scan_worker_releases_ui_and_reports_error() {
+        let mut app = App::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.opening = Some(rx);
+        let before = app.log.len();
+        drop(tx);
+        assert!(app.tick().contains(&Effect::StopTicking));
+        assert!(!app.opening());
+        assert_eq!(app.log.len(), before + 1);
     }
 
     /// A minimal scan result: one title, one row, enough for the tree to
