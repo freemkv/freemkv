@@ -31,9 +31,7 @@ jobs:
 
       # Lint the manifest before building (fast fail on structural issues).
       - name: Lint manifest
-        run: |
-          flatpak run --command=flatpak-builder-lint org.flatpak.Builder \
-            manifest packaging/flatpak/org.freemkv.FreeMKV.yaml
+        run: flatpak-builder-lint manifest packaging/flatpak/org.freemkv.FreeMKV.yaml
 
       # Offline build in the Flathub container. No siblings checkout and no
       # network `cargo build`: sources come from the pinned git tag and the
@@ -51,6 +49,4 @@ jobs:
       # allows entries Flathub explicitly permits per-app (e.g. --device=all
       # for optical-media tools) once granted.
       - name: Lint repo
-        run: |
-          flatpak run --command=flatpak-builder-lint org.flatpak.Builder \
-            --exceptions repo repo
+        run: flatpak-builder-lint --exceptions repo repo
