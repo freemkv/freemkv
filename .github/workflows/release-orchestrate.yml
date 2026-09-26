@@ -27,6 +27,10 @@ on:
         description: Run every mechanic in print-only mode, change nothing
         type: boolean
         default: true
+      skip_media:
+        description: Explicitly waive media evidence for this release only
+        type: boolean
+        default: false
       prerelease:
         description: Prerelease (rc) — cut -rc tags only; do NOT push qa, advance main, or publish the site
         type: boolean
@@ -52,9 +56,14 @@ jobs:
       - name: Preflight — qa green on all eight, main coherent, media evidence
         env:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          SKIP_MEDIA: ${{ inputs.skip_media }}
           NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
         run: |
           set -uo pipefail
+          if [ "$SKIP_MEDIA" = true ]; then
+            NON_GATING="($NON_GATING)|^hash-matrix$"
+            echo "::warning::Media evidence explicitly waived for this release"
+          fi
           fail=0
           : > /tmp/qa-shas
           for r in freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n \
@@ -88,6 +97,7 @@ jobs:
           done
           [ "$fail" = "0" ] || { echo "::error::refusing to release — qa not green / main not coherent across the set"; exit 1; }
 
+          if [ "$SKIP_MEDIA" = true ]; then exit 0; fi
           # Require the bounded media gate at this exact candidate, including every OS.
           fsha=$(gh api repos/freemkv/freemkv/git/ref/heads/qa -q .object.sha)
           rid=$(gh api "repos/freemkv/freemkv/actions/runs?head_sha=$fsha&per_page=100" \
