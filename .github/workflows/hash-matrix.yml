@@ -13,8 +13,38 @@ permissions:
 jobs:
   media:
     runs-on: ubuntu-latest
+    outputs:
+      libfreemkv: ${{ steps.revisions.outputs.libfreemkv }}
+      engine: ${{ steps.revisions.outputs.engine }}
+      keys: ${{ steps.revisions.outputs.keys }}
+      i18n: ${{ steps.revisions.outputs.i18n }}
+      unlock: ${{ steps.revisions.outputs.unlock }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Snapshot the candidate dependencies
+        id: revisions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIBLING_REF: ${{ github.ref_name == 'dev' && 'dev' || 'qa' }}
+        run: |
+          python3 - <<'PYREFS'
+          import json, os, subprocess
+          revisions = {"freemkv": os.environ["GITHUB_SHA"]}
+          names = {"libfreemkv": "libfreemkv", "engine": "freemkv-engine",
+                   "keys": "freemkv-keysources", "i18n": "freemkv-i18n", "unlock": "freemkv-unlock"}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as outputs:
+              for key, repo in names.items():
+                  sha = subprocess.check_output(["gh", "api", f"repos/freemkv/{repo}/git/ref/heads/{os.environ['SIBLING_REF']}",
+                                                 "--jq", ".object.sha"], text=True).strip()
+                  if len(sha) != 40:
+                      raise SystemExit(f"Invalid revision for {repo}")
+                  revisions[repo] = sha
+                  outputs.write(f"{key}={sha}\n")
+          with open("revisions.json", "w") as output:
+              json.dump(revisions, output, sort_keys=True)
+          PYREFS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: media-revisions, path: revisions.json, if-no-files-found: error }
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Generate the shared master.mkv
@@ -39,15 +69,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { path: freemkv }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/libfreemkv, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
+        with: { repository: freemkv/libfreemkv, ref: "${{ needs.media.outputs.libfreemkv }}", path: libfreemkv }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-engine, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-engine }
+        with: { repository: freemkv/freemkv-engine, ref: "${{ needs.media.outputs.engine }}", path: freemkv-engine }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-keysources, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-keysources }
+        with: { repository: freemkv/freemkv-keysources, ref: "${{ needs.media.outputs.keys }}", path: freemkv-keysources }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-i18n, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
+        with: { repository: freemkv/freemkv-i18n, ref: "${{ needs.media.outputs.i18n }}", path: freemkv-i18n }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-unlock, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
+        with: { repository: freemkv/freemkv-unlock, ref: "${{ needs.media.outputs.unlock }}", path: freemkv-unlock }
       - name: Point the patches at the sibling checkouts
         shell: bash
         run: |
@@ -198,6 +228,7 @@ jobs:
           PY
 
   real-media:
+    needs: media
     strategy:
       fail-fast: false
       matrix:
@@ -210,15 +241,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { path: freemkv }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/libfreemkv, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
+        with: { repository: freemkv/libfreemkv, ref: "${{ needs.media.outputs.libfreemkv }}", path: libfreemkv }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-engine, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-engine }
+        with: { repository: freemkv/freemkv-engine, ref: "${{ needs.media.outputs.engine }}", path: freemkv-engine }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-keysources, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-keysources }
+        with: { repository: freemkv/freemkv-keysources, ref: "${{ needs.media.outputs.keys }}", path: freemkv-keysources }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-i18n, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-i18n }
+        with: { repository: freemkv/freemkv-i18n, ref: "${{ needs.media.outputs.i18n }}", path: freemkv-i18n }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { repository: freemkv/freemkv-unlock, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: freemkv-unlock }
+        with: { repository: freemkv/freemkv-unlock, ref: "${{ needs.media.outputs.unlock }}", path: freemkv-unlock }
       - name: Point the patches at the sibling checkouts
         shell: bash
         run: |
