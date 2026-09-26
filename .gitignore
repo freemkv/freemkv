@@ -2,3 +2,5 @@
 .cargo/config.toml
 # Debug aid from `res/make-ico.py --sheet`, never an asset.
 /res/make-ico-sheet.png
+
+__pycache__/

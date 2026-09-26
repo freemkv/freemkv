@@ -25,6 +25,7 @@ path = [
     "**/*.py",
     "**/*.ps1",
     "**/*.golden",
+    "tests/media-fixtures/*.mkv",
     "**/*.svg",
     "**/*.png",
     "**/*.ico",

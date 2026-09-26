@@ -1,23 +1,7 @@
 name: qa
 
-# ── The qa gate: "is this production worth?" ────────────────────────────────
-#
-# dev -> qa -> main.
-#
-# `dev` is for committing often. ci.yml answers "is it green" in minutes with
-# fmt, clippy and the unit suite, so a mistake surfaces while it is still cheap
-# to fix. `qa` is the release-candidate branch, and THIS workflow is the claim
-# that a commit is production worth: everything expensive that can run without
-# physical media. `main` only ever receives a qa that went green here.
-#
-# Sibling repos are checked out at `qa`, NOT `dev`. A qa run that resolved its
-# dependencies from dev tips would be validating a combination that is not the
-# one being released, which is the exact failure this branch exists to prevent.
-#
-# What this gate CANNOT cover: `disc://` and real `iso://` need physical media,
-# and no hosted runner has the disk for a 53 GB UHD. Those run on ephemeral
-# EC2 runners (see cli-matrix at the end), launched per run and torn down
-# after one job.
+# Bounded media validation runs in hash-matrix; full-disc EC2 integration is opt-in.
+
 on:
   push:
     branches: [qa]
@@ -25,87 +9,20 @@ on:
     inputs:
       run_media:
         description: >-
-          Also run the full-size media matrix on EC2 (~2h, real money).
-          Off by default: a dispatch is usually someone re-running the cheap
-          gates, and a push trigger for this is how a busy afternoon becomes a
-          surprise bill. On, it is the only way to prove the media gate without
-          promoting all eight repos to qa first.
+          Run full-disc DVD/BD/UHD/HD-DVD integration on ephemeral EC2 runners
+          (~121 GiB per platform, approximately two hours). The bounded media
+          known-answer and three-platform parity gate runs on every QA push.
         type: boolean
         default: false
 
-# Rapid pushes supersede their own in-progress runs instead of stacking.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Least privilege by default. Jobs that need more elevate themselves: rc-tag
-# pushes the candidate tag (contents: write), and launch-runners / cli-matrix
-# assume an AWS role over OIDC (id-token: write).
 permissions:
   contents: read
 
 jobs:
-  # ── Does this candidate warrant the media matrix? ─────────────────────────
-  #
-  # The full-size media matrix (cli-matrix, ~2h on EC2, real money) proves the
-  # RIP ENGINE on real discs. A push that changes only workflows, docs, or
-  # markdown cannot change a rip, so it must not burn that run. `media=true`
-  # only when the push touched something outside {.github/, docs/, *.md}. A
-  # dispatch uses the run_media input instead. Safe default: if the diff can't
-  # be computed (first push / force-push / missing base), media=true.
-  detect:
-    runs-on: ubuntu-latest
-    outputs:
-      media: ${{ steps.decide.outputs.media }}
-    steps:
-      - uses: actions/checkout@v5
-        with: { fetch-depth: 0 }
-      - id: decide
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" != "push" ]; then
-            echo "media=false" >> "$GITHUB_OUTPUT"; echo "dispatch — media only via run_media input"; exit 0
-          fi
-          # Manual bypass: the author certifies this change cannot affect a rip.
-          if git log -1 --format=%B '${{ github.sha }}' | grep -qiE '\[skip[- ]media\]'; then
-            echo "media=false" >> "$GITHUB_OUTPUT"; echo "[skip-media] in commit → media SKIPPED (manual bypass)"; exit 0
-          fi
-          before='${{ github.event.before }}'
-          if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
-            echo "media=true" >> "$GITHUB_OUTPUT"; echo "no usable base sha — media ON (safe default)"; exit 0
-          fi
-          # Runner setup and acceptance checks live in this workflow.
-          if git diff --name-only "$before" "${{ github.sha }}" | grep -qx '.github/workflows/qa.yml'; then
-            echo "media=true" >> "$GITHUB_OUTPUT"; echo "media workflow changed — media ON"; exit 0
-          fi
-          # "core" = anything that could change a rip. Exclude workflows, docs,
-          # any *.md, and licensing/metadata (REUSE.toml, LICENSE, LICENSES/,
-          # .reuse/, .gitignore) — none of which can affect a produced file.
-          # Manual bypass ([skip-media]) and run_media dispatch remain above.
-          core=$(git diff --name-only "$before" "${{ github.sha }}" \
-                   | grep -vE '^(\.github/|docs/|LICENSES?/|\.reuse/|[^/]*\.md$|.*/[^/]*\.md$|REUSE\.toml$|LICENSE$|\.gitignore$)' || true)
-          if [ -n "$core" ]; then
-            echo "media=true" >> "$GITHUB_OUTPUT"
-            echo "core code changed → media ON:"; printf '  %s\n' $core
-          else
-            echo "media=false" >> "$GITHUB_OUTPUT"
-            echo "only workflows/docs/markdown changed → media SKIPPED"
-          fi
-
-  # ── Name the candidate ────────────────────────────────────────────────
-  #
-  # Every push to `qa` is a release candidate, so every push gets a tag:
-  # v<version>-rc<N>, N incrementing. That is the answer to "which build is on
-  # qa right now, and is it the one I tested?" — a question that otherwise gets
-  # answered from memory.
-  #
-  # This runs FIRST and does not depend on the gates, deliberately. A red
-  # candidate needs a name more than a green one does: "rc3 failed
-  # release-tests on windows" is a sentence you can act on; "qa is red" is not.
-  # Red on qa is a working gate, not an incident — it is the branch saying this
-  # is not production worth yet. Fix on dev, get dev green, push qa again.
-  #
-  # release.yml excludes v*-rc* so a candidate never publishes a release.
   rc-tag:
     runs-on: ubuntu-latest
     permissions:
@@ -120,18 +37,12 @@ jobs:
           set -euo pipefail
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           [ -n "$v" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
-          # Numeric sort on the rc ordinal: -rc10 must beat -rc9, and a plain
-          # lexical sort gets that backwards from the tenth candidate on.
           n=$(git tag -l "v$v-rc*" | sed "s|^v$v-rc||" | sort -n | tail -1)
           tag="v$v-rc$(( ${n:-0} + 1 ))"
           git tag "$tag"
           git push origin "$tag"
           echo "### Candidate \`$tag\`" >> "$GITHUB_STEP_SUMMARY"
 
-  # The debug suite runs on every dev push. Release is a DIFFERENT build:
-  # overflow checks are off, debug_assert! is compiled out, and inlining
-  # changes what the optimiser can prove. A test that only passes in debug is
-  # a test that never guarded the binary anyone actually ships.
   release-tests:
     strategy:
       fail-fast: false
@@ -159,10 +70,6 @@ jobs:
       - run: cargo test --release --tests
         working-directory: freemkv
 
-  # Windows compiles the tests but does not run them, matching the policy
-  # ci.yml already set. The value here is codegen: the #[cfg(windows)] halves
-  # of the SCSI transport and platform layers compile on no other runner, so
-  # without this they are first built at release time.
   windows-build:
     runs-on: windows-latest
     steps:
@@ -213,21 +120,6 @@ jobs:
           else
             brew install ffmpeg
           fi
-      # Two legs, both hardware-free, both previously manual pre-release steps
-      # — the kind that get skipped precisely when a release is being rushed.
-      #
-      # cli-parity is a golden-master characterization: a matrix of invocations
-      # whose exit code, stdout and stderr are captured, normalized to strip the
-      # version stamp and paths, and diffed against a recorded golden. It
-      # catches the CLI contract changing by accident.
-      #
-      # cli-integration generates its own Blu-ray-legal media with ffmpeg and
-      # verifies the output with ffprobe rather than trusting an exit code. It
-      # is the check that catches a sink writing the wrong thing while
-      # returning 0 — which is exactly how a defect reached a release.
-      # cli-integration.sh builds the binary itself; cli-parity.sh does not —
-      # it checks for one and exits 2 with "build it first". Build once here so
-      # both legs share it and neither depends on the other's side effects.
       - run: cargo build --release --bin freemkv
         working-directory: freemkv
       - run: tests/cli-parity.sh check
@@ -235,23 +127,9 @@ jobs:
       - run: tests/cli-integration.sh
         working-directory: freemkv
 
-  # ── Full-size media, on ephemeral EC2 ───────────────────────────────────────
-  #
-  # The one thing no hosted runner can do. GitHub's runners ship ~14 GB of disk
-  # against a 35 GB Blu-ray and a 53 GB UHD, so the fixtures in `hash-matrix`
-  # stop at a 6 GB DVD. These two jobs are the only reason EC2 exists here.
-  #
-  # They run LAST, behind everything cheap, for the same reason `real-media`
-  # does: this is the leg that costs money per minute.
-  #
-  # macOS is deliberately absent. EC2 Mac is bare-metal-only and requires a
-  # Dedicated Host with a 24-hour minimum allocation, so a 90-minute job bills
-  # a full day and no teardown can avoid it. Hosted macOS already covers build,
-  # test, the synthetic CLI matrix and the 6 GB real DVD — full-size media on
-  # macOS is a known, accepted gap rather than a silent one.
   launch-runners:
-    needs: [detect, release-tests, windows-build, cli-integration]
-    if: inputs.run_media || (github.event_name == 'push' && needs.detect.outputs.media == 'true')
+    needs: [release-tests, windows-build, cli-integration]
+    if: github.event_name == 'workflow_dispatch' && inputs.run_media
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -267,21 +145,11 @@ jobs:
       - name: Mint a registration token and stash it in SSM (SecureString)
         id: reg
         env:
-          # GITHUB_TOKEN cannot mint runner registration tokens: that needs
-          # repo-admin, which it is never granted. Uses the PAT.
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
         run: |
           set -euo pipefail
           tok=$(gh api -X POST "repos/${{ github.repository }}/actions/runners/registration-token" -q .token)
           echo "::add-mask::$tok"
-          # A GitHub registration token is valid for REPEATED registrations for
-          # its whole 60-minute life, and an EC2 tag is readable by any principal
-          # with ec2:DescribeTags/DescribeInstances — so the token is NEVER put in
-          # a tag. It goes into SSM Parameter Store as a KMS-encrypted SecureString
-          # (ssm:GetParameter + kms:Decrypt to read — far narrower than DescribeTags),
-          # keyed per launch; only the non-secret PARAMETER NAME is tagged, and the
-          # instance reads-then-deletes it at boot (see user-data-linux.sh). This
-          # mirrors ci-runner-launch.yml.
           param="/freemkv-ci/runner-reg/${{ github.run_id }}-${{ matrix.os }}"
           aws ssm put-parameter --name "$param" --type SecureString --value "$tok" --overwrite >/dev/null
           echo "param=$param" >> "$GITHUB_OUTPUT"
@@ -289,10 +157,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # ── Windows: UNCHANGED. The windows runner launches cleanly today; the
-          # only leg hitting Spot InsufficientInstanceCapacity is the linux
-          # real-media runner, so this path is left exactly as it was — one
-          # instance type, Subnets[0], inheriting everything from the template.
           if [ "${{ matrix.os }}" = "windows" ]; then
             vpc=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
             subnet=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" --query 'Subnets[0].SubnetId' --output text)
@@ -308,30 +172,12 @@ jobs:
             exit 0
           fi
 
-          # ── Linux real-media runner: resilient placement in us-west-2 ────────
-          # A single (instance type, subnet) request in one AZ turns a transient
-          # Spot "InsufficientInstanceCapacity" into a hard qa failure. Stay in
-          # us-west-2 — the fixture ISOs live in the us-west-2 bucket and must
-          # NOT move — but sweep EVERY default-VPC subnet (all AZs) across a
-          # small list of equivalent instance types, first as Spot, then, if
-          # every Spot attempt is capacity-starved, as On-Demand. On-Demand for
-          # a ~15-minute ephemeral runner is a few cents and kills the flake.
-          #
-          # Everything else — AMI, security group, IAM instance profile,
-          # user-data / runner-registration script, tags — stays in the
-          # freemkv-runner-linux launch template and is inherited unchanged;
-          # only the placement (subnet/type) and the market type are chosen here.
 
           vpc=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
-          # ALL subnets, not Subnets[0]: each maps to a different AZ, and Spot
-          # capacity is per-AZ, so a second AZ is the cheapest possible retry.
           subnets=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" \
                       --query 'Subnets[].SubnetId' --output text)
           [ -n "$subnets" ] || { echo "no subnets in default VPC $vpc" >&2; exit 1; }
 
-          # Same arch/size class as the launch template's c7i.4xlarge (x86_64,
-          # 16 vCPU): keep it FIRST, then two comparable Intel fallbacks so a
-          # capacity hole in one family does not stall the whole run.
           types="c7i.4xlarge c6i.4xlarge m7i.4xlarge"
 
           tags="ResourceType=instance,Tags=[
@@ -340,10 +186,6 @@ jobs:
               {Key=runner-repo,Value=${{ github.repository }}},
               {Key=launched-by,Value=${{ github.run_id }}}]"
 
-          # $1 = market label (for logs); remaining args are passed to
-          # run-instances (the market-options flag). Returns: 0 launched,
-          # 1 every attempt was capacity-starved, 2 a non-capacity hard error
-          # (bad template / IAM) that must fail fast rather than burn the grid.
           try_launch() {
             local market="$1"; shift
             local t s id
@@ -357,7 +199,6 @@ jobs:
                           "$@" \
                           --tag-specifications "$tags" \
                           --query 'Instances[0].InstanceId' --output text 2>launch.err); then
-                  # The instance-id downstream consumers expect, echoed as before.
                   echo "$id"
                   echo "launched $id (linux, type=$t subnet=$s market=$market)"
                   return 0
@@ -372,7 +213,6 @@ jobs:
             return 1
           }
 
-          # 1) Spot across every type × subnet.
           rc=0
           try_launch spot --instance-market-options 'MarketType=spot' || rc=$?
           [ "$rc" = 0 ] && exit 0
@@ -381,9 +221,6 @@ jobs:
             exit 1
           fi
 
-          # 2) Every Spot attempt was capacity-starved — same sweep On-Demand.
-          # '{}' clears the launch template's Spot market options, so the request
-          # is a plain On-Demand instance.
           echo "all Spot attempts hit capacity — falling back to On-Demand"
           rc=0
           try_launch on-demand --instance-market-options '{}' || rc=$?
@@ -391,36 +228,9 @@ jobs:
           echo "::error title=No capacity::every instance type × subnet failed as both Spot and On-Demand in us-west-2 — check service quotas / capacity in the region" >&2
           exit 1
 
-  # ── The CLI matrix: every feature, both platforms, byte-identical ─────────
-  #
-  # This is the ONLY real-media gate. It replaced two jobs that overlapped and
-  # a third that could never run:
-  #
-  #   - a LAN-only `real-media` job that ran the acceptance suite on a
-  #     pre-provisioned box. It needed a host with the ISO hoard mounted, so it
-  #     was gated behind a repo variable, and with that variable unset it
-  #     SKIPPED every run — the suite that catches this project's worst defects
-  #     was not running at all.
-  #   - a `full-media` job that ripped three ISOs and hashed them. That is four
-  #     of this suite's ~90 checks: it proved the mux, and nothing about the
-  #     selection matrix, the format matrix, `dir://` sources or round-trips.
-  #
-  # Both are gone. The acceptance suite now runs HERE, on ephemeral EC2, on
-  # Linux and Windows, and the two must produce identical hashes.
-  #
-  # macOS is deliberately absent, and it is the one gap in this gate: EC2 Mac
-  # requires a Dedicated Host with a 24-hour minimum allocation, which is not
-  # worth it per qa push. macOS parity is still covered on hosted runners by
-  # hash-matrix.yml against synthetic and small-fixture media — what it does
-  # not cover is full-size real discs.
-  #
-  # ORDERING: `needs` is the cost control, not decoration. This is by far the
-  # most expensive thing the gate runs, so nothing touches real media until
-  # the release tests, the Windows build and the synthetic CLI matrix are all
-  # green. A typo cannot burn a two-hour rip.
   cli-matrix:
-    needs: [detect, launch-runners]
-    if: inputs.run_media || (github.event_name == 'push' && needs.detect.outputs.media == 'true')
+    needs: [launch-runners]
+    if: github.event_name == 'workflow_dispatch' && inputs.run_media
     strategy:
       fail-fast: false
       matrix:
@@ -433,42 +243,29 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with: { path: freemkv }
-      # Real-media job keeps its own dev->dev / else->qa sibling ref (passed to
-      # the composite via `ref`), rather than the composite's default 3-way.
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
           ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}"
-      # The acceptance suite is not in this public repo; it lives in a private one.
       - uses: actions/checkout@v5
         with:
           repository: freemkv/freemkv-ci
+          ref: 7ff716072c7063aaf4f1a7dd7200f532dab77794
           token: ${{ secrets.ORG_DISPATCH_TOKEN }}
           path: ci
       - name: Record the libfreemkv sha
         shell: bash
-        # MUX_APP carries libfreemkv's short sha, so two legs built from
-        # different commits differ in output BYTES while being functionally
-        # identical. The compare job refuses to judge a mismatch unless these
-        # agree, rather than reporting a divergence that means nothing.
         run: echo "LF_SHA=$(git -C libfreemkv rev-parse --short HEAD)" >> "$GITHUB_ENV"
       - name: Install ffmpeg
         shell: bash
-        # The suite verifies EVERY output with ffprobe — stream counts, clean
-        # decode, audio actually present on the timeline. Without ffmpeg it
-        # does not fail, it degrades into checking exit codes, which is the
-        # failure mode this gate exists to prevent.
         run: |
           set -euo pipefail
           if [ "${{ matrix.os }}" = "linux" ]; then
             sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3
           else
             choco install ffmpeg python3 -y --no-progress
-            # choco writes the MACHINE PATH, which the already-running shell
-            # does not see. Re-read it rather than assume — this exact thing
-            # cost a full runner debug cycle with the AWS CLI.
             export PATH="$PATH:/c/ProgramData/chocolatey/bin"
             echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
           fi
@@ -477,20 +274,7 @@ jobs:
             exit 1
           }
           ffprobe -version | head -1
-          # The suite's timeline analyser is a python program. This runner is
-          # self-hosted, so it carries nothing a hosted image would have had:
-          # the windows leg had no python at all, and every timeline check on
-          # it produced an empty verdict, which the harness read as a pass. The
-          # suite now refuses to run without an interpreter; install one, and
-          # name it here rather than leaving it to a PATH search that finds the
-          # Windows Store stub.
           if [ "${{ matrix.os }}" = "windows" ]; then
-            # choco installs python3 into /c/PythonNNN where NNN floats with the
-            # release (3.14 today; this was pinned to 3.13/3.12 and silently
-            # missed a 3.14 box, aborting the whole windows leg). The shim it
-            # drops is python3.NN.exe, never plain python3/python. Add whatever
-            # /c/Python3* actually holds python.exe — for THIS step (export) and
-            # the later ones ($GITHUB_PATH) — plus the choco shim dir.
             echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
             export PATH="$PATH:/c/ProgramData/chocolatey/bin"
             for d in /c/Python3*/; do
@@ -509,24 +293,9 @@ jobs:
           "$PY" --version
       - name: Provision the build toolchain
         shell: bash
-        # The media runner is self-hosted and ephemeral; like ffmpeg and python
-        # above, it carries no build toolchain — the build step below was failing
-        # with `cargo: command not found` (exit 127), and a bare runner also lacks
-        # the C compiler/linker the build needs (rustc's linker driver + ring's C
-        # backend on both OSes; MSVC link.exe on windows). Provision per-run rather
-        # than depend on a hand-baked AMI, so the acceptance build reproduces on any
-        # contributor's runner. Every install is idempotent/guarded — a no-op when
-        # the AMI already provided it.
         run: |
           set -euo pipefail
-          # ── Native C toolchain + linker ──────────────────────────────────────
           if [ "${{ matrix.os }}" = "windows" ]; then
-            # The build targets x86_64-pc-windows-msvc (what the release ships and
-            # what build.rs's manifest/icon path assumes). rustup installs RUST, not
-            # a linker: a bare Windows Server AMI has no link.exe/Windows SDK, so
-            # `cargo build` dies with `linking with link.exe failed`, and ring needs
-            # cl.exe. rustc locates MSVC via vswhere (no PATH help needed). Gate on a
-            # vswhere probe so this is a no-op when the AMI already has VS Build Tools.
             vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
             have_vc=
             if [ -x "$vswhere" ]; then
@@ -539,13 +308,8 @@ jobs:
               choco install -y visualstudio2022-workload-vctools --no-progress
             fi
           else
-            # The GNU/Linux binary links GTK even when invoked as a CLI.
-            # Apt lists were refreshed by the media-tools step above.
             sudo apt-get install -y -qq build-essential curl pkg-config libgtk-4-dev libadwaita-1-dev
           fi
-          # ── Rust, pinned to the CI toolchain. A runner whose baked AMI carries an
-          # older default (e.g. 1.97.x) must still be pinned to the bins' 1.98 MSRV,
-          # so install+default 1.98.0 even when cargo is already present. ──────────
           if command -v cargo >/dev/null 2>&1; then
             cargo --version
             rustup toolchain install 1.98.0 --profile minimal 2>/dev/null || true
@@ -554,9 +318,6 @@ jobs:
             curl -sSf -o rustup-init.exe https://win.rustup.rs/x86_64
             ./rustup-init.exe -y --profile minimal --default-toolchain 1.98.0 \
               --default-host x86_64-pc-windows-msvc
-            # POSIX form for $GITHUB_PATH, matching the /c/... entries the ffmpeg and
-            # python steps already write. A C:\Users\...\bin entry gets split on its
-            # drive-letter colon when Git-Bash re-parses PATH for the next step.
             echo "$(cygpath -u "$USERPROFILE")/.cargo/bin" >> "$GITHUB_PATH"
           else
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -569,23 +330,10 @@ jobs:
         run: cargo build --release --bin freemkv
       - name: Fetch the four disc fixtures
         shell: bash
-        # One of each family: DVD/CSS, Blu-ray/AACS v1, UHD/AACS 2.0, HD-DVD.
-        # ~121 GiB, held for the whole run rather than fetched-and-deleted per
-        # rip, because the format/selection/dir:// groups revisit them. The
-        # launch templates carry 600 GB for exactly this.
         run: |
           set -euo pipefail
-          # The bucket is in us-west-2 and the runner's apt `awscli` is the v1
-          # client, which does NOT read the instance's region from IMDS for an
-          # `s3 cp` — with no region it hits the wrong endpoint and burns the
-          # retry budget on a redirect before failing with a masked error. The
-          # head-object calls below already pass --region for exactly this;
-          # setting it for the whole step covers the cp calls too, on any client.
           export AWS_DEFAULT_REGION=us-west-2 AWS_REGION=us-west-2
           B="${{ secrets.FMKV_FIXTURES_BUCKET }}"
-          # Windows: the freemkv binary is a NATIVE build and cannot resolve an
-          # MSYS path like /d/a/iso. `cygpath -m` yields C:/... , which Git-bash
-          # and the native binary both accept — so one variable works for both.
           if [ "${{ matrix.os }}" = "windows" ]; then
             ISO_DIR=$(cygpath -m "$(pwd)")/isos
           else
@@ -593,14 +341,6 @@ jobs:
           fi
           mkdir -p isos
           echo "ISO_DIR=$ISO_DIR" >> "$GITHUB_ENV"
-          # The key database, alongside the discs. BOTH key sources are
-          # configured, because that is what a real user has and because
-          # neither covers everything on its own: the online service had no
-          # key for the Blu-ray fixture (E7022, disc id 20312DAD...), which
-          # this keydb does hold, and the keydb has no entry for the UHD
-          # fixture, which the service serves. One source alone means a
-          # permanently skipped family — and with a service configured a skip
-          # is now a failure, correctly.
           if ! err=$(aws s3 cp "s3://$B/keydb.cfg" keydb.cfg --region us-west-2 --only-show-errors 2>&1); then
             echo "::error title=Key database download failed::could not fetch keydb.cfg from the fixtures bucket — the BD family cannot decrypt without it: ${err:-<no client output>}"
             exit 1
@@ -626,17 +366,10 @@ jobs:
         id: suite
         shell: bash
         env:
-          # The same online key service autorip ships with by default, so CI
-          # tests the configuration users actually have. The fixtures are real
-          # retail discs: CSS (DVD) cracks keylessly, AACS (BD/UHD) does not.
           FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
           FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
         run: |
           set -uo pipefail
-          # Fail EARLY and BY NAME on a missing secret. Without this the run
-          # gets six minutes in, rips the DVD fine (CSS needs no key), and only
-          # then reports a key error on the Blu-ray — which reads like a media
-          # defect rather than an unset secret.
           if [ -z "${FMKV_KEY_URL:-}" ] || [ -z "${FMKV_KEY_AUTH:-}" ]; then
             echo "::error title=Key service not configured::FMKV_KEY_URL / FMKV_KEY_AUTH are unset, so the AACS fixtures (bd, uhd) cannot decrypt. Set them as repo secrets. The DVD would still pass, because CSS needs no key — do not read a green DVD as evidence the keys work."
             exit 1
@@ -645,14 +378,13 @@ jobs:
           BIN="$PWD/freemkv/target/release/freemkv"
           if [ "${{ matrix.os }}" = "windows" ]; then
             BIN="$(cygpath -m "$PWD")/freemkv/target/release/freemkv.exe"
-            # $WORK comes from mktemp under $TMPDIR; give it a mixed path too,
-            # or the suite hands the native binary an MSYS path it cannot open.
             export TMPDIR="$(cygpath -m "${RUNNER_TEMP}")"
           fi
           [ -x "${BIN%.exe}" ] || [ -x "$BIN" ] || {
             echo "::error title=CLI binary missing::expected a release build at $BIN"; exit 1; }
 
           chmod +x ci/scripts/cli-acceptance.sh || true
+          FMKV_MEDIA_CHECKS="$PWD/freemkv/tests/media_checks.py" \
           FMKV_BIN="$BIN" \
           FMKV_DVD_ISO="$ISO_DIR/dvd.iso" \
           FMKV_BD_ISO="$ISO_DIR/bd.iso" \
@@ -663,20 +395,12 @@ jobs:
             bash ci/scripts/cli-acceptance.sh 2>&1 | tee "suite-${{ matrix.os }}.log"
           rc=${PIPESTATUS[0]}
 
-          # The suite's own FAIL/SKIP lines are the diagnosis, and a step log
-          # is NOT readable until the whole RUN completes — so while a matrix
-          # sibling is still ripping, the failed leg's reason is unreachable
-          # for another hour. Artifacts upload immediately, so the transcript
-          # goes out as one, and the failing lines are echoed below as well.
           if [ "$rc" != 0 ]; then
             echo "── every failing check on ${{ matrix.os }} ──"
             grep -E '^  (FAIL|SKIP)' "suite-${{ matrix.os }}.log" || true
             echo "──"
           fi
 
-          # The suite's own summary already names each FAIL and each unexpected
-          # SKIP. Add the one line that says which LEG this was, so a red run in
-          # a two-platform matrix does not require opening both to find out.
           if [ "$rc" != 0 ]; then
             echo "::error title=CLI acceptance failed on ${{ matrix.os }}::the suite exited $rc — the FAIL/SKIP lines naming each check are in this step's log above"
           fi
@@ -684,16 +408,11 @@ jobs:
           echo "── hashes recorded on ${{ matrix.os }} ──"
           cat "cli-${{ matrix.os }}.txt"
           exit $rc
-      # `always()`: a leg that FAILED still produced artifacts, and those are
-      # exactly the ones worth comparing — "windows diverged" is the more
-      # useful sentence when windows is also the leg that went red.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: "cli-matrix-${{ matrix.os }}"
           path: "cli-${{ matrix.os }}.txt"
-      # Separate artifact, always: this is the one thing that makes a failed
-      # leg diagnosable while the other leg is still running.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -701,14 +420,10 @@ jobs:
           path: "suite-${{ matrix.os }}.log"
 
   compare-cli-matrix:
-    needs: [detect, cli-matrix]
-    if: always() && (inputs.run_media || (github.event_name == 'push' && needs.detect.outputs.media == 'true'))
+    needs: [cli-matrix]
+    if: always() && (github.event_name == 'workflow_dispatch' && inputs.run_media)
     runs-on: ubuntu-latest
     steps:
-      # continue-on-error: with no matching artifact this action FAILS, which
-      # would replace the diagnostic below ("neither leg uploaded a hash file,
-      # check whether the runners registered") with a generic download error —
-      # burying the actual cause in exactly the case it matters most.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { pattern: "cli-matrix-*", path: hashes }
         continue-on-error: true
@@ -749,11 +464,6 @@ jobs:
                     "would be meaningless. Pin the sibling refs.")
               fail = True
 
-          # Name the platforms that MUST report rather than accepting whatever
-          # turned up. A run where one leg died before writing hashes would
-          # otherwise compare the survivor with itself, agree, and go green —
-          # claiming parity having tested one, with the missing platform being
-          # the one that failed and so the one most worth comparing.
           EXPECTED = {"linux", "windows"}
           absent = sorted(EXPECTED - set(plats))
           if absent:

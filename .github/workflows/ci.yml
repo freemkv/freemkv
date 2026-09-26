@@ -67,6 +67,12 @@ jobs:
   # forgot its changelog entry must fail here rather than ship a blank release.
   # Hard-fails on main (and PRs targeting main); warns elsewhere so an
   # in-progress dev/qa branch whose entry isn't written yet is not blocked.
+  media-harness-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 -m unittest discover -s tests -p 'test_media*.py' -v
+
   changelog:
     runs-on: ubuntu-latest
     steps:

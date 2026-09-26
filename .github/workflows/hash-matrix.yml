@@ -1,27 +1,12 @@
 name: hash-matrix
 
-# Cross-platform output parity for the WHOLE CLI suite.
-#
-# parity.yml already proves linux/macOS/Windows agree on one remux
-# (mkv://->mkv://). This runs the entire cli-integration suite on all three and
-# compares every artifact it produces, so the claim covers the container
-# conversions and the stdio round-trip as well as the plain remux.
-#
-# THE INPUT IS GENERATED ONCE AND SHARED. Encoder output differs between ffmpeg
-# builds, so three runners each generating their own master produce three
-# different inputs -- and comparing the outputs would then be measuring the
-# runners' ffmpeg rather than this program. That is exactly why the ledger in
-# cli-integration.sh keys per platform and explicitly leaves cross-platform
-# equality to a workflow like this one.
-#
-# Runs on `qa` and on demand: it is a release gate, not a linter.
+# Fixed answers prove correctness; shared inputs make platform parity meaningful.
+
 on:
   push:
     branches: [qa]
   workflow_dispatch:
 
-# Least privilege by default; the real-media job elevates itself to id-token:
-# write for the OIDC role it assumes to read the fixture bucket.
 permissions:
   contents: read
 
@@ -30,13 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # ubuntu-latest does not ship ffmpeg preinstalled.
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Generate the shared master.mkv
         run: |
-          # Byte-for-byte the invocation in tests/cli-integration.sh, so the
-          # shared media is the media that suite was written against.
           ffmpeg -v error -f lavfi -i testsrc=duration=6:size=640x480:rate=24 \
             -f lavfi -i sine=frequency=440:duration=6 \
             -f lavfi -i sine=frequency=880:duration=6 \
@@ -56,9 +38,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { path: freemkv }
-      # Siblings are path deps and must sit BESIDE freemkv: the committed
-      # Cargo.toml patches them to git tags and the .cargo/config.toml that
-      # redirects to paths is gitignored, so a bare checkout cannot resolve them.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/libfreemkv, ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}", path: libfreemkv }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -86,19 +65,10 @@ jobs:
       - name: Record the libfreemkv sha
         shell: bash
         run: |
-          # MUX_APP (mux/mkv.rs MuxingApp/WritingApp) carries libfreemkv's short
-          # sha, so two runs built from different libfreemkv commits differ in
-          # output BYTES while being functionally identical. The compare job
-          # refuses to read anything into a mismatch unless these agree.
           echo "LF_SHA=$(git -C libfreemkv rev-parse --short HEAD)" >> "$GITHUB_ENV"
-      - name: Install ffmpeg (all) and GTK4 (Linux — for the freemkv 1.7.6 desktop shell)
+      - name: Install FFmpeg and Linux GUI dependencies
         shell: bash
         run: |
-          # The suite verifies its outputs with ffprobe throughout, so ffmpeg is
-          # needed even though the media itself now arrives pre-made. On Linux
-          # `cargo build --bin freemkv` also links the GTK4 + libadwaita desktop
-          # shell (added in 1.7.6), so glib-sys / gio-sys / gobject-sys need
-          # libgtk-4-dev + libadwaita-1-dev too.
           case "${{ matrix.os }}" in
             ubuntu-*)  sudo apt-get update && sudo apt-get install -y ffmpeg libgtk-4-dev libadwaita-1-dev build-essential ;;
             macos-*)   brew install ffmpeg ;;
@@ -111,6 +81,21 @@ jobs:
         working-directory: freemkv
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: matrix-master-media, path: shared }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Validate content and subtitle lifecycle against known answers
+        shell: bash
+        run: |
+          BIN="$PWD/freemkv/target/release/freemkv"
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          python freemkv/tests/media_kat.py --binary "$BIN" --artifacts media-results
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: media-${{ matrix.os }}
+          path: media-results
+          if-no-files-found: error
+          retention-days: 14
       - name: Run the CLI suite against the shared media
         shell: bash
         run: |
@@ -126,14 +111,21 @@ jobs:
           echo "--- hashes recorded on ${{ matrix.os }} ---"
           cat "hashes-${{ matrix.os }}.txt"
           exit $rc
-      # if: always() -- a suite that FAILED still produced artifacts, and those
-      # are the ones worth comparing: "windows diverged" is the more useful
-      # sentence when the windows run is also the one that went red.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: "matrix-hashes-${{ matrix.os }}"
           path: "hashes-${{ matrix.os }}.txt"
+
+  compare-known-answers:
+    needs: suite
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { pattern: 'media-*', path: reports }
+      - run: python3 tests/media_kat.py --compare reports
 
   compare:
     needs: suite
@@ -150,7 +142,6 @@ jobs:
           python3 - <<'PY'
           import glob, os, sys, collections
 
-          # artifact -> {platform: hash}; and platform -> libfreemkv sha
           arts = collections.defaultdict(dict)
           shas = {}
           files = sorted(glob.glob("hashes/*.txt"))
@@ -174,20 +165,12 @@ jobs:
 
           fail = False
 
-          # A differing libfreemkv sha changes MUX_APP, so the output bytes
-          # differ for a reason that is not a divergence. Refuse to judge in
-          # that case rather than report a mismatch that means nothing.
           if len(set(shas.values())) > 1:
               print("::error::libfreemkv shas differ across the matrix "
                     f"({shas}) -- MUX_APP differs, so a byte comparison would be "
                     "meaningless. Pin the sibling refs.")
               fail = True
 
-          # Name the platforms that MUST report, rather than accepting whatever
-          # turned up. A run where one leg died before writing its hashes would
-          # otherwise compare the surviving two, agree, and go green -- reporting
-          # three-way parity having tested two, with the missing platform being
-          # the one that failed and so the one most worth comparing.
           EXPECTED = {"ubuntu-latest", "macos-latest", "windows-latest"}
           absent = sorted(EXPECTED - set(plats))
           if absent:
@@ -202,11 +185,6 @@ jobs:
               if len(uniq) == 1 and not missing:
                   print(f"  OK    {name}: identical on all {len(by)} platforms")
               elif len(uniq) == 1:
-                  # Agreeing where produced is NOT the claim this gate makes.
-                  # A platform that never produced the artifact was never
-                  # compared, and passing here would report parity across three
-                  # platforms while having checked two -- coverage that only
-                  # looks like coverage.
                   fail = True
                   print(f"::error::{name} was NOT produced on {', '.join(missing)} "
                         "-- it agrees where it exists, but that platform is unproven")
@@ -219,23 +197,6 @@ jobs:
           sys.exit(1 if fail else 0)
           PY
 
-  # ── Real disc media, same three platforms ──────────────────────────────────
-  #
-  # The suite above proves parity on ffmpeg-generated media. That exercises the
-  # mux, but nothing above it: no UDF/ISO9660 parse, no title enumeration, no
-  # VOB/clip walk. This runs the same three platforms against a REAL disc image
-  # so those paths are compared too.
-  #
-  # The fixture is a small DVD-Video image (~35 MB) held privately, named by
-  # secrets so a public workflow file does not carry the account or bucket. It
-  # is fetched with a short-lived OIDC token assumed into a role that can read
-  # nothing but the fixture prefix, and whose trust policy names the two
-  # branches -- so a fork's pull request cannot assume it at all.
-  #
-  # Encrypted BD/UHD parity is deliberately NOT here: it would put AACS key
-  # material on hosted runners for a public repository. Decryption is proven on
-  # the self-hosted runner that already holds the key database; what needs
-  # proving across platforms is the mux, and that needs no keys.
   real-media:
     strategy:
       fail-fast: false
@@ -275,13 +236,9 @@ jobs:
       - name: Record the libfreemkv sha
         shell: bash
         run: echo "LF_SHA=$(git -C libfreemkv rev-parse --short HEAD)" >> "$GITHUB_ENV"
-      # A fork, or this repo before the secrets exist, has no credentials. Say
-      # so once and skip the rest -- a job that dies on a missing secret reads
-      # like a broken pipeline rather than an absent one.
       - name: Are the fixture credentials available?
         id: creds
         shell: bash
-        # Secrets flow through env, never interpolated into the script body.
         env:
           FMKV_FIXTURES_ROLE: ${{ secrets.FMKV_FIXTURES_ROLE }}
           FMKV_FIXTURES_S3: ${{ secrets.FMKV_FIXTURES_S3 }}
@@ -290,7 +247,8 @@ jobs:
             echo "have=true" >> "$GITHUB_OUTPUT"
           else
             echo "have=false" >> "$GITHUB_OUTPUT"
-            echo "No fixture credentials -- real-media parity skipped." >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Required DVD fixture credentials are missing"
+            exit 1
           fi
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         if: steps.creds.outputs.have == 'true'
@@ -300,16 +258,19 @@ jobs:
       - name: Fetch the disc fixture
         if: steps.creds.outputs.have == 'true'
         shell: bash
-        # Secret bucket path via env, not interpolated into the command.
         env:
           FMKV_FIXTURES_S3: ${{ secrets.FMKV_FIXTURES_S3 }}
         run: aws s3 cp "$FMKV_FIXTURES_S3/dvd.iso" dvd.iso --quiet && ls -l dvd.iso
-      - name: Install GTK4 + libadwaita (Linux, for the freemkv 1.7.6 desktop shell)
-        if: steps.creds.outputs.have == 'true' && runner.os == 'Linux'
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Install media tools and Linux GUI dependencies
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
+          case "${{ matrix.os }}" in
+            ubuntu-*) sudo apt-get update && sudo apt-get install -y ffmpeg libgtk-4-dev libadwaita-1-dev build-essential ;;
+            macos-*) brew install ffmpeg ;;
+            windows-*) choco install ffmpeg -y --no-progress ;;
+          esac
       - uses: dtolnay/rust-toolchain@stable
         if: steps.creds.outputs.have == 'true'
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -325,9 +286,9 @@ jobs:
           set -euo pipefail
           BIN="$PWD/freemkv/target/release/freemkv"
           [ -f "$BIN.exe" ] && BIN="$BIN.exe"
-          # Bare filenames: under Git-bash on Windows an absolute $PWD is an
-          # MSYS path the native binary cannot resolve. Both files are here.
           "$BIN" iso://dvd.iso mkv://dvd-out.mkv
+          python freemkv/tests/media_checks.py timeline dvd-out.mkv --mode cadence
+          python freemkv/tests/media_checks.py decode dvd-out.mkv
           if command -v sha256sum >/dev/null; then H=$(sha256sum dvd-out.mkv | cut -d' ' -f1)
           else H=$(shasum -a 256 dvd-out.mkv | cut -d' ' -f1); fi
           printf '%s  dvd-out.mkv\nlibfreemkv=%s\n' "$H" "$LF_SHA" > "real-${{ matrix.os }}.txt"
@@ -350,13 +311,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # No artifacts at all means the fixture credentials were absent and
-          # every leg skipped. That is a stated, visible skip -- not a silent
-          # pass and not a failure.
           if ! ls real/*.txt >/dev/null 2>&1; then
             echo "real-media parity skipped: no fixture credentials on this repo/branch." \
               | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
+            exit 1
           fi
           python3 - <<'PY'
           import glob, os, sys, collections
@@ -381,8 +339,6 @@ jobs:
                     "MUX_APP differs, so a byte comparison would be meaningless.")
               fail = True
 
-          # Same rule as the synthetic compare: if a platform ran at all, all
-          # three must report, or this cannot claim three-way parity.
           EXPECTED = {"ubuntu-latest", "macos-latest", "windows-latest"}
           absent = sorted(EXPECTED - set(plats))
           if absent:

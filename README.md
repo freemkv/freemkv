@@ -310,3 +310,17 @@ The minimum supported Rust version (MSRV) is **1.98**, declared as
 ## License
 
 MIT. Built on [libfreemkv](https://github.com/freemkv/libfreemkv).
+
+### Media validation
+
+QA runs fixed synthetic media through the CLI on Linux, macOS and Windows.
+It checks decoded content, frame/sample counts, timestamps, track metadata and
+PGS display/replacement/clear events against committed answers, then compares
+platform results. A small DVD image also exercises disc parsing and decoding.
+The full DVD/BD/UHD/HD-DVD suite is opt-in through QA's `run_media` input.
+
+With FFmpeg installed, run `python3 tests/media_kat.py --binary target/release/freemkv`.
+Run validator regression tests with `python3 -m unittest discover -s tests -p 'test_media*.py'`.
+Fixtures contain only generated pixels/audio/subtitles. `--generate` explicitly
+rebuilds their answers from authored inputs and FFmpeg, never freemkv output;
+normal validation never rewrites them. Review regenerated answers before committing.

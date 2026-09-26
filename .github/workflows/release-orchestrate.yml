@@ -31,10 +31,6 @@ on:
         description: Prerelease (rc) — cut -rc tags only; do NOT push qa, advance main, or publish the site
         type: boolean
         default: false
-      media_evidence_skip:
-        description: Bypass the real-media evidence gate (MEDIA_EVIDENCE_SKIP=1) — for an rc verified on real hardware instead of the CI matrix
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -53,11 +49,10 @@ jobs:
     # low and the job is killed mid-cascade, after tags are already public.
     timeout-minutes: 180
     steps:
-      - name: Preflight — qa green on all eight, main coherent, real-media evidence
+      - name: Preflight — qa green on all eight, main coherent, media evidence
         env:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
           NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
-          MEDIA_EVIDENCE_SKIP: ${{ inputs.media_evidence_skip && '1' || '0' }}
         run: |
           set -uo pipefail
           fail=0
@@ -93,49 +88,23 @@ jobs:
           done
           [ "$fail" = "0" ] || { echo "::error::refusing to release — qa not green / main not coherent across the set"; exit 1; }
 
-          # real-media EVIDENCE (F5): the qa 'green' above counts a SKIPPED media
-          # matrix as green. A release is normally backed by a real-disc run at the
-          # exact freemkv qa sha — both cli-matrix legs SUCCEEDED (not skipped).
-          #
-          # WAIVERS (either one skips this gate; both logged loud):
-          #   - [skip-media] on the freemkv qa TIP commit. This is the SAME marker
-          #     qa.yml honours to skip the matrix for a change that cannot touch the
-          #     rip engine (--share capture, workflows, docs). It MUST waive the
-          #     matrix and this evidence requirement TOGETHER — otherwise the two
-          #     disagree: qa skips the run, yet the release still blocks on evidence
-          #     that was skipped by design. That mismatch was the bug.
-          #   - MEDIA_EVIDENCE_SKIP=1 — env emergency hatch for anything else.
+          # Require the bounded media gate at this exact candidate, including every OS.
           fsha=$(gh api repos/freemkv/freemkv/git/ref/heads/qa -q .object.sha)
-          fmsg=$(gh api "repos/freemkv/freemkv/commits/$fsha" -q .commit.message 2>/dev/null || echo "")
-          if printf '%s' "$fmsg" | grep -qiE '\[skip[- ]media\]'; then
-            echo "::warning::MEDIA_EVIDENCE gate WAIVED — [skip-media] on freemkv qa ${fsha:0:7}: the matrix was skipped by design (change cannot affect a rip); releasing without a real-disc run"
-          elif [ "${MEDIA_EVIDENCE_SKIP:-0}" = "1" ]; then
-            echo "::warning::MEDIA_EVIDENCE gate BYPASSED (MEDIA_EVIDENCE_SKIP=1) — releasing without a real-disc run"
-          else
-            # `gh api ... -q` runs jq over the RAW REST JSON: the run id field is
-            # `.id`, NOT `.databaseId` (that alias only exists in `gh run --json`
-            # output). Using the wrong name yielded an empty id, which turned the
-            # jobs call below into `actions/runs//jobs` — a 404 whose JSON body then
-            # misparsed as "0 green legs", failing a release whose matrix WAS green.
-            # `// empty` returns "" (not the string "null") when no qa run matches.
-            rid=$(gh api "repos/freemkv/freemkv/actions/runs?head_sha=$fsha&per_page=100" \
-                    -q 'first(.workflow_runs[]|select(.name=="qa")).id // empty' 2>/dev/null || echo "")
-            if [ -z "$rid" ]; then
-              echo "::error::no qa workflow run found at freemkv ${fsha:0:7} — cannot confirm real-media evidence. Push to qa so the matrix runs, mark the commit [skip-media], or set MEDIA_EVIDENCE_SKIP=1."
-              exit 1
-            fi
-            # per_page=100 so a qa run with >30 jobs can't paginate the cli-matrix
-            # legs off page 1 and read as "missing".
-            legs=$(gh api "repos/freemkv/freemkv/actions/runs/$rid/jobs?per_page=100" \
-                    -q '[.jobs[]|select(.name|startswith("cli-matrix ("))|.conclusion]' 2>/dev/null || echo "[]")
-            n=$(echo "$legs" | jq 'length'); good=$(echo "$legs" | jq '[.[]|select(.=="success")]|length')
-            if [ "${n:-0}" -ge 2 ] && [ "$n" = "$good" ]; then
-              echo "  ok real-media: both cli-matrix legs green at freemkv ${fsha:0:7} (run $rid)"
-            else
-              echo "::error::no real-media evidence at freemkv ${fsha:0:7} (qa run $rid): cli-matrix legs=$legs (need >=2 all success). Push to qa so the matrix runs, mark the commit [skip-media], or MEDIA_EVIDENCE_SKIP=1."
-              exit 1
-            fi
-          fi
+          rid=$(gh api "repos/freemkv/freemkv/actions/runs?head_sha=$fsha&per_page=100" \
+                  -q 'first(.workflow_runs[]|select(.name=="hash-matrix" and .head_branch=="qa" and .conclusion=="success")).id // empty')
+          [ -n "$rid" ] || { echo "::error::No successful media gate at $fsha"; exit 1; }
+          gh api "repos/freemkv/freemkv/actions/runs/$rid/jobs?per_page=100" > /tmp/media-jobs.json
+          python3 - <<'PYMEDIA'
+          import json
+          jobs = {j["name"]: j["conclusion"] for j in json.load(open("/tmp/media-jobs.json"))["jobs"]}
+          required = {"compare", "compare-known-answers", "compare-real"}
+          required.update(f"{job} ({os})" for job in ("suite", "real-media")
+                          for os in ("ubuntu-latest", "macos-latest", "windows-latest"))
+          missing = sorted(name for name in required if jobs.get(name) != "success")
+          if missing:
+              raise SystemExit(f"Missing successful media evidence: {missing}")
+          print("Independent answers, conversion parity and DVD validation passed on all three platforms")
+          PYMEDIA
 
       # The eight repos side by side under one root, the way the inline mechanics
       # expect (FMKV_ROOT). No freemkv-ci checkout — there is no script to fetch.
@@ -289,24 +258,8 @@ jobs:
           #      does not re-run any of it. Normal flow: push to dev, CI goes green,
           #      release.
           #
-          #   2. A real-disc run in CI, green at the exact commit being tagged:
-          #
-          #        push the commit to qa  →  qa.yml runs the media matrix
-          #
-          #      qa.yml runs the acceptance suite on ephemeral EC2 runners as
-          #      cli-matrix (linux) and cli-matrix (windows), against full-size disc
-          #      images in S3. Preflight CHECKS that BOTH legs are green for THIS SHA —
-          #      bound to the commit, not to a file mtime. It drives
-          #      CLI -> freemkv-engine -> libfreemkv, the shared core the GUI and autorip
-          #      also sit on, so a green run is evidence for all three consumers. No
-          #      laptop, no prerelease.sh: the evidence is produced by CI or it does
-          #      not exist.
-          #
-          #   Emergency hatches, both loud in the log: RELEASE_CI_SKIP=1,
-          #   MEDIA_EVIDENCE_SKIP=1 (PRERELEASE_SKIP still honoured).
-          #
-          # See also: the internal release checklist — the operator checklist
-          # this script automates, kept in step with what the code above actually does.
+          # Release preflight requires the bounded media gate at the exact QA SHA.
+          # Full-disc integration is available through QA's run_media input.
 
           set -euo pipefail
 

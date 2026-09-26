@@ -2,7 +2,8 @@
 
 ## [1.7.7] — 2026-09-26
 
-- Provision GTK development dependencies on real-media CI runners and validate changes to the media workflow.
+- Validate QA media against independent content, timing and subtitle answers on Linux, macOS and Windows; keep full-disc integration opt-in.
+- Fail media validation on decoder failures, missing timestamps, collapsed audio or missing platform results.
 
 ### Maintenance
 
@@ -10,6 +11,7 @@
 
 ### Fixed
 
+- Keep the Linux interface responsive while opening and scanning sources.
 - Rips preserve subtitle clear events and audio timing through the updated libfreemkv pipeline.
 
 ### Changed
