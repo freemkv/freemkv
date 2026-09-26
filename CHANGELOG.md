@@ -2,6 +2,8 @@
 
 ## [1.7.7] — 2026-09-26
 
+- Provision GTK development dependencies on real-media CI runners and validate changes to the media workflow.
+
 ### Maintenance
 
 - Replace comment-overflow documentation with concise source contracts and README instructions; enforce the shared comment policy in CI.

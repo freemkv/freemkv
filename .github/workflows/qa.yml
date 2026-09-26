@@ -74,6 +74,10 @@ jobs:
           if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
             echo "media=true" >> "$GITHUB_OUTPUT"; echo "no usable base sha — media ON (safe default)"; exit 0
           fi
+          # Runner setup and acceptance checks live in this workflow.
+          if git diff --name-only "$before" "${{ github.sha }}" | grep -qx '.github/workflows/qa.yml'; then
+            echo "media=true" >> "$GITHUB_OUTPUT"; echo "media workflow changed — media ON"; exit 0
+          fi
           # "core" = anything that could change a rip. Exclude workflows, docs,
           # any *.md, and licensing/metadata (REUSE.toml, LICENSE, LICENSES/,
           # .reuse/, .gitignore) — none of which can affect a produced file.
@@ -535,10 +539,9 @@ jobs:
               choco install -y visualstudio2022-workload-vctools --no-progress
             fi
           else
-            # rustc's default linker driver is `cc` and ring compiles C, so gcc + ld
-            # are mandatory; curl bootstraps rustup. Idempotent (apt lists already
-            # refreshed by the ffmpeg step earlier in this job).
-            sudo apt-get install -y -qq build-essential curl
+            # The GNU/Linux binary links GTK even when invoked as a CLI.
+            # Apt lists were refreshed by the media-tools step above.
+            sudo apt-get install -y -qq build-essential curl pkg-config libgtk-4-dev libadwaita-1-dev
           fi
           # ── Rust, pinned to the CI toolchain. A runner whose baked AMI carries an
           # older default (e.g. 1.97.x) must still be pinned to the bins' 1.98 MSRV,
