@@ -1795,6 +1795,8 @@ jobs:
               freemkv-x86_64-macos.dmg
               freemkv-x86_64-windows.zip
               freemkv-x86_64-linux.AppImage
+              freemkv-amd64.deb
+              freemkv-x86_64.flatpak
               # bare CLI binaries
               freemkv-aarch64-macos
               freemkv-x86_64-macos

@@ -87,7 +87,7 @@ jobs:
           flatpak install --user --noninteractive ./freemkv.flatpak
           expected=$(python3 -c 'import json; print(json.load(open("flatpak-package/provenance.json"))["version"])')
           flatpak run --command=freemkv org.freemkv.FreeMKV --version | tee version.log
-          grep -F "freemkv $expected" version.log
+          awk -v expected="$expected" '$1 == expected { found=1 } END { exit !found }' version.log
           status=0
           xvfb-run --auto-servernum dbus-run-session -- \
             timeout 15s flatpak run --env=GDK_BACKEND=x11 \
