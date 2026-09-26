@@ -343,7 +343,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! ls real/*.txt >/dev/null 2>&1; then
-            echo "real-media parity skipped: no fixture credentials on this repo/branch." \
+            echo "Required real-media reports are missing; platform parity was not validated." \
               | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi

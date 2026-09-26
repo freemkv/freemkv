@@ -58,7 +58,7 @@ class ReleaseBranchTests(unittest.TestCase):
             subprocess.run(['git', 'clone', str(remote), str(checkout)], check=True, capture_output=True)
             git('config', 'commit.gpgsign', 'false')
             git('config', 'core.hooksPath', str(root / 'no-hooks'))
-            git('config', 'user.email', 'test@example.invalid')
+            git('config', 'user.email', 'test@example.com')
             git('config', 'user.name', 'Release test')
             git('checkout', '-b', 'main')
             git('commit', '--allow-empty', '-m', 'base')
