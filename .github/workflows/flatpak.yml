@@ -2,8 +2,8 @@ name: Flatpak
 
 # Validates the Flathub submission manifest the same way Flathub's own CI
 # does: build OFFLINE in the current Flathub runtime container, then run
-# flatpak-builder-lint on both the manifest and the built repo. Green here
-# means it builds and lints on Flathub's infrastructure.
+# flatpak-builder-lint on both the manifest and the built repo, then check
+# the installed GUI starts. Physical drive and interactive testing is manual.
 #
 # Runs on the flathub-submission branch and on manual dispatch. Not part of
 # the dev/qa/main fast-path; the CLI+GUI compile is covered by ci.yml.
@@ -45,15 +45,22 @@ jobs:
           mirror-screenshots-url: https://dl.flathub.org/media
           upload-artifact: true
 
-      # Lint the built repo the way Flathub gates submissions. --exceptions
-      # allows entries Flathub explicitly permits per-app (e.g. --device=all
-      # for optical-media tools) once granted.
+      # Keep strict lint blocking: no per-app exceptions are needed today.
       - name: Lint repo
-        run: flatpak-builder-lint --exceptions repo repo
-
-      # Diagnostic only: the same repo lint WITHOUT --exceptions, so the log
-      # shows any findings (e.g. --device=all) that need a Flathub-granted
-      # per-app exception at review time. Non-blocking.
-      - name: Lint repo (strict, informational)
-        continue-on-error: true
         run: flatpak-builder-lint repo repo
+
+      - name: Check installed GUI launch
+        shell: bash
+        run: |
+          flatpak install --user --noninteractive ./freemkv.flatpak
+          # A GUI should stay running until timeout; CLI help exits immediately.
+          # This exercises the default manifest command without an explicit gui arg.
+          status=0
+          xvfb-run --auto-servernum dbus-run-session -- \
+            timeout 15s flatpak run --env=GDK_BACKEND=x11 \
+              org.freemkv.FreeMKV > gui-launch.log 2>&1 || status=$?
+          cat gui-launch.log
+          if [ "$status" -ne 124 ]; then
+            echo "Expected a running GUI; launcher exited with status $status"
+            exit 1
+          fi

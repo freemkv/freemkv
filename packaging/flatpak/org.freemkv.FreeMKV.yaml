@@ -1,4 +1,4 @@
-# Flathub-ready Flatpak manifest for freemkv.
+# Flatpak manifest for freemkv.
 #
 # Build model: OFFLINE. Flathub's builder has no network during the build
 # phase, so nothing here runs `cargo build` against the network. Instead:
@@ -28,7 +28,7 @@ runtime-version: '51'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
-command: freemkv
+command: freemkv-gui
 
 finish-args:
   # GTK4 desktop app: Wayland first, X11 fallback for X sessions.
@@ -66,13 +66,11 @@ modules:
     build-commands:
       - cargo --offline build --release --bin freemkv
       - install -Dm755 target/release/freemkv /app/bin/freemkv
-      # The .desktop, AppStream metainfo and icon. The .desktop and metainfo
-      # are shipped alongside this manifest (not taken from the immutable
-      # v1.7.6 tag) so Flathub-specific metadata fixes don't require an
-      # upstream re-release. The icon comes from the tagged source tree.
-      - install -Dm644 org.freemkv.FreeMKV.desktop
+      - install -Dm755 freemkv-gui /app/bin/freemkv-gui
+      # Install the metadata from upstream's source tree.
+      - install -Dm644 packaging/flatpak/org.freemkv.FreeMKV.desktop
           /app/share/applications/org.freemkv.FreeMKV.desktop
-      - install -Dm644 org.freemkv.FreeMKV.metainfo.xml
+      - install -Dm644 packaging/flatpak/org.freemkv.FreeMKV.metainfo.xml
           /app/share/metainfo/org.freemkv.FreeMKV.metainfo.xml
       - install -Dm644 res/freemkv-icon.svg
           /app/share/icons/hicolor/scalable/apps/org.freemkv.FreeMKV.svg
@@ -82,10 +80,13 @@ modules:
         url: https://github.com/freemkv/freemkv.git
         tag: v1.7.6
         commit: 1ad50de6a0bafae1d404ec544951215d0ca25210
-      # Flathub-maintained metadata, colocated with the manifest.
-      - type: file
-        path: org.freemkv.FreeMKV.desktop
-      - type: file
-        path: org.freemkv.FreeMKV.metainfo.xml
+      # Backport the screenshot metadata already present on the upstream
+      # flathub-submission branch. Drop this patch when a release includes it.
+      - type: patch
+        path: upstream-metainfo.patch
+      - type: script
+        dest-filename: freemkv-gui
+        commands:
+          - exec /app/bin/freemkv gui "$@"
       # Vendored cargo dependencies (crates.io tarballs + git siblings).
       - cargo-sources.json
