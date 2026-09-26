@@ -62,6 +62,15 @@ jobs:
   promote:
     runs-on: ubuntu-latest
     steps:
+      # Private-info gate: the org-specific scanner lives in the private
+      # freemkv-ci repo; its output here is redacted to category + file:line.
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-ci
+          token: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          path: ci
+      - name: Refuse if any public repo's dev carries private info
+        run: bash ci/scripts/scan-public.sh dev $REPOS .github homebrew-tap
       - name: Check every repo's dev is green and qa can fast-forward
         id: check
         env:

@@ -1,0 +1,30 @@
+name: leak-scan
+
+# Daily private-info scan of every public freemkv repo (dev + main). The
+# org-specific scanner lives in the private freemkv-ci repo; output here is
+# redacted to category + file:line. promote and release-orchestrate run the
+# same gate before anything moves.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: freemkv/freemkv-ci
+          token: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          path: ci
+      - name: Scan dev and main
+        run: |
+          set -uo pipefail
+          repos="freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n freemkv-engine bdemu freemkv autorip freemkv-firmware .github homebrew-tap"
+          fail=0
+          for ref in dev main; do bash ci/scripts/scan-public.sh "$ref" $repos || fail=1; done
+          exit $fail

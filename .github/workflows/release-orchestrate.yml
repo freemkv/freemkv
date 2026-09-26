@@ -161,6 +161,20 @@ jobs:
       # canonical name is `marketing` — same for the local checkout path.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with: { repository: freemkv/marketing,          ref: main, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/marketing,          fetch-depth: 0 }
+      # Private-info gate over everything this release makes public; output is
+      # redacted to category + file:line because this log is public.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { repository: freemkv/freemkv-ci, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ci-private }
+      - name: Refuse to release private info (qa of every public repo + the website)
+        run: |
+          set -uo pipefail
+          fail=0
+          bash ci-private/scripts/scan-public.sh qa freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n freemkv-engine bdemu freemkv autorip .github homebrew-tap || fail=1
+          if ! out=$(bash ci-private/scripts/scan-secrets.sh --strict ws/marketing/src 2>&1); then
+            fail=1; echo "::error::website has private-info findings:"
+            printf '%s\n' "$out" | grep -oE '\[[A-Z0-9-]+\] [^ ]+' | sed 's|ws/marketing/src/||; s/^/  /'
+          fi
+          exit $fail
 
       - name: Assert the checkouts match the preflight-verified qa shas (F6 TOCTOU)
         run: |

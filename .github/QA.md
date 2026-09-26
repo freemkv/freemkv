@@ -36,7 +36,7 @@ question. Current state of each:
 
 | script | what it proves | now runs |
 |---|---|---|
-| `scan-secrets.sh` | no leaks in public repos | `leak-guard.yml`, every push |
+| `scan-secrets.sh` (private, via `scan-public.sh`) | no private info in any public repo | `promote.yml` + `release-orchestrate.yml` gates, daily `leak-scan.yml` |
 | `precommit.sh` — fmt, clippy | style + lint on the CI toolchain | `ci.yml`, every push |
 | `precommit.sh` — `cargo test` | the unit suite | `ci.yml`, every push |
 | `precommit.sh` — `test --release` | release-profile behaviour | `qa.yml`, push to `qa` |
