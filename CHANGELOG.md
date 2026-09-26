@@ -7,6 +7,8 @@
 
 ### Maintenance
 
+- Keep Flatpak builds current with QA source snapshots and publish offline packaging bundles with stable releases.
+
 - Replace comment-overflow documentation with concise source contracts and README instructions; enforce the shared comment policy in CI.
 
 ### Fixed

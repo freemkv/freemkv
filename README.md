@@ -324,3 +324,9 @@ Run validator regression tests with `python3 -m unittest discover -s tests -p 't
 Fixtures contain only generated pixels/audio/subtitles. `--generate` explicitly
 rebuilds their answers from authored inputs and FFmpeg, never freemkv output;
 normal validation never rewrites them. Review regenerated answers before committing.
+
+Flatpak packaging is generated from the current QA candidate and from matching
+version tags for releases. The `Flatpak` workflow builds offline, checks the
+installed version and GUI startup, and retains the manifest, vendored sources,
+lockfile and commit provenance. Stable releases also carry the `.flatpak` and
+an offline build package; Flathub acceptance is not required for these builds.
