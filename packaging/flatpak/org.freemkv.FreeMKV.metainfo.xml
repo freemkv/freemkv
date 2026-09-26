@@ -38,16 +38,14 @@
     </ul>
   </description>
 
-  <!--
-    Screenshot. The freemkv desktop UI is the SAME app on every OS; this is
-    the real, currently-published product screenshot. The native Linux (GTK4)
-    shell is BETA as of 1.7.6 and does not yet have its own published
-    screenshot; replace this with a Linux capture once one is hosted.
-  -->
   <screenshots>
     <screenshot type="default">
-      <image>https://freemkv.org/freemkv-gui-windows.png</image>
+      <image>https://github.com/user-attachments/assets/b7c6bfa7-7d39-4ab7-a422-9defba5649f6</image>
       <caption>Selecting titles and tracks before ripping a disc</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://github.com/user-attachments/assets/37e1d34d-91b7-4a17-a577-af740c4de979</image>
+      <caption>Ripping a disc with progress and output information</caption>
     </screenshot>
   </screenshots>
 

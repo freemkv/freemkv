@@ -1,18 +1,13 @@
 name: Flatpak
 
-# Validates the Flathub submission manifest the same way Flathub's own CI
-# does: build OFFLINE in the current Flathub runtime container, then run
-# flatpak-builder-lint on both the manifest and the built repo, then check
-# the installed GUI starts. Physical drive and interactive testing is manual.
-#
-# Runs alongside qa.yml on pushes to qa in the dev -> qa -> main flow.
-# Manual dispatch remains available for packaging checks on other branches.
-# This checks the release pinned in the manifest, not the current qa sources;
-# ci.yml and qa.yml cover the candidate's application code.
+# Candidate source and dependencies are snapshotted once, then built offline.
 on:
   workflow_dispatch:
   push:
-    branches: [qa]
+    branches: [dev, qa]
+    tags: ['v*', '!v*-rc*']
+  pull_request:
+    paths: ['packaging/flatpak/**', '.github/workflows/flatpak.yml']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,41 +17,77 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  packaging-tests:
     runs-on: ubuntu-latest
-    # gnome-51 == org.gnome.Platform/Sdk 51, the current Flathub runtime.
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: python -m unittest discover -s packaging/flatpak -p 'test_*.py' -v
+
+  prepare:
+    needs: packaging-tests
+    if: github.ref_name == 'qa' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with: { path: checkouts/freemkv }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Snapshot matching candidate or release dependencies
+        env:
+          BUILD_REF: ${{ github.ref_name }}
+          BUILD_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD_REF_TYPE" = tag ]; then
+            ref="$BUILD_REF"
+          elif [ "$BUILD_REF" = dev ]; then
+            ref=dev
+          else
+            ref=qa
+          fi
+          for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do
+            git clone --depth 1 --branch "$ref" "https://github.com/freemkv/$repo.git" "checkouts/$repo"
+          done
+          python checkouts/freemkv/packaging/flatpak/prepare.py --checkouts checkouts --output flatpak-package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-package
+          path: flatpak-package
+          if-no-files-found: error
+          retention-days: 90
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
     steps:
-      - uses: actions/checkout@v5
-
-      # Lint the manifest before building (fast fail on structural issues).
-      - name: Lint manifest
-        run: flatpak-builder-lint manifest packaging/flatpak/org.freemkv.FreeMKV.yaml
-
-      # Offline build in the Flathub container. No siblings checkout and no
-      # network `cargo build`: sources come from the pinned git tag and the
-      # vendored cargo-sources.json.
-      - name: Build (offline)
+      - uses: actions/download-artifact@v4
+        with: { name: flatpak-package, path: flatpak-package }
+      - name: Lint current manifest
+        run: flatpak-builder-lint manifest flatpak-package/org.freemkv.FreeMKV.json
+      - name: Build current package offline
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: freemkv.flatpak
-          manifest-path: packaging/flatpak/org.freemkv.FreeMKV.yaml
+          manifest-path: flatpak-package/org.freemkv.FreeMKV.json
           cache-key: flatpak-builder-${{ github.sha }}
           mirror-screenshots-url: https://dl.flathub.org/media
           upload-artifact: true
-
-      # Keep strict lint blocking: no per-app exceptions are needed today.
-      - name: Lint repo
+      - name: Lint built repository
         run: flatpak-builder-lint repo repo
-
-      - name: Check installed GUI launch
+      - name: Check installed version and GUI launch
         shell: bash
         run: |
+          set -euo pipefail
           flatpak install --user --noninteractive ./freemkv.flatpak
-          # A GUI should stay running until timeout; CLI help exits immediately.
-          # This exercises the default manifest command without an explicit gui arg.
+          expected=$(python3 -c 'import json; print(json.load(open("flatpak-package/provenance.json"))["version"])')
+          flatpak run --command=freemkv org.freemkv.FreeMKV --version | tee version.log
+          grep -F "freemkv $expected" version.log
           status=0
           xvfb-run --auto-servernum dbus-run-session -- \
             timeout 15s flatpak run --env=GDK_BACKEND=x11 \
@@ -66,3 +97,49 @@ jobs:
             echo "Expected a running GUI; launcher exited with status $status"
             exit 1
           fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: flatpak-validation
+          path: |
+            gui-launch.log
+            version.log
+          retention-days: 90
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-validated-binary
+          path: freemkv.flatpak
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: flatpak-package, path: flatpak-package }
+      - uses: actions/download-artifact@v4
+        with: { name: flatpak-validated-binary, path: binary }
+      - name: Attach validated package to the existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tar -czf "freemkv-flatpak-package-$RELEASE_TAG.tar.gz" flatpak-package
+          cp binary/freemkv.flatpak freemkv-x86_64.flatpak
+          for attempt in $(seq 1 90); do
+            if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+              gh release upload "$RELEASE_TAG" freemkv-x86_64.flatpak \
+                "freemkv-flatpak-package-$RELEASE_TAG.tar.gz" --clobber
+              exit 0
+            fi
+            echo "Waiting for release $RELEASE_TAG ($attempt/90)"
+            sleep 20
+          done
+          echo "Release $RELEASE_TAG was not created; validated artifacts remain in this run."
+          exit 1
