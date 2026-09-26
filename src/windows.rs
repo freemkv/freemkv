@@ -1,5 +1,4 @@
 //! Windows Win32 shell over the shared `ui`/`engine`/`settings` core.
-//! See docs/windows-shell.md for full design rationale.
 //!
 //! ```text
 //! 1. render   App::view() -> View     assign strings/flags to widgets
@@ -258,8 +257,7 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
-// The shell UI font at `dpi`. See docs/windows-shell.md — why this shell
-// builds its own per-DPI font instead of using winsafe's single global one.
+// The shell UI font at `dpi`.
 #[must_use]
 fn ui_font(dpi: u32) -> Option<w::HFONT> {
     UI_FONTS.with(|cache| {
@@ -350,8 +348,8 @@ pub fn system_locale_code() -> Option<String> {
 
 // ── window icon ───────────────────────────────────────────────────────────
 
-// Attach the embedded icon to the window (title bar/Alt-Tab/taskbar), not
-// just the class icon. Best-effort; see docs/windows-shell.md for the why.
+// Attach the embedded icon to the window (title bar/Alt-Tab/taskbar), not just the class icon.
+// Best-effort.
 fn set_icons(hwnd: &w::HWND) {
     let Ok(hinst) = w::HINSTANCE::GetModuleHandle(None) else {
         return;
@@ -389,8 +387,8 @@ fn set_icons(hwnd: &w::HWND) {
 
 // ── tri-state checkboxes ──────────────────────────────────────────────────
 
-// Fill the tree's STATE image list with unchecked/checked/mixed glyphs,
-// theme-drawn and sized/rebuilt per DPI. See docs/windows-shell.md.
+// Fill the tree's STATE image list with unchecked/checked/mixed glyphs, theme-drawn and
+// sized/rebuilt per DPI.
 fn build_check_images<T: 'static>(tree: &gui::TreeView<T>, dpi: u32) -> w::AnyResult<()> {
     let side =
         w::GetSystemMetricsForDpi(co::SM::CXSMICON, dpi).unwrap_or(lay::Scale::new(dpi).px(16));
@@ -1464,9 +1462,9 @@ impl Shell {
         r
     }
 
-    // Ask before quitting mid-rip; `true` means go ahead. Shared by the window's
-    // X and File > Exit, which used to disagree (see docs/windows-shell.md) —
-    // one question, one place, not a copy beside each call site.
+    // Ask before quitting mid-rip; `true` means go ahead. Shared by the window's X and File >
+    // Exit, which used to disagree  — one question, one place, not a copy beside each call
+    // site.
     fn confirm_quit_mid_rip(&self) -> bool {
         if !self.app.borrow().running() {
             return true;
@@ -1483,9 +1481,8 @@ impl Shell {
         answer.map(|a| a == co::DLGID::YES).unwrap_or(false)
     }
 
-    // Signal the worker to stop, then WAIT (bounded by `QUIT_GRACE`) for it to
-    // put its output down, so the partial file is closed/finalised rather than
-    // left mid-write. See docs/windows-shell.md for the incident this fixed.
+    // Signal the worker to stop, then WAIT (bounded by `QUIT_GRACE`) for it to put its output
+    // down, so the partial file is closed/finalised rather than left mid-write.
     fn cancel_and_drain(&self) {
         self.act(Cmd::Cancel);
         let run = self.app.borrow().run.clone();
@@ -1895,9 +1892,8 @@ impl Shell {
         self.render();
     }
 
-    // `SetTimer` can fail; if the poller never starts the rip finishes silently
-    // in the background forever. See docs/windows-shell.md — same "never die
-    // silently" fix as `run_main`'s own error path: a `MessageBox`.
+    // `SetTimer` can fail; if the poller never starts the rip finishes silently in the
+    // background forever.
     fn report_timer_failure(wnd: &gui::WindowMain, id: usize, elapse_ms: u32) {
         if let Err(e) = wnd.hwnd().SetTimer(id, elapse_ms, None) {
             let _ = wnd.hwnd().MessageBox(
@@ -2353,9 +2349,8 @@ fn enum_options(key: &str) -> Vec<(&'static str, String)> {
     }
 }
 
-// A multi-select language picker: a button showing the chosen languages plus
-// a checkable popup menu behind it (Win32 has no checked-list combo box).
-// See docs/windows-shell.md for why, and why the string is stored here.
+// A multi-select language picker: a button showing the chosen languages plus a checkable popup
+// menu behind it (Win32 has no checked-list combo box).
 #[derive(Clone)]
 struct LangPicker {
     btn: gui::Button,
@@ -3149,9 +3144,8 @@ impl About {
         }
     }
 
-    // Re-text everything localized here, for a live language change. Needed
-    // because this shell builds its About window ONCE and reuses it (unlike
-    // macOS, which drops its cache): see docs/windows-shell.md.
+    // Re-text everything localized here, for a live language change. Needed because this shell
+    // builds its About window ONCE and reuses it (unlike macOS, which drops its cache):
     fn relocalize(&self, st: &crate::settings::Settings) {
         let g = crate::strings::get;
         let _ = self.wnd.hwnd().SetWindowText(&g("gui.menu.app_about"));
@@ -3214,9 +3208,8 @@ impl About {
     }
 }
 
-// Save `Settings` to disk and tell the operator whether it worked. The ONE
-// call site for this policy — see docs/windows-shell.md for the bug where a
-// second, silent-`let _ =` copy of it used to exist.
+// Save `Settings` to disk and tell the operator whether it worked. The ONE call site for this
+// policy.
 fn save_settings_reporting_error(sh: &Shell) {
     match sh.settings.borrow().save() {
         Ok(()) => sh.app_mut(|a| {
@@ -3767,9 +3760,8 @@ impl Shell {
     }
 }
 
-// The WIDGET-level assertions: what controls actually show vs what the
-// core's `View` said they should. See docs/windows-shell.md for why these
-// exist and how `self_test`/`#[test]` share them.
+// The WIDGET-level assertions: what controls actually show vs what the core's `View` said they
+// should.
 #[cfg(any(test, debug_assertions))]
 impl Shell {
     fn widget_checks(&self) -> Vec<(bool, String)> {

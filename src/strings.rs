@@ -4,8 +4,6 @@
 // is a thin re-export so existing call sites keep working unchanged.
 pub use freemkv_i18n::*;
 
-// See docs/strings.md — get_or/fmt_or rationale, dedup history, and how
-// missing translations are still caught (golden `--help` tests).
 /// A catalog string with a compiled-in English fallback, for keys this crate
 /// knows that the pinned `freemkv-i18n` tag does not ship yet.
 ///

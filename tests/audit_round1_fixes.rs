@@ -41,9 +41,8 @@ fn outcome_is_typed_not_parsed_from_prose() {
     assert_eq!(RunOutcome::default(), RunOutcome::Completed);
 }
 
-// ── A disc volume label reached the output path almost unsanitised. ─────────
-// The DEFAULT template is the empty one, the branch the original fix missed.
-// See docs/audit-round1-fixes.md — default-template traversal gap.
+// ── A disc volume label reached the output path almost unsanitised. ───────── The DEFAULT
+// template is the empty one, the branch the original fix missed.
 #[test]
 fn the_default_template_sanitises_the_label_too() {
     for evil in [
@@ -106,9 +105,7 @@ fn the_extract_destination_cannot_escape_the_chosen_folder() {
     }
 }
 
-// Every seam that turns a disc label into a path, enumerated. See
-// docs/audit-round1-fixes.md — why this invariant is stated once over all
-// exported helpers instead of per finding.
+// Every seam that turns a disc label into a path, enumerated.
 #[test]
 fn every_label_derived_name_stays_one_component() {
     let evil = r"..\..\..\Users\victim\AppData\Roaming\evil";

@@ -5,8 +5,6 @@
 //! answer "is this still the same title?" from this single type. Declared by
 //! both `lib.rs` and `main.rs` since `pipe` and `engine` are separate
 //! compilations (`engine` is macOS-only in the binary).
-//!
-//! See docs/title-identity.md — why one definition, and why these fields.
 
 /// The identity of one scanned title. Three fields, and no others:
 ///
@@ -16,8 +14,7 @@
 /// - `extents` — the SECTORS the title is read from, the physical identity of
 ///   the bytes.
 ///
-/// Deliberately NOT used: the index, or duration/size. See
-/// docs/title-identity.md for why.
+/// Deliberately NOT used: the index, or duration/size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TitleIdentity {
     playlist: String,

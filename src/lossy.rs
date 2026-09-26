@@ -5,8 +5,6 @@
 //! tracks the sink could not deliver) and `errors` / `lost_bytes` (bytes read
 //! but not carried). Declared by both crate roots so the CLI's `pipe` and
 //! the GUI's `engine` render one answer instead of two.
-//!
-//! See docs/lossy.md for why this module exists and the incident it fixes.
 
 /// Every line a finished mux must add when the file is not everything that was
 /// asked for. Empty when nothing was lost.
@@ -16,8 +14,6 @@
 /// not a failure. The dropped-bytes line reuses `dir.file_lossy`; the
 /// undelivered-streams header uses a container-agnostic `mux.undelivered_header`
 /// (English fallback until the catalog ships it), since loss isn't mp4-specific.
-///
-/// See docs/lossy.md for the full rationale.
 pub fn lossy_lines(outcome: &libfreemkv::MuxOutcome, target: &str) -> Vec<String> {
     let mut lines = Vec::new();
     if !outcome.undelivered_streams.is_empty() {
@@ -55,18 +51,16 @@ pub fn lossy_lines(outcome: &libfreemkv::MuxOutcome, target: &str) -> Vec<String
 /// Whether a finished mux lost anything at all — the one question both shells'
 /// summary text has to ask before it can say "written".
 ///
-/// The LIBRARY target always exercises this; the BIN target's reachability
-/// depends on which shell that platform compiles, so a plain `#[allow(dead_code)]`
-/// is used rather than a per-platform `cfg` (see docs/lossy.md for why a
-/// `cfg` attempt here was wrong twice).
+/// The LIBRARY target always exercises this; the BIN target's reachability depends on which
+/// shell that platform compiles, so a plain `#[allow(dead_code)]` is used rather than a
+/// per-platform `cfg`.
 #[allow(dead_code)]
 pub fn is_lossy(outcome: &libfreemkv::MuxOutcome) -> bool {
     !outcome.undelivered_streams.is_empty() || outcome.lost_bytes > 0 || outcome.errors > 0
 }
 
-// Bytes as MB for the loss line, ROUNDED UP: rounding to nearest would
-// render a real loss as "0.00 MB lost" on the one path meant to say
-// something was lost. See docs/lossy.md for the full rationale.
+// Bytes as MB for the loss line, ROUNDED UP: rounding to nearest would render a real loss as
+// "0.00 MB lost" on the one path meant to say something was lost.
 fn lost_mb(bytes: u64) -> String {
     if bytes == 0 {
         // Skip events with no byte count attached (`errors > 0`, `lost_bytes`

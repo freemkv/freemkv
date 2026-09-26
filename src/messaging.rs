@@ -1,5 +1,4 @@
 // freemkv — messaging standard (Level + Code + Message). MIT license.
-// See docs/messaging.md — WS2 format and level_for authority.
 
 /// The closed set of message levels. `Warn`/`Info` belong to the tracing-log
 /// channel (file sink); `Error` is the terminal failure render.

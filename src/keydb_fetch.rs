@@ -8,7 +8,6 @@
 //! pins the validated addresses into the agent, follows zero redirects,
 //! and bounds the connect/read timeouts and the response body size.
 //!
-//! See docs/keydb-fetch.md for the full design rationale.
 
 use libfreemkv::{Error, Result};
 use std::io::Read;
@@ -56,9 +55,8 @@ pub fn fetch(url: &str) -> Result<Vec<u8>> {
     read_capped(resp.into_body().into_reader(), MAX_BODY_BYTES).map_err(|e| cap_error(&e, url))
 }
 
-// Which keydb error a capped read's failure is: an over-large body is
-// E8002 (content), a dead socket is E8000 (network, retry). See
-// docs/keydb-fetch.md#cap_error.
+// Which keydb error a capped read's failure is: an over-large body is E8002 (content), a dead
+// socket is E8000 (network, retry).
 fn cap_error(e: &CapError, url: &str) -> Error {
     match e {
         CapError::TooLarge => Error::KeydbInvalid,
@@ -66,8 +64,7 @@ fn cap_error(e: &CapError, url: &str) -> Error {
     }
 }
 
-// Why a capped read did not produce a body — the two outcomes [`cap_error`]
-// tells apart. See docs/keydb-fetch.md#caperror.
+// Why a capped read did not produce a body — the two outcomes [`cap_error`] tells apart.
 #[derive(Debug)]
 enum CapError {
     /// The body ran past the cap. A statement about the response.
@@ -76,9 +73,8 @@ enum CapError {
     Io,
 }
 
-// Read at most `cap` bytes, rejecting anything larger. Split out of
-// [`fetch`] so the cap is directly testable without real network I/O — see
-// docs/keydb-fetch.md#read_capped.
+// Read at most `cap` bytes, rejecting anything larger. Split out of [`fetch`] so the cap is
+// directly testable without real network I/O.
 fn read_capped(r: impl std::io::Read, cap: u64) -> std::result::Result<Vec<u8>, CapError> {
     let mut buf = Vec::new();
     // One byte past the cap, so an over-cap body is DETECTABLE rather than
@@ -121,9 +117,8 @@ fn host_of(url: &str) -> String {
 // `ResolvedSocketAddrs` is a fixed 16-slot array; keep only the first 16.
 const MAX_PINNED_ADDRS: usize = 16;
 
-// The pinned-address resolver behind [`hardened_agent`], mirroring the one
-// in `freemkv-keysources::online`. Must be wired via `Agent::with_parts`,
-// never `new_with_config` — see docs/keydb-fetch.md#hardened_agent.
+// The pinned-address resolver behind [`hardened_agent`], mirroring the one in
+// `freemkv-keysources::online`. Must be wired via `Agent::with_parts`, never `new_with_config`
 #[derive(Debug)]
 struct PinnedResolver(Vec<SocketAddr>);
 
@@ -147,9 +142,8 @@ impl Resolver for PinnedResolver {
     }
 }
 
-// Chained after DefaultConnector to re-arm a ROLLING per-read idle bound on
-// every body read, restoring the stall detection ureq 3.4.1 removed (#1194).
-// See docs/keydb-fetch.md#hardened_agent.
+// Chained after DefaultConnector to re-arm a ROLLING per-read idle bound on every body read,
+// restoring the stall detection ureq 3.4.1 removed (#1194).
 #[derive(Debug)]
 struct IdleReCapConnector {
     idle: Duration,
@@ -418,9 +412,8 @@ mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
-    // The keydb BODY is bounded, not just its headers (ureq 3's
-    // `timeout_recv_response` covers headers only). See
-    // docs/keydb-fetch.md#test-the_keydb_body_read_is_bounded_not_only_the_headers.
+    // The keydb BODY is bounded, not just its headers (ureq 3's `timeout_recv_response` covers
+    // headers only).
     #[test]
     fn the_keydb_body_read_is_bounded_not_only_the_headers() {
         let agent = hardened_agent(Vec::new());
@@ -575,9 +568,8 @@ mod tests {
         assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
     }
 
-    // Each disjunct of the SSRF guard, isolated — each case here trips
-    // exactly one clause, so a broken clause shows up. See
-    // docs/keydb-fetch.md#test-every_ssrf_disjunct_blocks_on_its_own.
+    // Each disjunct of the SSRF guard, isolated — each case here trips exactly one clause, so a
+    // broken clause shows up.
     #[test]
     fn every_ssrf_disjunct_blocks_on_its_own() {
         let cases: &[(&str, &str)] = &[
@@ -644,8 +636,7 @@ mod tests {
         ))));
     }
 
-    // The body-size cap — the decompression-bomb defence. See
-    // docs/keydb-fetch.md#test-read_capped_admits_up_to_the_cap_and_rejects_past_it.
+    // The body-size cap — the decompression-bomb defence.
     #[test]
     fn read_capped_admits_up_to_the_cap_and_rejects_past_it() {
         // Exactly at the cap is fine — an off-by-one here would reject valid
@@ -684,9 +675,8 @@ mod tests {
         );
     }
 
-    // A connection that dies mid-body is a TRANSPORT failure (E8000), not a
-    // verdict about the content (E8002) — the two must not collapse into
-    // one value. See docs/keydb-fetch.md#test-a_connection_that_dies_mid_body_is_not_an_invalid_keydb.
+    // A connection that dies mid-body is a TRANSPORT failure (E8000), not a verdict about the
+    // content (E8002) — the two must not collapse into one value.
     #[test]
     fn a_connection_that_dies_mid_body_is_not_an_invalid_keydb() {
         struct Reset;
@@ -721,9 +711,8 @@ mod tests {
         }
     }
 
-    // The CGNAT clause must not become over-broad — mutating its `&&` to
-    // `||` must not silently start blocking ordinary public addresses. See
-    // docs/keydb-fetch.md#test-the_cgnat_clause_does_not_block_ordinary_public_addresses.
+    // The CGNAT clause must not become over-broad — mutating its `&&` to `||` must not silently
+    // start blocking ordinary public addresses.
     #[test]
     fn the_cgnat_clause_does_not_block_ordinary_public_addresses() {
         for ip in ["8.65.0.1", "1.100.0.1", "203.0.100.7"] {
@@ -778,9 +767,8 @@ mod tests {
         assert_eq!(host_of("https://user@example.org/k"), "example.org");
     }
 
-    // Proves `hardened_agent` actually consults the pinned resolver rather
-    // than falling back to live DNS (which would reopen the rebind window).
-    // See docs/keydb-fetch.md#test-hardened_agent_connects_to_the_pinned_address_not_dns.
+    // Proves `hardened_agent` actually consults the pinned resolver rather than falling back to
+    // live DNS (which would reopen the rebind window).
     #[test]
     fn hardened_agent_connects_to_the_pinned_address_not_dns() {
         use std::io::Write as _;

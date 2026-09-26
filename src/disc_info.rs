@@ -624,8 +624,6 @@ enum EncLabel {
     GenericAacs,
 }
 
-// See docs/disc-info.md — emit_encryption_line: one-line "<gen> encrypted"
-// label shared by disc:// and iso://; why "encrypted" stays app-layer English.
 fn emit_encryption_line(out: &Output, disc: &Disc) -> bool {
     match encryption_label(disc) {
         Some(EncLabel::Css) => out.print(Normal, "disc.css_encrypted"),

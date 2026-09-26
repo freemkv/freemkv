@@ -717,7 +717,6 @@ pub struct RunState {
 }
 
 impl RunState {
-    // See docs/engine.md — RunState::outcome_now poison recovery.
     /// The run's verdict, recovering from a poisoned lock rather than
     /// defaulting.
     ///
@@ -750,7 +749,6 @@ impl RunState {
 /// lose regardless.
 pub const QUIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
-// See docs/engine.md — await_worker_exit and why a quit must wait.
 /// Wait (up to `grace`) for a cancelled worker to finish. `true` if it did.
 ///
 /// Polls `finished` rather than joining the thread — the worker publishes
@@ -776,9 +774,8 @@ pub fn await_worker_exit(run: &RunState, grace: std::time::Duration) -> bool {
 
 struct UiSink(Arc<RunState>);
 
-// The GUI core's ONLY `Sink`; both methods recover a poisoned lock rather
-// than skip the write — a poisoned `lines` mutex means a worker panicked,
-// exactly when the log matters most. See docs/engine.md for detail.
+// The GUI core's ONLY `Sink`; both methods recover a poisoned lock rather than skip the write —
+// a poisoned `lines` mutex means a worker panicked, exactly when the log matters most.
 impl fe::Sink for UiSink {
     fn log(&self, _level: fe::Level, msg: &str) {
         self.0
@@ -838,7 +835,6 @@ pub(crate) fn key_summary(disc: &libfreemkv::Disc, won: Option<&str>) -> String 
     }
 }
 
-// See docs/engine.md — error_code regression history.
 /// Recover the library's numeric error code from a muxed `std::io::Error`.
 ///
 /// The library's `Display` is `E<code>` or `E<code>: <data>` (no English by
@@ -897,7 +893,6 @@ fn recovery_terminal_result(
     }
 }
 
-// See docs/engine.md — explain: catalog routing rationale.
 /// Turn a library error code into something a person can act on.
 ///
 /// Routes through the catalog (`error.E<code>`) so failures are localized in
@@ -946,7 +941,6 @@ fn describe_failure(code: Option<u16>, kind: std::io::ErrorKind) -> String {
     }
 }
 
-// See docs/engine.md — summarize_outcome: why Err carries partial success.
 /// Render a finished title loop as the run summary.
 ///
 /// `Err` is not decoration: only [`fe::RipOutcome::Ok`] and a cancel are
@@ -1006,7 +1000,6 @@ pub fn summarize_outcome(
     }
 }
 
-// See docs/engine.md — summarize_stream: outcome grading rationale.
 /// Render a finished single-file/container mux (`run_stream`'s `mkv://` /
 /// `m2ts://` / `mp4://` source path) as the run summary.
 ///
@@ -1049,7 +1042,6 @@ pub fn summarize_stream(outcome: &libfreemkv::MuxOutcome, target: &str, dest_dir
     }
 }
 
-// See docs/engine.md — lossy_lines: why one renderer replaced two.
 /// The lines a GUI run must add when a completed mux did not deliver
 /// everything — the front-end twin of the CLI's `pipe::print_lossy_outcome`,
 /// sharing the same renderer ([`crate::lossy::lossy_lines`]).
@@ -1061,7 +1053,6 @@ pub fn lossy_lines(outcome: &libfreemkv::MuxOutcome, target: &str) -> Vec<String
     crate::lossy::lossy_lines(outcome, target)
 }
 
-// See docs/engine.md — summarize_image_decrypt: CopyResult regression.
 /// Render a finished image decrypt (`iso://` -> `iso://`, drive-free) as the
 /// run summary — sibling of [`summarize_stream`] and [`summarize_extract`].
 ///
@@ -1174,7 +1165,6 @@ impl KeyConfig {
     }
 }
 
-// See docs/engine.md — TitleStreams: the ambiguity it replaces.
 /// Whether a request carries a per-title stream breakdown at all.
 ///
 /// One representation used to carry two meanings: a title's absence in a
@@ -1283,9 +1273,9 @@ pub struct RipRequest {
 /// Run the real rip on a worker thread: engine title loop + per-title mux.
 /// Returns immediately.
 pub fn start_rip(req: RipRequest, state: Arc<RunState>) {
-    // Sets `finished` on EVERY exit — normal return, an early `?`, or a panic
-    // unwinding through. Used to be the closure's last statement, so a panic
-    // left `finished` unset and `ui::tick` polled forever. See docs/engine.md.
+    // Sets `finished` on EVERY exit — normal return, an early `?`, or a panic unwinding
+    // through. Used to be the closure's last statement, so a panic left `finished` unset and
+    // `ui::tick` polled forever.
     struct SignalDone(Arc<RunState>);
     impl Drop for SignalDone {
         fn drop(&mut self) {
@@ -1425,9 +1415,8 @@ fn is_stream_source(path: &str) -> bool {
     )
 }
 
-// The URL scheme for a source already established as neither a drive nor a
-// stream container: a FOLDER is dir://, anything else is an image (iso://).
-// Deliberately NOT source_scheme — see docs/engine.md for why.
+// The URL scheme for a source already established as neither a drive nor a stream container: a
+// FOLDER is dir://, anything else is an image (iso://). Deliberately NOT source_scheme.
 fn image_or_dir_scheme(source: &str) -> &'static str {
     if std::path::Path::new(source).is_dir() {
         "dir"
@@ -1509,7 +1498,6 @@ fn out_kind(format: &str) -> OutKind {
     }
 }
 
-// See docs/engine.md — planned_output_name: the bug this replaced.
 /// The path this request will actually write, decided the way the RIP
 /// decides it rather than guessed alongside it.
 ///
@@ -1591,7 +1579,6 @@ pub fn container_word(format: &str) -> &'static str {
 /// disc-bytes-to-UI boundary lives.
 pub use crate::strings::sanitize_display;
 
-// See docs/engine.md — sanitize_label vs sanitize_name.
 /// Make a disc-supplied label safe to use as ONE filename component.
 ///
 /// The volume label is disc bytes — untrusted; a label containing `..\..\`
@@ -1666,9 +1653,9 @@ pub fn title_basename(template: &str, label: &str, n: usize) -> String {
     sanitize_label(&name)
 }
 
-// The stream filter for one title (or the whole request with no title).
-// Selection lives on InputOptions, not MuxOptions — MuxOptions.selection is
-// read only by the Session/live-drive arm. See docs/engine.md for detail.
+// The stream filter for one title (or the whole request with no title). Selection lives on
+// InputOptions, not MuxOptions — MuxOptions.selection is read only by the Session/live-drive
+// arm.
 fn stream_selection_for(req: &RipRequest, title: Option<usize>) -> libfreemkv::StreamSelection {
     if !req.explicit_streams {
         return libfreemkv::StreamSelection::default();
@@ -1928,9 +1915,6 @@ fn fmt_damage_time(secs: f64) -> String {
     }
 }
 
-// See docs/engine.md — damage_note: the disclosure gap it closes.
-// Trailing note for a multipass result with residual damage under the
-// configured tolerance (empty string when the recovery was clean).
 fn damage_note(result: &fe::MultipassResult) -> String {
     if result.unreadable_bytes == 0 && result.pending_bytes == 0 {
         return String::new();
@@ -2105,9 +2089,9 @@ fn recovery_plan(kind: OutKind, multipass: bool) -> DiscPlan {
     }
 }
 
-// The `raw` flag a recovery job must carry, or the reason it cannot run.
-// multipass_rip refuses raw=false for a real sweep; staged title-mux images
-// are RAW, decrypted on the ordinary iso:// re-open. See docs/engine.md.
+// The `raw` flag a recovery job must carry, or the reason it cannot run. multipass_rip refuses
+// raw=false for a real sweep; staged title-mux images are RAW, decrypted on the ordinary iso://
+// re-open.
 fn recovery_raw(multipass: bool, want_iso: bool, user_raw: bool) -> Result<bool, String> {
     if !multipass {
         // Single-pass: an ordinary decrypting copy, and `raw` means what the
@@ -2130,7 +2114,6 @@ fn recovery_raw(multipass: bool, want_iso: bool, user_raw: bool) -> Result<bool,
     )
 }
 
-// See docs/engine.md — TitleIdentity: why duration alone was not enough.
 /// What a title NUMBER actually referred to, so a selection survives a
 /// rescan. Lives in [`crate::title_identity`] because the CLI's
 /// `pipe::resolve_scanned_title` asks the identical question one scan later.
@@ -2141,9 +2124,8 @@ fn recovery_raw(multipass: bool, want_iso: bool, user_raw: bool) -> Result<bool,
 /// type.
 pub use crate::title_identity::TitleIdentity;
 
-// Translate a selection made against the DRIVE scan into indices valid for
-// the staged image's scan. Position is not identity: a multipass recovery
-// can shorten the title list. See docs/engine.md for the ids-keying detail.
+// Translate a selection made against the DRIVE scan into indices valid for the staged image's
+// scan. Position is not identity: a multipass recovery can shorten the title list.
 fn remap_titles_by_identity(
     iso_path: &str,
     titles: &[usize],
@@ -2210,9 +2192,9 @@ fn remap_title_pids(
     }
 }
 
-// Confirm the title at `idx` in a FRESH scan is still the one the selection
-// meant, before it is muxed under that number. Verifies rather than remaps:
-// a moved title list between two scans is a disc/drive problem — see docs/engine.md.
+// Confirm the title at `idx` in a FRESH scan is still the one the selection meant, before it is
+// muxed under that number. Verifies rather than remaps: a moved title list between two scans is
+// a disc/drive problem.
 fn verify_title_identity(
     expected: Option<&TitleIdentity>,
     scanned: &[TitleIdentity],
@@ -2239,9 +2221,8 @@ fn verify_title_identity(
     }
 }
 
-// Confirm a whole SELECTION still means what it meant when it was made — the
-// window between ticking titles and pressing Start, which run_disc's
-// fresh pre-mux scan can't see on its own. See docs/engine.md for detail.
+// Confirm a whole SELECTION still means what it meant when it was made — the window between
+// ticking titles and pressing Start, which run_disc's fresh pre-mux scan can't see on its own.
 fn verify_selection_identity(
     titles: &[usize],
     picked: &[TitleIdentity],
@@ -2270,16 +2251,16 @@ fn recovery_produced_no_data(good_bytes: u64) -> bool {
     good_bytes == 0
 }
 
-// Whether the staging ISO is removed after the title mux. Three conditions,
-// not one: keep_iso alone would delete the image on a cancel or failed mux,
-// destroying the one artefact that lets the user retry. See docs/engine.md.
+// Whether the staging ISO is removed after the title mux. Three conditions, not one: keep_iso
+// alone would delete the image on a cancel or failed mux, destroying the one artefact that lets
+// the user retry.
 fn should_delete_staging_iso(keep_iso: bool, mux_succeeded: bool, cancelled: bool) -> bool {
     !keep_iso && mux_succeeded && !cancelled
 }
 
-// Rip from a live optical drive (disc://). Scans once to resolve titles and
-// keys, then runs the chosen sink via fe::run_titles (same loop the ISO path
-// uses). NEEDS HARDWARE VALIDATION end-to-end. See docs/engine.md.
+// Rip from a live optical drive (disc://). Scans once to resolve titles and keys, then runs the
+// chosen sink via fe::run_titles (same loop the ISO path uses). NEEDS HARDWARE VALIDATION
+// end-to-end.
 fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
     if req.decrypt_threads > 0 {
         libfreemkv::set_decrypt_threads(req.decrypt_threads);
@@ -2610,9 +2591,8 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
 // every variant fell through to an Ok string reported as a success.
 #[cfg(test)]
 mod run_state_poison_tests {
-    // A panicking worker must not turn its verdict into "Completed" — this
-    // pins RunState::outcome_now's poison recovery (see docs/engine.md), not
-    // just what the accessor happens to do today.
+    // A panicking worker must not turn its verdict into "Completed" — this pins
+    // RunState::outcome_now's poison recovery, not just what the accessor happens to do today.
     #[test]
     fn a_poisoned_lock_does_not_turn_a_failure_into_a_completion() {
         use super::{RunOutcome, RunState};
@@ -2648,9 +2628,8 @@ mod run_state_poison_tests {
         );
     }
 
-    // The GUI core's only Sink must still deliver lines/progress after a
-    // worker panics — UiSink recovers the poisoned lock rather than silently
-    // dropping data. See docs/engine.md for the regression this pins.
+    // The GUI core's only Sink must still deliver lines/progress after a worker panics — UiSink
+    // recovers the poisoned lock rather than silently dropping data.
     #[test]
     fn the_ui_sink_still_delivers_lines_and_progress_through_a_poisoned_lock() {
         use super::{Prog, RunState, UiSink};
@@ -2706,9 +2685,8 @@ mod run_state_poison_tests {
         );
     }
 
-    // Makes outcome_now's doc claim true instead of merely written down:
-    // every `lines` lock in engine.rs/main.rs must recover from poison,
-    // verified by source scan. See docs/engine.md for the regression closed.
+    // Makes outcome_now's doc claim true instead of merely written down: every `lines` lock in
+    // engine.rs/main.rs must recover from poison, verified by source scan.
     #[test]
     fn every_lines_lock_recovers_from_poison() {
         let needle = concat!("lines", ".lock()");
@@ -4303,9 +4281,9 @@ mod routing_tests {
         assert_eq!(remap_against(&[], &[], &[]), Ok(vec![]));
     }
 
-    // A title with NO captured identity must cost only itself. Indexed by
-    // canonical title number, so "nothing recorded for title 3" is a
-    // per-title answer, not a disarm of the whole selection. See docs/engine.md.
+    // A title with NO captured identity must cost only itself. Indexed by canonical title
+    // number, so "nothing recorded for title 3" is a per-title answer, not a disarm of the
+    // whole selection.
     #[test]
     fn an_uncaptured_title_does_not_disarm_the_rest_of_the_selection() {
         // The user picked all three titles; identities are known for the first

@@ -154,8 +154,7 @@ fn cli_parity_flags_persist() {
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // Home-derived paths must stay absolute even with no HOME set (regressed via
-// unwrap_or_default()). Mutates the process-global HOME; see docs/settings-tests.md.
-// See docs/settings-tests.md — derived_paths_stay_absolute_without_a_home_variable
+// unwrap_or_default()). Mutates the process-global HOME.
 #[test]
 fn derived_paths_stay_absolute_without_a_home_variable() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -190,9 +189,8 @@ fn derived_paths_stay_absolute_without_a_home_variable() {
     assert!(dest.is_absolute(), "default_dest_dir relative: {dest:?}");
 }
 
-// save()/load() must actually round-trip through disk, not just serde_json
-// in memory — a no-op save() previously survived every other test here.
-// See docs/settings-tests.md — settings_round_trip_through_a_real_file
+// save()/load() must actually round-trip through disk, not just serde_json in memory — a no-op
+// save() previously survived every other test here.
 #[test]
 fn settings_round_trip_through_a_real_file() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -242,9 +240,8 @@ fn settings_round_trip_through_a_real_file() {
     assert_eq!(url, want_url, "keyserver_url did not survive save+load");
 }
 
-// gui-settings.json holds keyserver_token in plaintext; checks save() leaves
-// no stray .tmp file and (Unix) writes it at mode 0600, not the umask default.
-// See docs/settings-tests.md — saved_settings_file_is_private_and_leaves_no_temp_file
+// gui-settings.json holds keyserver_token in plaintext; checks save() leaves no stray.tmp file
+// and (Unix) writes it at mode 0600, not the umask default.
 #[test]
 fn saved_settings_file_is_private_and_leaves_no_temp_file() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -346,9 +343,8 @@ fn in_a_temp_support_dir<T>(tag: &str, f: impl FnOnce(&std::path::Path) -> T) ->
     outcome.unwrap()
 }
 
-// A leading UTF-8 BOM must not wipe the config: load() used to fall back to
-// defaults on ANY parse failure, silently discarding a file PowerShell/Notepad
-// commonly write with a BOM. See docs/settings-tests.md for the incident.
+// A leading UTF-8 BOM must not wipe the config: load() used to fall back to defaults on ANY
+// parse failure, silently discarding a file PowerShell/Notepad commonly write with a BOM.
 #[test]
 fn a_settings_file_with_a_utf8_bom_still_loads_the_users_values() {
     in_a_temp_support_dir("settings-bom", |support| {

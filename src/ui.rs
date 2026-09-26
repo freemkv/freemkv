@@ -105,9 +105,8 @@ fn lang_filter(tags: &[String]) -> freemkv_engine::StreamFilter {
     }
 }
 
-// Resolve one class's PIDs, falling back to "keep everything in this class"
-// when the preference matched nothing that IS there.
-// See docs/ui.md — class_or_fallback fallback rule
+// Resolve one class's PIDs, falling back to "keep everything in this class" when the preference
+// matched nothing that IS there.
 fn class_or_fallback(f: freemkv_engine::PidFilter, all: &[u16]) -> Vec<u16> {
     match f {
         freemkv_engine::PidFilter::All => all.to_vec(),
@@ -116,9 +115,8 @@ fn class_or_fallback(f: freemkv_engine::PidFilter, all: &[u16]) -> Vec<u16> {
     }
 }
 
-// Which of ONE title's stream PIDs the preferences keep.
-// Reuses freemkv-engine's language matcher via resolve_stream_selection_forced.
-// See docs/ui.md — preferred_pids per-class fallback
+// Which of ONE title's stream PIDs the preferences keep. Reuses freemkv-engine's language
+// matcher via resolve_stream_selection_forced.
 fn preferred_pids(
     rows: &[&crate::engine::Row],
     prefs: &LangPrefs,
@@ -229,9 +227,8 @@ pub struct Tree {
     pub roots: Vec<usize>,
 }
 
-// Does the minimum-title-length filter keep this title? ONE predicate shared
-// by row display and "Default selection" ticking, so they can't disagree.
-// See docs/ui.md — title_visible
+// Does the minimum-title-length filter keep this title? ONE predicate shared by row display and
+// "Default selection" ticking, so they can't disagree.
 fn title_visible(duration_secs: f64, min_eff: f64) -> bool {
     !(duration_secs > 0.0 && duration_secs < min_eff)
 }
@@ -239,13 +236,11 @@ fn title_visible(duration_secs: f64, min_eff: f64) -> bool {
 impl Tree {
     /// Build from an engine scan. An empty scan yields an empty tree.
     ///
-    /// `sel_mode` is the "Default selection" setting; it decides which
-    /// titles start checked. `min_secs` hides titles shorter than it (known,
-    /// non-zero duration), but never so aggressively the list is empty.
-    /// `prefs` narrows which of a checked title's STREAM rows start checked;
-    /// empty `prefs` or a category matching nothing on this title keeps
-    /// every stream checked — see `preferred_pids`.
-    /// See docs/ui.md — Tree::from_scan.
+    /// `sel_mode` is the "Default selection" setting; it decides which titles start checked.
+    /// `min_secs` hides titles shorter than it (known, non-zero duration), but never so
+    /// aggressively the list is empty. `prefs` narrows which of a checked title's STREAM rows
+    /// start checked; empty `prefs` or a category matching nothing on this title keeps every
+    /// stream checked — see `preferred_pids`.
     pub fn from_scan(sc: &Scanned, sel_mode: &str, min_secs: f64, prefs: &LangPrefs) -> Self {
         // Titles present in the scan, with durations, for the filter + defaults.
         let titles: Vec<(usize, f64)> = sc
@@ -356,12 +351,10 @@ impl Tree {
     /// Tick state for a row: the row's OWN flag decides `Off`, its checkable
     /// children decide `On` vs `Mixed`.
     ///
-    /// The two halves answer two different questions: for a title the own
-    /// flag is "rip this title" (what [`Tree::ticked_titles`] collects),
-    /// while the children are "which of its tracks". `Off` means, exactly,
-    /// "this will not be ripped". A ticked title with no ticked tracks is
-    /// `Mixed`: it IS being ripped, and not all of it.
-    /// See docs/ui.md — Tree::check_state.
+    /// The two halves answer two different questions: for a title the own flag is "rip this
+    /// title" (what [`Tree::ticked_titles`] collects), while the children are "which of its
+    /// tracks". `Off` means, exactly, "this will not be ripped". A ticked title with no ticked
+    /// tracks is `Mixed`: it IS being ripped, and not all of it.
     pub fn check_state(&self, i: usize) -> Check {
         let n = &self.arena[i];
         if !*n.checked.borrow() {
@@ -380,11 +373,10 @@ impl Tree {
 
     /// What a CLICK on row `i`'s tick box does.
     ///
-    /// This is a decision, so it lives here and not in a shell — both shells
-    /// previously computed their own answer and disagreed on what a mixed
-    /// state means. A partly-ticked title becomes fully ticked; clicking
-    /// again clears it, the only reading that makes a second click undo the
-    /// first. See docs/ui.md — Tree::toggle.
+    /// This is a decision, so it lives here and not in a shell — both shells previously
+    /// computed their own answer and disagreed on what a mixed state means. A partly-ticked
+    /// title becomes fully ticked; clicking again clears it, the only reading that makes a
+    /// second click undo the first.
     pub fn toggle(&self, i: usize) {
         let on = matches!(self.check_state(i), Check::Off | Check::Mixed);
         self.set_checked(i, on);
@@ -418,10 +410,9 @@ impl Tree {
     /// Canonical indices of ticked titles — what the engine's `Selection`
     /// wants. Tree position is not the index once a disc is listed in full.
     ///
-    /// A title is ripped when its BOX is not empty, i.e. `check_state` — the
-    /// same fold that draws it — reports anything but [`Check::Off`]. `Mixed`
-    /// is ripped — some tracks are still ticked, which is exactly what the
-    /// partial glyph promises. See docs/ui.md — Tree::ticked_titles.
+    /// A title is ripped when its BOX is not empty, i.e. `check_state` — the same fold that
+    /// draws it — reports anything but [`Check::Off`]. `Mixed` is ripped — some tracks are
+    /// still ticked, which is exactly what the partial glyph promises.
     pub fn ticked_titles(&self) -> Vec<usize> {
         self.arena
             .iter()
@@ -464,12 +455,10 @@ impl Tree {
 
     /// The ticked PIDs of each title, keyed by CANONICAL title index.
     ///
-    /// Unlike [`Tree::ticked_streams`], which unions every title's PIDs into
-    /// one list, this keeps each title's selection separate — needed because
-    /// Blu-ray playlists of the same feature routinely share PIDs. The union
-    /// still decides `explicit_streams`, and is the fallback for a source
-    /// with no title rows at all.
-    /// See docs/ui.md — Tree::ticked_streams_by_title.
+    /// Unlike [`Tree::ticked_streams`], which unions every title's PIDs into one list, this
+    /// keeps each title's selection separate — needed because Blu-ray playlists of the same
+    /// feature routinely share PIDs. The union still decides `explicit_streams`, and is the
+    /// fallback for a source with no title rows at all.
     pub fn ticked_streams_by_title(&self) -> TitleStreams {
         let mut out: Vec<(usize, Vec<u16>, Vec<u16>)> = Vec::new();
         for n in &self.arena {
@@ -637,9 +626,8 @@ pub fn canonical_lang_code(tag: &str) -> Option<String> {
         .map(|l| l.to_639_3().to_string())
 }
 
-// The ISO 639-2/B codes that differ from 639-2/T (= 639-3), mapped to /T.
-// Deliberately a second copy of freemkv_engine::streams' private table.
-// See docs/ui.md — bib_to_terminologic.
+// The ISO 639-2/B codes that differ from 639-2/T (= 639-3), mapped to /T. Deliberately a second
+// copy of freemkv_engine::streams' private table.
 fn bib_to_terminologic(code: &str) -> Option<&'static str> {
     Some(match code {
         "alb" => "sqi",
@@ -746,9 +734,8 @@ pub fn lang_is_selected(stored: &str, code: &str) -> bool {
 /// DVD's MPEG-2, an HD DVD's VC-1); the option is then REMOVED rather than
 /// offered-and-refused. Pass true when the codecs are unknown.
 ///
-/// `disc_source` is "not a container": true for a physical disc AND an ISO
-/// file, since both carry a whole disc to unpack.
-/// See docs/ui.md — output_formats.
+/// `disc_source` is "not a container": true for a physical disc AND an ISO file, since both
+/// carry a whole disc to unpack.
 pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>> {
     let mut titles = vec!["Selected titles → MKV"];
     if mp4_ok {
@@ -771,9 +758,8 @@ pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>>
     }
 }
 
-// Video codecs MP4 can actually carry; anything else has no MP4 mapping, so
-// warn up front rather than fail at mux time. MUST match the mux gate in
-// `libfreemkv::mux::mp4`. See docs/ui.md — MP4_VIDEO.
+// Video codecs MP4 can actually carry; anything else has no MP4 mapping, so warn up front
+// rather than fail at mux time. MUST match the mux gate in `libfreemkv::mux::mp4`.
 const MP4_VIDEO: &[&str] = &["H.264", "HEVC"];
 
 /// Resolve a popup's visible text back to the canonical format string.
@@ -788,7 +774,7 @@ pub fn format_by_title(title: &str, disc_source: bool, mp4_ok: bool) -> Option<&
         .find(|f| *f == title)
 }
 
-/// Sources the file picker accepts, per docs/cli #stream-urls.
+/// Source formats accepted by the file picker.
 pub const SOURCE_EXTS: &[&str] = &["iso", "ISO", "mkv", "m2ts", "mts", "mp4"];
 
 /// True for a container source (single title, no disc scan).
@@ -1273,14 +1259,12 @@ pub fn format_label(canonical: &str) -> String {
     }
 }
 
-// Inverse of format_label: resolve a LOCALIZED popup label back to the
-// canonical format string, since format_by_title only matches English.
-// See docs/ui.md — missing_key_fallback_tests.
+// Inverse of format_label: resolve a LOCALIZED popup label back to the canonical format string,
+// since format_by_title only matches English.
 #[cfg(test)]
 mod missing_key_fallback_tests {
-    // A key this crate knows but the pinned i18n tag does not ship must
-    // render as readable English, never as the dotted path.
-    // See docs/ui.md — missing_key_fallback_tests.
+    // A key this crate knows but the pinned i18n tag does not ship must render as readable
+    // English, never as the dotted path.
     #[test]
     fn a_key_absent_from_the_pinned_catalog_falls_back_to_the_canonical_text() {
         // `strings::get` echoes the path for an unknown key; that echo is the
@@ -1385,10 +1369,9 @@ pub fn overall_pct(titles_done: usize, total: usize, current_pct: f64) -> f64 {
 /// engine matches on; the label is the localized dropdown text. An empty
 /// result means "not an enum dropdown".
 ///
-/// The returned order is the menu order, and callers may map a selected
-/// INDEX back to `opts[i].0`; `"container"` is deliberately absent since
-/// the macOS format popup carries separator rows and maps by title.
-/// See docs/ui.md — enum_options.
+/// The returned order is the menu order, and callers may map a selected INDEX back to
+/// `opts[i].0`; `"container"` is deliberately absent since the macOS format popup carries
+/// separator rows and maps by title.
 pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
     let g = crate::strings::get;
     match key {
@@ -1429,10 +1412,8 @@ pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
 /// starts a new root, depth 1 hangs off the most recent root, anything
 /// deeper hangs off the most recent depth-1 row.
 ///
-/// A row that arrives before its parent has no parent to hang from. It
-/// becomes a root rather than being dropped — a row the core decided to
-/// show must always be reachable.
-/// See docs/ui.md — row_parents.
+/// A row that arrives before its parent has no parent to hang from. It becomes a root rather
+/// than being dropped — a row the core decided to show must always be reachable.
 pub fn row_parents(rows: &[Row]) -> Vec<Option<usize>> {
     let (mut last_root, mut last_title) = (None, None);
     let mut out = Vec::with_capacity(rows.len());
@@ -1455,12 +1436,10 @@ pub fn row_parents(rows: &[Row]) -> Vec<Option<usize>> {
 
 /// Which row a freshly-rebuilt tree should leave sitting at the top.
 ///
-/// Not simply "row 0": under the default "Main film only" the single
-/// ticked title can be anywhere in the disc's order, and that title is
-/// the point of the screen. So it is the first TICKED row, which under
-/// "All titles" is row 0 anyway. Nothing ticked (an empty disc, or a
+/// Not simply "row 0": under the default "Main film only" the single ticked title can be
+/// anywhere in the disc's order, and that title is the point of the screen. So it is the first
+/// TICKED row, which under "All titles" is row 0 anyway. Nothing ticked (an empty disc, or a
 /// preset that selected nothing) falls back to the first row.
-/// See docs/ui.md — first_visible_row.
 pub fn first_visible_row(rows: &[Row]) -> Option<usize> {
     rows.iter()
         .position(|r| matches!(r.check, Some(Check::On) | Some(Check::Mixed)))
@@ -1471,12 +1450,10 @@ pub fn first_visible_row(rows: &[Row]) -> Option<usize> {
 
 /// Whether `format` is one of the options `formats` currently offers.
 ///
-/// `View` publishes the chosen format and the offered list as two
-/// independent fields, and nothing kept them in agreement. Opening a
-/// source that withdraws an option — an MPEG-2 DVD after an H.264
-/// Blu-ray withdraws MP4 — left the model holding a format no longer on
-/// the list.
-/// See docs/ui.md — format_is_offered.
+/// `View` publishes the chosen format and the offered list as two independent fields, and
+/// nothing kept them in agreement. Opening a source that withdraws an option — an MPEG-2 DVD
+/// after an H.264 Blu-ray withdraws MP4 — left the model holding a format no longer on the
+/// list.
 pub fn format_is_offered(format: &str, formats: &[Vec<&'static str>]) -> bool {
     formats.iter().any(|g| g.contains(&format))
 }
@@ -1751,9 +1728,8 @@ impl App {
         app
     }
 
-    // Newest lines kept on screen: unbounded growth during a multi-hour rip
-    // both eats memory and slows every tick, since shells re-read the WHOLE
-    // buffer each time. See docs/ui.md — App::LOG_MAX.
+    // Newest lines kept on screen: unbounded growth during a multi-hour rip both eats memory
+    // and slows every tick, since shells re-read the WHOLE buffer each time.
     const LOG_MAX: usize = 5_000;
     /// Dropped per trim, so a long rip pays the O(n) drain rarely instead of
     /// once per line.
@@ -1794,13 +1770,11 @@ impl App {
 
     /// The format this rip will ACTUALLY use.
     ///
-    /// `self.format` is the user's standing preference and outlives the
-    /// source it was chosen for — `open()` deliberately does not reset it.
-    /// But a new source may not offer it, so every consumer (the view, the
-    /// progress captions, the output filename, the `RipRequest`) reads the
-    /// format through here rather than the raw preference, giving one
-    /// answer instead of one per caller.
-    /// See docs/ui.md — App::effective_format.
+    /// `self.format` is the user's standing preference and outlives the source it was chosen
+    /// for — `open()` deliberately does not reset it. But a new source may not offer it, so
+    /// every consumer (the view, the progress captions, the output filename, the `RipRequest`)
+    /// reads the format through here rather than the raw preference, giving one answer instead
+    /// of one per caller.
     pub fn effective_format(&self) -> String {
         let offered = self.offered_formats();
         reconcile_format(&self.format, &offered).to_string()
@@ -1915,15 +1889,7 @@ impl App {
         }
     }
 
-    /// Decide which `disc://` source "open the disc in the drive" should
-    /// open, and log what was found. `None` means there is nothing to open.
-    /// The WHOLE decision behind File ▸ Open disc, the empty state's "Open
-    /// disc" button and the launch probe — one copy, so the shells cannot
-    /// drift. Split from [`App::open`], which BLOCKS for the scan; this
-    /// lets the shell repaint first.
-    ///
-    /// `announce_missing` is true for the menu item/button (a human asked),
-    /// false for the launch probe, which must leave no trace — docs/ui.md.
+    /// Announce missing tools for explicit user requests; keep the launch probe quiet.
     pub fn disc_source(&mut self, announce_missing: bool) -> Option<String> {
         // A probe nobody asked for must not GUESS: bare `disc://` autodetects the
         // drive with media, vs. naming drives[0] and risking an empty tray. Not
@@ -1996,9 +1962,7 @@ impl App {
     /// there. Used by the launch probe: a disc already in the drive should
     /// just appear, an empty tray should look like before the probe existed.
     ///
-    /// OFF THE UI THREAD, unlike [`App::open`] — see docs/ui.md. Returns
-    /// immediately with `StartTicking`, the seam both shells already
-    /// implement for a running job; [`App::tick`] applies the result.
+    /// OFF THE UI THREAD, unlike [`App::open`].
     pub fn open_probe(&mut self, path: &str) -> Vec<Effect> {
         // A second probe cannot help and could clobber the first one's result.
         if self.probe.is_some() {
@@ -2532,9 +2496,8 @@ pub struct View {
 mod tests {
     use super::*;
 
-    // A source pin: the disc can be swapped while the operator reviews the
-    // tree, so the request must carry title identities to check against.
-    // See docs/ui.md — the_rip_request_carries_the_identities test.
+    // A source pin: the disc can be swapped while the operator reviews the tree, so the request
+    // must carry title identities to check against.
     #[test]
     fn the_rip_request_carries_the_identities_the_ticked_numbers_referred_to() {
         let src = include_str!("ui.rs").replace("\r\n", "\n");
@@ -2569,9 +2532,9 @@ mod tests {
         }
     }
 
-    // A forced-subtitle preference that matches nothing must keep NOTHING —
-    // unlike audio, a forced track with no match must not fall back to "keep
-    // everything": it displays over the picture unasked. See docs/ui.md.
+    // A forced-subtitle preference that matches nothing must keep NOTHING — unlike audio, a
+    // forced track with no match must not fall back to "keep everything": it displays over the
+    // picture unasked.
     #[test]
     fn a_forced_preference_matching_nothing_keeps_nothing() {
         let rows = [
@@ -2637,9 +2600,8 @@ mod tests {
         assert!(!keep.contains(&1301) && !keep.contains(&1302));
     }
 
-    // Neither About box may hard-code what it reports (macOS once did).
-    // Source inspection, not a UI test: neither shell instantiates off
-    // its own platform. See docs/ui.md — neither_about_box test.
+    // Neither About box may hard-code what it reports (macOS once did). Source inspection, not
+    // a UI test: neither shell instantiates off its own platform.
     #[test]
     fn neither_about_box_hard_codes_its_version_or_key_count() {
         // CRLF-normalized: Windows CI checks the tree out with CRLF.
@@ -2678,9 +2640,9 @@ mod tests {
         }
     }
 
-    // Both log panes must keep the NEWEST line in view (mac.rs once had no
-    // scroll call at all, despite a comment claiming parity with windows.rs).
-    // Source inspection, same reason as the test above. See docs/ui.md.
+    // Both log panes must keep the NEWEST line in view (mac.rs once had no scroll call at all,
+    // despite a comment claiming parity with windows.rs). Source inspection, same reason as the
+    // test above.
     #[test]
     fn both_log_panes_keep_the_newest_line_in_view() {
         // CRLF-normalized: Windows CI checks the tree out with CRLF.
@@ -2698,9 +2660,9 @@ mod tests {
         );
     }
 
-    // Neither shell's worker-message drain may bail out on a poisoned inbox:
-    // an early return there also skips clearing the "busy" flag and stopping
-    // the drain timer, hanging the process. See docs/ui.md — neither_shell_drain.
+    // Neither shell's worker-message drain may bail out on a poisoned inbox: an early return
+    // there also skips clearing the "busy" flag and stopping the drain timer, hanging the
+    // process.
     #[test]
     fn neither_shell_drain_gives_up_on_a_poisoned_inbox() {
         // CRLF-normalized: Windows CI checks the tree out with CRLF.
@@ -2754,9 +2716,9 @@ mod tests {
         assert_eq!(fmt_bytes(64_424_509_440), "60.00 GB");
     }
 
-    // A failed probe (common case: empty tray) must look exactly like the
-    // app did before the probe existed — no notice, no log line — while a
-    // prompted open of the same bad source must still report. See docs/ui.md.
+    // A failed probe (common case: empty tray) must look exactly like the app did before the
+    // probe existed — no notice, no log line — while a prompted open of the same bad source
+    // must still report.
     #[test]
     fn a_failed_probe_says_nothing_but_a_failed_open_still_reports() {
         const BAD: &str = "iso:///nonexistent/definitely-not-here.iso";
@@ -2854,9 +2816,9 @@ mod tests {
         );
     }
 
-    // A probe the drive never answers must be abandoned, not waited on for
-    // the life of the process: the worker thread can't be killed (blocked in
-    // the driver), but the UI must stop waiting for it. See docs/ui.md.
+    // A probe the drive never answers must be abandoned, not waited on for the life of the
+    // process: the worker thread can't be killed (blocked in the driver), but the UI must stop
+    // waiting for it.
     #[test]
     fn a_probe_that_never_answers_is_abandoned_instead_of_ticking_forever() {
         let mut app = App::new();
@@ -3226,9 +3188,9 @@ mod tests {
         assert!(t.arena.is_empty());
     }
 
-    // Every string the picker can offer must have a gui.format.* key present
-    // in en.json: format_label's catch-all otherwise renders correctly under
-    // en while staying untranslatable elsewhere. See docs/ui.md.
+    // Every string the picker can offer must have a gui.format.* key present in en.json:
+    // format_label's catch-all otherwise renders correctly under en while staying
+    // untranslatable elsewhere.
     #[test]
     fn every_offered_format_has_a_translation_key_present_in_english() {
         let en: serde_json::Value =
@@ -3270,9 +3232,8 @@ mod tests {
         }
     }
 
-    // A canonical format's localized label must resolve back to that exact
-    // canonical string, or a one-way label is a setting that silently
-    // reverts. REGRESSION PIN — see docs/ui.md.
+    // A canonical format's localized label must resolve back to that exact canonical string, or
+    // a one-way label is a setting that silently reverts. REGRESSION PIN.
     #[test]
     fn every_offered_format_round_trips_through_its_label() {
         for (disc, mp4) in [(true, true), (true, false), (false, true), (false, false)] {

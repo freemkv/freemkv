@@ -1,6 +1,6 @@
 [package]
 name = "freemkv"
-version = "1.7.6"
+version = "1.7.7"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -61,7 +61,7 @@ windows = { version = "=0.62", features = ["UI_Notifications", "Data_Xml_Dom", "
 # GTK4 is what Flathub reviewers expect and what the GNOME desktop draws
 # natively; libadwaita adds the modern GNOME widgets (AdwApplicationWindow,
 # AdwHeaderBar hamburger menu, AdwToast) so the app looks like a first-class
-# GNOME app rather than a themed port. See docs/linux-shell.md.
+# GNOME app.
 #
 # PINNED with `=`: same rationale as winsafe. GTK4 bindings ship every ~6
 # months with API adjustments; libadwaita is pre-1.0 across upstream too.

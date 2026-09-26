@@ -115,8 +115,8 @@ fn r(x: f64, y: f64, w: f64, h: f64) -> NSRect {
 
 // ── stub disc model (stands in for engine::scan) ──────────────────────────
 
-// Row-list identity (excludes tick state) so render() can detect a real
-// tree change vs. a tick-only update. See docs/mac-shell.md — rows_sig
+// Row-list identity (excludes tick state) so render() can detect a real tree change vs. a
+// tick-only update.
 fn rows_sig(rows: &[crate::ui::Row]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::hash::DefaultHasher::new();
@@ -462,9 +462,8 @@ impl TitlesSource {
         Some(unsafe { Retained::cast_unchecked(tf) })
     }
 
-    // Repaint the tick boxes in place, leaving the rows — and therefore the
-    // user's expansion, selection and scroll position — untouched. Runs on
-    // every ordinary redraw; see docs/mac-shell.md — sync_check_states.
+    // Repaint the tick boxes in place, leaving the rows — and therefore the user's expansion,
+    // selection and scroll position — untouched. Runs on every ordinary redraw.
     fn sync_check_states(&self, rows: &[crate::ui::Row]) {
         // Early-out when nothing about the ticks moved. The caller only reaches
         // here when `rows_sig` matched, so only checkbox state can still differ;
@@ -1329,9 +1328,8 @@ impl Controller {
         choice
     }
 
-    // Save `Settings` to disk and tell the operator whether it worked.
-    // One policy, one call site — see docs/mac-shell.md —
-    // save_settings_reporting_error.
+    // Save `Settings` to disk and tell the operator whether it worked. One policy, one call
+    // site.
     fn save_settings_reporting_error(&self) {
         match self.ivars().settings.borrow().save() {
             Ok(()) => self.app_mut(|a| {
@@ -1461,9 +1459,8 @@ impl Controller {
         }
     }
 
-    // Record that a keydb download is (or isn't) in flight, and reflect it on
-    // the button. The FLAG is the guard; the disabled button is only how it's
-    // shown — see docs/mac-shell.md — set_keydb_updating.
+    // Record that a keydb download is (or isn't) in flight, and reflect it on the button. The
+    // FLAG is the guard; the disabled button is only how it's shown.
     fn set_keydb_updating(&self, updating: bool) {
         self.ivars().keydb_updating.set(updating);
         if let Some(b) = self.ivars().keydb_btn.borrow().as_ref() {
@@ -3305,9 +3302,8 @@ impl Rows {
         self.y -= 30.0;
     }
 
-    // Multi-select language row: pull-down listing every offered language
-    // with checkmarks. Registered in `self.langs`, not `self.popups` — see
-    // docs/mac-shell.md — Rows::langs.
+    // Multi-select language row: pull-down listing every offered language with checkmarks.
+    // Registered in `self.langs`, not `self.popups`
     fn langs(&mut self, mtm: MainThreadMarker, key: &str, s: &str, w: f64, c: &Controller) {
         self.label(mtm, s);
         // Pull-down, not pop-up: a pop-up's title tracks the selected row, but
@@ -3337,9 +3333,8 @@ impl Rows {
         self.langs.push((key.to_string(), p));
         self.y -= 30.0;
     }
-    // A plain text row. MUST register `(key, control)` in `self.fields`: it
-    // is the only thing `read_prefs_form` and the populate loop use, so a
-    // row missing from it is write-only. See docs/mac-shell.md — Rows::field.
+    // A plain text row. MUST register `(key, control)` in `self.fields`: it is the only thing
+    // `read_prefs_form` and the populate loop use, so a row missing from it is write-only.
     fn field(&mut self, mtm: MainThreadMarker, key: &str, s: &str, val: &str, w: f64) {
         self.label(mtm, s);
         let f = {
@@ -3357,9 +3352,8 @@ impl Rows {
         self.y -= 30.0;
     }
 
-    // Same contract as `field`, but for a secret (keyserver bearer token):
-    // an `NSSecureTextField` masks its contents, unlike the plain
-    // `NSTextField` this used to be. See docs/mac-shell.md — field_secure.
+    // Same contract as `field`, but for a secret (keyserver bearer token): an
+    // `NSSecureTextField` masks its contents, unlike the plain `NSTextField` this used to be.
     fn field_secure(&mut self, mtm: MainThreadMarker, key: &str, s: &str, val: &str, w: f64) {
         self.label(mtm, s);
         let f = {
@@ -4776,7 +4770,6 @@ mod tests {
     }
 
     // The drag-and-drop overlay must not be leaked once per language switch.
-    // See docs/mac-shell.md — drop overlay leak test.
     #[test]
     fn the_drop_overlay_is_not_leaked_on_every_language_switch() {
         let src = include_str!("mac.rs");
@@ -4796,7 +4789,6 @@ mod tests {
     }
 
     // A widget list `build_ui` PUSHES into must be emptied by `build_ui`.
-    // See docs/mac-shell.md — widget-list clear test.
     #[test]
     fn every_widget_list_build_ui_pushes_into_is_cleared_there_first() {
         let src = include_str!("mac.rs");
@@ -4839,7 +4831,6 @@ mod tests {
     }
 
     // Every action this shell defines must be reachable from the UI.
-    // See docs/mac-shell.md — orphaned-selector test.
     #[test]
     fn every_action_selector_this_shell_defines_is_wired_to_something() {
         let src = include_str!("mac.rs");
@@ -4871,7 +4862,6 @@ mod tests {
     }
 
     // The format popup's rebuild guard has to compare like with like.
-    // See docs/mac-shell.md — format popup rebuild-guard test.
     #[test]
     fn the_format_popup_comparison_counts_the_separators_appkit_reports() {
         let titles = vec!["Selected titles → MKV", "Selected titles → M2TS"];
@@ -5296,7 +5286,6 @@ mod tests {
     }
 
     // The AppKit language pickers own no parsing of their own.
-    // See docs/mac-shell.md — language-picker parsing test.
     #[test]
     fn the_language_pickers_own_no_parsing_source_inspection_only() {
         let src = include_str!("mac.rs");
@@ -5340,7 +5329,6 @@ mod tests {
     }
 
     // "Stop & Quit" has to STOP before it quits.
-    // See docs/mac-shell.md — stop-and-quit worker-wait test.
     #[test]
     fn stop_and_quit_waits_for_the_worker_before_letting_the_process_go() {
         let src = include_str!("mac.rs");

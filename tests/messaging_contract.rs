@@ -312,9 +312,8 @@ fn libfreemkv_declared_codes() -> Option<std::collections::BTreeMap<u32, String>
     Some(declared)
 }
 
-// The subset of declared codes an `Error` can actually carry: constants named
-// on the right-hand side of an arm in `Error::code()`.
-// See docs/messaging-contract.md — codes_carried_by_a_variant.
+// The subset of declared codes an `Error` can actually carry: constants named on the right-hand
+// side of an arm in `Error::code()`.
 fn codes_carried_by_a_variant(text: &str) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     for line in text.lines() {
@@ -330,9 +329,9 @@ fn codes_carried_by_a_variant(text: &str) -> std::collections::BTreeSet<String> 
     out
 }
 
-// Catches a stale `error.E*` string left in en.json after its code was
-// retired from libfreemkv's `error.rs`. Asks libfreemkv, not `all_error_variants()`,
-// which codes are legitimate. See docs/messaging-contract.md — en_json_has_no_string_for_a_code_libfreemkv_does_not_declare.
+// Catches a stale `error.E*` string left in en.json after its code was retired from
+// libfreemkv's `error.rs`. Asks libfreemkv, not `all_error_variants()`, which codes are
+// legitimate.
 #[test]
 fn en_json_has_no_string_for_a_code_libfreemkv_does_not_declare() {
     let Some(declared) = libfreemkv_declared_codes() else {
@@ -355,9 +354,8 @@ fn en_json_has_no_string_for_a_code_libfreemkv_does_not_declare() {
     );
 }
 
-// Every code libfreemkv can put inside an `Error` must appear in
-// `all_error_variants()`, and vice versa. A forgotten variant is INVISIBLE to
-// every other assertion here — see docs/messaging-contract.md — fixture_enumerates_every_error_code_a_variant_can_carry.
+// Every code libfreemkv can put inside an `Error` must appear in `all_error_variants()`, and
+// vice versa. A forgotten variant is INVISIBLE to every other assertion here.
 #[test]
 fn fixture_enumerates_every_error_code_a_variant_can_carry() {
     let Some(declared) = libfreemkv_declared_codes() else {

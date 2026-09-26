@@ -13,9 +13,8 @@ static LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuar
 /// hint ("re-run with --log-level 3 (writes ./log.txt)").
 const DEFAULT_LOG_FILE: &str = "log.txt";
 
-// Tracing has two channels (terminal + optional file log, see
-// docs/cli-entry.md § "Tracing / logging channels"); PendingDiag holds a
-// startup diagnostic that can't render yet — see § "PendingDiag" below.
+// Tracing has two channels; PendingDiag holds a startup diagnostic that can't render yet — see
+// § "PendingDiag" below.
 struct PendingDiag {
     key: &'static str,
     // English fallback while the pinned freemkv-i18n tag doesn't ship `key`.
@@ -39,9 +38,7 @@ impl PendingDiag {
         self
     }
 
-    // The localized text, separate from emit() so a test can read it. See
-    // docs/cli-entry.md § "PendingDiag" for why a typo'd key is worse than
-    // the hard-coded English this replaced.
+    // The localized text, separate from emit() so a test can read it.
     fn render(&self) -> String {
         let args: Vec<(&str, &str)> = self.args.iter().map(|(k, v)| (*k, v.as_str())).collect();
         crate::strings::fmt_or(self.key, self.english, &args)
@@ -53,9 +50,8 @@ impl PendingDiag {
     }
 }
 
-// The two logging flags, parsed out of the raw argv. Split from
-// init_logging so it's unit-testable (that fn installs a process-global
-// subscriber). See docs/cli-entry.md § "parse_logging_flags".
+// The two logging flags, parsed out of the raw argv. Split from init_logging so it's
+// unit-testable (that fn installs a process-global subscriber).
 fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>, Vec<PendingDiag>) {
     let mut level_num: Option<u8> = None;
     let mut log_file: Option<String> = None;
@@ -182,9 +178,8 @@ fn init_logging(args: &[String]) -> Vec<PendingDiag> {
     diags
 }
 
-// Every word the dispatcher matches args[1] against ("gui" is intercepted
-// earlier by app_entry::wants_gui, so it's deliberately absent). See
-// docs/cli-entry.md § "SUBCOMMANDS" for why this list matters.
+// Every word the dispatcher matches args[1] against ("gui" is intercepted earlier by
+// app_entry::wants_gui, so it's deliberately absent).
 #[cfg(test)]
 pub(crate) const SUBCOMMANDS: &[&str] = &["info", "update-keys", "version", "help", "gui"];
 
@@ -320,9 +315,8 @@ fn canon_url(s: &str) -> Option<String> {
     ))
 }
 
-// Pull --language/--lang and its value out of the argument list, with the
-// same URL-value guard as collect_urls. See docs/cli-entry.md §
-// "strip_language_flag".
+// Pull --language/--lang and its value out of the argument list, with the same URL-value guard
+// as collect_urls.
 fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>, Vec<PendingDiag>) {
     let mut filtered = Vec::new();
     let mut language = None;
@@ -360,9 +354,8 @@ fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>, Vec<Pen
     (filtered, language, diags)
 }
 
-// Print the curated fatal-error block (Channel 1, STDERR, never a raw
-// error code or tracing event) and exit non-zero. See docs/cli-entry.md §
-// "fatal" for the block format and why it's ANSI-free on redirect.
+// Print the curated fatal-error block (Channel 1, STDERR, never a raw error code or tracing
+// event) and exit non-zero.
 fn fatal(op_key: &str, cause: &str) -> ! {
     let op = crate::strings::get(op_key);
     // WS2: `Error:` is rendered from the translatable `error.level_error` key so
@@ -393,9 +386,8 @@ fn fail_mark() -> &'static str {
     }
 }
 
-// Every flag that consumes the following token as its value — the ONE
-// source of truth for flag arity, shared by collect_urls and asserted
-// against parse_flags by a test. See docs/cli-entry.md § "VALUE_FLAGS".
+// Every flag that consumes the following token as its value — the ONE source of truth for flag
+// arity, shared by collect_urls and asserted against parse_flags by a test.
 pub(crate) const VALUE_FLAGS: &[&str] = &[
     "-t",
     "--title",
@@ -410,9 +402,8 @@ pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--log-level",
 ];
 
-// Whether a token is another FLAG, and so can never be a flag's value.
-// The companion to the scheme:// rule; ONE definition shared by both
-// parsers. See docs/cli-entry.md § "is_flag_token".
+// Whether a token is another FLAG, and so can never be a flag's value. The companion to the
+// scheme:// rule; ONE definition shared by both parsers.
 pub(crate) fn is_flag_token(s: &str) -> bool {
     let mut rest = s.strip_prefix('-').unwrap_or("").chars();
     match rest.next() {
@@ -421,9 +412,8 @@ pub(crate) fn is_flag_token(s: &str) -> bool {
     }
 }
 
-// Flags this CLI no longer accepts but which DID take a value; collect_urls
-// still steps over the value so it doesn't collapse into a bogus third
-// positional. See docs/cli-entry.md § "RETIRED_VALUE_FLAGS".
+// Flags this CLI no longer accepts but which DID take a value; collect_urls still steps over
+// the value so it doesn't collapse into a bogus third positional.
 pub(crate) const RETIRED_VALUE_FLAGS: &[&str] = &["-k", "--device", "-d"];
 
 fn collect_urls(args: &[String]) -> Vec<String> {
@@ -462,8 +452,8 @@ fn collect_urls(args: &[String]) -> Vec<String> {
 }
 
 // Format the per-stream summary lines for `info mkv://` / `info m2ts://`.
-// v.label/a.label/a.language/s.language are disc-derived strings, so each
-// is sanitized before printing. See docs/cli-entry.md § "stream_info_lines".
+// v.label/a.label/a.language/s.language are disc-derived strings, so each is sanitized before
+// printing.
 fn stream_info_lines(streams: &[libfreemkv::Stream]) -> Vec<String> {
     let mut lines = Vec::with_capacity(streams.len());
     for s in streams {
@@ -651,9 +641,8 @@ fn info_cmd(args: &[String]) {
     }
 }
 
-// Destination-only schemes, with English fallback text (crate::strings::
-// get_or) until freemkv-i18n ships their keys. See docs/cli-entry.md §
-// "TRACK_SINK_URL_LINES".
+// Destination-only schemes, with English fallback text (crate::strings:: get_or) until
+// freemkv-i18n ships their keys.
 const TRACK_SINK_URL_LINES: &[(&str, &str)] = &[
     (
         "usage.url.demux",
@@ -829,9 +818,8 @@ fn help_update_keys() {
     println!("{}", crate::strings::get("help.update_keys.flag_url"));
 }
 
-// Resolve where update-keys saves the downloaded keydb: --keydb <path>
-// wins, else the standard search/default location. See docs/cli-entry.md §
-// "update_keys_dest".
+// Resolve where update-keys saves the downloaded keydb: --keydb <path> wins, else the standard
+// search/default location.
 fn update_keys_dest(args: &[String]) -> std::path::PathBuf {
     let mut keydb: Option<String> = None;
     let mut i = 0;
@@ -898,9 +886,8 @@ fn update_keys(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    // A value-taking logging flag must not swallow the NEXT FLAG as its
-    // value (e.g. --log-file --raw would eat --raw and run without it).
-    // See docs/cli-entry.md § "a_logging_flag_does_not_swallow...".
+    // A value-taking logging flag must not swallow the NEXT FLAG as its value (e.g. --log-file
+    // --raw would eat --raw and run without it).
     #[test]
     fn a_logging_flag_does_not_swallow_the_following_flag() {
         for flag in ["--log-file", "--log-level"] {
@@ -940,9 +927,8 @@ mod tests {
 
     use super::{SUBCOMMANDS, collect_urls, stream_info_lines, update_keys_dest};
 
-    // Covers the tag-assembly arms of stream_info_lines (purpose/secondary/
-    // label) that the escape-stripping test below never reaches. See
-    // docs/cli-entry.md § "stream_info_lines_render_purpose...".
+    // Covers the tag-assembly arms of stream_info_lines (purpose/secondary/ label) that the
+    // escape-stripping test below never reaches.
     #[test]
     fn stream_info_lines_render_purpose_secondary_and_label_tags() {
         use libfreemkv::{
@@ -1027,9 +1013,8 @@ mod tests {
 
     use libfreemkv::SampleRate;
 
-    // v.label/a.label/a.language/s.language are disc/file-controlled; a
-    // crafted terminal escape in any must not survive to the terminal. See
-    // docs/cli-entry.md § "stream_info_lines_strip_terminal_escapes...".
+    // v.label/a.label/a.language/s.language are disc/file-controlled; a crafted terminal escape
+    // in any must not survive to the terminal.
     #[test]
     fn stream_info_lines_strip_terminal_escapes_from_every_disc_controlled_field() {
         use libfreemkv::{
@@ -1094,9 +1079,8 @@ mod tests {
         }
     }
 
-    // Subcommand names a string tells the user to TYPE, as opposed to
-    // "freemkv" just naming the product in a sentence. See
-    // docs/cli-entry.md § "commands_named_in" for the exact heuristic.
+    // Subcommand names a string tells the user to TYPE, as opposed to "freemkv" just naming the
+    // product in a sentence.
     fn commands_named_in(value: &str) -> std::collections::BTreeSet<String> {
         let mut out = std::collections::BTreeSet::new();
         let mut from = 0;
@@ -1337,9 +1321,8 @@ mod tests {
     }
 }
 
-// The argv decisions run() and init_logging() make before anything else
-// happens; previously unreachable from cargo test. See docs/cli-entry.md
-// § "mod arg_tests".
+// The argv decisions run() and init_logging() make before anything else happens; previously
+// unreachable from cargo test.
 #[cfg(test)]
 mod arg_tests {
     use super::{
@@ -1351,9 +1334,8 @@ mod arg_tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
-    // The one deliberate exception: a leading `-` on a NEGATIVE NUMBER is a
-    // value, not a flag, so `--log-level -1` reaches the range check. See
-    // docs/cli-entry.md § "is_flag_token_treats_negative_numbers...".
+    // The one deliberate exception: a leading `-` on a NEGATIVE NUMBER is a value, not a flag,
+    // so `--log-level -1` reaches the range check.
     #[test]
     fn is_flag_token_treats_negative_numbers_as_values_not_flags() {
         assert!(is_flag_token("--raw"));
@@ -1379,8 +1361,7 @@ mod arg_tests {
         assert!(!is_url("3"));
     }
 
-    // Just the two REQUESTS; diagnostics are a separate axis with their own
-    // tests. See docs/cli-entry.md § "flags(...) test helper".
+    // Just the two REQUESTS; diagnostics are a separate axis with their own tests.
     fn flags(args: &[String]) -> (Option<u8>, Option<String>) {
         let (level, file, _) = parse_logging_flags(args);
         (level, file)
@@ -1416,8 +1397,7 @@ mod arg_tests {
         assert_eq!(parse_logging_flags(&v(&["--log-level", "255"])).0, Some(4));
     }
 
-    // Bad input is reported and IGNORED, never clamped up to 1. See
-    // docs/cli-entry.md § "a_bad_log_level_is_ignored_rather_than_guessed_at".
+    // Bad input is reported and IGNORED, never clamped up to 1.
     #[test]
     fn a_bad_log_level_is_ignored_rather_than_guessed_at() {
         assert_eq!(parse_logging_flags(&v(&["--log-level", "0"])).0, None);
@@ -1447,9 +1427,8 @@ mod arg_tests {
         assert_eq!(flags(&v(&["--log-file"])), (None, None));
     }
 
-    // A refused --log-file value must be REPORTED, not swallowed silently —
-    // absence of a log is itself a bug. See docs/cli-entry.md §
-    // "a_refused_log_file_value_records_a_diagnostic".
+    // A refused --log-file value must be REPORTED, not swallowed silently — absence of a log is
+    // itself a bug.
     #[test]
     fn a_refused_log_file_value_records_a_diagnostic() {
         // Next token is a flag: value refused, so the path is None AND a
@@ -1531,9 +1510,9 @@ mod arg_tests {
         assert_eq!(args, original);
     }
 
-    // Every deferred diagnostic must round-trip through the real catalog
-    // (checked against strings::get, never PendingDiag::render, whose
-    // English fallback would make the check vacuous). See docs/cli-entry.md.
+    // Every deferred diagnostic must round-trip through the real catalog (checked against
+    // strings::get, never PendingDiag::render, whose English fallback would make the check
+    // vacuous).
     #[test]
     fn every_deferred_startup_diagnostic_resolves_to_real_localized_text() {
         let cases = [
@@ -1602,9 +1581,8 @@ mod arg_tests {
         }
     }
 
-    // The argv pre-pass must not print anything ITSELF — a strings::get or
-    // eprintln! here runs before locale is resolved. See docs/cli-entry.md
-    // § "the_pre_locale_argv_pass_prints_nothing_of_its_own".
+    // The argv pre-pass must not print anything ITSELF — a strings::get or eprintln! here runs
+    // before locale is resolved.
     #[test]
     fn the_pre_locale_argv_pass_prints_nothing_of_its_own() {
         let src = include_str!("cli_entry.rs").replace("\r\n", "\n");
@@ -1651,9 +1629,8 @@ mod arg_tests {
         }
     }
 
-    // The `info` subcommand must speak ONE language, whatever the URL —
-    // source-pinned since neither the container arm nor --share is
-    // reachable from a test. See docs/cli-entry.md § "the_info_surface...".
+    // The `info` subcommand must speak ONE language, whatever the URL — source-pinned since
+    // neither the container arm nor --share is reachable from a test.
     #[test]
     fn the_info_surface_never_prints_english_of_its_own() {
         // CRLF-normalized: Windows CI checks the tree out with CRLF.

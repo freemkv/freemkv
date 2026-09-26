@@ -7,13 +7,11 @@ use libfreemkv::Drive;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 
-// The invocation printed into artifacts that leave this machine (TOML header,
-// issue body). See docs/info.md — CAPTURE_COMMAND.
+// The invocation printed into artifacts that leave this machine (TOML header, issue body).
 const CAPTURE_COMMAND: &str = "freemkv info disc://";
 
-// The drive identity, as it is safe to put in front of a human: fields are
-// sanitised ONCE here so no later site can print a raw firmware string.
-// See docs/info.md — DriveIdentity.
+// The drive identity, as it is safe to put in front of a human: fields are sanitised ONCE here
+// so no later site can print a raw firmware string.
 struct DriveIdentity {
     vendor: String,
     product: String,
@@ -59,8 +57,8 @@ impl DriveIdentity {
     }
 }
 
-// The drive-identity block `freemkv info disc://` prints, as lines. Sanitises
-// the raw `DriveId` itself. See docs/info.md — drive_identity_lines.
+// The drive-identity block `freemkv info disc://` prints, as lines. Sanitises the raw `DriveId`
+// itself.
 fn drive_identity_lines(raw: &libfreemkv::DriveId, device: &str, mask: bool) -> Vec<String> {
     let id = DriveIdentity::from_drive(raw);
     vec![
@@ -97,9 +95,8 @@ fn drive_identity_lines(raw: &libfreemkv::DriveId, device: &str, mask: bool) -> 
     ]
 }
 
-// The `drive.toml` header comment, and the blank line after it. NOT
-// `toml_escape`d (a comment needs no escaping), safe only because
-// `DriveIdentity` already stripped control chars. See docs/info.md.
+// The `drive.toml` header comment, and the blank line after it. NOT `toml_escape`d (a comment
+// needs no escaping), safe only because `DriveIdentity` already stripped control chars.
 fn toml_header_comment(id: &DriveIdentity) -> String {
     format!(
         "# {} {} {} — {CAPTURE_COMMAND}\n\n",
@@ -728,16 +725,14 @@ pub(crate) fn present_for_submission(profile_name: &str, zip_path: &Path, title:
     println!("────────────────────────────────────────");
 }
 
-// Whether to offer the auto-submit prompt at all: both stdin and stderr must
-// be a terminal, or the question could go unseen while blocking on a read.
-// See docs/info.md — may_prompt_for_consent.
+// Whether to offer the auto-submit prompt at all: both stdin and stderr must be a terminal, or
+// the question could go unseen while blocking on a read.
 fn may_prompt_for_consent(token: &str, stdin_is_tty: bool, stderr_is_tty: bool) -> bool {
     !token.is_empty() && stdin_is_tty && stderr_is_tty
 }
 
-// Whether the user EXPLICITLY consented to submit the profile: EOF (n == 0),
-// a bare Enter, and anything but the locale's affirmative token all fail
-// closed. See docs/info.md — consent_granted.
+// Whether the user EXPLICITLY consented to submit the profile: EOF (n == 0), a bare Enter, and
+// anything but the locale's affirmative token all fail closed.
 fn consent_granted(n: usize, answer: &str, affirmative: &str) -> bool {
     n > 0 && !answer.is_empty() && answer.eq_ignore_ascii_case(affirmative)
 }
@@ -813,9 +808,8 @@ const SUBMIT_MAX_TIME_SECS: u32 = 120;
 /// scanning it for `html_url`.
 const SUBMIT_MAX_FILESIZE_BYTES: u32 = 1024 * 1024;
 
-// Which `curl` to run: named absolutely on Windows (CWE-427, a bare name
-// there searches the app dir and CWD before System32); bare on Unix, where
-// PATH doesn't. See docs/info.md — curl_program.
+// Which `curl` to run: named absolutely on Windows (CWE-427, a bare name there searches the app
+// dir and CWD before System32); bare on Unix, where PATH doesn't.
 fn curl_program() -> String {
     // `SystemRoot` is set by the OS on every Windows session; if something has
     // unset it there is no trustworthy absolute path to build, so fall back to
@@ -837,11 +831,10 @@ fn curl_program_from(system_root: Option<&str>) -> String {
     }
 }
 
-/// The exact `curl` argv the auto-submit POST runs, split out of
-/// `submit_issue` so it's testable without a real GitHub request. `-f` is
-/// deliberately NOT passed. The bearer token is deliberately NOT here: it is
-/// fed to curl as a config file on STDIN (see `submit_issue`) so it never
-/// appears in this process's argv (visible in `ps`). See docs/info.md.
+/// The exact `curl` argv the auto-submit POST runs, split out of `submit_issue` so it's
+/// testable without a real GitHub request. `-f` is deliberately NOT passed. The bearer token is
+/// deliberately NOT here: it is fed to curl as a config file on STDIN (see `submit_issue`) so
+/// it never appears in this process's argv (visible in `ps`).
 fn curl_submit_args(payload: &str) -> Vec<String> {
     [
         "-s",
@@ -895,9 +888,9 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-// Archive exactly the named files from `dir` — a manifest, not a directory
-// walk, since the archive can reach a public tracker. A missing name is
-// skipped rather than failing the submission. See docs/info.md — zip_files.
+// Archive exactly the named files from `dir` — a manifest, not a directory walk, since the
+// archive can reach a public tracker. A missing name is skipped rather than failing the
+// submission.
 pub(crate) fn zip_files(
     dir: &std::path::Path,
     names: &[String],
@@ -970,9 +963,8 @@ fn hex_dump(data: &[u8]) -> String {
         .join("\n  ")
 }
 
-// Reduce an untrusted firmware-derived string to a safe single path
-// component (lowercase alnum/-/_ only; never `.`, `..`, or a separator).
-// Falls back to `drive` if empty. See docs/info.md — sanitize_component.
+// Reduce an untrusted firmware-derived string to a safe single path component (lowercase
+// alnum/-/_ only; never `.`, `..`, or a separator). Falls back to `drive` if empty.
 pub(crate) fn sanitize_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_dash = false;
@@ -1003,9 +995,9 @@ pub(crate) fn sanitize_component(s: &str) -> String {
     }
 }
 
-// Escape a string for embedding inside a TOML basic (double-quoted) string:
-// drive identity fields are raw firmware bytes and can contain `"`, `\`, or
-// control chars that would break `key = "..."`. See docs/info.md.
+// Escape a string for embedding inside a TOML basic (double-quoted) string: drive identity
+// fields are raw firmware bytes and can contain `"`, `\`, or control chars that would break
+// `key = "..."`.
 fn toml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -1173,8 +1165,8 @@ mod tests {
         assert_eq!(parsed["v"], "he said \"hi\"\npath: C:\\x");
     }
 
-    // A drive whose firmware answers INQUIRY with terminal escapes — junk a
-    // wedged USB-SATA bridge produces routinely. See docs/info.md.
+    // A drive whose firmware answers INQUIRY with terminal escapes — junk a wedged USB-SATA
+    // bridge produces routinely.
     fn hostile_drive_id() -> libfreemkv::DriveId {
         libfreemkv::DriveId {
             vendor_id: " HL-DT-ST\u{1b}[31m ".into(),
@@ -1247,9 +1239,8 @@ mod tests {
         assert!(header.ends_with("\n\n"), "{header:?}");
     }
 
-    // On Windows the program to run must be named absolutely, or a hostile
-    // `curl.exe` on the app dir/CWD wins the search over System32's.
-    // See docs/info.md — the_submit_curl_is_named_absolutely....
+    // On Windows the program to run must be named absolutely, or a hostile `curl.exe` on the
+    // app dir/CWD wins the search over System32's.
     #[test]
     fn the_submit_curl_is_named_absolutely_where_the_search_order_is_unsafe() {
         assert_eq!(
@@ -1262,9 +1253,9 @@ mod tests {
         assert_eq!(super::curl_program_from(None), "curl");
     }
 
-    // The auto-submit POST is the LAST thing `--share` does; it shipped with
-    // no bound on connect/total time/response size, so a stalled peer hung
-    // the command after the work was already on disk. See docs/info.md.
+    // The auto-submit POST is the LAST thing `--share` does; it shipped with no bound on
+    // connect/total time/response size, so a stalled peer hung the command after the work was
+    // already on disk.
     #[test]
     fn the_auto_submit_post_is_bounded_in_time_and_size() {
         let args = super::curl_submit_args("{}");
@@ -1494,9 +1485,9 @@ mod tests {
 mod share_safety_tests {
     use super::{consent_granted, may_prompt_for_consent, zip_files};
 
-    // Submitting requires EXPLICIT consent with the locale's accept token,
-    // never a hard-coded ASCII "y" — a crafted `de.json` can render "[j/N]"
-    // (default NO), so a bare Enter must not post. See docs/info.md.
+    // Submitting requires EXPLICIT consent with the locale's accept token, never a hard-coded
+    // ASCII "y" — a crafted `de.json` can render "[j/N]" (default NO), so a bare Enter must not
+    // post.
     #[test]
     fn submitting_requires_an_explicit_locale_matched_yes() {
         // A bare Enter is NOT consent — it declines, whatever the prompt hinted.
@@ -1544,9 +1535,8 @@ mod share_safety_tests {
             .collect()
     }
 
-    // The archive is bounded by what this run WROTE, not what happens to be
-    // in the directory (which could include a previous UNMASKED run's
-    // capture, or unrelated local files). See docs/info.md.
+    // The archive is bounded by what this run WROTE, not what happens to be in the directory
+    // (which could include a previous UNMASKED run's capture, or unrelated local files).
     #[test]
     fn the_archive_carries_only_the_files_this_run_wrote() {
         let dir = scratch_dir("zip-manifest-test");
@@ -1621,9 +1611,9 @@ mod share_safety_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // The consent prompt is only offered when the user can actually READ it:
-    // testing stdin alone let `--share 2>/dev/null` block on a read with
-    // nothing on screen, and bare Enter is the [Y] default. See docs/info.md.
+    // The consent prompt is only offered when the user can actually READ it: testing stdin
+    // alone let `--share 2>/dev/null` block on a read with nothing on screen, and bare Enter is
+    // the [Y] default.
     #[test]
     fn consent_is_only_offered_when_the_question_is_visible_and_answerable() {
         // Both channels interactive: ask.

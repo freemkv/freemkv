@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.7.7] — 2026-09-26
+
+### Maintenance
+
+- Replace comment-overflow documentation with concise source contracts and README instructions; enforce the shared comment policy in CI.
+
+### Fixed
+
+- Rips preserve subtitle clear events and audio timing through the updated libfreemkv pipeline.
+
+### Changed
+
+- Keep consumer release notes alongside release workflows.
+
 ## [1.7.6] — 2026-09-26
 
 ### Added

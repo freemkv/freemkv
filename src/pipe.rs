@@ -58,7 +58,6 @@ extern "C" fn handle_sigint(_sig: libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
-// See docs/pipe.md#SigintHalt — Bridge the process-wide SIGINT flag ([`INTERRUPTED`]) into a…
 struct SigintHalt {
     halt: libfreemkv::Halt,
     done: Arc<AtomicBool>,
@@ -107,7 +106,6 @@ impl Drop for SigintHalt {
     }
 }
 
-// See docs/pipe.md#PipeFail — A per-title mux failure carrying both the display…
 struct PipeFail {
     display: String,
     /// How the multi-title loop should classify this failure. The loop feeds it
@@ -137,7 +135,6 @@ impl PipeFail {
         }
     }
 
-    // See docs/pipe.md#from_typed — A typed library error (a preflight decrypt gate).…
     fn from_typed(e: libfreemkv::Error) -> Self {
         let display = e.to_string();
         let io: std::io::Error = e.into();
@@ -158,7 +155,6 @@ impl PipeFail {
     }
 }
 
-// See docs/pipe.md#CliMuxEvents — The CLI's [`MuxEvents`] implementation: it renders exactly what…
 struct CliMuxEvents {
     out: Output,
     dest: String,
@@ -224,7 +220,6 @@ impl MuxEvents for CliMuxEvents {
     }
 }
 
-// See docs/pipe.md#finalize_mux — Render the outcome of a `mux_stream` run into…
 fn finalize_mux(
     result: std::io::Result<libfreemkv::MuxOutcome>,
     out: &Output,
@@ -249,7 +244,6 @@ fn finalize_mux(
     }
 }
 
-// See docs/pipe.md#print_lossy_outcome — Print everything a COMPLETED mux still has to…
 fn print_lossy_outcome(out: &Output, outcome: &libfreemkv::MuxOutcome, dest: &str) {
     for line in crate::lossy::lossy_lines(outcome, dest) {
         out.raw(crate::output::Level::Always, &line);
@@ -267,7 +261,6 @@ pub fn fmt_err(e: &dyn std::fmt::Display) -> String {
     fmt_err_str(&s)
 }
 
-// See docs/pipe.md#fmt_err_str — Render a libfreemkv `E<code>[: <data>]` Display string (or…
 fn fmt_err_str(s: &str) -> String {
     if let Some((code_part, data)) = parse_error_code(s) {
         let key = format!("error.{code_part}");
@@ -312,7 +305,6 @@ pub fn render_error(e: &dyn std::fmt::Display) -> String {
     format!("{}: {}", level, fmt_err(e))
 }
 
-// See docs/pipe.md#check_selection_coverage — Handle the `-a`/`-s` "no matching stream" case for…
 fn check_selection_coverage(
     streams: &freemkv_engine::StreamChoice,
     title: &libfreemkv::DiscTitle,
@@ -400,7 +392,6 @@ fn render_stream_sel_error(
     }
 }
 
-// See docs/pipe.md#parse_error_code — Parse a libfreemkv Display string of the form…
 fn parse_error_code(s: &str) -> Option<(&str, &str)> {
     let rest = s.strip_prefix('E')?;
     // The code is the leading run of digits after 'E'.
@@ -442,7 +433,6 @@ struct ParsedFlags {
     streams: freemkv_engine::StreamChoice,
 }
 
-// See docs/pipe.md#parse_stream_spec — Parse an `-a`/`-s` value into a [`freemkv_engine::StreamFilter`]
 fn parse_stream_spec(spec: &str) -> freemkv_engine::StreamFilter {
     use freemkv_engine::StreamFilter;
     if spec.eq_ignore_ascii_case("all") {
@@ -491,7 +481,6 @@ impl KeyConfig {
     }
 }
 
-// See docs/pipe.md#parse_flags — Parse rip flags, returning a clear error string…
 fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
     let mut f = ParsedFlags::default();
     let mut i = 0;
@@ -1020,7 +1009,6 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
 
 // ── Pre-flight invocation validation (fail loud and EARLY) ──────────────────
 
-// See docs/pipe.md#is_scheme_only_sink — Whether a destination is a scheme-only sink with…
 fn is_scheme_only_sink(parsed_dest: &libfreemkv::StreamUrl) -> bool {
     matches!(
         parsed_dest,
@@ -1028,7 +1016,6 @@ fn is_scheme_only_sink(parsed_dest: &libfreemkv::StreamUrl) -> bool {
     )
 }
 
-// See docs/pipe.md#preflight_validate — Validate the whole rip invocation BEFORE any drive…
 #[allow(clippy::too_many_arguments)] // cohesive one-shot invocation validator
 fn preflight_validate(
     source: &str,
@@ -1195,7 +1182,6 @@ fn validate_dir_dest(path: &std::path::Path, dest: &str, force: bool) -> Result<
     Ok(())
 }
 
-// See docs/pipe.md#validate_dir_input — Validate a `dir://` SOURCE: it must exist, be…
 fn validate_dir_input(path: &std::path::Path) -> Result<(), String> {
     let md = match std::fs::metadata(path) {
         Ok(m) => m,
@@ -1224,7 +1210,6 @@ fn validate_dir_input(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-// See docs/pipe.md#validate_iso_input — Validate an `iso://` input path: must exist, be…
 fn validate_iso_input(path: &std::path::Path) -> Result<(), String> {
     let md = match std::fs::metadata(path) {
         Ok(m) => m,
@@ -1270,7 +1255,6 @@ fn validate_iso_input(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-// See docs/pipe.md#validate_file_dest — Validate a single-file destination path: the parent directory…
 fn validate_file_dest(path: &std::path::Path) -> Result<(), String> {
     // An existing directory at the file path can't receive a single-file write.
     if path.is_dir() {
@@ -1333,7 +1317,6 @@ fn validate_file_dest(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-// See docs/pipe.md#disc_title_identities — The titles this disc has, for expanding `-t…
 fn disc_title_identities(
     source: &str,
     keys: &KeyConfig,
@@ -1372,7 +1355,6 @@ fn disc_title_identities(
     (!ids.is_empty()).then_some(ids)
 }
 
-// See docs/pipe.md#disc_title_nums — The title list a DISC source should rip,…
 pub(crate) fn disc_title_nums(all_titles: bool, requested: &[usize], found: usize) -> Vec<usize> {
     if !all_titles || !requested.is_empty() {
         return requested.to_vec();
@@ -1380,7 +1362,6 @@ pub(crate) fn disc_title_nums(all_titles: bool, requested: &[usize], found: usiz
     (1..=found).collect()
 }
 
-// See docs/pipe.md#resolve_disc_all_titles — Resolve the `(title_nums, identities)` pair for a `-t…
 fn resolve_disc_all_titles(
     requested: &[usize],
     scan: Option<Vec<TitleIdentity>>,
@@ -1389,7 +1370,6 @@ fn resolve_disc_all_titles(
     Some((disc_title_nums(true, requested, ids.len()), ids))
 }
 
-// See docs/pipe.md#build_jobs — Build the `(title_index, dest_url)` job list
 fn build_jobs(
     titles: &Option<Vec<libfreemkv::DiscTitle>>,
     is_disc: bool,
@@ -1542,12 +1522,10 @@ fn build_jobs(
 
 // ── The pipeline engine ─────────────────────────────────────────────────────
 
-// See docs/pipe.md#keyless_scan_opts — Disc source: one open, one scan, one stream.…
 fn keyless_scan_opts() -> libfreemkv::ScanOptions {
     libfreemkv::ScanOptions::default()
 }
 
-// See docs/pipe.md#drive_scan_opts — ScanOptions for a **live-drive** scan: keyless, plus the…
 pub(crate) fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOptions {
     libfreemkv::ScanOptions {
         credentials: drive_credentials(keydb_path),
@@ -1555,12 +1533,10 @@ pub(crate) fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOp
     }
 }
 
-// See docs/pipe.md#dest_is_directory — Is the destination directory-STYLE — a trailing `/`,…
 fn dest_is_directory(dest: &str, parsed_dest: &libfreemkv::StreamUrl) -> bool {
     dest.ends_with('/') || std::path::Path::new(parsed_dest.path_str()).is_dir()
 }
 
-// See docs/pipe.md#drive_credentials — Build the AACS host credentials for a live-drive…
 pub(crate) fn drive_credentials(
     keydb_path: &Option<String>,
 ) -> Option<libfreemkv::DriveCredentials> {
@@ -1569,7 +1545,6 @@ pub(crate) fn drive_credentials(
     (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs })
 }
 
-// See docs/pipe.md#resolve_info_keys — Resolve a **live drive's** AACS unit keys in…
 pub(crate) fn resolve_info_keys(
     drive: &mut libfreemkv::Drive,
     disc: &mut libfreemkv::Disc,
@@ -1584,7 +1559,6 @@ pub(crate) fn resolve_info_keys(
     resolve_disc_keys(disc, drive, &keys, out);
 }
 
-// See docs/pipe.md#scan_iso — Scan an `iso://` source's structure ONCE (keyless). The…
 fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>)> {
     // `dir://` is an image-level source too: `scan_dir` synthesizes a UDF
     // volume and returns the same pair `scan_iso` does. Without this arm,
@@ -1600,7 +1574,6 @@ fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::Secto
     }
 }
 
-// See docs/pipe.md#resolve_iso_unit_keys — Resolve an ISO's AACS unit keys from an…
 fn resolve_iso_unit_keys(
     mut disc: libfreemkv::Disc,
     mut reader: Box<dyn libfreemkv::SectorSource>,
@@ -1614,7 +1587,6 @@ fn resolve_iso_unit_keys(
     }
 }
 
-// See docs/pipe.md#build_iso_key_fetch — Build the fresh-key-on-failure closure for an ISO mux,…
 fn build_iso_key_fetch(source: &str, keys: &KeyConfig) -> Option<libfreemkv::sector::KeyFetch> {
     let url = keys.key_url.clone()?;
     // Reuse the SSRF guard the upfront source list uses; a rejected URL means no
@@ -1667,7 +1639,6 @@ fn build_iso_key_fetch(source: &str, keys: &KeyConfig) -> Option<libfreemkv::sec
     Some(libfreemkv::keysource::key_fetch(inputs, make_sources))
 }
 
-// See docs/pipe.md#resolved_keydb_path — The keydb path to use: `--keydb <path>` if…
 pub(crate) fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::PathBuf {
     keydb_path
         .clone()
@@ -1677,12 +1648,10 @@ pub(crate) fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::Pat
         .unwrap_or_else(|| std::path::PathBuf::from("keydb.cfg"))
 }
 
-// See docs/pipe.md#build_key_sources_quiet — Build the ordered `KeySource` list from the key…
 fn build_key_sources_quiet(keys: &KeyConfig) -> Vec<Box<dyn freemkv_keysources::KeySource>> {
     freemkv_engine::key_sources(&key_params(keys))
 }
 
-// See docs/pipe.md#key_params — Normalize the CLI's flags into the engine's `KeyParams`,…
 fn key_params(keys: &KeyConfig) -> freemkv_engine::KeyParams {
     // Local keydb is added whenever the user didn't ask for online-only. (An
     // explicit --keydb, or no key flags at all, both want the keydb.)
@@ -1717,7 +1686,6 @@ fn warn_ssrf_rejected(keys: &KeyConfig, out: &Output) {
     }
 }
 
-// See docs/pipe.md#key_source_factory — Build the [`libfreemkv::KeySourceFactory`] the library's key resolution
 fn key_source_factory(keys: &KeyConfig, out: &Output) -> libfreemkv::KeySourceFactory {
     warn_ssrf_rejected(keys, out);
     let keys = keys.clone();
@@ -1735,7 +1703,6 @@ fn emit_resolution_trace(out: &Output, trace: &libfreemkv::aacs::trace::Resoluti
     }
 }
 
-// See docs/pipe.md#resolve_disc_keys — Resolve an AACS key for a keyless-scanned `disc`…
 fn resolve_disc_keys(
     disc: &mut libfreemkv::Disc,
     reader: &mut dyn libfreemkv::SectorSource,
@@ -1747,7 +1714,6 @@ fn resolve_disc_keys(
     emit_resolution_trace(out, &resolved.trace);
 }
 
-// See docs/pipe.md#render_resolution_trace — Render a [`libfreemkv::aacs::trace::ResolutionTrace`] into human-readable
 fn render_resolution_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> Vec<String> {
     use libfreemkv::aacs::trace::{KeyNode, KeyOutcome as KO, UnlockOutcome};
 
@@ -1920,7 +1886,6 @@ fn pipe_disc(
     finalize_mux(result, out, &events)
 }
 
-// See docs/pipe.md#is_metadata_sink — Whether a destination URL is a metadata sink…
 fn is_metadata_sink(dest: &str) -> bool {
     matches!(
         libfreemkv::parse_url(dest),
@@ -1928,7 +1893,6 @@ fn is_metadata_sink(dest: &str) -> bool {
     )
 }
 
-// See docs/pipe.md#disc_copy_recovered_data — Whether a completed disc→ISO sweep actually recovered any…
 fn disc_copy_recovered_data(bytes_good: u64) -> bool {
     bytes_good > 0
 }
@@ -1951,12 +1915,10 @@ enum CopyVerdict {
     Complete,
 }
 
-// See docs/pipe.md#disc_copy_succeeded — Whether a graded copy is a SUCCESS for…
 fn disc_copy_succeeded(verdict: CopyVerdict) -> bool {
     matches!(verdict, CopyVerdict::Complete)
 }
 
-// See docs/pipe.md#copy_verdict — Grade a `CopyResult`. Two of the three verdicts…
 fn copy_verdict(r: &freemkv_engine::CopyResult) -> CopyVerdict {
     if r.halted {
         CopyVerdict::Interrupted
@@ -1972,7 +1934,6 @@ fn copy_verdict(r: &freemkv_engine::CopyResult) -> CopyVerdict {
     }
 }
 
-// See docs/pipe.md#disc_copy_options — The copy options a CLI disc→ISO sweep runs…
 fn disc_copy_options<'a>(
     raw: bool,
     multipass: bool,
@@ -1996,7 +1957,6 @@ fn interrupted_error(out: &Output) -> String {
     strings::get("rip.interrupted")
 }
 
-// See docs/pipe.md#pipe — Decide whether a per-title mux failure should abort…
 fn pipe(
     source: &str,
     dest: &str,
@@ -2038,7 +1998,6 @@ fn pipe(
 
 // ── Disc → ISO (raw sector copy, not a stream) ────────────────────────────
 
-// See docs/pipe.md#url_path_of — The filesystem path behind a URL — for…
 fn url_path_of(url: &libfreemkv::StreamUrl) -> Option<std::path::PathBuf> {
     use libfreemkv::StreamUrl as U;
     match url {
@@ -2094,7 +2053,6 @@ fn whole_image_decrypting_source<S: libfreemkv::SectorSource>(
     src
 }
 
-// See docs/pipe.md#image_to_iso — `<image source> → iso://` — write a decrypted…
 fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
     let iso_path = match libfreemkv::parse_url(dest) {
         libfreemkv::StreamUrl::Iso { path } => path,
@@ -2444,7 +2402,6 @@ fn disc_to_iso(
 
 // ── dir:// decrypted file-tree extraction ───────────────────────────────────
 
-// See docs/pipe.md#dir_to_extract — Extract a disc's decrypted file tree to a…
 fn dir_to_extract(
     source: &str,
     dest: &str,
@@ -2546,7 +2503,6 @@ fn dir_to_extract(
     }
 }
 
-// See docs/pipe.md#HaltSink — A [`freemkv_engine::Sink`] that forwards `should_cancel` to a
 struct HaltSink<'a>(&'a libfreemkv::Halt);
 
 impl freemkv_engine::Sink for HaltSink<'_> {
@@ -2555,7 +2511,6 @@ impl freemkv_engine::Sink for HaltSink<'_> {
     }
 }
 
-// See docs/pipe.md#extract_succeeded — Whether a `dir://` extraction counts as a success…
 fn extract_succeeded(halted: bool, complete: bool) -> bool {
     !halted && complete
 }
@@ -2688,7 +2643,6 @@ fn fmt_damage_time(secs: f64) -> String {
     }
 }
 
-// See docs/pipe.md#fmt_disc_damage — Render the disc-level damage string ("lost" / "no…
 fn fmt_disc_damage(p: &libfreemkv::progress::PassProgress) -> String {
     let bytes_disc = p.bytes_total_disc;
     if bytes_disc == 0 {
@@ -2818,14 +2772,12 @@ fn print_progress(done: u64, total: u64, start: &std::time::Instant) {
     let _ = std::io::stderr().flush();
 }
 
-// See docs/pipe.md#debug_drive_step — Log a discarded drive-handshake step error to stderr…
 fn debug_drive_step(step: &str, result: libfreemkv::Result<()>) {
     if let Err(e) = result {
         eprintln!("freemkv: drive {step} (advisory) failed: {e}");
     }
 }
 
-// See docs/pipe.md#print_completion_summary — Clear the progress line and print the final…
 fn print_completion_summary(out: &Output, done: u64, start: std::time::Instant) {
     if !out.is_quiet() {
         eprint!("\r\x1b[K");
@@ -2920,7 +2872,6 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
     }
 }
 
-// See docs/pipe.md#print_mp4_skips — For an `mp4://` destination, print the tracks that…
 fn print_mp4_skips(out: &Output, dest: &str, title: &libfreemkv::DiscTitle) {
     if !matches!(
         libfreemkv::parse_url(dest),
@@ -2952,7 +2903,6 @@ fn print_mp4_skips(out: &Output, dest: &str, title: &libfreemkv::DiscTitle) {
     }
 }
 
-// See docs/pipe.md#mp4_skip_reason_key — The i18n key for an `mp4://` exclusion reason.…
 fn mp4_skip_reason_key(reason: &libfreemkv::Mp4SkipReason) -> &'static str {
     match reason {
         libfreemkv::Mp4SkipReason::BitmapSubtitle => "mp4.reason.subtitle",
@@ -2972,12 +2922,10 @@ fn mp4_skip_reason_key(reason: &libfreemkv::Mp4SkipReason) -> &'static str {
     }
 }
 
-// See docs/pipe.md#is_url_token — Whether a token is a positional stream URL…
 pub(crate) fn is_url_token(s: &str) -> bool {
     s.contains("://")
 }
 
-// See docs/pipe.md#is_keyserver_url — Whether a token is a plausible key-service URL…
 fn is_keyserver_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
@@ -2989,15 +2937,12 @@ fn copy_should_continue(interrupted: bool) -> bool {
     !interrupted
 }
 
-// See docs/pipe.md#title_in_range — Whether a 0-based title index is within a…
 fn title_in_range(idx: usize, count: usize) -> bool {
     idx < count
 }
 
-// See docs/pipe.md#TitleIdentity_use — What identifies a scanned title ACROSS an independent…
 use crate::title_identity::TitleIdentity;
 
-// See docs/pipe.md#title_changed_message — The message shown when a re-scan's title no…
 fn title_changed_message(num: usize, expected: &TitleIdentity, found: &TitleIdentity) -> String {
     const KEY: &str = "error.title_changed";
     let args = [
@@ -3017,12 +2962,10 @@ fn title_changed_message(num: usize, expected: &TitleIdentity, found: &TitleIden
     )
 }
 
-// See docs/pipe.md#job_identity — The identity recorded for one job, out of…
 fn job_identity(identities: &[TitleIdentity], title_idx: Option<usize>) -> Option<&TitleIdentity> {
     identities.get(title_idx.unwrap_or(0))
 }
 
-// See docs/pipe.md#resolve_scanned_title — Pick the title a job refers to out…
 fn resolve_scanned_title<'a>(
     titles: &'a [libfreemkv::DiscTitle],
     title_idx: usize,
@@ -3047,24 +2990,20 @@ fn resolve_scanned_title<'a>(
     Ok(title)
 }
 
-// See docs/pipe.md#needs_pre_mux_title_key — Whether a disc format needs its per-title key…
 fn needs_pre_mux_title_key(format: libfreemkv::DiscFormat) -> bool {
     !matches!(format, libfreemkv::DiscFormat::Dvd)
 }
 
-// See docs/pipe.md#normalize_title_nums — The `-t` default: with no `-t N` and…
 fn normalize_title_nums(title_nums: &mut Vec<usize>, all_titles: bool) {
     if title_nums.is_empty() && !all_titles {
         title_nums.push(1);
     }
 }
 
-// See docs/pipe.md#title_policy — The two inputs the per-title skip/stop policy runs…
 fn title_policy(job_count: usize, title_nums: &[usize], all_titles: bool) -> (bool, bool) {
     (job_count > 1, !title_nums.is_empty() && !all_titles)
 }
 
-// See docs/pipe.md#is_feature_title — Whether this job is the main feature —…
 fn is_feature_title(title_idx: Option<usize>) -> bool {
     title_idx.unwrap_or(0) == 0
 }
@@ -3173,7 +3112,6 @@ mod tests {
         );
     }
 
-    // See docs/pipe.md#a_dir_source_must_exist_and_be_a_directory — `dir://` source validation, which had no test at…
     #[test]
     fn a_dir_source_must_exist_and_be_a_directory() {
         let base = std::env::temp_dir().join(format!("fmkv-dirval-{}", std::process::id()));
@@ -3359,7 +3297,6 @@ mod tests {
     // ── `-t` default (1.6.0): main title unless `-t N` / `-t all` ──────────
     // (normalization lives in `run()`; this pins the parse layer only)
 
-    // See docs/pipe.md#t_all_on_a_disc_expands_to_every_title — `-t all` on a DISC must expand to…
     #[test]
     fn t_all_on_a_disc_expands_to_every_title() {
         // The whole disc.
@@ -3407,7 +3344,6 @@ mod tests {
         assert_eq!(jobs[0].0, Some(0));
     }
 
-    // See docs/pipe.md#the_t_default_normalizes_to_the_main_title_only — The `-t` DEFAULT, at the layer that actually…
     #[test]
     fn the_t_default_normalizes_to_the_main_title_only() {
         // The rule `run()` itself applies, called directly. It used to be
@@ -3540,7 +3476,6 @@ mod tests {
     // The decrypt no-key verdict matrix now lives in `libfreemkv::Disc::
     // ensure_decryptable[_keys]`; no-raw-code-leak is covered below.
 
-    // See docs/pipe.md#pipefail_classifies_via_the_engine — `PipeFail::from_mux` classifies the typed `io::Error` `mux_stream` returns
     #[test]
     fn pipefail_classifies_via_the_engine() {
         use freemkv_engine::TitleResult;
@@ -3587,7 +3522,6 @@ mod tests {
     // The skip/stop/fail POLICY (decide_title) is unit-tested in freemkv-engine;
     // the CLI only classifies PipeFail into a TitleResult (above), so it doesn't re-test the policy.
 
-    // See docs/pipe.md#metadata_sink_detected_for_chapters_and_json — `chapters://` / `json://` are metadata sinks. `mux_stream` short-circuits
     #[test]
     fn metadata_sink_detected_for_chapters_and_json() {
         assert!(is_metadata_sink("chapters:///tmp/out.xml"));
@@ -3610,7 +3544,6 @@ mod tests {
         );
     }
 
-    // See docs/pipe.md#disc_copy_recovered_data_gates_zero_recovery — The disc→ISO sweep-success guard. `Disc::copy` returns `Ok` even…
     #[test]
     fn disc_copy_recovered_data_gates_zero_recovery() {
         // Whole disc unreadable → no data recovered → not a success.
@@ -3639,7 +3572,6 @@ mod tests {
         assert_eq!(parse_error_code("Eabc"), None);
     }
 
-    // See docs/pipe.md#fmt_err_renders_codes_to_english — A representative sample of codes must render to…
     #[test]
     fn fmt_err_renders_codes_to_english() {
         // E6009 NoStreams — the Theme A zero-output error. Code now prefixed,
@@ -3679,7 +3611,6 @@ mod tests {
         assert!(s.contains("deadbeef"), "hash not substituted: {s}");
     }
 
-    // See docs/pipe.md#key_service_failures_do_not_render_as_a_missing_disc_key — What the operator actually reads. During a seven-hour…
     #[test]
     fn key_service_failures_do_not_render_as_a_missing_disc_key() {
         let missing = fmt_err_str("E7022: 422eb0");
@@ -3753,7 +3684,6 @@ mod tests {
         assert!(s.contains("42") && !s.contains("0x"), "got: {s}");
     }
 
-    // See docs/pipe.md#fmt_err_unknown_code_uses_generic_wrapper — A code with NO locale entry falls back…
     #[test]
     fn fmt_err_unknown_code_uses_generic_wrapper() {
         // E1234 has no locale entry; the generic wrapper keeps the code.
@@ -3781,7 +3711,6 @@ mod tests {
 
     // ── negative path: no-keydb AACS disc → E7022 surfaced in English ───────
 
-    // See docs/pipe.md#no_keydb_aacs_disc_surfaces_e7022_in_english — End-to-end negative-path coverage: when the decrypt gate
     #[test]
     fn no_keydb_aacs_disc_surfaces_e7022_in_english() {
         // The error pipe_disc returns, rendered for the user.
@@ -3844,7 +3773,6 @@ mod tests {
         assert_eq!(pct, 100.0);
     }
 
-    // See docs/pipe.md#disc_damage_unread_is_not_lost — A healthy in-progress rip (zero read errors, large…
     #[test]
     fn disc_damage_unread_is_not_lost() {
         let p = libfreemkv::progress::PassProgress {
@@ -4285,7 +4213,6 @@ mod tests {
         assert_eq!(s[1].label(), "online", "online service is the fallback");
     }
 
-    // See docs/pipe.md#build_key_sources_drops_ssrf_rejected_url — SSRF guard: a `--key-url` that resolves to an…
     #[test]
     fn build_key_sources_drops_ssrf_rejected_url() {
         // url-only, metadata endpoint → rejected → zero sources.
@@ -4350,7 +4277,6 @@ mod tests {
         assert!(!parse_flags(&v(&[])).unwrap().force);
     }
 
-    // See docs/pipe.md#keydb_does_not_take_the_following_flag_as_its_path — `--keydb` must not accept the next FLAG as…
     #[test]
     fn keydb_does_not_take_the_following_flag_as_its_path() {
         let e = parse_flags(&v(&["--keydb", "--raw"]))
@@ -4365,7 +4291,6 @@ mod tests {
         assert!(f.raw, "--raw must survive a well-formed --keydb");
     }
 
-    // See docs/pipe.md#no_value_flag_takes_the_following_flag_as_its_value — EVERY value-taking flag must refuse the next FLAG…
     #[test]
     fn no_value_flag_takes_the_following_flag_as_its_value() {
         // Derived from VALUE_FLAGS, not hand-listed: a hand-listed version
@@ -4487,7 +4412,6 @@ mod tests {
         std::env::temp_dir().join(format!("freemkv_test_{}_{}_{}", tag, std::process::id(), n))
     }
 
-    // See docs/pipe.md#temp_dest — A destination URL whose path is unique and…
     fn temp_dest(scheme: &str, tag: &str) -> String {
         format!("{scheme}://{}", temp_path(tag).display())
     }
@@ -4656,7 +4580,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
-    // See docs/pipe.md#dir_dest_existing_file_rejected_even_with_force — disc:// → dir:// where the dir:// target is…
     #[test]
     fn dir_dest_existing_file_rejected_even_with_force() {
         let f = temp_path("dir_isfile");
@@ -4825,7 +4748,6 @@ mod tests {
 
     // ── predicates ───────────────────────────────────────────────────────────
 
-    // See docs/pipe.md#raw_and_multipass_require_a_drive_source — `--raw` / `--multipass` are DRIVE flags, gated on…
     #[test]
     fn raw_and_multipass_require_a_drive_source() {
         assert!(preflight("iso://in.iso", "iso://out.iso", false, true).is_err());
@@ -4847,7 +4769,6 @@ mod tests {
 
     // ── null:// multi-title routing fix ──────────────────────────────────────
 
-    // See docs/pipe.md#null_dest_multi_title_routes_all_to_sink — Regression: `null://` on a MULTI-title scanned source must…
     #[test]
     fn null_dest_multi_title_routes_all_to_sink() {
         let titles = Some(vec![
@@ -4887,7 +4808,6 @@ mod tests {
         }
     }
 
-    // See docs/pipe.md#demux_dest_multi_title_urls_carry_scheme — `demux://` multi-title routing: each title gets its own
     #[test]
     fn demux_dest_multi_title_urls_carry_scheme() {
         let titles = Some(vec![
@@ -4911,7 +4831,6 @@ mod tests {
         }
     }
 
-    // See docs/pipe.md#kind_filter_dest_multi_title_urls_carry_own_scheme — A multi-title `video://` (kind-filter) dest must carry its…
     #[test]
     fn kind_filter_dest_multi_title_urls_carry_own_scheme() {
         for scheme in ["video", "audio", "sub"] {
@@ -4943,7 +4862,6 @@ mod tests {
         }
     }
 
-    // See docs/pipe.md#mp4_skip_reasons_render_distinct_resolving_strings — Every `mp4://` exclusion reason renders a DISTINCT, resolving…
     #[test]
     fn mp4_skip_reasons_render_distinct_resolving_strings() {
         let variants = [
@@ -5070,7 +4988,6 @@ mod tests {
         );
     }
 
-    // See docs/pipe.md#dropped_device_flags_are_unknown — The dropped `--device` / `-d` flags: the device…
     #[test]
     fn dropped_device_flags_are_unknown() {
         for bad in [
@@ -5086,7 +5003,6 @@ mod tests {
         }
     }
 
-    // See docs/pipe.md#value_flag_set_matches_parser — The guard `cli_entry::VALUE_FLAGS`' doc comment names, and which…
     #[test]
     fn value_flag_set_matches_parser() {
         // The arity table, written out rather than read back from the code
@@ -5158,7 +5074,6 @@ mod tests {
         }
     }
 
-    // See docs/pipe.md#retired_value_flags_are_rejected_by_the_parser — The other half of the arity contract: `cli_entry::RETIRED_VALUE_FLAGS`
     #[test]
     fn retired_value_flags_are_rejected_by_the_parser() {
         for flag in crate::cli_entry::RETIRED_VALUE_FLAGS {
@@ -5354,7 +5269,6 @@ mod tests {
         );
     }
 
-    // See docs/pipe.md#fatal_operation_keys_all_resolve — Each operation name key the fatal block can…
     #[test]
     fn fatal_operation_keys_all_resolve() {
         for key in [
@@ -5398,7 +5312,6 @@ mod tests {
     }
 }
 
-// See docs/pipe.md#verdict_tests — The decisions that separate "the rip worked" from…
 #[cfg(test)]
 mod verdict_tests {
     use super::{
@@ -5423,7 +5336,6 @@ mod verdict_tests {
         Output::new(false, true)
     }
 
-    // See docs/pipe.md#a_completed_but_lossy_mux_names_the_undelivered_stream — A mux that `completed` can still be LOSSY.…
     #[test]
     fn a_completed_but_lossy_mux_names_the_undelivered_stream() {
         // Pin the catalog so the assertion reads the English wording regardless of
@@ -5461,7 +5373,6 @@ mod verdict_tests {
         );
     }
 
-    // See docs/pipe.md#a_completed_mux_that_dropped_payload_bytes_says_how_much_it_lost — A mux that dropped PAYLOAD BYTES is lossy…
     #[test]
     fn a_completed_mux_that_dropped_payload_bytes_says_how_much_it_lost() {
         crate::strings::set_locale("en");
@@ -5504,7 +5415,6 @@ mod verdict_tests {
         Output::new(false, false)
     }
 
-    // See docs/pipe.md#a_truncated_mux_is_a_failure_not_a_success — EVERY CLI mux funnels its result through `finalize_mux`…
     #[test]
     fn a_truncated_mux_is_a_failure_not_a_success() {
         let events = super::CliMuxEvents::new(quiet(), "mkv:///out/x.mkv".into(), true);
@@ -5543,7 +5453,6 @@ mod verdict_tests {
         }
     }
 
-    // See docs/pipe.md#copy_verdict_reports_a_halt_and_a_zero_recovery_as_failures — Both failure verdicts arrive from the engine as…
     #[test]
     fn copy_verdict_reports_a_halt_and_a_zero_recovery_as_failures() {
         // Ctrl-C after 5 GB: a partial ISO, resumable from the mapfile.
@@ -5575,7 +5484,6 @@ mod verdict_tests {
         );
     }
 
-    // See docs/pipe.md#a_partial_recovery_is_never_graded_as_a_clean_image — A sweep that LOST sectors is not a…
     #[test]
     fn a_partial_recovery_is_never_graded_as_a_clean_image() {
         // 4 KiB unreadable out of 25 GB: two sectors of the user's film, gone.
@@ -5600,7 +5508,6 @@ mod verdict_tests {
         );
     }
 
-    // See docs/pipe.md#a_lossy_copy_reports_its_loss_and_fails_the_exit_code — Only a whole image is a success, and…
     #[test]
     fn a_lossy_copy_reports_its_loss_and_fails_the_exit_code() {
         assert!(disc_copy_succeeded(CopyVerdict::Complete));
@@ -5637,7 +5544,6 @@ mod verdict_tests {
         );
     }
 
-    // See docs/pipe.md#the_disc_copy_options_honour_raw_multipass_and_progress — `decrypt: !raw` inverted writes a CIPHERTEXT ISO under…
     #[test]
     fn the_disc_copy_options_honour_raw_multipass_and_progress() {
         let nop = |_: &libfreemkv::progress::PassProgress| true;
@@ -5663,7 +5569,6 @@ mod verdict_tests {
         assert!(raw.progress.is_some());
     }
 
-    // See docs/pipe.md#a_halted_or_holed_extraction_exits_nonzero — `dir://` extraction hands its bool straight to the…
     #[test]
     fn a_halted_or_holed_extraction_exits_nonzero() {
         assert!(extract_succeeded(false, true));
@@ -5679,7 +5584,6 @@ mod verdict_tests {
         assert!(!extract_succeeded(true, true));
     }
 
-    // See docs/pipe.md#a_single_title_rip_never_downgrades_a_failure_to_a_skip — One job and a named title can never…
     #[test]
     fn a_single_title_rip_never_downgrades_a_failure_to_a_skip() {
         use freemkv_engine::{TitleAction, TitleResult, decide_title};
@@ -5740,7 +5644,6 @@ mod verdict_tests {
         })
     }
 
-    // See docs/pipe.md#a_requested_language_absent_from_the_title_is_an_error_for_a_single_title — `-a jpn` against a title that carries only…
     #[test]
     fn a_requested_language_absent_from_the_title_is_an_error_for_a_single_title() {
         let mut title = libfreemkv::DiscTitle::empty();
@@ -5800,7 +5703,6 @@ mod disc_gate_tests {
     use super::needs_pre_mux_title_key;
     use libfreemkv::DiscFormat;
 
-    // See docs/pipe.md#every_format_but_dvd_is_key_checked_before_the_mux — The per-title decrypt gate runs for every format…
     #[test]
     fn every_format_but_dvd_is_key_checked_before_the_mux() {
         for f in [
@@ -5878,7 +5780,6 @@ mod iso_key_tests {
         }
     }
 
-    // See docs/pipe.md#aacs_unit_keys_are_forwarded_from_the_scan — The keys the scan resolved must be the…
     #[test]
     fn aacs_unit_keys_are_forwarded_from_the_scan() {
         let out = Output::new(false, true);
@@ -5918,7 +5819,6 @@ mod build_jobs_edge_tests {
     use crate::output::Output;
     use libfreemkv::parse_url;
 
-    // See docs/pipe.md#an_empty_scanned_title_list_still_builds_a_job — A scanned source whose title list came back…
     #[test]
     fn an_empty_scanned_title_list_still_builds_a_job() {
         let out = Output::new(false, true);
@@ -5936,7 +5836,6 @@ mod build_jobs_edge_tests {
         assert_eq!(jobs[0].0, None, "no title was selected, so no index");
     }
 
-    // See docs/pipe.md#one_title_into_a_directory_is_still_named_per_title — One title going to a DIRECTORY is named…
     #[test]
     fn one_title_into_a_directory_is_still_named_per_title() {
         let out = Output::new(false, true);
@@ -5972,7 +5871,6 @@ mod build_jobs_edge_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // See docs/pipe.md#an_expanded_disc_selection_refuses_a_single_file_destination — `-t all` on a disc must be REJECTED…
     #[test]
     fn an_expanded_disc_selection_refuses_a_single_file_destination() {
         let out = Output::new(false, true);
@@ -6022,7 +5920,6 @@ mod dest_is_source_tests {
         }
     }
 
-    // See docs/pipe.md#the_same_file_under_two_spellings_is_recognised — The same file under two spellings is one…
     #[test]
     fn the_same_file_under_two_spellings_is_recognised() {
         let t = Tmp::new("spellings");
@@ -6063,7 +5960,6 @@ mod dest_is_source_tests {
         assert!(!same_file(None, &dest));
     }
 
-    // See docs/pipe.md#the_image_decrypt_path_actually_calls_the_guard — The guard is actually WIRED, not merely correct
     #[test]
     fn the_image_decrypt_path_actually_calls_the_guard() {
         let src = include_str!("pipe.rs").replace("\r\n", "\n");
@@ -6306,7 +6202,6 @@ mod dest_is_source_tests {
         );
     }
 
-    // See docs/pipe.md#the_preflight_gate_actually_calls_the_guard — The guard is WIRED into the gate that…
     #[test]
     fn the_preflight_gate_actually_calls_the_guard() {
         let src = include_str!("pipe.rs").replace("\r\n", "\n");
@@ -6399,7 +6294,6 @@ mod title_identity_tests {
         resolve_scanned_title, title_changed_message,
     };
 
-    // See docs/pipe.md#a_failed_all_titles_scan_aborts_instead_of_ripping_title_one — A `-t all` DISC rip whose upfront scan…
     #[test]
     fn a_failed_all_titles_scan_aborts_instead_of_ripping_title_one() {
         let scan = first_scan();
@@ -6420,7 +6314,6 @@ mod title_identity_tests {
         );
     }
 
-    // See docs/pipe.md#title — A title with a distinct playlist and distinct…
     fn title(playlist_id: u16, start_lba: u32) -> libfreemkv::DiscTitle {
         libfreemkv::DiscTitle {
             playlist: format!("{:05}.mpls", playlist_id),
@@ -6449,7 +6342,6 @@ mod title_identity_tests {
         ]
     }
 
-    // See docs/pipe.md#a_reordered_rescan_fails_loudly_instead_of_muxing_the_wrong_title — THE DEFECT. The re-scan returns the same titles…
     #[test]
     fn a_reordered_rescan_fails_loudly_instead_of_muxing_the_wrong_title() {
         let expected = TitleIdentity::of(&first_scan()[1]);
@@ -6563,7 +6455,6 @@ mod title_identity_tests {
         assert_ne!(TitleIdentity::of(&a), TitleIdentity::of(&b));
     }
 
-    // See docs/pipe.md#every_expanded_job_looks_up_the_identity_of_its_own_title — The `-t all` expansion and the identity list…
     #[test]
     fn every_expanded_job_looks_up_the_identity_of_its_own_title() {
         let scan = first_scan();

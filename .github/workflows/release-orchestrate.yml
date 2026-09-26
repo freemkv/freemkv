@@ -550,11 +550,11 @@ jobs:
               # forces the announcement BEFORE the release exists. The release itself
               # publishes these notes to the site as its LAST step (publish_site_changelog).
               if [ "${WEBSITE_SKIP:-0}" != "1" ]; then
-                local notes="$CANONICAL_ROOT/freemkv/docs/consumer-changelog/$VERSION.md"
+                local notes="$CANONICAL_ROOT/freemkv/.github/release-notes/$VERSION.md"
                 if [ ! -s "$notes" ]; then
-                  die "consumer release notes missing/empty: freemkv/docs/consumer-changelog/$VERSION.md — write them (they publish to the live site as the announcement at the END of the release). Bypass: WEBSITE_SKIP=1."
+                  die "consumer release notes missing/empty: freemkv/.github/release-notes/$VERSION.md — write them (they publish to the live site as the announcement at the END of the release). Bypass: WEBSITE_SKIP=1."
                 fi
-                ok "consumer notes present: docs/consumer-changelog/$VERSION.md"
+                ok "consumer notes present: .github/release-notes/$VERSION.md"
               fi
             fi
           }
@@ -1608,7 +1608,7 @@ jobs:
           # publish_site_changelog — the release IS the sole writer of the live site
           # changelog, and it writes it DEAD LAST (after every tag + main advance). The
           # consumer notes are authored in the freemkv repo at
-          # docs/consumer-changelog/<version>.md (non-public, flows dev→qa); this renders
+          # .github/release-notes/<version>.md (non-public, flows dev→qa); this renders
           # them into a `## <version>` entry, dates it, prepends it above the newest entry
           # on marketing, and pushes — which is the public announcement (Pages
           # deploy + RSS→Discord). Because nobody hand-pushes the site changelog, a release
@@ -1616,11 +1616,11 @@ jobs:
           # Idempotent: if the site already has `## <version>`, it no-ops (a re-run).
           publish_site_changelog() {
             say "step 8a: publish consumer changelog → the site (this is the public announcement)"
-            local notes="$CANONICAL_ROOT/freemkv/docs/consumer-changelog/$VERSION.md"
+            local notes="$CANONICAL_ROOT/freemkv/.github/release-notes/$VERSION.md"
             local site_cl="$WEBSITE_DIR/$WEBSITE_CHANGELOG_REL"
 
             if [ "${WEBSITE_SKIP:-0}" = "1" ]; then warn "WEBSITE_SKIP=1 — not publishing site changelog"; return 0; fi
-            [ -s "$notes" ]   || die "consumer notes missing/empty: $notes (write docs/consumer-changelog/$VERSION.md; bypass WEBSITE_SKIP=1)"
+            [ -s "$notes" ]   || die "consumer notes missing/empty: $notes (write .github/release-notes/$VERSION.md; bypass WEBSITE_SKIP=1)"
             [ -f "$site_cl" ] || die "site changelog not checked out at $site_cl (WEBSITE_SKIP=1 to bypass)"
 
             if grep -Eq "^## +$VERSION([[:space:]]|\$)" "$site_cl"; then
@@ -1628,7 +1628,7 @@ jobs:
               return 0
             fi
             if $DRY_RUN; then
-              printf '  [dry-run] prepend "## %s" (dated %s) from docs/consumer-changelog/%s.md to the site changelog + push\n' "$VERSION" "$RELEASE_DATE" "$VERSION"
+              printf '  [dry-run] prepend "## %s" (dated %s) from .github/release-notes/%s.md to the site changelog + push\n' "$VERSION" "$RELEASE_DATE" "$VERSION"
               return 0
             fi
 

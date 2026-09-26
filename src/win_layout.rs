@@ -6,8 +6,6 @@
 //! rectangles used to position controls. Kept as pure functions of
 //! `(dpi, client size, page state)` so the arithmetic is testable without a
 //! live `HWND`; not `cfg(windows)` since it holds no Win32 types.
-//!
-//! See `docs/win-layout.md` for why PerMonitorV2 awareness requires this.
 
 use crate::ui::Page;
 
@@ -403,11 +401,9 @@ pub fn form_metrics(dpi: u32) -> FormMetrics {
 /// columns via `MF::MENUBARBREAK` so a popup taller than the screen doesn't
 /// need to scroll.
 ///
-/// `items` is the total entry count, `item_h` is the caller's estimate of one
-/// menu row's height in physical pixels (`SM::CYMENU`, with zero or negative
-/// treated as one), and `screen_h` is the screen height in physical pixels.
-/// Returns the row count per column. See `docs/win-layout.md` for why the
-/// budget is four fifths of screen height and why columns are balanced.
+/// `items` is the total entry count, `item_h` is the caller's estimate of one menu row's height
+/// in physical pixels (`SM::CYMENU`, with zero or negative treated as one), and `screen_h` is
+/// the screen height in physical pixels. Returns the row count per column.
 #[must_use]
 pub fn menu_column_rows(items: usize, item_h: i32, screen_h: i32) -> usize {
     if items == 0 {
@@ -893,9 +889,8 @@ mod tests {
         assert_eq!(menu_column_rows(0, 19, 1080), 1);
     }
 
-    // Settings pages stack downwards from `top` with no scrolling, so a page
-    // that grows past the tab's page area puts controls off the bottom of
-    // the window at every DPI. See docs/win-layout.md for the tallest pages.
+    // Settings pages stack downwards from `top` with no scrolling, so a page that grows past
+    // the tab's page area puts controls off the bottom of the window at every DPI.
     #[test]
     fn the_tallest_settings_pages_still_fit_the_settings_window() {
         // COUNT THE REAL PAGE, don't restate it: hand-written row counts left

@@ -272,8 +272,6 @@ mod tests {
         }
     }
 
-    // See docs/platform-derived-paths.md — Windows regression test for
-    // paths going relative when USERPROFILE/APPDATA are unset.
     #[cfg(windows)]
     #[test]
     fn derived_paths_stay_absolute_without_userprofile_or_appdata() {

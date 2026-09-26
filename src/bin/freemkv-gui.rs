@@ -12,8 +12,6 @@
 //! shell lives in `freemkv::win_app` / `freemkv::windows`, shared with
 //! `freemkv gui`, so the two entry points can't drift. On non-Windows
 //! targets this compiles to an empty `main`.
-//!
-//! See docs/freemkv-gui-bin.md for why this is a separate binary at all.
 #![windows_subsystem = "windows"]
 
 // Match `freemkv.exe`: the GUI does the same large, highly concurrent buffer

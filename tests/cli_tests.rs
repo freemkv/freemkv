@@ -37,9 +37,8 @@ fn help_shows_usage() {
     assert!(out.status.success());
 }
 
-// A flag the parser ACTS on must be findable in `--help`; the list is
-// written out (not scraped from the parser) so adding a flag without
-// documenting it fails here. See docs/cli-tests.md for full rationale.
+// A flag the parser ACTS on must be findable in `--help`; the list is written out (not scraped
+// from the parser) so adding a flag without documenting it fails here.
 #[test]
 fn every_flag_the_rip_parser_accepts_is_named_in_the_help() {
     // NOTE ON SCOPE: `--share`/`--mask` are NOT rip-parser flags (they belong

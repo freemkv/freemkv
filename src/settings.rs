@@ -369,9 +369,8 @@ impl Settings {
         }
     }
 
-    // Snap enum-valued and path fields back to defaults when unusable so the
-    // popup and engine always have a value to select/match on.
-    // See docs/settings-normalize.md — full field-by-field rationale.
+    // Snap enum-valued and path fields back to defaults when unusable so the popup and engine
+    // always have a value to select/match on.
     fn normalize(&mut self) {
         let d = Settings::default();
         let snap = |cur: &mut String, opts: &[&str], def: &str| {
@@ -684,9 +683,8 @@ mod normalize_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Running out of `.bad` slots must not leave the corrupt file where the
-    // next `save()` overwrites it with defaults.
-    // See docs/settings-preserve-overflow.md — why the oldest copy must win.
+    // Running out of `.bad` slots must not leave the corrupt file where the next `save()`
+    // overwrites it with defaults.
     #[test]
     fn a_full_set_of_bad_slots_still_moves_the_corrupt_file_out_of_harms_way() {
         let dir = scratch("overflow");
@@ -923,9 +921,8 @@ mod normalize_tests {
         assert!(u.force && !u.raw && !u.keep_iso);
     }
 
-    // The update-check URL's `owner/repo` must match where releases are
-    // actually published; pulled via `include_str!` and cross-checked
-    // against the README. See docs/settings-update-check-url.md for why.
+    // The update-check URL's `owner/repo` must match where releases are actually published;
+    // pulled via `include_str!` and cross-checked against the README.
     #[test]
     fn update_check_url_names_the_repo_releases_are_actually_published_to() {
         let src = include_str!("settings.rs");

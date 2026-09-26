@@ -9,4 +9,4 @@ concurrency:
 jobs:
   comment-guard:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
-    uses: freemkv/.github/.github/workflows/guard-comment.yml@v1
+    uses: freemkv/.github/.github/workflows/guard-comment.yml@v2

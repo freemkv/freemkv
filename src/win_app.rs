@@ -5,9 +5,8 @@
 //! `run` below; `freemkv.exe` keeps the byte-for-byte CLI contract and
 //! reaches the same function via `freemkv gui`.
 //!
-//! This lives in the **lib**, not in a bin, so both binaries can call it, and
-//! is `cfg(target_os = "windows")` so it compiles to nothing elsewhere.
-//! See docs/win-app.md for why the two-binary split exists at all.
+//! This lives in the **lib**, not in a bin, so both binaries can call it, and is `cfg(target_os
+//! = "windows")` so it compiles to nothing elsewhere.
 
 /// Open the Windows desktop shell. Does not return until the window closes.
 pub fn run() {

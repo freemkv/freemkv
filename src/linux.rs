@@ -1,28 +1,9 @@
-//! Linux desktop shell — GTK4 + libadwaita.
+//! Linux desktop shell using GTK4 and libadwaita.
 //!
-//! Third native shell alongside `windows.rs` (winsafe / Win32) and `mac.rs`
-//! (objc2 / AppKit). Every user-facing decision comes from `ui.rs`, so the
-//! app is the same product on all three OSes; only how the widgets are drawn
-//! differs. See docs/linux-shell.md.
-//!
-//! The contract is the other shells' three steps and nothing else: `render`
-//! assigns `App::view()` to widgets, every click / menu pick / key goes to
-//! `App::dispatch`, and the returned `Effect`s are performed here. The
-//! toolkit-free part of the glue (action table, accelerator spelling, log
-//! append detection, …) lives in `linux_glue.rs` so its tests run on every CI
-//! leg, not only a Linux one.
-//!
-//! GNOME idioms instead of copies of the other shells: an `AdwHeaderBar`
-//! hamburger (no menubar), an `AdwPreferencesWindow` for Settings (changes are
-//! committed when it closes, the GNOME convention, rather than via OK/Cancel),
-//! `GtkFileDialog` / `GtkFileLauncher` / `GtkUriLauncher` so choosers and
-//! "show in folder" go through the XDG portals inside a Flatpak, and an
-//! `AdwToast` + `GNotification` when a rip finishes.
-//!
-//! WHY not `egui` / `iced` / Tauri: the project's stated invariant is that
-//! every shell looks 100% native on its OS. GTK4 + libadwaita is what a GNOME
-//! app looks like on Fedora, Ubuntu, and Pop!_OS in 2026, and what Flathub
-//! reviewers expect.
+//! Render `App::view()` into widgets, route input through `App::dispatch`, and
+//! perform the returned effects. Product decisions live in `ui.rs`; toolkit-free
+//! glue is tested through `linux_glue.rs` on every platform.
+//! File/URI operations use GTK portal-aware APIs for Flatpak compatibility.
 
 mod main_view;
 mod prefs;

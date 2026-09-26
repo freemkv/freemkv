@@ -6,8 +6,8 @@
 //!   (`freemkv::windows`) on Windows — over the shared `ui`/`engine`/`settings`
 //!   core.
 //!
-//! The dispatcher routes a CLI-style invocation to the CLI shell and a
-//! windowed launch to the desktop shell; see `freemkv::app_entry::wants_gui` and docs/main.md.
+//! The dispatcher routes a CLI-style invocation to the CLI shell and a windowed launch to the
+//! desktop shell via `freemkv::app_entry::wants_gui`.
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -122,7 +122,6 @@ fn launched_windowed() -> bool {
 }
 
 // Whether an executable path sits inside a macOS `.app` bundle.
-// See docs/main.md — is_app_bundle_path, why this is separated and tested.
 #[cfg(target_os = "macos")]
 fn is_app_bundle_path(p: &str) -> bool {
     p.contains(".app/Contents/MacOS/")
@@ -158,9 +157,8 @@ mod launch_tests {
     }
 }
 
-// Windows: never. An Explorer double-click is indistinguishable from a
-// `cmd` invocation; the windowed image is the separate `freemkv-gui.exe`.
-// See docs/main.md — launched_windowed (Windows).
+// Windows: never. An Explorer double-click is indistinguishable from a `cmd` invocation; the
+// windowed image is the separate `freemkv-gui.exe`.
 #[cfg(target_os = "windows")]
 fn launched_windowed() -> bool {
     false

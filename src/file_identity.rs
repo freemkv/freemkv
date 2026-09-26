@@ -6,8 +6,6 @@
 //! [`same_file`](crate::file_identity::same_file) for the full check. Same
 //! shape as `title_identity`: one
 //! question, one answer, declared by both crate roots.
-//!
-//! See docs/file_identity.md for why this was answered twice and diverged.
 
 /// Whether two paths name the same existing file.
 ///
@@ -60,8 +58,6 @@ pub fn file_id(_path: &std::path::Path) -> Option<(u64, u64)> {
 /// fights a sharing mode the sink may hold and can still open a directory
 /// (`dir://` sources and destinations go through this guard too). Any
 /// failure answers `None`, leaving the canonical-path comparison to stand.
-///
-/// See docs/file_identity.md for why this is now tested unconditionally.
 #[cfg(windows)]
 pub fn file_id(path: &std::path::Path) -> Option<(u64, u64)> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -160,9 +156,8 @@ mod tests {
         );
     }
 
-    // A HARDLINK: both names canonicalize to themselves, so only filesystem
-    // identity sees that writing either one destroys the other. Runs on
-    // Windows too — see docs/file_identity.md for why that used to not be true.
+    // A HARDLINK: both names canonicalize to themselves, so only filesystem identity sees that
+    // writing either one destroys the other. Runs on Windows too.
     #[test]
     fn a_hardlink_is_the_same_file_even_though_the_paths_differ() {
         let t = Tmp::new("hardlink");
