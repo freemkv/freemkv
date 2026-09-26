@@ -4,10 +4,8 @@ Name=freemkv
 GenericName=Disc Ripper
 Comment=Rip DVD, Blu-ray and UHD discs to MKV / MP4 / M2TS
 Categories=AudioVideo;Video;
-# The Flatpak entry-point launches the shared `freemkv` binary in its GUI
-# mode. `freemkv gui` on any OS opens the same window; `.desktop` files
-# never inherit a terminal `$LANG`, so the shell reads it via `apply_locale`.
-Exec=freemkv gui
+# A bare launch of the app build opens the window.
+Exec=freemkv
 Icon=org.freemkv.FreeMKV
 Terminal=false
 StartupNotify=true

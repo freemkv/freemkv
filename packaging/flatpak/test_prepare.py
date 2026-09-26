@@ -37,6 +37,16 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("v1.7.6", json.dumps(manifest))
         self.assertFalse(any(s.get("type") == "patch" for s in module["sources"]))
 
+    def test_bare_command_launches_the_gui_build(self):
+        manifest = prepare.manifest("a" * 64)
+        module = manifest["modules"][0]
+        self.assertEqual(manifest["command"], "freemkv")
+        self.assertIn("--features gui --bin freemkv", module["build-commands"][0])
+        self.assertEqual(len(module["sources"]), 1)
+        self.assertNotIn("freemkv-gui", json.dumps(manifest))
+        desktop = (Path(prepare.__file__).parent / "org.freemkv.FreeMKV.desktop").read_text()
+        self.assertIn("\nExec=freemkv\n", desktop)
+
     def test_metadata_without_release_history_fails(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "metadata.xml"

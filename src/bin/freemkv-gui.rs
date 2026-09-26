@@ -1,17 +1,17 @@
-//! `freemkv-gui.exe` — the image a Windows user double-clicks.
+//! The windowed image of the Windows app, shipped as `freemkv.exe`.
 //!
 //! Two binaries from one crate, distinguished by PE subsystem:
 //!
 //! ```text
-//! freemkv.exe      console subsystem   the CLI contract, unchanged
-//!                                      (`freemkv gui` still opens the window)
-//! freemkv-gui.exe  windows subsystem   double-click → the window, no console
+//! freemkv.com  console subsystem   the `freemkv` bin: CLI for any arguments,
+//!                                  bare launch starts this image and returns
+//! freemkv.exe  windows subsystem   this bin: double-click → the window
 //! ```
 //!
-//! No argument parsing here — the CLI lives in `freemkv.exe`. The window
-//! shell lives in `freemkv::win_app` / `freemkv::windows`, shared with
-//! `freemkv gui`, so the two entry points can't drift. On non-Windows
-//! targets this compiles to an empty `main`.
+//! No argument parsing here — the CLI lives in the console image. The window
+//! shell lives in `freemkv::win_app` / `freemkv::windows`, shared by both, so
+//! the two entry points can't drift. App build only (`required-features`); on
+//! non-Windows targets this compiles to an empty `main`.
 #![windows_subsystem = "windows"]
 
 // Match `freemkv.exe`: the GUI does the same large, highly concurrent buffer

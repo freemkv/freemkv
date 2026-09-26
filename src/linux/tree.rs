@@ -164,10 +164,10 @@ impl TitleTree {
 
         let widget = gtk::ScrolledWindow::builder()
             .child(&view)
-            .has_frame(true)
             .vexpand(true)
             .hexpand(true)
             .build();
+        super::main_view::card(&widget);
         TitleTree {
             widget,
             selection,

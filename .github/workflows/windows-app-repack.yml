@@ -71,6 +71,12 @@ jobs:
             Write-Output "::error::$env:TAG has no freemkv-gui.rs — this is not a packaging omission, it needs a release"
             exit 1
           }
+          # Post-split tags (`gui` feature) package freemkv.exe + freemkv.com;
+          # this repack only knows the pre-split single-image layout.
+          if (Select-String -Quiet -Pattern 'required-features = \["gui"\]' Cargo.toml) {
+            Write-Output "::error::$env:TAG uses the gui-feature layout — repack it with release.yml's build-windows packaging, not this workflow"
+            exit 1
+          }
 
       - name: Build
         working-directory: freemkv

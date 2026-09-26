@@ -64,22 +64,30 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libgtk-4-dev libadwaita-1-dev \
-            dpkg-dev lintian desktop-file-utils
+            musl-tools dpkg-dev lintian desktop-file-utils
       - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-unknown-linux-musl }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with: { workspaces: freemkv }
-      - name: Build native GUI and package
+      - name: Build app and static CLI packages
         working-directory: freemkv
         run: |
-          cargo build --release --bin freemkv
-          python3 packaging/deb/build.py --output ../deb-package
+          set -euo pipefail
+          cargo build --release --features gui --bin freemkv
+          python3 packaging/deb/build.py --package freemkv --output ../deb-package
+          cargo build --release --target x86_64-unknown-linux-musl --bin freemkv
+          python3 packaging/deb/build.py --package freemkv-cli --output ../deb-package \
+            --binary target/x86_64-unknown-linux-musl/release/freemkv
           cp ../revisions.json ../deb-package/revisions.json
-      - name: Lint package and desktop entry
+      - name: Lint packages and desktop entry
         run: |
+          set -euo pipefail
           desktop-file-validate freemkv/packaging/flatpak/org.freemkv.FreeMKV.desktop
-          lintian --fail-on error deb-package/freemkv-amd64.deb
-          dpkg-deb --info deb-package/freemkv-amd64.deb
-          dpkg-deb --contents deb-package/freemkv-amd64.deb
+          for deb in deb-package/freemkv-amd64.deb deb-package/freemkv-cli-amd64.deb; do
+            lintian --fail-on error "$deb"
+            dpkg-deb --info "$deb"
+            dpkg-deb --contents "$deb"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: deb-package
@@ -94,15 +102,19 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with: { name: deb-package, path: deb-package }
-      - name: Install into a clean Ubuntu 24.04 runtime
+      - name: Install app into a clean Ubuntu 24.04 runtime
+        shell: bash
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          set -euo pipefail
           apt-get update
           apt-get install -y --no-install-recommends ./deb-package/freemkv-amd64.deb \
             xvfb xauth dbus-x11 python3 fonts-dejavu-core
           dpkg-query -W -f='${Status}\n' freemkv | grep -Fx 'install ok installed'
-          expected=$(python3 -c 'import json; print(json.load(open("deb-package/package.json"))["version"])')
+          dpkg-query -W libgtk-4-1 libadwaita-1-0
+          ldd /usr/bin/freemkv | grep -F libgtk-4.so
+          expected=$(python3 -c 'import json; print(json.load(open("deb-package/freemkv.json"))["version"])')
           freemkv --version | tee version.log
           awk -v expected="$expected" '$1 == expected { found=1 } END { exit !found }' version.log
       - name: Launch installed GUI without a terminal
@@ -113,9 +125,44 @@ jobs:
           chmod 755 "$GITHUB_WORKSPACE"
           status=0
           runuser -u tester -- xvfb-run --auto-servernum dbus-run-session -- \
-            timeout 15s env GDK_BACKEND=x11 /usr/bin/freemkv-gui > gui-launch.log 2>&1 || status=$?
+            timeout 15s env GDK_BACKEND=x11 /usr/bin/freemkv > gui-launch.log 2>&1 || status=$?
           cat gui-launch.log
           test "$status" -eq 124
+      - name: CLI package replaces the app and is static
+        shell: bash
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends ./deb-package/freemkv-cli-amd64.deb
+          dpkg-query -W -f='${Status}\n' freemkv-cli | grep -Fx 'install ok installed'
+          if dpkg-query -W -f='${Status}\n' freemkv 2>/dev/null | grep -Fxq 'install ok installed'; then
+            echo "freemkv is still installed alongside freemkv-cli"; exit 1
+          fi
+          test ! -e /usr/share/applications/org.freemkv.FreeMKV.desktop
+          expected=$(python3 -c 'import json; print(json.load(open("deb-package/freemkv-cli.json"))["version"])')
+          /usr/bin/freemkv --version | tee cli-version.log
+          awk -v expected="$expected" '$1 == expected { found=1 } END { exit !found }' cli-version.log
+          (ldd /usr/bin/freemkv 2>&1 || true) | tee cli-ldd.log
+          grep -Eq 'statically linked|not a dynamic executable' cli-ldd.log
+          # A display must not matter: the CLI build prints usage and exits 2.
+          status=0
+          env DISPLAY=:99 WAYLAND_DISPLAY=wayland-0 /usr/bin/freemkv > cli-usage.log 2>&1 || status=$?
+          cat cli-usage.log
+          test "$status" -eq 2
+      - name: App package replaces the CLI
+        shell: bash
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends ./deb-package/freemkv-amd64.deb
+          dpkg-query -W -f='${Status}\n' freemkv | grep -Fx 'install ok installed'
+          if dpkg-query -W -f='${Status}\n' freemkv-cli 2>/dev/null | grep -Fxq 'install ok installed'; then
+            echo "freemkv-cli is still installed alongside freemkv"; exit 1
+          fi
+          ldd /usr/bin/freemkv | grep -F libgtk-4.so
+          test -f /usr/share/applications/org.freemkv.FreeMKV.desktop
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -123,6 +170,7 @@ jobs:
           path: |
             version.log
             gui-launch.log
+            cli-*.log
           retention-days: 90
 
   publish:
@@ -141,9 +189,12 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          cd deb-package
+          for deb in freemkv-amd64.deb freemkv-cli-amd64.deb; do sha256sum "$deb" > "$deb.sha256"; done
           for attempt in $(seq 1 90); do
             if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-              gh release upload "$RELEASE_TAG" deb-package/*.deb --clobber
+              gh release upload "$RELEASE_TAG" freemkv-amd64.deb freemkv-amd64.deb.sha256 \
+                freemkv-cli-amd64.deb freemkv-cli-amd64.deb.sha256 --clobber
               exit 0
             fi
             echo "Waiting for release $RELEASE_TAG ($attempt/90)"

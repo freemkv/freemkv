@@ -178,8 +178,8 @@ fn init_logging(args: &[String]) -> Vec<PendingDiag> {
     diags
 }
 
-// Every word the dispatcher matches args[1] against ("gui" is intercepted earlier by
-// app_entry::wants_gui, so it's deliberately absent).
+// Every word the dispatcher matches args[1] against. "gui" opens the window in the app
+// build; in the CLI build it reaches `run` and prints where to get the app.
 #[cfg(test)]
 pub(crate) const SUBCOMMANDS: &[&str] = &["info", "update-keys", "version", "help", "gui"];
 
@@ -230,6 +230,11 @@ pub fn run(args: Vec<String>) {
 
         "info" => info_cmd(&args[2..]),
         "update-keys" => update_keys(&args[2..]),
+        // Only reached in the CLI build; the app build opens the window before `run`.
+        "gui" => {
+            eprintln!("{}", crate::strings::get("error.gui_not_in_build"));
+            std::process::exit(2);
+        }
         // NOTE: deliberately no `remux`/conversion verb. The operation IS the
         // URL pair: `freemkv <source-url> <dest-url> [opts]` — source→dest is
         // the whole grammar, so a conversion "command" would be redundant.

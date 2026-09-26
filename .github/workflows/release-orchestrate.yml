@@ -1800,20 +1800,33 @@ jobs:
             fi
 
             local freemkv_expected=(
-              # desktop app (macOS .dmg per arch, Windows .zip, Linux AppImage)
+              # app
               freemkv-aarch64-macos.dmg
+              freemkv-aarch64-macos.zip
               freemkv-x86_64-macos.dmg
+              freemkv-x86_64-macos.zip
+              freemkv-x86_64-windows-setup.exe
               freemkv-x86_64-windows.zip
               freemkv-x86_64-linux.AppImage
               freemkv-amd64.deb
-              freemkv-x86_64.flatpak
-              # bare CLI binaries
+              freemkv-x86_64-linux.flatpak
+              freemkv-flatpak-package.tar.gz
+              # CLI
+              freemkv-cli-aarch64-macos
+              freemkv-cli-x86_64-macos
+              freemkv-cli-x86_64-linux
+              freemkv-cli-aarch64-linux
+              freemkv-cli-x86_64-windows.exe
+              freemkv-cli-amd64.deb
+              # legacy CLI aliases, kept for one release
               freemkv-aarch64-macos
               freemkv-x86_64-macos
               freemkv-x86_64-linux
               freemkv-aarch64-linux
               freemkv-x86_64-windows.exe
             )
+            # Each asset ships with a .sha256.
+            freemkv_expected+=("${freemkv_expected[@]/%/.sha256}")
             local autorip_expected=(
               autorip-aarch64-macos
               autorip-x86_64-linux

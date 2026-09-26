@@ -14,17 +14,20 @@ path = "src/lib.rs"
 name = "freemkv"
 path = "src/main.rs"
 
-# The double-clickable Windows image. `freemkv.exe` is console-subsystem and
-# must stay the CLI byte-for-byte, and a PE subsystem is fixed at link time —
-# so the windowed launch has to be a second binary, not a runtime branch.
-#
-# Cargo has no `[target.'cfg(windows)'.bin]`, so the platform gate lives inside
-# the file: on macOS and Linux it is an empty `main` that links nothing. It is
-# NOT behind `required-features`, deliberately — a feature that CI forgets to
-# pass would silently ship the release zip without the app in it.
+# The Windows app's windowed image. A PE subsystem is fixed at link time, so it
+# is a second binary; CI renames it to `freemkv.exe` beside the console image
+# renamed to `freemkv.com`. Empty on macOS and Linux.
 [[bin]]
 name = "freemkv-gui"
 path = "src/bin/freemkv-gui.rs"
+required-features = ["gui"]
+
+# The desktop app. Without it the build is the CLI, with no UI dependencies.
+[features]
+default = []
+gui = ["dep:winsafe", "dep:windows", "dep:gtk4", "dep:libadwaita",
+       "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation",
+       "dep:objc2-user-notifications", "dep:block2"]
 
 [dependencies]
 freemkv-engine = "1.7"
@@ -52,10 +55,10 @@ mimalloc = "0.1"
 # PINNED with `=`: winsafe is pre-1.0 and moves on a quarterly cadence, so it
 # reserves the right to break the API. Upgrade deliberately, never implicitly.
 [target.'cfg(target_os = "windows")'.dependencies]
-winsafe = { version = "=0.0.29", features = ["gui", "shell", "advapi"] }
+winsafe = { optional = true, version = "=0.0.29", features = ["gui", "shell", "advapi"] }
 # Rip-finished toast (WinRT `ToastNotificationManager`), which winsafe does not
 # wrap. PINNED with `=`, same rationale as winsafe.
-windows = { version = "=0.62", features = ["UI_Notifications", "Data_Xml_Dom", "Foundation"] }
+windows = { optional = true, version = "=0.62", features = ["UI_Notifications", "Data_Xml_Dom", "Foundation"] }
 
 # ── Linux desktop shell (GTK4 + libadwaita) ────────────────────────────────
 # GTK4 is what Flathub reviewers expect and what the GNOME desktop draws
@@ -73,12 +76,12 @@ windows = { version = "=0.62", features = ["UI_Notifications", "Data_Xml_Dom", "
 # src/linux.rs / src/linux_app.rs — see the matching cfg in src/lib.rs
 # and src/main.rs.
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
-gtk4 = { version = "=0.9", features = ["v4_10"] }
-libadwaita = { version = "=0.7", features = ["v1_4"] }
+gtk4 = { optional = true, version = "=0.9", features = ["v4_10"] }
+libadwaita = { optional = true, version = "=0.7", features = ["v1_4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = [
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { optional = true, version = "0.3", features = [
   "NSApplication", "NSWindow", "NSView", "NSControl", "NSButton",
   "NSTextField", "NSPopUpButton", "NSMenu", "NSMenuItem", "NSResponder",
   "NSProgressIndicator", "NSBox", "NSOutlineView", "NSTableView",
@@ -91,19 +94,19 @@ objc2-app-kit = { version = "0.3", features = [
   "NSTabView", "NSTabViewItem", "NSStepper", "NSSlider", "NSWorkspace",
   "NSPasteboardItem", "NSFilePromiseReceiver", "NSSecureTextField",
 ] }
-objc2-foundation = { version = "0.3", features = [
+objc2-foundation = { optional = true, version = "0.3", features = [
   "NSString", "NSGeometry", "NSArray", "NSObjCRuntime", "NSNotification",
   "NSDate", "NSTimer", "NSRunLoop", "NSURL", "NSValue", "NSDictionary",
   "NSEnumerator", "NSError", "NSRange", "NSAttributedString", "NSDictionary",
   "NSBundle",
 ] }
 # Rip-finished notification. PINNED with `=`, same rationale as winsafe.
-objc2-user-notifications = { version = "=0.3", default-features = false, features = [
+objc2-user-notifications = { optional = true, version = "=0.3", default-features = false, features = [
   "std", "block2", "bitflags", "UNNotification", "UNNotificationContent",
   "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound",
   "UNNotificationTrigger", "UNUserNotificationCenter",
 ] }
-block2 = "=0.6"
+block2 = { version = "=0.6", optional = true }
 
 # Resolve the freemkv crates from their GIT TAGS. They are OFF crates.io
 # (libfreemkv git-deps the firmware crate, and keysources deps libfreemkv), so

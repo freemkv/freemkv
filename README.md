@@ -12,7 +12,9 @@
 
 # freemkv
 
-Open source 4K UHD / Blu-ray / DVD backup tool — a **command-line tool and a native desktop app in one binary**. On the command line it's two arguments — source and destination; stream URLs let you rip, remux, and transfer between any combination of disc, file, and network. Or open the desktop app (macOS today, Windows next; `freemkv gui` or the `.app`): pick titles and tracks, choose a format, press Rip. Same binary, same engine — the app just opens a window.
+Open source 4K UHD / Blu-ray / DVD backup tool — a **command-line tool and a native desktop app** for macOS, Windows and Linux. On the command line it's two arguments — source and destination; stream URLs let you rip, remux, and transfer between any combination of disc, file, and network. Or open the desktop app: pick titles and tracks, choose a format, press Rip. Same engine either way.
+
+Two builds ship, both installed as `freemkv`: the **app** (the window, plus the full CLI for any command) and the **CLI** (command line only, no UI libraries). Install one or the other.
 
 DVDs (CSS) need no setup. Blu-ray and UHD (AACS) require a `keydb.cfg` supplying disc-specific volume unique keys.
 
@@ -20,26 +22,25 @@ DVDs (CSS) need no setup. Blu-ray and UHD (AACS) require a `keydb.cfg` supplying
 
 ### 1. Install
 
+**App:** download from the [latest release](https://github.com/freemkv/freemkv/releases/latest) —
+`.dmg` on macOS, `freemkv-x86_64-windows-setup.exe` on Windows, `freemkv-amd64.deb`,
+AppImage or Flatpak on Linux. On macOS: `brew install --cask freemkv/tap/freemkv`.
+
+**CLI:**
+
 ```bash
-# Linux
-curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86_64-unknown-linux-musl.tar.gz | tar xz
-sudo mv freemkv /usr/local/bin/
+# macOS
+brew install freemkv/tap/freemkv-cli
 
-# macOS (Apple Silicon)
-curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-aarch64-apple-darwin.tar.gz | tar xz
-sudo mv freemkv /usr/local/bin/
+# Linux x86_64 (static; freemkv-cli-aarch64-linux on arm64)
+curl -sLo freemkv https://github.com/freemkv/freemkv/releases/latest/download/freemkv-cli-x86_64-linux
+chmod +x freemkv && sudo mv freemkv /usr/local/bin/
 
-# macOS (Intel)
-curl -sL https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x86_64-apple-darwin.tar.gz | tar xz
-sudo mv freemkv /usr/local/bin/
-
-# Windows — download .zip from https://github.com/freemkv/freemkv/releases/latest
+# Windows — download freemkv-cli-x86_64-windows.exe, rename to freemkv.exe, put it on PATH
 ```
 
-Prefer a single plain binary (no archive) with a sha256 checksum? Each
-release also publishes unwrapped, ready-to-run binaries like
-`freemkv-x86_64-linux`. See [INSTALL.md](INSTALL.md) for the full list,
-checksum verification, and per-platform steps.
+See [INSTALL.md](INSTALL.md) for every asset, the `freemkv-cli` `.deb`, checksum
+verification, and per-platform steps.
 
 ### 2. Set up decryption keys (UHD discs only)
 
@@ -273,15 +274,18 @@ freemkv is fully localized. All output — errors, status, labels — adapts to 
 
 ## Building from Source
 
+freemkv isn't on crates.io; install straight from a release tag:
 ```bash
-cargo install freemkv
+cargo install --locked --git https://github.com/freemkv/freemkv --tag vX.Y.Z freemkv                   # CLI
+cargo install --locked --git https://github.com/freemkv/freemkv --tag vX.Y.Z --features gui freemkv    # app
 ```
 
 Or clone and build:
 ```bash
 git clone https://github.com/freemkv/freemkv
-cd freemkv/freemkv
-cargo build --release
+cd freemkv
+cargo build --release                   # CLI
+cargo build --release --features gui    # app (Linux: needs libgtk-4-dev libadwaita-1-dev)
 ```
 
 ## Supported Drives

@@ -25,10 +25,9 @@ rm -rf macos/freemkv.iconset
 
 cp macos/Info.plist "$APP/Contents/Info.plist"
 
-# Build first so the bundle can never ship a stale binary. (`precommit` only
-# builds debug, so relying on a pre-existing target/release/freemkv silently
-# bundled whatever was last compiled — a real footgun during QA.)
-BUILD=(cargo build --bin freemkv)
+# Build first so the bundle can never ship a stale binary. The .app is the
+# `gui` build; without the feature the binary is the CLI and prints usage.
+BUILD=(cargo build --bin freemkv --features gui)
 [ "$PROFILE" = release ] && BUILD+=(--release)
 [ -n "$TARGET" ] && BUILD+=(--target "$TARGET")
 "${BUILD[@]}"
