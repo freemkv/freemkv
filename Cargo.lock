@@ -107,9 +107,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.4.7"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54413ede23c2daf518f35156dfde027feb2374004d63bd497f983c8db9c0e313"
+checksum = "f360145194ee8e21db5ee7f3fcd4fe52210864c75c985dae33218202c8bbe040"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -325,9 +325,9 @@ dependencies = [
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.13"
+version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
+checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "flate2"
@@ -380,8 +380,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-engine"
-version = "1.7.4"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.7.4#babc7a835a812c4d0157ca542f77e542594afd68"
+version = "1.7.6"
+source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.7.6#d7518f176142e7d108864d70dc4c526949b29963"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -393,16 +393,16 @@ dependencies = [
 
 [[package]]
 name = "freemkv-i18n"
-version = "1.7.4"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.7.4#f1ef402be88901dd0f5e06e006a7d9478dfd58a0"
+version = "1.7.6"
+source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.7.6#9173cab5b37d775786006793ba020e0f0ee39ca9"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "freemkv-keysources"
-version = "1.7.4"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.7.4#4f169a488120ef384dbabe71c882c05db2c6ec89"
+version = "1.7.6"
+source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.7.6#e987506d96a198f93c629b45251a0fea676aa279"
 dependencies = [
  "base64",
  "flate2",
@@ -415,8 +415,8 @@ dependencies = [
 
 [[package]]
 name = "freemkv-unlock"
-version = "1.7.4"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.7.4#d257d40de92bd094963f062f92bb6ebf5765351d"
+version = "1.7.6"
+source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.7.6#965c1f984c103689b9314f510becaeaec33eb7e7"
 dependencies = [
  "aes",
  "base64",
@@ -600,7 +600,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -984,8 +984,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfreemkv"
-version = "1.7.4"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.7.4#8ce40edba3610b5363f6e39f9a036eb0647e80e6"
+version = "1.7.6"
+source = "git+https://github.com/freemkv/libfreemkv?tag=v1.7.6#3f156f1f03c0395a0910daf0934fd0a448b485ab"
 dependencies = [
  "aes",
  "base64",
@@ -1614,9 +1614,9 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "siphasher"
-version = "1.0.3"
+version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "slab"
@@ -1626,9 +1626,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
-version = "1.16.1"
+version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
+checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 
 [[package]]
 name = "stable_deref_trait"
@@ -1702,18 +1702,18 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "thiserror"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2113,6 +2113,15 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+dependencies = [
+ "windows-targets",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.59.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets",
 ]
