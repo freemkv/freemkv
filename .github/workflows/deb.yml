@@ -1,0 +1,153 @@
+name: Debian package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev, qa]
+    tags: ['v*', '!v*-rc*']
+  pull_request:
+    paths: ['packaging/deb/**', '.github/workflows/deb.yml']
+
+concurrency:
+  group: deb-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  packaging-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: python -m unittest discover -s packaging/deb -p 'test_*.py' -v
+
+  build:
+    needs: packaging-tests
+    if: github.ref_name == 'qa' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with: { path: freemkv }
+      - name: Pin matching sibling sources
+        env:
+          BUILD_REF: ${{ github.ref_name }}
+          BUILD_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD_REF_TYPE" = tag ]; then ref="$BUILD_REF"
+          elif [ "$BUILD_REF" = dev ]; then ref=dev
+          else ref=qa; fi
+          for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do
+            git clone --depth 1 --branch "$ref" "https://github.com/freemkv/$repo.git" "$repo"
+          done
+          python3 - <<'PY'
+          import importlib.util, json, pathlib, subprocess, tomllib
+          spec = importlib.util.spec_from_file_location('flatpak_prepare', 'freemkv/packaging/flatpak/prepare.py')
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          version = tomllib.loads(pathlib.Path('freemkv/Cargo.toml').read_text())['package']['version']
+          revisions = {}
+          for repo in module.REPOS:
+              actual = tomllib.loads(pathlib.Path(repo, 'Cargo.toml').read_text())['package']['version']
+              if actual != version:
+                  raise SystemExit(f'{repo} version {actual} differs from {version}')
+              revisions[repo] = subprocess.check_output(['git', '-C', repo, 'rev-parse', 'HEAD'], text=True).strip()
+          config = pathlib.Path('freemkv/.cargo/config.toml')
+          config.parent.mkdir(exist_ok=True)
+          config.write_text(module.patches())
+          pathlib.Path('revisions.json').write_text(json.dumps(revisions, indent=2) + '\n')
+          PY
+      - name: Install Ubuntu 24.04 build and package tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libgtk-4-dev libadwaita-1-dev \
+            dpkg-dev lintian desktop-file-utils
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { workspaces: freemkv }
+      - name: Build native GUI and package
+        working-directory: freemkv
+        run: |
+          cargo build --release --bin freemkv
+          python3 packaging/deb/build.py --output ../deb-package
+          cp ../revisions.json ../deb-package/revisions.json
+      - name: Lint package and desktop entry
+        run: |
+          desktop-file-validate freemkv/packaging/flatpak/org.freemkv.FreeMKV.desktop
+          lintian --fail-on error deb-package/freemkv-amd64.deb
+          dpkg-deb --info deb-package/freemkv-amd64.deb
+          dpkg-deb --contents deb-package/freemkv-amd64.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: deb-package
+          if-no-files-found: error
+          retention-days: 90
+
+  install:
+    needs: build
+    runs-on: ubuntu-24.04
+    container: ubuntu:24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: deb-package, path: deb-package }
+      - name: Install into a clean Ubuntu 24.04 runtime
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ./deb-package/freemkv-amd64.deb \
+            xvfb xauth dbus-x11 python3 fonts-dejavu-core
+          dpkg-query -W -f='${Status}\n' freemkv | grep -Fx 'install ok installed'
+          expected=$(python3 -c 'import json; print(json.load(open("deb-package/package.json"))["version"])')
+          freemkv --version | tee version.log
+          awk -v expected="$expected" '$1 == expected { found=1 } END { exit !found }' version.log
+      - name: Launch installed GUI without a terminal
+        shell: bash
+        run: |
+          set -euo pipefail
+          useradd --create-home tester
+          chmod 755 "$GITHUB_WORKSPACE"
+          status=0
+          runuser -u tester -- xvfb-run --auto-servernum dbus-run-session -- \
+            timeout 15s env GDK_BACKEND=x11 /usr/bin/freemkv-gui > gui-launch.log 2>&1 || status=$?
+          cat gui-launch.log
+          test "$status" -eq 124
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deb-validation
+          path: |
+            version.log
+            gui-launch.log
+          retention-days: 90
+
+  publish:
+    needs: install
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: deb-package, path: deb-package }
+      - name: Attach installed and validated packages to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+              gh release upload "$RELEASE_TAG" deb-package/*.deb --clobber
+              exit 0
+            fi
+            echo "Waiting for release $RELEASE_TAG ($attempt/90)"
+            sleep 20
+          done
+          echo "Release $RELEASE_TAG was not created; packages remain in this run."
+          exit 1
