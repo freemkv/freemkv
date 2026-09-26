@@ -881,8 +881,8 @@ jobs:
           # version must carry the real release date (Flathub reads it), so stamp
           # RELEASE_DATE into it, adding the entry if the version has none yet.
           date_metainfo_release() {
-            local dir="$1" ver="$2" mi
-            mi=$(ls "$dir"/packaging/flatpak/*.metainfo.xml 2>/dev/null | head -1)
+            local dir="$1" ver="$2" mi=""
+            for f in "$dir"/packaging/flatpak/*.metainfo.xml; do [ -f "$f" ] && { mi="$f"; break; }; done
             [ -n "$mi" ] || return 0
             if $DRY_RUN; then
               printf '  [dry-run] date %s: <release version="%s" date="%s">\n' "$(basename "$mi")" "$ver" "$RELEASE_DATE"
