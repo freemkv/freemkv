@@ -50,3 +50,10 @@ jobs:
       # for optical-media tools) once granted.
       - name: Lint repo
         run: flatpak-builder-lint --exceptions repo repo
+
+      # Diagnostic only: the same repo lint WITHOUT --exceptions, so the log
+      # shows any findings (e.g. --device=all) that need a Flathub-granted
+      # per-app exception at review time. Non-blocking.
+      - name: Lint repo (strict, informational)
+        continue-on-error: true
+        run: flatpak-builder-lint repo repo
