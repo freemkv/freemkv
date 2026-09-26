@@ -1910,7 +1910,9 @@ jobs:
             fi
             git -C "$dir" fetch --quiet origin main qa dev \
               || die "$name: cannot fetch release branches"
-            target=$(git -C "$dir" rev-parse origin/qa)
+            target=$(git -C "$dir" rev-parse HEAD)
+            [ "$(git -C "$dir" rev-parse origin/qa)" = "$target" ] \
+              || die "$name: qa changed after this release snapshot; refusing to publish concurrent work"
             git -C "$dir" merge-base --is-ancestor "v$VERSION" "$target" \
               || die "$name: qa does not contain v$VERSION"
             for branch in main qa dev; do

@@ -89,6 +89,14 @@ class ReleaseBranchTests(unittest.TestCase):
             before = git('ls-remote', '--heads', 'origin')
             self.assertNotEqual(align().returncode, 0)
             self.assertEqual(git('ls-remote', '--heads', 'origin'), before)
+            git('checkout', 'qa')
+            extra = git('commit-tree', target + '^{tree}', '-p', target, '-m', 'concurrent promotion')
+            git('push', 'origin', extra + ':refs/heads/qa')
+            before = git('ls-remote', '--heads', 'origin')
+            result = align()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('qa changed', result.stderr)
+            self.assertEqual(git('ls-remote', '--heads', 'origin'), before)
 
 
 if __name__ == '__main__':

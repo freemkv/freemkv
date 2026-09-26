@@ -101,11 +101,19 @@ def matroska_timing(path):
             start = stop
 
     tracks, padding = [], []
+    scale = 1_000_000
 
-    def walk(start, end):
+    def walk(start, end, cluster_time=0):
+        nonlocal scale
         for kind, payload, stop in elements(start, end):
-            if kind in (0x18538067, 0x1654AE6B, 0x1F43B675):
+            if kind in (0x18538067, 0x1654AE6B, 0x1549A966):
                 walk(payload, stop)
+            elif kind == 0x2AD7B1:
+                scale = int.from_bytes(data[payload:stop], "big")
+            elif kind == 0x1F43B675:
+                children = {k: (a, b) for k, a, b in elements(payload, stop)}
+                a, b = children[0xE7]
+                walk(payload, stop, int.from_bytes(data[a:b], "big"))
             elif kind == 0xAE:
                 values = {k: int.from_bytes(data[a:b], "big") for k, a, b in elements(payload, stop)
                           if k in (0xD7, 0x56AA, 0x56BB)}
@@ -116,12 +124,24 @@ def matroska_timing(path):
                 if 0x75A2 in children:
                     a, b = children[0x75A2]
                     block, _ = children[0xA1]
-                    track, _ = vint(block)
-                    padding.append({"track": track, "padding_ns": int.from_bytes(data[a:b], "big", signed=True)})
+                    track, offset = vint(block)
+                    relative = int.from_bytes(data[offset:offset + 2], "big", signed=True)
+                    padding.append({"track": track, "padding_ns": int.from_bytes(data[a:b], "big", signed=True),
+                                    "pts_us": round((cluster_time + relative) * scale / 1000)})
     walk(0, len(data))
     if not tracks:
         raise ValidationError("no Matroska tracks")
     return {"tracks": tracks, "padding": padding}
+
+
+def matches_timing(actual, expected):
+    if actual["tracks"] != expected["tracks"] or len(actual["padding"]) != len(expected["padding"]):
+        return False
+    for got, want in zip(actual["padding"], expected["padding"]):
+        if (got["track"] != want["track"] or got["padding_ns"] != want["padding_ns"]
+                or abs(got["pts_us"] - want["pts_us"]) > 1000):
+            return False
+    return True
 
 
 def matches_streams(actual, expected):
@@ -231,7 +251,7 @@ def validate(binary, artifacts):
                 log=artifacts / f"{name}-{attempt}.log")
             actual = {"streams": stream_answers(output), "timing": matroska_timing(output)}
             agrees = (matches_streams(actual["streams"], expected["streams"])
-                      and actual["timing"] == expected["timing"])
+                      and matches_timing(actual["timing"], expected["timing"]))
             if name == "pgs":
                 actual["subtitles"] = pgs_answers(output)
                 agrees = agrees and actual["subtitles"] == expected["subtitles"]

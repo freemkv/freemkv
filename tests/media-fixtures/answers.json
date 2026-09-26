@@ -3,7 +3,7 @@
   "provenance": "Synthetic pixels and PCM authored here; FFmpeg encodes inputs. Video hashes and subtitle events come from source values. AC-3 answers use the fixed-point reference decoder on committed input without automatic sample trimming, never freemkv output. Container delay/padding is checked separately to avoid decoder-version differences.",
   "cases": {
     "cfr": {
-      "input_sha256": "c1bd8558234a969b38018f313fb17486b14acea9407bdfdbf6d9f44c67014056",
+      "input_sha256": "cca9ef56dc0b051f1abc24a3c8d8a420d44ebe1287d43581e8d39397c5a2ce8d",
       "streams": [
         {
           "kind": "video",
@@ -178,17 +178,19 @@
         "padding": [
           {
             "track": 2,
-            "padding_ns": 10666667
+            "padding_ns": 10666667,
+            "pts_us": 1284000
           },
           {
             "track": 3,
-            "padding_ns": 10666667
+            "padding_ns": 10666667,
+            "pts_us": 1284000
           }
         ]
       }
     },
     "vfr": {
-      "input_sha256": "0e298e5507719854e473efcdd3fab52f1bbd1873f8d5d24326b9b62e336b2b27",
+      "input_sha256": "7ac9228342f6ce1d1f6305e32d4ba3dd36587d21d1ebe45625e79bfb2e950246",
       "streams": [
         {
           "kind": "video",
@@ -342,17 +344,19 @@
         "padding": [
           {
             "track": 2,
-            "padding_ns": 10666667
+            "padding_ns": 10666667,
+            "pts_us": 1284000
           },
           {
             "track": 3,
-            "padding_ns": 10666667
+            "padding_ns": 10666667,
+            "pts_us": 1284000
           }
         ]
       }
     },
     "pgs": {
-      "input_sha256": "c0ced11defca8d21edf5b7c9c38e25ccf1da6664212695b67efeb8d8a30db5e7",
+      "input_sha256": "e25cc12c6f1a5e13463305360710f0f15c870ea3ade5a65bd17748e6f820774e",
       "subtitles": [
         {
           "language": "eng",

@@ -128,6 +128,16 @@ class KnownAnswerTests(unittest.TestCase):
         actual[0]["pts_us"][0] += 2000
         self.assertFalse(kat.matches_streams(actual, expected))
 
+    def test_padding_moved_to_the_wrong_block_fails(self):
+        expected = json.loads((kat.FIXTURES / "answers.json").read_text())["cases"]["cfr"]["timing"]
+        actual = copy.deepcopy(expected)
+        self.assertTrue(actual["padding"])
+        actual["padding"][0]["pts_us"] = 0
+        self.assertFalse(kat.matches_timing(actual, expected))
+        actual = copy.deepcopy(expected)
+        actual["tracks"][1]["delay_ns"] = 0
+        self.assertFalse(kat.matches_timing(actual, expected))
+
     def test_parity_requires_all_platforms_and_cases(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
