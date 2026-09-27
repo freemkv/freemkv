@@ -1,9 +1,9 @@
 //! The Windows desktop entry point — the one function both Windows binaries
 //! open the shell through.
 //!
-//! `freemkv-gui.exe` (windows-subsystem, no console) calls straight into
-//! `run` below; `freemkv.exe` keeps the byte-for-byte CLI contract and
-//! reaches the same function via `freemkv gui`.
+//! The windowed image (`freemkv.exe`, windows subsystem) calls straight into
+//! `run` below. The console image (`freemkv.com`, the CLI) starts that sibling
+//! on `freemkv gui` and only falls back to `run` in-process when none is found.
 //!
 //! This lives in the **lib**, not in a bin, so both binaries can call it, and is `cfg(target_os
 //! = "windows")` so it compiles to nothing elsewhere.

@@ -52,6 +52,8 @@ pub mod ui;
 // The Windows shell's DPI→geometry arithmetic. Not `cfg(windows)` on purpose:
 // gating it would make its unit tests unrunnable anywhere but Windows.
 pub mod win_layout;
+// The Windows menu bar and accelerator table as data, ungated for the same reason.
+pub mod win_menu;
 // The GTK shell's toolkit-free glue, ungated for the same reason.
 pub mod linux_glue;
 

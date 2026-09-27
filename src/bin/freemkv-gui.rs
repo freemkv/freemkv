@@ -14,16 +14,16 @@
 //! non-Windows targets this compiles to an empty `main`.
 #![windows_subsystem = "windows"]
 
-// Match `freemkv.exe`: the GUI does the same large, highly concurrent buffer
-// churn during a rip, and the two images must not have different allocator
-// behaviour.
+// Match the console image (`freemkv.com`): the GUI does the same large,
+// highly concurrent buffer churn during a rip, and the two images must not
+// have different allocator behaviour.
 #[cfg(target_os = "windows")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// No dispatcher and no argument parsing: this image has exactly one job.
-/// Anything a user could pass on a command line belongs to `freemkv.exe`, which
-/// is the documented CLI and is what a shell completes on.
+/// Anything a user could pass on a command line belongs to `freemkv.com`, the
+/// CLI, which is what `freemkv` resolves to first (PATHEXT).
 #[cfg(target_os = "windows")]
 fn main() {
     freemkv::win_app::run();
