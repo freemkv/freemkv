@@ -48,9 +48,9 @@ jobs:
         run: |
           set -euo pipefail
           want=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          got=$(sed -n 's/^ *rust-channel: "\(.*\)"/\1/p' snap/snapcraft.yaml)
+          got=$(sed -n 's/^ *- RUST_TOOLCHAIN: "\(.*\)"/\1/p' snap/snapcraft.yaml)
           [ "$want" = "$got" ] || {
-            echo "::error file=snap/snapcraft.yaml::rust-channel is '$got' but Cargo.toml rust-version is '$want'"
+            echo "::error file=snap/snapcraft.yaml::RUST_TOOLCHAIN is '$got' but Cargo.toml rust-version is '$want'"
             exit 1
           }
       # Release tags build from the committed git-tag patches; everything else

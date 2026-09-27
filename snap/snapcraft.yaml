@@ -55,14 +55,14 @@ apps:
 
 parts:
   freemkv:
-    plugin: rust
+    # `nil`, not `rust`: under the gnome extension the rust plugin cannot find
+    # its rustup build-snap, so the pinned toolchain is installed directly.
+    plugin: nil
     source: .
-    # Must match rust-version in Cargo.toml; snap.yml fails the build if not.
-    rust-channel: "1.98"
-    build-packages: [build-essential]
-    # The gnome extension rewrites PATH without /snap/bin, hiding the rustup build-snap.
+    build-packages: [build-essential, curl, git, pkg-config]
     build-environment:
-      - PATH: "/snap/bin:${PATH}"
+      # Must match rust-version in Cargo.toml; tests/snap_packaging.rs checks.
+      - RUST_TOOLCHAIN: "1.98"
     override-pull: |
       craftctl default
       base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -74,10 +74,14 @@ parts:
         *-*|*+*) craftctl set grade=devel ;;
         *) craftctl set grade=stable ;;
       esac
-    # Not `craftctl default`: the plugin's `cargo install --locked` rejects
-    # the sibling-checkout patches CI writes to .cargo/config.toml on dev/qa.
+    # `--locked` only without the sibling-checkout patches CI writes to
+    # .cargo/config.toml on dev and qa, which the committed lock does not match.
     override-build: |
       set -eu
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+      export PATH="$HOME/.cargo/bin:$PATH"
+      rustc --version
       locked=""
       [ -f .cargo/config.toml ] || locked="--locked"
       cargo build --release $locked --features gui --bin freemkv

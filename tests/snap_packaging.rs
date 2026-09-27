@@ -18,11 +18,11 @@ fn quoted_value(text: &str, key: &str) -> String {
 }
 
 #[test]
-fn rust_channel_is_the_msrv() {
+fn snap_toolchain_is_the_msrv() {
     let snap = read("snap/snapcraft.yaml");
     let cargo = read("Cargo.toml");
     assert_eq!(
-        quoted_value(&snap, "rust-channel:"),
+        quoted_value(&snap, "- RUST_TOOLCHAIN:"),
         quoted_value(&cargo, "rust-version =")
     );
 }
