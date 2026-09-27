@@ -168,9 +168,15 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb dbus-x11
+          sudo apt-get install -y -qq xvfb
+          # `snap run` moves the app into a scope via the user's systemd, so start
+          # a real user session rather than a bare dbus-run-session bus.
+          sudo loginctl enable-linger "$USER"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          for _ in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
           status=0
-          xvfb-run --auto-servernum dbus-run-session -- \
+          xvfb-run --auto-servernum \
             timeout 20s env GDK_BACKEND=x11 freemkv > gui-launch.log 2>&1 || status=$?
           cat gui-launch.log
           [ "$status" -eq 124 ] || { echo "::error::GUI exited early (status $status)"; exit 1; }
