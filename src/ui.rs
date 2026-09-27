@@ -1533,6 +1533,21 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// What Eject does for the open source: only a live drive has a tray.
+#[derive(Debug, PartialEq)]
+enum EjectAction {
+    NothingToEject,
+    Eject,
+}
+
+fn eject_action(source: &str) -> EjectAction {
+    if crate::engine::is_disc_source(source) {
+        EjectAction::Eject
+    } else {
+        EjectAction::NothingToEject
+    }
+}
+
 /// A platform action the core cannot perform itself. The shell executes it and
 /// usually feeds the answer back in as a `Cmd`.
 #[derive(Debug, PartialEq)]
@@ -1677,6 +1692,11 @@ pub struct App {
     run_dest: String,
     scan: ScanFn,
     probe_scan: ScanFn,
+    /// An Eject in flight: the source it ejects, and its worker's verdict
+    /// (collected on the tick).
+    ejecting: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
+    /// The SCSI eject the worker runs — a seam so tests never touch a drive.
+    eject_fn: fn(&str) -> Result<String, String>,
     /// Highest unreadable-sector count already announced, so the notice is
     /// not repeated on every 100 ms tick.
     reported_bad: u64,
@@ -1762,6 +1782,8 @@ impl App {
             run_dest: String::new(),
             scan: SCANNERS.0,
             probe_scan: SCANNERS.1,
+            ejecting: None,
+            eject_fn: crate::engine::eject_source,
             reported_bad: 0,
         };
         app.say(
@@ -1855,7 +1877,9 @@ impl App {
 
     /// The single entry point for every user action, on every platform.
     pub fn dispatch(&mut self, cmd: Cmd) -> Vec<Effect> {
-        if blocked_while_running(cmd) && (self.running() || (self.opening() && cmd != Cmd::Close)) {
+        if blocked_while_running(cmd)
+            && (self.running() || self.ejecting.is_some() || (self.opening() && cmd != Cmd::Close))
+        {
             return vec![];
         }
         match cmd {
@@ -1863,12 +1887,7 @@ impl App {
             Cmd::SetOutput => vec![Effect::PickOutputDir],
             Cmd::Close => {
                 self.opening = None;
-                self.probe = None;
-                self.pending = None;
-                self.tree = Tree::default();
-                self.source.clear();
-                self.disc_label.clear();
-                self.page = Page::Empty;
+                self.close_source();
                 self.say(
                     LogKind::Result,
                     &crate::strings::get("gui.log.source_closed"),
@@ -1883,13 +1902,7 @@ impl App {
                 }
                 vec![Effect::Redraw]
             }
-            Cmd::Eject => {
-                self.say(
-                    LogKind::Result,
-                    &crate::strings::get("gui.log.nothing_eject"),
-                );
-                vec![Effect::Redraw]
-            }
+            Cmd::Eject => self.start_eject(),
             Cmd::SelectAll => {
                 self.tree.set_all(true);
                 vec![Effect::Redraw]
@@ -2002,6 +2015,9 @@ impl App {
 
     /// Open a source: scan it, rebuild the tree, report honestly on failure.
     pub fn open(&mut self, path: &str) -> Vec<Effect> {
+        if self.ejecting.is_some() {
+            return vec![Effect::Redraw];
+        }
         self.opening = None;
         if let Some(fx) = self.wait_for_probe(path, false) {
             return fx;
@@ -2014,7 +2030,7 @@ impl App {
     /// Scan and preflight away from the UI thread; tick applies the result.
     #[cfg(any(target_os = "linux", test))]
     pub fn open_async(&mut self, path: &str) -> Vec<Effect> {
-        if self.running() || self.opening() {
+        if self.running() || self.opening() || self.ejecting.is_some() {
             return vec![];
         }
         if let Some(fx) = self.wait_for_probe(path, true) {
@@ -2080,6 +2096,82 @@ impl App {
         vec![Effect::Redraw, Effect::StartTicking]
     }
 
+    // Forget the open source (Close, or after its disc was ejected).
+    fn close_source(&mut self) {
+        self.probe = None;
+        self.pending = None;
+        self.tree = Tree::default();
+        self.source.clear();
+        self.disc_label.clear();
+        self.page = Page::Empty;
+    }
+
+    // Eject the open disc off the UI thread (SCSI can block for seconds);
+    // `tick` collects the verdict.
+    fn start_eject(&mut self) -> Vec<Effect> {
+        if eject_action(&self.source) == EjectAction::NothingToEject {
+            self.say(
+                LogKind::Result,
+                &crate::strings::get("gui.log.nothing_eject"),
+            );
+            return vec![Effect::Redraw];
+        }
+        self.say(
+            LogKind::Detail,
+            &crate::strings::get_or("gui.log.ejecting", "Ejecting the disc…"),
+        );
+        let (source, eject) = (self.source.clone(), self.eject_fn);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("eject".into())
+            .spawn(move || {
+                let _ = tx.send(eject(&source));
+            });
+        if let Err(e) = spawned {
+            self.say(LogKind::Notice, &e.to_string());
+            return vec![Effect::Redraw];
+        }
+        self.ejecting = Some((self.source.clone(), rx));
+        vec![Effect::Redraw, Effect::StartTicking]
+    }
+
+    // Apply a finished eject: the tree now describes a disc that is gone.
+    fn poll_eject(&mut self) -> Vec<Effect> {
+        let verdict = match self.ejecting.as_ref().map(|(_, rx)| rx.try_recv()) {
+            None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
+            Some(Ok(v)) => v,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                Err("eject worker stopped before returning a result".into())
+            }
+        };
+        let ejected = self.ejecting.take().map(|(src, _)| src);
+        match verdict {
+            Ok(device) => {
+                // Only the ejected disc is stale; never wipe a source opened since.
+                if ejected.as_deref() == Some(self.source.as_str()) {
+                    self.close_source();
+                }
+                self.say(
+                    LogKind::Result,
+                    &crate::strings::fmt_or(
+                        "gui.log.ejected",
+                        "Ejected the disc ({device}).",
+                        &[("device", &device)],
+                    ),
+                );
+            }
+            Err(e) => self.say(
+                LogKind::Notice,
+                &crate::strings::fmt_or(
+                    "gui.log.eject_failed",
+                    "Eject failed: {error}",
+                    &[("error", &e)],
+                ),
+            ),
+        }
+        vec![Effect::Redraw]
+    }
+
     pub fn opening(&self) -> bool {
         self.opening.is_some() || self.pending.is_some()
     }
@@ -2091,7 +2183,7 @@ impl App {
     /// OFF THE UI THREAD, unlike [`App::open`].
     pub fn open_probe(&mut self, path: &str) -> Vec<Effect> {
         // A second probe cannot help and could clobber the first one's result.
-        if self.probe.is_some() || self.opening() || self.running() {
+        if self.probe.is_some() || self.opening() || self.running() || self.ejecting.is_some() {
             return vec![Effect::Redraw];
         }
         let state = Arc::new(ProbeState {
@@ -2411,6 +2503,7 @@ impl App {
     /// apply. All progress arithmetic is the engine's — never recomputed here.
     pub fn tick(&mut self) -> Vec<Effect> {
         let mut probe_fx = self.poll_probe();
+        probe_fx.extend(self.poll_eject());
         if let Some(rx) = &self.opening {
             match rx.try_recv() {
                 Ok(opened) => {
@@ -2440,7 +2533,7 @@ impl App {
             // Keep the timer alive while the probe is still out; stopping it
             // here would strand the result with nothing left to collect it.
             let mut fx = probe_fx;
-            if self.probe.is_none() && !self.opening() {
+            if self.probe.is_none() && !self.opening() && self.ejecting.is_none() {
                 fx.push(Effect::StopTicking);
             } else if fx.is_empty() {
                 fx.push(Effect::Redraw);
@@ -2573,7 +2666,9 @@ impl App {
             // on the TYPED verdict — substring-matching the summary text used to send
             // an undecryptable disc and abort-for-loss paths to the success heading.
             result_heading: result_heading(self.result_outcome),
-            eject_visible: false,
+            eject_visible: eject_action(&self.source) == EjectAction::Eject
+                && !self.running()
+                && self.ejecting.is_none(),
         }
     }
 
@@ -3788,5 +3883,158 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Eject (C12): used to be a stub that always said "the source is a file",
+    // even with a disc open. The SCSI work is behind `eject_fn`; no drive is touched.
+
+    use std::sync::atomic::AtomicUsize;
+
+    static EJECT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn fake_eject_ok(_source: &str) -> Result<String, String> {
+        EJECT_CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok("/dev/fake0".into())
+    }
+
+    fn fake_eject_err(_source: &str) -> Result<String, String> {
+        Err("E1000: fake0".into())
+    }
+
+    fn drain_eject(app: &mut App) {
+        for _ in 0..2_000 {
+            app.tick();
+            if app.ejecting.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the eject worker never finished");
+    }
+
+    fn logged(app: &App, needle: &str) -> bool {
+        app.log.iter().any(|l| l.text.contains(needle))
+    }
+
+    #[test]
+    fn eject_action_is_decided_by_source_kind() {
+        assert_eq!(eject_action("disc://"), EjectAction::Eject);
+        assert_eq!(eject_action("disc:///dev/disk4"), EjectAction::Eject);
+        for file in [
+            "",
+            "/m/Movie.iso",
+            "/m/BDMV_DIR",
+            "mkv:///m/a.mkv",
+            "iso:///m/a.iso",
+        ] {
+            assert_eq!(eject_action(file), EjectAction::NothingToEject, "{file}");
+        }
+    }
+
+    #[test]
+    fn eject_on_a_disc_source_runs_off_thread_and_clears_the_stale_disc() {
+        let mut app = App::new();
+        app.eject_fn = fake_eject_ok;
+        app.source = "disc://".into();
+        app.page = Page::Titles;
+        app.disc_label = "MOVIE".into();
+        let before = EJECT_CALLS.load(Ordering::SeqCst);
+        let fx = app.dispatch(Cmd::Eject);
+        assert!(
+            !logged(&app, &crate::strings::get("gui.log.nothing_eject")),
+            "a disc source must not be reported as a file"
+        );
+        assert!(
+            fx.contains(&Effect::StartTicking),
+            "the result is collected on the tick: {fx:?}"
+        );
+        drain_eject(&mut app);
+        assert!(
+            EJECT_CALLS.load(Ordering::SeqCst) > before,
+            "the eject never ran"
+        );
+        assert!(
+            app.source.is_empty(),
+            "the ejected disc's source must be closed"
+        );
+        assert_eq!(app.page, Page::Empty);
+        assert!(app.disc_label.is_empty());
+    }
+
+    #[test]
+    fn a_failed_eject_is_reported_and_keeps_the_disc_open() {
+        let mut app = App::new();
+        app.eject_fn = fake_eject_err;
+        app.source = "disc:///dev/fake0".into();
+        app.page = Page::Titles;
+        app.dispatch(Cmd::Eject);
+        drain_eject(&mut app);
+        assert!(
+            logged(&app, "E1000: fake0"),
+            "the failure must reach the log"
+        );
+        assert_eq!(app.source, "disc:///dev/fake0");
+        assert_eq!(app.page, Page::Titles);
+    }
+
+    #[test]
+    fn eject_on_a_file_source_still_says_nothing_to_eject() {
+        let mut app = App::new();
+        app.eject_fn = fake_eject_err;
+        app.source = "/m/Movie.iso".into();
+        let fx = app.dispatch(Cmd::Eject);
+        assert!(logged(&app, &crate::strings::get("gui.log.nothing_eject")));
+        assert!(!fx.contains(&Effect::StartTicking));
+        assert!(app.ejecting.is_none());
+    }
+
+    #[test]
+    fn the_eject_button_shows_for_an_idle_disc_source_only() {
+        let mut app = App::new();
+        app.source = "disc://".into();
+        app.page = Page::Titles;
+        assert!(app.view().eject_visible);
+        app.run = Some(Arc::default());
+        assert!(!app.view().eject_visible, "hidden while a rip runs");
+        app.run = None;
+        app.eject_fn = fake_eject_gated;
+        app.dispatch(Cmd::Eject);
+        assert!(
+            !app.view().eject_visible,
+            "hidden while an eject is in flight"
+        );
+        EJECT_GATE.store(true, Ordering::SeqCst);
+        drain_eject(&mut app);
+        app.source = "/m/Movie.iso".into();
+        assert!(!app.view().eject_visible);
+    }
+
+    // Released by the tests that use it; every waiter ends up released, so
+    // sharing one gate across parallel tests can only shorten a wait.
+    static EJECT_GATE: AtomicBool = AtomicBool::new(false);
+
+    fn fake_eject_gated(_source: &str) -> Result<String, String> {
+        while !EJECT_GATE.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Ok("/dev/fake0".into())
+    }
+
+    #[test]
+    fn a_finished_eject_never_closes_a_source_opened_meanwhile() {
+        let mut app = App::new();
+        app.eject_fn = fake_eject_gated;
+        app.source = "disc://".into();
+        app.page = Page::Titles;
+        app.dispatch(Cmd::Eject);
+        // A drop-to-open during the eject is refused outright...
+        app.open("/m/Other.iso");
+        assert_eq!(app.source, "disc://", "open must wait for the eject");
+        // ...and even if a source changes anyway, the verdict leaves it alone.
+        app.source = "/m/Other.iso".into();
+        EJECT_GATE.store(true, Ordering::SeqCst);
+        drain_eject(&mut app);
+        assert_eq!(app.source, "/m/Other.iso");
+        assert_eq!(app.page, Page::Titles);
     }
 }

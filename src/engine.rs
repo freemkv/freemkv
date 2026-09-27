@@ -542,6 +542,19 @@ fn eject_disc(device: &str, sink: &UiSink) {
     }
 }
 
+/// Eject the disc behind a `disc://` source on demand (the Eject command).
+/// Bare `disc://` resolves like a rip's `DeviceTarget::Autodetect`: the drive
+/// holding media. `Ok` carries the device that was ejected.
+pub fn eject_source(source: &str) -> Result<String, String> {
+    let mut drive = match disc_device(source) {
+        Some(p) => libfreemkv::Drive::open(std::path::Path::new(&p)).map_err(|e| format!("{e}"))?,
+        None => libfreemkv::find_drive().ok_or("No drive with a disc found — nothing to eject.")?,
+    };
+    let device = drive.device_path().to_string();
+    drive.eject().map_err(|e| format!("{e}"))?;
+    Ok(device)
+}
+
 /// Host certs / credentials for the AACS bus handshake, from the keydb — the
 /// same input the CLI's `drive_credentials` builds. Passed to the shared
 /// `fe::open_scan_resolve`.
