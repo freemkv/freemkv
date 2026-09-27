@@ -21,23 +21,28 @@ GRANT_REASON = "human review required due to 'deny-connection' constraint (inter
 # The whole shape of a held issue: the tag, one check id, optionally the known
 # reason, and at most a closing full stop.
 GRANT_ISSUE = re.compile(
-    r"\(NEEDS REVIEW\)\s+(?P<id>[\w-]+(?::[\w-]+){2,})"
-    r"(?:\s+" + re.escape(GRANT_REASON) + r")?\.?"
+    r"\(NEEDS REVIEW\) (?P<id>[a-z0-9_-]+(?::[a-z0-9_-]+){2,})"
+    r"(?: " + re.escape(GRANT_REASON) + r")?\.?"
 )
-# craft-cli prints these after an error's message; they end the issue list.
-ERROR_TRAILERS = (
-    "Detailed information:",
-    "Recommended resolution:",
-    "For more information, check out:",
-    "Full execution log:",
+# What `snapcraft upload --verbosity=verbose` (snapcraft 9) prints, whole lines
+# only: the progress-bar caption, the status poll (store/client.py
+# _HUMAN_STATUS, or a raw status code), the result, and craft-cli's error
+# trailers. Anything else makes the upload "failed".
+PROGRESS = re.compile(
+    r"Uploading\.\.\."
+    r"|Status: (?:processing|ready to release!|will need manual review"
+    r"|error while processing delta|error while processing|[a-z_]+)"
 )
-# After a trailer, a (TAG)/[TAG] marker means another finding, not trailer text.
-TAG_MARKER = re.compile(r"[(\[][A-Z][A-Z ]*[)\]]")
-
-HELD_STATUS = "will need manual review"
+HELD_STATUS = "Status: will need manual review"
 ISSUES_HEADER = "Issues while processing snap:"
-CREATED = re.compile(r"Revision \d+ created for 'freemkv'")
-
+REVISION = re.compile(
+    r"Revision \d+ created for 'freemkv'"
+    r"(?: and released to '(?:edge|beta|candidate|stable)')?"
+)
+TRAILER = re.compile(
+    r"Full execution log: '[^'\n]+'|For more information, check out: https://\S+"
+)
+READY_STATUS = "Status: ready to release!"
 
 def expected_review_exit(report):
     """snap-review's exit code for a report: 2 with errors, else 3 with warnings, else 0."""
@@ -64,53 +69,60 @@ def review(report):
     return lines, failures
 
 
-def upload_issues(log):
-    """The issue lines under snapcraft's 'Issues while processing snap:' header.
-
-    None if anything there is not a plain top-level `- ` item, such as an
-    indented continuation line: an unfamiliar shape is never trusted.
-    """
-    if ISSUES_HEADER not in log:
-        return None
-    issues, trailer = [], False
-    for line in log.split(ISSUES_HEADER, 1)[1].splitlines():
-        if not line.strip():
-            continue
-        if trailer or line.startswith(ERROR_TRAILERS):
-            trailer = True
-            if ISSUES_HEADER in line or looks_like_a_finding(line):
-                return None
-            continue
-        if not line.startswith("- "):
-            return None
-        issues.append(line[2:].strip())
-    return issues
-
-
-def looks_like_a_finding(line):
-    """An issue bullet, an uppercase (TAG) or [TAG], or the word 'rejected'."""
-    return bool(
-        TAG_MARKER.search(line)
-        or re.search(r"\brejected\b", line, re.IGNORECASE)
-        or line.lstrip().startswith("- ")
-    )
-
-
 def is_known_grant_issue(issue):
     """Exactly `(NEEDS REVIEW) <known grant id>`, optionally with its known reason."""
-    m = GRANT_ISSUE.fullmatch(issue.strip())
+    m = GRANT_ISSUE.fullmatch(issue)
     return m is not None and m["id"] in STORE_GRANT_IDS
+
+
+def _released_or_held(lines):
+    """Exit 0: progress lines and one revision line; the final status decides."""
+    statuses, revisions = [], 0
+    for line in lines:
+        if not line.strip():
+            continue
+        if PROGRESS.fullmatch(line):
+            if line.startswith("Status: "):
+                statuses.append(line)
+        elif REVISION.fullmatch(line):
+            revisions += 1
+        else:
+            return "failed"
+    if revisions != 1:
+        return "failed"
+    last = statuses[-1] if statuses else None
+    return {READY_STATUS: "released", HELD_STATUS: "held"}.get(last, "failed")
+
+
+def _held_by_known_grants(lines):
+    """Exit 1: progress, the header, known-grant issues, then craft-cli trailers."""
+    state, issues = "progress", 0
+    for line in lines:
+        if not line.strip():
+            continue
+        if state == "progress":
+            if line == ISSUES_HEADER:
+                state = "issues"
+            elif not PROGRESS.fullmatch(line):
+                return "failed"
+        elif state == "issues" and line.startswith("- ") and is_known_grant_issue(line[2:]):
+            issues += 1
+        elif issues and TRAILER.fullmatch(line):
+            state = "trailer"
+        else:
+            return "failed"
+    return "held" if issues else "failed"
 
 
 def classify_upload(exit_code, log):
     """'released', 'held' (waiting for the known store grants) or 'failed'."""
+    lines = log.splitlines()
     if exit_code == 0:
-        if not CREATED.search(log):
+        if ISSUES_HEADER in log:
             return "failed"
-        return "held" if HELD_STATUS in log else "released"
-    issues = upload_issues(log)
-    if issues and all(is_known_grant_issue(i) for i in issues):
-        return "held"
+        return _released_or_held(lines)
+    if exit_code == 1:
+        return _held_by_known_grants(lines)
     return "failed"
 
 
@@ -136,8 +148,13 @@ def main(argv):
         except ValueError:
             print(f"::error::snapcraft exit code {argv[2]!r} is not a number")
             return 2
-        with open(argv[3]) as f:
-            print(classify_upload(code, f.read()))
+        try:
+            with open(argv[3], encoding="utf-8") as f:
+                log = f.read()
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"::error::cannot read the snapcraft upload log: {e}")
+            return 2
+        print(classify_upload(code, log))
         return 0
     print(f"usage: {argv[0]} review EXIT_CODE REPORT.json | upload EXIT_CODE LOG", file=sys.stderr)
     return 2

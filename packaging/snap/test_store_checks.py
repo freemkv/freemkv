@@ -69,111 +69,138 @@ class ReviewExit(unittest.TestCase):
         self.assertEqual(self._run(0, report()), 0)
 
 
-class Upload(unittest.TestCase):
-    RELEASED = "Status: ready to release!\nRevision 12 created for 'freemkv' and released to 'beta'\n"
+BARE_PLUG, BARE_SLOT = (g.split(":", 1)[1] for g in sc.KNOWN_GRANTS)
+PRE = "Uploading...\nStatus: processing\nStatus: will need manual review\n"
+HDR = sc.ISSUES_HEADER + "\n"
+LOG = "Full execution log: '/root/snapcraft-1.log'\n"
+DOCS = "For more information, check out: https://snapcraft.io/docs/store-review\n"
+
+
+def item(grant, reason=True, stop=""):
+    return f"- (NEEDS REVIEW) {grant}" + (f" {sc.GRANT_REASON}" if reason else "") + stop + "\n"
+
+
+HELD = PRE + HDR + item(PLUG) + item(SLOT) + LOG
+
+
+class UploadHeld(unittest.TestCase):
+    def test_legit_held_variants(self):
+        cases = {
+            "both grants": HELD,
+            "plug only": PRE + HDR + item(PLUG) + LOG,
+            "slot only, no trailer": PRE + HDR + item(SLOT),
+            "unprefixed ids": PRE + HDR + item(BARE_PLUG) + item(BARE_SLOT) + LOG,
+            "no reason": PRE + HDR + item(PLUG, reason=False) + LOG,
+            "full stop after id": PRE + HDR + item(PLUG, reason=False, stop=".") + LOG,
+            "full stop after reason": PRE + HDR + item(SLOT, stop=".") + LOG,
+            "docs link and log": PRE + HDR + item(PLUG) + DOCS + LOG,
+            "blank lines": PRE + "\n" + HDR + "\n" + item(PLUG) + "\n" + LOG,
+            "CRLF": (PRE + HDR + item(PLUG) + item(SLOT) + LOG).replace("\n", "\r\n"),
+            "no progress lines": HDR + item(PLUG),
+        }
+        for name, log in cases.items():
+            self.assertEqual(sc.classify_upload(1, log), "held", name)
+
+
+class UploadAdversarial(unittest.TestCase):
+    CASES = {
+        # before the header
+        "error line before header": "Error: something\n" + HDR + item(PLUG),
+        "traceback before header": "Traceback (most recent call last):\n" + HDR + item(PLUG),
+        "unknown progress text": "Uploading 12%\n" + HDR + item(PLUG),
+        "status with trailing text": "Status: processing (REJECTED)\n" + HDR + item(PLUG),
+        "bullet before header": "- (REJECTED) raw-usb\n" + HDR + item(PLUG),
+        "indented header": "  " + HDR + item(PLUG),
+        "header with suffix": sc.ISSUES_HEADER + " (1 of 2)\n" + item(PLUG),
+        "header lowercase": HDR.lower() + item(PLUG),
+        "no header": PRE + item(PLUG),
+        "header only": PRE + HDR + LOG,
+        # the issue lines
+        "no status tag": HDR + f"- {PLUG}\n",
+        "lowercase tag": HDR + f"- (needs review) {PLUG}\n",
+        "rejected tag": HDR + f"- (REJECTED) {PLUG}\n",
+        "bracketed tag": HDR + f"- [NEEDS REVIEW] {PLUG}\n",
+        "two tags": HDR + f"- (NEEDS REVIEW) (REJECTED) {PLUG}\n",
+        "unknown grant": HDR + "- (NEEDS REVIEW) declaration-snap-v2:plugs_connection:raw-usb:raw-usb\n",
+        "grant then rejected": HDR + f"- (NEEDS REVIEW) {PLUG}; (REJECTED) other\n",
+        "grant suffix -evil": HDR + f"- (NEEDS REVIEW) {PLUG}-evil\n",
+        "bare grant suffix -evil": HDR + f"- (NEEDS REVIEW) {BARE_PLUG}-evil\n",
+        "trailing extra text": HDR + f"- (NEEDS REVIEW) {PLUG}, also raw-usb denied\n",
+        "partial reason": HDR + f"- (NEEDS REVIEW) {PLUG} human review required\n",
+        "reason then more": HDR + item(PLUG, stop="; also raw-usb"),
+        "two full stops": HDR + item(PLUG, reason=False, stop=".."),
+        "asterisk bullet": HDR + f"* (NEEDS REVIEW) {PLUG}\n",
+        "unicode bullet": HDR + f"\u2022 (NEEDS REVIEW) {PLUG}\n",
+        "indented bullet": HDR + f"  - (NEEDS REVIEW) {PLUG}\n",
+        "double space": HDR + f"-  (NEEDS REVIEW) {PLUG}\n",
+        "tab separator": HDR + f"- (NEEDS REVIEW)\t{PLUG}\n",
+        "indented continuation": HDR + item(PLUG) + "  plugs_installation:block-devices\n",
+        "unknown issue after a known one": HDR + item(PLUG) + "- (REJECTED) raw-usb\n",
+        # after the issues
+        "detailed information": HDR + item(PLUG) + "Detailed information: x\n",
+        "recommended resolution": HDR + item(PLUG) + "Recommended resolution: y\n",
+        "bullet after trailer": HDR + item(PLUG) + LOG + "- (REJECTED) raw-usb\n",
+        "second issues block": HDR + item(PLUG) + LOG + HDR + "- (REJECTED) raw-usb\n",
+        "text inside trailer": HDR + item(PLUG) + "Full execution log: '/x' (REJECTED)\n",
+        "http docs link": HDR + item(PLUG) + "For more information, check out: http://x\n",
+        "error after trailer": HDR + item(PLUG) + LOG + "Error: upload rejected\n",
+        "grant after trailer": HDR + item(PLUG) + LOG + item(SLOT),
+    }
+
+    def test_every_adversarial_case_fails(self):
+        self.assertGreaterEqual(len(self.CASES), 36)
+        for name, log in self.CASES.items():
+            self.assertEqual(sc.classify_upload(1, log), "failed", name)
+
+    def test_held_needs_exit_code_one(self):
+        for code in (2, 3, 127, -1):
+            self.assertEqual(sc.classify_upload(code, HELD), "failed", code)
+
+
+class UploadSuccess(unittest.TestCase):
+    OK = "Uploading...\nStatus: processing\nStatus: ready to release!\n"
+    REV = "Revision 12 created for 'freemkv' and released to 'beta'\n"
 
     def test_released(self):
-        self.assertEqual(sc.classify_upload(0, self.RELEASED), "released")
+        self.assertEqual(sc.classify_upload(0, self.OK + self.REV), "released")
+        self.assertEqual(sc.classify_upload(0, (self.OK + self.REV).replace("\n", "\r\n")), "released")
 
-    def test_held_without_errors_is_not_released(self):
-        log = "Status: will need manual review\nRevision 12 created for 'freemkv' and released to 'beta'\n"
+    def test_held_status_is_not_released(self):
+        log = "Status: will need manual review\n" + self.REV
         self.assertEqual(sc.classify_upload(0, log), "held")
 
-    def test_success_in_an_unknown_format_fails(self):
-        self.assertEqual(sc.classify_upload(0, "all good\n"), "failed")
+    def test_success_cases_that_fail(self):
+        cases = {
+            "no revision line": self.OK,
+            "revision not a whole line": self.OK + "x " + self.REV,
+            "revision with suffix": self.OK + self.REV.rstrip("\n") + " (REJECTED)\n",
+            "other snap": self.OK + "Revision 12 created for 'other'\n",
+            "two revision lines": self.OK + self.REV + self.REV,
+            "issues header": self.OK + self.REV + HDR + item(PLUG),
+            "unknown line": self.OK + "Warning: odd\n" + self.REV,
+            "no status": self.REV,
+            "final status not ready": "Status: processing\n" + self.REV,
+            "unknown channel": self.OK + "Revision 12 created for 'freemkv' and released to 'x'\n",
+        }
+        for name, log in cases.items():
+            self.assertEqual(sc.classify_upload(0, log), "failed", name)
 
-    def test_only_known_grant_issues_are_held(self):
-        log = (f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}\n"
-               f"- (NEEDS REVIEW) {SLOT} {sc.GRANT_REASON}\n")
-        self.assertEqual(sc.classify_upload(1, log), "held")
 
-    def test_any_other_needs_review_fails(self):
-        log = (f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}\n"
-               "- (NEEDS REVIEW) declaration-snap-v2:plugs_installation:block-devices\n")
-        self.assertEqual(sc.classify_upload(1, log), "failed")
-
-    def test_manual_review_words_alone_do_not_hold(self):
-        self.assertEqual(sc.classify_upload(1, "needs manual review\nhuman review\n"), "failed")
-
-    def test_grant_plus_rejected_finding_on_one_line_fails(self):
-        log = f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG}; (REJECTED) other\n"
-        self.assertEqual(sc.classify_upload(1, log), "failed")
-
-    def test_grant_prefix_of_a_longer_token_fails(self):
-        log = f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG}-evil {sc.GRANT_REASON}\n"
-        self.assertEqual(sc.classify_upload(1, log), "failed")
-        bare = PLUG.split(":", 1)[1]
-        log = f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {bare}-evil\n"
-        self.assertEqual(sc.classify_upload(1, log), "failed")
-
-    def test_indented_continuation_line_fails(self):
-        log = (f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}\n"
-               "  plugs_installation:block-devices also flagged\n")
-        self.assertEqual(sc.classify_upload(1, log), "failed")
-
-    def test_grant_without_prefix_and_log_trailer_is_held(self):
-        bare = SLOT.split(":", 1)[1]
-        log = (f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {bare} {sc.GRANT_REASON}\n"
-               "Full execution log: '/root/snapcraft.log'\n")
-        self.assertEqual(sc.classify_upload(1, log), "held")
-
-    def _held(self, *items, trailer=""):
-        return sc.classify_upload(1, sc.ISSUES_HEADER + "\n" + "".join(f"- {i}\n" for i in items) + trailer)
-
-    def test_issue_without_status_tag_fails(self):
-        self.assertEqual(self._held(PLUG), "failed")
-
-    def test_lowercase_or_bracketed_tags_fail(self):
-        self.assertEqual(self._held(f"(rejected) {PLUG}"), "failed")
-        self.assertEqual(self._held(f"[REJECTED] {PLUG}"), "failed")
-        self.assertEqual(self._held(f"(NEEDS REVIEW) {PLUG} (rejected)"), "failed")
-        self.assertEqual(self._held(f"[REJECTED] (NEEDS REVIEW) {PLUG}"), "failed")
-
-    def test_trailing_extra_text_fails(self):
-        self.assertEqual(self._held(f"(NEEDS REVIEW) {PLUG}, also raw-usb denied"), "failed")
-        self.assertEqual(self._held(f"(NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}; also raw-usb"), "failed")
-
-    def test_known_reason_and_full_stop_are_held(self):
-        self.assertEqual(self._held(f"(NEEDS REVIEW) {PLUG}."), "held")
-        self.assertEqual(self._held(f"(NEEDS REVIEW) {SLOT} {sc.GRANT_REASON}."), "held")
-
-    def test_craft_cli_trailers_end_the_issue_list(self):
-        issue = f"(NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}"
-        for trailer in (
-            "Detailed information: the store said so\nmore detail on a second line\n",
-            "Recommended resolution: ask for a store grant\n",
-            "For more information, check out: https://snapcraft.io/docs\n",
-            "Full execution log: '/root/snapcraft.log'\n",
-        ):
-            self.assertEqual(self._held(issue, trailer=trailer), "held", trailer)
-
-    def test_bullet_after_detailed_information_fails(self):
-        issue = f"(NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}"
-        trailer = "Detailed information: x\n- (REJECTED) raw-usb\n"
-        self.assertEqual(self._held(issue, trailer=trailer), "failed")
-
-    def test_second_issues_block_fails(self):
-        issue = f"(NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}"
-        trailer = (f"Full execution log: '/root/a.log'\n{sc.ISSUES_HEADER}\n"
-                   "- (REJECTED) declaration-snap-v2:plugs_installation:raw-usb\n")
-        self.assertEqual(self._held(issue, trailer=trailer), "failed")
-
-    def test_rejection_inside_detailed_information_fails(self):
-        issue = f"(NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}"
-        for trailer in ("Detailed information: (REJECTED) raw-usb\n",
-                        "Detailed information: upload x\n[REJECTED] raw-usb\n",
-                        "Detailed information: the snap was rejected\n"):
-            self.assertEqual(self._held(issue, trailer=trailer), "failed", trailer)
-
-    def test_unknown_line_before_a_trailer_fails(self):
-        issue = f"(NEEDS REVIEW) {PLUG}"
-        self.assertEqual(self._held(issue, trailer="something else\nRecommended resolution: x\n"), "failed")
-
+class UploadMain(unittest.TestCase):
     def test_non_numeric_exit_code_is_a_numbered_failure(self):
         self.assertEqual(sc.main(["store_checks.py", "upload", "oops", "/dev/null"]), 2)
 
-    def test_other_errors_fail(self):
-        self.assertEqual(sc.classify_upload(1, "Invalid credentials\n"), "failed")
+    def test_unreadable_log_is_a_numbered_failure(self):
+        self.assertEqual(sc.main(["store_checks.py", "upload", "1", "/nonexistent/upload.log"]), 2)
+
+    def test_undecodable_log_is_a_numbered_failure(self):
+        import os, tempfile
+        with tempfile.NamedTemporaryFile("wb", delete=False) as f:
+            f.write(b"\xff\xfe\xfa")
+        try:
+            self.assertEqual(sc.main(["store_checks.py", "upload", "1", f.name]), 2)
+        finally:
+            os.unlink(f.name)
 
 
 if __name__ == "__main__":
