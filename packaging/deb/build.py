@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from email.utils import format_datetime
 import gzip
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -13,7 +14,6 @@ import shutil
 import subprocess
 import tempfile
 import tomllib
-import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -123,6 +123,8 @@ def stage(binary, root, package_version, depends, epoch, notices, package='freem
     dest.mkdir(parents=True)
     (dest / 'freemkv.1.gz').write_bytes(gzip.compress(man.encode(), mtime=0))
     installed = sum(p.stat().st_size for p in root.rglob('*') if p.is_file())
+    (root / 'DEBIAN').mkdir(exist_ok=True)
+    normalize_modes(root)
     write(root, 'DEBIAN/control',
           f'Package: {package}\nVersion: {package_version}\nArchitecture: amd64\n'
           'Section: video\nPriority: optional\n'
@@ -137,6 +139,13 @@ def stage(binary, root, package_version, depends, epoch, notices, package='freem
     write(root, 'DEBIAN/md5sums', checksums)
 
 
+def normalize_modes(root):
+    """Debian policy 10.9 modes regardless of the builder's umask: dirs 0755, files 0644."""
+    for path in [root, *root.rglob('*')]:
+        executable = path.is_dir() or path == root / 'usr/bin/freemkv'
+        path.chmod(0o755 if executable else 0o644)
+
+
 def stage_desktop(root, package_version, epoch):
     packaging = ROOT / 'packaging/flatpak'
     copy(root, packaging / 'org.freemkv.FreeMKV.desktop',
@@ -145,16 +154,16 @@ def stage_desktop(root, package_version, epoch):
          'usr/share/icons/hicolor/scalable/apps/org.freemkv.FreeMKV.svg')
     metainfo = copy(root, packaging / 'org.freemkv.FreeMKV.metainfo.xml',
                     'usr/share/metainfo/org.freemkv.FreeMKV.metainfo.xml')
-    tree = ET.parse(metainfo)
-    releases = tree.find('releases')
-    if releases is None:
-        raise ValueError('missing AppStream release history')
-    upstream = package_version.replace('~', '-', 1)
-    if releases.find('release') is None or releases.find('release').get('version') != upstream:
-        releases.insert(0, ET.Element('release', version=upstream,
-                                     date=datetime.fromtimestamp(epoch, timezone.utc).date().isoformat()))
-    ET.indent(tree, space='  ')
-    tree.write(metainfo, encoding='utf-8', xml_declaration=True)
+    flatpak_metadata().update_metadata(metainfo, package_version.replace('~', '-', 1),
+                                       datetime.fromtimestamp(epoch, timezone.utc).date().isoformat())
+
+
+def flatpak_metadata():
+    """The Flatpak preparer, which owns the shared AppStream release-history update."""
+    spec = importlib.util.spec_from_file_location('flatpak_prepare', ROOT / 'packaging/flatpak/prepare.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def dependency_notices():
