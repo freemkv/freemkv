@@ -65,7 +65,8 @@ jobs:
         run: bash freemkv/.github/scripts/exact-toolchain.sh assert-env x86_64-unknown-linux-gnu freemkv
       - name: Build release binary
         working-directory: freemkv
-        run: cargo build --release --features gui --bin freemkv
+        # A release links the tagged crates, so its committed lock must hold as-is.
+        run: cargo build ${{ inputs.release && '--locked' || '' }} --release --features gui --bin freemkv
       - name: Assemble AppDir
         run: |
           set -euo pipefail

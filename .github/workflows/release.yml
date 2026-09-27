@@ -56,6 +56,8 @@ jobs:
       - name: Exact toolchain (rust-version)
         run: bash .github/scripts/exact-toolchain.sh install Cargo.toml
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Clean build environment and C toolchain
+        run: bash .github/scripts/exact-toolchain.sh assert-env "$(rustc -vV | sed -n 's/^host: //p')"
       - run: cargo test --locked --tests
       - run: cargo test --locked --tests --features gui
 

@@ -42,10 +42,12 @@ install() {
 }
 
 # Variables that change what rustc or the C compilers (cc-rs) emit.
-DIRTY_RE='^(FREEMKV_BUILD_LABEL|FREEMKV_GH_TOKEN|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTC_WRAPPER|CARGO_PROFILE_RELEASE_[A-Z0-9_]+|CARGO_TARGET_[A-Z0-9_]+_(RUSTFLAGS|LINKER|RUNNER)|(TARGET_|HOST_)?(CC|CFLAGS|CXX|CXXFLAGS|AR|ARFLAGS)|(CC|CFLAGS|CXX|CXXFLAGS|AR|ARFLAGS)_[A-Za-z0-9_.-]+)$'
+DIRTY_RE='^(FREEMKV_BUILD_LABEL|FREEMKV_GH_TOKEN|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTC_BOOTSTRAP|RUSTC_LINKER|CRATE_CC_NO_DEFAULTS|CL|_CL_|LINK|_LINK_|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTC_WRAPPER|CARGO_PROFILE_RELEASE_[A-Z0-9_]+|CARGO_TARGET_[A-Z0-9_]+_(RUSTFLAGS|LINKER|RUNNER)|(TARGET_|HOST_)?(CC|CFLAGS|CXX|CXXFLAGS|AR|ARFLAGS|RANLIB)|(CC|CFLAGS|CXX|CXXFLAGS|AR|ARFLAGS|RANLIB)_[A-Za-z0-9_.-]+)$'
 
-# Cargo config keys and tables that change the compiled code.
-CONFIG_RE='^[[:space:]]*(\[(build|env|profile|target)([].]|$)|(rustflags|rustdocflags|linker|rustc|rustc-wrapper|rustc-workspace-wrapper|ar)[[:space:]]*=)'
+# Cargo config that changes the compiled code, in any TOML spelling: a table header
+# ([build], [[target…]]), a dotted or inline key (build.rustflags =, env = {…}), an
+# include, or a code-changing key under any table ([host] linker = …).
+CONFIG_RE='^[[:space:]]*(\[+[[:space:]]*"?(build|env|profile|target|host)\b|"?(build|env|profile|target|host|include)"?[[:space:]]*[.=])|(^|[.{,[:space:]])"?(rustflags|rustdocflags|linker|rustc|rustc-wrapper|rustc-workspace-wrapper|ar)"?[[:space:]]*='
 
 # The C compiler cc-rs resolves for the target, and its version.
 c_toolchain() {
@@ -53,7 +55,8 @@ c_toolchain() {
   case "$target" in
     aarch64-unknown-linux-musl)
       # Built through `cross`: the compiler is the pinned image's.
-      echo "cross image ${CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_IMAGE:-<unpinned>}" ;;
+      [[ "${CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_IMAGE:-}" == *@sha256:* ]] || return 1
+      echo "cross image $CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_IMAGE" ;;
     *-linux-musl)
       # cc-rs compiles x86_64 musl C with musl-gcc (the musl-tools wrapper).
       command -v musl-gcc >/dev/null 2>&1 || return 1
@@ -107,6 +110,6 @@ assert_env() {
 case "${1:-}" in
   install)    shift; [ $# -ge 1 ] || die "Usage" "install <Cargo.toml> [target...]"; install "$@" ;;
   assert-env) shift; [ $# -ge 1 ] || die "Usage" "assert-env <target> [crate-dir]"; assert_env "$@" ;;
-  version)    shift; read_tc "$1" ;;
+  version)    shift; [ $# -ge 1 ] || die "Usage" "version <Cargo.toml>"; read_tc "$1" ;;
   *) die "Usage" "exact-toolchain.sh install|assert-env|version ..." ;;
 esac

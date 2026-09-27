@@ -122,7 +122,8 @@ class ExactToolchainTests(unittest.TestCase):
                      'FREEMKV_GH_TOKEN', 'CARGO_PROFILE_RELEASE_LTO', 'CARGO_PROFILE_RELEASE_OPT_LEVEL',
                      'CC', 'CFLAGS', 'CXX', 'CXXFLAGS', 'AR', 'TARGET_CC', 'HOST_CFLAGS',
                      'CC_x86_64_unknown_linux_musl', 'CFLAGS_x86_64-unknown-linux-musl',
-                     'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS', 'RUSTC_WRAPPER'):
+                     'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS', 'RUSTC_WRAPPER',
+                     'CL', '_CL_', 'LINK', '_LINK_', 'RANLIB', 'CRATE_CC_NO_DEFAULTS', 'RUSTC_BOOTSTRAP'):
             with self.subTest(name=name):
                 r = box.run('assert-env', 'x86_64-unknown-linux-gnu', str(box.crate), env={name: 'x'})
                 self.assertNotEqual(r.returncode, 0)
@@ -141,13 +142,20 @@ class ExactToolchainTests(unittest.TestCase):
             'parent': ('[target.x86_64-unknown-linux-musl]\nlinker = "x"\n', True),
             'home': ('[profile.release]\nlto = false\n', True),
             'env': ('[env]\nFOO = "1"\n', True),
+            'dotted-build': ('build.rustflags = ["-Ctarget-cpu=native"]\n', True),
+            'dotted-profile': ('profile.release.opt-level = 1\n', True),
+            'dotted-target': ('target.x86_64-unknown-linux-musl.linker = "x"\n', True),
+            'dotted-env': ('env.CC = "clang"\n', True),
+            'inline': ('build = { rustflags = ["x"] }\n', True),
+            'include': ('include = "other.toml"\n', True),
+            'host': ('[host]\nlinker = "x"\n', True),
+            'net': ('[net]\ngit-fetch-with-cli = true\n', False),
             'patch': ('[patch.crates-io]\nlibfreemkv = { path = "../libfreemkv" }\n', False),
         }
         for where, (text, fails) in cases.items():
             with self.subTest(where=where):
                 box = Sandbox(self)
-                base = {'crate': box.crate, 'parent': box.crate.parent, 'home': None,
-                        'env': box.crate, 'patch': box.crate}[where]
+                base = {'parent': box.crate.parent, 'home': None}.get(where, box.crate)
                 path = box.home / 'config.toml' if base is None else base / '.cargo' / 'config.toml'
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(text)
@@ -175,6 +183,8 @@ class ExactToolchainTests(unittest.TestCase):
                     env={'CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_IMAGE': image})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn(image, r.stdout)
+        r = box.run('assert-env', 'aarch64-unknown-linux-musl', str(box.crate))
+        self.assertNotEqual(r.returncode, 0, 'an unpinned cross image must fail')
 
 
 class WorkflowToolchainTests(unittest.TestCase):
@@ -198,7 +208,7 @@ class WorkflowToolchainTests(unittest.TestCase):
                     self.assertLess(tc[0], idx[0])
 
     def test_shipped_and_evidence_builds_assert_a_clean_environment(self):
-        shipped = [('release.yml', 'build'), ('release.yml', 'build-windows'), ('release.yml', 'cli-binaries'),
+        shipped = [('release.yml', 'test'), ('release.yml', 'build'), ('release.yml', 'build-windows'), ('release.yml', 'cli-binaries'),
                    ('deb.yml', 'build'), ('appimage.yml', 'build'), ('qa.yml', 'cli-matrix')]
         for wf, job in shipped:
             steps = jobs(wf)[job]
@@ -207,8 +217,18 @@ class WorkflowToolchainTests(unittest.TestCase):
                 built = [i for i, s in enumerate(steps) if builds(s)]
                 self.assertTrue(check and built)
                 self.assertLess(check[-1], built[0])
-                for i in range(check[-1] + 1, built[-1]):
-                    self.assertNotIn('GITHUB_ENV', steps[i], 'env changed after the clean-env check')
+                for i in range(check[-1] + 1, built[-1] + 1):
+                    for sink in ('GITHUB_ENV', 'GITHUB_PATH'):
+                        self.assertNotIn(sink, steps[i], f'{sink} changed after the clean-env check')
+                for i in built:
+                    self.assertNotRegex(steps[i], r'\n        env:', 'a build step sets its own env')
+
+    def test_release_appimage_is_locked(self):
+        steps = jobs('appimage.yml')['build']
+        cmds = [c for s in steps for c in re.findall(r'cargo build[^\n]*', s)]
+        self.assertTrue(cmds)
+        for cmd in cmds:
+            self.assertIn("inputs.release && '--locked'", cmd)
 
     def test_release_builds_are_locked(self):
         for job, steps in jobs('release.yml').items():
