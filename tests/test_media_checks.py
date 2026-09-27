@@ -150,6 +150,22 @@ class KnownAnswerTests(unittest.TestCase):
             with self.assertRaises(checks.ValidationError):
                 kat.compare_reports(root)
 
+    def test_parity_accepts_identical_and_rejects_divergent_platforms(self):
+        report = {f"{name}-{n}": {"timing": {"duration_ns": 2_000_000_000}}
+                  for name in ("cfr", "vfr", "pgs") for n in range(2)}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for platform in ("ubuntu-latest", "macos-latest", "windows-latest"):
+                (root / f"media-{platform}").mkdir()
+                (root / f"media-{platform}" / "answers.json").write_text(json.dumps(report))
+            with patch("builtins.print"):
+                kat.compare_reports(root)
+            divergent = copy.deepcopy(report)
+            divergent["vfr-1"]["timing"]["duration_ns"] += 1
+            (root / "media-windows-latest" / "answers.json").write_text(json.dumps(divergent))
+            with self.assertRaisesRegex(checks.ValidationError, "differs across platforms"):
+                kat.compare_reports(root)
+
 
 class ToolTests(unittest.TestCase):
     @patch("media_checks.subprocess.run")

@@ -107,9 +107,9 @@ fn every_asset_has_a_sha256_partner() {
         yml.contains(r#"freemkv_expected+=("${freemkv_expected[@]/%/.sha256}")"#),
         "the .sha256 expansion of freemkv_expected is gone"
     );
-    for n in e.all().filter(|n| n.ends_with(".sha256")) {
-        let base = n.trim_end_matches(".sha256");
-        assert!(e.all().any(|m| m == base), "{n} hashes nothing");
+    // A listed hash would be expanded again into a `.sha256.sha256` nothing uploads.
+    for n in e.all() {
+        assert!(!n.ends_with(".sha256"), "{n}: list the base name only");
     }
 }
 
@@ -158,82 +158,197 @@ fn legacy_aliases_are_the_cli_names_without_cli() {
     }
 }
 
-/// Names a workflow can upload: literal `freemkv-*` tokens (and their hash), plus each release.yml matrix
-/// `asset:`/`legacy:` joined with every suffix its `files:` block uses.
+/// Names a workflow uploads: its `files: |` blocks (literal names, or each matrix `asset:`/`legacy:`
+/// joined with the suffixes used) and its `gh release upload` arguments, where `name*` expands to
+/// `name` plus `name.sha256` when the job hashes `name`.
 fn produced() -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for f in ["deb.yml", "appimage.yml", "flatpak.yml"] {
-        let y = workflow(f);
-        for tok in y.split(|c: char| !(c.is_ascii_alphanumeric() || "-_.".contains(c))) {
-            if tok.starts_with("freemkv-") {
-                let tok = tok.trim_end_matches('.');
-                // These hash in a shell loop (`> "$f.sha256"`), so the pair isn't literal.
-                if y.contains("sha256sum") {
-                    out.insert(format!("{tok}.sha256"));
-                }
-                out.insert(tok.to_string());
-            }
-        }
-    }
-    let rel = workflow("release.yml");
-    // Split at the two-space job keys under `jobs:`.
+    let files = ["deb.yml", "appimage.yml", "flatpak.yml", "release.yml"];
+    let texts: Vec<(&str, String)> = files.iter().map(|f| (*f, workflow(f))).collect();
+    produced_from(&texts)
+}
+
+/// Splits a workflow at the two-space job keys under `jobs:`.
+fn jobs(y: &str) -> Vec<Vec<&str>> {
     let mut jobs: Vec<Vec<&str>> = vec![Vec::new()];
-    for line in rel.lines() {
+    for line in y.lines() {
         let job_key = line.starts_with("  ") && !line[2..].starts_with([' ', '#']);
         if job_key && line.trim_end().ends_with(':') {
             jobs.push(Vec::new());
         }
         jobs.last_mut().unwrap().push(line);
     }
-    for job in jobs {
-        let mut entries: Vec<(Vec<String>, String)> = Vec::new();
-        let mut suffixes = BTreeSet::new();
-        let mut in_files = false;
-        for line in job {
-            let t = line.trim();
-            if let Some(rest) = t.strip_prefix("- ")
-                && rest.contains(':')
-                && !rest.starts_with("uses:")
-                && !rest.starts_with("name:")
-            {
-                entries.push((Vec::new(), String::new()));
+    jobs
+}
+
+/// Names a job hashes as `sha256sum "X" > "X.sha256"` or `for f in X Y; do sha256sum "$f" > "$f.sha256"`.
+fn hashed(job: &[&str]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let lines: Vec<&str> = job.iter().map(|l| l.trim()).collect();
+    for (i, t) in lines.iter().enumerate() {
+        if let Some(rest) = t.strip_prefix("for ")
+            && let Some((var, rest)) = rest.split_once(" in ")
+            && let Some((list, body)) = rest.split_once("; do")
+        {
+            let tail = lines[i + 1..].iter().take_while(|l| !l.starts_with("done"));
+            let body = std::iter::once(body)
+                .chain(tail.copied())
+                .collect::<Vec<_>>();
+            let hash = format!(r#"sha256sum "${var}" > "${var}.sha256""#);
+            if body.iter().any(|l| l.contains(&hash)) {
+                out.extend(list.split_whitespace().map(String::from));
             }
-            let kv = t.trim_start_matches("- ");
-            if let Some((k, v)) = kv.split_once(':') {
-                let v = v.trim().trim_matches('\'').trim_matches('"').to_string();
-                if let Some(e) = entries.last_mut() {
-                    match k.trim() {
-                        "asset" | "legacy" => e.0.push(v),
-                        "ext" => e.1 = v,
-                        _ => {}
+        } else if let Some(rest) = t.strip_prefix("sha256sum \"")
+            && let Some((name, redirect)) = rest.split_once('"')
+            && redirect.trim() == format!(r#"> "{name}.sha256""#)
+        {
+            out.insert(name.to_string());
+        }
+    }
+    out
+}
+
+/// Arguments of every `gh release upload <tag> ...` command, `\` continuations joined.
+fn gh_uploads(job: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut lines = job.iter().map(|l| l.trim());
+    while let Some(t) = lines.next() {
+        let Some((_, rest)) = t.split_once("gh release upload ") else {
+            continue;
+        };
+        let mut cmd = rest.to_string();
+        while cmd.ends_with('\\') {
+            cmd.pop();
+            cmd.push(' ');
+            cmd.push_str(lines.next().unwrap_or_default());
+        }
+        let args = cmd
+            .split_whitespace()
+            .skip(1)
+            .filter(|a| !a.starts_with('-'));
+        out.extend(args.map(|a| a.trim_matches('"').to_string()));
+    }
+    out
+}
+
+fn produced_from(workflows: &[(&str, String)]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (_, y) in workflows {
+        for job in jobs(y) {
+            let hashes = hashed(&job);
+            for arg in gh_uploads(&job) {
+                match arg.strip_suffix('*') {
+                    Some(name) => {
+                        out.insert(name.to_string());
+                        if hashes.contains(name) {
+                            out.insert(format!("{name}.sha256"));
+                        }
+                    }
+                    None => {
+                        out.insert(arg);
                     }
                 }
             }
-            if t == "files: |" {
-                in_files = true;
-                continue;
-            }
-            if in_files {
-                if !t.starts_with("${{") {
-                    in_files = false;
+            let mut entries: Vec<(Vec<String>, String)> = Vec::new();
+            let mut suffixes = BTreeSet::new();
+            let mut in_files = false;
+            for line in job {
+                let t = line.trim();
+                if let Some(rest) = t.strip_prefix("- ")
+                    && rest.contains(':')
+                    && !rest.starts_with("uses:")
+                    && !rest.starts_with("name:")
+                {
+                    entries.push((Vec::new(), String::new()));
+                }
+                let kv = t.trim_start_matches("- ");
+                if let Some((k, v)) = kv.split_once(':') {
+                    let v = v.trim().trim_matches('\'').trim_matches('"').to_string();
+                    if let Some(e) = entries.last_mut() {
+                        match k.trim() {
+                            "asset" | "legacy" => e.0.push(v),
+                            "ext" => e.1 = v,
+                            _ => {}
+                        }
+                    }
+                }
+                if t == "files: |" {
+                    in_files = true;
                     continue;
                 }
-                for var in ["${{ matrix.asset }}", "${{ matrix.legacy }}"] {
-                    if let Some(s) = t.strip_prefix(var) {
-                        suffixes.insert(s.to_string());
+                if in_files {
+                    if t.starts_with("freemkv-") {
+                        out.insert(t.to_string());
+                        continue;
+                    }
+                    if !t.starts_with("${{") {
+                        in_files = false;
+                        continue;
+                    }
+                    for var in ["${{ matrix.asset }}", "${{ matrix.legacy }}"] {
+                        if let Some(s) = t.strip_prefix(var) {
+                            suffixes.insert(s.to_string());
+                        }
                     }
                 }
             }
-        }
-        for (names, ext) in &entries {
-            for n in names {
-                for s in &suffixes {
-                    out.insert(format!("{n}{}", s.replace("${{ matrix.ext }}", ext)));
+            for (names, ext) in &entries {
+                for n in names {
+                    for s in &suffixes {
+                        out.insert(format!("{n}{}", s.replace("${{ matrix.ext }}", ext)));
+                    }
                 }
             }
         }
     }
     out
+}
+
+fn edit(y: &str, from: &str, to: &str) -> String {
+    assert!(y.contains(from), "fixture text {from:?} not found");
+    y.replacen(from, to, 1)
+}
+
+#[test]
+fn only_real_upload_steps_count_as_produced() {
+    let deb = edit(
+        &workflow("deb.yml"),
+        "freemkv-cli-amd64.deb freemkv-cli-amd64.deb.sha256",
+        "",
+    );
+    let made = produced_from(&[("deb.yml", deb)]);
+    assert!(made.contains("freemkv-amd64.deb.sha256"), "{made:?}");
+    assert!(!made.contains("freemkv-cli-amd64.deb"), "{made:?}");
+    assert!(!made.contains("freemkv-cli-amd64.deb.sha256"), "{made:?}");
+
+    let appimage = produced_from(&[("appimage.yml", workflow("appimage.yml"))]);
+    let want: BTreeSet<String> = [
+        "freemkv-x86_64-linux.AppImage",
+        "freemkv-x86_64-linux.AppImage.sha256",
+    ]
+    .map(String::from)
+    .into();
+    assert_eq!(appimage, want);
+
+    let flatpak = produced_from(&[("flatpak.yml", workflow("flatpak.yml"))]);
+    for n in [
+        "freemkv-x86_64-linux.flatpak",
+        "freemkv-flatpak-package.tar.gz",
+    ] {
+        assert!(
+            flatpak.contains(n) && flatpak.contains(&format!("{n}.sha256")),
+            "{flatpak:?}"
+        );
+    }
+    let unhashed = edit(
+        &workflow("flatpak.yml"),
+        "linux.flatpak freemkv-flatpak-package.tar.gz; do",
+        "linux.flatpak; do",
+    );
+    let made = produced_from(&[("flatpak.yml", unhashed)]);
+    assert!(
+        !made.contains("freemkv-flatpak-package.tar.gz.sha256"),
+        "{made:?}"
+    );
 }
 
 #[test]
