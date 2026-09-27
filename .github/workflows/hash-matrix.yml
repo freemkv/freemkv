@@ -117,7 +117,7 @@ jobs:
         working-directory: freemkv
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: matrix-master-media, path: shared }
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: { python-version: '3.12' }
       - name: Validate content and subtitle lifecycle against known answers
         shell: bash
@@ -298,7 +298,7 @@ jobs:
         env:
           FMKV_FIXTURES_S3: ${{ secrets.FMKV_FIXTURES_S3 }}
         run: aws s3 cp "$FMKV_FIXTURES_S3/dvd.iso" dvd.iso --quiet && ls -l dvd.iso
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: { python-version: '3.12' }
       - name: Install media tools
         shell: bash
