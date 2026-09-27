@@ -13,9 +13,8 @@
 //! without a corresponding shell handler fails an integration test
 //! instead of shipping a menu item that does nothing on Linux.
 //!
-//! Adding a new `Cmd` variant → this test won't compile (the `match` is
-//! exhaustive by design). Adding a new `Effect` variant → this test still
-//! passes; a per-`Cmd` line changes only when its emitted set changes.
+//! A new `Cmd` won't compile until listed in `every_cmd!`, `expected_default_kinds`
+//! and `in_menu_bar`. A new `Effect` changes a line only where it is emitted.
 
 use freemkv::ui::{App, Cmd, Effect, MenuAction, MenuEntry, MenuGroupId, menu_layout};
 
@@ -40,6 +39,77 @@ fn kind(e: &Effect) -> &'static str {
 
 fn kinds(app: &mut App, cmd: Cmd) -> Vec<&'static str> {
     app.dispatch(cmd).iter().map(kind).collect()
+}
+
+/// Every `Cmd`, from ONE list that is also an exhaustive `match`: a new unit
+/// variant not named here is a compile error, so the loops below cannot drift.
+macro_rules! every_cmd {
+    ($($v:ident),* $(,)?) => {
+        fn every_cmd(fmt: &'static str) -> Vec<Cmd> {
+            fn _listed(c: Cmd) {
+                match c {
+                    $(Cmd::$v)|* | Cmd::SetFormat(_) => {}
+                }
+            }
+            vec![$(Cmd::$v,)* Cmd::SetFormat(fmt)]
+        }
+    };
+}
+every_cmd!(
+    Open,
+    Close,
+    SetOutput,
+    Run,
+    Cancel,
+    Eject,
+    SelectAll,
+    SelectNone,
+    Invert,
+    ClearLog,
+    ToggleLog,
+    Settings,
+    About,
+    Docs,
+    CheckUpdates,
+    Quit,
+);
+
+/// A format string `output_formats` really offers (the model rejects others).
+fn a_real_format() -> &'static str {
+    freemkv::ui::output_formats(false, false)
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("at least one output format must be offered")
+}
+
+/// `CheckUpdates` does a real HTTPS request to api.github.com (no stub seam),
+/// so the hermetic loops skip it; its expected set stays pinned above.
+fn touches_the_network(cmd: Cmd) -> bool {
+    matches!(cmd, Cmd::CheckUpdates)
+}
+
+/// Where each `Cmd` is reached from. Exhaustive, so a new `Cmd` must be placed.
+fn in_menu_bar(cmd: Cmd) -> bool {
+    match cmd {
+        // Main-window controls: the progress-page button and the format dropdown.
+        Cmd::Cancel | Cmd::SetFormat(_) => false,
+        Cmd::Open
+        | Cmd::Close
+        | Cmd::SetOutput
+        | Cmd::Run
+        | Cmd::Eject
+        | Cmd::SelectAll
+        | Cmd::SelectNone
+        | Cmd::Invert
+        | Cmd::ClearLog
+        | Cmd::ToggleLog
+        | Cmd::Settings
+        | Cmd::About
+        | Cmd::Docs
+        | Cmd::CheckUpdates
+        | Cmd::Quit => true,
+    }
 }
 
 /// The default-state answer for every `Cmd`. If you add a `Cmd`, the match
@@ -76,30 +146,11 @@ fn expected_default_kinds(cmd: Cmd) -> Vec<&'static str> {
 
 #[test]
 fn every_cmd_from_a_fresh_app_emits_the_same_effect_set_for_every_shell() {
-    // The universe of `Cmd`s a shell menu bar can fire. `SetFormat` carries a
-    // borrowed string; the exact string does not matter for effect kinds, but
-    // it must be one `output_formats` produces or the model rejects it.
-    let all: &[Cmd] = &[
-        Cmd::Open,
-        Cmd::Close,
-        Cmd::SetOutput,
-        Cmd::Run,
-        Cmd::Cancel,
-        Cmd::Eject,
-        Cmd::SelectAll,
-        Cmd::SelectNone,
-        Cmd::Invert,
-        Cmd::ClearLog,
-        Cmd::ToggleLog,
-        Cmd::Settings,
-        Cmd::About,
-        Cmd::Docs,
-        Cmd::CheckUpdates,
-        // Skip `Cmd::Quit` in the loop — it emits `Effect::Quit` which the
-        // shell would honour by tearing down the app; still asserted below.
-    ];
-
-    for &cmd in all {
+    for cmd in every_cmd(a_real_format()) {
+        if touches_the_network(cmd) {
+            continue;
+        }
+        // `Quit` is included: dispatch only returns `Effect::Quit`, nothing exits.
         let mut app = App::new();
         assert_eq!(
             kinds(&mut app, cmd),
@@ -109,57 +160,13 @@ fn every_cmd_from_a_fresh_app_emits_the_same_effect_set_for_every_shell() {
              updating (do all three shells still do the right thing?)",
         );
     }
-
-    // Format setting: needs a valid format string; the first offered
-    // canonical wins so the test survives translation churn but still
-    // exercises the SetFormat path.
-    let mut app = App::new();
-    let fmt = freemkv::ui::output_formats(false, false)
-        .into_iter()
-        .flatten()
-        .next()
-        .expect("at least one output format must be offered");
-    assert_eq!(
-        kinds(&mut app, Cmd::SetFormat(fmt)),
-        expected_default_kinds(Cmd::SetFormat(fmt)),
-    );
-
-    // Quit stands alone: shell reads `Effect::Quit` and terminates.
-    let mut app = App::new();
-    assert_eq!(
-        kinds(&mut app, Cmd::Quit),
-        expected_default_kinds(Cmd::Quit)
-    );
 }
 
-/// The other half of the shell contract: every user-driveable `Cmd` that a
-/// menu bar ought to expose is actually IN `menu_layout`. Add a new `Cmd` and
-/// forget to add it to the layout → this test fails and reminds you before
-/// three shells silently gain a keyboard-only-command-with-no-menu-item.
-///
-/// Exclusions: `Cmd::Cancel` and `Cmd::SetFormat` live in the main window
-/// (Cancel is the progress-page button; SetFormat is the output-format
-/// dropdown), not in the menu bar; both intentionally have no menu row.
+/// The other half of the shell contract: every `Cmd` whose `in_menu_bar` is the
+/// menu bar is actually IN `menu_layout`. Add a new `Cmd` and it must be placed
+/// in `in_menu_bar`; place it in the menu bar and forget the layout → this fails.
 #[test]
 fn every_user_driveable_cmd_that_belongs_in_a_menu_is_in_the_layout() {
-    let must_be_in_layout: &[Cmd] = &[
-        Cmd::Open,
-        Cmd::Close,
-        Cmd::SetOutput,
-        Cmd::Run,
-        Cmd::Eject,
-        Cmd::SelectAll,
-        Cmd::SelectNone,
-        Cmd::Invert,
-        Cmd::ClearLog,
-        Cmd::ToggleLog,
-        Cmd::Settings,
-        Cmd::About,
-        Cmd::Docs,
-        Cmd::CheckUpdates,
-        Cmd::Quit,
-    ];
-
     let mut in_layout: Vec<Cmd> = Vec::new();
     for group in menu_layout(false) {
         for entry in group.entries {
@@ -171,12 +178,19 @@ fn every_user_driveable_cmd_that_belongs_in_a_menu_is_in_the_layout() {
         }
     }
 
-    for c in must_be_in_layout {
-        assert!(
-            in_layout.iter().any(|f| f == c),
-            "Cmd::{c:?} is a user-visible menu command but is missing from \
-             ui::menu_layout — every shell would silently omit its menu row"
-        );
+    for c in every_cmd(a_real_format()) {
+        if in_menu_bar(c) {
+            assert!(
+                in_layout.contains(&c),
+                "Cmd::{c:?} is a user-visible menu command but is missing from \
+                 ui::menu_layout — every shell would silently omit its menu row"
+            );
+        } else {
+            assert!(
+                !in_layout.contains(&c),
+                "Cmd::{c:?} is a main-window control but also has a menu row"
+            );
+        }
     }
 }
 
@@ -246,7 +260,9 @@ fn every_layout_row_has_a_linux_action_with_the_cores_running_rule() {
     // Each action's dispatch path, from a fresh App, emits the same effect set
     // the other shells see — the Linux handler adds no effect of its own.
     for (_, action) in ACTIONS {
-        if let MenuAction::Cmd(cmd) = action {
+        if let MenuAction::Cmd(cmd) = action
+            && !touches_the_network(*cmd)
+        {
             let mut app = App::new();
             assert_eq!(kinds(&mut app, *cmd), expected_default_kinds(*cmd));
         }

@@ -236,4 +236,13 @@ mod tests {
             }
         }
     }
+    /// `blank` goes through the capture seam like every other line, and still
+    /// honours the level gate.
+    #[test]
+    fn a_blank_line_is_captured_and_gated() {
+        let ((), text) = super::capture(|| Output::new(false, false).blank(Level::Normal));
+        assert_eq!(text, "\n", "blank() bypassed the capture seam");
+        let ((), quiet) = super::capture(|| Output::new(false, true).blank(Level::Normal));
+        assert_eq!(quiet, "", "a quiet Output printed a Normal blank");
+    }
 }

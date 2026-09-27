@@ -41,8 +41,8 @@ fn outcome_is_typed_not_parsed_from_prose() {
     assert_eq!(RunOutcome::default(), RunOutcome::Completed);
 }
 
-// ── A disc volume label reached the output path almost unsanitised. ───────── The DEFAULT
-// template is the empty one, the branch the original fix missed.
+// ── A disc volume label reached the output path almost unsanitised. ─────────
+// The DEFAULT template is the empty one, the branch the original fix missed.
 #[test]
 fn the_default_template_sanitises_the_label_too() {
     for evil in [
@@ -206,13 +206,48 @@ fn legitimate_labels_are_left_alone() {
     assert_eq!(sanitize_label("Mission: Impossible"), "Mission_ Impossible");
 }
 
-/// The user's own template is trusted and must not be mangled — only the
-/// disc-supplied label is untrusted.
+/// The assembled name (template text included) is sanitised: legal template
+/// text is kept verbatim, only characters illegal in a file name are replaced.
 #[test]
-fn the_user_template_is_not_sanitised() {
-    let out = title_basename("Movie.2024 - {title}", "Label", 3);
-    assert!(
-        out.starts_with("Movie.2024 - Label"),
-        "template mangled: {out}"
+fn the_user_template_keeps_legal_text_and_loses_only_illegal_characters() {
+    assert_eq!(
+        title_basename("Movie.2024 - {title}", "Label", 3),
+        "Movie.2024 - Label_t3"
     );
+    assert_eq!(
+        title_basename("Show: {title}", "Label", 3),
+        "Show_ Label_t3"
+    );
+}
+
+/// Separators typed into the template itself must not escape the folder.
+#[test]
+fn a_hostile_template_stays_one_path_component() {
+    for tpl in ["../{title}", "a/b/{title}", r"..\{title}", "/abs/{title}"] {
+        let out = title_basename(tpl, "X", 1);
+        assert_eq!(
+            std::path::Path::new(&out).components().count(),
+            1,
+            "{tpl:?} escaped the folder: {out}"
+        );
+        assert!(!out.contains('/') && !out.contains('\\'), "{out}");
+    }
+}
+
+/// The GUI's twin of `lossy_lines`: an mkv/m2ts loss must not blame MP4.
+#[test]
+fn the_gui_undelivered_summary_does_not_blame_mp4() {
+    freemkv::strings::set_locale("en");
+    let outcome = libfreemkv::MuxOutcome {
+        completed: true,
+        output_opened: true,
+        bytes_written: 1 << 30,
+        errors: 0,
+        lost_bytes: 0,
+        streams: 3,
+        undelivered_streams: vec![1],
+    };
+    let msg = freemkv::engine::summarize_stream(&outcome, "/out/m.mkv", "/out");
+    assert!(msg.starts_with("Written to /out — "), "{msg}");
+    assert!(!msg.to_lowercase().contains("mp4"), "{msg}");
 }
