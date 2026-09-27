@@ -11,6 +11,10 @@
 - Homebrew: the cask is now `freemkv` (was `freemkv-app`) and also links the `freemkv` command; the CLI formula is now `freemkv-cli` (was `freemkv`). Existing installs follow the rename.
 - Versioned duplicate assets are no longer published; every asset has a stable name and a `.sha256`.
 
+### Added
+
+- Linux: a strictly confined Snap of the app and CLI, `freemkv-amd64.snap`, attached to every release. Install it with `snap install --dangerous` and connect `freemkv:optical-write` for drive access; Snap Store publishing follows once the listing is approved. See [INSTALL.md](INSTALL.md).
+
 ## [1.7.7] — 2026-09-26
 
 ### Fixed

@@ -47,18 +47,20 @@ jobs:
 
   # Parallel tripwire, exactly as the CLI does it: fails the run, but `build`
   # does NOT `needs:` it, so packaging starts as soon as `verify` passes. The
-  # tag decision was already gated by CI (ci.yml on dev, then a green qa.yml) on the same stable Rust.
+  # tag decision was already gated by CI (ci.yml on dev, then a green qa.yml) on the same exact Rust.
   test:
     needs: verify
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
+      - name: Exact toolchain (rust-version)
+        run: bash .github/scripts/exact-toolchain.sh install Cargo.toml
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test --tests
-      - run: cargo test --tests --features gui
+      - name: Clean build environment and C toolchain
+        run: |
+          bash .github/scripts/exact-toolchain.sh assert-env "$(rustc -vV | sed -n 's/^host: //p')"
+      - run: cargo test --locked --tests
+      - run: cargo test --locked --tests --features gui
 
   # ── macOS app (`gui` build) ─────────────────────────────────────────────────
   build:
@@ -82,16 +84,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
+      - name: Exact toolchain (rust-version)
+        shell: bash
+        run: bash .github/scripts/exact-toolchain.sh install Cargo.toml "${{ matrix.target }}"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
 
+      - name: Clean build environment and C toolchain
+        run: bash .github/scripts/exact-toolchain.sh assert-env "${{ matrix.target }}"
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --features gui --bin freemkv
+        run: cargo build --locked --release --target ${{ matrix.target }} --features gui --bin freemkv
 
       # ── Developer ID signing ──────────────────────────────────────────────
       #
@@ -236,16 +239,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
+      - name: Exact toolchain (rust-version)
+        shell: bash
+        run: bash .github/scripts/exact-toolchain.sh install Cargo.toml "${{ matrix.target }}"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}-app
 
+      - name: Clean build environment and C toolchain
+        shell: bash
+        run: bash .github/scripts/exact-toolchain.sh assert-env "${{ matrix.target }}"
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --features gui
+        run: cargo build --locked --release --target ${{ matrix.target }} --features gui
 
       - name: Stage and zip
         shell: pwsh
@@ -393,10 +398,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
+      - name: Exact toolchain (rust-version)
+        shell: bash
+        run: bash .github/scripts/exact-toolchain.sh install Cargo.toml "${{ matrix.target }}"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
@@ -415,12 +419,15 @@ jobs:
           tar xzf cross.tar.gz cross
           sudo mv cross /usr/local/bin/
           echo 'CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_IMAGE=ghcr.io/cross-rs/aarch64-unknown-linux-musl:0.2.5@sha256:702154f52b2d8091671aa2c84d5582d849f949977228c735ff8462f93cc0e1e4' >> "$GITHUB_ENV"
+      - name: Clean build environment and C toolchain
+        shell: bash
+        run: bash .github/scripts/exact-toolchain.sh assert-env "${{ matrix.target }}"
       - name: Build CLI
         if: matrix.target != 'aarch64-unknown-linux-musl'
-        run: cargo build --release --target ${{ matrix.target }} --bin freemkv
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin freemkv
       - name: Build CLI (cross)
         if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: cross build --release --target ${{ matrix.target }} --bin freemkv
+        run: cross build --locked --release --target ${{ matrix.target }} --bin freemkv
 
       # The CLI must not pull in UI libraries: none at all on static Linux,
       # no AppKit/UserNotifications on macOS.

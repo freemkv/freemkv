@@ -969,7 +969,7 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
                 ),
                 item(
                     MenuAction::OpenDisc,
-                    g("gui.menu.open_disc", "Open Disc…"),
+                    g("gui.menu.open_disc", "Open disc…"),
                     Some(Accel::primary("d")),
                 ),
                 item(
@@ -980,18 +980,18 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
                 sep(),
                 item(
                     MenuAction::Cmd(Cmd::SetOutput),
-                    g("gui.menu.set_output", "Set Output Folder…"),
+                    g("gui.menu.set_output", "Set output folder…"),
                     None,
                 ),
                 item(
                     MenuAction::Cmd(Cmd::Run),
-                    g("gui.menu.start_rip", "Start Rip"),
+                    g("gui.menu.start_rip", "Start rip"),
                     Some(Accel::primary("r")),
                 ),
                 sep(),
                 item(
                     MenuAction::Cmd(Cmd::Eject),
-                    g("gui.menu.eject", "Eject"),
+                    g("gui.menu.eject", "Eject disc"),
                     Some(Accel::primary("e")),
                 ),
             ],
@@ -1036,7 +1036,7 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
                 ),
                 item(
                     MenuAction::Cmd(Cmd::Invert),
-                    g("gui.menu.invert_titles", "Invert Selection"),
+                    g("gui.menu.invert_titles", "Invert Title Selection"),
                     None,
                 ),
             ],
@@ -1052,7 +1052,7 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
                 ),
                 item(
                     MenuAction::Cmd(Cmd::ClearLog),
-                    g("gui.menu.clear_log", "Clear Log"),
+                    g("gui.menu.clear_log", "Clear log"),
                     Some(Accel::primary("k")),
                 ),
             ],
@@ -1063,14 +1063,14 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
             entries: vec![
                 item(
                     MenuAction::Cmd(Cmd::Docs),
-                    g("gui.menu.docs", "Documentation"),
+                    g("gui.menu.docs", "freemkv Documentation"),
                     // macOS uses ⌘? (⇧⌘/ on the responder chain); Windows uses
                     // F1. Both shells map their own accelerator when rendering.
                     Some(Accel::bare("F1")),
                 ),
                 item(
                     MenuAction::Cmd(Cmd::CheckUpdates),
-                    g("gui.menu.check_updates", "Check for Updates…"),
+                    g("gui.menu.check_updates", "Check for updates…"),
                     None,
                 ),
             ],

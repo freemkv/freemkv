@@ -141,8 +141,8 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
         out.raw(
             Normal,
             &strings::fmt_or(
-                "cli.log_level_not_a_number",
-                "--log-level: expected a number 1-4, got '{value}', ignored",
+                "error.log_level_not_a_number",
+                "--log-level: expected a number 1–4, got '{value}', ignored",
                 &[("value", v)],
             ),
         );
