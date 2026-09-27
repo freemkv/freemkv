@@ -5766,7 +5766,7 @@ mod tests {
     fn notifications_are_gated_off_outside_an_app_bundle() {
         assert!(!notifications_available(), "cargo test runs unbundled");
         // Ungated, UNUserNotificationCenter raises and aborts this process.
-        notify_rip_finished("t", "b", "/nonexistent");
+        notify_rip_finished("t", "b", Some("/nonexistent"));
         let src = prod_src();
         for (at, _) in src.match_indices("UNUserNotificationCenter::currentNotificationCenter()") {
             let before = &src[src[..at].rfind("\nfn ").unwrap_or(0)..at];
