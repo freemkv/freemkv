@@ -311,13 +311,13 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
 // (`main.rs` has its own `mod engine`), so the bin build sees it as dead.
 #[allow(dead_code)]
 pub fn scan(path: &str) -> Result<Scanned, String> {
-    scan_with_keys(path, &KeyConfig::default(), false)
+    scan_with_keys(path, &KeyConfig::default())
 }
 
 /// Scan, then consult the key sources so the key strip reflects a real
-/// resolution rather than the scan-time placeholder. `verbose` mirrors the
-/// CLI's `info -v`: the logged detail block gains the resolved keys.
-pub fn scan_with_keys(path: &str, keys: &KeyConfig, verbose: bool) -> Result<Scanned, String> {
+/// resolution rather than the scan-time placeholder. Key bytes are never
+/// logged, at any verbosity.
+pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
     // A FOLDER is an image-level source too — `scan_dir` synthesizes a UDF
     // volume over an extracted disc tree, returning the same (Disc, reader)
     // pair `scan_iso` does (needed for "Open Folder" / drag-and-drop).
@@ -332,13 +332,13 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig, verbose: bool) -> Result<Sca
 
     let won = resolve_disc_keys(&mut disc, reader.as_mut(), keys);
     let summary = key_summary(&disc, won.as_deref());
-    Ok(scanned_from_disc(&disc, summary, verbose))
+    Ok(scanned_from_disc(&disc, summary))
 }
 
 /// The `freemkv info -v` detail block for a scanned disc/ISO — the same facts
 /// the CLI prints (format, capacity, region, MKB version, disc hash, VID, key
 /// state, title list), as log lines the desktop app shows on open.
-fn disc_details(disc: &libfreemkv::Disc, key_summary: &str, verbose: bool) -> Vec<String> {
+fn disc_details(disc: &libfreemkv::Disc, key_summary: &str) -> Vec<String> {
     let mut d = Vec::new();
     d.push(format!("Type: {:?}", disc.format));
     if disc.capacity_bytes > 0 {
@@ -369,18 +369,6 @@ fn disc_details(disc: &libfreemkv::Disc, key_summary: &str, verbose: bool) -> Ve
         }
     }
     d.push(format!("Protection: {key_summary}"));
-    // Verbose (Log detail: Verbose) reveals the resolved keys, like `info -v`:
-    // the Volume Unique Key and each CPS unit key.
-    if verbose && let Some(aacs) = &disc.aacs {
-        if let Some(vuk) = aacs.vuk {
-            let h: String = vuk.iter().map(|b| format!("{b:02x}")).collect();
-            d.push(format!("  VUK: 0x{h}"));
-        }
-        for (cps, key) in &aacs.unit_keys {
-            let h: String = key.iter().map(|b| format!("{b:02x}")).collect();
-            d.push(format!("  CPS {cps}: 0x{h}"));
-        }
-    }
     // Just the count — the per-title list lives in the UI tree, no need to
     // duplicate it in the log.
     d.push(format!("Titles: {}", disc.titles.len()));
@@ -390,7 +378,7 @@ fn disc_details(disc: &libfreemkv::Disc, key_summary: &str, verbose: bool) -> Ve
 /// Build the title tree + info rows from a scanned `Disc`. Shared by the ISO
 /// (`scan_with_keys`) and live-drive (`scan_disc_with_keys`) paths so a disc
 /// looks identical whether it came from a file or a physical drive.
-fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String, verbose: bool) -> Scanned {
+fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
     let mut rows = Vec::new();
     // The volume id is untrusted disc bytes that become `Scanned.label`, fed
     // to the log pane and disc row text. Sanitise ONCE here, at the
@@ -463,7 +451,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String, verbose: bool) ->
         rows.extend(stream_rows(t, ti));
     }
 
-    let details = disc_details(disc, &summary, verbose);
+    let details = disc_details(disc, &summary);
     Scanned {
         label,
         volume_id: disc.volume_id.clone(),
@@ -595,11 +583,7 @@ fn won_from_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> Option<St
 /// and resolve its keys, returning the SAME `Scanned` shape the ISO path does —
 /// so the title tree renders identically. Mirrors the CLI's `pipe_disc` scan.
 /// NEEDS HARDWARE to exercise; the session flow matches the proven CLI path.
-pub fn scan_disc_with_keys(
-    source: &str,
-    keys: &KeyConfig,
-    verbose: bool,
-) -> Result<Scanned, String> {
+pub fn scan_disc_with_keys(source: &str, keys: &KeyConfig) -> Result<Scanned, String> {
     // The shared drive bring-up (open + lock + scan + resolve) — the SAME core
     // the CLI's pipe_disc uses; the GUI just renders the result.
     let (session, trace) = fe::open_scan_resolve(
@@ -616,7 +600,7 @@ pub fn scan_disc_with_keys(
     let won = won_from_trace(&trace);
     let disc = session.disc().ok_or("scan produced no disc")?;
     let summary = key_summary(disc, won.as_deref());
-    Ok(scanned_from_disc(disc, summary, verbose))
+    Ok(scanned_from_disc(disc, summary))
 }
 
 /// Ask the engine whether a job can run, without executing it.
@@ -3348,7 +3332,7 @@ mod disc_details_tests {
     #[test]
     fn a_plain_unencrypted_disc_shows_type_capacity_region_and_titles() {
         let d = disc(false);
-        let lines = disc_details(&d, "unencrypted", false);
+        let lines = disc_details(&d, "unencrypted");
         assert!(lines.contains(&"Type: BluRay".to_string()), "{lines:?}");
         assert!(
             lines
@@ -3370,7 +3354,7 @@ mod disc_details_tests {
     fn zero_capacity_omits_the_capacity_line() {
         let mut d = disc(false);
         d.capacity_bytes = 0;
-        let lines = disc_details(&d, "unencrypted", false);
+        let lines = disc_details(&d, "unencrypted");
         assert!(
             !lines.iter().any(|l| l.starts_with("Capacity:")),
             "{lines:?}"
@@ -3385,24 +3369,24 @@ mod disc_details_tests {
             libfreemkv::disc::BdRegion::C,
         ]);
         assert!(
-            disc_details(&bd, "x", false).contains(&"Region: Blu-ray A/C".to_string()),
+            disc_details(&bd, "x").contains(&"Region: Blu-ray A/C".to_string()),
             "{:?}",
-            disc_details(&bd, "x", false)
+            disc_details(&bd, "x")
         );
 
         let mut dvd = disc(false);
         dvd.region = libfreemkv::disc::DiscRegion::Dvd(vec![1, 2]);
         assert!(
-            disc_details(&dvd, "x", false).contains(&"Region: DVD 1,2".to_string()),
+            disc_details(&dvd, "x").contains(&"Region: DVD 1,2".to_string()),
             "{:?}",
-            disc_details(&dvd, "x", false)
+            disc_details(&dvd, "x")
         );
 
         // An empty region list falls through to no region line at all.
         let mut empty = disc(false);
         empty.region = libfreemkv::disc::DiscRegion::BluRay(vec![]);
         assert!(
-            !disc_details(&empty, "x", false)
+            !disc_details(&empty, "x")
                 .iter()
                 .any(|l| l.starts_with("Region:")),
             "an empty region list emits no line"
@@ -3419,7 +3403,7 @@ mod disc_details_tests {
         a.volume_id = [0xAB; 16];
         d.aacs = Some(a);
 
-        let lines = disc_details(&d, "unlocked via keydb", false);
+        let lines = disc_details(&d, "unlocked via keydb");
         assert!(lines.contains(&"MKB v64".to_string()), "{lines:?}");
         // Bus-encryption flag isn't surfaced any more; Type: Uhd carries it.
         assert!(
@@ -3436,7 +3420,7 @@ mod disc_details_tests {
                 .any(|l| l == "VID: 0xabababababababababababababababab"),
             "{lines:?}"
         );
-        // Non-verbose hides the resolved key material.
+        // Resolved key material never renders.
         assert!(!lines.iter().any(|l| l.contains("VUK")), "{lines:?}");
         assert!(
             !lines.iter().any(|l| l.trim_start().starts_with("CPS")),
@@ -3449,39 +3433,25 @@ mod disc_details_tests {
         let mut d = disc(true);
         d.aacs = Some(aacs(vec![])); // volume_id defaults to all-zero
         assert!(
-            !disc_details(&d, "x", false)
-                .iter()
-                .any(|l| l.starts_with("VID:")),
+            !disc_details(&d, "x").iter().any(|l| l.starts_with("VID:")),
             "an unavailable (all-zero) VID must not print a line"
         );
     }
 
+    // The GUI log is shared in bug reports: planted key bytes must never render,
+    // whatever the log detail level.
     #[test]
-    fn verbose_reveals_the_vuk_and_each_cps_unit_key() {
+    fn the_detail_block_never_renders_the_vuk_or_any_unit_key() {
         let mut d = disc(true);
         let mut a = aacs(vec![(3, [0x11; 16]), (7, [0x22; 16])]);
         a.vuk = Some([0xEE; 16]);
         d.aacs = Some(a);
 
-        let lines = disc_details(&d, "unlocked via keydb", true);
-        assert!(
-            lines
-                .iter()
-                .any(|l| l == "  VUK: 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
-            "{lines:?}"
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l == "  CPS 3: 0x11111111111111111111111111111111"),
-            "{lines:?}"
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l == "  CPS 7: 0x22222222222222222222222222222222"),
-            "{lines:?}"
-        );
+        let text = disc_details(&d, "unlocked via keydb").join("\n");
+        for secret in ["eeeeeeee", "11111111", "22222222"] {
+            assert!(!text.contains(secret), "key bytes {secret} leaked:\n{text}");
+        }
+        assert!(!text.contains("VUK") && !text.contains("CPS"), "{text}");
     }
 }
 
@@ -5111,7 +5081,7 @@ mod display_sanitisation_tests {
     #[test]
     fn no_disc_derived_row_text_carries_an_unsafe_display_char() {
         let disc = hostile_disc();
-        let scanned = scanned_from_disc(&disc, "none".into(), false);
+        let scanned = scanned_from_disc(&disc, "none".into());
         let bad = offenders(&scanned.rows);
         assert!(bad.is_empty(), "unsanitised row text: {bad:?}");
     }
@@ -5130,8 +5100,8 @@ mod display_sanitisation_tests {
     /// same shape, only the payload differs, so any extra line came from it.
     #[test]
     fn tooltips_keep_their_own_shape() {
-        let hostile = scanned_from_disc(&hostile_disc(), "none".into(), false);
-        let benign = scanned_from_disc(&benign_disc(), "none".into(), false);
+        let hostile = scanned_from_disc(&hostile_disc(), "none".into());
+        let benign = scanned_from_disc(&benign_disc(), "none".into());
         assert_eq!(hostile.rows.len(), benign.rows.len(), "row count differs");
         for (h, b) in hostile.rows.iter().zip(&benign.rows) {
             assert_eq!(

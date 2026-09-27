@@ -1584,13 +1584,13 @@ pub enum LogKind {
 // Scan a source by its kind. The ONE dispatch from a URL to a scan, shared
 // by the synchronous open and the launch probe's worker thread. Free-standing
 // rather than a method because the worker holds no `App`.
-fn scan_source(path: &str, keys: &KeyConfig, verbose: bool) -> Result<Scanned, String> {
+fn scan_source(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
     if is_container(path) {
         crate::engine::scan_stream(path)
     } else if crate::engine::is_disc_source(path) {
-        crate::engine::scan_disc_with_keys(path, keys, verbose)
+        crate::engine::scan_disc_with_keys(path, keys)
     } else {
-        crate::engine::scan_with_keys(path, keys, verbose)
+        crate::engine::scan_with_keys(path, keys)
     }
 }
 
@@ -1979,12 +1979,11 @@ impl App {
         self.probe = None;
         let path = path.to_owned();
         let keys = KeyConfig::from_settings(&self.settings);
-        let verbose = self.verbose_log();
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("open-source".into())
             .spawn(move || {
-                let scanned = scan_source(&path, &keys, verbose);
+                let scanned = scan_source(&path, &keys);
                 let preflight = (scanned.is_ok()
                     && !is_container(&path)
                     && !crate::engine::is_disc_source(&path))
@@ -2028,7 +2027,6 @@ impl App {
         // Everything the scan needs is copied out HERE, on the UI thread. The
         // worker gets no reference to `App`.
         let keys = KeyConfig::from_settings(&self.settings);
-        let verbose = self.verbose_log();
         let path = path.to_string();
         let worker = state.clone();
         let spawned = std::thread::Builder::new()
@@ -2042,7 +2040,7 @@ impl App {
                 let scanned = if no_drive {
                     Err(String::new())
                 } else {
-                    scan_source(&path, &keys, verbose)
+                    scan_source(&path, &keys)
                 };
                 if let Ok(mut slot) = worker.result.lock() {
                     *slot = Some(scanned);
@@ -2058,18 +2056,8 @@ impl App {
         vec![Effect::Redraw, Effect::StartTicking]
     }
 
-    /// "Log detail: Verbose" (or Debug) reveals the resolved keys in the
-    /// on-open detail block, mirroring the CLI's `info -v`.
-    fn verbose_log(&self) -> bool {
-        self.settings.log_level == "Verbose" || self.settings.log_level == "Debug"
-    }
-
     fn open_inner(&mut self, path: &str, quiet: bool) -> Vec<Effect> {
-        let scanned = scan_source(
-            path,
-            &KeyConfig::from_settings(&self.settings),
-            self.verbose_log(),
-        );
+        let scanned = scan_source(path, &KeyConfig::from_settings(&self.settings));
         self.apply_scan(path, scanned, quiet)
     }
 
