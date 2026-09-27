@@ -69,6 +69,8 @@ pub(crate) struct Shell {
     /// drains them, because GTK objects never cross threads.
     inbox: Arc<Mutex<Vec<(LogKind, String)>>>,
     keydb_updating: Cell<bool>,
+    /// An Open Disc's drive enumeration is in flight.
+    finding_drives: Cell<bool>,
     quit_confirmed: Cell<bool>,
     /// True while `render` writes to widgets, so the change signals those
     /// writes emit are not mistaken for the user.
@@ -117,6 +119,7 @@ fn build_ui(gapp: &adw::Application) {
         drain: RefCell::new(None),
         inbox: Arc::new(Mutex::new(Vec::new())),
         keydb_updating: Cell::new(false),
+        finding_drives: Cell::new(false),
         quit_confirmed: Cell::new(false),
         painting: Cell::new(false),
         prefs: RefCell::new(None),
@@ -185,19 +188,34 @@ impl Shell {
         self.apply(|a| a.open_async(path));
     }
 
-    /// Which drive, and what to log about it, is the core's `disc_source`, as
-    /// on macOS/Windows; the scan itself runs in the worker.
+    /// The launch probe enumerates nothing here. An explicit Open Disc lists
+    /// drives on a worker (a SCSI walk), then logs and opens as macOS/Windows.
     fn open_disc(self: &Rc<Self>, announce_missing: bool) {
-        self.apply(|a| {
-            if announce_missing && !glue::action_enabled(Some(Cmd::Open), a.running(), a.opening())
-            {
-                return vec![];
-            }
-            match a.disc_source(announce_missing) {
-                None => vec![],
-                Some(url) if announce_missing => a.open_async(&url),
+        if !announce_missing {
+            self.apply(|a| match a.disc_source(false) {
                 Some(url) => a.open_probe(&url),
-            }
+                None => vec![],
+            });
+            return;
+        }
+        let ok = {
+            let a = self.app.borrow();
+            glue::action_enabled(Some(Cmd::Open), a.running(), a.opening())
+        };
+        if !ok || self.finding_drives.replace(true) {
+            return;
+        }
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            let drives = gio::spawn_blocking(crate::engine::list_optical_drives)
+                .await
+                .unwrap_or_default();
+            me.finding_drives.set(false);
+            let (kind, line, url) = glue::disc_open_plan(&drives);
+            me.apply(|a| {
+                a.say(kind, &line);
+                url.map_or_else(Vec::new, |u| a.open_async(&u))
+            });
         });
     }
 
@@ -410,6 +428,8 @@ impl Shell {
         let show = show_folder_label();
 
         let toast = adw::Toast::new(&glib::markup_escape_text(title));
+        // Plain body: GTK's backend and the portal take plain text; only
+        // markup-parsing fdo servers (Plasma, dunst) may misrender a `&`.
         let n = gio::Notification::new(title);
         n.set_body(Some(body));
         if let Some(dir) = output_dir {

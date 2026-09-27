@@ -166,6 +166,52 @@ pub fn rows_sig(rows: &[Row]) -> u64 {
     h.finish()
 }
 
+/// An explicit Open Disc, given the drives a worker enumerated off the UI
+/// thread: the log line and the URL to scan (`None` = no drive, stop). The
+/// same rule and wording as the core's `App::disc_source(true)`.
+pub fn disc_open_plan(drives: &[crate::engine::OpticalDrive]) -> (LogKind, String, Option<String>) {
+    use crate::strings::{fmt_or, get_or, sanitize_display};
+    match drives {
+        [] => (
+            LogKind::Notice,
+            get_or(
+                "gui.log.no_drive",
+                "No optical drive found. Connect a Blu-ray/DVD drive with a disc.",
+            ),
+            None,
+        ),
+        [d] => (
+            LogKind::Detail,
+            fmt_or(
+                "gui.log.opening_drive",
+                "Opening {label} ({device})",
+                &[
+                    ("label", &sanitize_display(&d.label)),
+                    ("device", &d.device),
+                ],
+            ),
+            Some(format!("disc://{}", d.device)),
+        ),
+        _ => {
+            let list = drives
+                .iter()
+                .map(|d| format!("{} ({})", sanitize_display(&d.label), d.device))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let n = drives.len().to_string();
+            (
+                LogKind::Detail,
+                fmt_or(
+                    "gui.log.drives_found",
+                    "{n} drives found: {list} — using the one with a disc",
+                    &[("n", &n), ("list", &list)],
+                ),
+                Some("disc://".to_string()),
+            )
+        }
+    }
+}
+
 /// A keydb worker's outcome as a log line: a failure in the Notice style,
 /// never the success one.
 pub fn keydb_update_line(r: Result<String, String>) -> (LogKind, String) {
@@ -444,6 +490,28 @@ mod tests {
         assert!(!action_enabled(Some(Cmd::Close), true, false));
         assert!(action_enabled(Some(Cmd::ToggleLog), true, true));
         assert!(action_enabled(None, true, true));
+    }
+
+    #[test]
+    fn open_disc_names_one_drive_autodetects_several_and_stops_on_none() {
+        let drive = |d: &str| crate::engine::OpticalDrive {
+            device: d.into(),
+            label: "HL-DT-ST\u{202e} BD".into(),
+        };
+        let (k, _, url) = disc_open_plan(&[]);
+        assert_eq!((k, url), (LogKind::Notice, None));
+        let (k, line, url) = disc_open_plan(&[drive("/dev/sr0")]);
+        assert_eq!(
+            (k, url.as_deref()),
+            (LogKind::Detail, Some("disc:///dev/sr0"))
+        );
+        assert!(
+            line.contains("/dev/sr0") && !line.contains('\u{202e}'),
+            "{line}"
+        );
+        let (_, line, url) = disc_open_plan(&[drive("/dev/sr0"), drive("/dev/sr1")]);
+        assert_eq!(url.as_deref(), Some("disc://"));
+        assert!(line.contains("/dev/sr1"), "{line}");
     }
 
     #[test]

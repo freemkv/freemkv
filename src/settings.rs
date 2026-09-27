@@ -110,9 +110,6 @@ fn home() -> PathBuf {
     crate::platform::home_dir()
 }
 
-/// Serde `default` helper: bool fields that should default to `true` when
-/// missing from an older settings file. `#[serde(default)]` on a bool defaults
-/// to `false`, which would silently opt users out of features they had on.
 /// Per-OS writable state directory — see `platform::support_dir`. Kept as a
 /// re-export so the many existing `settings::support_dir()` call sites (and the
 /// GUI log writer in `main.rs`) are unchanged.

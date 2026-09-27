@@ -137,7 +137,8 @@ pub fn apply_locale(language: &str, system_locale: impl FnOnce() -> Option<Strin
             crate::strings::set_locale(&sys);
         }
     } else {
-        crate::strings::set_language(code);
+        // Not `set_language`: its override would pin a later live "Auto".
+        crate::strings::set_locale(code);
     }
 }
 
