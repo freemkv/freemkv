@@ -1,10 +1,13 @@
 name: AppImage
 
 # Builds a portable AppImage of the Linux desktop app (bundles GTK4 +
-# libadwaita). On demand for testing; on a version tag release.yml calls it
-# with release: true and it uploads freemkv-x86_64-linux.AppImage.
+# libadwaita). On every qa push, so a green qa proves it like deb/flatpak; on
+# demand; and on a version tag release.yml calls it with release: true to
+# upload freemkv-x86_64-linux.AppImage.
 on:
   workflow_dispatch:
+  push:
+    branches: [qa]
   # release.yml calls this with release: true on a version tag.
   workflow_call:
     inputs:
@@ -30,6 +33,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           path: freemkv
+          persist-credentials: false
       # Dev builds link sibling dev checkouts; a release links the tagged crates.
       - if: ${{ !inputs.release }}
         uses: freemkv/.github/.github/actions/checkout-siblings@v1
@@ -54,7 +58,9 @@ jobs:
             b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171 linuxdeploy-plugin-gtk.sh \
             | sha256sum -c -
           chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv

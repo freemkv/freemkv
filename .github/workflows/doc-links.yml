@@ -6,8 +6,13 @@ name: doc-links
 #
 # Fails on broken intra-doc links in ///|//! comments (`cargo doc -D
 # rustdoc::broken_intra_doc_links`). Toolchain resolves from `rust-version`
-# in Cargo.toml so a bump moves in lockstep.
-on: [push, pull_request]
+# in Cargo.toml so a bump moves in lockstep; the same toolchain also checks
+# that every target still compiles on the declared MSRV. Branches only: a tag
+# push is a commit its branch run already checked.
+on:
+  push:
+    branches: ['**']
+  pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -38,7 +43,7 @@ jobs:
         run: |
           v=$(grep -m1 -E '^[[:space:]]*rust-version[[:space:]]*=' freemkv/Cargo.toml | sed -E 's/.*"([0-9.]+)".*/\1/')
           echo "v=${v:-stable}" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: ${{ steps.msrv.outputs.v }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -51,3 +56,8 @@ jobs:
         run: |
           cargo doc --no-deps --document-private-items --lib --bins
           cargo doc --no-deps --document-private-items --lib --bins --features gui
+      - name: cargo check on the MSRV (all targets, both builds)
+        working-directory: freemkv
+        run: |
+          cargo check --all-targets
+          cargo check --all-targets --features gui

@@ -23,20 +23,24 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Verify Cargo.toml version matches tag
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           CARGO_VER="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
-          if [ "$CARGO_VER" != "${{ github.ref_name }}" ]; then
-            echo "::error::Cargo.toml says $CARGO_VER but tag is ${{ github.ref_name }}"
+          if [ "$CARGO_VER" != "$TAG" ]; then
+            echo "::error::Cargo.toml says $CARGO_VER but tag is $TAG"
             exit 1
           fi
           echo "Version match: $CARGO_VER"
       # The .app's version is what the user sees in About, so it must agree too.
       # A stale Info.plist ships a build that lies about which release it is.
       - name: Verify Info.plist version matches tag
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           PLIST_VER="v$(sed -n 's/.*<key>CFBundleShortVersionString<\/key><string>\(.*\)<\/string>.*/\1/p' macos/Info.plist)"
-          if [ "$PLIST_VER" != "${{ github.ref_name }}" ]; then
-            echo "::error::Info.plist says $PLIST_VER but tag is ${{ github.ref_name }}"
+          if [ "$PLIST_VER" != "$TAG" ]; then
+            echo "::error::Info.plist says $PLIST_VER but tag is $TAG"
             exit 1
           fi
           echo "Info.plist match: $PLIST_VER"
@@ -49,7 +53,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test --tests
       - run: cargo test --tests --features gui
@@ -74,8 +80,11 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@stable
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -225,8 +234,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@stable
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -247,6 +259,8 @@ jobs:
 
       - name: Build the installer
         shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
           if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
@@ -254,14 +268,16 @@ jobs:
             choco install innosetup --version 6.4.3 -y --no-progress
             $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           }
-          $ver = "${{ github.ref_name }}".TrimStart('v')
+          $ver = $env:TAG.TrimStart('v')
           & $iscc "/DAppVersion=$ver" "/DBinDir=$((Resolve-Path stage).Path)" "/O$PWD" packaging/windows/freemkv.iss
           if ($LASTEXITCODE -ne 0) { throw "iscc exited $LASTEXITCODE" }
 
       - name: Verify
         shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          $ver = "${{ github.ref_name }}".TrimStart('v')
+          $ver = $env:TAG.TrimStart('v')
           $a   = "${{ matrix.asset }}"
           function Get-Subsystem($path) {
             $b  = [IO.File]::ReadAllBytes($path)
@@ -283,26 +299,40 @@ jobs:
           if ("$out" -notmatch [regex]::Escape($ver)) { throw "freemkv.com --version does not report $ver" }
           if (-not (Test-Path "$a-setup.exe")) { throw "$a-setup.exe was not built" }
 
-      # Round-trip the installer: files land, PATH gains the dir, uninstall
-      # removes both.
+      # Round-trip the installer: files, shortcut and PATH land; uninstall
+      # removes them and leaves the user's other PATH entries intact.
       - name: Verify the installer
         shell: pwsh
         run: |
           $dir = "$env:LOCALAPPDATA\Programs\freemkv"
+          $lnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\freemkv.lnk"
           $userPath = { [Environment]::GetEnvironmentVariable('Path', 'User') }
+          $keep = @("$env:RUNNER_TEMP\keep-a", "$env:RUNNER_TEMP\keep-b")
+          [Environment]::SetEnvironmentVariable('Path', ((@((& $userPath) -split ';') + $keep) | Where-Object { $_ }) -join ';', 'User')
+          $before = (& $userPath) -split ';'
           Start-Process -Wait "./${{ matrix.asset }}-setup.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
           foreach ($f in 'freemkv.exe','freemkv.com','unins000.exe') {
             if (-not (Test-Path "$dir\$f")) { throw "installer did not create $dir\$f" }
           }
+          if (-not (Test-Path $lnk)) { throw "installer did not create $lnk" }
           if ((& $userPath) -split ';' -notcontains $dir) { throw "installer did not add $dir to the user PATH" }
           & "$dir\freemkv.com" --version
           if ($LASTEXITCODE -ne 0) { throw "installed freemkv.com --version exited $LASTEXITCODE" }
+          # The bare name must resolve to the console .com (PATHEXT), not the windowed .exe.
+          $env:Path = (& $userPath) + ';' + [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          $bare = (Get-Command freemkv -CommandType Application | Select-Object -First 1).Source
+          if ($bare -ne "$dir\freemkv.com") { throw "bare 'freemkv' resolves to $bare, want $dir\freemkv.com" }
+          freemkv --version
+          if ($LASTEXITCODE -ne 0) { throw "bare freemkv --version exited $LASTEXITCODE" }
           Start-Process -Wait "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
           # The uninstaller relaunches itself from %TEMP%, so -Wait can return early.
           $done = { -not (Test-Path "$dir\freemkv.exe") -and ((& $userPath) -split ';' -notcontains $dir) }
           for ($i = 0; $i -lt 60 -and -not (& $done); $i++) { Start-Sleep 1 }
           if (Test-Path "$dir\freemkv.exe") { throw "uninstaller left $dir\freemkv.exe" }
           if ((& $userPath) -split ';' -contains $dir) { throw "uninstaller left $dir on the user PATH" }
+          if (Test-Path $lnk) { throw "uninstaller left $lnk" }
+          $after = (& $userPath) -split ';'
+          if (Compare-Object $before $after -SyncWindow 0) { throw "uninstall changed other user PATH entries: '$($before -join ';')' -> '$($after -join ';')'" }
 
       - name: Checksums
         shell: bash
@@ -361,8 +391,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@stable
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -372,11 +405,16 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       # arm64 musl goes through `cross`: mimalloc-sys and ring compile C, which
       # a plain x86 `cargo build --target` cannot link.
+      # Pinned + hash-checked like linuxdeploy in appimage.yml; the build image by digest.
       - name: Install cross
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
-          curl -sL https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-musl.tar.gz | tar xz
+          set -euo pipefail
+          curl -fsSLo cross.tar.gz https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-musl.tar.gz
+          echo 'a486cefa6cb486971b97be321ea9dfc2e90c1979550295314a368f53fab6d588  cross.tar.gz' | sha256sum -c -
+          tar xzf cross.tar.gz cross
           sudo mv cross /usr/local/bin/
+          echo 'CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_IMAGE=ghcr.io/cross-rs/aarch64-unknown-linux-musl:0.2.5@sha256:702154f52b2d8091671aa2c84d5582d849f949977228c735ff8462f93cc0e1e4' >> "$GITHUB_ENV"
       - name: Build CLI
         if: matrix.target != 'aarch64-unknown-linux-musl'
         run: cargo build --release --target ${{ matrix.target }} --bin freemkv
@@ -529,4 +567,4 @@ jobs:
           token: ${{ secrets.ORG_DISPATCH_TOKEN }}
           repository: freemkv/.github
           event-type: new-release
-          client-payload: '{"version": "${{ github.ref_name }}"}'
+          client-payload: '{"version": ${{ toJSON(github.ref_name) }}}'
