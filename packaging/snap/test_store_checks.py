@@ -58,6 +58,12 @@ class ReviewExit(unittest.TestCase):
         self.assertEqual(self._run(1, report()), 1)
         self.assertEqual(self._run(2, report()), 1)
 
+    def test_exit_3_with_a_warnings_only_report_passes(self):
+        self.assertEqual(self._run(3, report(warns={"lint-snap-v2:foo": {"text": "w"}})), 0)
+
+    def test_non_numeric_exit_code_fails(self):
+        self.assertEqual(self._run("x", report()), 2)
+
     def test_expected_exit_with_known_grants_passes(self):
         self.assertEqual(self._run(2, report({PLUG: {}, SLOT: {}})), 0)
         self.assertEqual(self._run(0, report()), 0)
@@ -77,12 +83,12 @@ class Upload(unittest.TestCase):
         self.assertEqual(sc.classify_upload(0, "all good\n"), "failed")
 
     def test_only_known_grant_issues_are_held(self):
-        log = (f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG} human review required\n"
-               f"- (NEEDS REVIEW) {SLOT} human review required\n")
+        log = (f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}\n"
+               f"- (NEEDS REVIEW) {SLOT} {sc.GRANT_REASON}\n")
         self.assertEqual(sc.classify_upload(1, log), "held")
 
     def test_any_other_needs_review_fails(self):
-        log = (f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG} human review required\n"
+        log = (f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}\n"
                "- (NEEDS REVIEW) declaration-snap-v2:plugs_installation:block-devices\n")
         self.assertEqual(sc.classify_upload(1, log), "failed")
 
@@ -94,22 +100,59 @@ class Upload(unittest.TestCase):
         self.assertEqual(sc.classify_upload(1, log), "failed")
 
     def test_grant_prefix_of_a_longer_token_fails(self):
-        log = f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG}-evil human review required\n"
+        log = f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG}-evil {sc.GRANT_REASON}\n"
         self.assertEqual(sc.classify_upload(1, log), "failed")
         bare = PLUG.split(":", 1)[1]
         log = f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {bare}-evil\n"
         self.assertEqual(sc.classify_upload(1, log), "failed")
 
     def test_indented_continuation_line_fails(self):
-        log = (f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG} human review required\n"
+        log = (f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}\n"
                "  plugs_installation:block-devices also flagged\n")
         self.assertEqual(sc.classify_upload(1, log), "failed")
 
     def test_grant_without_prefix_and_log_trailer_is_held(self):
         bare = SLOT.split(":", 1)[1]
-        log = (f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {bare} human review required\n"
+        log = (f"{sc.ISSUES_HEADER}\n- (NEEDS REVIEW) {bare} {sc.GRANT_REASON}\n"
                "Full execution log: '/root/snapcraft.log'\n")
         self.assertEqual(sc.classify_upload(1, log), "held")
+
+    def _held(self, *items, trailer=""):
+        return sc.classify_upload(1, sc.ISSUES_HEADER + "\n" + "".join(f"- {i}\n" for i in items) + trailer)
+
+    def test_issue_without_status_tag_fails(self):
+        self.assertEqual(self._held(PLUG), "failed")
+
+    def test_lowercase_or_bracketed_tags_fail(self):
+        self.assertEqual(self._held(f"(rejected) {PLUG}"), "failed")
+        self.assertEqual(self._held(f"[REJECTED] {PLUG}"), "failed")
+        self.assertEqual(self._held(f"(NEEDS REVIEW) {PLUG} (rejected)"), "failed")
+        self.assertEqual(self._held(f"[REJECTED] (NEEDS REVIEW) {PLUG}"), "failed")
+
+    def test_trailing_extra_text_fails(self):
+        self.assertEqual(self._held(f"(NEEDS REVIEW) {PLUG}, also raw-usb denied"), "failed")
+        self.assertEqual(self._held(f"(NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}; also raw-usb"), "failed")
+
+    def test_known_reason_and_full_stop_are_held(self):
+        self.assertEqual(self._held(f"(NEEDS REVIEW) {PLUG}."), "held")
+        self.assertEqual(self._held(f"(NEEDS REVIEW) {SLOT} {sc.GRANT_REASON}."), "held")
+
+    def test_craft_cli_trailers_end_the_issue_list(self):
+        issue = f"(NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}"
+        for trailer in (
+            "Detailed information: the store said so\nmore detail on a second line\n",
+            "Recommended resolution: ask for a store grant\n",
+            "For more information, check out: https://snapcraft.io/docs\n",
+            "Full execution log: '/root/snapcraft.log'\n",
+        ):
+            self.assertEqual(self._held(issue, trailer=trailer), "held", trailer)
+
+    def test_unknown_line_before_a_trailer_fails(self):
+        issue = f"(NEEDS REVIEW) {PLUG}"
+        self.assertEqual(self._held(issue, trailer="something else\nRecommended resolution: x\n"), "failed")
+
+    def test_non_numeric_exit_code_is_a_numbered_failure(self):
+        self.assertEqual(sc.main(["store_checks.py", "upload", "oops", "/dev/null"]), 2)
 
     def test_other_errors_fail(self):
         self.assertEqual(sc.classify_upload(1, "Invalid credentials\n"), "failed")

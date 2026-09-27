@@ -16,10 +16,21 @@ KNOWN_GRANTS = (
 )
 # A store upload error may name a grant with or without the review-tools prefix.
 STORE_GRANT_IDS = frozenset(KNOWN_GRANTS) | {g.split(":", 1)[1] for g in KNOWN_GRANTS}
-# A whole review check id: colon-separated words, at least three parts.
-CHECK_ID = re.compile(r"(?<![\w:.-])[\w.-]+(?::[\w.-]+){2,}(?![\w:.-])")
-STATUS_TAG = re.compile(r"\(([A-Z][A-Z ]*)\)")
-LOG_TRAILER = "Full execution log:"
+# review-tools' explanation for both grants; the only text allowed after the id.
+GRANT_REASON = "human review required due to 'deny-connection' constraint (interface attributes)"
+# The whole shape of a held issue: the tag, one check id, optionally the known
+# reason, and at most a closing full stop.
+GRANT_ISSUE = re.compile(
+    r"\(NEEDS REVIEW\)\s+(?P<id>[\w-]+(?::[\w-]+){2,})"
+    r"(?:\s+" + re.escape(GRANT_REASON) + r")?\.?"
+)
+# craft-cli prints these after an error's message; they end the issue list.
+ERROR_TRAILERS = (
+    "Detailed information:",
+    "Recommended resolution:",
+    "For more information, check out:",
+    "Full execution log:",
+)
 
 HELD_STATUS = "will need manual review"
 ISSUES_HEADER = "Issues while processing snap:"
@@ -63,7 +74,7 @@ def upload_issues(log):
     for line in log.split(ISSUES_HEADER, 1)[1].splitlines():
         if not line.strip():
             continue
-        if line.startswith(LOG_TRAILER):
+        if line.startswith(ERROR_TRAILERS):
             break
         if not line.startswith("- "):
             return None
@@ -72,11 +83,9 @@ def upload_issues(log):
 
 
 def is_known_grant_issue(issue):
-    """One NEEDS REVIEW finding naming exactly one known grant, as a whole token."""
-    if ";" in issue or any(t != "NEEDS REVIEW" for t in STATUS_TAG.findall(issue)):
-        return False
-    ids = CHECK_ID.findall(issue)
-    return len(ids) == 1 and ids[0] in STORE_GRANT_IDS
+    """Exactly `(NEEDS REVIEW) <known grant id>`, optionally with its known reason."""
+    m = GRANT_ISSUE.fullmatch(issue.strip())
+    return m is not None and m["id"] in STORE_GRANT_IDS
 
 
 def classify_upload(exit_code, log):
@@ -97,18 +106,24 @@ def main(argv):
             with open(argv[3]) as f:
                 report = json.load(f)
             lines, failures = review(report)
+            code = int(argv[2])
         except (ValueError, json.JSONDecodeError) as e:
-            print(f"::error::unexpected review-tools output: {e}")
+            print(f"::error::unexpected review-tools output or exit code: {e}")
             return 2
         print("\n".join(lines))
         want = expected_review_exit(report)
-        if int(argv[2]) != want:
+        if code != want:
             print(f"::error::snap-review exited {argv[2]}, but its report implies {want}")
             return 1
         return 1 if failures else 0
     if len(argv) == 4 and argv[1] == "upload":
+        try:
+            code = int(argv[2])
+        except ValueError:
+            print(f"::error::snapcraft exit code {argv[2]!r} is not a number")
+            return 2
         with open(argv[3]) as f:
-            print(classify_upload(int(argv[2]), f.read()))
+            print(classify_upload(code, f.read()))
         return 0
     print(f"usage: {argv[0]} review EXIT_CODE REPORT.json | upload EXIT_CODE LOG", file=sys.stderr)
     return 2
