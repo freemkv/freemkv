@@ -1,0 +1,92 @@
+name: freemkv
+# Version and grade come from Cargo.toml plus the suffix CI writes to
+# snap/local/version-suffix (empty on a release tag). See override-pull.
+adopt-info: freemkv
+base: core24
+confinement: strict
+license: MIT
+icon: res/freemkv-icon.svg
+
+platforms:
+  amd64:
+  # Built only by `snapcraft remote-build` (Launchpad); see packaging/snap/README.md.
+  arm64:
+
+# Drive access, verified against snapd interfaces/builtin/optical_drive.go:
+# the plain `optical-drive` plug grants read on /dev/sr*, /dev/scd*, /dev/sg*
+# and auto-connects; `write: true` adds write on the same nodes (SG_IO
+# commands, tray lock, eject), but the base declaration denies its
+# auto-connection, so it stays manual (`snap connect freemkv:optical-write`)
+# until the store grants this snap auto-connect. The default seccomp
+# template does not filter ioctl by request, so SG_IO needs nothing more.
+plugs:
+  optical-write:
+    interface: optical-drive
+    write: true
+
+apps:
+  freemkv:
+    # App build: a bare launch opens the window when a display is present,
+    # any arguments run the CLI (src/app_entry.rs wants_gui).
+    command: bin/freemkv
+    common-id: org.freemkv.FreeMKV
+    desktop: usr/share/applications/org.freemkv.FreeMKV.desktop
+    extensions: [gnome]
+    plugs:
+      - optical-drive
+      - optical-write
+      - hardware-observe
+      - home
+      - removable-media
+      - network
+  freemkv-cli:
+    # Same binary with the display variables cleared, so a bare launch
+    # prints usage like the CLI build. Still needs the GNOME runtime
+    # because the binary links GTK4.
+    command: bin/freemkv-cli
+    extensions: [gnome]
+    plugs:
+      - optical-drive
+      - optical-write
+      - hardware-observe
+      - home
+      - removable-media
+      - network
+
+parts:
+  freemkv:
+    plugin: rust
+    source: .
+    # Must match rust-version in Cargo.toml; snap.yml fails the build if not.
+    rust-channel: "1.98"
+    build-packages: [build-essential]
+    override-pull: |
+      craftctl default
+      base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+      suffix_file="$CRAFT_PROJECT_DIR/snap/local/version-suffix"
+      if [ -f "$suffix_file" ]; then suffix=$(tr -d '[:space:]' < "$suffix_file"); else suffix="+dev"; fi
+      version="$base$suffix"
+      craftctl set version="$version"
+      case "$version" in
+        *-*|*+*) craftctl set grade=devel ;;
+        *) craftctl set grade=stable ;;
+      esac
+    # Not `craftctl default`: the plugin's `cargo install --locked` rejects
+    # the sibling-checkout patches CI writes to .cargo/config.toml on dev/qa.
+    override-build: |
+      set -eu
+      locked=""
+      [ -f .cargo/config.toml ] || locked="--locked"
+      cargo build --release $locked --features gui --bin freemkv
+      install -Dm755 target/release/freemkv "$CRAFT_PART_INSTALL/bin/freemkv"
+      printf '%s\n' '#!/bin/sh' \
+        'exec env -u DISPLAY -u WAYLAND_DISPLAY "$SNAP/bin/freemkv" "$@"' \
+        > "$CRAFT_PART_INSTALL/bin/freemkv-cli"
+      chmod 755 "$CRAFT_PART_INSTALL/bin/freemkv-cli"
+      install -Dm644 packaging/flatpak/org.freemkv.FreeMKV.desktop \
+        "$CRAFT_PART_INSTALL/usr/share/applications/org.freemkv.FreeMKV.desktop"
+      install -Dm644 packaging/flatpak/org.freemkv.FreeMKV.metainfo.xml \
+        "$CRAFT_PART_INSTALL/usr/share/metainfo/org.freemkv.FreeMKV.metainfo.xml"
+      install -Dm644 res/freemkv-icon.svg \
+        "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/scalable/apps/org.freemkv.FreeMKV.svg"
+    parse-info: [usr/share/metainfo/org.freemkv.FreeMKV.metainfo.xml]

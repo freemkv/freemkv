@@ -140,6 +140,7 @@ fn every_os_ships_an_app_and_a_cli() {
         "freemkv-cli-amd64.deb",
         "freemkv-x86_64-linux.AppImage",
         "freemkv-x86_64-linux.flatpak",
+        "freemkv-amd64.snap",
     ] {
         assert!(
             e.current.iter().any(|n| n == must),
@@ -162,7 +163,7 @@ fn legacy_aliases_are_the_cli_names_without_cli() {
 /// joined with the suffixes used) and its `gh release upload` arguments, where `name*` expands to
 /// `name` plus `name.sha256` when the job hashes `name`.
 fn produced() -> BTreeSet<String> {
-    let files = ["deb.yml", "appimage.yml", "flatpak.yml", "release.yml"];
+    let files = ["deb.yml", "appimage.yml", "flatpak.yml", "release.yml", "snap.yml"];
     let texts: Vec<(&str, String)> = files.iter().map(|f| (*f, workflow(f))).collect();
     produced_from(&texts)
 }

@@ -27,7 +27,7 @@ points at the newest release.
 | macOS Apple Silicon | `freemkv-aarch64-macos.dmg` / `.zip` | `freemkv-cli-aarch64-macos` |
 | macOS Intel | `freemkv-x86_64-macos.dmg` / `.zip` | `freemkv-cli-x86_64-macos` |
 | Windows x86_64 | `freemkv-x86_64-windows-setup.exe` (installer), `freemkv-x86_64-windows.zip` (portable) | `freemkv-cli-x86_64-windows.exe` |
-| Linux x86_64 | `freemkv-amd64.deb`, `freemkv-x86_64-linux.AppImage`, `freemkv-x86_64-linux.flatpak` | `freemkv-cli-amd64.deb`, `freemkv-cli-x86_64-linux` |
+| Linux x86_64 | `freemkv-amd64.deb`, `freemkv-x86_64-linux.AppImage`, `freemkv-x86_64-linux.flatpak`, `freemkv-amd64.snap` | `freemkv-cli-amd64.deb`, `freemkv-cli-x86_64-linux` |
 | Linux arm64 | — | `freemkv-cli-aarch64-linux` |
 
 The Linux CLI binaries are static (musl) and need no shared libraries. The
@@ -117,6 +117,41 @@ curl -sLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-x8
 flatpak install --user ./freemkv-x86_64-linux.flatpak
 flatpak run org.freemkv.FreeMKV
 ```
+
+**App — Snap (direct download):**
+
+```bash
+curl -sLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-amd64.snap
+curl -sLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-amd64.snap.sha256
+sha256sum -c freemkv-amd64.snap.sha256
+sudo snap install --dangerous ./freemkv-amd64.snap
+sudo snap connect freemkv:optical-drive
+sudo snap connect freemkv:optical-write
+```
+
+`--dangerous` installs a snap that is not signed by the Snap Store, so it does
+not auto-update: install each new release the same way until the store listing
+exists. The snap also provides the CLI, as `freemkv <args>` or, for the CLI's
+behaviour on a bare launch, `freemkv.freemkv-cli`
+(`sudo snap alias freemkv.freemkv-cli freemkv-cli` names it `freemkv-cli`).
+
+**App — Snap Store** (once published):
+
+```bash
+sudo snap install freemkv
+sudo snap connect freemkv:optical-write
+```
+
+The snap is strictly confined. Reading discs uses the `optical-drive`
+interface, which connects automatically from the store. Ripping also sends
+drive commands that need write access to the drive node, the separate
+`optical-write` plug, which the store does not connect automatically. Connect
+`freemkv:removable-media` to save to drives under `/media` or `/mnt`, and
+`freemkv:hardware-observe` if drives are not listed. Output is limited to your
+home directory (not its hidden folders) and removable media. The snap keeps
+its settings and key database under `~/snap/freemkv/current/`, so the
+`keydb.cfg` it reads is `~/snap/freemkv/current/.config/freemkv/keydb.cfg`
+(`freemkv update-keys` writes it there).
 
 **CLI — Debian/Ubuntu:**
 

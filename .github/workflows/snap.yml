@@ -1,0 +1,361 @@
+name: Snap
+
+# Every push builds, installs and smoke-tests the snap. Publishing needs the
+# SNAPCRAFT_STORE_CREDENTIALS secret and is skipped without it:
+#   release tag -> stable   (the .snap is also attached to the GitHub release)
+#   qa          -> beta     (only after CI and qa are green on the same commit)
+#   dev         -> edge     (only when the repo variable SNAP_PUBLISH_EDGE is 'true')
+# arm64 builds on Launchpad via `snapcraft remote-build`, only when the
+# LAUNCHPAD_CREDENTIALS secret exists. See packaging/snap/README.md.
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev, qa]
+    tags: ['v*', '!v*-rc*']
+  pull_request:
+    paths: ['snap/**', 'packaging/snap/**', '.github/workflows/snap.yml']
+
+concurrency:
+  group: snap-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Secrets cannot appear in a job-level `if`, so their presence is surfaced here.
+  secrets:
+    runs-on: ubuntu-24.04
+    outputs:
+      store: ${{ steps.check.outputs.store }}
+      launchpad: ${{ steps.check.outputs.launchpad }}
+    steps:
+      - id: check
+        env:
+          STORE: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+          LAUNCHPAD: ${{ secrets.LAUNCHPAD_CREDENTIALS }}
+        run: |
+          echo "store=$([ -n "$STORE" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "launchpad=$([ -n "$LAUNCHPAD" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Snap toolchain must match Cargo.toml rust-version
+        run: |
+          set -euo pipefail
+          want=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          got=$(sed -n 's/^ *rust-channel: "\(.*\)"/\1/p' snap/snapcraft.yaml)
+          [ "$want" = "$got" ] || {
+            echo "::error file=snap/snapcraft.yaml::rust-channel is '$got' but Cargo.toml rust-version is '$want'"
+            exit 1
+          }
+      # Release tags build from the committed git-tag patches; everything else
+      # links the matching sibling branches, as deb.yml and flatpak.yml do.
+      - name: Pin matching sibling sources
+        if: github.ref_type != 'tag'
+        env:
+          BUILD_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD_REF" = qa ]; then ref=qa; else ref=dev; fi
+          for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do
+            git clone --depth 1 --branch "$ref" "https://github.com/freemkv/$repo.git" "siblings/$repo"
+          done
+          mkdir -p .cargo
+          {
+            echo '[patch.crates-io]'
+            for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n; do
+              echo "$repo = { path = \"siblings/$repo\" }"
+            done
+            echo '[patch."https://github.com/freemkv/freemkv-unlock"]'
+            echo 'freemkv-unlock = { path = "siblings/freemkv-unlock" }'
+          } > .cargo/config.toml
+          cat .cargo/config.toml
+      - name: Stamp the snap version
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          short=$(git rev-parse --short=7 HEAD)
+          if [ "$REF_TYPE" = tag ]; then
+            [ "$REF_NAME" = "v$base" ] || { echo "::error::tag $REF_NAME does not match Cargo.toml $base"; exit 1; }
+            suffix=""
+          elif [ "$REF_NAME" = qa ]; then
+            suffix="+qa.$short"
+          else
+            suffix="+git.$short"
+          fi
+          mkdir -p snap/local
+          printf '%s\n' "$suffix" > snap/local/version-suffix
+          echo "version=$base$suffix" >> "$GITHUB_OUTPUT"
+          echo "Snap version: $base$suffix"
+      - uses: canonical/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1.3.0
+        id: build
+      - name: Stable asset name and checksum
+        env:
+          SNAP_FILE: ${{ steps.build.outputs.snap }}
+        run: |
+          set -euo pipefail
+          mkdir -p snap-package
+          cp "$SNAP_FILE" snap-package/freemkv-amd64.snap
+          cd snap-package
+          sha256sum freemkv-amd64.snap > freemkv-amd64.snap.sha256
+          ls -l
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: snap-amd64
+          path: snap-package
+          if-no-files-found: error
+          retention-days: 90
+
+  test:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: snap-amd64, path: snap-package }
+      - name: Install the snap
+        run: |
+          set -euo pipefail
+          (cd snap-package && sha256sum -c freemkv-amd64.snap.sha256)
+          sudo snap install --dangerous ./snap-package/freemkv-amd64.snap
+          snap list freemkv
+      - name: Installed version matches the build
+        env:
+          EXPECTED: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          installed=$(snap list freemkv | awk '$1 == "freemkv" { print $2 }')
+          [ "$installed" = "$EXPECTED" ] || { echo "::error::installed $installed, expected $EXPECTED"; exit 1; }
+          freemkv --version | tee version.log
+          awk -v v="${EXPECTED%%+*}" '$1 == v { found=1 } END { exit !found }' version.log
+      - name: CLI entry point runs without a display
+        run: |
+          set -euo pipefail
+          freemkv.freemkv-cli --help | tee cli-help.log
+          grep -q 'disc://' cli-help.log
+          sudo snap alias freemkv.freemkv-cli freemkv-cli
+          freemkv-cli --help > /dev/null
+          # The wrapper clears the display, so a bare launch is the CLI's usage (exit 2).
+          status=0
+          env DISPLAY=:99 WAYLAND_DISPLAY=wayland-0 freemkv-cli > cli-bare.log 2>&1 || status=$?
+          cat cli-bare.log
+          test "$status" -eq 2
+      - name: Interfaces are declared and connectable
+        run: |
+          set -euo pipefail
+          snap connections freemkv | tee connections.log
+          for plug in optical-drive optical-write hardware-observe home removable-media network; do
+            grep -Eq "^[a-z-]+ +freemkv:$plug " connections.log \
+              || { echo "::error::plug $plug is not declared"; exit 1; }
+          done
+          grep -Eq '^optical-drive +freemkv:optical-write ' connections.log \
+            || { echo "::error::optical-write is not an optical-drive plug"; exit 1; }
+          # Manual connection must work: the store denies auto-connect for write.
+          for plug in optical-write hardware-observe removable-media; do
+            sudo snap connect "freemkv:$plug"
+          done
+          snap connections freemkv | tee connections-after.log
+          grep -Eq '^optical-drive +freemkv:optical-write +:optical-drive ' connections-after.log
+      - name: Desktop app launches under a virtual display
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb dbus-x11
+          status=0
+          xvfb-run --auto-servernum dbus-run-session -- \
+            timeout 20s env GDK_BACKEND=x11 freemkv > gui-launch.log 2>&1 || status=$?
+          cat gui-launch.log
+          [ "$status" -eq 124 ] || { echo "::error::GUI exited early (status $status)"; exit 1; }
+      - name: Store review checks (review-tools)
+        run: |
+          set -euo pipefail
+          sudo snap install review-tools
+          status=0
+          review-tools.snap-review --json snap-package/freemkv-amd64.snap > review.json || status=$?
+          python3 - <<'PY'
+          import json, sys
+          report = json.load(open("review.json"))
+          # Store policy (optical-drive write) needs a manual review, not a fix.
+          allowed = ("declaration-snap-v2",)
+          bad = []
+          for section, results in report.items():
+              for level in ("error", "warn"):
+                  for check, detail in (results.get(level) or {}).items():
+                      tag = "ALLOWED" if check.startswith(allowed) else level.upper()
+                      print(f"{tag:8} {section} {check}: {detail.get('text', '')}")
+                      if tag != "ALLOWED" and level == "error":
+                          bad.append(check)
+          sys.exit(1 if bad else 0)
+          PY
+          echo "snap-review exit status: $status"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: snap-validation
+          path: |
+            *.log
+            review.json
+          retention-days: 90
+
+  remote-build-arm64:
+    needs: [secrets, build]
+    if: >-
+      needs.secrets.outputs.launchpad == 'true' &&
+      (github.ref_type == 'tag' || github.ref_name == 'qa' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { fetch-depth: 0 }
+      - name: Pin matching sibling sources
+        if: github.ref_type != 'tag'
+        env:
+          BUILD_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD_REF" = qa ]; then ref=qa; else ref=dev; fi
+          for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do
+            git clone --depth 1 --branch "$ref" "https://github.com/freemkv/$repo.git" "siblings/$repo"
+          done
+          mkdir -p .cargo
+          {
+            echo '[patch.crates-io]'
+            for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n; do
+              echo "$repo = { path = \"siblings/$repo\" }"
+            done
+            echo '[patch."https://github.com/freemkv/freemkv-unlock"]'
+            echo 'freemkv-unlock = { path = "siblings/freemkv-unlock" }'
+          } > .cargo/config.toml
+      - name: Build arm64 on Launchpad
+        env:
+          LAUNCHPAD_CREDENTIALS: ${{ secrets.LAUNCHPAD_CREDENTIALS }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p snap/local
+          printf '%s\n' "${VERSION#"$base"}" > snap/local/version-suffix
+          sudo snap install snapcraft --classic
+          export XDG_DATA_HOME="$RUNNER_TEMP/xdg-data"
+          mkdir -p "$XDG_DATA_HOME/snapcraft"
+          printf '%s\n' "$LAUNCHPAD_CREDENTIALS" > "$XDG_DATA_HOME/snapcraft/launchpad-credentials"
+          # remote-build pushes a git tree, so the generated files must be committed locally.
+          git config user.name ci && git config user.email ci@localhost
+          rm -rf siblings/*/.git
+          git add -f siblings .cargo snap/local 2>/dev/null || true
+          git commit -qm "remote-build inputs" || true
+          snapcraft remote-build --launchpad-accept-public-upload --build-for arm64
+          mkdir -p snap-package
+          cp freemkv_*_arm64.snap snap-package/freemkv-arm64.snap
+          (cd snap-package && sha256sum freemkv-arm64.snap > freemkv-arm64.snap.sha256)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: snap-arm64
+          path: snap-package
+          if-no-files-found: error
+          retention-days: 90
+
+  # The direct download: attached to the GitHub release whether or not the
+  # store is set up, so it ships before the store listing exists.
+  release-asset:
+    needs: test
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: snap-amd64, path: snap-package }
+      - name: Attach the tested snap to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd snap-package
+          sha256sum -c freemkv-amd64.snap.sha256
+          for attempt in $(seq 1 90); do
+            if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+              gh release upload "$RELEASE_TAG" freemkv-amd64.snap freemkv-amd64.snap.sha256 --clobber
+              exit 0
+            fi
+            echo "Waiting for release $RELEASE_TAG ($attempt/90)"
+            sleep 20
+          done
+          echo "Release $RELEASE_TAG was not created; the snap remains in this run."
+          exit 1
+
+  publish:
+    needs: [secrets, build, test, remote-build-arm64]
+    if: >-
+      always() && needs.test.result == 'success' &&
+      needs.secrets.outputs.store == 'true' && github.event_name == 'push' &&
+      (github.ref_type == 'tag' || github.ref_name == 'qa' ||
+       (github.ref_name == 'dev' && vars.SNAP_PUBLISH_EDGE == 'true'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Pick the channel
+        id: channel
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then c=stable
+          elif [ "$REF_NAME" = qa ]; then c=beta
+          else c=edge; fi
+          echo "channel=$c" >> "$GITHUB_OUTPUT"
+      # qa publishes only a candidate the release gate would accept: CI and qa
+      # both green on this exact commit.
+      - name: Wait for CI and qa to pass on this commit
+        if: github.ref_name == 'qa'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 120); do
+            pending=0
+            for wf in ci.yml qa.yml; do
+              read -r status conclusion < <(gh api "repos/$GH_REPO/actions/workflows/$wf/runs?head_sha=$SHA&event=push&per_page=1" \
+                --jq '.workflow_runs[0] | "\(.status // "missing") \(.conclusion // "none")"')
+              echo "$wf: $status $conclusion"
+              if [ "$status" != completed ]; then pending=1
+              elif [ "$conclusion" != success ]; then
+                echo "::error::$wf is $conclusion on $SHA; not publishing to beta"; exit 1
+              fi
+            done
+            [ "$pending" = 0 ] && exit 0
+            sleep 60
+          done
+          echo "::error::CI/qa did not finish within 2h; not publishing to beta"
+          exit 1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: snap-amd64, path: snap-package }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.remote-build-arm64.result == 'success'
+        with: { name: snap-arm64, path: snap-package }
+      - uses: canonical/action-publish@214b86e5ca036ead1668c79afb81e550e6c54d40 # v1.2.0
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: snap-package/freemkv-amd64.snap
+          release: ${{ steps.channel.outputs.channel }}
+      - uses: canonical/action-publish@214b86e5ca036ead1668c79afb81e550e6c54d40 # v1.2.0
+        if: needs.remote-build-arm64.result == 'success'
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: snap-package/freemkv-arm64.snap
+          release: ${{ steps.channel.outputs.channel }}

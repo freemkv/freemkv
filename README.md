@@ -24,7 +24,7 @@ DVDs (CSS) need no setup. Blu-ray and UHD (AACS) require a `keydb.cfg` supplying
 
 **App:** download from the [latest release](https://github.com/freemkv/freemkv/releases/latest) —
 `.dmg` on macOS, `freemkv-x86_64-windows-setup.exe` on Windows, `freemkv-amd64.deb`,
-AppImage or Flatpak on Linux. On macOS: `brew install --cask freemkv/tap/freemkv`.
+AppImage, Flatpak or Snap (`freemkv-amd64.snap`) on Linux. On macOS: `brew install --cask freemkv/tap/freemkv`.
 
 **CLI:**
 
@@ -336,3 +336,8 @@ version tags for releases. The `Flatpak` workflow builds offline, checks the
 installed version and GUI startup, and retains the manifest, vendored sources,
 lockfile and commit provenance. Stable releases also carry the `.flatpak` and
 an offline build package; Flathub acceptance is not required for these builds.
+
+The `Snap` workflow builds the snap on every push, installs it and checks the
+version, CLI mode, GUI startup and declared interfaces. Stable releases carry
+`freemkv-amd64.snap`; store publishing is described in
+[packaging/snap/README.md](packaging/snap/README.md).

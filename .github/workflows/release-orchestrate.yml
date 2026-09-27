@@ -1860,6 +1860,7 @@ jobs:
               freemkv-amd64.deb
               freemkv-x86_64-linux.flatpak
               freemkv-flatpak-package.tar.gz
+              freemkv-amd64.snap
               # CLI
               freemkv-cli-aarch64-macos
               freemkv-cli-x86_64-macos
