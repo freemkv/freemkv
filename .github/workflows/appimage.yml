@@ -24,8 +24,6 @@ permissions:
 
 jobs:
   build:
-    permissions:
-      contents: write
     # 24.04: the shell needs GTK >= 4.10 and libadwaita >= 1.4 (Cargo features
     # v4_10 / v1_4), which 22.04 does not ship. Sets the distro floor to 2024+.
     runs-on: ubuntu-24.04
@@ -117,8 +115,25 @@ jobs:
           A=freemkv-x86_64-linux
           mv freemkv-x86_64.AppImage "$A.AppImage"
           sha256sum "$A.AppImage" > "$A.AppImage.sha256"
+      - if: ${{ inputs.release }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: freemkv-appimage-release
+          path: freemkv-x86_64-linux.AppImage*
+          if-no-files-found: error
+
+  # Only this job holds contents: write, and only when called for a release.
+  publish:
+    needs: build
+    if: ${{ inputs.release }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: freemkv-appimage-release
       - name: Upload to the release
-        if: ${{ inputs.release }}
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: |
