@@ -24,6 +24,9 @@ permissions:
 
 jobs:
   rc-tag:
+    # Only a qa push is a candidate; a dispatch (e.g. a media run on dev) must
+    # not mint an rc tag.
+    if: github.event_name == 'push' && github.ref_name == 'qa'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -236,8 +239,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [linux, windows]
-        # The targets release.yml ships the CLI for. Linux is static musl, where
-        # the GTK/libadwaita deps are cfg'd out entirely.
+        # The targets release.yml ships the CLI for. Building the host gnu
+        # target instead pulled in GTK (glib-sys) on Linux; on musl it is
+        # cfg'd out.
         include:
           - os: linux
             target: x86_64-unknown-linux-musl
@@ -345,13 +349,14 @@ jobs:
           rustup toolchain install "$V" --profile minimal --target "${{ matrix.target }}"
           echo "RUSTUP_TOOLCHAIN=$V" >> "$GITHUB_ENV"
           RUSTUP_TOOLCHAIN="$V" rustc --version
+      # Catches the gui feature's crates leaking into the CLI build.
       - name: The CLI build has no UI dependencies
         shell: bash
         working-directory: freemkv
         run: |
           set -euo pipefail
           tree=$(cargo tree -e normal,build --target "${{ matrix.target }}" --prefix none)
-          ui=$(grep -E '^(gtk4|gdk4|libadwaita|glib-sys|gobject-sys|gio-sys|winsafe|objc2-app-kit) ' \
+          ui=$(grep -E '^(gtk4|gdk4|libadwaita|glib-sys|gobject-sys|gio-sys|winsafe|windows|objc2-app-kit) ' \
                  <<<"$tree" | sed 's/ (\*)$//' | sort -u || true)
           if [ -n "$ui" ]; then
             echo "::error title=UI crates in the CLI build::the CLI must build without the gui feature's dependencies:"
