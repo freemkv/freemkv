@@ -131,6 +131,9 @@ jobs:
           $aumid = 'org.freemkv.FreeMKV'
           $aumidKey = "HKCU:\Software\Classes\AppUserModelId\$aumid"
           $userPath = { [Environment]::GetEnvironmentVariable('Path', 'User') }
+          $keep = @("$env:RUNNER_TEMP\keep-a", "$env:RUNNER_TEMP\keep-b")
+          [Environment]::SetEnvironmentVariable('Path', ((@((& $userPath) -split ';') + $keep) | Where-Object { $_ }) -join ';', 'User')
+          $before = (& $userPath) -split ';'
           Start-Process -Wait ./freemkv-x86_64-windows-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
           foreach ($f in 'freemkv.exe','freemkv.com','unins000.exe') {
             if (-not (Test-Path "$dir\$f")) { throw "installer did not create $dir\$f" }
@@ -148,6 +151,10 @@ jobs:
           if (-not (Test-Path $aumidKey)) { throw "installer did not register $aumidKey" }
           & "$dir\freemkv.com" --version
           if ($LASTEXITCODE -ne 0) { throw "installed freemkv.com --version exited $LASTEXITCODE" }
+          # The bare name must resolve to the console .com (PATHEXT), not the windowed .exe.
+          $env:Path = (& $userPath) + ';' + [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          $bare = (Get-Command freemkv -CommandType Application | Select-Object -First 1).Source
+          if ($bare -ne "$dir\freemkv.com") { throw "bare 'freemkv' resolves to $bare, want $dir\freemkv.com" }
           Start-Process -Wait "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
           # The uninstaller relaunches itself from %TEMP%, so -Wait can return early.
           $done = { -not (Test-Path "$dir\freemkv.exe") -and ((& $userPath) -split ';' -notcontains $dir) }
@@ -156,6 +163,8 @@ jobs:
           if ((& $userPath) -split ';' -contains $dir) { throw "uninstaller left $dir on the user PATH" }
           if (Test-Path $lnk) { throw "uninstaller left $lnk" }
           if (Test-Path $aumidKey) { throw "uninstaller left $aumidKey" }
+          $after = (& $userPath) -split ';'
+          if (Compare-Object $before $after -SyncWindow 0) { throw "uninstall changed other user PATH entries: '$($before -join ';')' -> '$($after -join ';')'" }
 
   cli-integration:
     strategy:
