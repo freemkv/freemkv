@@ -63,8 +63,9 @@ pub mod win_app;
 #[cfg(all(feature = "gui", target_os = "windows"))]
 pub mod windows;
 
-// ── GTK4 + libadwaita shell — LINUX GLIBC ONLY ───────────────────────────── Symmetric with
-// the Windows shell above; the musl CLI skips (Cargo.toml dep gate matches).
+// ── GTK4 + libadwaita shell — LINUX GLIBC ONLY ──────────────────────────────
+// Symmetric with the Windows shell above; the musl CLI skips (Cargo.toml dep
+// gate matches).
 #[cfg(all(feature = "gui", target_os = "linux", target_env = "gnu"))]
 pub mod linux;
 #[cfg(all(feature = "gui", target_os = "linux", target_env = "gnu"))]

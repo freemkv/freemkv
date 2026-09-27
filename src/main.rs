@@ -61,7 +61,9 @@ fn main() {
         )
     ))]
     if freemkv::app_entry::wants_gui(&args, display_available()) {
-        run_gui();
+        // `freemkv --lang de gui`: the flag picks this run's language, as it does for the CLI.
+        let lang = freemkv::app_entry::set_launch_language(&args);
+        run_gui(lang);
         return;
     }
 
@@ -74,7 +76,7 @@ fn main() {
 // Launch the desktop shell: macOS builds it here (AppKit is a module of
 // this binary); Windows hands off to the windowed image.
 #[cfg(all(feature = "gui", target_os = "macos"))]
-fn run_gui() {
+fn run_gui(_launch_language: bool) {
     let (cfg, loaded) = settings::Settings::load_reporting();
 
     // "Auto" follows the OS language. A Finder-launched `.app` inherits no
@@ -102,12 +104,15 @@ fn run_gui() {
 
 // Shipped as `freemkv.com`, which cmd/PowerShell resolve first (PATHEXT). A window from it
 // would keep the console attached, so start the windowed sibling and return the prompt;
-// in-process is the fallback when none is found (see `app_entry::windowed_candidates`).
+// in-process when none is found, or for a launch `--lang` the argless sibling cannot receive.
 #[cfg(all(feature = "gui", target_os = "windows"))]
-fn run_gui() {
+fn run_gui(launch_language: bool) {
     let Ok(me) = std::env::current_exe() else {
         return freemkv::win_app::run();
     };
+    if launch_language {
+        return freemkv::win_app::run();
+    }
     let windowed = freemkv::app_entry::windowed_candidates(&me)
         .into_iter()
         .find(|p| p.is_file());
@@ -117,12 +122,13 @@ fn run_gui() {
     }
 }
 
+// GTK's status is the process's: a GTK/libadwaita init failure must not exit 0.
 #[cfg(all(feature = "gui", target_os = "linux", target_env = "gnu"))]
-fn run_gui() {
-    // GTK's application runner returns an i32 status; the process exits
-    // when GTK's main loop does, so nothing to do with the code here — a
-    // normal return from `main` is the success path per the CLI contract.
-    let _ = freemkv::linux_app::run();
+fn run_gui(_launch_language: bool) {
+    let code = freemkv::linux_app::run();
+    if code != 0 {
+        std::process::exit(code);
+    }
 }
 
 // Can a window be drawn? Only Linux can lack one: over SSH, a bare `freemkv`

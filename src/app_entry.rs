@@ -11,12 +11,92 @@
 /// Only the app build (`--features gui`) asks. A bare `freemkv` opens the window, and so does
 /// an explicit `freemkv gui`; any other argument is a CLI invocation, so the app answers every
 /// command the CLI does. `display` is false when no window can be drawn (a Linux SSH session), in
-/// which case a bare launch prints usage exactly as the CLI build does.
+/// which case a bare launch prints usage exactly as the CLI build does. Neither a macOS process
+/// serial nor a language flag is a command (see [`command_args`]).
 pub fn wants_gui(args: &[String], display: bool) -> bool {
-    match args.get(1).map(String::as_str) {
+    match command_args(args).first().map(String::as_str) {
         Some("gui") => true,
         Some(_) => false,
         None => display,
+    }
+}
+
+/// A LaunchServices process-serial argument (`-psn_0_<n>`), passed on the first Finder launch of
+/// a quarantined app. Not a flag of this CLI on any platform, so it is ignored everywhere.
+pub fn is_process_serial(arg: &str) -> bool {
+    arg.starts_with("-psn_")
+}
+
+/// The `--language` spellings. Shared with `cli_entry::strip_language_flag`.
+pub const LANGUAGE_FLAGS: [&str; 2] = ["--language", "--lang"];
+
+/// Whether a token may be a flag's value: neither a `scheme://` URL nor another flag.
+pub fn is_flag_value(v: &str) -> bool {
+    !v.contains("://") && !is_flag_token(v)
+}
+
+/// Whether a token is a flag. A negative number (`-1`) is a value, not a flag.
+pub fn is_flag_token(s: &str) -> bool {
+    let mut rest = s.strip_prefix('-').unwrap_or("").chars();
+    match rest.next() {
+        None => false,
+        Some(c) => !c.is_ascii_digit(),
+    }
+}
+
+// argv past argv[0], a leading process serial and every language flag (with its value, when it
+// has one), by the CLI's own rule.
+fn command_args(args: &[String]) -> Vec<String> {
+    let mut rest = args.get(1..).unwrap_or_default();
+    if rest.first().is_some_and(|a| is_process_serial(a)) {
+        rest = &rest[1..];
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        if LANGUAGE_FLAGS.contains(&rest[i].as_str()) {
+            i += if rest.get(i + 1).is_some_and(|v| is_flag_value(v)) {
+                2
+            } else {
+                1
+            };
+        } else {
+            out.push(rest[i].clone());
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The language a `--lang <code>` on the launch command line asks for; the last one wins, as
+/// in the CLI.
+pub fn launch_language(args: &[String]) -> Option<String> {
+    args.windows(2)
+        .filter(|w| LANGUAGE_FLAGS.contains(&w[0].as_str()) && is_flag_value(&w[1]))
+        .map(|w| w[1].clone())
+        .next_back()
+}
+
+static LAUNCH_LANGUAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record the launch command line's language, which [`apply_locale`] then prefers over the saved
+/// setting for this run. Returns whether one was given.
+pub fn set_launch_language(args: &[String]) -> bool {
+    match launch_language(args) {
+        Some(l) => {
+            let _ = LAUNCH_LANGUAGE.set(l);
+            true
+        }
+        None => false,
+    }
+}
+
+// The launch language wins when it names a known locale (or "auto"); an unknown code would
+// silently mean "Auto", so the saved choice is kept instead.
+fn chosen_language<'a>(saved: &'a str, launch: Option<&'a str>) -> &'a str {
+    match launch {
+        Some(l) if l.eq_ignore_ascii_case("auto") || crate::ui::locale_code(l) != "auto" => l,
+        _ => saved,
     }
 }
 
@@ -41,14 +121,16 @@ pub fn windowed_candidates(me: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 /// Apply the saved interface language before the shell builds anything, so the
-/// first string lookup resolves in the right locale. (A later change in
-/// Settings switches live via `strings::set_locale`.)
+/// first string lookup resolves in the right locale; a launch `--lang` (see
+/// [`set_launch_language`]) wins for this run. (A later change in Settings switches live via
+/// `strings::set_locale`.)
 ///
 /// `system_locale` is the platform's "what language is this PC in?" call,
 /// passed in rather than `cfg`-selected here: a Finder-launched `.app` and a
 /// double-clicked `.exe` both inherit no `LANG`, so the i18n crate's env
 /// detection would fall back to English for the "Auto" setting.
 pub fn apply_locale(language: &str, system_locale: impl FnOnce() -> Option<String>) {
+    let language = chosen_language(language, LAUNCH_LANGUAGE.get().map(String::as_str));
     let code = crate::ui::locale_code(language);
     if code == "auto" {
         if let Some(sys) = system_locale() {
@@ -114,7 +196,8 @@ pub fn init_gui_logging(log_level: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        GUI_LOG_CAP_BYTES, display_present, trim_oversized_log, wants_gui, windowed_candidates,
+        GUI_LOG_CAP_BYTES, chosen_language, display_present, launch_language, trim_oversized_log,
+        wants_gui, windowed_candidates,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -194,6 +277,68 @@ mod tests {
         }
         // `freemkv info gui` is an `info` invocation.
         assert!(!wants_gui(&argv(&["info", "gui"]), true));
+    }
+
+    // LaunchServices passes `-psn_0_<n>` on the first Finder launch of a quarantined app; routing
+    // that to the CLI made the app bounce and quit.
+    #[test]
+    fn a_macos_process_serial_argument_is_a_bare_launch() {
+        assert!(wants_gui(&argv(&["-psn_0_123456"]), true));
+        assert!(!wants_gui(&argv(&["-psn_0_123456"]), false));
+        assert!(wants_gui(&argv(&["-psn_0_1", "gui"]), false));
+        assert!(!wants_gui(&argv(&["-psn_0_1", "info"]), true));
+        // Only in argv[1], where LaunchServices puts it.
+        assert!(!wants_gui(&argv(&["info", "-psn_0_1"]), true));
+    }
+
+    // `freemkv --lang de gui` in the app build must open the window, not reach the CLI's
+    // "the app is not part of this build".
+    #[test]
+    fn a_language_flag_before_the_command_does_not_hide_it() {
+        for flag in ["--lang", "--language"] {
+            assert!(wants_gui(&argv(&[flag, "de", "gui"]), false), "{flag}");
+            assert!(wants_gui(&argv(&[flag, "de"]), true), "{flag}");
+            assert!(!wants_gui(&argv(&[flag, "de"]), false), "{flag}");
+            assert!(!wants_gui(&argv(&[flag, "de", "info"]), true), "{flag}");
+        }
+        assert!(wants_gui(
+            &argv(&["-psn_0_1", "--lang", "de", "gui"]),
+            false
+        ));
+        // The CLI's value rule: a URL or a flag is never the language, so it stays a command.
+        assert!(!wants_gui(&argv(&["--lang", "disc://"]), true));
+        assert!(!wants_gui(&argv(&["--lang", "--verbose", "gui"]), true));
+        // A value-less flag at the end is skipped alone, as the CLI does.
+        assert!(wants_gui(&argv(&["--lang"]), true));
+    }
+
+    #[test]
+    fn the_launch_language_is_the_cli_flags_value() {
+        assert_eq!(
+            launch_language(&argv(&["--lang", "de", "gui"])).as_deref(),
+            Some("de")
+        );
+        assert_eq!(
+            launch_language(&argv(&["gui", "--language", "fr"])).as_deref(),
+            Some("fr")
+        );
+        // Last one wins, as in `strip_language_flag`.
+        assert_eq!(
+            launch_language(&argv(&["--lang", "de", "--lang", "fr"])).as_deref(),
+            Some("fr")
+        );
+        assert_eq!(launch_language(&argv(&["gui"])), None);
+        assert_eq!(launch_language(&argv(&["--lang", "disc://"])), None);
+        assert_eq!(launch_language(&argv(&["--lang"])), None);
+    }
+
+    #[test]
+    fn a_known_launch_language_overrides_the_saved_one_for_this_run() {
+        assert_eq!(chosen_language("English", Some("de")), "de");
+        assert_eq!(chosen_language("de", Some("auto")), "auto");
+        assert_eq!(chosen_language("de", None), "de");
+        // An unknown code would silently mean "Auto"; the saved choice is the better guess.
+        assert_eq!(chosen_language("de", Some("xx")), "de");
     }
 
     #[test]
