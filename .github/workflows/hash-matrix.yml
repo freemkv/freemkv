@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   media:
     runs-on: ubuntu-latest
@@ -129,7 +133,7 @@ jobs:
       - name: Run the CLI suite against the shared media
         shell: bash
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           BIN="$PWD/freemkv/target/release/freemkv"
           [ -f "$BIN.exe" ] && BIN="$BIN.exe"
           FMKV_BIN="$BIN" \

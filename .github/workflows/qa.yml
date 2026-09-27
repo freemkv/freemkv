@@ -15,8 +15,10 @@ on:
         type: boolean
         default: false
 
+# A run_media dispatch gets its own group: cancelling it after launch-runners
+# would strand its EC2 runners until their 4h self-destruct.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && inputs.run_media && format('-media-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -95,6 +97,56 @@ jobs:
         working-directory: freemkv
       - run: cargo build --release --tests --features gui
         working-directory: freemkv
+      # The release installer, compiled and round-tripped here so a broken
+      # freemkv.iss fails qa instead of the tag build (steps mirror release.yml).
+      - run: cargo build --release --features gui
+        working-directory: freemkv
+      - name: Build the installer
+        shell: pwsh
+        working-directory: freemkv
+        run: |
+          New-Item -ItemType Directory -Force stage | Out-Null
+          Copy-Item target/release/freemkv-gui.exe stage/freemkv.exe
+          Copy-Item target/release/freemkv.exe stage/freemkv.com
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --version 6.4.3 -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          & $iscc "/DAppVersion=$ver" "/DBinDir=$((Resolve-Path stage).Path)" "/O$PWD" packaging/windows/freemkv.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc exited $LASTEXITCODE" }
+          if (-not (Test-Path freemkv-x86_64-windows-setup.exe)) { throw "freemkv-x86_64-windows-setup.exe was not built" }
+      - name: Round-trip the installer
+        shell: pwsh
+        working-directory: freemkv
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\freemkv"
+          $lnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\freemkv.lnk"
+          $aumid = 'org.freemkv.FreeMKV'
+          $aumidKey = "HKCU:\Software\Classes\AppUserModelId\$aumid"
+          $userPath = { [Environment]::GetEnvironmentVariable('Path', 'User') }
+          Start-Process -Wait ./freemkv-x86_64-windows-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
+          foreach ($f in 'freemkv.exe','freemkv.com','unins000.exe') {
+            if (-not (Test-Path "$dir\$f")) { throw "installer did not create $dir\$f" }
+          }
+          if ((& $userPath) -split ';' -notcontains $dir) { throw "installer did not add $dir to the user PATH" }
+          if (-not (Test-Path $lnk)) { throw "installer did not create $lnk" }
+          $item = (New-Object -ComObject Shell.Application).NameSpace((Split-Path $lnk)).ParseName((Split-Path $lnk -Leaf))
+          $got = $item.ExtendedProperty('System.AppUserModel.ID')
+          if ($got -ne $aumid) { throw "Start-menu shortcut AppUserModelID is '$got', want $aumid" }
+          if (-not (Test-Path $aumidKey)) { throw "installer did not register $aumidKey" }
+          & "$dir\freemkv.com" --version
+          if ($LASTEXITCODE -ne 0) { throw "installed freemkv.com --version exited $LASTEXITCODE" }
+          Start-Process -Wait "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
+          # The uninstaller relaunches itself from %TEMP%, so -Wait can return early.
+          $done = { -not (Test-Path "$dir\freemkv.exe") -and ((& $userPath) -split ';' -notcontains $dir) }
+          for ($i = 0; $i -lt 60 -and -not (& $done); $i++) { Start-Sleep 1 }
+          if (Test-Path "$dir\freemkv.exe") { throw "uninstaller left $dir\freemkv.exe" }
+          if ((& $userPath) -split ';' -contains $dir) { throw "uninstaller left $dir on the user PATH" }
+          if (Test-Path $lnk) { throw "uninstaller left $lnk" }
+          if (Test-Path $aumidKey) { throw "uninstaller left $aumidKey" }
 
   cli-integration:
     strategy:
@@ -231,6 +283,12 @@ jobs:
           [ "$rc" = 0 ] && exit 0
           echo "::error title=No capacity::every instance type × subnet failed as both Spot and On-Demand in us-west-2 — check service quotas / capacity in the region" >&2
           exit 1
+      # No instance will consume the registration token: delete it rather than leave it in SSM.
+      - name: Delete the unused registration token
+        if: (failure() || cancelled()) && steps.reg.outputs.param != ''
+        env:
+          PARAM: ${{ steps.reg.outputs.param }}
+        run: aws ssm delete-parameter --name "$PARAM" || true
 
   cli-matrix:
     needs: [launch-runners]
@@ -250,7 +308,6 @@ jobs:
     runs-on: [self-hosted, freemkv-media, "${{ matrix.os }}"]
     timeout-minutes: 240
     permissions:
-      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@v5
@@ -266,6 +323,7 @@ jobs:
           repository: freemkv/freemkv-ci
           ref: 7ff716072c7063aaf4f1a7dd7200f532dab77794
           token: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          persist-credentials: false
           path: ci
       - name: Record the libfreemkv sha
         shell: bash
@@ -408,7 +466,7 @@ jobs:
           FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
           FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           if [ -z "${FMKV_KEY_URL:-}" ] || [ -z "${FMKV_KEY_AUTH:-}" ]; then
             echo "::error title=Key service not configured::FMKV_KEY_URL / FMKV_KEY_AUTH are unset, so the AACS fixtures (bd, uhd) cannot decrypt. Set them as repo secrets. The DVD would still pass, because CSS needs no key — do not read a green DVD as evidence the keys work."
             exit 1

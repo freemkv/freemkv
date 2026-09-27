@@ -12,6 +12,8 @@
 # an execution trace would echo it straight into the tee'd log. `-euo pipefail`
 # keeps the fail-fast behaviour without ever printing the token.
 set -euo pipefail
+# Any exit, including a set -e abort mid-setup, powers off (and so terminates) the box.
+trap 'shutdown -h now' EXIT
 exec > >(tee /var/log/freemkv-runner.log) 2>&1
 
 # Hard deadline: terminate no matter what, even if the job hangs and the
@@ -43,12 +45,12 @@ IID=$(md instance-id)
 # there is no ordering trap). IMDS tags still require InstanceMetadataTags=enabled.
 PARAM=$(md tags/instance/runner-token-param)
 REPO=$(md tags/instance/runner-repo)
-[ -n "$PARAM" ] && [ -n "$REPO" ] || { echo "FATAL: tags not visible via IMDS — is InstanceMetadataTags enabled?"; shutdown -h now; }
+[ -n "$PARAM" ] && [ -n "$REPO" ] || { echo "FATAL: tags not visible via IMDS — is InstanceMetadataTags enabled?"; exit 1; }
 REGION=$(md placement/region)
 REG=$(aws ssm get-parameter --region "$REGION" --name "$PARAM" --with-decryption --query Parameter.Value --output text)
 # Delete immediately so the token never outlives this boot, whatever happens next.
 aws ssm delete-parameter --region "$REGION" --name "$PARAM" || true
-[ -n "$REG" ] || { echo "FATAL: registration token not found in SSM ($PARAM)"; shutdown -h now; }
+[ -n "$REG" ] || { echo "FATAL: registration token not found in SSM ($PARAM)"; exit 1; }
 
 mkdir -p "$RUNNER_HOME/actions-runner" && cd "$RUNNER_HOME/actions-runner"
 RUNNER_VER=$(curl -sS https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name | tr -d v)
@@ -62,5 +64,3 @@ su - "$RUNNER_USER" -c "cd $RUNNER_HOME/actions-runner && ./config.sh \
 
 # `run.sh` returns as soon as the single job finishes, because of --ephemeral.
 su - "$RUNNER_USER" -c "cd $RUNNER_HOME/actions-runner && ./run.sh" || true
-
-shutdown -h now

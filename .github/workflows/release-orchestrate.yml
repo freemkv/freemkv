@@ -39,10 +39,10 @@ on:
 permissions:
   contents: read
 
-# Two release dispatches must never run the cascade at once — they would
-# interleave tag pushes and qa commits across eight repos.
+# Shared with promote: two releases, or a promote during a release, would
+# interleave qa pushes and tags across eight repos.
 concurrency:
-  group: release-orchestrate
+  group: freemkv-qa-pipeline
   cancel-in-progress: false
 
 jobs:
@@ -66,13 +66,21 @@ jobs:
           fi
           fail=0
           : > /tmp/qa-shas
+          # Prints the branch sha. Status 1 = no such branch (404); 2 = lookup failed (see ref_err).
+          ref_sha() {
+            gh api "repos/freemkv/$1/git/ref/heads/$2" -q .object.sha 2>/tmp/ref.err && return 0
+            grep -q 'HTTP 404' /tmp/ref.err && return 1 || return 2
+          }
+          ref_err() { echo "::error::$1: cannot read $2 ($(tr '\n' ' ' </tmp/ref.err))"; }
           for r in freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n \
                    freemkv-engine bdemu freemkv autorip; do
             sha=$(gh api "repos/freemkv/$r/git/ref/heads/qa" -q .object.sha 2>/dev/null || echo "")
             [ -n "$sha" ] || { echo "::error::$r has no qa branch"; fail=1; continue; }
+            # Only the newest run of each workflow per branch counts: a superseded or re-dispatched run must not gate.
             runs=$(gh api "repos/freemkv/$r/actions/runs?head_sha=$sha&per_page=100" \
-                     -q '[.workflow_runs[] | {name, status, conclusion}]')
-            gating=$(echo "$runs" | jq --arg re "$NON_GATING" '[.[] | select(.name | test($re) | not)]')
+                     -q '[.workflow_runs[] | {name, head_branch, status, conclusion, created_at}]')
+            gating=$(echo "$runs" | jq --arg re "$NON_GATING" \
+                       '[.[] | select(.name | test($re) | not)] | group_by([.name, .head_branch]) | map(max_by(.created_at))')
             [ "$(echo "$gating" | jq 'length')" != "0" ] || { echo "::error::$r: no qa run for ${sha:0:7}"; fail=1; continue; }
             [ "$(echo "$gating" | jq '[.[]|select(.status!="completed")]|length')" = "0" ] \
               || { echo "::error::$r: qa still running for ${sha:0:7}"; fail=1; continue; }
@@ -83,7 +91,8 @@ jobs:
             # about to tag, so qa→main is a clean push. If main carries commits qa
             # does not, the release would abort at advance_main AFTER all 8 tags
             # are public. Catch it here, before a single tag is cut.
-            main=$(gh api "repos/freemkv/$r/git/ref/heads/main" -q .object.sha 2>/dev/null || echo "")
+            st=0; main=$(ref_sha "$r" main) || st=$?
+            [ "$st" -le 1 ] || { ref_err "$r" main; fail=1; continue; }
             if [ -n "$main" ] && [ "$main" != "$sha" ]; then
               mcmp=$(gh api "repos/freemkv/$r/compare/$sha...$main" -q .status 2>/dev/null || echo "unknown")
               case "$mcmp" in
@@ -91,11 +100,21 @@ jobs:
                 *) echo "::error::$r: main is '$mcmp' vs qa ${sha:0:7} — out-of-band commit on main. Bring it into dev (cherry-pick), re-promote, then release."; fail=1; continue ;;
               esac
             fi
+            # dev must be ⊆ qa too: advance_main_to_release fast-forwards dev to the tag, after the tags are public.
+            st=0; dev=$(ref_sha "$r" dev) || st=$?
+            [ "$st" -le 1 ] || { ref_err "$r" dev; fail=1; continue; }
+            if [ -n "$dev" ] && [ "$dev" != "$sha" ]; then
+              dcmp=$(gh api "repos/freemkv/$r/compare/$sha...$dev" -q .status 2>/dev/null || echo "unknown")
+              case "$dcmp" in
+                behind|identical) ;;
+                *) echo "::error::$r: dev is '$dcmp' vs qa ${sha:0:7} — dev has commits qa lacks. Re-promote (and let qa go green) or wait, then release."; fail=1; continue ;;
+              esac
+            fi
 
             echo "$r $sha" >> /tmp/qa-shas
-            echo "  ok $r: qa ${sha:0:7} green, main coherent"
+            echo "  ok $r: qa ${sha:0:7} green, main and dev coherent"
           done
-          [ "$fail" = "0" ] || { echo "::error::refusing to release — qa not green / main not coherent across the set"; exit 1; }
+          [ "$fail" = "0" ] || { echo "::error::refusing to release — qa not green / main or dev not coherent across the set"; exit 1; }
 
           if [ "$SKIP_MEDIA" = true ]; then exit 0; fi
           # Require the bounded media gate at this exact candidate, including every OS.
@@ -352,7 +371,7 @@ jobs:
           # Override via the TOOLCHAIN env for a pinned release if ever needed.
           TOOLCHAIN="${TOOLCHAIN:-stable}"
           # Directory of this script — locates the security scanners (scan-tarball.sh,
-          # scan-secrets.sh) that live alongside it. Used by the pre-publish gate.
+          # scan-secrets.sh) that live alongside it. Only the disabled run_security_gate uses it.
           SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
           # GitHub org owning the public repos — used to build the git-patch URLs that the
           # binaries pin (https://github.com/<ORG>/libfreemkv etc.).
@@ -494,6 +513,7 @@ jobs:
                 die "$name has uncommitted changes to tracked files"
               fi
               ok "$name: on $WORK_BRANCH, clean"
+              if $PRERELEASE; then refuse_qa_candidate_tag "$r"; fi
             done
 
             # Release notes must exist (cheap, file-only; NOT code verification).
@@ -528,6 +548,16 @@ jobs:
             fi
           }
 
+          # qa.yml stamps LIGHTWEIGHT vX.Y.Z-rcN candidate tags; this cascade's tags are
+          # annotated. Reusing a stamped name would make every release_* step skip it as done.
+          refuse_qa_candidate_tag() {
+            local dir="$1" refs
+            refs=$(git -C "$dir" ls-remote origin "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}") \
+              || die "$(basename "$dir"): cannot list tags on origin"
+            [ -z "$refs" ] || grep -q '\^{}$' <<<"$refs" \
+              || die "$(basename "$dir"): v$VERSION is a qa.yml candidate stamp, not a release tag — pick an unused rc number"
+          }
+
           # check_changelog_ready <crate-dir> <version>
           #
           # Enforces, for CHANGELOG.md in <crate-dir>:
@@ -552,7 +582,7 @@ jobs:
             # Locate the heading line for this version. Anchored to line start so a
             # version mentioned only in prose (e.g. "since 1.6.0") can't match.
             local match
-            match=$(grep -nE "^## \[$ver\]([[:space:]]|\$)" "$cl" | head -1)
+            match=$(grep -nE "^## \[$ver\]([[:space:]]|\$)" "$cl" | head -1 || true)
             if [ -z "$match" ]; then
               die "$name: CHANGELOG.md has no '## [$ver]' heading — write the release notes before tagging (or set CHANGELOG_GATE_SKIP=1 to bypass; recorded loudly)."
             fi
@@ -729,7 +759,7 @@ jobs:
             [ -f "$toml" ] || die "no Cargo.toml at $toml"
 
             local current
-            current=$(grep -m1 '^version' "$toml" | sed -E 's/^version *= *"([^"]+)".*/\1/')
+            current=$(grep -m1 '^version' "$toml" | sed -E 's/^version *= *"([^"]+)".*/\1/' || true)
             if [ -z "$current" ]; then
               die "could not find a top-level 'version = \"...\"' line in $toml"
             fi
@@ -751,7 +781,7 @@ jobs:
 
             # Verify
             local updated
-            updated=$(grep -m1 '^version' "$toml" | sed -E 's/^version *= *"([^"]+)".*/\1/')
+            updated=$(grep -m1 '^version' "$toml" | sed -E 's/^version *= *"([^"]+)".*/\1/' || true)
             [ "$updated" = "$newver" ] || die "Cargo.toml bump failed: still '$updated' in $toml"
             ok "$(basename "$dir"): Cargo.toml $current → $newver"
           }
@@ -897,8 +927,7 @@ jobs:
             bump_macos_plist_version "$LIBFREEMKV_DIR" "$VERSION"
             bump_readme_version "$LIBFREEMKV_DIR" "libfreemkv" "$VERSION"
             date_changelog_heading "$LIBFREEMKV_DIR" "$VERSION"
-            # libfreemkv is git-only now (it git-deps the firmware crate), so there is no
-            # crates.io tarball to scan — run the leak tripwire over the git-tracked source.
+            # No-op while run_security_gate is disabled (see there).
             run_security_gate "$LIBFREEMKV_DIR" "libfreemkv" source
             # libfreemkv's Cargo.lock is gitignored → stage_lock=false (no lock to regen).
             # The helper cuts the tag on a git-pinned freemkv-unlock commit, then restores
@@ -1254,7 +1283,7 @@ jobs:
             local dir="$1" name="$2" msg="$3" stage_lock="${4:-true}"
 
             if $DRY_RUN; then
-              printf '  [dry-run] git -C %s add Cargo.toml%s\n' "$dir" "$([ "$stage_lock" = true ] && echo ' Cargo.lock')"
+              printf '  [dry-run] git -C %s add Cargo.toml CHANGELOG.md macos/Info.plist README.md packaging/flatpak/*.metainfo.xml%s\n' "$dir" "$([ "$stage_lock" = true ] && echo ' Cargo.lock')"
               printf '  [dry-run] git -C %s commit -m %q  (skip if nothing staged)\n' "$dir" "$msg"
               printf '  [dry-run] git -C %s push origin "$WORK_BRANCH"  (rebase+retry on non-ff)\n' "$dir"
               printf '  [dry-run] git -C %s tag -a v%s -m %q <bump-sha> ; push origin v%s\n' "$dir" "$VERSION" "v$VERSION" "$VERSION"
@@ -1277,6 +1306,8 @@ jobs:
             git -C "$dir" add macos/Info.plist 2>/dev/null || true
             # README.md, for the same reason -- see bump_readme_version.
             git -C "$dir" add README.md 2>/dev/null || true
+            # The AppStream entry dated by date_metainfo_release, likewise.
+            git -C "$dir" add -- 'packaging/flatpak/*.metainfo.xml' 2>/dev/null || true
             # Cargo.lock is committed for binary crates but gitignored for library crates
             # (freemkv-keysources). `git add` of an ignored path errors under set -e, so
             # guard it. CI/consumers don't need keysources's lock anyway.
@@ -1339,9 +1370,11 @@ jobs:
             fi
           }
 
-          # run_security_gate <dir> <name>
+          # run_security_gate <dir> <name> — DISABLED: returns before scanning anything.
+          # The only pre-tag scan is the qa-snapshot step before the cascade; the bump
+          # commits this cascade creates and tags are not scanned until leak-guard runs.
           run_security_gate() {
-            return 0  # pure-yaml release: qa + leak-guard already scanned this exact SHA
+            return 0
             local dir="$1" name="$2" mode="${3:-tarball}"
             local scan="$SELF_DIR/scan-tarball.sh"
             if $DRY_RUN; then
@@ -1397,8 +1430,7 @@ jobs:
                 || die "$name: cargo build --all-features failed at v$VERSION"
               ok "$name: builds (incl. emulation feature) at v$VERSION"
             fi
-            # Leak tripwire over the git-tracked source (Cargo.lock gitignored, git-only
-            # consumption — same rationale as the binary "source" scan).
+            # No-op while run_security_gate is disabled (see there).
             run_security_gate "$dir" "$name" source
             # Single [package]; the bump is in the root Cargo.toml git_commit_push_tag stages.
             git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release)" false
@@ -1533,9 +1565,7 @@ jobs:
             verify_lockfile_invariants "$dir" freemkv-i18n "$VERSION"
             verify_lockfile_invariants "$dir" freemkv-engine "$VERSION"
 
-            # Security tripwire for leaked key material / internal infra. Binary crates
-            # don't publish to crates.io and have git-only deps, so scan the git-tracked
-            # source ("source" mode) rather than a `cargo package` tarball.
+            # No-op while run_security_gate is disabled (see there).
             run_security_gate "$dir" "$name" source
 
             git_commit_push_tag "$dir" "$name" "v$VERSION: bump version (unified release with libfreemkv $VERSION)" true
@@ -1985,11 +2015,11 @@ jobs:
           # the releases actually carry. Runs after tags are pushed (structural limit):
           # it cannot prevent a bad release, only refuse to call it good. It fails the run
           # rather than warn — a release shipping dead download buttons is not complete.
-          # Steps 6-8 are RELEASE-ONLY. A prerelease (rc) publishes the -rc tags and
-          # their prerelease artifacts and stops there: it does NOT update the download
-          # page, advance main, or announce on the public site.
+          # Steps 6-8 are RELEASE-ONLY. A prerelease (rc) pushes the -rc tags and stops
+          # there (release/deb/flatpak ignore v*-rc*, so no artifacts are built): it does
+          # NOT update the download page, advance main, or announce on the public site.
           if $PRERELEASE; then
-            say "prerelease (rc): tags pushed + prerelease builds triggered — skipping download-asset verify, main advance, and site announcement"
+            say "prerelease (rc): tags pushed (no builds: release workflows ignore v*-rc*) — skipping download-asset verify, main advance, and site announcement"
           else
           verify_release_assets || {
             err "release v$VERSION is TAGGED and PUBLISHED but incomplete — fix the assets above before announcing it"
