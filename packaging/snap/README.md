@@ -7,7 +7,8 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
 
 | Trigger | Build + install + smoke test | GitHub release asset | Snap Store |
 |---------|------------------------------|----------------------|------------|
-| PR, `dev` push, manual run | yes | — | `edge`, only if the repo variable `SNAP_PUBLISH_EDGE` is `true` |
+| PR or manual run | yes | — | never |
+| `dev` push | yes | — | `edge`, only if the repo variable `SNAP_PUBLISH_EDGE` is `true` |
 | `qa` push | yes | — | `beta`, after `CI` and `qa` are green on the same commit |
 | `v*` release tag | yes | `freemkv-amd64.snap` + `.sha256` | `stable` |
 
@@ -16,9 +17,16 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
   and build as `stable`.
 - The GitHub release asset is attached whether or not the store is set up.
 - The store upload is skipped while `SNAPCRAFT_STORE_CREDENTIALS` is unset.
-  With it set, an upload the store holds for manual review (expected until
-  step 4 below is granted) is a warning and a run-summary line, not a
-  failure; any other store error, or a failed arm64 build, fails the job.
+  With it set, [`store_checks.py`](store_checks.py) judges each upload: an
+  upload held for review of exactly the two grants in step 4 (or held with
+  no errors) is a warning and a run-summary line saying it was NOT released;
+  any other finding, an unrecognised snapcraft output, or an arm64 build that
+  did not succeed (failed or cancelled) fails the job. If the store words the
+  two grants differently from review-tools, the first upload fails visibly
+  and `STORE_GRANT_MARKERS` needs updating.
+- Snapcraft is pinned to the `9.x/stable` track (`SNAPCRAFT_CHANNEL`).
+  review-tools only has a `latest` track, so the run records its version in
+  the summary and `store_checks.py` fails on an unfamiliar report format.
 - The release asset needs only the build and the install/CLI checks
   (`smoke`). The GUI launch and review-tools (`review`) gate publishing only,
   so a Snap Store outage cannot block the release asset. The release

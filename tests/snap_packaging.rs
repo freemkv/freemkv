@@ -103,13 +103,50 @@ fn release_asset_does_not_wait_for_store_backed_checks() {
 }
 
 #[test]
-fn review_allows_only_the_two_store_grants() {
+fn review_allows_exactly_the_two_store_grants() {
+    let py = read("packaging/snap/store_checks.py");
+    let start = py.find("KNOWN_GRANTS = (").expect("KNOWN_GRANTS");
+    let body = &py[start..start + py[start..].find("\n)").unwrap()];
+    let grants: Vec<&str> = body.split('"').skip(1).step_by(2).collect();
+    assert_eq!(
+        grants,
+        [
+            "declaration-snap-v2:plugs_connection:optical-write:optical-drive",
+            "declaration-snap-v2:slots_connection:freemkv-dbus:dbus",
+        ]
+    );
     let wf = read(".github/workflows/snap.yml");
-    assert!(!wf.contains("startswith(allowed)"));
-    for check in [
-        "declaration-snap-v2:plugs_connection:optical-write:optical-drive",
-        "declaration-snap-v2:slots_connection:freemkv-dbus:dbus",
-    ] {
-        assert!(wf.contains(&format!("\"{check}\"")), "{check}");
-    }
+    assert!(wf.contains("store_checks.py review review.json"));
+    assert!(wf.contains("unittest discover -s packaging/snap"));
+}
+
+#[test]
+fn publish_runs_only_on_push_and_reports_honestly() {
+    let wf = read(".github/workflows/snap.yml");
+    let publish = &wf[wf.find("\n  publish:").expect("publish job")..];
+    assert!(publish.contains("github.event_name == 'push'"));
+    assert!(
+        publish.contains("API error, retrying"),
+        "a transient API error must retry"
+    );
+    assert!(publish.contains("store_checks.py upload \"$code\" upload.log"));
+    assert!(publish.contains("held for store manual review, NOT released"));
+    assert!(
+        publish.contains(r#"[ "$ARM64_BUILD" != success ] && [ "$ARM64_BUILD" != skipped ]"#),
+        "arm64 that failed or was cancelled must fail the job"
+    );
+    let arm = &publish[publish.find("ARM64_BUILD\" != skipped").unwrap()..];
+    assert!(arm[..arm.find("fi\n").unwrap()].contains("rc=1"));
+}
+
+#[test]
+fn gui_smoke_needs_the_bus_name_a_visible_window_and_a_live_app() {
+    let wf = read(".github/workflows/snap.yml");
+    assert!(wf.contains("NameHasOwner org.freemkv.FreeMKV"));
+    assert!(
+        wf.contains(r#"!/ 1x1\+/"#),
+        "the 1x1 leader window must not count"
+    );
+    assert!(wf.contains("Map State: IsViewable"));
+    assert!(wf.contains(r#"kill -0 "$app" 2>/dev/null || alive=false"#));
 }

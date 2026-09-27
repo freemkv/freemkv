@@ -22,7 +22,19 @@ concurrency:
 permissions:
   contents: read
 
+# Snapcraft major track used by every job. review-tools has only a `latest`
+# track, so its version is recorded and its output format checked instead.
+env:
+  SNAPCRAFT_CHANNEL: 9.x/stable
+
 jobs:
+  packaging-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { persist-credentials: false }
+      - run: python3 -m unittest discover -s packaging/snap -p 'test_*.py' -v
+
   # Secrets cannot appear in a job-level `if`, so their presence is surfaced here.
   secrets:
     runs-on: ubuntu-24.04
@@ -39,11 +51,13 @@ jobs:
           echo "launchpad=$([ -n "$LAUNCHPAD" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
   build:
+    needs: packaging-tests
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { persist-credentials: false }
       - name: Snap toolchain must match Cargo.toml rust-version
         run: |
           set -euo pipefail
@@ -98,6 +112,8 @@ jobs:
           echo "Snap version: $base$suffix"
       - uses: canonical/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1.3.0
         id: build
+        with:
+          snapcraft-channel: ${{ env.SNAPCRAFT_CHANNEL }}
       - name: Stable asset name and checksum
         env:
           SNAP_FILE: ${{ steps.build.outputs.snap }}
@@ -209,41 +225,34 @@ jobs:
               --method org.freedesktop.DBus.NameHasOwner org.freemkv.FreeMKV 2>/dev/null \
               | grep -q true && owned=true
             xwininfo -root -tree > windows.log 2>&1 || true
-            grep -qi 'freemkv' windows.log && window=true
+            # GTK also creates a hidden 1x1 leader window named freemkv; only a
+            # viewable window larger than that counts.
+            while read -r id; do
+              xwininfo -id "$id" 2>/dev/null | grep -q 'Map State: IsViewable' && window=true
+            done < <(awk '/"freemkv"/ && !/ 1x1\+/ { print $1 }' windows.log)
             if $owned && $window; then break; fi
             kill -0 "$app" 2>/dev/null || break
             sleep 1
           done
+          alive=true
+          kill -0 "$app" 2>/dev/null || alive=false
           kill "$app" 2>/dev/null || true
           cat gui-launch.log
           grep -i freemkv windows.log || true
           $owned || { echo "::error::org.freemkv.FreeMKV never appeared on the session bus"; exit 1; }
-          $window || { echo "::error::no freemkv window was mapped"; exit 1; }
+          $window || { echo "::error::no visible freemkv window larger than 1x1 was mapped"; exit 1; }
+          $alive || { echo "::error::the app exited before the check finished"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { path: src, persist-credentials: false }
       - name: Store review checks (review-tools)
         run: |
           set -euo pipefail
           sudo snap install review-tools
+          echo "review-tools $(snap list review-tools | awk '$1 == "review-tools" { print $2 }')" | tee -a "$GITHUB_STEP_SUMMARY"
           status=0
           review-tools.snap-review --json snap-package/freemkv-amd64.snap > review.json || status=$?
           echo "snap-review exit status: $status"
-          python3 - <<'PY'
-          import json, sys
-          report = json.load(open("review.json"))
-          # Store policy, not defects: both need the store's manual grant (packaging/snap/README.md).
-          allowed = {
-              "declaration-snap-v2:plugs_connection:optical-write:optical-drive",
-              "declaration-snap-v2:slots_connection:freemkv-dbus:dbus",
-          }
-          bad = []
-          for section, results in report.items():
-              for level in ("error", "warn"):
-                  for check, detail in (results.get(level) or {}).items():
-                      tag = "ALLOWED" if check in allowed else level.upper()
-                      print(f"{tag:8} {section} {check}: {detail.get('text', '')}")
-                      if tag != "ALLOWED" and level == "error":
-                          bad.append(check)
-          sys.exit(1 if bad else 0)
-          PY
+          python3 src/packaging/snap/store_checks.py review review.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -261,7 +270,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with: { fetch-depth: 0 }
+        with: { fetch-depth: 0, persist-credentials: false }
       - name: Pin matching sibling sources
         if: github.ref_type != 'tag'
         env:
@@ -290,7 +299,7 @@ jobs:
           base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           mkdir -p snap/local
           printf '%s\n' "${VERSION#"$base"}" > snap/local/version-suffix
-          sudo snap install snapcraft --classic
+          sudo snap install snapcraft --classic --channel="$SNAPCRAFT_CHANNEL"
           export XDG_DATA_HOME="$RUNNER_TEMP/xdg-data"
           mkdir -p "$XDG_DATA_HOME/snapcraft"
           printf '%s\n' "$LAUNCHPAD_CREDENTIALS" > "$XDG_DATA_HOME/snapcraft/launchpad-credentials"
@@ -401,6 +410,8 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: needs.remote-build-arm64.result == 'success'
         with: { name: snap-arm64, path: snap-package }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { path: src, persist-credentials: false }
       - name: Upload and release to the store
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
@@ -408,25 +419,27 @@ jobs:
           ARM64_BUILD: ${{ needs.remote-build-arm64.result }}
         run: |
           set -uo pipefail
-          sudo snap install snapcraft --classic
+          sudo snap install snapcraft --classic --channel="$SNAPCRAFT_CHANNEL"
           rc=0
           for f in snap-package/freemkv-*.snap; do
-            if snapcraft upload --release="$CHANNEL" "$f" > upload.log 2>&1; then
-              cat upload.log
-              echo "- \`$(basename "$f")\` released to \`$CHANNEL\`" >> "$GITHUB_STEP_SUMMARY"
-            elif grep -qiE 'manual review|need_manual_review|human review' upload.log; then
-              cat upload.log
-              echo "::warning::$(basename "$f") is uploaded but waits for Snap Store manual review; it is not on $CHANNEL yet"
-              echo "- \`$(basename "$f")\` waits for store manual review, not released to \`$CHANNEL\`" >> "$GITHUB_STEP_SUMMARY"
-            else
-              cat upload.log
-              echo "::error::store upload of $(basename "$f") to $CHANNEL failed"
-              rc=1
-            fi
+            name=$(basename "$f")
+            code=0
+            snapcraft upload --verbosity=verbose --release="$CHANNEL" "$f" > upload.log 2>&1 || code=$?
+            cat upload.log
+            case "$(python3 src/packaging/snap/store_checks.py upload "$code" upload.log)" in
+              released)
+                echo "- \`$name\` released to \`$CHANNEL\`" >> "$GITHUB_STEP_SUMMARY" ;;
+              held)
+                echo "::warning::$name is uploaded but held for Snap Store manual review (optical-write / dbus grants); it is NOT on $CHANNEL"
+                echo "- \`$name\` held for store manual review, NOT released to \`$CHANNEL\`" >> "$GITHUB_STEP_SUMMARY" ;;
+              *)
+                echo "::error::store upload of $name to $CHANNEL failed"
+                rc=1 ;;
+            esac
           done
-          # A failed arm64 build must not leave arm64 silently on an older revision.
-          if [ "$ARM64_BUILD" = failure ]; then
-            echo "::error::the arm64 remote build failed; arm64 on $CHANNEL stays at its previous revision"
+          # arm64 that did not build (failed, cancelled) must not stay silently stale.
+          if [ "$ARM64_BUILD" != success ] && [ "$ARM64_BUILD" != skipped ]; then
+            echo "::error::the arm64 remote build was $ARM64_BUILD; arm64 on $CHANNEL stays at its previous revision"
             rc=1
           fi
           exit $rc

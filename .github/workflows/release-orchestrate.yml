@@ -1951,7 +1951,7 @@ jobs:
                 if printf '%s\n' "$names" | grep -Fxq "$want"; then
                   printf '  %-34s OK (optional)\n' "$want"
                 else
-                  err "WARN: optional asset $want is not attached to freemkv v$VERSION"
+                  printf '::warning::optional asset %s is not attached to freemkv v%s\n' "$want" "$VERSION"
                 fi
               done
             fi
