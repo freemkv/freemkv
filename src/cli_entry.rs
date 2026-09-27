@@ -540,8 +540,8 @@ fn info_cmd(args: &[String]) {
         // was the one place that never learned this, so a folder used to fail here.
         libfreemkv::StreamUrl::Dir { path } | libfreemkv::StreamUrl::Iso { path } => {
             // `--share` on an image/folder captures the disc STRUCTURE profile
-            // (there is no drive here) — intercepted before the listing-flag
-            // parser, mirroring how `disc://` routes `--share` to `info::run`.
+            // (there is no drive here), mirroring how `disc://` routes `--share`
+            // to `info::run` — and with that route's flag parser.
             let share = args[1..].iter().any(|a| a == "--share" || a == "-s");
 
             // A folder needs scan_dir (which additionally decides the
@@ -554,6 +554,14 @@ fn info_cmd(args: &[String]) {
             };
 
             if share {
+                // Same parser as `disc:// --share`: unknown flags exit 1, `--help` prints help.
+                let flags = match crate::info::parse_drive_flags(&args[1..]) {
+                    crate::info::DriveParse::Ok(f) => f,
+                    crate::info::DriveParse::Help => return crate::info::print_share_help(),
+                    crate::info::DriveParse::Unknown(opt) => {
+                        crate::disc_info::reject_unknown_option(&opt)
+                    }
+                };
                 let (disc, mut reader) = match scan(
                     std::path::Path::new(path),
                     libfreemkv::ScanOptions::default(),
@@ -565,7 +573,7 @@ fn info_cmd(args: &[String]) {
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("disc");
-                crate::disc_capture::run(&disc, reader.as_mut(), label);
+                crate::disc_capture::run(&disc, reader.as_mut(), label, flags.quiet);
                 return;
             }
 

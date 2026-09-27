@@ -12,10 +12,13 @@
 //! resolution triage (issue #46): the computed disc hash (the keydb lookup key),
 //! AACS generation, MKB version, bus-encryption flag, and a vid-available
 //! boolean. NEVER any key material — no VUK, unit keys, MKB bytes, or raw VID.
-//! On a keyless scan (no AACS handshake) the disc may carry no AACS state, so
-//! the profile records a clear "not captured — run with -v" marker instead.
+//! When there is no AACS state it records why: the AACS step failed (its error
+//! code), or the disc has no AACS at all (DVD / unencrypted Blu-ray).
 
-use crate::info::{base64_encode, present_for_submission, save_bin, zip_files};
+use crate::info::{
+    base64_encode, json_escape, present_for_submission, push_zip_section, save_bin, try_save_bin,
+    zip_files,
+};
 use crate::strings;
 use libfreemkv::{Disc, SectorSource};
 use std::path::Path;
@@ -24,11 +27,13 @@ use std::path::Path;
 pub(crate) struct DiscSummary {
     pub file_count: usize,
     pub total_bytes: usize,
+    // Localized "name: reason" lines for disc files that were not saved.
+    pub skipped: Vec<String>,
 }
 
-// Read the disc's structure files and save them (nested) into `profile_dir`,
-// appending each relative path to `written`. `Ok(None)` = no files; `Err`
-// carries the read failure so callers can say why instead of guessing.
+// Save the disc's structure files (nested) into `profile_dir`, recording each in
+// `written`. `Ok(None)` = no files; `Err` = the read failure. Best-effort per file:
+// an unsafe name or failed write skips that file only (see `DiscSummary::skipped`).
 pub(crate) fn fold_structure(
     profile_dir: &Path,
     written: &mut Vec<String>,
@@ -38,27 +43,68 @@ pub(crate) fn fold_structure(
     if files.is_empty() {
         return Ok(None);
     }
-    let total_bytes = files.iter().map(|(_, b)| b.len()).sum();
-    let file_count = files.len();
+    let mut summary = DiscSummary {
+        file_count: 0,
+        total_bytes: 0,
+        skipped: Vec::new(),
+    };
     for (rel, bytes) in files {
-        save_bin(profile_dir, &rel, &bytes, written);
+        let shown = strings::sanitize_display(&rel);
+        let saved = if is_safe_rel_path(&rel) {
+            try_save_bin(profile_dir, &rel, &bytes).map_err(|e| e.to_string())
+        } else {
+            Err(strings::get_or(
+                "disc.capture_unsafe_name",
+                "unsafe file name",
+            ))
+        };
+        match saved {
+            Ok(()) => {
+                written.push(rel);
+                summary.file_count += 1;
+                summary.total_bytes += bytes.len();
+            }
+            Err(reason) => summary.skipped.push(format!("{shown}: {reason}")),
+        }
     }
-    Ok(Some(DiscSummary {
-        file_count,
-        total_bytes,
-    }))
+    Ok(Some(summary))
 }
 
-// Minimal JSON string escaper for the machine-artifact profiles below.
-fn json_esc(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| match c {
-            '"' => vec!['\\', '"'],
-            '\\' => vec!['\\', '\\'],
-            c if (c as u32) < 0x20 => format!("\\u{:04x}", c as u32).chars().collect(),
-            c => vec![c],
+// Whether a disc-supplied relative path is safe to join under the profile dir on
+// every OS: `/`-separated plain components only — no `..`, `\`, drive/UNC
+// prefix, NTFS-illegal or control char, trailing dot/space, or DOS device stem.
+pub(crate) fn is_safe_rel_path(rel: &str) -> bool {
+    const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    !rel.is_empty()
+        && rel.split('/').all(|c| {
+            let stem = c.split('.').next().unwrap_or(c).to_ascii_uppercase();
+            let device = RESERVED.contains(&stem.as_str())
+                || (stem.len() == 4
+                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && stem.as_bytes()[3].is_ascii_digit());
+            !c.is_empty()
+                && c != "."
+                && c != ".."
+                && !c.ends_with(['.', ' '])
+                && !device
+                && !c
+                    .chars()
+                    .any(|ch| ch.is_control() || "\\:*?\"<>|".contains(ch))
         })
-        .collect()
+}
+
+// Tell the user which disc files were left out of the profile, and why.
+pub(crate) fn report_skipped(summary: &DiscSummary) {
+    for line in &summary.skipped {
+        eprintln!(
+            "{}",
+            strings::fmt_or(
+                "disc.capture_skipped",
+                "Skipped disc file {file}",
+                &[("file", line)],
+            )
+        );
+    }
 }
 
 /// Non-secret AACS diagnostics distilled from a scanned disc, for keydb / AACS
@@ -67,12 +113,12 @@ fn json_esc(s: &str) -> String {
 /// plus the disc hash, which is the public keydb lookup key (SHA-1 of
 /// `Unit_Key_RO.inf`, the same value a maintainer matches against keydb rows).
 pub(crate) struct AacsDiag {
-    // Whether the scan carried any AACS state at all. A plain (keyless) ISO /
-    // folder scan may leave `disc.aacs == None`, so this is `false` and the
-    // profile records the "run with -v" marker instead of crypto shape.
+    // Whether the scan carried any AACS state at all.
     pub captured: bool,
-    // 40-hex keydb lookup key (no `0x` prefix), when the scan read the disc's
-    // `Unit_Key_RO.inf`. `None` when uncaptured or the hash was blank.
+    // Uncaptured because the AACS step failed: its language-neutral `E<code>`.
+    pub error_code: Option<String>,
+    // KEYDB.cfg lookup key in its row form, `0x<40hex>`, when the scan read the
+    // disc's `Unit_Key_RO.inf`. `None` when uncaptured or the hash was blank.
     pub disc_hash: Option<String>,
     // AACS generation / major version (1 = BD, 2 = UHD).
     pub generation: Option<u8>,
@@ -88,12 +134,12 @@ pub(crate) struct AacsDiag {
 pub(crate) fn aacs_diag(disc: &Disc) -> AacsDiag {
     match disc.aacs.as_ref() {
         Some(a) => {
-            // `disc_hash` is stored with an `0x` prefix; keydb rows are keyed by
-            // the bare 40-hex, so strip it to the comparable lookup form.
+            // KEYDB.cfg rows are keyed `0x<hash>`; normalise to exactly that form.
             let hash = libfreemkv::hex::strip_hex_prefix(a.disc_hash.trim()).trim();
             AacsDiag {
                 captured: true,
-                disc_hash: (!hash.is_empty()).then(|| hash.to_string()),
+                error_code: None,
+                disc_hash: (!hash.is_empty()).then(|| format!("0x{hash}")),
                 generation: Some(a.version),
                 mkb_version: a.mkb_version,
                 bus_encryption: Some(a.bus_encryption),
@@ -103,6 +149,7 @@ pub(crate) fn aacs_diag(disc: &Disc) -> AacsDiag {
         }
         None => AacsDiag {
             captured: false,
+            error_code: disc.aacs_error.as_ref().map(|e| format!("E{}", e.code())),
             disc_hash: None,
             generation: None,
             mkb_version: None,
@@ -112,24 +159,30 @@ pub(crate) fn aacs_diag(disc: &Disc) -> AacsDiag {
     }
 }
 
-// Guidance shown when a keyless scan left no AACS data — tells a reporter how
-// to include the disc hash next time. Shared by the profile note + on-run line.
-const AACS_ABSENT_HINT: &str = "AACS diagnostics not captured — this was a keyless scan (no AACS handshake). \
-     Re-run `freemkv info <disc> -v --share` (verbose runs the handshake) to include \
-     disc_hash, the keydb lookup key, for keydb/AACS triage.";
+// Why no AACS diagnostics exist, for the English machine artifacts (JSON note + issue body).
+fn aacs_absent_reason(d: &AacsDiag) -> String {
+    match &d.error_code {
+        Some(code) => format!("Not captured — the AACS step failed ({code})."),
+        None => "No AACS on this disc (DVD or unencrypted Blu-ray).".to_string(),
+    }
+}
 
 /// The `aacs.json` profile member: non-secret AACS diagnostics for keydb triage.
-/// When the scan carried no AACS state, records a clear "not captured" marker
-/// with the `-v` hint. NEVER emits key material, VUK, unit keys, MKB bytes, or
-/// the raw Volume ID — only shape + the public disc hash. Literal English/JSON.
+/// Without AACS state it records why (failed step's code, or no AACS on the
+/// disc). NEVER emits key material, VUK, unit keys, MKB bytes, or the raw
+/// Volume ID — only shape + the public disc hash. Literal English/JSON.
 pub(crate) fn aacs_json(disc: &Disc) -> String {
     let d = aacs_diag(disc);
     let mut s = String::new();
     s.push_str("{\n");
+    s.push_str(&format!(
+        "  \"aacs_present\": {},\n",
+        d.captured || d.error_code.is_some()
+    ));
     s.push_str(&format!("  \"aacs_captured\": {},\n", d.captured));
     if d.captured {
         match &d.disc_hash {
-            Some(h) => s.push_str(&format!("  \"disc_hash\": \"{}\",\n", json_esc(h))),
+            Some(h) => s.push_str(&format!("  \"disc_hash\": \"{}\",\n", json_escape(h))),
             None => s.push_str("  \"disc_hash\": null,\n"),
         }
         match d.generation {
@@ -146,13 +199,19 @@ pub(crate) fn aacs_json(disc: &Disc) -> String {
         ));
         s.push_str(&format!("  \"vid_available\": {},\n", d.vid_available));
         s.push_str(
-            "  \"note\": \"disc_hash is the AACS keydb lookup key (SHA-1 of Unit_Key_RO.inf); \
-             compare it against keydb rows. Present only when the scan read the disc's AACS data. \
+            "  \"note\": \"disc_hash is the AACS keydb lookup key (SHA-1 of Unit_Key_RO.inf) in \
+             KEYDB.cfg's `0x<hash>` row form. Present only when the scan read the disc's AACS data. \
              No key material, VUK, unit keys, MKB bytes, or raw Volume ID is included — \
              vid_available only reports whether the SCSI handshake yielded a Volume ID.\"\n",
         );
     } else {
-        s.push_str(&format!("  \"note\": \"{}\"\n", json_esc(AACS_ABSENT_HINT)));
+        if let Some(code) = &d.error_code {
+            s.push_str(&format!("  \"aacs_error\": \"{}\",\n", json_escape(code)));
+        }
+        s.push_str(&format!(
+            "  \"note\": \"{}\"\n",
+            json_escape(&aacs_absent_reason(&d))
+        ));
     }
     s.push_str("}\n");
     s
@@ -162,7 +221,7 @@ pub(crate) fn aacs_json(disc: &Disc) -> String {
 // re-running: picked title first (`titles[0]`), then every title's shape.
 // Literal English/JSON — a machine artifact, not localized UI.
 pub(crate) fn selection_json(disc: &Disc) -> String {
-    let esc = json_esc;
+    let esc = json_escape;
     let pick = disc.titles.first().map(|t| t.playlist_id).unwrap_or(0);
     let mut s = String::new();
     s.push_str("{\n");
@@ -201,7 +260,7 @@ pub(crate) fn selection_json(disc: &Disc) -> String {
 // Full `--share` flow for an ISO / folder / already-scanned disc (no drive):
 // write structure + selection into a profile dir, zip it, print saved paths plus
 // a paste/email base64 bundle. Exits on a hard I/O failure, like the drive path.
-pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str) {
+pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str, quiet: bool) {
     let profile_name = format!("disc-profile-{}", crate::info::sanitize_component(label));
     let profile_dir = std::path::PathBuf::from(&profile_name);
     if let Err(e) = std::fs::create_dir_all(&profile_dir) {
@@ -230,8 +289,8 @@ pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str) {
     );
 
     // Non-secret AACS diagnostics for keydb / AACS resolution triage (issue #46):
-    // the computed disc hash (keydb lookup key) + crypto shape, or a "run with
-    // -v" marker on a keyless scan. Never carries key material — see `aacs_json`.
+    // the disc hash (keydb lookup key) + crypto shape, or why there is none.
+    // Never carries key material — see `aacs_json`.
     save_bin(
         &profile_dir,
         "aacs.json",
@@ -240,8 +299,12 @@ pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str) {
     );
 
     // Raw structure files. If none are readable there is nothing to report.
-    let summary = match fold_structure(&profile_dir, &mut written, reader) {
-        Ok(Some(s)) => s,
+    let folded = fold_structure(&profile_dir, &mut written, reader);
+    if let (Ok(Some(s)), false) = (&folded, quiet) {
+        report_skipped(s);
+    }
+    let summary = match folded {
+        Ok(Some(s)) if s.file_count > 0 => s,
         other => {
             eprintln!(
                 "{}",
@@ -251,55 +314,21 @@ pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str) {
                 )
             );
             if let Err(e) = other {
-                eprintln!("  {e}");
+                eprintln!("  {}", crate::pipe::fmt_err(&e));
             }
             std::process::exit(1);
         }
     };
 
-    println!(
-        "{}",
-        strings::fmt_or(
-            "disc.capture_summary",
-            "Captured disc structure: {files} files ({bytes} bytes).",
-            &[
-                ("files", &summary.file_count.to_string()),
-                ("bytes", &summary.total_bytes.to_string()),
-            ],
-        )
-    );
-
-    // AACS triage guidance (issue #46): confirm the disc hash was bundled, or —
-    // on a keyless scan that yielded no AACS state — tell the reporter to re-run
-    // with `-v` so the keydb lookup key ends up in the profile next time.
-    let diag = aacs_diag(disc);
-    match diag.disc_hash {
-        Some(hash) => println!(
-            "{}",
-            strings::fmt_or(
-                "disc.capture_aacs_hash",
-                "AACS diagnostics: disc hash {hash} (keydb lookup key) recorded in aacs.json.",
-                &[("hash", &hash)],
-            )
-        ),
-        None => println!(
-            "{}",
-            strings::get_or("disc.capture_aacs_absent", AACS_ABSENT_HINT)
-        ),
+    if !quiet {
+        print_capture_notes(disc, &summary);
     }
 
     // Zip + base64, same helpers as the drive path.
     let zip_data = match zip_files(&profile_dir, &written) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!(
-                "{}",
-                strings::fmt_or(
-                    "drive.zip_failed",
-                    "Could not build zip: {error}",
-                    &[("error", &e.to_string())]
-                )
-            );
+            eprintln!("{}", crate::info::zip_failed_line(&*e));
             std::process::exit(1);
         }
     };
@@ -318,19 +347,56 @@ pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str) {
         std::process::exit(1);
     }
 
-    let body = issue_body(disc, &summary, &base64_encode(&zip_data));
+    let (body, inlined) = issue_body(disc, &summary, &base64_encode(&zip_data));
     let title = format!(
         "Disc profile: {:?} ({} titles)",
         disc.format,
         disc.titles.len()
     );
-    present_for_submission(&profile_name, &zip_path, &title, &body);
+    present_for_submission(&profile_name, &zip_path, &title, &body, inlined);
 }
 
-// The GitHub issue / email body. Literal English markdown (a machine artifact,
-// like the drive body): a disc summary a human can read without unzipping, then
-// the base64 zip in a <details> block.
-pub(crate) fn issue_body(disc: &Disc, summary: &DiscSummary, zip_b64: &str) -> String {
+// The on-run summary + AACS triage lines (localized; suppressed by `-q`).
+fn print_capture_notes(disc: &Disc, summary: &DiscSummary) {
+    println!(
+        "{}",
+        strings::fmt_or(
+            "disc.capture_summary",
+            "Captured disc structure: {files} files ({bytes} bytes).",
+            &[
+                ("files", &summary.file_count.to_string()),
+                ("bytes", &summary.total_bytes.to_string()),
+            ],
+        )
+    );
+    let diag = aacs_diag(disc);
+    let line = match (&diag.disc_hash, &disc.aacs_error) {
+        (Some(hash), _) => strings::fmt_or(
+            "disc.capture_aacs_hash",
+            "AACS diagnostics: disc hash {hash} (keydb lookup key) recorded in aacs.json.",
+            &[("hash", hash)],
+        ),
+        (None, _) if diag.captured => strings::get_or(
+            "disc.capture_aacs_no_hash",
+            "AACS diagnostics recorded in aacs.json (disc hash unavailable).",
+        ),
+        (None, Some(e)) => strings::fmt_or(
+            "disc.capture_aacs_failed",
+            "AACS diagnostics not captured — the AACS step failed: {error}",
+            &[("error", &crate::pipe::fmt_err(e))],
+        ),
+        (None, None) => strings::get_or(
+            "disc.capture_aacs_none",
+            "No AACS on this disc — no AACS diagnostics to capture.",
+        ),
+    };
+    println!("{line}");
+}
+
+// The GitHub issue / email body (literal English markdown, a machine artifact): a
+// readable disc summary, then the base64 zip — or an attach note when too large.
+// Returns the body and whether the zip was inlined.
+pub(crate) fn issue_body(disc: &Disc, summary: &DiscSummary, zip_b64: &str) -> (String, bool) {
     let pick = disc.titles.first();
     let mut body = String::new();
     body.push_str("## Disc structure\n\n```\n");
@@ -352,8 +418,7 @@ pub(crate) fn issue_body(disc: &Disc, summary: &DiscSummary, zip_b64: &str) -> S
     body.push_str("```\n\n");
 
     // AACS diagnostics (issue #46): the disc hash (keydb lookup key) + crypto
-    // shape a maintainer needs to compare against keydb rows — or a "run with
-    // -v" marker when this was a keyless scan. Non-secret only; see `aacs_json`.
+    // shape, or why there is none. Non-secret only; see `aacs_json`.
     let diag = aacs_diag(disc);
     body.push_str("## AACS diagnostics\n\n```\n");
     if diag.captured {
@@ -374,13 +439,10 @@ pub(crate) fn issue_body(disc: &Disc, summary: &DiscSummary, zip_b64: &str) -> S
         ));
         body.push_str(&format!("VID available:   {}\n", diag.vid_available));
     } else {
-        body.push_str("Not captured — keyless scan (no AACS handshake).\n");
+        body.push_str(&aacs_absent_reason(&diag));
+        body.push('\n');
     }
     body.push_str("```\n\n");
-    if !diag.captured {
-        body.push_str(AACS_ABSENT_HINT);
-        body.push_str("\n\n");
-    }
 
     body.push_str(
         "Metadata only — no audio/video essence, no AACS keys (no VUK, unit keys, MKB \
@@ -388,14 +450,13 @@ pub(crate) fn issue_body(disc: &Disc, summary: &DiscSummary, zip_b64: &str) -> S
          title ranking; `aacs.json` carries the non-secret AACS diagnostics above \
          (disc hash, version, vid-available) for keydb triage.\n\n",
     );
-    body.push_str("<details><summary>Disc structure (base64 zip)</summary>\n\n```\n");
-    for chunk in zip_b64.as_bytes().chunks(76) {
-        body.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
-        body.push('\n');
-    }
-    body.push_str("```\n\n</details>\n\n");
-    body.push_str("---\n*Captured by `freemkv info … --share`*\n");
-    body
+    let inlined = push_zip_section(
+        &mut body,
+        "Disc structure (base64 zip)",
+        zip_b64,
+        "---\n*Captured by `freemkv info … --share`*\n",
+    );
+    (body, inlined)
 }
 
 #[cfg(test)]
@@ -448,10 +509,9 @@ mod aacs_diag_tests {
 
     #[test]
     fn aacs_present_puts_disc_hash_into_profile() {
-        // Stored with the `0x` prefix; the profile must record the bare 40-hex
-        // keydb lookup key.
+        // KEYDB.cfg rows are keyed `0x<40hex>`; the profile records that exact form.
         let raw = "0xaabbccddeeff00112233445566778899aabbccdd";
-        let bare = "aabbccddeeff00112233445566778899aabbccdd";
+        let bare = "0xaabbccddeeff00112233445566778899aabbccdd";
         let disc = disc_with(Some(aacs_with_secrets(raw)));
 
         let json = aacs_json(&disc);
@@ -471,9 +531,11 @@ mod aacs_diag_tests {
             &DiscSummary {
                 file_count: 3,
                 total_bytes: 100,
+                skipped: Vec::new(),
             },
             "QUJD",
-        );
+        )
+        .0;
         assert!(body.contains("## AACS diagnostics"), "{body}");
         assert!(
             body.contains(bare),
@@ -482,28 +544,24 @@ mod aacs_diag_tests {
     }
 
     #[test]
-    fn keyless_disc_records_not_captured_marker() {
+    fn a_disc_with_no_aacs_state_records_no_crypto_shape() {
         let disc = disc_with(None);
         let json = aacs_json(&disc);
         assert!(json.contains("\"aacs_captured\": false"), "{json}");
-        assert!(json.contains("-v"), "hint must point at verbose: {json}");
-        // No crypto-shape fields when nothing was captured (the note prose may
-        // still mention disc_hash — assert on the JSON key form only).
+        // No crypto-shape fields when nothing was captured (assert the JSON key form only).
         assert!(!json.contains("\"disc_hash\""), "{json}");
         assert!(!json.contains("\"vid_available\""), "{json}");
-
         let body = issue_body(
             &disc,
             &DiscSummary {
                 file_count: 1,
                 total_bytes: 10,
+                skipped: Vec::new(),
             },
             "QUJD",
-        );
-        assert!(
-            body.contains("Not captured — keyless scan"),
-            "issue body must flag the keyless case: {body}"
-        );
+        )
+        .0;
+        assert!(body.contains("No AACS on this disc"), "{body}");
     }
 
     #[test]
@@ -519,9 +577,11 @@ mod aacs_diag_tests {
             &DiscSummary {
                 file_count: 1,
                 total_bytes: 1,
+                skipped: Vec::new(),
             },
             "QUJD",
-        );
+        )
+        .0;
 
         // Hex of each secret fill and the raw uk_ro / mkb bytes.
         let leaks = [
@@ -579,5 +639,210 @@ mod fold_structure_tests {
             r.map(|s| s.is_some())
         );
         assert!(written.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod share_fix_tests {
+    use super::*;
+    use libfreemkv::disc::DiscRegion;
+    use libfreemkv::{DiscFormat, Error};
+    use std::path::PathBuf;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fmkv-share-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("scratch dir");
+        d
+    }
+
+    fn put(root: &std::path::Path, rel: &str, bytes: &[u8]) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(p, bytes).expect("write fixture");
+    }
+
+    fn bare_disc(encrypted: bool, aacs_error: Option<Error>) -> Disc {
+        Disc {
+            volume_id: "T".to_string(),
+            meta_title: None,
+            format: DiscFormat::BluRay,
+            capacity_sectors: 0,
+            capacity_bytes: 0,
+            layers: 1,
+            titles: Vec::new(),
+            region: DiscRegion::Free,
+            aacs: None,
+            css: None,
+            encrypted,
+            aacs_error,
+            css_error: None,
+            content_format: libfreemkv::ContentFormat::BdTs,
+        }
+    }
+
+    fn summary() -> DiscSummary {
+        DiscSummary {
+            file_count: 1,
+            total_bytes: 1,
+            skipped: Vec::new(),
+        }
+    }
+
+    // K4: a FAILED AACS step must say so (with its code), not blame a keyless scan.
+    #[test]
+    fn a_failed_aacs_step_is_reported_as_a_failure() {
+        let disc = bare_disc(true, Some(Error::AacsNoKeys));
+        let json = aacs_json(&disc);
+        let code = format!("E{}", Error::AacsNoKeys.code());
+        assert!(
+            json.contains(&format!("\"aacs_error\": \"{code}\"")),
+            "{json}"
+        );
+        assert!(!json.contains("keyless") && !json.contains("-v"), "{json}");
+        let body = issue_body(&disc, &summary(), "QUJD").0;
+        assert!(!body.contains("keyless") && body.contains(&code), "{body}");
+    }
+
+    // K4: no AACS on the disc (DVD / clear BD) is not a missing capture.
+    #[test]
+    fn a_disc_without_aacs_says_so() {
+        let disc = bare_disc(false, None);
+        let json = aacs_json(&disc);
+        assert!(!json.contains("keyless") && !json.contains("-v"), "{json}");
+        assert!(json.contains("\"aacs_present\": false"), "{json}");
+        let body = issue_body(&disc, &summary(), "QUJD").0;
+        assert!(!body.contains("keyless"), "{body}");
+    }
+
+    // L7: a real BD's zip base64 blows GitHub's 65536-char body cap; point at the file instead.
+    #[test]
+    fn an_oversized_zip_is_not_inlined() {
+        let disc = bare_disc(false, None);
+        let big = "A".repeat(200_000);
+        let body = issue_body(&disc, &summary(), &big).0;
+        assert!(
+            body.chars().count() <= crate::info::GITHUB_BODY_MAX_CHARS,
+            "body is {} chars",
+            body.chars().count()
+        );
+        assert!(body.contains("profile.zip"), "{body}");
+        let small = issue_body(&disc, &summary(), "QUJD").0;
+        assert!(
+            small.contains("QUJD"),
+            "a small zip is still inlined: {small}"
+        );
+    }
+
+    fn bd_folder(tag: &str) -> PathBuf {
+        let src = scratch(tag).join("disc");
+        put(&src, "BDMV/index.bdmv", b"INDX0200");
+        put(&src, "BDMV/PLAYLIST/00001.mpls", b"MPLS0200-playlist");
+        put(&src, "BDMV/CLIPINF/00001.clpi", b"HDMV0200-clip");
+        std::fs::create_dir_all(src.join("BDMV/STREAM")).expect("stream dir");
+        src
+    }
+
+    // L1: only plain `/`-separated components survive, on every OS.
+    #[test]
+    fn only_plain_portable_paths_are_safe() {
+        for ok in [
+            "BDMV/PLAYLIST/00001.mpls",
+            "VIDEO_TS/VTS_01_0.IFO",
+            "BDMV/META/DL/bdmt_eng.xml",
+        ] {
+            assert!(is_safe_rel_path(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "/etc/x",
+            "BDMV//x",
+            "BDMV/../x",
+            "..",
+            "./x",
+            "a\\..\\x.xml",
+            "C:x.xml",
+            "BDMV/a:b.xml",
+            "BDMV/a*.xml",
+            "BDMV/x.xml.",
+            "BDMV/x.xml ",
+            "BDMV/CON.xml",
+            "BDMV/com1.mpls",
+            "BDMV/LPT9",
+            "BDMV/a\u{1}.xml",
+            "BDMV/a\".xml",
+            "BDMV/a|b",
+        ] {
+            assert!(!is_safe_rel_path(bad), "{bad:?} accepted");
+        }
+        assert!(
+            is_safe_rel_path("BDMV/CONSOLE.xml"),
+            "only exact DOS device stems are reserved"
+        );
+    }
+
+    // T11: the success path writes nested names and zips exactly those entries.
+    #[test]
+    fn a_structure_fold_writes_nested_files_and_zips_them() {
+        let src = bd_folder("ok");
+        let out = src.parent().expect("parent").join("profile");
+        std::fs::create_dir_all(&out).expect("profile dir");
+        let mut img = libfreemkv::DirImage::open(&src).expect("dir image");
+        let mut written = Vec::new();
+        let s = fold_structure(&out, &mut written, &mut img)
+            .expect("fold ok")
+            .expect("files found");
+        for rel in ["BDMV/PLAYLIST/00001.mpls", "BDMV/CLIPINF/00001.clpi"] {
+            assert!(written.iter().any(|w| w == rel), "{rel} not in {written:?}");
+            assert!(out.join(rel).is_file(), "{rel} not written");
+        }
+        assert_eq!(s.file_count, written.len());
+        let zip = crate::info::zip_files(&out, &written).expect("zip");
+        let mut a = zip::ZipArchive::new(std::io::Cursor::new(zip)).expect("valid zip");
+        let names: Vec<String> = (0..a.len())
+            .map(|i| a.by_index(i).expect("entry").name().to_string())
+            .collect();
+        assert_eq!(names, written);
+    }
+
+    // L1: a disc-supplied name carrying a separator or `..` never reaches the filesystem.
+    #[cfg(unix)]
+    #[test]
+    fn a_hostile_disc_name_is_skipped_not_joined() {
+        let src = bd_folder("evil");
+        put(&src, "BDMV/META/DL/x\\..\\..\\..\\..\\evil.xml", b"<x/>");
+        put(&src, "BDMV/META/DL/ok.xml", b"<x/>");
+        let out = src.parent().expect("parent").join("profile");
+        std::fs::create_dir_all(&out).expect("profile dir");
+        let mut img = libfreemkv::DirImage::open(&src).expect("dir image");
+        let mut written = Vec::new();
+        let _ = fold_structure(&out, &mut written, &mut img).expect("fold ok");
+        assert!(
+            written.iter().any(|w| w == "BDMV/META/DL/ok.xml"),
+            "{written:?}"
+        );
+        assert!(
+            !written.iter().any(|w| w.contains('\\') || w.contains("..")),
+            "a hostile name was written: {written:?}"
+        );
+    }
+
+    // L14: one unwritable file must not end the process; the rest still land.
+    #[test]
+    fn one_failed_write_skips_that_file_only() {
+        let src = bd_folder("fail");
+        let out = src.parent().expect("parent").join("profile");
+        std::fs::create_dir_all(out.join("BDMV/PLAYLIST/00001.mpls")).expect("blocker");
+        let mut img = libfreemkv::DirImage::open(&src).expect("dir image");
+        let mut written = Vec::new();
+        let _ = fold_structure(&out, &mut written, &mut img).expect("fold ok");
+        assert!(
+            written.iter().any(|w| w == "BDMV/CLIPINF/00001.clpi"),
+            "{written:?}"
+        );
+        assert!(
+            !written.iter().any(|w| w == "BDMV/PLAYLIST/00001.mpls"),
+            "{written:?}"
+        );
     }
 }
