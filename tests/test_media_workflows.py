@@ -55,9 +55,16 @@ FAKE_GH = r"""import json, os, subprocess, sys
 args = sys.argv[1:]
 with open(os.environ['FAKE_GH_LOG'], 'a') as log:
     log.write(' '.join(args) + '\n')
+routes = json.load(open(os.environ['FAKE_GH_ROUTES']))
+if args[:2] == ['workflow', 'run']:
+    wf, repo = args[2], args[args.index('--repo') + 1]
+    base = f'repos/{repo}/actions/workflows/{wf}/runs?branch=qa&per_page=1'
+    for key in (base, base + '&event=workflow_dispatch'):
+        routes[key] = {'workflow_runs': [{'id': 9999, 'created_at': '2099-01-01T00:00:00Z'}]}
+    json.dump(routes, open(os.environ['FAKE_GH_ROUTES'], 'w'))
+    sys.exit(0)
 if args[:1] != ['api']:
     sys.exit(0)
-routes = json.load(open(os.environ['FAKE_GH_ROUTES']))
 path, query, method, rest = None, None, 'GET', args[1:]
 while rest:
     arg = rest.pop(0)
@@ -70,17 +77,22 @@ while rest:
     elif path is None:
         path = arg
 route = routes.get(path if method == 'GET' else f'{method} {path}')
-if route is None:
-    sys.stderr.write('gh: Not Found (HTTP 404)\n')
-    sys.exit(1)
-if isinstance(route, int):
-    sys.stderr.write(f'gh: Server Error (HTTP {route})\n')
+if route is None or isinstance(route, int):
+    status = route or 404
+    # Real gh prints the error body to stdout, the summary to stderr.
+    sys.stdout.write(json.dumps({'message': 'Not Found' if status == 404 else 'Server Error', 'status': str(status)}))
+    sys.stderr.write(f'gh: {"Not Found" if status == 404 else "Server Error"} (HTTP {status})\n')
     sys.exit(1)
 out = json.dumps(route)
 if query:
     out = subprocess.run(['jq', '-r', query], input=out, capture_output=True, text=True, check=True).stdout
 sys.stdout.write(out)
 """
+
+
+def idle(workflow):
+    return {f'repos/freemkv/freemkv/actions/workflows/{workflow}/runs?status={s}&per_page=1': {'total_count': 0}
+            for s in ('queued', 'in_progress', 'requested', 'waiting', 'pending')}
 
 
 def green_runs(branch, names=('CI', 'qa')):
@@ -202,16 +214,16 @@ class ReleasePreflightTests(GhHarness):
     NON_GATING = '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
 
     def routes(self, qa='a' * 40):
-        routes = {}
+        routes = idle('promote.yml')
         for r in REPOS:
             for branch in ('qa', 'main', 'dev'):
                 routes[f'repos/freemkv/{r}/git/ref/heads/{branch}'] = {'object': {'sha': qa}}
             routes[f'repos/freemkv/{r}/actions/runs?head_sha={qa}&per_page=100'] = {'workflow_runs': green_runs('qa')}
         return routes
 
-    def preflight(self, routes):
+    def preflight(self, routes, prerelease='false'):
         return self.gh(routes, run_block('release-orchestrate.yml', self.STEP),
-                       env={'SKIP_MEDIA': 'true', 'NON_GATING': self.NON_GATING})
+                       env={'SKIP_MEDIA': 'true', 'NON_GATING': self.NON_GATING, 'PRERELEASE': prerelease})
 
     def test_green_and_coherent_set_passes(self):
         result, _ = self.preflight(self.routes())
@@ -224,6 +236,8 @@ class ReleasePreflightTests(GhHarness):
         result, _ = self.preflight(routes)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('freemkv: dev is', result.stdout)
+        result, _ = self.preflight(routes, prerelease='true')
+        self.assertEqual(result.returncode, 0, 'a prerelease never advances dev')
         routes[f"repos/freemkv/freemkv/compare/{'a' * 40}...{'d' * 40}"] = {'status': 'behind'}
         result, _ = self.preflight(routes)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -240,6 +254,24 @@ class ReleasePreflightTests(GhHarness):
         del routes['repos/freemkv/libfreemkv/git/ref/heads/main']
         result, _ = self.preflight(routes)
         self.assertEqual(result.returncode, 0, 'a repo without main is coherent')
+
+    def test_unreadable_qa_fails_closed_and_absent_qa_is_named(self):
+        routes = self.routes()
+        routes['repos/freemkv/bdemu/git/ref/heads/qa'] = 500
+        result, _ = self.preflight(routes)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('bdemu: cannot read qa', result.stdout)
+        del routes['repos/freemkv/bdemu/git/ref/heads/qa']
+        result, _ = self.preflight(routes)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('bdemu has no qa branch', result.stdout)
+
+    def test_refuses_while_a_promote_is_active(self):
+        routes = self.routes()
+        routes['repos/freemkv/freemkv/actions/workflows/promote.yml/runs?status=queued&per_page=1'] = {'total_count': 1}
+        result, _ = self.preflight(routes)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('a promote run is queued', result.stdout)
 
     def test_only_the_latest_run_of_each_workflow_gates(self):
         routes = self.routes()
@@ -263,7 +295,7 @@ class PromoteTests(GhHarness):
     def routes(self):
         dev, qa = 'd' * 40, 'a' * 40
         cargo = base64.b64encode(b'[package]\nversion = "1.7.8"\n').decode()
-        routes = {}
+        routes = idle('release-orchestrate.yml')
         for r in REPOS:
             routes[f'repos/freemkv/{r}/git/ref/heads/dev'] = {'object': {'sha': dev}}
             routes[f'repos/freemkv/{r}/git/ref/heads/qa'] = {'object': {'sha': qa}}
@@ -282,8 +314,15 @@ class PromoteTests(GhHarness):
         result, _ = self.check(self.routes())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_refuses_while_a_release_is_active(self):
+        routes = self.routes()
+        routes['repos/freemkv/freemkv/actions/workflows/release-orchestrate.yml/runs?status=in_progress&per_page=1'] = {'total_count': 1}
+        result, _ = self.check(routes)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('a release-orchestrate run is in_progress', result.stdout)
+
     def test_unreadable_qa_or_main_fails_closed(self):
-        for branch in ('qa', 'main'):
+        for branch in ('dev', 'qa', 'main'):
             routes = self.routes()
             routes[f'repos/freemkv/bdemu/git/ref/heads/{branch}'] = 503
             with self.subTest(branch=branch):
@@ -300,21 +339,47 @@ class PromoteTests(GhHarness):
         result, _ = self.check(routes)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_unchanged_dependents_rerun_qa_against_advanced_dependencies(self):
-        step = run_block('promote.yml', 'Promote dev → qa, in dependency order')
-        shas = ''.join(f"{r} {'d' * 40} {'ready' if r == 'libfreemkv' else 'already'}\n" for r in REPOS)
-        routes = {f'repos/freemkv/{r}/git/ref/heads/qa': {'object': {'sha': 'a' * 40}} for r in REPOS}
+    def rerun_routes(self, moved, last):
+        routes = {}
+        for r in REPOS:
+            sha = format(REPOS.index(r), 'x') * 40
+            routes[f'repos/freemkv/{r}/git/ref/heads/qa'] = {'object': {'sha': sha}}
+            routes[f'repos/freemkv/{r}/actions/runs?head_sha={sha}&branch=qa&per_page=100'] = {
+                'workflow_runs': [{'created_at': moved[r]}] if moved.get(r) else []}
+            for wf in ('qa.yml', 'hash-matrix.yml'):
+                base = f'repos/freemkv/{r}/actions/workflows/{wf}/runs?branch=qa&per_page=1'
+                routes[base] = {'workflow_runs': [{'id': 1, 'created_at': last.get(r, moved.get(r))}]}
+                routes[base + '&event=workflow_dispatch'] = {'workflow_runs': [{'id': 1, 'created_at': '2026-01-01T00:00:00Z'}]}
         routes['PATCH repos/freemkv/libfreemkv/git/refs/heads/qa'] = {'object': {'sha': 'd' * 40}}
-        result, log = self.gh(routes, step, files={'shas': shas})
+        return routes
+
+    def rerun(self, routes, ready=()):
+        step = run_block('promote.yml', 'Promote dev → qa, in dependency order')
+        shas = ''.join(f"{r} {'d' * 40} {'ready' if r in ready else 'already'}\n" for r in REPOS)
+        result, log = self.gh(routes, step, env={'REPOS': ' '.join(REPOS)}, files={'shas': shas})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        dispatched = [line for line in log.splitlines() if line.startswith('workflow run')]
+        return sorted(line for line in log.splitlines() if line.startswith('workflow run'))
+
+    def test_unchanged_dependents_rerun_qa_against_advanced_dependencies(self):
+        old = {r: '2026-09-01T00:00:00Z' for r in REPOS}
         downstream = REPOS[REPOS.index('libfreemkv') + 1:]
-        expected = [f'workflow run qa.yml --repo freemkv/{r} --ref qa' for r in downstream]
-        expected.append('workflow run hash-matrix.yml --repo freemkv/freemkv --ref qa')
-        self.assertEqual(sorted(dispatched), sorted(expected))
-        result, log = self.gh(routes, step, files={'shas': shas.replace('ready', 'already')})
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn('workflow run', log)
+        expected = sorted([f'workflow run qa.yml --repo freemkv/{r} --ref qa' for r in downstream]
+                          + ['workflow run hash-matrix.yml --repo freemkv/freemkv --ref qa'])
+        with self.subTest('just pushed, runs not created yet'):
+            moved = dict(old, libfreemkv=None)
+            self.assertEqual(self.rerun(self.rerun_routes(moved, {}), ready=('libfreemkv',)), expected)
+        with self.subTest('retry after a failed dispatch: nothing pushed this time'):
+            moved = dict(old, libfreemkv='2026-09-02T00:00:00Z')
+            self.assertEqual(self.rerun(self.rerun_routes(moved, {})), expected)
+        with self.subTest('dependents already re-run'):
+            moved = dict(old, libfreemkv='2026-09-02T00:00:00Z')
+            last = {r: '2026-09-03T00:00:00Z' for r in downstream}
+            self.assertEqual(self.rerun(self.rerun_routes(moved, last)), [])
+        with self.subTest('dependent itself moved after the dependency'):
+            moved = dict(old, libfreemkv='2026-09-02T00:00:00Z', freemkv='2026-09-03T00:00:00Z')
+            got = self.rerun(self.rerun_routes(moved, {}))
+            self.assertNotIn('workflow run qa.yml --repo freemkv/freemkv --ref qa', got)
+            self.assertIn('workflow run qa.yml --repo freemkv/autorip --ref qa', got)
 
 
 class CascadeHelperTests(unittest.TestCase):

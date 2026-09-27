@@ -33,10 +33,10 @@ on:
 permissions:
   contents: read
 
-# Shared with release-orchestrate: a promote must never move qa under a running
-# release cascade, and two promotes must never race their qa pushes.
+# Two promote runs must never race their qa PATCH/POST pushes. A concurrent
+# release is refused by both preflights instead (see the check step).
 concurrency:
-  group: freemkv-qa-pipeline
+  group: promote
   cancel-in-progress: false
 
 env:
@@ -78,17 +78,27 @@ jobs:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
         run: |
           set -uo pipefail
+          # Separate concurrency groups (a shared one would let a queued run silently replace
+          # another), so refuse while release-orchestrate is queued or running instead.
+          for s in queued in_progress requested waiting pending; do
+            n=$(gh api "repos/freemkv/freemkv/actions/workflows/release-orchestrate.yml/runs?status=$s&per_page=1" -q .total_count)
+            [ "$n" = 0 ] || { echo "::error::a release-orchestrate run is $s — wait for it to finish, then retry"; exit 1; }
+          done
           fail=0
           : > /tmp/shas
           : > /tmp/versions
           # Prints the branch sha. Status 1 = no such branch (404); 2 = lookup failed (see ref_err).
+          # gh prints an error body to stdout, so trust the output only when it is a sha.
           ref_sha() {
-            gh api "repos/freemkv/$1/git/ref/heads/$2" -q .object.sha 2>/tmp/ref.err && return 0
+            local out
+            out=$(gh api "repos/freemkv/$1/git/ref/heads/$2" -q .object.sha 2>/tmp/ref.err) || out=""
+            if [[ "$out" =~ ^[0-9a-f]{40}$ ]]; then echo "$out"; return 0; fi
             grep -q 'HTTP 404' /tmp/ref.err && return 1 || return 2
           }
           ref_err() { echo "::error::$1: cannot read $2 ($(tr '\n' ' ' </tmp/ref.err))"; }
           for r in $REPOS; do
-            dev=$(gh api "repos/freemkv/$r/git/ref/heads/dev" -q .object.sha 2>/dev/null || echo "")
+            st=0; dev=$(ref_sha "$r" dev) || st=$?
+            [ "$st" -ne 2 ] || { ref_err "$r" dev; fail=1; continue; }
             if [ -z "$dev" ]; then echo "::error::$r: no dev branch"; fail=1; continue; fi
 
             # UNIFIED-VERSION PARITY: all eight ship the SAME version. Capture the
@@ -181,15 +191,8 @@ jobs:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
         run: |
           set -euo pipefail
-          pushed=false; rerun=()
           while read -r r sha state; do
-            if [ "$state" != "ready" ]; then
-              echo "  = $r: already at ${sha:0:7}"
-              # Unchanged, but a dependency (earlier in REPOS) moved: its qa evidence is stale.
-              if $pushed; then rerun+=("$r"); fi
-              continue
-            fi
-            pushed=true
+            [ "$state" = "ready" ] || { echo "  = $r: already at ${sha:0:7}"; continue; }
             printf '  → %-20s ' "$r"
             # Create the ref if qa does not exist yet, otherwise fast-forward.
             if gh api "repos/freemkv/$r/git/ref/heads/qa" >/dev/null 2>&1; then
@@ -198,14 +201,42 @@ jobs:
               gh api -X POST "repos/freemkv/$r/git/refs" -f ref=refs/heads/qa -f sha="$sha" -q .object.sha
             fi
           done < /tmp/shas
-          stale=0
-          for r in ${rerun[@]+"${rerun[@]}"}; do
+          # Re-run qa where a dependency's qa moved after the repo's own qa and its last run.
+          # Derived from state, not from this run's pushes, so a retry after a failed push or
+          # dispatch still catches it. REPOS is in dependency order.
+          now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          moved_at() {
+            local sha t
+            sha=$(gh api "repos/freemkv/$1/git/ref/heads/qa" -q .object.sha)
+            t=$(gh api "repos/freemkv/$1/actions/runs?head_sha=$sha&branch=qa&per_page=100" \
+                  -q '[.workflow_runs[].created_at] | min // empty')
+            echo "${t:-$now}"
+          }
+          last_run() {
+            gh api "repos/freemkv/$1/actions/workflows/$2/runs?branch=qa&per_page=1${3:+&event=$3}" \
+              -q '.workflow_runs[0] | "\(.id // 0) \(.created_at // "")"'
+          }
+          upstream=""; stale=0
+          for r in $REPOS; do
+            own=$(moved_at "$r")
             wfs=qa.yml; [ "$r" != freemkv ] || wfs="qa.yml hash-matrix.yml"
             for wf in $wfs; do
+              read -r _ last <<<"$(last_run "$r" "$wf")"
+              [ -n "$upstream" ] && [[ "$own" < "$upstream" && "$last" < "$upstream" ]] || continue
+              read -r before _ <<<"$(last_run "$r" "$wf" workflow_dispatch)"
               echo "  ↻ $r: re-running $wf against the advanced dependencies"
               gh workflow run "$wf" --repo "freemkv/$r" --ref qa \
-                || { echo "::error::$r: could not dispatch $wf on qa — run it by hand before releasing"; stale=1; }
+                || { echo "::error::$r: could not dispatch $wf on qa — re-run promote"; stale=1; continue; }
+              # Wait until the run exists, so a release dispatched next cannot see only the old green run.
+              id=$before
+              for _ in $(seq 60); do
+                read -r id _ <<<"$(last_run "$r" "$wf" workflow_dispatch)"
+                [ "$id" = "$before" ] || break
+                sleep 5
+              done
+              [ "$id" != "$before" ] || { echo "::error::$r: the $wf dispatch never appeared — re-run promote"; stale=1; }
             done
+            [[ "$own" < "$upstream" ]] || upstream=$own
           done
           [ "$stale" = 0 ] || exit 1
           echo "promoted. qa CI is running — the heaviest leg (full-size media) runs last, behind everything else."

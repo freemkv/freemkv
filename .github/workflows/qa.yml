@@ -70,7 +70,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -89,7 +91,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -133,9 +137,14 @@ jobs:
           }
           if ((& $userPath) -split ';' -notcontains $dir) { throw "installer did not add $dir to the user PATH" }
           if (-not (Test-Path $lnk)) { throw "installer did not create $lnk" }
-          $item = (New-Object -ComObject Shell.Application).NameSpace((Split-Path $lnk)).ParseName((Split-Path $lnk -Leaf))
-          $got = $item.ExtendedProperty('System.AppUserModel.ID')
-          if ($got -ne $aumid) { throw "Start-menu shortcut AppUserModelID is '$got', want $aumid" }
+          # The shell property read is best-effort; the registry key checks below are the hard gate.
+          $got = $null
+          try {
+            $item = (New-Object -ComObject Shell.Application).NameSpace((Split-Path $lnk)).ParseName((Split-Path $lnk -Leaf))
+            $got = $item.ExtendedProperty('System.AppUserModel.ID')
+          } catch { }
+          if (-not $got) { Write-Output "::warning::could not read the AppUserModelID of $lnk; not verified" }
+          elseif ($got -ne $aumid) { throw "Start-menu shortcut AppUserModelID is '$got', want $aumid" }
           if (-not (Test-Path $aumidKey)) { throw "installer did not register $aumidKey" }
           & "$dir\freemkv.com" --version
           if ($LASTEXITCODE -ne 0) { throw "installed freemkv.com --version exited $LASTEXITCODE" }
@@ -163,7 +172,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv

@@ -39,10 +39,11 @@ on:
 permissions:
   contents: read
 
-# Shared with promote: two releases, or a promote during a release, would
-# interleave qa pushes and tags across eight repos.
+# Two release dispatches must never run the cascade at once — they would
+# interleave tag pushes and qa commits across eight repos. A concurrent promote
+# is refused by both preflights instead (see there).
 concurrency:
-  group: freemkv-qa-pipeline
+  group: release-orchestrate
   cancel-in-progress: false
 
 jobs:
@@ -57,6 +58,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
           SKIP_MEDIA: ${{ inputs.skip_media }}
+          PRERELEASE: ${{ inputs.prerelease }}
           NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
         run: |
           set -uo pipefail
@@ -64,17 +66,27 @@ jobs:
             NON_GATING="($NON_GATING)|^hash-matrix$"
             echo "::warning::Media evidence explicitly waived for this release"
           fi
+          # Separate concurrency groups (a shared one would let a queued run silently replace
+          # another), so refuse while promote is queued or running instead.
+          for s in queued in_progress requested waiting pending; do
+            n=$(gh api "repos/freemkv/freemkv/actions/workflows/promote.yml/runs?status=$s&per_page=1" -q .total_count)
+            [ "$n" = 0 ] || { echo "::error::a promote run is $s — wait for it to finish, then retry"; exit 1; }
+          done
           fail=0
           : > /tmp/qa-shas
           # Prints the branch sha. Status 1 = no such branch (404); 2 = lookup failed (see ref_err).
+          # gh prints an error body to stdout, so trust the output only when it is a sha.
           ref_sha() {
-            gh api "repos/freemkv/$1/git/ref/heads/$2" -q .object.sha 2>/tmp/ref.err && return 0
+            local out
+            out=$(gh api "repos/freemkv/$1/git/ref/heads/$2" -q .object.sha 2>/tmp/ref.err) || out=""
+            if [[ "$out" =~ ^[0-9a-f]{40}$ ]]; then echo "$out"; return 0; fi
             grep -q 'HTTP 404' /tmp/ref.err && return 1 || return 2
           }
           ref_err() { echo "::error::$1: cannot read $2 ($(tr '\n' ' ' </tmp/ref.err))"; }
           for r in freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n \
                    freemkv-engine bdemu freemkv autorip; do
-            sha=$(gh api "repos/freemkv/$r/git/ref/heads/qa" -q .object.sha 2>/dev/null || echo "")
+            st=0; sha=$(ref_sha "$r" qa) || st=$?
+            [ "$st" -ne 2 ] || { ref_err "$r" qa; fail=1; continue; }
             [ -n "$sha" ] || { echo "::error::$r has no qa branch"; fail=1; continue; }
             # Only the newest run of each workflow per branch counts: a superseded or re-dispatched run must not gate.
             runs=$(gh api "repos/freemkv/$r/actions/runs?head_sha=$sha&per_page=100" \
@@ -100,9 +112,13 @@ jobs:
                 *) echo "::error::$r: main is '$mcmp' vs qa ${sha:0:7} — out-of-band commit on main. Bring it into dev (cherry-pick), re-promote, then release."; fail=1; continue ;;
               esac
             fi
-            # dev must be ⊆ qa too: advance_main_to_release fast-forwards dev to the tag, after the tags are public.
-            st=0; dev=$(ref_sha "$r" dev) || st=$?
-            [ "$st" -le 1 ] || { ref_err "$r" dev; fail=1; continue; }
+            # dev must be ⊆ qa too: advance_main_to_release fast-forwards dev to the tag, after the tags
+            # are public. A prerelease never advances branches, so it is exempt.
+            dev=""
+            if [ "$PRERELEASE" != true ]; then
+              st=0; dev=$(ref_sha "$r" dev) || st=$?
+              [ "$st" -le 1 ] || { ref_err "$r" dev; fail=1; continue; }
+            fi
             if [ -n "$dev" ] && [ "$dev" != "$sha" ]; then
               dcmp=$(gh api "repos/freemkv/$r/compare/$sha...$dev" -q .status 2>/dev/null || echo "unknown")
               case "$dcmp" in
