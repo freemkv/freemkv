@@ -172,26 +172,28 @@ fn log_plan(shown: Option<LogShown>, first: u64, len: usize) -> LogPlan {
     }
 }
 
+/// Characters to delete for a front trim of `drop` lines, or `None` (rebuild)
+/// when the recorded line lengths no longer describe the pane exactly.
+fn trim_chars(
+    lens: &std::collections::VecDeque<usize>,
+    drop: usize,
+    pane_len: usize,
+) -> Option<usize> {
+    (lens.len() >= drop && lens.iter().sum::<usize>() == pane_len)
+        .then(|| lens.iter().take(drop).sum())
+}
+
 /// The keydb worker's one message and the log kind it is shown with.
 fn keydb_outcome(r: std::thread::Result<Result<String, String>>) -> (crate::ui::LogKind, String) {
     use crate::ui::LogKind;
     match r {
         Ok(Ok(m)) => (LogKind::Result, m),
         Ok(Err(m)) => (LogKind::Notice, m),
-        Err(p) => {
-            // First line only, capped: a panic message is for the bug report.
-            let why = p
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| p.downcast_ref::<String>().map(String::as_str))
-                .and_then(|m| m.lines().next())
-                .unwrap_or("unknown panic");
-            let why: String = why.chars().take(200).collect();
-            (
-                LogKind::Notice,
-                format!("keydb update failed — internal error: {why}"),
-            )
-        }
+        // The payload is dropped: a panic message can quote keydb bytes.
+        Err(_) => (
+            LogKind::Notice,
+            "keydb update failed — internal error".to_string(),
+        ),
     }
 }
 
@@ -1654,15 +1656,17 @@ impl Controller {
             let mut plan = log_plan(*iv.log_shown.borrow(), v.log_first, v.log.len());
             if let LogPlan::Trim { drop, from } = plan {
                 let mut lens = iv.log_lens.borrow_mut();
-                let chars: usize = lens.iter().take(drop).sum();
-                match &store {
-                    Some(s) if lens.len() >= drop && chars <= s.length() => {
+                let cut = store
+                    .as_ref()
+                    .and_then(|s| Some((s, trim_chars(&lens, drop, s.length())?)));
+                plan = match cut {
+                    Some((s, chars)) => {
                         s.deleteCharactersInRange(objc2_foundation::NSRange::new(0, chars));
                         lens.drain(..drop);
-                        plan = LogPlan::Append(from);
+                        LogPlan::Append(from)
                     }
-                    _ => plan = LogPlan::Rebuild,
-                }
+                    None => LogPlan::Rebuild,
+                };
             }
             let from = match plan {
                 LogPlan::Keep => None,
@@ -5606,9 +5610,9 @@ mod tests {
         );
     }
 
-    // M4 + M5: a failed update is a Notice and a panic keeps its message.
+    // M4 + M5: a failed update or a panic is a Notice; the payload never shows.
     #[test]
-    fn a_failed_keydb_update_is_a_notice_and_keeps_the_panic_message() {
+    fn a_failed_keydb_update_is_a_notice_and_never_shows_the_panic_payload() {
         use crate::ui::LogKind;
         let ok = keydb_outcome(Ok(Ok("keydb updated — 3 entries".into())));
         assert_eq!(ok, (LogKind::Result, "keydb updated — 3 entries".into()));
@@ -5620,17 +5624,12 @@ mod tests {
         });
         let (kind, msg) = keydb_outcome(boom);
         assert_eq!(kind, LogKind::Notice);
-        assert!(
-            msg.contains("zip entry out of range"),
-            "payload lost: {msg}"
-        );
+        assert_eq!(msg, "keydb update failed — internal error");
         let owned: std::thread::Result<Result<String, String>> =
-            Err(Box::new(format!("idx {}\nsecond line", 7)));
-        let (_, msg) = keydb_outcome(owned);
-        assert!(
-            msg.contains("idx 7") && !msg.contains("second line"),
-            "{msg}"
-        );
+            Err(Box::new(format!("KEY {}", "0123abcd")));
+        let (kind, msg) = keydb_outcome(owned);
+        assert_eq!(kind, LogKind::Notice);
+        assert!(!msg.contains("0123abcd"), "panic payload leaked: {msg}");
     }
 
     // M6: an ad-hoc signing failure must fail the bundle build.
@@ -5838,6 +5837,17 @@ mod tests {
         assert_eq!(log_plan(full, 1_000, 3_000), LogPlan::Rebuild, "shrank");
         assert_eq!(log_plan(full, 5_001, 0), LogPlan::Rebuild, "cleared");
         assert_eq!(log_plan(full, 9_000, 10), LogPlan::Rebuild, "past it");
+    }
+
+    // M18: a trim only deletes when the recorded lengths match the pane exactly.
+    #[test]
+    fn a_trim_rebuilds_when_the_recorded_lengths_disagree_with_the_pane() {
+        let lens: std::collections::VecDeque<usize> = [3, 5, 2].into();
+        assert_eq!(trim_chars(&lens, 2, 10), Some(8));
+        assert_eq!(trim_chars(&lens, 0, 10), Some(0));
+        assert_eq!(trim_chars(&lens, 2, 11), None, "pane holds an extra line");
+        assert_eq!(trim_chars(&lens, 2, 9), None, "pane shorter than recorded");
+        assert_eq!(trim_chars(&lens, 4, 10), None, "dropping more than shown");
     }
 
     // K2 + C13: the Recovery tab loses the stale capture caption; Output
