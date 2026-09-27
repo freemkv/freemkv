@@ -363,7 +363,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ matrix.os }}" = "linux" ]; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3 python3-venv
           else
             choco install ffmpeg python3 -y --no-progress
             export PATH="$PATH:/c/ProgramData/chocolatey/bin"
@@ -454,40 +454,40 @@ jobs:
         shell: bash
         working-directory: freemkv
         run: cargo build --release --target "${{ matrix.target }}" --bin freemkv
-      - name: Fetch the four disc fixtures
+      # All five keys at once, every ranged GET pinned to the ETag (or VersionId)
+      # recorded first, and each object's ETag recomputed from the bytes as they
+      # arrive (tests/media_fetch.py). The report records the fetch time per key.
+      - name: Fetch the disc fixtures and key database
         shell: bash
+        env:
+          B: ${{ secrets.FMKV_FIXTURES_BUCKET }}
         run: |
           set -euo pipefail
           export AWS_DEFAULT_REGION=us-west-2 AWS_REGION=us-west-2
-          B="${{ secrets.FMKV_FIXTURES_BUCKET }}"
           if [ "${{ matrix.os }}" = "windows" ]; then
             ISO_DIR=$(cygpath -m "$(pwd)")/isos
+            venv="$(cygpath -u "$RUNNER_TEMP")/fetch-venv"
+            venv_py="$venv/Scripts/python.exe"
           else
             ISO_DIR="$(pwd)/isos"
+            venv="$RUNNER_TEMP/fetch-venv"
+            venv_py="$venv/bin/python"
           fi
-          mkdir -p isos
           echo "ISO_DIR=$ISO_DIR" >> "$GITHUB_ENV"
-          if ! err=$(aws s3 cp "s3://$B/keydb.cfg" keydb.cfg --region us-west-2 --only-show-errors 2>&1); then
-            echo "::error title=Key database download failed::could not fetch keydb.cfg from the fixtures bucket — the BD family cannot decrypt without it: ${err:-<no client output>}"
-            exit 1
-          fi
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            echo "KEYDB_PATH=$(cygpath -m "$(pwd)")/keydb.cfg" >> "$GITHUB_ENV"
-          else
-            echo "KEYDB_PATH=$(pwd)/keydb.cfg" >> "$GITHUB_ENV"
-          fi
-
-          for f in dvd bd uhd hddvd; do
-            sz=$(aws s3api head-object --bucket "$B" --key "$f.iso" --region us-west-2 \
-                   --query ContentLength --output text)
-            echo "::group::fetch $f.iso ($((sz/1024/1024/1024)) GiB)"
-            if ! err=$(aws s3 cp "s3://$B/$f.iso" "isos/$f.iso" --region us-west-2 --only-show-errors 2>&1); then
-              echo "::error title=Fixture download failed ($f)::could not fetch $f.iso from the Oregon bucket — check the runner's instance profile can read it: ${err:-<no client output>}"
-              exit 1
-            fi
-            echo "::endgroup::"
-          done
+          echo "KEYDB_PATH=$ISO_DIR/keydb.cfg" >> "$GITHUB_ENV"
+          "$FMKV_PYTHON" -m venv "$venv"
+          "$venv_py" -m pip install --quiet --disable-pip-version-check --require-hashes --only-binary=:all: \
+            -r freemkv/tests/media-fetch-requirements.txt
+          "$venv_py" freemkv/tests/media_fetch.py resolve --bucket "$B" --out fixtures.json
+          "$venv_py" freemkv/tests/media_fetch.py fetch --bucket "$B" --manifest fixtures.json \
+            --dest isos --report "fetch-${{ matrix.os }}.json"
           df -h . | tail -1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: "fetch-report-${{ matrix.os }}"
+          path: "fetch-${{ matrix.os }}.json"
+          if-no-files-found: ignore
       - name: Run the full CLI acceptance suite
         id: suite
         shell: bash
