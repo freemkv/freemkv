@@ -80,3 +80,12 @@ fn publishing_is_gated_on_the_store_secret() {
         "beta waits for green CI and qa"
     );
 }
+
+#[test]
+fn app_may_own_its_bus_name() {
+    let snap = read("snap/snapcraft.yaml");
+    assert!(snap.contains(
+        "  freemkv-dbus:\n    interface: dbus\n    bus: session\n    name: org.freemkv.FreeMKV\n"
+    ));
+    assert!(snap.contains("    slots: [freemkv-dbus]\n"));
+}

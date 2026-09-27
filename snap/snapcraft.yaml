@@ -24,6 +24,14 @@ plugs:
     interface: optical-drive
     write: true
 
+# GtkApplication owns its application id on the session bus; confinement
+# denies that unless the snap declares the name as a dbus slot.
+slots:
+  freemkv-dbus:
+    interface: dbus
+    bus: session
+    name: org.freemkv.FreeMKV
+
 apps:
   freemkv:
     # App build: a bare launch opens the window when a display is present,
@@ -32,6 +40,7 @@ apps:
     common-id: org.freemkv.FreeMKV
     desktop: usr/share/applications/org.freemkv.FreeMKV.desktop
     extensions: [gnome]
+    slots: [freemkv-dbus]
     plugs:
       - optical-drive
       - optical-write
