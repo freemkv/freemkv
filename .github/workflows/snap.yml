@@ -124,7 +124,7 @@ jobs:
           cd snap-package
           sha256sum freemkv-amd64.snap > freemkv-amd64.snap.sha256
           ls -l
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: snap-amd64
           path: snap-package
@@ -136,7 +136,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: snap-amd64, path: snap-package }
       - name: Install the snap
         run: |
@@ -182,7 +182,7 @@ jobs:
           done
           snap connections freemkv | tee connections-after.log
           grep -Eq '^optical-drive +freemkv:optical-write +:optical-drive ' connections-after.log
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: snap-smoke
@@ -195,7 +195,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: snap-amd64, path: snap-package }
       - name: Install the snap
         run: |
@@ -252,8 +252,8 @@ jobs:
           status=0
           review-tools.snap-review --json snap-package/freemkv-amd64.snap > review.json || status=$?
           echo "snap-review exit status: $status"
-          python3 src/packaging/snap/store_checks.py review review.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+          python3 src/packaging/snap/store_checks.py review "$status" review.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: snap-review
@@ -312,7 +312,7 @@ jobs:
           mkdir -p snap-package
           cp freemkv_*_arm64.snap snap-package/freemkv-arm64.snap
           (cd snap-package && sha256sum freemkv-arm64.snap > freemkv-arm64.snap.sha256)
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: snap-arm64
           path: snap-package
@@ -328,7 +328,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: snap-amd64, path: snap-package }
       - name: Attach the tested snap to the release
         env:
@@ -405,9 +405,9 @@ jobs:
           done
           echo "::error::CI/qa did not finish within 2h; not publishing to beta"
           exit 1
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { name: snap-amd64, path: snap-package }
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: needs.remote-build-arm64.result == 'success'
         with: { name: snap-arm64, path: snap-package }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

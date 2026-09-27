@@ -23,7 +23,7 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
   any other finding, an unrecognised snapcraft output, or an arm64 build that
   did not succeed (failed or cancelled) fails the job. If the store words the
   two grants differently from review-tools, the first upload fails visibly
-  and `STORE_GRANT_MARKERS` needs updating.
+  and `STORE_GRANT_IDS` needs updating.
 - Snapcraft is pinned to the `9.x/stable` track (`SNAPCRAFT_CHANNEL`).
   review-tools only has a `latest` track, so the run records its version in
   the summary and `store_checks.py` fails on an unfamiliar report format.

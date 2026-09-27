@@ -14,12 +14,23 @@ KNOWN_GRANTS = (
     "declaration-snap-v2:plugs_connection:optical-write:optical-drive",
     "declaration-snap-v2:slots_connection:freemkv-dbus:dbus",
 )
-# How each grant shows up inside a store upload error line.
-STORE_GRANT_MARKERS = tuple(g.split(":", 1)[1] for g in KNOWN_GRANTS)
+# A store upload error may name a grant with or without the review-tools prefix.
+STORE_GRANT_IDS = frozenset(KNOWN_GRANTS) | {g.split(":", 1)[1] for g in KNOWN_GRANTS}
+# A whole review check id: colon-separated words, at least three parts.
+CHECK_ID = re.compile(r"(?<![\w:.-])[\w.-]+(?::[\w.-]+){2,}(?![\w:.-])")
+STATUS_TAG = re.compile(r"\(([A-Z][A-Z ]*)\)")
+LOG_TRAILER = "Full execution log:"
 
 HELD_STATUS = "will need manual review"
 ISSUES_HEADER = "Issues while processing snap:"
 CREATED = re.compile(r"Revision \d+ created for 'freemkv'")
+
+
+def expected_review_exit(report):
+    """snap-review's exit code for a report: 2 with errors, else 3 with warnings, else 0."""
+    if any(r["error"] for r in report.values()):
+        return 2
+    return 3 if any(r["warn"] for r in report.values()) else 0
 
 
 def review(report):
@@ -41,11 +52,31 @@ def review(report):
 
 
 def upload_issues(log):
-    """The `- ` lines snapcraft prints under its 'Issues while processing snap:' header."""
+    """The issue lines under snapcraft's 'Issues while processing snap:' header.
+
+    None if anything there is not a plain top-level `- ` item, such as an
+    indented continuation line: an unfamiliar shape is never trusted.
+    """
     if ISSUES_HEADER not in log:
-        return []
-    tail = log.split(ISSUES_HEADER, 1)[1].splitlines()
-    return [line.strip()[2:].strip() for line in tail if line.strip().startswith("- ")]
+        return None
+    issues = []
+    for line in log.split(ISSUES_HEADER, 1)[1].splitlines():
+        if not line.strip():
+            continue
+        if line.startswith(LOG_TRAILER):
+            break
+        if not line.startswith("- "):
+            return None
+        issues.append(line[2:].strip())
+    return issues
+
+
+def is_known_grant_issue(issue):
+    """One NEEDS REVIEW finding naming exactly one known grant, as a whole token."""
+    if ";" in issue or any(t != "NEEDS REVIEW" for t in STATUS_TAG.findall(issue)):
+        return False
+    ids = CHECK_ID.findall(issue)
+    return len(ids) == 1 and ids[0] in STORE_GRANT_IDS
 
 
 def classify_upload(exit_code, log):
@@ -55,26 +86,31 @@ def classify_upload(exit_code, log):
             return "failed"
         return "held" if HELD_STATUS in log else "released"
     issues = upload_issues(log)
-    if issues and all(any(m in i for m in STORE_GRANT_MARKERS) for i in issues):
+    if issues and all(is_known_grant_issue(i) for i in issues):
         return "held"
     return "failed"
 
 
 def main(argv):
-    if len(argv) == 3 and argv[1] == "review":
+    if len(argv) == 4 and argv[1] == "review":
         try:
-            with open(argv[2]) as f:
-                lines, failures = review(json.load(f))
+            with open(argv[3]) as f:
+                report = json.load(f)
+            lines, failures = review(report)
         except (ValueError, json.JSONDecodeError) as e:
             print(f"::error::unexpected review-tools output: {e}")
             return 2
         print("\n".join(lines))
+        want = expected_review_exit(report)
+        if int(argv[2]) != want:
+            print(f"::error::snap-review exited {argv[2]}, but its report implies {want}")
+            return 1
         return 1 if failures else 0
     if len(argv) == 4 and argv[1] == "upload":
         with open(argv[3]) as f:
             print(classify_upload(int(argv[2]), f.read()))
         return 0
-    print(f"usage: {argv[0]} review REPORT.json | upload EXIT_CODE LOG", file=sys.stderr)
+    print(f"usage: {argv[0]} review EXIT_CODE REPORT.json | upload EXIT_CODE LOG", file=sys.stderr)
     return 2
 
 

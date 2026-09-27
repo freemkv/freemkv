@@ -116,7 +116,7 @@ fn review_allows_exactly_the_two_store_grants() {
         ]
     );
     let wf = read(".github/workflows/snap.yml");
-    assert!(wf.contains("store_checks.py review review.json"));
+    assert!(wf.contains("store_checks.py review \"$status\" review.json"));
     assert!(wf.contains("unittest discover -s packaging/snap"));
 }
 
