@@ -209,11 +209,15 @@ fn notifications_available() -> bool {
         .is_some()
 }
 
-fn notify_rip_finished(title: &str, body: &str, output_dir: &str) {
+fn notify_rip_finished(title: &str, body: &str, output_dir: Option<&str>) {
     if !notifications_available() {
         return;
     }
-    let (title, body, dir) = (title.to_owned(), body.to_owned(), output_dir.to_owned());
+    let (title, body, dir) = (
+        title.to_owned(),
+        body.to_owned(),
+        output_dir.map(str::to_owned),
+    );
     // Asking again once decided is a no-op that just reports the answer.
     let post = block2::RcBlock::new(
         move |granted: objc2::runtime::Bool, _e: *mut objc2_foundation::NSError| {
@@ -226,10 +230,13 @@ fn notify_rip_finished(title: &str, body: &str, output_dir: &str) {
             content.setSound(Some(
                 &objc2_user_notifications::UNNotificationSound::defaultSound(),
             ));
-            let key = NSString::from_str(NOTIFY_DIR_KEY);
-            let val = NSString::from_str(&dir);
-            let info = NSDictionary::from_slices(&[&*key], &[&*val]);
-            unsafe { content.setUserInfo(&Retained::cast_unchecked(info)) };
+            // No folder, no userInfo: a click then reveals nothing.
+            if let Some(dir) = &dir {
+                let key = NSString::from_str(NOTIFY_DIR_KEY);
+                let val = NSString::from_str(dir);
+                let info = NSDictionary::from_slices(&[&*key], &[&*val]);
+                unsafe { content.setUserInfo(&Retained::cast_unchecked(info)) };
+            }
             let req = objc2_user_notifications::UNNotificationRequest::requestWithIdentifier_content_trigger(
             &NSString::from_str("rip-finished"),
             &content,
@@ -1436,7 +1443,7 @@ impl Controller {
                     title,
                     body,
                     output_dir,
-                } => notify_rip_finished(&title, &body, &output_dir),
+                } => notify_rip_finished(&title, &body, output_dir.as_deref()),
             }
         }
         self.render();

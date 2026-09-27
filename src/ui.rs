@@ -1555,14 +1555,15 @@ pub enum Effect {
     StartTicking,
     /// Stop it.
     StopTicking,
-    /// Fire a native desktop notification announcing a completed rip. The
+    /// Fire a native desktop notification announcing a run's end. The
     /// core builds `title` / `body` from `strings::` so all three shells
-    /// present the same wording; `output_dir` is the folder the shell can
-    /// offer to reveal. Gated on `Settings.notify_when_rip_finished`.
+    /// present the same wording; `output_dir` is the folder the run wrote to,
+    /// `None` when it did not complete (nothing to reveal). Gated on
+    /// `Settings.notify_when_rip_finished`.
     NotifyRipFinished {
         title: String,
         body: String,
-        output_dir: String,
+        output_dir: Option<String>,
     },
     Quit,
 }
@@ -1593,6 +1594,23 @@ fn scan_source(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
         crate::engine::scan_with_keys(path, keys)
     }
 }
+
+// The launch probe's scan: no drive at all is the same quiet failure as an empty tray.
+fn probe_source(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+    if crate::engine::is_disc_source(path) && crate::engine::list_optical_drives().is_empty() {
+        return Err(String::new());
+    }
+    scan_source(path, keys)
+}
+
+/// A source scan, as a value so unit tests can swap in one that never touches a drive.
+type ScanFn = fn(&str, &KeyConfig) -> Result<Scanned, String>;
+
+/// (open scan, probe scan). Unit tests get a pair that refuses `disc://` outright.
+#[cfg(not(test))]
+const SCANNERS: (ScanFn, ScanFn) = (scan_source, probe_source);
+#[cfg(test)]
+const SCANNERS: (ScanFn, ScanFn) = (tests::no_drive_scan, tests::no_drive_probe);
 
 // The autodetect disc URL: try every drive, take the one holding media.
 // Named because the launch probe passes it through three places and a
@@ -1653,6 +1671,12 @@ pub struct App {
     /// a Cancel button wired to nothing.
     probe: Option<Arc<ProbeState>>,
     opening: Option<std::sync::mpsc::Receiver<OpenedSource>>,
+    /// An explicit drive open waiting for the probe to let go of the drive.
+    pending: Option<PendingOpen>,
+    /// The folder the current run writes to, fixed at Start: the setting can change mid-rip.
+    run_dest: String,
+    scan: ScanFn,
+    probe_scan: ScanFn,
     /// Highest unreadable-sector count already announced, so the notice is
     /// not repeated on every 100 ms tick.
     reported_bad: u64,
@@ -1689,6 +1713,13 @@ pub struct ProbeState {
 /// it is outstanding. Generous enough that a slow-but-working drive still
 /// lands its result.
 pub const PROBE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A drive is single-open, so a second scan while the probe holds it fails for a
+/// readable disc. The open waits; if it names the probe's own source it adopts the result.
+struct PendingOpen {
+    path: String,
+    background: bool,
+}
 
 struct OpenedSource {
     path: String,
@@ -1727,6 +1758,10 @@ impl App {
             disc_label: String::new(),
             probe: None,
             opening: None,
+            pending: None,
+            run_dest: String::new(),
+            scan: SCANNERS.0,
+            probe_scan: SCANNERS.1,
             reported_bad: 0,
         };
         app.say(
@@ -1829,6 +1864,7 @@ impl App {
             Cmd::Close => {
                 self.opening = None;
                 self.probe = None;
+                self.pending = None;
                 self.tree = Tree::default();
                 self.source.clear();
                 self.disc_label.clear();
@@ -1899,7 +1935,8 @@ impl App {
         }
     }
 
-    /// Announce missing tools for explicit user requests; keep the launch probe quiet.
+    /// The drive URL to open. An explicit request (`announce_missing`) enumerates drives and
+    /// logs what it found, or that there is none; the launch probe gets bare `disc://`, silently.
     pub fn disc_source(&mut self, announce_missing: bool) -> Option<String> {
         // A probe nobody asked for must not GUESS: bare `disc://` autodetects the
         // drive with media, vs. naming drives[0] and risking an empty tray. Not
@@ -1966,7 +2003,11 @@ impl App {
     /// Open a source: scan it, rebuild the tree, report honestly on failure.
     pub fn open(&mut self, path: &str) -> Vec<Effect> {
         self.opening = None;
+        if let Some(fx) = self.wait_for_probe(path, false) {
+            return fx;
+        }
         self.probe = None;
+        self.pending = None;
         self.open_inner(path, false)
     }
 
@@ -1976,14 +2017,42 @@ impl App {
         if self.running() || self.opening() {
             return vec![];
         }
+        if let Some(fx) = self.wait_for_probe(path, true) {
+            return fx;
+        }
         self.probe = None;
+        self.spawn_open(path)
+    }
+
+    // Park a drive open behind an outstanding probe; `poll_probe` resumes it.
+    fn wait_for_probe(&mut self, path: &str, background: bool) -> Option<Vec<Effect>> {
+        if self.probe.is_none() || !crate::engine::is_disc_source(path) {
+            return None;
+        }
+        self.pending = Some(PendingOpen {
+            path: path.to_owned(),
+            background,
+        });
+        Some(vec![Effect::Redraw, Effect::StartTicking])
+    }
+
+    fn run_pending(&mut self, open: PendingOpen) -> Vec<Effect> {
+        if open.background {
+            self.spawn_open(&open.path)
+        } else {
+            self.open_inner(&open.path, false)
+        }
+    }
+
+    fn spawn_open(&mut self, path: &str) -> Vec<Effect> {
         let path = path.to_owned();
         let keys = KeyConfig::from_settings(&self.settings);
+        let scan = self.scan;
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("open-source".into())
             .spawn(move || {
-                let scanned = scan_source(&path, &keys);
+                let scanned = scan(&path, &keys);
                 let preflight = (scanned.is_ok()
                     && !is_container(&path)
                     && !crate::engine::is_disc_source(&path))
@@ -1997,7 +2066,14 @@ impl App {
         match spawned {
             Ok(_) => self.opening = Some(rx),
             Err(e) => {
-                self.say(LogKind::Notice, &e.to_string());
+                self.say(
+                    LogKind::Notice,
+                    &crate::strings::fmt_or(
+                        "gui.log.scan_not_started",
+                        "Could not start scanning the source: {detail}",
+                        &[("detail", &e.to_string())],
+                    ),
+                );
                 return vec![Effect::Redraw];
             }
         }
@@ -2005,7 +2081,7 @@ impl App {
     }
 
     pub fn opening(&self) -> bool {
-        self.opening.is_some()
+        self.opening.is_some() || self.pending.is_some()
     }
 
     /// Open something NOBODY asked to open, leaving no trace if it is not
@@ -2028,20 +2104,12 @@ impl App {
         // worker gets no reference to `App`.
         let keys = KeyConfig::from_settings(&self.settings);
         let path = path.to_string();
+        let scan = self.probe_scan;
         let worker = state.clone();
         let spawned = std::thread::Builder::new()
             .name("launch-probe".into())
             .spawn(move || {
-                // Enumeration before deciding whether to scan, drive sources only
-                // (the only case it says anything about). No drive at all isn't
-                // worth reporting (nobody asked) — same quiet failure as an empty tray.
-                let no_drive = crate::engine::is_disc_source(&path)
-                    && crate::engine::list_optical_drives().is_empty();
-                let scanned = if no_drive {
-                    Err(String::new())
-                } else {
-                    scan_source(&path, &keys)
-                };
+                let scanned = scan(&path, &keys);
                 if let Ok(mut slot) = worker.result.lock() {
                     *slot = Some(scanned);
                 }
@@ -2057,7 +2125,7 @@ impl App {
     }
 
     fn open_inner(&mut self, path: &str, quiet: bool) -> Vec<Effect> {
-        let scanned = scan_source(path, &KeyConfig::from_settings(&self.settings));
+        let scanned = (self.scan)(path, &KeyConfig::from_settings(&self.settings));
         self.apply_scan(path, scanned, quiet)
     }
 
@@ -2233,6 +2301,7 @@ impl App {
         self.reported_bad = 0;
         self.run_titles = titles.len().max(1);
         self.run_started = Some(std::time::Instant::now());
+        self.run_dest = self.output_dir.clone();
         // Name the file the way the engine will, so the row matches reality.
         let out_file = output_file_name(
             &self.source,
@@ -2299,15 +2368,35 @@ impl App {
                 // but dropping our `Arc<ProbeState>` lets it exit quietly, ending the
                 // 5 Hz repaint. SILENT, like every probe failure: nobody asked for this.
                 self.probe = None;
+                return match self.pending.take() {
+                    Some(open) => self.run_pending(open),
+                    None => Vec::new(),
+                };
             }
             return Vec::new();
         }
         self.probe = None;
-        let Some(scanned) = p.result.lock().ok().and_then(|mut r| r.take()) else {
-            // The worker set `done` without leaving a result, which means it
-            // panicked or the mutex was poisoned. The probe is optional; drop
-            // it, and above all do not announce anything.
-            return Vec::new();
+        let scanned = p.result.lock().ok().and_then(|mut r| r.take());
+        let scanned = match (self.pending.take(), scanned) {
+            // Adopted: the user asked for exactly this scan, so failures are reported.
+            (Some(open), Some(scanned)) if open.path == p.path => {
+                let scanned = scanned.map_err(|e| {
+                    if e.is_empty() {
+                        crate::strings::get_or(
+                            "gui.log.no_drive",
+                            "No optical drive found. Connect a Blu-ray/DVD drive with a disc.",
+                        )
+                    } else {
+                        e
+                    }
+                });
+                return self.apply_scan(&p.path, scanned, false);
+            }
+            (Some(open), _) => return self.run_pending(open),
+            (None, Some(scanned)) => scanned,
+            // The worker set `done` without a result (it panicked or the mutex was
+            // poisoned). The probe is optional; drop it without announcing anything.
+            (None, None) => return Vec::new(),
         };
         // The user did not wait for us. Anything they opened, or a rip they
         // started, outranks a probe nobody asked for — applying the result now
@@ -2337,7 +2426,10 @@ impl App {
                     self.opening = None;
                     self.say(
                         LogKind::Notice,
-                        "Source scan worker stopped before returning a result.",
+                        &crate::strings::get_or(
+                            "gui.log.scan_worker_stopped",
+                            "Source scan worker stopped before returning a result.",
+                        ),
                     );
                     probe_fx.push(Effect::Redraw);
                 }
@@ -2348,7 +2440,7 @@ impl App {
             // Keep the timer alive while the probe is still out; stopping it
             // here would strand the result with nothing left to collect it.
             let mut fx = probe_fx;
-            if self.probe.is_none() && self.opening.is_none() {
+            if self.probe.is_none() && !self.opening() {
                 fx.push(Effect::StopTicking);
             } else if fx.is_empty() {
                 fx.push(Effect::Redraw);
@@ -2396,10 +2488,15 @@ impl App {
             self.page = Page::Result;
             let mut fx = vec![Effect::Redraw, Effect::StopTicking];
             if self.settings.notify_when_rip_finished {
+                let completed = self.result_outcome == crate::engine::RunOutcome::Completed;
                 fx.push(Effect::NotifyRipFinished {
-                    title: crate::strings::get_or("gui.notify.rip_finished_title", "Rip finished"),
+                    title: if completed {
+                        crate::strings::get_or("gui.notify.rip_finished_title", "Rip finished")
+                    } else {
+                        result_heading(self.result_outcome)
+                    },
                     body: self.result_summary.clone(),
-                    output_dir: self.output_dir.clone(),
+                    output_dir: completed.then(|| self.run_dest.clone()),
                 });
             }
             return fx;
@@ -2475,14 +2572,7 @@ impl App {
             // Summary text is engine-emitted English; heading is localized, matched
             // on the TYPED verdict — substring-matching the summary text used to send
             // an undecryptable disc and abort-for-loss paths to the success heading.
-            result_heading: match self.result_outcome {
-                crate::engine::RunOutcome::Cancelled => crate::strings::get("gui.result.cancelled"),
-                // Reuses "nothing written" instead of a new key: `freemkv-i18n` is
-                // pinned to a release tag, so a new key means cutting a tag there.
-                // Wording debt, recorded, not a behaviour gap.
-                crate::engine::RunOutcome::Failed => crate::strings::get("gui.result.nothing"),
-                crate::engine::RunOutcome::Completed => crate::strings::get("gui.result.finished"),
-            },
+            result_heading: result_heading(self.result_outcome),
             eject_visible: false,
         }
     }
@@ -2528,6 +2618,17 @@ pub struct Row {
     pub desc: String,
     /// `None` means the row carries no checkbox at all.
     pub check: Option<Check>,
+}
+
+/// The Result page heading for a verdict, matched on the TYPED outcome.
+fn result_heading(outcome: crate::engine::RunOutcome) -> String {
+    match outcome {
+        crate::engine::RunOutcome::Cancelled => crate::strings::get("gui.result.cancelled"),
+        // Reuses "nothing written" instead of a new key: `freemkv-i18n` is
+        // pinned to a release tag, so a new key means cutting a tag there.
+        crate::engine::RunOutcome::Failed => crate::strings::get("gui.result.nothing"),
+        crate::engine::RunOutcome::Completed => crate::strings::get("gui.result.finished"),
+    }
 }
 
 /// A complete description of the screen. A shell assigns these to widgets and
@@ -3089,6 +3190,276 @@ mod tests {
         assert_eq!(app.log.len(), before + 1);
     }
 
+    /// The unit-test scan: a live drive is refused without being touched, so no test
+    /// depends on (or waits on) whatever hardware the machine running it has.
+    pub(super) fn no_drive_scan(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+        if crate::engine::is_disc_source(path) {
+            return Err(NO_DRIVE_IN_TESTS.to_string());
+        }
+        scan_source(path, keys)
+    }
+    pub(super) fn no_drive_probe(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+        if crate::engine::is_disc_source(path) {
+            return Err(NO_DRIVE_IN_TESTS.to_string());
+        }
+        probe_source(path, keys)
+    }
+    const NO_DRIVE_IN_TESTS: &str = "unit tests never open a drive";
+
+    #[test]
+    fn unit_tests_never_reach_a_real_drive() {
+        let mut app = App::new();
+        let before = app.log.len();
+        app.open(PROBE_SOURCE);
+        assert_eq!(
+            app.log.get(before).map(|l| l.text.as_str()),
+            Some(NO_DRIVE_IN_TESTS)
+        );
+        app.open_probe(PROBE_SOURCE);
+        drain_probe(&mut app);
+        assert_eq!(app.log.len(), before + 1, "the probe stays silent");
+    }
+
+    // ── An explicit open while the launch probe holds the drive ─────────────
+
+    fn in_flight_probe(app: &mut App) -> Arc<ProbeState> {
+        let p = Arc::new(ProbeState {
+            path: PROBE_SOURCE.to_string(),
+            result: Mutex::new(None),
+            done: AtomicBool::new(false),
+            started: std::time::Instant::now(),
+        });
+        app.probe = Some(p.clone());
+        p
+    }
+
+    fn finish_probe(p: &ProbeState, r: Result<Scanned, String>) {
+        *p.result.lock().unwrap() = Some(r);
+        p.done.store(true, Ordering::Release);
+    }
+
+    fn tick_until_settled(app: &mut App) {
+        for _ in 0..500 {
+            app.tick();
+            if app.probe.is_none() && !app.opening() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the open never settled");
+    }
+
+    static ADOPT_SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn busy_drive_adopt(_: &str, _: &KeyConfig) -> Result<Scanned, String> {
+        ADOPT_SCANS.fetch_add(1, Ordering::SeqCst);
+        Err("drive busy".to_string())
+    }
+
+    #[test]
+    fn a_prompted_open_of_the_probed_drive_adopts_the_probe() {
+        let mut app = App::new();
+        app.scan = busy_drive_adopt;
+        let p = in_flight_probe(&mut app);
+        let before = app.log.len();
+        app.open(PROBE_SOURCE);
+        assert_eq!(
+            ADOPT_SCANS.load(Ordering::SeqCst),
+            0,
+            "a second scan raced the probe for the drive"
+        );
+        assert_eq!(app.log.len(), before, "{:?}", &app.log[before..]);
+        assert!(
+            app.opening(),
+            "the open must stay pending until the probe lands"
+        );
+        finish_probe(&p, Ok(probe_scan()));
+        app.tick();
+        assert_eq!(app.source, PROBE_SOURCE);
+        assert!(matches!(app.page, Page::Titles));
+        assert!(!app.opening());
+    }
+
+    static ADOPT_ASYNC_SCANS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    fn busy_drive_adopt_async(_: &str, _: &KeyConfig) -> Result<Scanned, String> {
+        ADOPT_ASYNC_SCANS.fetch_add(1, Ordering::SeqCst);
+        Err("drive busy".to_string())
+    }
+
+    #[test]
+    fn a_background_open_of_the_probed_drive_adopts_the_probe() {
+        let mut app = App::new();
+        app.scan = busy_drive_adopt_async;
+        let p = in_flight_probe(&mut app);
+        app.open_async(PROBE_SOURCE);
+        finish_probe(&p, Ok(probe_scan()));
+        tick_until_settled(&mut app);
+        assert_eq!(ADOPT_ASYNC_SCANS.load(Ordering::SeqCst), 0);
+        assert_eq!(app.source, PROBE_SOURCE);
+        assert!(matches!(app.page, Page::Titles));
+    }
+
+    /// Adopted, the probe's failure is the answer to a question the user asked.
+    fn drive_busy(_: &str, _: &KeyConfig) -> Result<Scanned, String> {
+        Err("drive busy".to_string())
+    }
+
+    #[test]
+    fn an_adopted_probe_failure_is_reported() {
+        let mut app = App::new();
+        app.scan = drive_busy;
+        let p = in_flight_probe(&mut app);
+        app.open(PROBE_SOURCE);
+        finish_probe(&p, Err("no disc in the drive".to_string()));
+        app.tick();
+        assert!(
+            app.log.iter().any(|l| l.text == "no disc in the drive"),
+            "the user asked and was told nothing"
+        );
+        assert!(matches!(app.page, Page::Empty));
+
+        let mut app = App::new();
+        app.scan = drive_busy;
+        let p = in_flight_probe(&mut app);
+        app.open(PROBE_SOURCE);
+        finish_probe(&p, Err(String::new()));
+        app.tick();
+        let last = app.log.last().map(|l| l.text.clone()).unwrap_or_default();
+        assert!(
+            !last.is_empty(),
+            "an empty probe error must not become a blank line"
+        );
+    }
+
+    static QUEUED_SCANS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    fn record_queued(path: &str, _: &KeyConfig) -> Result<Scanned, String> {
+        QUEUED_SCANS.lock().unwrap().push(path.to_string());
+        Ok(probe_scan())
+    }
+
+    /// Another drive URL may still be the drive the probe holds: it waits its turn.
+    #[test]
+    fn an_open_of_another_drive_url_waits_for_the_probe() {
+        const OTHER: &str = "disc:///dev/the-other-one";
+        let mut app = App::new();
+        app.scan = record_queued;
+        let p = in_flight_probe(&mut app);
+        app.open(OTHER);
+        assert!(
+            QUEUED_SCANS.lock().unwrap().is_empty(),
+            "scanned while the probe held the drive"
+        );
+        assert!(app.opening());
+        let mut late = probe_scan();
+        late.title_count = 7;
+        finish_probe(&p, Ok(late));
+        app.tick();
+        assert_eq!(*QUEUED_SCANS.lock().unwrap(), vec![OTHER.to_string()]);
+        assert_eq!(app.source, OTHER, "the user's open must win over the probe");
+    }
+
+    /// A file needs no drive: it is opened at once, as before.
+    #[test]
+    fn a_file_open_does_not_wait_for_the_probe() {
+        let mut app = App::new();
+        let _p = in_flight_probe(&mut app);
+        let before = app.log.len();
+        app.open("iso:///nonexistent/freemkv-probe-wait-test.iso");
+        assert!(app.log.len() > before, "the failure must be reported now");
+        assert!(app.probe.is_none() && !app.opening());
+    }
+
+    // ── A finished run's notification ───────────────────────────────────────
+
+    fn tick_a_run_that_ended(outcome: crate::engine::RunOutcome) -> Vec<Effect> {
+        let mut app = App::new();
+        app.settings.notify_when_rip_finished = true;
+        app.run_dest = "/out".to_string();
+        // Repointed mid-rip (the preferences window can): not where this run wrote.
+        app.output_dir = "/elsewhere".to_string();
+        let st = Arc::new(RunState::default());
+        *st.summary.lock().unwrap() = "summary".to_string();
+        *st.outcome.lock().unwrap() = outcome;
+        st.finished.store(true, Ordering::Release);
+        app.run = Some(st);
+        app.tick()
+    }
+
+    fn notification(fx: &[Effect]) -> Option<(String, Option<String>)> {
+        fx.iter().find_map(|e| match e {
+            Effect::NotifyRipFinished {
+                title, output_dir, ..
+            } => Some((title.clone(), output_dir.clone())),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_cancelled_or_failed_rip_is_not_announced_as_finished() {
+        use crate::engine::RunOutcome::{Cancelled, Failed};
+        for (outcome, key) in [
+            (Cancelled, "gui.result.cancelled"),
+            (Failed, "gui.result.nothing"),
+        ] {
+            let fx = tick_a_run_that_ended(outcome);
+            assert_eq!(
+                notification(&fx),
+                Some((crate::strings::get(key), None)),
+                "{outcome:?}: titled by its verdict, and nothing to reveal"
+            );
+        }
+    }
+
+    #[test]
+    fn a_completed_rip_reveals_the_folder_it_wrote_to() {
+        let fx = tick_a_run_that_ended(crate::engine::RunOutcome::Completed);
+        assert_eq!(
+            notification(&fx).and_then(|(_, dir)| dir).as_deref(),
+            Some("/out"),
+            "not the output setting as it reads now"
+        );
+    }
+
+    // ── Tree / language edge cases ──────────────────────────────────────────
+
+    fn node(type_s: &str, pid: Option<u16>, title_idx: usize) -> Node {
+        Node {
+            type_s: type_s.to_string(),
+            desc: String::new(),
+            checkable: pid.is_some(),
+            checked: RefCell::new(true),
+            children: Vec::new(),
+            info: String::new(),
+            pid,
+            title_idx,
+        }
+    }
+
+    /// The header row's `usize::MAX` sentinel must never become a title to rip.
+    #[test]
+    fn a_header_row_with_a_pid_is_not_a_phantom_title() {
+        let tree = Tree {
+            arena: vec![
+                node("Audio", Some(0x1100), usize::MAX),
+                node("Audio", Some(0x1101), 0),
+            ],
+            roots: vec![0, 1],
+        };
+        let TitleStreams::PerTitle(per) = tree.ticked_streams_by_title() else {
+            panic!("expected a per-title breakdown");
+        };
+        assert_eq!(per, vec![(0, vec![0x1101], vec![])]);
+    }
+
+    /// English names outside the picker list resolve regardless of case.
+    #[test]
+    fn a_language_name_outside_the_picker_matches_in_any_case() {
+        for tag in ["welsh", "WELSH", "Welsh"] {
+            assert_eq!(canonical_lang_code(tag).as_deref(), Some("cym"), "{tag}");
+        }
+        assert_eq!(canonical_lang_code("basque").as_deref(), Some("eus"));
+    }
+
     /// A minimal scan result: one title, one row, enough for the tree to
     /// count it.
     fn probe_scan() -> Scanned {
@@ -3175,6 +3546,7 @@ mod tests {
         let mut app = App::new();
         app.settings.notify_when_rip_finished = notify;
         app.output_dir = "/out".to_string();
+        app.run_dest = "/out".to_string();
         let st = Arc::new(RunState::default());
         *st.summary.lock().unwrap() = "3 titles written".to_string();
         st.finished
@@ -3191,11 +3563,11 @@ mod tests {
             .filter_map(|e| match e {
                 Effect::NotifyRipFinished {
                     body, output_dir, ..
-                } => Some((body.as_str(), output_dir.as_str())),
+                } => Some((body.as_str(), output_dir.as_deref())),
                 _ => None,
             })
             .collect();
-        assert_eq!(n, vec![("3 titles written", "/out")]);
+        assert_eq!(n, vec![("3 titles written", Some("/out"))]);
     }
 
     #[test]

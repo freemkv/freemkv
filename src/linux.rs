@@ -266,7 +266,7 @@ impl Shell {
                     title,
                     body,
                     output_dir,
-                } => self.notify_finished(&title, &body, &output_dir),
+                } => self.notify_finished(&title, &body, output_dir.as_deref()),
                 Effect::Quit => self.window.close(),
                 Effect::Redraw => {}
             }
@@ -367,23 +367,24 @@ impl Shell {
         });
     }
 
-    /// In-window toast (with a "show" button) plus a desktop notification via
-    /// the XDG portal. Clicking either reveals THIS rip's output folder.
-    fn notify_finished(self: &Rc<Self>, title: &str, body: &str, output_dir: &str) {
+    /// In-window toast plus a desktop notification via the XDG portal. With an
+    /// output folder, both offer to reveal THIS rip's folder; without, neither does.
+    fn notify_finished(self: &Rc<Self>, title: &str, body: &str, output_dir: Option<&str>) {
         let action = format!("app.{}", glue::REVEAL_ACTION);
-        let target = output_dir.to_variant();
         let show = show_folder_label();
 
         let toast = adw::Toast::new(&glib::markup_escape_text(title));
-        toast.set_button_label(Some(&show));
-        toast.set_action_name(Some(&action));
-        toast.set_action_target_value(Some(&target));
-        self.toast_overlay.add_toast(toast);
-
         let n = gio::Notification::new(title);
         n.set_body(Some(body));
-        n.set_default_action_and_target_value(&action, Some(&target));
-        n.add_button_with_target_value(&show, &action, Some(&target));
+        if let Some(dir) = output_dir {
+            let target = dir.to_variant();
+            toast.set_button_label(Some(&show));
+            toast.set_action_name(Some(&action));
+            toast.set_action_target_value(Some(&target));
+            n.set_default_action_and_target_value(&action, Some(&target));
+            n.add_button_with_target_value(&show, &action, Some(&target));
+        }
+        self.toast_overlay.add_toast(toast);
         self.gapp.send_notification(Some("rip-finished"), &n);
     }
 

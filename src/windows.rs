@@ -1742,12 +1742,12 @@ fn register_toast_app_id() -> w::SysResult<()> {
     )
 }
 
-/// Show the rip-finished toast; clicking it reveals `output_dir`. The caller
+/// Show the rip-finished toast; clicking it reveals `output_dir`, if any. The caller
 /// keeps the returned toast alive so its `Activated` handler stays wired.
 fn show_rip_toast(
     title: &str,
     body: &str,
-    output_dir: &str,
+    output_dir: Option<&str>,
 ) -> windows::core::Result<windows::UI::Notifications::ToastNotification> {
     use windows::UI::Notifications::{
         ToastNotification, ToastNotificationManager, ToastTemplateType,
@@ -1760,11 +1760,12 @@ fn show_rip_toast(
         slots.Item(i as u32)?.AppendChild(&node)?;
     }
     let toast = ToastNotification::CreateToastNotification(&xml)?;
-    let dir = output_dir.to_owned();
-    toast.Activated(&windows::Foundation::TypedEventHandler::new(move |_, _| {
-        let _ = reveal_in_explorer(&dir);
-        Ok(())
-    }))?;
+    if let Some(dir) = output_dir.map(str::to_owned) {
+        toast.Activated(&windows::Foundation::TypedEventHandler::new(move |_, _| {
+            let _ = reveal_in_explorer(&dir);
+            Ok(())
+        }))?;
+    }
     ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID))?.Show(&toast)?;
     Ok(toast)
 }
@@ -1879,7 +1880,7 @@ impl Shell {
                     let shown = register_toast_app_id()
                         .map_err(|e| e.to_string())
                         .and_then(|()| {
-                            show_rip_toast(&title, &body, &output_dir)
+                            show_rip_toast(&title, &body, output_dir.as_deref())
                                 .map_err(|e| e.message().to_string())
                         });
                     match shown {
