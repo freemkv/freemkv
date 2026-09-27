@@ -60,6 +60,9 @@ parts:
     # Must match rust-version in Cargo.toml; snap.yml fails the build if not.
     rust-channel: "1.98"
     build-packages: [build-essential]
+    # The gnome extension rewrites PATH without /snap/bin, hiding the rustup build-snap.
+    build-environment:
+      - PATH: "/snap/bin:${PATH}"
     override-pull: |
       craftctl default
       base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
