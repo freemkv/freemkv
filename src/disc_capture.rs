@@ -71,26 +71,48 @@ pub(crate) fn fold_structure(
 }
 
 // Whether a disc-supplied relative path is safe to join under the profile dir on
-// every OS: `/`-separated plain components only — no `..`, `\`, drive/UNC
-// prefix, NTFS-illegal or control char, trailing dot/space, or DOS device stem.
+// every OS: `/`-separated components, each passing `is_plain_component`.
 pub(crate) fn is_safe_rel_path(rel: &str) -> bool {
-    const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
-    !rel.is_empty()
-        && rel.split('/').all(|c| {
-            let stem = c.split('.').next().unwrap_or(c).to_ascii_uppercase();
-            let device = RESERVED.contains(&stem.as_str())
-                || (stem.len() == 4
-                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
-                    && stem.as_bytes()[3].is_ascii_digit());
-            !c.is_empty()
-                && c != "."
-                && c != ".."
-                && !c.ends_with(['.', ' '])
-                && !device
-                && !c
-                    .chars()
-                    .any(|ch| ch.is_control() || "\\:*?\"<>|".contains(ch))
+    !rel.is_empty() && rel.split('/').all(is_plain_component)
+}
+
+// One path component safe on any host, incl. Windows. Mirrors libfreemkv dev's
+// `is_plain_file_name`, which the pinned v1.7.7 tag lacks.
+fn is_plain_component(name: &str) -> bool {
+    if name.is_empty() || name.ends_with('.') || name.ends_with(' ') {
+        return false; // also rejects "." and ".."
+    }
+    if name.chars().any(|c| {
+        matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*') || c.is_control()
+    }) {
+        return false;
+    }
+    // Windows reserved device names, matched on the stem with trailing spaces ignored.
+    let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+    let stem = stem.to_ascii_uppercase();
+    let numbered = |p: &str| {
+        stem.strip_prefix(p).is_some_and(|d| {
+            let mut c = d.chars();
+            matches!(
+                (c.next(), c.next()),
+                (Some('0'..='9' | '\u{B9}' | '\u{B2}' | '\u{B3}'), None)
+            )
         })
+    };
+    !(matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || numbered("COM")
+        || numbered("LPT"))
+}
+
+// Every structure file was found but none could be saved.
+pub(crate) fn all_skipped_line(summary: &DiscSummary) -> String {
+    strings::fmt_or(
+        "disc.capture_all_skipped",
+        "None of the {count} disc structure files could be saved.",
+        &[("count", &summary.skipped.len().to_string())],
+    )
 }
 
 // Tell the user which disc files were left out of the profile, and why.
@@ -300,11 +322,19 @@ pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str, quiet
 
     // Raw structure files. If none are readable there is nothing to report.
     let folded = fold_structure(&profile_dir, &mut written, reader);
-    if let (Ok(Some(s)), false) = (&folded, quiet) {
-        report_skipped(s);
-    }
     let summary = match folded {
-        Ok(Some(s)) if s.file_count > 0 => s,
+        Ok(Some(s)) if s.file_count > 0 => {
+            if !quiet {
+                report_skipped(&s);
+            }
+            s
+        }
+        // Every file was refused: the reasons ARE the error, so show them even under -q.
+        Ok(Some(s)) => {
+            report_skipped(&s);
+            eprintln!("{}", all_skipped_line(&s));
+            std::process::exit(1);
+        }
         other => {
             eprintln!(
                 "{}",
@@ -722,7 +752,7 @@ mod share_fix_tests {
         let big = "A".repeat(200_000);
         let body = issue_body(&disc, &summary(), &big).0;
         assert!(
-            body.chars().count() <= crate::info::GITHUB_BODY_MAX_CHARS,
+            body.chars().count() <= crate::info::BODY_INLINE_BUDGET_CHARS,
             "body is {} chars",
             body.chars().count()
         );
@@ -768,6 +798,12 @@ mod share_fix_tests {
             "BDMV/x.xml ",
             "BDMV/CON.xml",
             "BDMV/com1.mpls",
+            "BDMV/CON .xml",
+            "BDMV/CONIN$",
+            "BDMV/conout$.txt",
+            "BDMV/COM\u{B9}.mpls",
+            "BDMV/LPT\u{B3}",
+            "BDMV/COM0",
             "BDMV/LPT9",
             "BDMV/a\u{1}.xml",
             "BDMV/a\".xml",
@@ -825,6 +861,22 @@ mod share_fix_tests {
             !written.iter().any(|w| w.contains('\\') || w.contains("..")),
             "a hostile name was written: {written:?}"
         );
+    }
+
+    // Every file refused: the fold still returns (count 0 + reasons) so callers can say so.
+    #[test]
+    fn a_fold_where_every_write_fails_reports_zero_saved() {
+        let src = bd_folder("allfail");
+        let out = src.parent().expect("parent").join("profile");
+        std::fs::write(&out, b"not a dir").expect("blocker file");
+        let mut img = libfreemkv::DirImage::open(&src).expect("dir image");
+        let mut written = Vec::new();
+        let s = fold_structure(&out, &mut written, &mut img)
+            .expect("fold ok")
+            .expect("files found");
+        assert_eq!(s.file_count, 0);
+        assert!(written.is_empty() && !s.skipped.is_empty());
+        assert!(all_skipped_line(&s).contains(&s.skipped.len().to_string()));
     }
 
     // L14: one unwritable file must not end the process; the rest still land.

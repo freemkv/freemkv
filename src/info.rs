@@ -165,6 +165,15 @@ pub(crate) fn print_share_help() {
     println!("  --mask     {}", strings::get("drive.mask_desc"));
     println!("  --quiet    {}", strings::get("app.opt_quiet"));
     println!("  --verbose  {}", strings::get("app.opt_verbose"));
+    println!();
+    println!(
+        "{}",
+        strings::get_or(
+            "drive.share_image_note",
+            "On iso:// and dir:// sources --share captures the disc structure; \
+             --mask and --verbose have no effect there (there is no drive).",
+        )
+    );
 }
 
 pub fn run(device: Option<&str>, args: &[String]) {
@@ -478,7 +487,12 @@ pub fn run(device: Option<&str>, args: &[String]) {
             });
     if let (Some(ds), false) = (&disc_summary, quiet) {
         crate::disc_capture::report_skipped(ds);
+        if ds.file_count == 0 {
+            eprintln!("{}", crate::disc_capture::all_skipped_line(ds));
+        }
     }
+    // All files refused = no structure in this profile; don't claim "0 files".
+    let disc_summary = disc_summary.filter(|ds| ds.file_count > 0);
 
     // ── Summarize captured profile ─────────────────────────────────────────
 
@@ -645,7 +659,7 @@ pub(crate) fn push_zip_section(
     }
     block.push_str("```\n\n</details>\n\n");
     let total = body.chars().count() + block.chars().count() + footer.chars().count();
-    let inlined = total <= GITHUB_BODY_MAX_CHARS;
+    let inlined = total <= BODY_INLINE_BUDGET_CHARS;
     if inlined {
         body.push_str(&block);
     } else {
@@ -846,6 +860,9 @@ fn run_submit_curl(token: &str, payload_file: &str) -> Option<String> {
 
 /// GitHub's hard cap on an issue body, in characters.
 pub(crate) const GITHUB_BODY_MAX_CHARS: usize = 65_536;
+
+/// What `--share` lets a body grow to: headroom under the cap for a browser's CRLF newlines.
+pub(crate) const BODY_INLINE_BUDGET_CHARS: usize = GITHUB_BODY_MAX_CHARS - 1_536;
 
 /// The repository `--share` files drive-profile issues against.
 const SUBMIT_REPO: &str = "freemkv/bdemu";
@@ -1340,7 +1357,14 @@ mod tests {
         let mut big = String::from("head\n");
         let b64 = "A".repeat(super::GITHUB_BODY_MAX_CHARS);
         assert!(!super::push_zip_section(&mut big, "zip", &b64, footer));
-        assert!(big.chars().count() <= super::GITHUB_BODY_MAX_CHARS);
+        assert!(big.chars().count() <= super::BODY_INLINE_BUDGET_CHARS);
+        // Headroom for CRLF: the budget body still fits after every `\n` becomes `\r\n`.
+        let mut edge = String::new();
+        let b64 = "A".repeat(super::BODY_INLINE_BUDGET_CHARS - 2_000);
+        if super::push_zip_section(&mut edge, "zip", &b64, footer) {
+            let crlf = edge.chars().count() + edge.matches('\n').count();
+            assert!(crlf <= super::GITHUB_BODY_MAX_CHARS, "{crlf}");
+        }
         assert!(
             big.contains("profile.zip") && big.ends_with(footer),
             "{big}"
