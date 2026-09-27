@@ -33,8 +33,10 @@ AppImage or Flatpak on Linux. On macOS: `brew install --cask freemkv/tap/freemkv
 brew install freemkv/tap/freemkv-cli
 
 # Linux x86_64 (static; freemkv-cli-aarch64-linux on arm64)
-curl -sLo freemkv https://github.com/freemkv/freemkv/releases/latest/download/freemkv-cli-x86_64-linux
-chmod +x freemkv && sudo mv freemkv /usr/local/bin/
+curl -fsSLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-cli-x86_64-linux
+curl -fsSLO https://github.com/freemkv/freemkv/releases/latest/download/freemkv-cli-x86_64-linux.sha256
+sha256sum -c freemkv-cli-x86_64-linux.sha256
+mv freemkv-cli-x86_64-linux freemkv && chmod +x freemkv && sudo mv freemkv /usr/local/bin/
 
 # Windows — download freemkv-cli-x86_64-windows.exe, rename to freemkv.exe, put it on PATH
 ```
