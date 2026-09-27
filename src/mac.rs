@@ -127,12 +127,22 @@ fn rows_sig(rows: &[crate::ui::Row]) -> u64 {
     h.finish()
 }
 
+/// True when `new` shows exactly the ticks `cur` already paints.
+fn ticks_match(cur: &[crate::ui::Row], new: &[crate::ui::Row]) -> bool {
+    cur.len() == new.len() && cur.iter().zip(new).all(|(a, b)| a.check == b.check)
+}
+
 /// How the log pane must change to show `log`, given what it last showed.
 #[derive(Debug, PartialEq, Eq)]
 enum LogPlan {
     Keep,
     /// Append `log[n..]`; everything before it is already on screen.
     Append(usize),
+    /// Delete the first `drop` shown lines, then append `log[from..]`.
+    Trim {
+        drop: usize,
+        from: usize,
+    },
     Rebuild,
 }
 
@@ -150,7 +160,38 @@ fn log_plan(shown: Option<LogShown>, first: u64, len: usize) -> LogPlan {
     match shown {
         Some(s) if s.first == first && s.len == len => LogPlan::Keep,
         Some(s) if s.first == first && s.len < len => LogPlan::Append(s.len),
+        // A front trim: some shown lines survive and nothing else changed.
+        Some(s) if first > s.first => {
+            let drop = usize::try_from(first - s.first).unwrap_or(usize::MAX);
+            match s.len.checked_sub(drop) {
+                Some(kept) if kept > 0 && kept <= len => LogPlan::Trim { drop, from: kept },
+                _ => LogPlan::Rebuild,
+            }
+        }
         _ => LogPlan::Rebuild,
+    }
+}
+
+/// The keydb worker's one message and the log kind it is shown with.
+fn keydb_outcome(r: std::thread::Result<Result<String, String>>) -> (crate::ui::LogKind, String) {
+    use crate::ui::LogKind;
+    match r {
+        Ok(Ok(m)) => (LogKind::Result, m),
+        Ok(Err(m)) => (LogKind::Notice, m),
+        Err(p) => {
+            // First line only, capped: a panic message is for the bug report.
+            let why = p
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| p.downcast_ref::<String>().map(String::as_str))
+                .and_then(|m| m.lines().next())
+                .unwrap_or("unknown panic");
+            let why: String = why.chars().take(200).collect();
+            (
+                LogKind::Notice,
+                format!("keydb update failed — internal error: {why}"),
+            )
+        }
     }
 }
 
@@ -220,8 +261,11 @@ fn notify_rip_finished(title: &str, body: &str, output_dir: Option<&str>) {
     );
     // Asking again once decided is a no-op that just reports the answer.
     let post = block2::RcBlock::new(
-        move |granted: objc2::runtime::Bool, _e: *mut objc2_foundation::NSError| {
+        move |granted: objc2::runtime::Bool, e: *mut objc2_foundation::NSError| {
             if !granted.as_bool() {
+                // SAFETY: the NSError argument is nil or valid for the block's duration.
+                let why = unsafe { e.as_ref() }.map(|e| e.localizedDescription().to_string());
+                tracing::warn!("rip-finished notification not authorized: {why:?}");
                 return;
             }
             let content = UNMutableNotificationContent::new();
@@ -242,8 +286,17 @@ fn notify_rip_finished(title: &str, body: &str, output_dir: Option<&str>) {
             &content,
             None,
         );
+            let posted = block2::RcBlock::new(|e: *mut objc2_foundation::NSError| {
+                // SAFETY: as above, nil or valid for the block's duration.
+                if let Some(e) = unsafe { e.as_ref() } {
+                    tracing::warn!(
+                        "rip-finished notification failed: {}",
+                        e.localizedDescription()
+                    );
+                }
+            });
             UNUserNotificationCenter::currentNotificationCenter()
-                .addNotificationRequest_withCompletionHandler(&req, None);
+                .addNotificationRequest_withCompletionHandler(&req, Some(&posted));
         },
     );
     UNUserNotificationCenter::currentNotificationCenter()
@@ -378,7 +431,6 @@ define_class!(
             let Some(i) = self.idx(Some(&item)) else { return };
             if let Some(c) = self.ivars().ctrl.borrow().as_ref() {
                 c.app_mut(|a| a.selected_row = Some(i));
-                c.render();
             }
         }
     }
@@ -394,7 +446,6 @@ define_class!(
                 // shell only reports which row was clicked. Reading the
                 // direction from the button's own state broke on mixed state.
                 c.app_mut(|a| a.tree.toggle(i));
-                c.render();
             }
         }
     }
@@ -476,10 +527,7 @@ impl TitlesSource {
         // here when `rows_sig` matched, so only checkbox state can still differ;
         // if even that is unchanged, the clone + repaint loop below is pure waste.
         {
-            let cur = self.ivars().rows.borrow();
-            if cur.len() == rows.len()
-                && cur.iter().zip(rows.iter()).all(|(a, b)| a.check == b.check)
-            {
+            if ticks_match(&self.ivars().rows.borrow(), rows) {
                 return;
             }
         }
@@ -576,7 +624,7 @@ struct Ivars {
     on_empty: RefCell<bool>,
     /// Worker threads push user-visible lines here; a main-thread timer drains
     /// it. AppKit objects are main-thread-only, so nothing else may cross.
-    inbox: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    inbox: std::sync::Arc<std::sync::Mutex<Vec<(crate::ui::LogKind, String)>>>,
     drain: RefCell<Option<Retained<NSTimer>>>,
     /// Signature of the tree rows last painted, so a 200 ms progress tick does
     /// not force a full `reloadData` + re-expand of the (usually hidden)
@@ -585,6 +633,9 @@ struct Ivars {
     tree_sig: std::cell::Cell<Option<u64>>,
     /// What the log pane shows, so a tick appends only the new tail.
     log_shown: RefCell<Option<LogShown>>,
+    /// UTF-16 length of each shown log line (with its newline), so a front
+    /// trim can delete exactly the dropped lines' characters.
+    log_lens: RefCell<std::collections::VecDeque<usize>>,
     /// Retained here because `UNUserNotificationCenter.delegate` is weak.
     notify_delegate: RefCell<Option<Retained<NotifyDelegate>>>,
     /// The operator has already answered the rip-in-progress question for this
@@ -685,8 +736,7 @@ define_class!(
                 );
             if let Some(c) = self.ivars().borrow().as_ref() {
                 if ok {
-                    let fx = c.app_mut(|a| a.open(&p));
-                    c.perform(fx);
+                    c.step(|a| a.open(&p));
                 } else {
                     c.app_mut(|a| {
                         a.say(
@@ -694,7 +744,6 @@ define_class!(
                             &crate::strings::fmt("gui.log.not_supported", &[("p", &p)]),
                         )
                     });
-                    c.render();
                 }
             }
             objc2::runtime::Bool::new(ok)
@@ -1047,13 +1096,9 @@ define_class!(
                 // A panic in `update_keydb` must NOT strand the drain: catch it so
                 // a terminal message is pushed either way. It's the ONLY message
                 // the keydb worker sends; dropping it wedges Update off forever.
-                let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    match crate::settings::update_keydb(&url, &path) {
-                        Ok(m) => m,
-                        Err(e) => e,
-                    }
-                }))
-                .unwrap_or_else(|_| "keydb update failed — internal error".to_string());
+                let msg = keydb_outcome(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || crate::settings::update_keydb(&url, &path),
+                )));
                 // RECOVER rather than skip the push.
                 inbox
                     .lock()
@@ -1187,8 +1232,8 @@ define_class!(
         fn on_drain(&self, _s: Option<&AnyObject>) {
             // RECOVER a poisoned inbox rather than returning: an early return
             // stranded the drain (keydb "busy" flag stuck, note never shown,
-            // timer firing forever) and a poisoned `Vec<String>` is still fine.
-            let msgs: Vec<String> = self
+            // timer firing forever) and a poisoned inbox Vec is still fine.
+            let msgs: Vec<(crate::ui::LogKind, String)> = self
                 .ivars()
                 .inbox
                 .lock()
@@ -1200,13 +1245,13 @@ define_class!(
             }
             // Each say() goes through app_mut, which repaints — so worker-thread
             // messages (keydb update, etc.) show the moment they arrive.
-            for m in &msgs {
-                self.app_mut(|a| a.say(crate::ui::LogKind::Result, m));
+            for (kind, m) in &msgs {
+                self.app_mut(|a| a.say(*kind, m));
             }
             // This drain path is the keydb-update worker; surface its outcome
             // in the Settings note so the user sees it in place, not just the
             // log, and re-enable the button now the update is done.
-            if let Some(last) = msgs.last() {
+            if let Some((_, last)) = msgs.last() {
                 self.set_keydb_note(last);
             }
             self.set_keydb_updating(false);
@@ -1221,8 +1266,7 @@ define_class!(
 
         #[unsafe(method(onDoneResult:))]
         fn on_done_result(&self, _s: Option<&AnyObject>) {
-            let fx = self.app_mut(|a| a.dismiss_result());
-            self.perform(fx);
+            self.step(|a| a.dismiss_result());
         }
 
         #[unsafe(method(onReveal:))]
@@ -1272,8 +1316,7 @@ define_class!(
 
         #[unsafe(method(onTick:))]
         fn on_tick(&self, _s: Option<&AnyObject>) {
-            let fx = self.app_mut(|a| a.tick());
-            self.perform(fx);
+            self.step(|a| a.tick());
         }
 
         #[unsafe(method(onCancelRip:))]
@@ -1291,6 +1334,13 @@ impl Controller {
         let r = f(&mut self.ivars().app.borrow_mut());
         self.render();
         r
+    }
+
+    // Mutate the model and perform its effects; `perform` repaints once at
+    // the end, so this must not go through `app_mut` (a second full render).
+    fn step(&self, f: impl FnOnce(&mut crate::ui::App) -> Vec<crate::ui::Effect>) {
+        let fx = f(&mut self.ivars().app.borrow_mut());
+        self.perform(fx);
     }
 
     // The one place this shell asks "a rip is running — really quit?".
@@ -1357,8 +1407,7 @@ impl Controller {
     // The shell's entire job: hand the command to the core, perform the
     // platform effects it asks for, redraw. No decisions here.
     fn act(&self, cmd: crate::ui::Cmd) {
-        let effects = self.app_mut(|a| a.dispatch(cmd));
-        self.perform(effects);
+        self.step(|a| a.dispatch(cmd));
     }
 
     // Open the disc; drive/log decisions live in `ui::App::disc_source`. Two
@@ -1368,14 +1417,13 @@ impl Controller {
         let Some(url) = self.app_mut(|a| a.disc_source(announce_missing)) else {
             return;
         };
-        let fx = self.app_mut(|a| {
+        self.step(|a| {
             if announce_missing {
                 a.open(&url)
             } else {
                 a.open_probe(&url)
             }
         });
-        self.perform(fx);
     }
 
     fn perform(&self, effects: Vec<crate::ui::Effect>) {
@@ -1387,8 +1435,7 @@ impl Controller {
                     if let Some(p) =
                         self.pick(false, true, &crate::strings::get("gui.panel.source_msg"))
                     {
-                        let fx = self.app_mut(|a| a.open(&p));
-                        self.perform(fx);
+                        self.step(|a| a.open(&p));
                     }
                 }
                 E::PickOutputDir => {
@@ -1540,7 +1587,9 @@ impl Controller {
             } else {
                 src.sync_check_states(&v.title_rows);
             }
-            if let Some(tv) = src.ivars().info.borrow().as_ref() {
+            if let Some(tv) = src.ivars().info.borrow().as_ref()
+                && tv.string().to_string() != v.detail
+            {
                 tv.setString(&NSString::from_str(&v.detail));
             }
         }
@@ -1601,22 +1650,37 @@ impl Controller {
 
         // log
         if let Some(tv) = iv.log.borrow().as_ref() {
-            let plan = log_plan(*iv.log_shown.borrow(), v.log_first, v.log.len());
+            let store = unsafe { tv.textStorage() };
+            let mut plan = log_plan(*iv.log_shown.borrow(), v.log_first, v.log.len());
+            if let LogPlan::Trim { drop, from } = plan {
+                let mut lens = iv.log_lens.borrow_mut();
+                let chars: usize = lens.iter().take(drop).sum();
+                match &store {
+                    Some(s) if lens.len() >= drop && chars <= s.length() => {
+                        s.deleteCharactersInRange(objc2_foundation::NSRange::new(0, chars));
+                        lens.drain(..drop);
+                        plan = LogPlan::Append(from);
+                    }
+                    _ => plan = LogPlan::Rebuild,
+                }
+            }
             let from = match plan {
                 LogPlan::Keep => None,
                 LogPlan::Append(n) => Some(n),
-                LogPlan::Rebuild => {
+                LogPlan::Rebuild | LogPlan::Trim { .. } => {
                     tv.setString(&NSString::from_str(""));
+                    iv.log_lens.borrow_mut().clear();
                     Some(0)
                 }
             };
             if let Some(from) = from {
-                let store = unsafe { tv.textStorage() };
                 if let Some(s) = &store {
                     s.beginEditing();
                 }
+                let mut lens = iv.log_lens.borrow_mut();
                 for l in &v.log[from..] {
                     log_append(tv, &l.text, log_colour(l.kind));
+                    lens.push_back(l.text.encode_utf16().count() + 1);
                 }
                 if let Some(s) = &store {
                     s.endEditing();
@@ -1626,9 +1690,11 @@ impl Controller {
                     len: v.log.len(),
                 });
                 // Keep the newest line in view. Only when lines arrived, so an
-                // ordinary progress tick never yanks the view.
-                let end = { tv.string() }.length();
-                tv.scrollRangeToVisible(objc2_foundation::NSRange::new(end, 0));
+                // ordinary progress tick (or a bare trim) never yanks the view.
+                if from < v.log.len() {
+                    let end = { tv.string() }.length();
+                    tv.scrollRangeToVisible(objc2_foundation::NSRange::new(end, 0));
+                }
             }
         }
         if let Some(sv) = iv.log_scroll.borrow().as_ref() {
@@ -1829,6 +1895,7 @@ impl Controller {
         self.ivars().tree_sig.set(None);
         // Same for the log: the new text view holds only the build-time line.
         *self.ivars().log_shown.borrow_mut() = None;
+        self.ivars().log_lens.borrow_mut().clear();
 
         // Settings and About are cached, built once and reused on reopen — but
         // in the old language, so drop them; next open rebuilds them fresh.
@@ -2868,6 +2935,17 @@ fn snapshot(view: &NSView, path: &str) {
 
 // ── run ───────────────────────────────────────────────────────────────────
 
+// `-[NSApplication activate]` is macOS 14+; Info.plist promises 11.0, where it
+// would raise an unrecognized-selector exception at launch.
+fn activate_app(app: &NSApplication) {
+    if app.respondsToSelector(sel!(activate)) {
+        app.activate();
+    } else {
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
+}
+
 pub fn run() {
     let mtm = MainThreadMarker::new().unwrap();
     let app = NSApplication::sharedApplication(mtm);
@@ -2971,7 +3049,7 @@ pub fn run() {
 
     window.center();
     window.makeKeyAndOrderFront(None);
-    app.activate();
+    activate_app(&app);
 
     if cfg!(debug_assertions) && std::env::var("FMKV_DUMP_MENUS").is_ok() {
         if let Some(main) = app.mainMenu() {
@@ -3001,7 +3079,6 @@ pub fn run() {
     // FMKV_PAGE=progress snapshots the rip page instead of the tree
     if cfg!(debug_assertions) && std::env::var("FMKV_PAGE").as_deref() == Ok("progress") {
         c.app_mut(|a| a.page = crate::ui::Page::Progress);
-        c.render();
         let v: f64 = dev_env("FMKV_PCT")
             .ok()
             .and_then(|x| x.parse().ok())
@@ -3051,8 +3128,7 @@ pub fn run() {
 
     if let Ok(src) = dev_env("FMKV_OPEN") {
         {
-            let fx = c.app_mut(|a| a.open(&src));
-            c.perform(fx);
+            c.step(|a| a.open(&src));
         };
     }
 
@@ -3062,7 +3138,6 @@ pub fn run() {
     if cfg!(debug_assertions) && std::env::var("FMKV_PAGE").as_deref() == Ok("result") {
         c.app_mut(|a| a.page = crate::ui::Page::Result);
         c.app_mut(|a| a.result_summary = "2 title(s) written".into());
-        c.render();
     }
     if let Ok(which) = dev_env("FMKV_WIN") {
         let w = match which.as_str() {
@@ -3552,6 +3627,15 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         &crate::strings::get("gui.set.auto_eject"),
         true,
     );
+    t.check(
+        mtm,
+        "notify_when_rip_finished",
+        &crate::strings::get_or(
+            "gui.set.notify_when_rip_finished",
+            "Notify when a rip finishes",
+        ),
+        true,
+    );
     add_tab(&crate::strings::get("gui.tab.output"), t);
 
     // ── Selection ── engine Job.selection
@@ -3636,7 +3720,6 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         &crate::strings::get("gui.set.overwrite"),
         false,
     );
-    t.note(mtm, &crate::strings::get("gui.set.capture_note"), tw);
     add_tab(&crate::strings::get("gui.tab.recovery"), t);
 
     // ── Keys ── keydb + the online key service
@@ -3934,7 +4017,7 @@ impl Controller {
     /// Click the actual checkbox in row `row` — builds the real cell and sends
     /// it `performClick:`, so `setTag`/`setTarget`/`setAction` wiring is
     /// exercised. A direct model mutation would not catch a mis-wired cell.
-    #[allow(dead_code)] // test-only UI-driver; the bin compiles this module but never calls it
+    #[cfg(debug_assertions)]
     pub fn drive_click_checkbox(&self, row: usize) -> bool {
         let Some(src) = self.ivars().src.borrow().clone() else {
             return false;
@@ -3962,7 +4045,7 @@ impl Controller {
 
     /// Invoke a menu item by title, through its own target/action — the same
     /// path a user picking it takes. Returns false if it is disabled.
-    #[allow(dead_code)] // test-only UI-driver; the bin compiles this module but never calls it
+    #[cfg(debug_assertions)]
     pub fn drive_menu(&self, menu_title: &str, item_title: &str) -> bool {
         let mtm = MainThreadMarker::new().unwrap();
         let app = NSApplication::sharedApplication(mtm);
@@ -4015,7 +4098,7 @@ impl Controller {
     }
 
     /// Click a button found by its title anywhere in the window.
-    #[allow(dead_code)] // test-only UI-driver; the bin compiles this module but never calls it
+    #[cfg(debug_assertions)]
     pub fn drive_click_button(&self, title: &str) -> bool {
         fn walk(v: &NSView, title: &str) -> Option<Retained<NSButton>> {
             for sub in { v.subviews() }.iter() {
@@ -4060,7 +4143,6 @@ impl Controller {
             .map(|(i, _)| i);
         let Some(i) = idx else { return false };
         self.app_mut(|a| a.tree.set_checked(i, on));
-        self.render();
         true
     }
 
@@ -4094,7 +4176,7 @@ impl Controller {
         }
     }
 
-    #[allow(dead_code)] // test-only UI-driver; the bin compiles this module but never calls it
+    #[cfg(debug_assertions)]
     pub fn drive_log(&self) -> String {
         self.ivars()
             .log
@@ -4105,8 +4187,7 @@ impl Controller {
     }
 
     pub fn drive_open(&self, path: &str) {
-        let fx = self.app_mut(|a| a.open(path));
-        self.perform(fx);
+        self.step(|a| a.open(path));
     }
 }
 
@@ -4585,8 +4666,7 @@ impl Controller {
             self.app_mut(|a| a.output_dir = shot_dir.to_string());
             let started = self.drive_click_button("Run Now");
             std::thread::sleep(std::time::Duration::from_millis(400));
-            let fx = self.app_mut(|a| a.tick());
-            self.perform(fx);
+            self.step(|a| a.tick());
             check(
                 "click-run",
                 started && view().page == Page::Progress,
@@ -4622,8 +4702,7 @@ impl Controller {
             let cancelled = self.drive_click_button("Cancel");
             for _ in 0..25 {
                 std::thread::sleep(std::time::Duration::from_millis(200));
-                let fx = self.app_mut(|a| a.tick());
-                self.perform(fx);
+                self.step(|a| a.tick());
                 if view().page == Page::Result {
                     break;
                 }
@@ -4650,18 +4729,15 @@ impl Controller {
 
         // 12 ── progress and result pages render
         self.app_mut(|a| a.page = Page::Progress);
-        self.render();
         check("progress-page", view().page == Page::Progress, "shown");
         snap("05-progress");
         self.app_mut(|a| {
             a.result_summary = "2 title(s) written".into();
             a.page = Page::Result;
         });
-        self.render();
         check("result-page", view().page == Page::Result, "shown");
         snap("06-result");
         self.app_mut(|a| a.page = Page::Titles);
-        self.render();
 
         // 13 ── engine-facing guards
         check(
@@ -5083,7 +5159,7 @@ mod tests {
     }
 
     #[test]
-    fn a_clear_or_trim_rebuilds_and_a_fresh_pane_rebuilds() {
+    fn a_clear_rebuilds_a_fresh_pane_rebuilds_and_a_trim_drops_the_head() {
         let full = Some(LogShown {
             first: 0,
             len: 5_000,
@@ -5097,8 +5173,11 @@ mod tests {
         );
         assert_eq!(
             log_plan(full, 1_000, 5_200),
-            LogPlan::Rebuild,
-            "front-trimmed at the cap yet longer than what was shown"
+            LogPlan::Trim {
+                drop: 1_000,
+                from: 4_000
+            },
+            "front-trimmed at the cap: drop the head, append the tail"
         );
     }
 
@@ -5473,6 +5552,305 @@ mod tests {
             "onDrain: no longer invalidates and clears the drain timer once \
              messages are processed — it would go back to polling an always- \
              empty inbox at 5 Hz forever after the first keydb update"
+        );
+    }
+
+    // ── codeaudit mac cluster ─────────────────────────────────────────────
+
+    fn prod_src() -> &'static str {
+        let src = include_str!("mac.rs");
+        &src[..src.find("#[cfg(test)]").unwrap_or(src.len())]
+    }
+
+    fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
+        let at = src
+            .find(sig)
+            .unwrap_or_else(|| panic!("{sig} moved — this test cannot see it"));
+        let indent = at - src[..at].rfind('\n').map_or(0, |n| n + 1);
+        let close = format!("\n{}}}", " ".repeat(indent));
+        let body = &src[at..];
+        &body[..body.find(&close).map_or(body.len(), |e| e + close.len())]
+    }
+
+    // M1: `-[NSApplication activate]` is macOS 14+; the plist promises 11.0.
+    #[test]
+    fn activation_falls_back_below_macos_14_source_inspection_only() {
+        let src = prod_src();
+        let body = fn_body(src, "fn activate_app(");
+        let bare = format!("{}{}", ".activ", "ate();");
+        assert_eq!(
+            src.matches(&bare).count(),
+            body.matches(&bare).count(),
+            "-[NSApplication activate] called outside activate_app: it is macOS \
+             14+ only, so macOS 11-13 (LSMinimumSystemVersion 11.0) abort at launch"
+        );
+        assert!(fn_body(src, "pub fn run(").contains("activate_app(&app);"));
+        assert!(body.contains("respondsToSelector(sel!(activate))"));
+        assert!(body.contains("activateIgnoringOtherApps(true)"));
+        let plist = include_str!("../macos/Info.plist");
+        assert!(plist.contains("<key>LSMinimumSystemVersion</key><string>11.0</string>"));
+    }
+
+    // M3: a denied or failed notification must leave a trace.
+    #[test]
+    fn notification_failures_are_logged_source_inspection_only() {
+        let body = fn_body(prod_src(), "fn notify_rip_finished(");
+        let silent = format!("{}{}", "withCompletionHandler(&req, ", "None)");
+        assert!(
+            !body.contains(&silent),
+            "addNotificationRequest error dropped"
+        );
+        assert!(
+            body.matches("tracing::warn!").count() >= 2,
+            "authorization denial/error and post error must both be logged"
+        );
+    }
+
+    // M4 + M5: a failed update is a Notice and a panic keeps its message.
+    #[test]
+    fn a_failed_keydb_update_is_a_notice_and_keeps_the_panic_message() {
+        use crate::ui::LogKind;
+        let ok = keydb_outcome(Ok(Ok("keydb updated — 3 entries".into())));
+        assert_eq!(ok, (LogKind::Result, "keydb updated — 3 entries".into()));
+        let err = keydb_outcome(Ok(Err("keydb download failed: 404".into())));
+        assert_eq!(err.0, LogKind::Notice, "an Err is styled like a success");
+        assert_eq!(err.1, "keydb download failed: 404");
+        let boom = std::panic::catch_unwind(|| -> Result<String, String> {
+            std::panic::panic_any("zip entry out of range")
+        });
+        let (kind, msg) = keydb_outcome(boom);
+        assert_eq!(kind, LogKind::Notice);
+        assert!(
+            msg.contains("zip entry out of range"),
+            "payload lost: {msg}"
+        );
+        let owned: std::thread::Result<Result<String, String>> =
+            Err(Box::new(format!("idx {}\nsecond line", 7)));
+        let (_, msg) = keydb_outcome(owned);
+        assert!(
+            msg.contains("idx 7") && !msg.contains("second line"),
+            "{msg}"
+        );
+    }
+
+    // M6: an ad-hoc signing failure must fail the bundle build.
+    #[test]
+    fn bundle_sh_fails_when_ad_hoc_signing_fails() {
+        let sh = include_str!("../macos/bundle.sh");
+        for line in sh
+            .lines()
+            .filter(|l| l.trim_start().starts_with("codesign"))
+        {
+            assert!(
+                !line.contains("|| true") && !line.contains("2>/dev/null"),
+                "codesign failure swallowed: {line}"
+            );
+        }
+        assert!(sh.contains("set -e"));
+        assert!(
+            sh.matches("codesign --verify").count() >= 2,
+            "both signing paths must verify the result"
+        );
+    }
+
+    // M8: every item of the shared menu becomes a real, correctly routed item.
+    #[test]
+    fn every_shared_menu_item_maps_to_a_selector_that_routes_back_to_it() {
+        use crate::ui::{MenuAction, MenuEntry};
+        for hidden in [false, true] {
+            for g in crate::ui::menu_layout(hidden) {
+                for e in &g.entries {
+                    let MenuEntry::Item(mi) = e else { continue };
+                    let Some((s, to_ctrl)) = selector_for_action(&mi.action) else {
+                        panic!("{:?} in {:?} is silently dropped on macOS", mi.action, g.id);
+                    };
+                    match &mi.action {
+                        MenuAction::Cmd(c) => {
+                            assert!(to_ctrl, "{c:?} would go to the responder chain");
+                            assert_eq!(cmd_for(s), Some(*c), "{c:?} runs another command");
+                        }
+                        MenuAction::OpenDisc => {
+                            assert!(to_ctrl);
+                            assert_eq!(s, sel!(onOpenDisc:));
+                        }
+                        MenuAction::StandardCut => assert_eq!((s, to_ctrl), (sel!(cut:), false)),
+                        MenuAction::StandardCopy => assert_eq!((s, to_ctrl), (sel!(copy:), false)),
+                        MenuAction::StandardPaste => {
+                            assert_eq!((s, to_ctrl), (sel!(paste:), false))
+                        }
+                        MenuAction::StandardSelectAllText => {
+                            assert_eq!((s, to_ctrl), (sel!(selectAll:), false))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // M10 + M11: a language switch must forget the log memo and menu handle.
+    #[test]
+    fn a_language_switch_forgets_the_log_memo_and_menu_item_source_inspection_only() {
+        let body = fn_body(prod_src(), "fn relocalize(");
+        for reset in [
+            format!("{}{}", "self.ivars().log_shown", ".borrow_mut() = None;"),
+            format!(
+                "{}{}",
+                "self.ivars().log_menu_item", ".borrow_mut() = None;"
+            ),
+            format!("{}{}", "self.ivars().log_lens", ".borrow_mut().clear();"),
+        ] {
+            assert!(body.contains(&reset), "relocalize() lost `{reset}`");
+        }
+    }
+
+    // M12: the UI-driver helpers must not hide behind a dead-code allow.
+    #[test]
+    fn no_production_code_is_allowed_to_be_dead() {
+        let allow = format!("{}{}", "#[allow(dead", "_code)]");
+        assert!(
+            !prod_src().contains(&allow),
+            "an allow(dead_code) hides helpers nothing calls; gate them on \
+             cfg(debug_assertions) with their only caller, self_test"
+        );
+    }
+
+    // M13: the shared Accel -> AppKit key-equivalent translation.
+    #[test]
+    fn accelerators_translate_to_appkit_key_equivalents() {
+        use crate::ui::Accel;
+        assert_eq!(key_equivalent(None), "");
+        assert_eq!(key_equivalent(Some(&Accel::primary("c"))), "c");
+        assert_eq!(key_equivalent(Some(&Accel::primary("C"))), "c");
+        assert_eq!(key_equivalent(Some(&Accel::primary_shift("a"))), "A");
+        assert_eq!(key_equivalent(Some(&Accel::bare("F1"))), "");
+        let alt = Accel {
+            alt: true,
+            ..Accel::primary("x")
+        };
+        assert_eq!(key_equivalent(Some(&alt)), "");
+        for g in crate::ui::menu_layout(false) {
+            for e in &g.entries {
+                if let crate::ui::MenuEntry::Item(mi) = e
+                    && let Some(a) = &mi.accel
+                    && a.key.len() == 1
+                    && !a.alt
+                {
+                    assert!(!key_equivalent(Some(a)).is_empty(), "{:?}", mi.action);
+                }
+            }
+        }
+    }
+
+    // M14: the tick-repaint early-out.
+    #[test]
+    fn the_tick_repaint_is_skipped_only_when_no_tick_moved() {
+        use crate::ui::{Check, Row};
+        let row = |i: usize, c: Option<Check>| Row {
+            index: i,
+            depth: 0,
+            type_s: "Title".into(),
+            desc: format!("t{i}"),
+            check: c,
+        };
+        let a = vec![row(0, Some(Check::On)), row(1, None)];
+        assert!(ticks_match(&a, &a.clone()));
+        let flipped = vec![row(0, Some(Check::Off)), row(1, None)];
+        assert!(!ticks_match(&a, &flipped), "a click must repaint");
+        let mixed = vec![row(0, Some(Check::Mixed)), row(1, None)];
+        assert!(!ticks_match(&a, &mixed));
+        assert!(!ticks_match(&a, &a[..1]), "a length change must repaint");
+        assert!(ticks_match(&[], &[]));
+    }
+
+    // M15: outside an .app bundle (this test binary) the gate must hold.
+    #[test]
+    fn notifications_are_gated_off_outside_an_app_bundle() {
+        assert!(!notifications_available(), "cargo test runs unbundled");
+        // Ungated, UNUserNotificationCenter raises and aborts this process.
+        notify_rip_finished("t", "b", "/nonexistent");
+        let src = prod_src();
+        for (at, _) in src.match_indices("UNUserNotificationCenter::currentNotificationCenter()") {
+            let before = &src[src[..at].rfind("\nfn ").unwrap_or(0)..at];
+            let before = &before[before.rfind("\npub fn ").unwrap_or(0)..];
+            assert!(
+                before.contains("notifications_available()"),
+                "ungated UNUserNotificationCenter use near byte {at}"
+            );
+        }
+    }
+
+    // M16: one render per tick/command, not two.
+    #[test]
+    fn a_command_or_tick_renders_once_source_inspection_only() {
+        let src = prod_src();
+        for (at, _) in src.match_indices("perform(fx);") {
+            let stmt_start = src[..at].rfind("let fx = ").unwrap_or(0);
+            assert!(
+                !src[stmt_start..at].contains("app_mut("),
+                "app_mut renders and perform renders again: {}",
+                &src[stmt_start..at]
+            );
+        }
+        for (at, _) in src.match_indices(".render();") {
+            let prev = src[..at].trim_end();
+            let prev = &prev[..prev.rfind('\n').unwrap_or(0)];
+            let prev_stmt = &prev[prev.rfind(";\n").map_or(0, |i| i + 2)..];
+            assert!(
+                !prev_stmt.trim_start().contains(".app_mut("),
+                "render() straight after app_mut() paints twice: {prev_stmt}"
+            );
+        }
+    }
+
+    // M17: an unchanged detail pane is not reset (keeps the user's selection).
+    #[test]
+    fn the_detail_pane_is_only_reset_when_it_changed_source_inspection_only() {
+        let body = fn_body(prod_src(), "fn render(");
+        let set = format!("{}{}", "tv.setString(&NSString::from_str(&v", ".detail));");
+        let at = body.find(&set).expect("detail setString moved");
+        assert!(
+            body[at.saturating_sub(200)..at].contains("!= v.detail"),
+            "detail text view is reset on every render"
+        );
+    }
+
+    // M18: a front trim deletes the dropped lines instead of rebuilding.
+    #[test]
+    fn a_front_trim_drops_lines_instead_of_rebuilding() {
+        let full = Some(LogShown {
+            first: 0,
+            len: 5_001,
+        });
+        assert_eq!(
+            log_plan(full, 1_000, 4_001),
+            LogPlan::Trim {
+                drop: 1_000,
+                from: 4_001
+            }
+        );
+        assert_eq!(
+            log_plan(full, 1_000, 4_050),
+            LogPlan::Trim {
+                drop: 1_000,
+                from: 4_001
+            }
+        );
+        assert_eq!(log_plan(full, 1_000, 3_000), LogPlan::Rebuild, "shrank");
+        assert_eq!(log_plan(full, 5_001, 0), LogPlan::Rebuild, "cleared");
+        assert_eq!(log_plan(full, 9_000, 10), LogPlan::Rebuild, "past it");
+    }
+
+    // K2 + C13: the Recovery tab loses the stale capture caption; Output
+    // gains the notify toggle on the same keyed get_bool/set_bool path.
+    #[test]
+    fn settings_form_has_the_notify_toggle_and_no_capture_note() {
+        let body = fn_body(prod_src(), "fn build_prefs(");
+        let note = format!("{}{}", "gui.set.capture", "_note");
+        assert!(!body.contains(&note), "stale capture caption still shown");
+        let key = format!("{}{}", "\"notify_when_rip", "_finished\",");
+        assert!(
+            body.contains(&key),
+            "no Notify when a rip finishes checkbox"
         );
     }
 }
