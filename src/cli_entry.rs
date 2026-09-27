@@ -1345,8 +1345,8 @@ mod tests {
 #[cfg(test)]
 mod arg_tests {
     use super::{
-        PendingDiag, canon_url, drop_process_serial, is_flag_token, is_url_token, parse_logging_flags,
-        same_stream_url, split_log_path, strip_language_flag, wants_help,
+        PendingDiag, canon_url, drop_process_serial, is_flag_token, is_url_token,
+        parse_logging_flags, same_stream_url, split_log_path, strip_language_flag, wants_help,
     };
 
     fn v(items: &[&str]) -> Vec<String> {
