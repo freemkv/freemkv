@@ -32,7 +32,12 @@ pub const LANGUAGE_FLAGS: [&str; 2] = ["--language", "--lang"];
 
 /// Whether a token may be a flag's value: neither a `scheme://` URL nor another flag.
 pub fn is_flag_value(v: &str) -> bool {
-    !v.contains("://") && !is_flag_token(v)
+    !is_url_token(v) && !is_flag_token(v)
+}
+
+/// Whether a token is a stream URL (`scheme://...`). ONE rule for every parser.
+pub fn is_url_token(s: &str) -> bool {
+    s.contains("://")
 }
 
 /// Whether a token is a flag. A negative number (`-1`) is a value, not a flag.

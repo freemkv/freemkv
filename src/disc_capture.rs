@@ -249,6 +249,10 @@ pub(crate) fn selection_json(disc: &Disc) -> String {
     s.push_str("{\n");
     s.push_str(&format!(
         "  \"freemkv\": \"{}\",\n",
+        esc(env!("CARGO_PKG_VERSION"))
+    ));
+    s.push_str(&format!(
+        "  \"libfreemkv\": \"{}\",\n",
         esc(libfreemkv::VERSION_LABEL)
     ));
     s.push_str(&format!("  \"format\": \"{:?}\",\n", disc.format));
@@ -592,6 +596,15 @@ mod aacs_diag_tests {
         )
         .0;
         assert!(body.contains("No AACS on this disc"), "{body}");
+    }
+
+    /// L10: the bundle names freemkv's own version, not libfreemkv's label.
+    #[test]
+    fn selection_json_names_the_freemkv_version() {
+        let sel = selection_json(&disc_with(None));
+        let want = format!("\"freemkv\": \"{}\",", env!("CARGO_PKG_VERSION"));
+        assert!(sel.contains(&want), "{sel}");
+        assert!(sel.contains("\"libfreemkv\": "), "{sel}");
     }
 
     #[test]
