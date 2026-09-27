@@ -236,6 +236,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [linux, windows]
+        # The targets release.yml ships the CLI for. Linux is static musl, where
+        # the GTK/libadwaita deps are cfg'd out entirely.
+        include:
+          - os: linux
+            target: x86_64-unknown-linux-musl
+          - os: windows
+            target: x86_64-pc-windows-msvc
     runs-on: [self-hosted, freemkv-media, "${{ matrix.os }}"]
     timeout-minutes: 240
     permissions:
@@ -309,26 +316,52 @@ jobs:
               choco install -y visualstudio2022-workload-vctools --no-progress
             fi
           else
-            sudo apt-get install -y -qq build-essential curl pkg-config
+            # musl-tools: ring and mimalloc compile C for the musl target.
+            sudo apt-get install -y -qq build-essential curl musl-tools
           fi
-          if command -v cargo >/dev/null 2>&1; then
-            cargo --version
-            rustup toolchain install 1.98.0 --profile minimal 2>/dev/null || true
-            rustup default 1.98.0 2>/dev/null || true
-          elif [ "${{ matrix.os }}" = "windows" ]; then
-            curl -sSf -o rustup-init.exe https://win.rustup.rs/x86_64
-            ./rustup-init.exe -y --profile minimal --default-toolchain 1.98.0 \
-              --default-host x86_64-pc-windows-msvc
-            echo "$(cygpath -u "$USERPROFILE")/.cargo/bin" >> "$GITHUB_PATH"
+          # One pinned toolchain: freemkv's rust-version, as release-orchestrate
+          # uses. Any rustup failure fails the job; never fall back to the AMI's.
+          V=$(sed -n -E 's/^rust-version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' freemkv/Cargo.toml | head -1)
+          [ -n "$V" ] || { echo "::error::could not read rust-version from freemkv/Cargo.toml"; exit 1; }
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            cargo_bin="$(cygpath -u "$USERPROFILE")/.cargo/bin"
           else
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal --default-toolchain 1.98.0
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            cargo_bin="$HOME/.cargo/bin"
+          fi
+          if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$cargo_bin/rustup" ] && [ ! -x "$cargo_bin/rustup.exe" ]; then
+            if [ "${{ matrix.os }}" = "windows" ]; then
+              curl -sSf -o rustup-init.exe https://win.rustup.rs/x86_64
+              ./rustup-init.exe -y --profile minimal --default-toolchain none \
+                --default-host x86_64-pc-windows-msvc
+            else
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain none
+            fi
+          fi
+          # POSIX form for $GITHUB_PATH: a C:\ entry is split on its drive-letter
+          # colon when Git-Bash re-parses PATH for the next step.
+          export PATH="$cargo_bin:$PATH"
+          echo "$cargo_bin" >> "$GITHUB_PATH"
+          rustup toolchain install "$V" --profile minimal --target "${{ matrix.target }}"
+          echo "RUSTUP_TOOLCHAIN=$V" >> "$GITHUB_ENV"
+          RUSTUP_TOOLCHAIN="$V" rustc --version
+      - name: The CLI build has no UI dependencies
+        shell: bash
+        working-directory: freemkv
+        run: |
+          set -euo pipefail
+          tree=$(cargo tree -e normal,build --target "${{ matrix.target }}" --prefix none)
+          ui=$(grep -E '^(gtk4|gdk4|libadwaita|glib-sys|gobject-sys|gio-sys|winsafe|objc2-app-kit) ' \
+                 <<<"$tree" | sed 's/ (\*)$//' | sort -u || true)
+          if [ -n "$ui" ]; then
+            echo "::error title=UI crates in the CLI build::the CLI must build without the gui feature's dependencies:"
+            echo "$ui"
+            exit 1
           fi
       - name: Build the CLI
         shell: bash
         working-directory: freemkv
-        run: cargo build --release --bin freemkv
+        run: cargo build --release --target "${{ matrix.target }}" --bin freemkv
       - name: Fetch the four disc fixtures
         shell: bash
         run: |
@@ -376,9 +409,9 @@ jobs:
             exit 1
           fi
 
-          BIN="$PWD/freemkv/target/release/freemkv"
+          BIN="$PWD/freemkv/target/${{ matrix.target }}/release/freemkv"
           if [ "${{ matrix.os }}" = "windows" ]; then
-            BIN="$(cygpath -m "$PWD")/freemkv/target/release/freemkv.exe"
+            BIN="$(cygpath -m "$PWD")/freemkv/target/${{ matrix.target }}/release/freemkv.exe"
             export TMPDIR="$(cygpath -m "${RUNNER_TEMP}")"
           fi
           [ -x "${BIN%.exe}" ] || [ -x "$BIN" ] || {
