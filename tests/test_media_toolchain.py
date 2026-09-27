@@ -190,6 +190,21 @@ class ExactToolchainTests(unittest.TestCase):
 
 
 class WorkflowToolchainTests(unittest.TestCase):
+    def test_edited_workflows_are_valid_yaml(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest('PyYAML is not installed')
+        for wf in PINNED + ['release-orchestrate.yml', 'snap.yml']:
+            with self.subTest(wf=wf):
+                self.assertIn('jobs', yaml.safe_load((WORKFLOWS / wf).read_text()))
+
+    def test_snap_builds_with_the_exact_toolchain(self):
+        snap = (ROOT / 'snap/snapcraft.yaml').read_text()
+        cargo = (ROOT / 'Cargo.toml').read_text()
+        want = re.search(r'^rust-version\s*=\s*"([^"]*)"', cargo, re.M).group(1)
+        self.assertIn(f'- RUST_TOOLCHAIN: "{want}"', snap)
+
     def test_no_floating_toolchain_in_evidence_or_shipped_builds(self):
         for wf in PINNED:
             text = (WORKFLOWS / wf).read_text()

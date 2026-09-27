@@ -80,7 +80,8 @@ jobs:
       # The check release.yml runs before shipping, exercised on every qa run first.
       - name: Clean build environment and C toolchain
         shell: bash
-        run: bash freemkv/.github/scripts/exact-toolchain.sh assert-env "$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')" freemkv
+        run: |
+          bash freemkv/.github/scripts/exact-toolchain.sh assert-env "$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')" freemkv
       - run: cargo test --release --tests ${{ matrix.features }}
         working-directory: freemkv
 
@@ -104,7 +105,8 @@ jobs:
       # The check release.yml runs before shipping, exercised on every qa run first.
       - name: Clean build environment and C toolchain
         shell: bash
-        run: bash freemkv/.github/scripts/exact-toolchain.sh assert-env "$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')" freemkv
+        run: |
+          bash freemkv/.github/scripts/exact-toolchain.sh assert-env "$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')" freemkv
       - run: cargo build --release --tests
         working-directory: freemkv
       - run: cargo build --release --tests --features gui
