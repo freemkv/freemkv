@@ -105,15 +105,15 @@ fn toml_header_comment(id: &DriveIdentity) -> String {
 }
 
 #[derive(Debug, Default, PartialEq)]
-struct DriveFlags {
-    share: bool,
-    mask: bool,
-    quiet: bool,
-    verbose: bool,
+pub(crate) struct DriveFlags {
+    pub share: bool,
+    pub mask: bool,
+    pub quiet: bool,
+    pub verbose: bool,
 }
 
 #[derive(Debug, PartialEq)]
-enum DriveParse {
+pub(crate) enum DriveParse {
     Ok(DriveFlags),
     Help,
     Unknown(String),
@@ -124,7 +124,7 @@ fn next_value(args: &[String], i: usize) -> Option<&String> {
         .filter(|v| !crate::cli_entry::is_flag_token(v))
 }
 
-fn parse_drive_flags(args: &[String]) -> DriveParse {
+pub(crate) fn parse_drive_flags(args: &[String]) -> DriveParse {
     let mut f = DriveFlags::default();
     let mut i = 0;
     while i < args.len() {
@@ -157,6 +157,25 @@ fn parse_drive_flags(args: &[String]) -> DriveParse {
     DriveParse::Ok(f)
 }
 
+// `--share --help`, shared by the drive and the image/folder routes.
+pub(crate) fn print_share_help() {
+    println!("{}", strings::get("drive.share_usage"));
+    println!();
+    println!("  --share    {}", strings::get("drive.share_desc"));
+    println!("  --mask     {}", strings::get("drive.mask_desc"));
+    println!("  --quiet    {}", strings::get("app.opt_quiet"));
+    println!("  --verbose  {}", strings::get("app.opt_verbose"));
+    println!();
+    println!(
+        "{}",
+        strings::get_or(
+            "drive.share_image_note",
+            "On iso:// and dir:// sources --share captures the disc structure; \
+             --mask and --verbose have no effect there (there is no drive).",
+        )
+    );
+}
+
 pub fn run(device: Option<&str>, args: &[String]) {
     let DriveFlags {
         share,
@@ -165,19 +184,8 @@ pub fn run(device: Option<&str>, args: &[String]) {
         verbose,
     } = match parse_drive_flags(args) {
         DriveParse::Ok(f) => f,
-        DriveParse::Help => {
-            println!("{}", strings::get("drive.share_usage"));
-            println!();
-            println!("  --share    {}", strings::get("drive.share_desc"));
-            println!("  --mask     {}", strings::get("drive.mask_desc"));
-            println!("  --quiet    {}", strings::get("app.opt_quiet"));
-            println!("  --verbose  {}", strings::get("app.opt_verbose"));
-            return;
-        }
-        DriveParse::Unknown(opt) => {
-            eprintln!("{}", strings::fmt("app.unknown_option", &[("opt", &opt)]));
-            std::process::exit(1);
-        }
+        DriveParse::Help => return print_share_help(),
+        DriveParse::Unknown(opt) => crate::disc_info::reject_unknown_option(&opt),
     };
 
     let mut session = match device {
@@ -471,12 +479,20 @@ pub fn run(device: Option<&str>, args: &[String]) {
                         strings::fmt_or(
                             "drive.structure_unreadable",
                             "Disc structure not captured: {err}",
-                            &[("err", &e.to_string())],
+                            &[("err", &crate::pipe::fmt_err(&e))],
                         )
                     );
                 }
                 None
             });
+    if let (Some(ds), false) = (&disc_summary, quiet) {
+        crate::disc_capture::report_skipped(ds);
+        if ds.file_count == 0 {
+            eprintln!("{}", crate::disc_capture::all_skipped_line(ds));
+        }
+    }
+    // All files refused = no structure in this profile; don't claim "0 files".
+    let disc_summary = disc_summary.filter(|ds| ds.file_count > 0);
 
     // ── Summarize captured profile ─────────────────────────────────────────
 
@@ -521,10 +537,8 @@ pub fn run(device: Option<&str>, args: &[String]) {
     let zip_data = match zip_files(&profile_dir, &written) {
         Ok(d) => d,
         Err(e) => {
-            println!(
-                "{}",
-                strings::fmt("drive.zip_failed", &[("error", &e.to_string())])
-            );
+            println!();
+            eprintln!("{}", zip_failed_line(&*e));
             std::process::exit(1);
         }
     };
@@ -605,31 +619,68 @@ pub fn run(device: Option<&str>, args: &[String]) {
         );
     }
 
-    body.push_str("<details><summary>Profile data (base64 zip)</summary>\n\n");
-    body.push_str("```\n");
-    for chunk in zip_b64.as_bytes().chunks(76) {
-        // base64 output is pure ASCII, so a 76-byte chunk is always valid UTF-8
-        // on a char boundary; surface the impossible case loudly rather than
-        // silently dropping a line of profile data.
-        body.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
-        body.push('\n');
-    }
-    body.push_str("```\n\n");
-    body.push_str("</details>\n\n");
-
-    body.push_str(&format!("---\n*Captured by `{CAPTURE_COMMAND} --share`*\n"));
+    let inlined = push_zip_section(
+        &mut body,
+        "Profile data (base64 zip)",
+        &zip_b64,
+        &format!("---\n*Captured by `{CAPTURE_COMMAND} --share`*\n"),
+    );
 
     let title = format!("Drive profile: {} {}", id.vendor, id.product);
 
-    present_for_submission(&profile_name, &zip_path, &title, &body);
+    present_for_submission(&profile_name, &zip_path, &title, &body, inlined);
 
     // The captured profile (and its zip) are kept on disk so the user can
     // attach/paste them when filing the issue. Do NOT remove the dir.
 }
 
+// The localized "could not build the zip" line. Both `--share` routes exit on it (no text-only
+// fallback exists), so it must not reuse `drive.zip_failed`, which promises one.
+pub(crate) fn zip_failed_line(e: &dyn std::fmt::Display) -> String {
+    strings::fmt_or(
+        "share.zip_failed",
+        "Could not build the profile zip: {error}",
+        &[("error", &e.to_string())],
+    )
+}
+
+/// Finish an issue body: the base64 zip in a `<details>` block when the whole body fits GitHub's
+/// limit, else a note to attach `profile.zip`. Returns whether the zip was inlined.
+pub(crate) fn push_zip_section(
+    body: &mut String,
+    summary: &str,
+    zip_b64: &str,
+    footer: &str,
+) -> bool {
+    let mut block = format!("<details><summary>{summary}</summary>\n\n```\n");
+    for chunk in zip_b64.as_bytes().chunks(76) {
+        block.push_str(&String::from_utf8_lossy(chunk));
+        block.push('\n');
+    }
+    block.push_str("```\n\n</details>\n\n");
+    let total = body.chars().count() + block.chars().count() + footer.chars().count();
+    let inlined = total <= BODY_INLINE_BUDGET_CHARS;
+    if inlined {
+        body.push_str(&block);
+    } else {
+        body.push_str(
+            "The profile zip is too large to include in this issue; please attach \
+             `profile.zip` from the saved profile folder.\n\n",
+        );
+    }
+    body.push_str(footer);
+    inlined
+}
+
 // Print everything needed to file the drive-profile issue by hand: title,
 // pre-filled URL, full body, and the saved zip path. Always exits cleanly.
-pub(crate) fn present_for_submission(profile_name: &str, zip_path: &Path, title: &str, body: &str) {
+pub(crate) fn present_for_submission(
+    profile_name: &str,
+    zip_path: &Path,
+    title: &str,
+    body: &str,
+    zip_inlined: bool,
+) {
     println!();
     println!(
         "{}",
@@ -642,6 +693,16 @@ pub(crate) fn present_for_submission(profile_name: &str, zip_path: &Path, title:
             &[("path", &zip_path.display().to_string())]
         )
     );
+    if !zip_inlined {
+        println!(
+            "{}",
+            strings::fmt_or(
+                "share.attach_zip",
+                "The profile zip is too large for the issue text — attach {path} to the issue.",
+                &[("path", &zip_path.display().to_string())],
+            )
+        );
+    }
 
     // Build-injected, issues-only PAT (FREEMKV_GH_TOKEN at build time) so the
     // secret lives in the binary, not source (GitHub's scanner revokes any
@@ -676,7 +737,8 @@ pub(crate) fn present_for_submission(profile_name: &str, zip_path: &Path, title:
         // Consent must be EXPLICIT: only the locale's affirmative token posts;
         // a bare Enter or EOF (n==0) is never consent (see prompt comment above).
         if consent_granted(n, ans, &affirmative) {
-            match submit_issue(token, title, body) {
+            let payload_file = zip_path.with_file_name("submit-payload.json");
+            match submit_issue(token, title, body, &payload_file) {
                 Some(url) => {
                     println!();
                     println!(
@@ -740,28 +802,34 @@ fn consent_granted(n: usize, answer: &str, affirmative: &str) -> bool {
 // POST a drive-profile issue to `freemkv/bdemu` via the GitHub Issues API.
 // Returns the `html_url` on success, `None` on any failure (caller falls
 // back to the manual print path). Uses `curl` to avoid an HTTP stack dep.
-fn submit_issue(token: &str, title: &str, body: &str) -> Option<String> {
+fn submit_issue(token: &str, title: &str, body: &str, payload_file: &Path) -> Option<String> {
     let payload = format!(
         r#"{{"title":"{}","body":"{}","labels":["drive-profile"]}}"#,
         json_escape(title),
         json_escape(body)
     );
+    // By file, not argv: a BD-sized payload overflows the OS argv/command-line limits.
+    std::fs::write(payload_file, payload).ok()?;
+    let response = run_submit_curl(token, &payload_file.to_string_lossy());
+    let _ = std::fs::remove_file(payload_file);
+    response
+}
 
+// Run the POST and pull the new issue's `html_url` out of the reply.
+fn run_submit_curl(token: &str, payload_file: &str) -> Option<String> {
     let mut child = std::process::Command::new(curl_program())
-        .args(curl_submit_args(&payload))
+        .args(curl_submit_args(payload_file))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
 
-    // Feed curl the Authorization header via a config file on stdin, so the
-    // bearer token never lands in argv (`ps`). Syntax is `header = "…"`; the
-    // token is opaque ASCII with no quotes, so no escaping. Handle drop ends it.
+    // The Authorization header goes in via a config file on stdin, never argv (`ps`).
     {
         use std::io::Write;
         let mut stdin = child.stdin.take()?;
-        let _ = writeln!(stdin, r#"header = "Authorization: token {token}""#);
+        let _ = stdin.write_all(curl_auth_config(token).as_bytes());
     }
 
     // Bounded read: never buffer more than the response cap, even if curl (or a
@@ -789,6 +857,12 @@ fn submit_issue(token: &str, title: &str, body: &str) -> Option<String> {
     }
     None
 }
+
+/// GitHub's hard cap on an issue body, in characters.
+pub(crate) const GITHUB_BODY_MAX_CHARS: usize = 65_536;
+
+/// What `--share` lets a body grow to: headroom under the cap for a browser's CRLF newlines.
+pub(crate) const BODY_INLINE_BUDGET_CHARS: usize = GITHUB_BODY_MAX_CHARS - 1_536;
 
 /// The repository `--share` files drive-profile issues against.
 const SUBMIT_REPO: &str = "freemkv/bdemu";
@@ -831,11 +905,17 @@ fn curl_program_from(system_root: Option<&str>) -> String {
     }
 }
 
+// The stdin curl config carrying the Authorization header. Syntax is `header = "…"`; the token
+// is opaque ASCII with no quotes, so no escaping.
+fn curl_auth_config(token: &str) -> String {
+    format!("header = \"Authorization: token {token}\"\n")
+}
+
 /// The exact `curl` argv the auto-submit POST runs, split out of `submit_issue` so it's
 /// testable without a real GitHub request. `-f` is deliberately NOT passed. The bearer token is
 /// deliberately NOT here: it is fed to curl as a config file on STDIN (see `submit_issue`) so
 /// it never appears in this process's argv (visible in `ps`).
-fn curl_submit_args(payload: &str) -> Vec<String> {
+fn curl_submit_args(payload_file: &str) -> Vec<String> {
     [
         "-s",
         "-X",
@@ -861,8 +941,8 @@ fn curl_submit_args(payload: &str) -> Vec<String> {
         "Accept: application/vnd.github+json",
         "-H",
         "User-Agent: freemkv-info",
-        "-d",
-        payload,
+        "--data-binary",
+        &format!("@{payload_file}"),
     ]
     .into_iter()
     .map(str::to_string)
@@ -872,7 +952,7 @@ fn curl_submit_args(payload: &str) -> Vec<String> {
 /// Minimal JSON string escaper for the issue payload (quotes, backslashes,
 /// newlines, and control chars). The body carries base64 + backticks, so a
 /// naive replace isn't enough.
-fn json_escape(s: &str) -> String {
+pub(crate) fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 16);
     for c in s.chars() {
         match c {
@@ -925,13 +1005,7 @@ pub(crate) fn zip_files(
 // not bookkeeping, it's what bounds the archive. See `zip_files`.
 pub(crate) fn save_bin(dir: &std::path::Path, name: &str, data: &[u8], written: &mut Vec<String>) {
     let path = dir.join(name);
-    // `name` may be a nested path (e.g. `BDMV/PLAYLIST/00800.mpls` from the disc
-    // structure capture); create its parent chain so the write can't fail on a
-    // missing directory. Flat names (the drive capture) have no parent to make.
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::write(&path, data) {
+    if let Err(e) = try_save_bin(dir, name, data) {
         // `error.cannot_write` already exists and already carries exactly
         // this pair — a second, English-only phrasing of the same failure is
         // the drift this catalog exists to prevent.
@@ -948,6 +1022,16 @@ pub(crate) fn save_bin(dir: &std::path::Path, name: &str, data: &[u8], written: 
         std::process::exit(1);
     }
     written.push(name.to_string());
+}
+
+// Write one capture file, creating its parent chain for a nested name
+// (`BDMV/PLAYLIST/00800.mpls`). `name` must already be vetted: it is joined as-is.
+pub(crate) fn try_save_bin(dir: &std::path::Path, name: &str, data: &[u8]) -> std::io::Result<()> {
+    let path = dir.join(name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, data)
 }
 
 fn hex_dump(data: &[u8]) -> String {
@@ -1253,6 +1337,53 @@ mod tests {
         assert_eq!(super::curl_program_from(None), "curl");
     }
 
+    // T14: the stdin curl config is exactly one `header = "…"` line carrying the token.
+    #[test]
+    fn the_auth_config_is_a_single_quoted_header_line() {
+        assert_eq!(
+            super::curl_auth_config("ghp_abc123"),
+            "header = \"Authorization: token ghp_abc123\"\n"
+        );
+    }
+
+    // L7: the whole body stays within GitHub's cap; a small zip is inlined, a big one is not.
+    #[test]
+    fn the_zip_is_inlined_only_when_the_body_fits() {
+        let footer = "---\nfooter\n";
+        let mut small = String::from("head\n");
+        assert!(super::push_zip_section(&mut small, "zip", "QUJD", footer));
+        assert!(small.contains("QUJD") && small.ends_with(footer), "{small}");
+
+        let mut big = String::from("head\n");
+        let b64 = "A".repeat(super::GITHUB_BODY_MAX_CHARS);
+        assert!(!super::push_zip_section(&mut big, "zip", &b64, footer));
+        assert!(big.chars().count() <= super::BODY_INLINE_BUDGET_CHARS);
+        // Headroom for CRLF: the budget body still fits after every `\n` becomes `\r\n`.
+        let mut edge = String::new();
+        let b64 = "A".repeat(super::BODY_INLINE_BUDGET_CHARS - 2_000);
+        if super::push_zip_section(&mut edge, "zip", &b64, footer) {
+            let crlf = edge.chars().count() + edge.matches('\n').count();
+            assert!(crlf <= super::GITHUB_BODY_MAX_CHARS, "{crlf}");
+        }
+        assert!(
+            big.contains("profile.zip") && big.ends_with(footer),
+            "{big}"
+        );
+    }
+
+    // L7: a real BD's payload is hundreds of KiB — as one argv element it is E2BIG on Linux
+    // and over the Windows command-line cap. The payload goes by FILE, never argv.
+    #[test]
+    fn the_payload_is_passed_by_file_not_argv() {
+        let args = super::curl_submit_args("/tmp/p/submit-payload.json");
+        let i = args
+            .iter()
+            .position(|a| a == "--data-binary")
+            .unwrap_or_else(|| panic!("no --data-binary: {args:?}"));
+        assert_eq!(args[i + 1], "@/tmp/p/submit-payload.json");
+        assert!(!args.iter().any(|a| a == "-d" || a == "--data"), "{args:?}");
+    }
+
     // The auto-submit POST is the LAST thing `--share` does; it shipped with no bound on
     // connect/total time/response size, so a stalled peer hung the command after the work was
     // already on disk.
@@ -1288,7 +1419,6 @@ mod tests {
             !args.iter().any(|a| a.contains("Authorization")),
             "the Authorization header must not appear in the argv: {args:?}"
         );
-        assert!(args.contains(&"{}".to_string()), "the payload: {args:?}");
         // Redirect-following is off (curl's default) and must stay off — the
         // request carries a bearer token.
         assert!(

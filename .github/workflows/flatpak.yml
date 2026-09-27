@@ -34,7 +34,9 @@ jobs:
         with: { path: checkouts/freemkv }
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - name: Snapshot matching candidate or release dependencies
         env:
           BUILD_REF: ${{ github.ref_name }}
@@ -63,7 +65,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51@sha256:78d969b18225ae107ca29497bf09c4a3f791e5f1838a9a912a529d0024fb6210
       options: --privileged
     steps:
       - uses: actions/download-artifact@v4
@@ -71,7 +73,7 @@ jobs:
       - name: Lint current manifest
         run: flatpak-builder-lint manifest flatpak-package/org.freemkv.FreeMKV.json
       - name: Build current package offline
-        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6
         with:
           bundle: freemkv.flatpak
           manifest-path: flatpak-package/org.freemkv.FreeMKV.json

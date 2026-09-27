@@ -195,6 +195,7 @@ pub fn run(args: Vec<String>) {
     // uses: a value-flag must not swallow a following positional URL or flag token
     // (e.g. `--language disc://` or `--language --verbose`) as if it were a language code.
     let (args, language, lang_diags) = strip_language_flag(&args);
+    let args = drop_process_serial(args);
     pending.extend(lang_diags);
     if let Some(lang) = language
         && !lang.eq_ignore_ascii_case("auto")
@@ -309,7 +310,7 @@ fn same_stream_url(a: &str, b: &str) -> bool {
 }
 
 /// Canonical form of a `scheme://rest` URL for equivalence checks: scheme
-/// lowercased, one trailing slash trimmed off the remainder. `None` for a
+/// lowercased, trailing slashes trimmed off the remainder. `None` for a
 /// schemeless token, which has no canonical form to compare.
 fn canon_url(s: &str) -> Option<String> {
     let (scheme, rest) = s.split_once("://")?;
@@ -320,6 +321,18 @@ fn canon_url(s: &str) -> Option<String> {
     ))
 }
 
+// Drop a leading macOS process serial (`-psn_0_<n>`, see `app_entry::is_process_serial`): the
+// app build already ignores it, and here it would only be taken for a source.
+fn drop_process_serial(mut args: Vec<String>) -> Vec<String> {
+    if args
+        .get(1)
+        .is_some_and(|a| freemkv::app_entry::is_process_serial(a))
+    {
+        args.remove(1);
+    }
+    args
+}
+
 // Pull --language/--lang and its value out of the argument list, with the same URL-value guard
 // as collect_urls.
 fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>, Vec<PendingDiag>) {
@@ -328,12 +341,11 @@ fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>, Vec<Pen
     let mut diags: Vec<PendingDiag> = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--language" || args[i] == "--lang" {
+        if freemkv::app_entry::LANGUAGE_FLAGS.contains(&args[i].as_str()) {
             match args.get(i + 1) {
-                // Same value-guard as `pipe::parse_flags`: a value is neither a
-                // URL nor a flag. Uses shared `is_flag_token` (a negative number
-                // is a value) not bare `starts_with('-')` — ONE rule everywhere.
-                Some(v) if !is_url(v) && !is_flag_token(v) => {
+                // Same value-guard as `pipe::parse_flags`, and the one the app build's
+                // `wants_gui` applies: a value is neither a URL nor a flag.
+                Some(v) if freemkv::app_entry::is_flag_value(v) => {
                     language = Some(v.clone());
                     i += 2;
                 }
@@ -410,11 +422,7 @@ pub(crate) const VALUE_FLAGS: &[&str] = &[
 // Whether a token is another FLAG, and so can never be a flag's value. The companion to the
 // scheme:// rule; ONE definition shared by both parsers.
 pub(crate) fn is_flag_token(s: &str) -> bool {
-    let mut rest = s.strip_prefix('-').unwrap_or("").chars();
-    match rest.next() {
-        None => false,
-        Some(c) => !c.is_ascii_digit(),
-    }
+    freemkv::app_entry::is_flag_token(s)
 }
 
 // Flags this CLI no longer accepts but which DID take a value; collect_urls still steps over
@@ -540,8 +548,8 @@ fn info_cmd(args: &[String]) {
         // was the one place that never learned this, so a folder used to fail here.
         libfreemkv::StreamUrl::Dir { path } | libfreemkv::StreamUrl::Iso { path } => {
             // `--share` on an image/folder captures the disc STRUCTURE profile
-            // (there is no drive here) — intercepted before the listing-flag
-            // parser, mirroring how `disc://` routes `--share` to `info::run`.
+            // (there is no drive here), mirroring how `disc://` routes `--share`
+            // to `info::run` — and with that route's flag parser.
             let share = args[1..].iter().any(|a| a == "--share" || a == "-s");
 
             // A folder needs scan_dir (which additionally decides the
@@ -554,6 +562,14 @@ fn info_cmd(args: &[String]) {
             };
 
             if share {
+                // Same parser as `disc:// --share`: unknown flags exit 1, `--help` prints help.
+                let flags = match crate::info::parse_drive_flags(&args[1..]) {
+                    crate::info::DriveParse::Ok(f) => f,
+                    crate::info::DriveParse::Help => return crate::info::print_share_help(),
+                    crate::info::DriveParse::Unknown(opt) => {
+                        crate::disc_info::reject_unknown_option(&opt)
+                    }
+                };
                 let (disc, mut reader) = match scan(
                     std::path::Path::new(path),
                     libfreemkv::ScanOptions::default(),
@@ -565,7 +581,7 @@ fn info_cmd(args: &[String]) {
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("disc");
-                crate::disc_capture::run(&disc, reader.as_mut(), label);
+                crate::disc_capture::run(&disc, reader.as_mut(), label, flags.quiet);
                 return;
             }
 
@@ -1331,8 +1347,8 @@ mod tests {
 #[cfg(test)]
 mod arg_tests {
     use super::{
-        PendingDiag, is_flag_token, is_url, parse_logging_flags, split_log_path,
-        strip_language_flag, wants_help,
+        PendingDiag, canon_url, drop_process_serial, is_flag_token, is_url, parse_logging_flags,
+        same_stream_url, split_log_path, strip_language_flag, wants_help,
     };
 
     fn v(items: &[&str]) -> Vec<String> {
@@ -1476,6 +1492,56 @@ mod arg_tests {
         );
         assert!(split_log_path("/").is_none(), "a root path has no filename");
         assert!(split_log_path("..").is_none());
+    }
+
+    // A macOS LaunchServices `-psn_0_<n>` is not a command: dropped when it leads, so it can
+    // never become a bogus source URL.
+    #[test]
+    fn a_leading_macos_process_serial_is_dropped_before_dispatch() {
+        assert_eq!(
+            drop_process_serial(v(&["freemkv", "-psn_0_42"])),
+            v(&["freemkv"])
+        );
+        assert_eq!(
+            drop_process_serial(v(&["freemkv", "-psn_0_42", "info"])),
+            v(&["freemkv", "info"])
+        );
+        let later = v(&["freemkv", "info", "-psn_0_42"]);
+        assert_eq!(drop_process_serial(later.clone()), later);
+        assert_eq!(drop_process_serial(v(&["freemkv"])), v(&["freemkv"]));
+        assert_eq!(drop_process_serial(Vec::new()), Vec::<String>::new());
+    }
+
+    // The single-URL `info` path drops the URL from its original slot by this comparison; a
+    // miss passes it twice and info_cmd rejects the duplicate.
+    #[test]
+    fn same_stream_url_ignores_scheme_case_and_trailing_slashes_only() {
+        assert!(same_stream_url("disc://", "disc://"));
+        assert!(same_stream_url("DISC://", "disc://"));
+        assert!(same_stream_url("disc://dev/sr0/", "disc://dev/sr0"));
+        assert!(same_stream_url("Iso://a.iso", "iso://a.iso/"));
+        // The path is case-sensitive; only the scheme folds.
+        assert!(!same_stream_url("iso://A.iso", "iso://a.iso"));
+        assert!(!same_stream_url("disc://dev/sr0", "disc://dev/sr1"));
+        assert!(!same_stream_url("iso://a.iso", "mkv://a.iso"));
+        // Schemeless tokens compare byte-for-byte only.
+        assert!(same_stream_url("-v", "-v"));
+        assert!(!same_stream_url("a.iso/", "a.iso"));
+        assert!(!same_stream_url("-v", "disc://"));
+    }
+
+    #[test]
+    fn canon_url_lowercases_the_scheme_and_trims_trailing_slashes() {
+        assert_eq!(canon_url("DISC://").as_deref(), Some("disc://"));
+        assert_eq!(
+            canon_url("Mkv://Out/Movie.mkv/").as_deref(),
+            Some("mkv://Out/Movie.mkv")
+        );
+        assert_eq!(
+            canon_url("disc://dev/sr0//").as_deref(),
+            Some("disc://dev/sr0")
+        );
+        assert_eq!(canon_url("no-scheme"), None);
     }
 
     /// The value guard: `--language` must not swallow a following stream URL.

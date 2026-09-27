@@ -55,6 +55,14 @@ permissions:
 # app (`--features gui`, adds the AppKit / winsafe / GTK4 shell). Every job that
 # compiles the crate on macOS, Windows or Linux-glibc covers BOTH builds;
 # `cli-has-no-ui-deps` proves the CLI build links no UI crate on any target.
+#
+# RELEASE-CANDIDATE-ONLY JOBS. dev is the FAST lane, so the macOS, Windows and
+# Intel jobs below (and cli-linux's release builds) run on qa and main rather
+# than on every push to dev. Nothing stops being checked before a release:
+# qa.yml independently covers macOS and Windows, and the jobs unique to this
+# file run here on qa and main. `if` SKIPS a job rather than queueing it; a
+# never-scheduled job would leave the run pending and the required checks
+# incomplete forever.
 jobs:
   # CI owns the changelog: main may never carry a released version without a
   # CHANGELOG.md entry for it. The release orchestrator dates an existing
@@ -91,17 +99,7 @@ jobs:
   # ── macOS: the whole crate, GUI shell included ─────────────────────────────
   # --all-targets so the tests and the AppKit shell are linted too.
   lint-macos:
-    # dev is the FAST lane: this job still runs, but on the release-candidate
-    # branches rather than on every push to dev. Nothing is deleted and no
-    # platform stops being checked before a release -- qa.yml independently
-    # covers macOS and Windows, and the jobs unique to this file (the Intel
-    # macOS build, the Windows release build) run here on qa and main. A push
-    # to dev is meant to be cheap and frequent; waiting on three runner pools
-    # to agree is what a release candidate is for.
-    #
-    # `if` SKIPS the job (it does not queue). A queued job would be far worse
-    # than a slow one: a never-scheduled job leaves the run pending forever, so
-    # the branch's required checks never report complete.
+    # qa/main only: see "RELEASE-CANDIDATE-ONLY JOBS" in the header.
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
@@ -113,8 +111,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: stable
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -129,17 +128,7 @@ jobs:
   # The disc-backed tests skip themselves when FMKV_TEST_ISO is unset, so
   # this runs the platform-neutral suite without needing media on the runner.
   test-macos:
-    # dev is the FAST lane: this job still runs, but on the release-candidate
-    # branches rather than on every push to dev. Nothing is deleted and no
-    # platform stops being checked before a release -- qa.yml independently
-    # covers macOS and Windows, and the jobs unique to this file (the Intel
-    # macOS build, the Windows release build) run here on qa and main. A push
-    # to dev is meant to be cheap and frequent; waiting on three runner pools
-    # to agree is what a release candidate is for.
-    #
-    # `if` SKIPS the job (it does not queue). A queued job would be far worse
-    # than a slow one: a never-scheduled job leaves the run pending forever, so
-    # the branch's required checks never report complete.
+    # qa/main only: see "RELEASE-CANDIDATE-ONLY JOBS" in the header.
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
@@ -151,7 +140,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -167,17 +158,7 @@ jobs:
   # `platform.rs` in particular has a `#[cfg(windows)]` `GetDiskFreeSpaceExW`
   # arm that no other job compiles, so nothing else can catch a regression.
   lint-windows:
-    # dev is the FAST lane: this job still runs, but on the release-candidate
-    # branches rather than on every push to dev. Nothing is deleted and no
-    # platform stops being checked before a release -- qa.yml independently
-    # covers macOS and Windows, and the jobs unique to this file (the Intel
-    # macOS build, the Windows release build) run here on qa and main. A push
-    # to dev is meant to be cheap and frequent; waiting on three runner pools
-    # to agree is what a release candidate is for.
-    #
-    # `if` SKIPS the job (it does not queue). A queued job would be far worse
-    # than a slow one: a never-scheduled job leaves the run pending forever, so
-    # the branch's required checks never report complete.
+    # qa/main only: see "RELEASE-CANDIDATE-ONLY JOBS" in the header.
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
@@ -189,8 +170,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: stable
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -206,17 +188,7 @@ jobs:
   # themselves when FMKV_TEST_ISO is unset). If a test needs editing to pass
   # on Windows, the Windows port has broken something — that is the signal.
   test-windows:
-    # dev is the FAST lane: this job still runs, but on the release-candidate
-    # branches rather than on every push to dev. Nothing is deleted and no
-    # platform stops being checked before a release -- qa.yml independently
-    # covers macOS and Windows, and the jobs unique to this file (the Intel
-    # macOS build, the Windows release build) run here on qa and main. A push
-    # to dev is meant to be cheap and frequent; waiting on three runner pools
-    # to agree is what a release candidate is for.
-    #
-    # `if` SKIPS the job (it does not queue). A queued job would be far worse
-    # than a slow one: a never-scheduled job leaves the run pending forever, so
-    # the branch's required checks never report complete.
+    # qa/main only: see "RELEASE-CANDIDATE-ONLY JOBS" in the header.
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
@@ -228,7 +200,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -242,17 +216,7 @@ jobs:
   # release-only failures are real (LTO, codegen-units, opt-level). Cheap
   # insurance that the artifact the release workflow zips actually links.
   release-build-windows:
-    # dev is the FAST lane: this job still runs, but on the release-candidate
-    # branches rather than on every push to dev. Nothing is deleted and no
-    # platform stops being checked before a release -- qa.yml independently
-    # covers macOS and Windows, and the jobs unique to this file (the Intel
-    # macOS build, the Windows release build) run here on qa and main. A push
-    # to dev is meant to be cheap and frequent; waiting on three runner pools
-    # to agree is what a release candidate is for.
-    #
-    # `if` SKIPS the job (it does not queue). A queued job would be far worse
-    # than a slow one: a never-scheduled job leaves the run pending forever, so
-    # the branch's required checks never report complete.
+    # qa/main only: see "RELEASE-CANDIDATE-ONLY JOBS" in the header.
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
@@ -264,7 +228,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -279,17 +245,7 @@ jobs:
   # runners are arm64, so a break would have surfaced at tag time, in the
   # release workflow, after the version bump and the tag push.
   build-macos-intel:
-    # dev is the FAST lane: this job still runs, but on the release-candidate
-    # branches rather than on every push to dev. Nothing is deleted and no
-    # platform stops being checked before a release -- qa.yml independently
-    # covers macOS and Windows, and the jobs unique to this file (the Intel
-    # macOS build, the Windows release build) run here on qa and main. A push
-    # to dev is meant to be cheap and frequent; waiting on three runner pools
-    # to agree is what a release candidate is for.
-    #
-    # `if` SKIPS the job (it does not queue). A queued job would be far worse
-    # than a slow one: a never-scheduled job leaves the run pending forever, so
-    # the branch's required checks never report complete.
+    # qa/main only: see "RELEASE-CANDIDATE-ONLY JOBS" in the header.
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
@@ -301,8 +257,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: stable
           targets: x86_64-apple-darwin
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -333,12 +290,16 @@ jobs:
             libgtk-4-dev \
             libadwaita-1-dev \
             build-essential
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
-          components: clippy
+          toolchain: stable
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
+      # The only rustfmt gate on dev and on pull requests.
+      - run: cargo fmt --check
+        working-directory: freemkv
       - run: cargo clippy --all-targets -- -D warnings
         working-directory: freemkv
       - run: cargo clippy --all-targets --features gui -- -D warnings
@@ -348,8 +309,10 @@ jobs:
       - run: cargo test --tests --features gui
         working-directory: freemkv
       - run: cargo build --release --bin freemkv
+        if: github.ref_name == 'qa' || github.ref_name == 'main'
         working-directory: freemkv
       - run: cargo build --release --features gui --bin freemkv
+        if: github.ref_name == 'qa' || github.ref_name == 'main'
         working-directory: freemkv
 
   # The CLI build must link no UI crate on any target. `--target all` resolves
@@ -365,7 +328,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - name: No gtk4/libadwaita/winsafe/objc2-app-kit without the gui feature
         working-directory: freemkv
         shell: bash
@@ -401,7 +366,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check advisories bans licenses sources
@@ -424,7 +391,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -469,13 +438,14 @@ jobs:
           }
           exit $rc
 
-  # ── Coverage: informational, tokenless Codecov upload ──────────────────────
+  # ── Coverage: informational Codecov upload ─────────────────────────────────
   # Additive, NON-REQUIRED. Mirrors the Linux CLI job's sibling-checkout layout
   # (this is not a monorepo) so cargo llvm-cov can resolve the freemkv crates
   # from their dev tips via the generated .cargo/config.toml. `--locked` is
   # intentionally omitted for the same reason the rest of this file omits it
   # (see the header note): the committed Cargo.lock describes a developer's
-  # machine, not a release. Uploads tokenless to Codecov and never fails CI.
+  # machine, not a release. Uploads with CODECOV_TOKEN (empty on forks, where
+  # Codecov falls back to its tokenless mode) and never fails CI.
   coverage:
     runs-on: ubuntu-latest
     steps:
@@ -491,13 +461,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: stable
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@6db3a280da9eee4283c045c7431ab5116f1a0089 # cargo-llvm-cov
       - run: cargo llvm-cov --workspace --features gui --ignore-run-fail --lcov --output-path lcov.info
         working-directory: freemkv
       - uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7

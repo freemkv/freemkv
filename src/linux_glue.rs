@@ -11,7 +11,7 @@
 //! stack page a `Page` is, whether a log redraw can append instead of rewrite.
 //! Anything that decides what the product DOES stays in `ui.rs`.
 
-use crate::ui::{Accel, Cmd, MenuAction, Page, Row};
+use crate::ui::{Accel, Cmd, LogKind, MenuAction, Page, Row};
 
 /// Every `gio` action the hamburger menu and the accelerators ride on, with
 /// the `MenuAction` it performs. One table so the action map, the menu model
@@ -68,6 +68,14 @@ pub fn gating_cmd(a: &MenuAction) -> Option<Cmd> {
     }
 }
 
+/// Whether an action gated by `gate` is live: the same rule `App::dispatch`
+/// applies first, so a greyed row is exactly a refused command. The drop
+/// target and the Open Disc button ask it for `Cmd::Open`.
+pub fn action_enabled(gate: Option<Cmd>, running: bool, opening: bool) -> bool {
+    let Some(cmd) = gate else { return true };
+    !(crate::ui::blocked_while_running(cmd) && (running || (opening && cmd != Cmd::Close)))
+}
+
 /// Spell a shared `Accel` the way `gtk_accelerator_parse` reads it:
 /// `<Primary>` (Ctrl on Linux), a lower-case letter even with Shift held, and
 /// a keysym name for punctuation, which the parser does not take literally.
@@ -92,16 +100,6 @@ pub fn accel_string(a: &Accel) -> String {
     };
     s.push_str(&key);
     s
-}
-
-/// One `$LC_ALL` / `$LANG` value as a BCP-47-ish tag, or `None` for the
-/// "no language" values. `en_US.UTF-8` → `en-US`; `de_DE@euro` → `de-DE`.
-pub fn parse_locale_env(v: &str) -> Option<String> {
-    if v.is_empty() || v == "C" || v == "POSIX" || v.starts_with("C.") {
-        return None;
-    }
-    let tag = v.split(['.', '@']).next().unwrap_or("").replace('_', "-");
-    (!tag.is_empty()).then_some(tag)
 }
 
 /// Whether a dropped path is something the app can open: a directory (an
@@ -156,13 +154,71 @@ pub fn tree_shape(rows: &[Row]) -> (Vec<usize>, Vec<Vec<usize>>) {
     (roots, kids)
 }
 
-/// Row identity, excluding tick state — same signature the other shells use
-/// to tell a real tree change from a tick-only redraw.
-pub fn rows_sig(rows: &[Row]) -> String {
-    rows.iter()
-        .map(|r| format!("{}|{}|{}|{}", r.index, r.depth, r.type_s, r.desc))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Row identity, excluding tick state — hashed in place like the Windows
+/// shell's, so a tick-only redraw allocates nothing.
+pub fn rows_sig(rows: &[Row]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    rows.len().hash(&mut h);
+    for r in rows {
+        (r.index, r.depth, &r.type_s, &r.desc).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// An explicit Open Disc, given the drives a worker enumerated off the UI
+/// thread: the log line and the URL to scan (`None` = no drive, stop). The
+/// same rule and wording as the core's `App::disc_source(true)`.
+pub fn disc_open_plan(drives: &[crate::engine::OpticalDrive]) -> (LogKind, String, Option<String>) {
+    use crate::strings::{fmt_or, get_or, sanitize_display};
+    match drives {
+        [] => (
+            LogKind::Notice,
+            get_or(
+                "gui.log.no_drive",
+                "No optical drive found. Connect a Blu-ray/DVD drive with a disc.",
+            ),
+            None,
+        ),
+        [d] => (
+            LogKind::Detail,
+            fmt_or(
+                "gui.log.opening_drive",
+                "Opening {label} ({device})",
+                &[
+                    ("label", &sanitize_display(&d.label)),
+                    ("device", &d.device),
+                ],
+            ),
+            Some(format!("disc://{}", d.device)),
+        ),
+        _ => {
+            let list = drives
+                .iter()
+                .map(|d| format!("{} ({})", sanitize_display(&d.label), d.device))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let n = drives.len().to_string();
+            (
+                LogKind::Detail,
+                fmt_or(
+                    "gui.log.drives_found",
+                    "{n} drives found: {list} — using the one with a disc",
+                    &[("n", &n), ("list", &list)],
+                ),
+                Some("disc://".to_string()),
+            )
+        }
+    }
+}
+
+/// A keydb worker's outcome as a log line: a failure in the Notice style,
+/// never the success one.
+pub fn keydb_update_line(r: Result<String, String>) -> (LogKind, String) {
+    match r {
+        Ok(m) => (LogKind::Result, m),
+        Err(e) => (LogKind::Notice, e),
+    }
 }
 
 /// What the log pane last showed: the core's sequence number of its first
@@ -325,20 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn locale_env_values_parse_to_tags() {
-        assert_eq!(parse_locale_env("en_US.UTF-8").as_deref(), Some("en-US"));
-        assert_eq!(
-            parse_locale_env("de_DE.UTF-8@euro").as_deref(),
-            Some("de-DE")
-        );
-        assert_eq!(parse_locale_env("pt_BR").as_deref(), Some("pt-BR"));
-        assert!(parse_locale_env("C").is_none());
-        assert!(parse_locale_env("C.UTF-8").is_none());
-        assert!(parse_locale_env("POSIX").is_none());
-        assert!(parse_locale_env("").is_none());
-    }
-
-    #[test]
     fn a_drop_accepts_folders_and_source_files_in_any_case_only() {
         let dir = std::env::temp_dir();
         assert!(is_openable_source(&dir));
@@ -410,6 +452,74 @@ mod tests {
         assert_eq!(rows_sig(&a), rows_sig(&b));
         b[1].desc = "other".into();
         assert_ne!(rows_sig(&a), rows_sig(&b));
+    }
+
+    #[test]
+    fn the_row_signature_sees_every_identity_field_and_the_row_count() {
+        let a = vec![row(0, 0, "Disc"), row(1, 1, "Title"), row(2, 1, "Title")];
+        let changed: [fn(&mut Vec<Row>); 5] = [
+            |v| v[1].index = 7,
+            |v| v[1].depth = 2,
+            |v| v[1].type_s = "Audio".into(),
+            |v| {
+                v.pop();
+            },
+            |v| v.swap(1, 2),
+        ];
+        for (i, change) in changed.iter().enumerate() {
+            let mut b = a.clone();
+            change(&mut b);
+            assert_ne!(rows_sig(&a), rows_sig(&b), "change #{i} went unnoticed");
+        }
+    }
+
+    #[test]
+    fn the_menu_gate_matches_the_core_dispatch_rule() {
+        for (_, ma) in ACTIONS {
+            let gate = gating_cmd(ma);
+            assert!(
+                action_enabled(gate, false, false),
+                "{ma:?} greyed while idle"
+            );
+        }
+        let open = Some(Cmd::Open);
+        assert!(!action_enabled(open, true, false));
+        // A drop or Open Disc mid-scan would be silently refused by the core.
+        assert!(!action_enabled(open, false, true));
+        assert!(action_enabled(Some(Cmd::Close), false, true));
+        assert!(!action_enabled(Some(Cmd::Close), true, false));
+        assert!(action_enabled(Some(Cmd::ToggleLog), true, true));
+        assert!(action_enabled(None, true, true));
+    }
+
+    #[test]
+    fn open_disc_names_one_drive_autodetects_several_and_stops_on_none() {
+        let drive = |d: &str| crate::engine::OpticalDrive {
+            device: d.into(),
+            label: "HL-DT-ST\u{202e} BD".into(),
+        };
+        let (k, _, url) = disc_open_plan(&[]);
+        assert_eq!((k, url), (LogKind::Notice, None));
+        let (k, line, url) = disc_open_plan(&[drive("/dev/sr0")]);
+        assert_eq!(
+            (k, url.as_deref()),
+            (LogKind::Detail, Some("disc:///dev/sr0"))
+        );
+        assert!(
+            line.contains("/dev/sr0") && !line.contains('\u{202e}'),
+            "{line}"
+        );
+        let (_, line, url) = disc_open_plan(&[drive("/dev/sr0"), drive("/dev/sr1")]);
+        assert_eq!(url.as_deref(), Some("disc://"));
+        assert!(line.contains("/dev/sr1"), "{line}");
+    }
+
+    #[test]
+    fn a_failed_keydb_update_is_logged_as_a_notice() {
+        let (k, m) = keydb_update_line(Err("Download failed: x".into()));
+        assert_eq!((k, m.as_str()), (LogKind::Notice, "Download failed: x"));
+        let (k, _) = keydb_update_line(Ok("keydb updated".into()));
+        assert_eq!(k, LogKind::Result);
     }
 
     #[test]

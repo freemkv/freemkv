@@ -10,7 +10,7 @@ use gtk4::{gio, glib};
 use crate::linux_glue as glue;
 use crate::ui::{Check, Row};
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 type RowFn = Rc<dyn Fn(usize)>;
@@ -28,6 +28,8 @@ pub(super) struct TitleTree {
     rows: Rc<RefCell<Vec<Row>>>,
     kids: Rc<RefCell<Vec<Vec<usize>>>>,
     bound: Rc<RefCell<Vec<Bound>>>,
+    /// Scroll fraction still to apply after the next layout.
+    scroll_to: Rc<Cell<Option<f64>>>,
 }
 
 fn row_index(item: Option<glib::Object>) -> Option<usize> {
@@ -174,6 +176,7 @@ impl TitleTree {
             rows,
             kids,
             bound,
+            scroll_to: Rc::default(),
         }
     }
 
@@ -205,20 +208,36 @@ impl TitleTree {
         // All rows are expanded, so display position == flat index. GTK 4.10
         // has no `scroll_to`; rows are uniform, so the adjustment is exact enough.
         let at = crate::ui::first_visible_row(rows).unwrap_or(0);
-        let adj = self.widget.vadjustment();
-        adj.set_value(0.0);
+        self.widget.vadjustment().set_value(0.0);
         let n = rows.len().max(1) as f64;
-        glib::idle_add_local_once(move || {
-            if at > 0 {
-                adj.set_value(adj.upper() * at as f64 / n);
-            }
+        self.scroll_to.set((at > 0).then(|| at as f64 / n));
+        let pending = self.scroll_to.clone();
+        // `upper` is only right once the new model is laid out: wait for the
+        // next frame's after-paint, then read the latest pending target.
+        self.widget.add_tick_callback(move |w, clock| {
+            let (w, pending) = (w.clone(), pending.clone());
+            let slot: Rc<Cell<Option<glib::SignalHandlerId>>> = Rc::default();
+            let own = slot.clone();
+            let id = clock.connect_after_paint(move |c| {
+                if let Some(frac) = pending.take() {
+                    let adj = w.vadjustment();
+                    adj.set_value(adj.upper() * frac);
+                }
+                if let Some(id) = own.take() {
+                    c.disconnect(id);
+                }
+            });
+            slot.set(Some(id));
+            glib::ControlFlow::Break
         });
     }
 
     /// Ticks only: repaint the bound boxes in place, keeping expansion,
     /// selection and scroll position.
     pub(super) fn sync_checks(&self, rows: &[Row]) {
-        *self.rows.borrow_mut() = rows.to_vec();
+        for (mine, r) in self.rows.borrow_mut().iter_mut().zip(rows) {
+            mine.check = r.check;
+        }
         for b in self.bound.borrow().iter() {
             let (Some(cb), Some(state)) =
                 (b.check.upgrade(), rows.get(b.idx).and_then(|r| r.check))

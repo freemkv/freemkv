@@ -17,8 +17,9 @@ use std::rc::Rc;
 /// What was last painted — never model state, only "has this changed?".
 #[derive(Default)]
 pub(super) struct Memo {
-    rows: String,
+    rows: Option<u64>,
     formats: String,
+    detail: String,
     log: LogMemo,
 }
 
@@ -45,6 +46,8 @@ pub(super) struct MainView {
     log_view: gtk::TextView,
     log_end: gtk::TextMark,
     tags: [gtk::TextTag; 3],
+    /// On the process-wide StyleManager, so it must go with this view.
+    dark_handler: std::cell::Cell<Option<glib::SignalHandlerId>>,
 }
 
 fn g(key: &str) -> String {
@@ -231,7 +234,10 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     titles.set_end_child(Some(&right));
     titles.set_shrink_start_child(false);
     titles.set_shrink_end_child(false);
-    // The other shells' 46.4 % tree share of the default window width.
+    // The other shells' 46.4 % tree share of the default width; with both
+    // children resizable GtkPaned keeps that proportion as the window resizes.
+    titles.set_resize_start_child(true);
+    titles.set_resize_end_child(true);
     titles.set_position(540);
     titles.set_vexpand(true);
     stack.add_named(&titles, Some(glue::page_name(crate::ui::Page::Titles)));
@@ -299,10 +305,7 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     done.add_css_class("pill");
     done.add_css_class("suggested-action");
     let me = shell.clone();
-    done.connect_clicked(move |_| {
-        let fx = me.app_mut(|a| a.dismiss_result());
-        me.perform(fx);
-    });
+    done.connect_clicked(move |_| me.apply(|a| a.dismiss_result()));
     let result_btns = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     result_btns.set_halign(gtk::Align::Center);
     result_btns.append(&reveal);
@@ -333,7 +336,7 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
     let style = adw::StyleManager::default();
     paint_tags(&tags, style.is_dark());
     let dark_tags = tags.clone();
-    style.connect_dark_notify(move |s| paint_tags(&dark_tags, s.is_dark()));
+    let dark_handler = style.connect_dark_notify(move |s| paint_tags(&dark_tags, s.is_dark()));
     let log_end = buf.create_mark(None, &buf.end_iter(), false);
     let log_scroll = gtk::ScrolledWindow::builder()
         .child(&log_view)
@@ -368,18 +371,18 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
         log_view,
         log_end,
         tags,
+        dark_handler: std::cell::Cell::new(Some(dark_handler)),
     })
 }
 
-fn set_buffer_text(tv: &gtk::TextView, text: &str) {
-    let buf = tv.buffer();
-    let (s, e) = buf.bounds();
-    if buf.text(&s, &e, false) != text {
-        buf.set_text(text);
-    }
-}
-
 impl MainView {
+    /// Disconnect from the shared StyleManager before this view is dropped.
+    pub(super) fn detach(&self) {
+        if let Some(id) = self.dark_handler.take() {
+            adw::StyleManager::default().disconnect(id);
+        }
+    }
+
     /// Assign the view. Computes nothing the core already decided.
     pub(super) fn render(&self, v: &View, memo: &mut Memo) {
         self.stack.set_visible_child_name(glue::page_name(v.page));
@@ -389,13 +392,17 @@ impl MainView {
         self.log_scroll.set_visible(!v.log_hidden);
 
         let sig = glue::rows_sig(&v.title_rows);
-        if memo.rows != sig {
+        if memo.rows != Some(sig) {
             self.tree.rebuild(&v.title_rows);
-            memo.rows = sig;
+            memo.rows = Some(sig);
         } else {
             self.tree.sync_checks(&v.title_rows);
         }
-        set_buffer_text(&self.detail, &v.detail);
+        // Read-only buffer: only this writes it, so the memo is the truth.
+        if memo.detail != v.detail {
+            self.detail.buffer().set_text(&v.detail);
+            memo.detail.clone_from(&v.detail);
+        }
 
         if self.out_entry.text() != v.output_dir {
             self.out_entry.set_text(&v.output_dir);

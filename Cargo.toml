@@ -4,7 +4,7 @@ version = "1.7.7"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
-description = "Desktop UI for freemkv"
+description = "freemkv disc ripper: command-line tool, plus the desktop app with the gui feature"
 
 [lib]
 name = "freemkv"

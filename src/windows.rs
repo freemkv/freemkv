@@ -589,17 +589,19 @@ struct Shell {
     about: About,
 
     memo: Rc<RefCell<Memo>>,
-    /// The last rip-finished toast, kept so its click handler outlives `perform`.
-    toast: Rc<RefCell<Option<windows::UI::Notifications::ToastNotification>>>,
-    /// Worker threads push user-visible lines here; a main-thread timer drains
-    /// it. Win32 windows are owned by the thread that created them, so nothing
-    /// else may touch a control.
-    inbox: Arc<Mutex<Vec<String>>>,
+    /// Recent rip-finished toasts, kept so each one's click handler outlives
+    /// `perform` while it can still be clicked in the Action Center.
+    toasts: Rc<RefCell<Vec<windows::UI::Notifications::ToastNotification>>>,
+    /// Worker threads push user-visible lines here, with the log style they
+    /// earn; a main-thread timer drains it. Win32 windows are owned by the
+    /// thread that created them, so nothing else may touch a control.
+    inbox: Arc<Mutex<Vec<(LogKind, String)>>>,
 }
 
 impl Shell {
     fn new() -> Self {
         let settings = crate::settings::Settings::load();
+        let menus = win_menus();
 
         // No window exists yet, so only the system DPI is available. Sizes below
         // are placeholders (`relayout` fixes them on first `WM_SIZE`), but the
@@ -622,8 +624,8 @@ impl Shell {
                 | co::WS::MINIMIZEBOX
                 | co::WS::MAXIMIZEBOX
                 | co::WS::SIZEBOX,
-            menu: build_menu().unwrap_or(w::HMENU::NULL),
-            accel_table: build_accels().ok(),
+            menu: build_menu(&menus).unwrap_or(w::HMENU::NULL),
+            accel_table: build_accels(&menus).ok(),
             ..Default::default()
         });
 
@@ -941,7 +943,7 @@ impl Shell {
             prefs,
             about,
             memo: Rc::new(RefCell::new(Memo::default())),
-            toast: Rc::new(RefCell::new(None)),
+            toasts: Rc::new(RefCell::new(Vec::new())),
             inbox: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -985,224 +987,67 @@ fn idm_for_action(action: &crate::ui::MenuAction) -> Option<u16> {
     })
 }
 
-/// Render an [`Accel`] as a Windows menu suffix ("Ctrl+O", "F1", "Alt+F4").
-/// `primary` is Ctrl on Windows.
-fn accel_suffix(a: &crate::ui::Accel) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    if a.primary {
-        parts.push("Ctrl");
-    }
-    if a.alt {
-        parts.push("Alt");
-    }
-    if a.shift {
-        parts.push("Shift");
-    }
-    let key = if a.key.len() == 1 {
-        a.key.to_ascii_uppercase()
-    } else {
-        a.key.to_string()
-    };
-    parts.push(&key);
-    parts.join("+")
+/// The Windows menu plan for the current locale. Built once per call and fed
+/// to both [`build_menu`] and [`build_accels`], so hint and key can't drift.
+fn win_menus() -> Vec<crate::win_menu::WinMenu> {
+    crate::win_menu::win_menus(
+        &crate::ui::menu_layout(false),
+        &crate::strings::get("gui.menu.exit"),
+    )
 }
 
-fn item_text(label: &str, accel: Option<&crate::ui::Accel>) -> String {
-    match accel {
-        Some(a) => format!("{label}\t{}", accel_suffix(a)),
-        None => label.to_string(),
-    }
-}
-
-/// The Windows convention: no App menu — About lives at the bottom of Help,
-/// Settings + Exit at the bottom of File. Everything else follows
-/// [`crate::ui::menu_layout`] as-is, so adding a menu item is one edit in
-/// `ui.rs` and the Windows bar picks it up automatically.
-fn build_menu() -> w::SysResult<w::HMENU> {
-    use crate::ui::{Cmd, MenuAction, MenuEntry, MenuGroupId};
-
-    let layout = crate::ui::menu_layout(false);
-    let group = |id: MenuGroupId| layout.iter().find(|g| g.id == id);
-
-    // Convert a MenuEntry to a Windows `MenuItem::Entry` if it has an IDM,
-    // else fall through (skips Cut/Paste and any layout-only decoration).
-    // Separators pass through.
-    fn append_entries(
-        menu: &w::HMENU,
-        entries: &[MenuEntry],
-        skip: &[MenuAction],
-    ) -> w::SysResult<()> {
-        for entry in entries {
-            match entry {
-                MenuEntry::Separator => {
-                    menu.append_item(&[w::MenuItem::Separator])?;
-                }
-                MenuEntry::Item(mi) => {
-                    if skip.contains(&mi.action) {
-                        continue;
-                    }
-                    let Some(idm) = idm_for_action(&mi.action) else {
-                        continue;
-                    };
-                    let text = item_text(&mi.label, mi.accel.as_ref());
-                    menu.append_item(&[w::MenuItem::Entry {
-                        cmd_id: idm,
-                        text: &text,
-                    }])?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    // File — base entries, then Sep + Settings + Sep + Exit (App-group items
-    // Windows promotes here per convention). Exit gets its own text/accel
-    // ("gui.menu.exit" + Alt+F4) — the one documented per-platform override.
-    let file = w::HMENU::CreatePopupMenu()?;
-    let file_grp = group(MenuGroupId::File).expect("File group must be in menu_layout");
-    append_entries(&file, &file_grp.entries, &[])?;
-    file.append_item(&[w::MenuItem::Separator])?;
-    let app_grp = group(MenuGroupId::App).expect("App group must be in menu_layout");
-    for entry in &app_grp.entries {
-        let MenuEntry::Item(mi) = entry else { continue };
-        if mi.action == MenuAction::Cmd(Cmd::Settings) {
-            let text = item_text(&mi.label, mi.accel.as_ref());
-            file.append_item(&[w::MenuItem::Entry {
-                cmd_id: IDM_SETTINGS,
-                text: &text,
-            }])?;
-        }
-    }
-    file.append_item(&[w::MenuItem::Separator])?;
-    file.append_item(&[w::MenuItem::Entry {
-        cmd_id: IDM_EXIT,
-        text: &format!("{}\tAlt+F4", crate::strings::get("gui.menu.exit")),
-    }])?;
-
-    // Edit — Cut and Paste are skipped on Windows (no wired handler).
-    let edit = w::HMENU::CreatePopupMenu()?;
-    let edit_grp = group(MenuGroupId::Edit).expect("Edit group must be in menu_layout");
-    append_entries(
-        &edit,
-        &edit_grp.entries,
-        &[MenuAction::StandardCut, MenuAction::StandardPaste],
-    )?;
-
-    // View — as-is. The log toggle's text is state-dependent and rebuilt on
-    // toggle by `Shell::sync_log_menu_title`, so the built-once label here
-    // is the initial "Hide log" (log starts visible).
-    let view = w::HMENU::CreatePopupMenu()?;
-    let view_grp = group(MenuGroupId::View).expect("View group must be in menu_layout");
-    for entry in &view_grp.entries {
-        match entry {
-            MenuEntry::Separator => {
-                view.append_item(&[w::MenuItem::Separator])?;
-            }
-            MenuEntry::Item(mi) if mi.action == MenuAction::Cmd(Cmd::ToggleLog) => {
-                view.append_item(&[w::MenuItem::Entry {
-                    cmd_id: IDM_TOGGLE_LOG,
-                    text: &log_menu_text(&crate::ui::log_menu_label(false)),
-                }])?;
-            }
-            MenuEntry::Item(mi) => {
-                if let Some(idm) = idm_for_action(&mi.action) {
-                    let text = item_text(&mi.label, mi.accel.as_ref());
-                    view.append_item(&[w::MenuItem::Entry {
-                        cmd_id: idm,
-                        text: &text,
-                    }])?;
-                }
-            }
-        }
-    }
-
-    // Help — base entries, then Sep + About (promoted from App group).
-    let help = w::HMENU::CreatePopupMenu()?;
-    let help_grp = group(MenuGroupId::Help).expect("Help group must be in menu_layout");
-    append_entries(&help, &help_grp.entries, &[])?;
-    help.append_item(&[w::MenuItem::Separator])?;
-    for entry in &app_grp.entries {
-        let MenuEntry::Item(mi) = entry else { continue };
-        if mi.action == MenuAction::Cmd(Cmd::About) {
-            let text = item_text(&mi.label, mi.accel.as_ref());
-            help.append_item(&[w::MenuItem::Entry {
-                cmd_id: IDM_ABOUT,
-                text: &text,
-            }])?;
-        }
-    }
-
+/// The menu bar from [`crate::win_menu::win_menus`]: adding a menu item is one
+/// edit in `ui.rs`. Items with no Windows command id are left off.
+fn build_menu(menus: &[crate::win_menu::WinMenu]) -> w::SysResult<w::HMENU> {
+    use crate::win_menu::WinEntry;
     let bar = w::HMENU::CreateMenu()?;
-    let title =
-        |id: MenuGroupId| -> String { group(id).map(|g| g.title.clone()).unwrap_or_default() };
-    bar.append_item(&[
-        w::MenuItem::Submenu {
-            submenu: &file,
-            text: &title(MenuGroupId::File),
-        },
-        w::MenuItem::Submenu {
-            submenu: &edit,
-            text: &title(MenuGroupId::Edit),
-        },
-        w::MenuItem::Submenu {
-            submenu: &view,
-            text: &title(MenuGroupId::View),
-        },
-        w::MenuItem::Submenu {
-            submenu: &help,
-            text: &title(MenuGroupId::Help),
-        },
-    ])?;
+    for m in menus {
+        let popup = w::HMENU::CreatePopupMenu()?;
+        for e in &m.entries {
+            match e {
+                WinEntry::Separator => popup.append_item(&[w::MenuItem::Separator])?,
+                WinEntry::Item { action, text, .. } => {
+                    if let Some(cmd_id) = idm_for_action(action) {
+                        popup.append_item(&[w::MenuItem::Entry { cmd_id, text }])?;
+                    }
+                }
+            }
+        }
+        bar.append_item(&[w::MenuItem::Submenu {
+            submenu: &popup,
+            text: &m.title,
+        }])?;
+    }
     Ok(bar)
 }
 
-/// Ctrl-based accelerators, plus F1 for help — the Windows conventions. Alt+F4
-/// is handled by the system, so it needs no entry.
-fn build_accels() -> w::SysResult<w::guard::DestroyAcceleratorTableGuard> {
-    let ctrl = co::ACCELF::CONTROL | co::ACCELF::VIRTKEY;
-    let vk = co::ACCELF::VIRTKEY;
-    w::HACCEL::CreateAcceleratorTable(&[
-        w::ACCEL {
-            fVirt: ctrl,
-            key: co::VK::CHAR_O,
-            cmd: IDM_OPEN,
-        },
-        w::ACCEL {
-            fVirt: ctrl,
-            key: co::VK::CHAR_D,
-            cmd: IDM_OPEN_DISC,
-        },
-        w::ACCEL {
-            fVirt: ctrl,
-            key: co::VK::CHAR_W,
-            cmd: IDM_CLOSE,
-        },
-        w::ACCEL {
-            fVirt: ctrl,
-            key: co::VK::CHAR_R,
-            cmd: IDM_START_RIP,
-        },
-        w::ACCEL {
-            fVirt: ctrl,
-            key: co::VK::CHAR_E,
-            cmd: IDM_EJECT,
-        },
-        w::ACCEL {
-            fVirt: ctrl,
-            key: co::VK::CHAR_L,
-            cmd: IDM_TOGGLE_LOG,
-        },
-        w::ACCEL {
-            fVirt: ctrl,
-            key: co::VK::CHAR_K,
-            cmd: IDM_CLEAR_LOG,
-        },
-        w::ACCEL {
-            fVirt: vk,
-            key: co::VK::F1,
-            cmd: IDM_DOCS,
-        },
-    ])
+/// The accelerator table, derived from the same plan as the menu so every
+/// shortcut it shows works. Alt+F4 is handled by the system.
+fn build_accels(
+    menus: &[crate::win_menu::WinMenu],
+) -> w::SysResult<w::guard::DestroyAcceleratorTableGuard> {
+    let accels: Vec<w::ACCEL> = crate::win_menu::accel_table(menus)
+        .into_iter()
+        .filter_map(|(action, k)| {
+            let mut f = co::ACCELF::VIRTKEY;
+            for (on, flag) in [
+                (k.ctrl, co::ACCELF::CONTROL),
+                (k.shift, co::ACCELF::SHIFT),
+                (k.alt, co::ACCELF::ALT),
+            ] {
+                if on {
+                    f |= flag;
+                }
+            }
+            Some(w::ACCEL {
+                fVirt: f,
+                // SAFETY: a plain virtual-key value; no pointer or handle involved.
+                key: unsafe { co::VK::from_raw(k.vk) },
+                cmd: idm_for_action(&action)?,
+            })
+        })
+        .collect();
+    w::HACCEL::CreateAcceleratorTable(&accels)
 }
 
 // ── layout ────────────────────────────────────────────────────────────────
@@ -1562,7 +1407,8 @@ impl Shell {
         if changed {
             self.rebuild_tree(&v.title_rows);
             self.memo.borrow_mut().rows = sig;
-        } else {
+        } else if p == Page::Titles {
+            // A hidden tree needs no ticks; the next Titles render syncs them.
             self.sync_tree_states(&v.title_rows);
         }
         let _ = self.detail.set_text(&crlf(&v.detail));
@@ -1725,6 +1571,8 @@ fn reveal_in_explorer(p: &str) -> std::io::Result<()> {
 
 /// The AppUserModelID the process runs under and toasts are sent as.
 const APP_ID: &str = "org.freemkv.FreeMKV";
+/// How many rip-finished toasts stay clickable: the Action Center's per-app cap.
+const TOASTS_KEPT: usize = 20;
 
 // An unpackaged exe can only toast under an AUMID registered here (or on a
 // Start-menu shortcut); `CreateToastNotifierWithId` fails silently otherwise.
@@ -1742,12 +1590,12 @@ fn register_toast_app_id() -> w::SysResult<()> {
     )
 }
 
-/// Show the rip-finished toast; clicking it reveals `output_dir`. The caller
+/// Show the rip-finished toast; clicking it reveals `output_dir`, if any. The caller
 /// keeps the returned toast alive so its `Activated` handler stays wired.
 fn show_rip_toast(
     title: &str,
     body: &str,
-    output_dir: &str,
+    output_dir: Option<&str>,
 ) -> windows::core::Result<windows::UI::Notifications::ToastNotification> {
     use windows::UI::Notifications::{
         ToastNotification, ToastNotificationManager, ToastTemplateType,
@@ -1760,11 +1608,15 @@ fn show_rip_toast(
         slots.Item(i as u32)?.AppendChild(&node)?;
     }
     let toast = ToastNotification::CreateToastNotification(&xml)?;
-    let dir = output_dir.to_owned();
-    toast.Activated(&windows::Foundation::TypedEventHandler::new(move |_, _| {
-        let _ = reveal_in_explorer(&dir);
-        Ok(())
-    }))?;
+    if let Some(dir) = output_dir.map(str::to_owned) {
+        // Runs off the UI thread, so the log pane is out of reach: trace it instead.
+        toast.Activated(&windows::Foundation::TypedEventHandler::new(move |_, _| {
+            if let Err(e) = reveal_in_explorer(&dir) {
+                tracing::warn!("toast click could not open {dir} in Explorer: {e}");
+            }
+            Ok(())
+        }))?;
+    }
     ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID))?.Show(&toast)?;
     Ok(toast)
 }
@@ -1854,7 +1706,7 @@ impl Shell {
                             .ShellExecute("open", &u, None, None, co::SW::SHOWNORMAL);
                 }
                 Effect::ShowSettings => self.prefs.show(&self.settings.borrow()),
-                Effect::ShowAbout => self.about.show(),
+                Effect::ShowAbout => self.about.show(&self.settings.borrow()),
                 Effect::StartTicking => {
                     Self::report_timer_failure(&self.wnd, TIMER_TICK, TICK_MS);
                 }
@@ -1879,11 +1731,16 @@ impl Shell {
                     let shown = register_toast_app_id()
                         .map_err(|e| e.to_string())
                         .and_then(|()| {
-                            show_rip_toast(&title, &body, &output_dir)
+                            show_rip_toast(&title, &body, output_dir.as_deref())
                                 .map_err(|e| e.message().to_string())
                         });
                     match shown {
-                        Ok(t) => *self.toast.borrow_mut() = Some(t),
+                        Ok(t) => {
+                            let mut kept = self.toasts.borrow_mut();
+                            kept.push(t);
+                            let over = kept.len().saturating_sub(TOASTS_KEPT);
+                            kept.drain(..over);
+                        }
                         Err(e) => tracing::warn!("rip-finished toast failed: {e}"),
                     }
                 }
@@ -2124,7 +1981,8 @@ impl Shell {
         // The rip poller and the worker-message drain.
         let me = self.clone();
         self.wnd.on().wm_timer(TIMER_TICK, move || {
-            let fx = me.app_mut(|a| a.tick());
+            // Not `app_mut`: `perform` always ends in the one render a tick needs.
+            let fx = me.app.borrow_mut().tick();
             me.perform(fx);
             Ok(())
         });
@@ -2307,7 +2165,7 @@ impl Shell {
         // RECOVER a poisoned inbox rather than returning (see macOS `onDrain:`):
         // returning stranded `set_keydb_updating(false)` and skipped KillTimer,
         // leaving a 5 Hz timer running for the process's life on a dead lock.
-        let msgs: Vec<String> = self
+        let msgs: Vec<(LogKind, String)> = self
             .inbox
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2316,12 +2174,12 @@ impl Shell {
         if msgs.is_empty() {
             return;
         }
-        for m in &msgs {
-            self.app_mut(|a| a.say(LogKind::Result, m));
+        for (kind, m) in &msgs {
+            self.app_mut(|a| a.say(*kind, m));
         }
         // Surface the keydb outcome in the Settings note so the user sees the
         // result in place, not only in the (possibly hidden) log.
-        if let Some(last) = msgs.last() {
+        if let Some((_, last)) = msgs.last() {
             self.prefs.set_keydb_note(last);
         }
         self.prefs.set_keydb_updating(false);
@@ -2731,6 +2589,13 @@ impl Prefs {
         r.gap();
         checks.push(("keep_iso", r.check(&g("gui.set.keep_iso"))));
         checks.push(("auto_eject", r.check(&g("gui.set.auto_eject"))));
+        checks.push((
+            "notify_when_rip_finished",
+            r.check(&crate::strings::get_or(
+                "gui.set.notify_when_rip_finished",
+                "Notify when a rip finishes",
+            )),
+        ));
 
         // ── Selection ── engine Job.selection
         let mut r = Rows::new(&pages[1], dpi);
@@ -2778,7 +2643,6 @@ impl Prefs {
         r.note(&g("gui.set.raw_note"));
         r.gap();
         checks.push(("force", r.check(&g("gui.set.overwrite"))));
-        r.note(&g("gui.set.capture_note"));
 
         // ── Keys ── keydb + the online key service
         let mut r = Rows::new(&pages[3], dpi);
@@ -3163,7 +3027,12 @@ impl About {
         let _ = self.btn_close.hwnd().SetWindowText(&g("gui.btn.close"));
     }
 
-    fn show(&self) {
+    fn show(&self, st: &crate::settings::Settings) {
+        // Values are re-read on every open: the keydb row changes with Update,
+        // with `keydb_path`, and with its age.
+        for (l, (_, v)) in self.lbl_vals.iter().zip(&about_rows(st)) {
+            let _ = l.hwnd().SetWindowText(v);
+        }
         let _ = self.wnd.hwnd().ShowWindow(co::SW::SHOW);
         self.relayout();
         self.wnd.hwnd().SetForegroundWindow();
@@ -3363,11 +3232,17 @@ impl Prefs {
                 // disabled and TIMER_DRAIN firing forever (`drain()` stops on batch).
                 let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     match crate::settings::update_keydb(&url, &path) {
-                        Ok(m) => m,
-                        Err(e) => e,
+                        Ok(m) => (LogKind::Result, m),
+                        // A failure is a Notice, never logged in the success style.
+                        Err(e) => (LogKind::Notice, e),
                     }
                 }))
-                .unwrap_or_else(|_| "keydb update failed — internal error".to_string());
+                .unwrap_or_else(|_| {
+                    (
+                        LogKind::Notice,
+                        "keydb update failed — internal error".to_string(),
+                    )
+                });
                 // RECOVER rather than skip the push (see macOS's identical worker).
                 inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
             });
@@ -3472,7 +3347,7 @@ impl Shell {
         // does not free the old `HMENU`, so it must be destroyed by hand or it
         // leaks on every language change.
         let old_bar = self.wnd.hwnd().GetMenu();
-        if let Ok(bar) = build_menu() {
+        if let Ok(bar) = build_menu(&win_menus()) {
             let _ = self.wnd.hwnd().SetMenu(&bar);
             let _ = self.wnd.hwnd().DrawMenuBar();
             if let Some(mut old) = old_bar {
@@ -3841,6 +3716,20 @@ impl Shell {
             self.drive_log() == log_text(&v.log),
             format!("log pane holds {:?}", self.drive_log()),
         );
+        // An ordinary tick APPENDS (EM_REPLACESEL at the end), not a rebuild:
+        // drive that path on the real EDIT control and compare again.
+        let shown = self.memo.borrow().log;
+        let plan = log_plan(shown, v.log_first, v.log.len() + 2);
+        self.app_mut(|a| {
+            a.say(LogKind::Detail, "widget check: appended line");
+            a.say(LogKind::Notice, "widget check: appended notice");
+        });
+        let after = self.app.borrow().view();
+        check(
+            "widget-log-append-matches-the-rendered-lines",
+            matches!(plan, LogPlan::Append(_)) && self.drive_log() == log_text(&after.log),
+            format!("plan {plan:?}; log pane holds {:?}", self.drive_log()),
+        );
         check(
             "widget-log-is-readonly-and-selectable",
             self.log.hwnd().style().has(co::WS::TABSTOP),
@@ -4153,7 +4042,7 @@ impl Shell {
             &format!("{shot_dir}/10-settings.bmp"),
         );
         self.prefs.hide();
-        self.about.show();
+        self.about.show(&self.settings.borrow());
         pump(250);
         let _ = snapshot(self.about.wnd.hwnd(), &format!("{shot_dir}/11-about.bmp"));
         self.about.hide();
@@ -4437,7 +4326,7 @@ impl Shell {
                 }
                 unsafe { self.prefs.wnd.hwnd().raw_copy() }
             } else {
-                self.about.show();
+                self.about.show(&self.settings.borrow());
                 unsafe { self.about.wnd.hwnd().raw_copy() }
             };
             pump(600);

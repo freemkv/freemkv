@@ -32,6 +32,8 @@ path = [
     "**/*.ico",
     "**/*.plist",
     "**/*.manifest",
+    "**/*.xml",
+    "**/*.desktop",
     "**/.gitignore",
     ".gitignore",
     "Makefile",
@@ -41,3 +43,10 @@ path = [
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Matthew Jackson & Contributors"
 SPDX-License-Identifier = "MIT"
+
+# The AppStream metainfo declares <metadata_license>CC0-1.0</metadata_license>.
+[[annotations]]
+path = "packaging/flatpak/org.freemkv.FreeMKV.metainfo.xml"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Matthew Jackson & Contributors"
+SPDX-License-Identifier = "CC0-1.0"

@@ -67,8 +67,10 @@ pub(crate) struct Shell {
     drain: RefCell<Option<glib::SourceId>>,
     /// Worker threads (keydb update) push lines here; a main-loop timer
     /// drains them, because GTK objects never cross threads.
-    inbox: Arc<Mutex<Vec<String>>>,
+    inbox: Arc<Mutex<Vec<(LogKind, String)>>>,
     keydb_updating: Cell<bool>,
+    /// An Open Disc's drive enumeration is in flight.
+    finding_drives: Cell<bool>,
     quit_confirmed: Cell<bool>,
     /// True while `render` writes to widgets, so the change signals those
     /// writes emit are not mistaken for the user.
@@ -117,6 +119,7 @@ fn build_ui(gapp: &adw::Application) {
         drain: RefCell::new(None),
         inbox: Arc::new(Mutex::new(Vec::new())),
         keydb_updating: Cell::new(false),
+        finding_drives: Cell::new(false),
         quit_confirmed: Cell::new(false),
         painting: Cell::new(false),
         prefs: RefCell::new(None),
@@ -164,11 +167,17 @@ impl Shell {
         r
     }
 
+    /// Mutate the model for effects and perform them; `perform` repaints
+    /// once at the end, so this never paints twice.
+    fn apply(self: &Rc<Self>, f: impl FnOnce(&mut App) -> Vec<Effect>) {
+        let fx = f(&mut self.app.borrow_mut());
+        self.perform(fx);
+    }
+
     /// The shell's entire job: hand the command to the core, perform what it
     /// asks for, redraw.
     fn act(self: &Rc<Self>, cmd: Cmd) {
-        let fx = self.app_mut(|a| a.dispatch(cmd));
-        self.perform(fx);
+        self.apply(|a| a.dispatch(cmd));
     }
 
     fn say(self: &Rc<Self>, kind: LogKind, text: &str) {
@@ -176,20 +185,38 @@ impl Shell {
     }
 
     fn open_path(self: &Rc<Self>, path: &str) {
-        let fx = self.app_mut(|a| a.open_async(path));
-        self.perform(fx);
+        self.apply(|a| a.open_async(path));
     }
 
-    /// Drive discovery and indexing run inside the scan worker.
+    /// The launch probe enumerates nothing here. An explicit Open Disc lists
+    /// drives on a worker (a SCSI walk), then logs and opens as macOS/Windows.
     fn open_disc(self: &Rc<Self>, announce_missing: bool) {
-        let fx = self.app_mut(|a| {
-            if announce_missing {
-                a.open_async("disc://")
-            } else {
-                a.open_probe("disc://")
-            }
+        if !announce_missing {
+            self.apply(|a| match a.disc_source(false) {
+                Some(url) => a.open_probe(&url),
+                None => vec![],
+            });
+            return;
+        }
+        let ok = {
+            let a = self.app.borrow();
+            glue::action_enabled(Some(Cmd::Open), a.running(), a.opening())
+        };
+        if !ok || self.finding_drives.replace(true) {
+            return;
+        }
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            let drives = gio::spawn_blocking(crate::engine::list_optical_drives)
+                .await
+                .unwrap_or_default();
+            me.finding_drives.set(false);
+            let (kind, line, url) = glue::disc_open_plan(&drives);
+            me.apply(|a| {
+                a.say(kind, &line);
+                url.map_or_else(Vec::new, |u| a.open_async(&u))
+            });
         });
-        self.perform(fx);
     }
 
     fn select_row(self: &Rc<Self>, idx: usize) {
@@ -226,8 +253,7 @@ impl Shell {
             *self.menu_label.borrow_mut() = v.log_menu_label.clone();
         }
         for (action, gate) in self.actions.borrow().iter() {
-            let blocked = gate.is_some_and(crate::ui::blocked_while_running);
-            action.set_enabled(!(blocked && (running || (opening && *gate != Some(Cmd::Close)))));
+            action.set_enabled(glue::action_enabled(*gate, running, opening));
         }
     }
 
@@ -248,10 +274,24 @@ impl Shell {
                 }
                 Effect::Reveal(p) => self.reveal(&p),
                 Effect::OpenUrl(u) => {
+                    let me = self.clone();
                     gtk::UriLauncher::new(&u).launch(
                         Some(&self.window),
                         gio::Cancellable::NONE,
-                        |_| {},
+                        move |r| {
+                            if let Err(e) = r
+                                && !e.matches(gtk::DialogError::Dismissed)
+                            {
+                                me.say(
+                                    LogKind::Notice,
+                                    &crate::strings::fmt_or(
+                                        "gui.log.open_url_failed",
+                                        "Could not open {url}: {e}",
+                                        &[("url", &u), ("e", &e.to_string())],
+                                    ),
+                                );
+                            }
+                        },
                     );
                 }
                 Effect::ShowSettings => prefs::show(self, None),
@@ -266,7 +306,7 @@ impl Shell {
                     title,
                     body,
                     output_dir,
-                } => self.notify_finished(&title, &body, &output_dir),
+                } => self.notify_finished(&title, &body, output_dir.as_deref()),
                 Effect::Quit => self.window.close(),
                 Effect::Redraw => {}
             }
@@ -280,8 +320,7 @@ impl Shell {
         }
         let me = self.clone();
         let id = glib::timeout_add_local(Duration::from_millis(TICK_MS), move || {
-            let fx = me.app_mut(|a| a.tick());
-            me.perform(fx);
+            me.apply(App::tick);
             glib::ControlFlow::Continue
         });
         *self.tick.borrow_mut() = Some(id);
@@ -300,7 +339,7 @@ impl Shell {
 
     /// The native chooser (`GtkFileDialog`, portal-backed under Flatpak).
     /// Asynchronous, unlike the other shells' modal panels, so the answer
-    /// arrives in `on_pick`; a dismissed dialog calls nothing.
+    /// arrives in `on_pick`; a dismissed dialog calls nothing, a failure logs.
     fn pick(
         self: &Rc<Self>,
         folder: bool,
@@ -334,10 +373,25 @@ impl Shell {
             dlg.set_filters(Some(&filters));
             dlg.set_default_filter(Some(&media));
         }
+        let me = self.clone();
         let done = move |r: Result<gio::File, glib::Error>| {
-            if let Some(p) = r.ok().and_then(|f| f.path()) {
-                on_pick(p.to_string_lossy().into_owned());
-            }
+            let msg = match r {
+                Ok(f) => match f.path() {
+                    Some(p) => return on_pick(p.to_string_lossy().into_owned()),
+                    None => crate::strings::fmt_or(
+                        "gui.log.pick_not_local",
+                        "Only local files and folders can be used: {p}",
+                        &[("p", &f.uri())],
+                    ),
+                },
+                Err(e) if e.matches(gtk::DialogError::Dismissed) => return,
+                Err(e) => crate::strings::fmt_or(
+                    "gui.log.pick_failed",
+                    "Could not open the file chooser: {e}",
+                    &[("e", &e.to_string())],
+                ),
+            };
+            me.say(LogKind::Notice, &msg);
         };
         if folder {
             dlg.select_folder(Some(&self.window), gio::Cancellable::NONE, done);
@@ -367,23 +421,26 @@ impl Shell {
         });
     }
 
-    /// In-window toast (with a "show" button) plus a desktop notification via
-    /// the XDG portal. Clicking either reveals THIS rip's output folder.
-    fn notify_finished(self: &Rc<Self>, title: &str, body: &str, output_dir: &str) {
+    /// In-window toast plus a desktop notification via the XDG portal. With an
+    /// output folder, both offer to reveal THIS rip's folder; without, neither does.
+    fn notify_finished(self: &Rc<Self>, title: &str, body: &str, output_dir: Option<&str>) {
         let action = format!("app.{}", glue::REVEAL_ACTION);
-        let target = output_dir.to_variant();
         let show = show_folder_label();
 
         let toast = adw::Toast::new(&glib::markup_escape_text(title));
-        toast.set_button_label(Some(&show));
-        toast.set_action_name(Some(&action));
-        toast.set_action_target_value(Some(&target));
-        self.toast_overlay.add_toast(toast);
-
+        // Plain body: GTK's backend and the portal take plain text; only
+        // markup-parsing fdo servers (Plasma, dunst) may misrender a `&`.
         let n = gio::Notification::new(title);
         n.set_body(Some(body));
-        n.set_default_action_and_target_value(&action, Some(&target));
-        n.add_button_with_target_value(&show, &action, Some(&target));
+        if let Some(dir) = output_dir {
+            let target = dir.to_variant();
+            toast.set_button_label(Some(&show));
+            toast.set_action_name(Some(&action));
+            toast.set_action_target_value(Some(&target));
+            n.set_default_action_and_target_value(&action, Some(&target));
+            n.add_button_with_target_value(&show, &action, Some(&target));
+        }
+        self.toast_overlay.add_toast(toast);
         self.gapp.send_notification(Some("rip-finished"), &n);
     }
 
@@ -452,7 +509,7 @@ impl Shell {
         }
         let me = self.clone();
         let id = glib::timeout_add_local(Duration::from_millis(TICK_MS), move || {
-            let msgs: Vec<String> = me
+            let msgs: Vec<(LogKind, String)> = me
                 .inbox
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -461,10 +518,10 @@ impl Shell {
             if msgs.is_empty() {
                 return glib::ControlFlow::Continue;
             }
-            for m in &msgs {
-                me.say(LogKind::Result, m);
+            for (kind, m) in &msgs {
+                me.say(*kind, m);
             }
-            if let Some(last) = msgs.last() {
+            if let Some((_, last)) = msgs.last() {
                 me.set_keydb_note(last);
             }
             me.set_keydb_updating(false);
@@ -477,6 +534,9 @@ impl Shell {
     /// Build (or, after a language switch, rebuild) the window's content and
     /// menu in the active locale, then repaint everything from the model.
     fn relocalize(self: &Rc<Self>) {
+        if let Some(old) = self.main.borrow_mut().take() {
+            old.detach();
+        }
         let m = main_view::build(self);
         self.toast_overlay.set_child(Some(&m.root));
         *self.main.borrow_mut() = Some(m);
@@ -537,11 +597,15 @@ impl Shell {
         });
 
         // Dropping a file or folder on the window opens it, as on macOS and
-        // Windows. Refused mid-rip by the core's rule for Open.
+        // Windows. Refused mid-rip or mid-scan by the core's rule for Open.
         let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
         let me = self.clone();
         drop.connect_drop(move |_, value, _, _| {
-            if me.app.borrow().running() && crate::ui::blocked_while_running(Cmd::Open) {
+            let (running, opening) = {
+                let a = me.app.borrow();
+                (a.running(), a.opening())
+            };
+            if !glue::action_enabled(Some(Cmd::Open), running, opening) {
                 return false;
             }
             let Some(path) = value
@@ -650,16 +714,6 @@ fn build_menu_model(log_hidden: bool) -> gio::Menu {
     menu
 }
 
-/// Best-effort `$LC_ALL` / `$LANG` for the "Auto" language setting. Same role
-/// as `mac::system_locale_code` / `windows::system_locale_code`.
-pub fn system_locale_code() -> Option<String> {
-    ["LC_ALL", "LANG"].iter().find_map(|var| {
-        std::env::var(var)
-            .ok()
-            .and_then(|v| glue::parse_locale_env(&v))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,6 +735,24 @@ mod tests {
         }
         for (name, _) in glue::ACTIONS {
             assert!(actions.contains(&format!("app.{name}")), "{name} missing");
+        }
+    }
+
+    // GTK's own keysym table (no display needed), not a character-class guess.
+    #[test]
+    fn every_layout_accelerator_names_a_real_gdk_key() {
+        const MODS: [&str; 3] = ["<Primary>", "<Alt>", "<Shift>"];
+        for group in crate::ui::menu_layout(false) {
+            for entry in group.entries {
+                let MenuEntry::Item(mi) = entry else { continue };
+                let Some(a) = mi.accel else { continue };
+                let s = glue::accel_string(&a);
+                let mut key = s.as_str();
+                while let Some(m) = MODS.iter().find(|m| key.starts_with(**m)) {
+                    key = &key[m.len()..];
+                }
+                assert!(gdk::Key::from_name(key).is_some(), "{s}: no GDK key {key}");
+            }
         }
     }
 }

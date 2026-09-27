@@ -52,6 +52,8 @@ pub mod ui;
 // The Windows shell's DPI→geometry arithmetic. Not `cfg(windows)` on purpose:
 // gating it would make its unit tests unrunnable anywhere but Windows.
 pub mod win_layout;
+// The Windows menu bar and accelerator table as data, ungated for the same reason.
+pub mod win_menu;
 // The GTK shell's toolkit-free glue, ungated for the same reason.
 pub mod linux_glue;
 
@@ -63,8 +65,9 @@ pub mod win_app;
 #[cfg(all(feature = "gui", target_os = "windows"))]
 pub mod windows;
 
-// ── GTK4 + libadwaita shell — LINUX GLIBC ONLY ───────────────────────────── Symmetric with
-// the Windows shell above; the musl CLI skips (Cargo.toml dep gate matches).
+// ── GTK4 + libadwaita shell — LINUX GLIBC ONLY ──────────────────────────────
+// Symmetric with the Windows shell above; the musl CLI skips (Cargo.toml dep
+// gate matches).
 #[cfg(all(feature = "gui", target_os = "linux", target_env = "gnu"))]
 pub mod linux;
 #[cfg(all(feature = "gui", target_os = "linux", target_env = "gnu"))]

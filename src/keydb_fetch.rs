@@ -46,10 +46,10 @@ const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 /// bytes are the raw response body (plain text, `.zip`, or `.gz`) — hand them
 /// to `freemkv_keysources::KeydbSource::save` for verify + atomic save.
 pub fn fetch(url: &str) -> Result<Vec<u8>> {
-    // An SSRF rejection (or a malformed/unsupported URL) surfaces as a connect
-    // failure — the request never leaves the host. The user sees the localized
-    // E8000 "could not connect" message keyed on the host.
-    let pinned = resolve_and_guard(url).map_err(|_| Error::KeydbConnect { host: host_of(url) })?;
+    let pinned = resolve_and_guard(url).map_err(|r| {
+        tracing::warn!(host = %host_of(url), reason = %r, "keydb URL refused before connecting");
+        r.into_error(url)
+    })?;
     let agent = hardened_agent(pinned);
     let resp = agent.get(url).call().map_err(|e| map_ureq_err(url, &e))?;
     read_capped(resp.into_body().into_reader(), MAX_BODY_BYTES).map_err(|e| cap_error(&e, url))
@@ -86,6 +86,41 @@ fn read_capped(r: impl std::io::Read, cap: u64) -> std::result::Result<Vec<u8>, 
         return Err(CapError::TooLarge);
     }
     Ok(buf)
+}
+
+// Why [`resolve_and_guard`] refused a URL. A policy refusal must not read as a dead server.
+#[derive(Debug)]
+enum Refusal {
+    /// Not `http://` / `https://`; carries the scheme.
+    Scheme(String),
+    /// The host resolved to a non-public address (the SSRF guard).
+    Blocked(IpAddr),
+    /// No usable host, or it did not resolve: a connect-class failure.
+    Unreachable(String),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::Scheme(s) => write!(f, "unsupported scheme '{s}'"),
+            Refusal::Blocked(ip) => write!(f, "refusing non-public address {ip} (SSRF guard)"),
+            Refusal::Unreachable(why) => f.write_str(why),
+        }
+    }
+}
+
+impl Refusal {
+    // E8006's text is "uses an address type that isn't supported ({detail})", which fits a
+    // refused scheme and a refused address alike; there is no keydb-specific SSRF code.
+    fn into_error(self, url: &str) -> Error {
+        match self {
+            Refusal::Scheme(scheme) => Error::KeydbUnsupportedScheme { scheme },
+            Refusal::Blocked(ip) => Error::KeydbUnsupportedScheme {
+                scheme: ip.to_string(),
+            },
+            Refusal::Unreachable(_) => Error::KeydbConnect { host: host_of(url) },
+        }
+    }
 }
 
 /// Map a `ureq` transport/HTTP error to a libfreemkv keydb error so the CLI
@@ -257,6 +292,9 @@ fn hardened_agent_with_timeouts(
         .timeout_connect(Some(connect))
         .timeout_recv_response(Some(response))
         .timeout_recv_body(Some(budget))
+        // Never the env proxy: PinnedResolver would answer the proxy's lookup with the keydb
+        // server's address, and a real proxy re-resolves the host, bypassing the guard.
+        .proxy(None)
         .build();
     // `with_parts`, never `new_with_config` — see [`PinnedResolver`].
     // DefaultConnector opens the (TLS) socket; IdleReCapConnector wraps its
@@ -322,32 +360,35 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
 }
 
 /// Resolve `url`'s host and validate every resulting address against the SSRF
-/// guard. Returns the pinned socket addresses on success, or an error string
-/// on rejection.
-fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, String> {
+/// guard. Returns the pinned socket addresses on success, or why it refused.
+fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, Refusal> {
+    let no_route = |why: &str| Refusal::Unreachable(why.to_string());
     let (rest, default_port) = if let Some(r) = url.strip_prefix("https://") {
         (r, 443u16)
     } else if let Some(r) = url.strip_prefix("http://") {
         (r, 80u16)
     } else {
-        return Err("URL must start with http:// or https://".into());
+        return Err(match url.split_once("://") {
+            Some((scheme, _)) if !scheme.is_empty() => Refusal::Scheme(scheme.to_string()),
+            _ => no_route("URL must start with http:// or https://"),
+        });
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let authority = authority.rsplit('@').next().unwrap_or(authority);
     if authority.is_empty() {
-        return Err("URL has no host".into());
+        return Err(no_route("URL has no host"));
     }
     let (host, port): (String, u16) = if let Some(stripped) = authority.strip_prefix('[') {
         match stripped.split_once(']') {
             Some((h, after)) => {
                 let p = after
                     .strip_prefix(':')
-                    .map(|s| s.parse::<u16>().map_err(|_| "invalid port".to_string()))
+                    .map(|s| s.parse::<u16>().map_err(|_| no_route("invalid port")))
                     .transpose()?
                     .unwrap_or(default_port);
                 (h.to_string(), p)
             }
-            None => return Err("malformed IPv6 host".into()),
+            None => return Err(no_route("malformed IPv6 host")),
         }
     } else if let Some((h, p)) = authority.rsplit_once(':') {
         match p.parse::<u16>() {
@@ -358,7 +399,7 @@ fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, String> 
         (authority.to_string(), default_port)
     };
     if host.is_empty() {
-        return Err("URL has no host".into());
+        return Err(no_route("URL has no host"));
     }
     // Bounded DNS: resolution runs on its own thread; we stop WAITING after
     // `DNS_TIMEOUT` without joining (can't cancel a parked resolver thread). Cap
@@ -373,7 +414,7 @@ fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, String> 
         // window where concurrent callers could all pass the check together.
         if DNS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed) >= MAX_DNS_IN_FLIGHT {
             DNS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
-            return Err("DNS resolution timed out".into());
+            return Err(no_route("DNS resolution timed out"));
         }
         let host = host.clone();
         let (tx, rx) = mpsc::channel();
@@ -389,19 +430,16 @@ fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, String> 
         });
         match rx.recv_timeout(DNS_TIMEOUT) {
             Ok(Ok(addrs)) => addrs,
-            Ok(Err(e)) => return Err(format!("could not resolve host: {e}")),
-            Err(_) => return Err("DNS resolution timed out".into()),
+            Ok(Err(e)) => return Err(Refusal::Unreachable(format!("could not resolve host: {e}"))),
+            Err(_) => return Err(no_route("DNS resolution timed out")),
         }
     };
     if addrs.is_empty() {
-        return Err("host did not resolve to any address".into());
+        return Err(no_route("host did not resolve to any address"));
     }
     for a in &addrs {
         if is_blocked_ip(&a.ip()) {
-            return Err(format!(
-                "refusing to connect to non-public address {} (SSRF guard)",
-                a.ip()
-            ));
+            return Err(Refusal::Blocked(a.ip()));
         }
     }
     Ok(addrs)
@@ -758,6 +796,58 @@ mod tests {
         // Explicit port honored.
         let addrs = resolve_and_guard("https://1.1.1.1:8443/k").expect("explicit port");
         assert_eq!(addrs[0].port(), 8443);
+    }
+
+    // A policy refusal must not read as a dead server (E8000 "cannot connect"). Literal
+    // addresses and a bad scheme are refused before any socket or DNS lookup.
+    #[test]
+    fn a_guard_refusal_is_not_reported_as_could_not_connect() {
+        let ip = format!("{}.{}.{}.{}", 192, 168, 1, 10);
+        let lan = fetch(&format!("http://{ip}/keydb.zip")).unwrap_err();
+        assert!(
+            matches!(&lan, Error::KeydbUnsupportedScheme { scheme } if *scheme == ip),
+            "an SSRF refusal must name the refused address, got {lan:?}"
+        );
+        let ftp = fetch("ftp://example.com/k").unwrap_err();
+        assert!(
+            matches!(&ftp, Error::KeydbUnsupportedScheme { scheme } if scheme == "ftp"),
+            "got {ftp:?}"
+        );
+        assert_eq!(ftp.code(), 8006);
+        // Not a URL at all: there is no scheme to name, so it stays E8000.
+        assert!(matches!(
+            fetch("not a url").unwrap_err(),
+            Error::KeydbConnect { .. }
+        ));
+    }
+
+    // ureq 3 defaults to `Proxy::try_from_env()`, and PinnedResolver would answer the proxy's
+    // lookup with the keydb server's address. Checked in a child so no test mutates the env.
+    #[test]
+    fn the_keydb_agent_never_uses_an_environment_proxy() {
+        const CHILD: &str = "FMKV_KEYDB_PROXY_CHILD";
+        const NAME: &str = "keydb_fetch::tests::the_keydb_agent_never_uses_an_environment_proxy";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(
+                hardened_agent(Vec::new()).config().proxy().is_none(),
+                "the pinned agent picked up a proxy from the environment"
+            );
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([NAME, "--exact", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("ALL_PROXY", "http://proxy.example:3128")
+            .env("HTTPS_PROXY", "http://proxy.example:3128")
+            .env("HTTP_PROXY", "http://proxy.example:3128")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "child run failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

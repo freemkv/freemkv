@@ -1,5 +1,6 @@
 import gzip
 import hashlib
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -90,6 +91,22 @@ class PackageTests(unittest.TestCase):
             files = {str(p.relative_to(root)) for p in root.rglob('*') if p.is_file() and 'DEBIAN' not in p.parts}
             sums = {line.split('  ', 1)[1] for line in (root / 'DEBIAN/md5sums').read_text().splitlines()}
             self.assertEqual(files, sums)
+
+    def test_modes_do_not_depend_on_the_builder_umask(self):
+        for package in build.PACKAGES:
+            with tempfile.TemporaryDirectory() as temp:
+                base = Path(temp)
+                binary = base / 'binary'
+                binary.write_bytes(b'fixture executable')
+                root = base / 'package'
+                old = os.umask(0o002)
+                try:
+                    build.stage(binary, root, '1.7.7', '', 1790380800, 'notices\n', package)
+                finally:
+                    os.umask(old)
+                for path in [root, *root.rglob('*')]:
+                    want = 0o755 if path.is_dir() or path == root / 'usr/bin/freemkv' else 0o644
+                    self.assertEqual(path.stat().st_mode & 0o777, want, f'{package}: {path.relative_to(root)}')
 
     def test_prerelease_is_an_upstream_version_in_metadata(self):
         with tempfile.TemporaryDirectory() as temp:

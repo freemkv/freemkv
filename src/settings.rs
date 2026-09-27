@@ -15,10 +15,9 @@ pub struct Settings {
     /// Eject the disc when the rip finishes reading it (mirrors autorip's
     /// `auto_eject`; default on).
     pub auto_eject: bool,
-    /// Fire a native desktop notification when a rip completes. Default on.
-    /// Absent from older settings files → serde's `default` fills `true` via
-    /// `bool_true()` below so an upgrade doesn't silently disable it.
-    #[serde(default = "bool_true")]
+    /// Fire a native desktop notification when a rip completes. Default on;
+    /// a file from before the field gets `true` via the container's
+    /// `#[serde(default)]` (`Settings::default()`).
     pub notify_when_rip_finished: bool,
     // Selection
     pub selection: String,
@@ -109,13 +108,6 @@ impl Default for Settings {
 
 fn home() -> PathBuf {
     crate::platform::home_dir()
-}
-
-/// Serde `default` helper: bool fields that should default to `true` when
-/// missing from an older settings file. `#[serde(default)]` on a bool defaults
-/// to `false`, which would silently opt users out of features they had on.
-fn bool_true() -> bool {
-    true
 }
 
 /// Per-OS writable state directory — see `platform::support_dir`. Kept as a
@@ -263,6 +255,7 @@ impl Settings {
         match key {
             "keep_iso" => self.keep_iso,
             "auto_eject" => self.auto_eject,
+            "notify_when_rip_finished" => self.notify_when_rip_finished,
             "raw" => self.raw,
             "force" => self.force,
             _ => false,
@@ -298,6 +291,7 @@ impl Settings {
         match key {
             "keep_iso" => self.keep_iso = v,
             "auto_eject" => self.auto_eject = v,
+            "notify_when_rip_finished" => self.notify_when_rip_finished = v,
             "raw" => self.raw = v,
             "force" => self.force = v,
             _ => {}
@@ -820,10 +814,8 @@ mod normalize_tests {
     // separate functions from what `platform.rs`'s own tests exercise, so
     // each could regress to `Default::default()` (e.g. `settings_path()` == "").
 
-    /// The notification opt-out must be a NEW default, so an upgraded
-    /// settings file doesn't silently lose it. `#[serde(default)]` on a
-    /// bool defaults to `false`; this test pins the `bool_true` helper
-    /// so a rename or removal can't quietly regress it.
+    /// An upgraded settings file must not silently lose the notification:
+    /// the absent field comes from `Settings::default()`, not bool's `false`.
     #[test]
     fn a_settings_file_from_before_notifications_still_opts_in_after_upgrade() {
         let s: Settings = serde_json::from_str("{}").expect("empty JSON must parse");
@@ -903,7 +895,13 @@ mod normalize_tests {
         s.set("not_a_key", "x".into());
         assert_eq!(s.get("not_a_key"), "");
 
-        for key in ["keep_iso", "auto_eject", "raw", "force"] {
+        for key in [
+            "keep_iso",
+            "auto_eject",
+            "notify_when_rip_finished",
+            "raw",
+            "force",
+        ] {
             s.set_bool(key, true);
             assert!(s.get_bool(key), "{key} did not round-trip as true");
             s.set_bool(key, false);

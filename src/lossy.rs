@@ -139,6 +139,19 @@ mod tests {
         assert_eq!(lost_mb(1_073_741_824), "1024.00");
     }
 
+    /// Undelivered streams are not an MP4 problem: an mkv/m2ts loss must not
+    /// be told its tracks "can't be stored in an MP4".
+    #[test]
+    fn the_undelivered_header_does_not_blame_mp4_for_other_containers() {
+        crate::strings::set_locale("en");
+        for target in ["/out/movie.mkv", "/out/movie.m2ts"] {
+            let lines = lossy_lines(&outcome(vec![0], 0, 0), target);
+            assert_eq!(lines.len(), 2, "header and the track: {lines:?}");
+            assert!(!lines[0].to_lowercase().contains("mp4"), "{lines:?}");
+            assert!(lines[0].contains('1'), "the count is named: {lines:?}");
+        }
+    }
+
     /// `errors` without a byte count is still a loss the user must see.
     #[test]
     fn a_skip_event_with_no_byte_total_still_reports() {

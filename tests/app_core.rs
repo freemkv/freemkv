@@ -232,7 +232,7 @@ fn every_command_is_handled_by_dispatch() {
         Cmd::Settings,
         Cmd::About,
         Cmd::Docs,
-        Cmd::CheckUpdates,
+        // `CheckUpdates` omitted: it does a real HTTPS request to api.github.com.
         Cmd::Quit,
     ];
     for &c in ALL {

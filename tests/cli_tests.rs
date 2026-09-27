@@ -549,3 +549,51 @@ fn info_on_a_disc_folder_rejects_an_unknown_flag() {
         "the rejection must name the flag, got: {combined}"
     );
 }
+
+// `info iso:// | dir:// --share` parses its flags like `disc:// --share`: an unknown
+// flag exits 1 naming it, and `--help` prints help instead of capturing.
+#[test]
+fn info_share_on_a_folder_rejects_an_unknown_flag() {
+    let s = Scratch::new("info_share_flag");
+    let root = bdmv_folder(&s, "backup");
+    let out = freemkv()
+        .current_dir(&s.0)
+        .args([
+            "info",
+            &format!("dir://{}", root.display()),
+            "--share",
+            "--bogus",
+        ])
+        .output()
+        .expect("failed to run");
+    let combined = combined_output(&out);
+    assert_eq!(out.status.code(), Some(1), "got: {combined}");
+    assert!(
+        combined.contains("--bogus"),
+        "must name the flag: {combined}"
+    );
+    assert!(!s.0.join("disc-profile-backup").exists(), "captured anyway");
+}
+
+#[test]
+fn info_share_on_a_folder_honours_help() {
+    let s = Scratch::new("info_share_help");
+    let root = bdmv_folder(&s, "backup");
+    let out = freemkv()
+        .current_dir(&s.0)
+        .args([
+            "info",
+            &format!("dir://{}", root.display()),
+            "--share",
+            "--help",
+        ])
+        .output()
+        .expect("failed to run");
+    let combined = combined_output(&out);
+    assert!(out.status.success(), "got: {combined}");
+    assert!(
+        combined.contains("--share"),
+        "expected the help text: {combined}"
+    );
+    assert!(!s.0.join("disc-profile-backup").exists(), "captured anyway");
+}

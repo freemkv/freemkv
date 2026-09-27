@@ -286,33 +286,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
         out.raw(Normal, &format!("Region: {}", region_name(&disc.region)));
 
         if let Some(ref aacs) = disc.aacs {
-            out.blank(Normal);
-            // The crypto block leads with the MKB generation. Bus-encryption
-            // isn't surfaced — `Type: Uhd` already signals AACS 2.0.
-            out.raw(Normal, &format!("MKB v{}", aacs.mkb_version.unwrap_or(0)));
-            out.raw(Normal, &format!("Disc hash: {}", aacs.disc_hash));
-            // Volume ID (from the SCSI AACS handshake). Absent on an ISO scan
-            // (no handshake) — the 16 bytes stay zero there, so only show it
-            // when the disc actually yielded one.
-            if aacs.volume_id.iter().any(|&b| b != 0) {
-                out.raw(Normal, &format!("VID: 0x{}", hex_bytes(&aacs.volume_id)));
-            }
-            // Keys group: source + count, then the Volume Unique Key (when a VUK
-            // path resolved it) and each CPS unit key on its own indented line.
-            out.raw(
-                Normal,
-                &format!(
-                    "Keys: {} ({} unit keys)",
-                    key_origin_label(aacs.key_source),
-                    aacs.unit_keys.len()
-                ),
-            );
-            if let Some(vuk) = aacs.vuk {
-                out.raw(Normal, &format!("  VUK:   0x{}", hex_bytes(&vuk)));
-            }
-            for (cps, key) in &aacs.unit_keys {
-                out.raw(Normal, &format!("  CPS {cps}: 0x{}", hex_bytes(key)));
-            }
+            emit_aacs_block(&out, aacs);
         }
     }
 
@@ -680,6 +654,31 @@ fn region_name(region: &DiscRegion) -> String {
             }
         }
     }
+}
+
+/// The `info -v` AACS crypto block: MKB, disc hash, VID, key source + count.
+fn emit_aacs_block(out: &Output, aacs: &libfreemkv::AacsState) {
+    out.blank(Normal);
+    // The crypto block leads with the MKB generation. Bus-encryption
+    // isn't surfaced — `Type: Uhd` already signals AACS 2.0.
+    out.raw(Normal, &format!("MKB v{}", aacs.mkb_version.unwrap_or(0)));
+    out.raw(Normal, &format!("Disc hash: {}", aacs.disc_hash));
+    // Volume ID (from the SCSI AACS handshake). Absent on an ISO scan
+    // (no handshake) — the 16 bytes stay zero there, so only show it
+    // when the disc actually yielded one.
+    if aacs.volume_id.iter().any(|&b| b != 0) {
+        out.raw(Normal, &format!("VID: 0x{}", hex_bytes(&aacs.volume_id)));
+    }
+    // Keys: source + count only. Key bytes (VUK, unit keys) never render —
+    // this output is pasted into public bug reports.
+    out.raw(
+        Normal,
+        &format!(
+            "Keys: {} ({} unit keys)",
+            key_origin_label(aacs.key_source),
+            aacs.unit_keys.len()
+        ),
+    );
 }
 
 /// Lower-case hex of a byte slice, no separators (for VID / hash-style fields).
@@ -1432,5 +1431,38 @@ mod tests {
             "{joined}"
         );
         assert!(joined.contains("Japanese"), "{joined}");
+    }
+
+    // `info -v` is pasted into bug reports: planted key bytes must never render,
+    // while the non-secret facts (source, count, hash, MKB, VID) still do.
+    #[test]
+    fn the_aacs_block_never_renders_key_material() {
+        let aacs = libfreemkv::AacsState {
+            version: 1,
+            bus_encryption: false,
+            mkb_version: Some(77),
+            disc_hash: "0xfeedface".into(),
+            key_source: libfreemkv::KeyOrigin::KeyDb,
+            vuk: Some([0xEE; 16]),
+            unit_keys: vec![(3, [0x11; 16]), (7, [0x22; 16])],
+            volume_id: [0x9C; 16],
+            uk_ro: Vec::new(),
+            mkb: Vec::new(),
+        };
+        let ((), text) = crate::output::capture(|| {
+            emit_aacs_block(&Output::new(true, false), &aacs);
+        });
+        let lower = text.to_ascii_lowercase();
+        for secret in ["eeeeeeee", "11111111", "22222222"] {
+            assert!(
+                !lower.contains(secret),
+                "key bytes {secret} leaked:\n{text}"
+            );
+        }
+        assert!(!text.contains("VUK") && !text.contains("CPS"), "{text}");
+        assert!(text.contains("(2 unit keys)"), "{text}");
+        assert!(text.contains("Disc hash: 0xfeedface"), "{text}");
+        assert!(text.contains("MKB v77"), "{text}");
+        assert!(text.contains("VID: 0x9c9c"), "{text}");
     }
 }

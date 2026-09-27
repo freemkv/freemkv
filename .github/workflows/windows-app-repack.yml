@@ -56,8 +56,9 @@ jobs:
           repository: freemkv/freemkv-unlock
           ref: ${{ inputs.tag || env.REPACK_TAG }}
           path: freemkv-unlock
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: stable
           targets: x86_64-pc-windows-msvc
 
       - name: Confirm the tag really does contain the desktop app

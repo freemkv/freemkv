@@ -82,6 +82,11 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
             have: 1_024,
             want: 4_096,
         },
+        Error::ImageEndsBeforeRead {
+            lba: 2_048,
+            have: 1_024,
+            want: 4_096,
+        },
         Error::AacsNoKeys,
         Error::AacsCertShort,
         Error::AacsAgidAlloc,
@@ -179,6 +184,8 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
             written: 0,
         },
         Error::SinkWroteNothing,
+        Error::StreamClosed,
+        Error::StreamHeaderWritten,
         // This list must enumerate EVERY code libfreemkv publishes, not just
         // what the CLI can reach: two tests read a missing entry oppositely
         // (hidden gap vs. stale string), which let E9056/E9057 ship string-less.

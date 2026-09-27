@@ -62,8 +62,10 @@ if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
   codesign --verify --strict --verbose=2 "$APP"
   echo "signed with Developer ID: $MACOS_SIGN_IDENTITY"
 else
-  codesign --force --sign - "$APP/Contents/MacOS/freemkv" 2>/dev/null || true
-  codesign --force --sign - "$APP" 2>/dev/null || true
+  # No `|| true`: an unsigned arm64 .app will not launch, so fail the build.
+  codesign --force --sign - "$APP/Contents/MacOS/freemkv"
+  codesign --force --sign - "$APP"
+  codesign --verify --strict --verbose=2 "$APP"
   echo "ad-hoc signed (no MACOS_SIGN_IDENTITY) — not distributable"
 fi
 echo "built $APP ($(lipo -archs "$APP/Contents/MacOS/freemkv"))"

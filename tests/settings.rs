@@ -153,14 +153,24 @@ fn cli_parity_flags_persist() {
 /// shared-global collision this suite was audited for.
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Every variable a per-OS support/config dir derives from. Linux honours the
+/// XDG ones before HOME, so omitting them leaves the real settings reachable.
+const HOME_VARS: [&str; 5] = [
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+];
+
 // Home-derived paths must stay absolute even with no HOME set (regressed via
 // unwrap_or_default()). Mutates the process-global HOME.
 #[test]
 fn derived_paths_stay_absolute_without_a_home_variable() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // Per-OS: Unix derives from HOME, Windows from USERPROFILE/APPDATA. Clearing
-    // only HOME would make this test vacuous on Windows.
-    let vars = ["HOME", "USERPROFILE", "APPDATA"];
+    // Per-OS: Unix derives from HOME (Linux: XDG first), Windows from
+    // USERPROFILE/APPDATA. Clearing only HOME would make this test vacuous.
+    let vars = HOME_VARS;
     let saved: Vec<(&str, Option<std::ffi::OsString>)> =
         vars.iter().map(|v| (*v, std::env::var_os(v))).collect();
     // SAFETY: serialised by HOME_LOCK; every var restored before returning.
@@ -194,7 +204,7 @@ fn derived_paths_stay_absolute_without_a_home_variable() {
 #[test]
 fn settings_round_trip_through_a_real_file() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let vars = ["HOME", "USERPROFILE", "APPDATA"];
+    let vars = HOME_VARS;
     let saved: Vec<(&str, Option<std::ffi::OsString>)> =
         vars.iter().map(|v| (*v, std::env::var_os(v))).collect();
 
@@ -213,7 +223,9 @@ fn settings_round_trip_through_a_real_file() {
     let outcome = std::panic::catch_unwind({
         let want_dest = want_dest.clone();
         let want_url = want_url.clone();
+        let dir = dir.clone();
         move || {
+            check_isolated(&freemkv::settings::support_dir(), &dir).unwrap();
             let mut s = freemkv::settings::Settings::load();
             s.dest_dir = want_dest;
             s.keyserver_url = want_url;
@@ -245,7 +257,7 @@ fn settings_round_trip_through_a_real_file() {
 #[test]
 fn saved_settings_file_is_private_and_leaves_no_temp_file() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let vars = ["HOME", "USERPROFILE", "APPDATA"];
+    let vars = HOME_VARS;
     let saved: Vec<(&str, Option<std::ffi::OsString>)> =
         vars.iter().map(|v| (*v, std::env::var_os(v))).collect();
 
@@ -258,6 +270,7 @@ fn saved_settings_file_is_private_and_leaves_no_temp_file() {
     }
 
     let outcome = std::panic::catch_unwind(|| {
+        check_isolated(&freemkv::settings::support_dir(), &dir).unwrap();
         let mut s = freemkv::settings::Settings::load();
         s.keyserver_token = "s3cr3t-token".into();
         s.save().expect("save should succeed into a writable home");
@@ -308,11 +321,15 @@ fn saved_settings_file_is_private_and_leaves_no_temp_file() {
 }
 
 // Helper for the tests below: point the per-OS support dir at a fresh temp
-// dir, run f, restore env, delete the dir. Must redirect HOME/USERPROFILE/APPDATA
-// together or these would read/write the runner's real gui-settings.json.
+// dir, run f, restore env, delete the dir. Must redirect every HOME_VARS entry
+// or these would read/write the runner's real gui-settings.json.
 fn in_a_temp_support_dir<T>(tag: &str, f: impl FnOnce(&std::path::Path) -> T) -> T {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let vars = ["HOME", "USERPROFILE", "APPDATA"];
+    in_a_temp_support_dir_locked(tag, f)
+}
+
+fn in_a_temp_support_dir_locked<T>(tag: &str, f: impl FnOnce(&std::path::Path) -> T) -> T {
+    let vars = HOME_VARS;
     let saved: Vec<(&str, Option<std::ffi::OsString>)> =
         vars.iter().map(|v| (*v, std::env::var_os(v))).collect();
 
@@ -326,8 +343,8 @@ fn in_a_temp_support_dir<T>(tag: &str, f: impl FnOnce(&std::path::Path) -> T) ->
         unsafe { std::env::set_var(v, &dir) };
     }
     let support = freemkv::settings::support_dir();
-    let outcome = std::fs::create_dir_all(&support)
-        .map_err(|e| format!("{e}"))
+    let outcome = check_isolated(&support, &dir)
+        .and_then(|()| std::fs::create_dir_all(&support).map_err(|e| format!("{e}")))
         .and_then(|()| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&support)))
                 .map_err(|_| "closure panicked".to_string())
@@ -441,5 +458,61 @@ fn a_leftover_temp_file_neither_blocks_the_next_save_nor_keeps_the_token() {
                 .contains("keys.example"),
             "the save that was supposed to happen did not land"
         );
+    });
+}
+
+// The redirect must beat an exported XDG_DATA_HOME: Linux support_dir() reads it
+// before HOME, so a HOME-only redirect wrote to the developer's real settings.
+fn check_isolated(support: &std::path::Path, dir: &std::path::Path) -> Result<(), String> {
+    if support.starts_with(dir) {
+        Ok(())
+    } else {
+        Err(format!(
+            "support dir {support:?} escaped the temp home {dir:?}"
+        ))
+    }
+}
+
+#[test]
+fn the_temp_support_dir_ignores_an_exported_xdg_data_home() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let decoy = std::env::temp_dir().join(format!("fmkv-decoy-{}", std::process::id()));
+    let saved = std::env::var_os("XDG_DATA_HOME");
+    // SAFETY: serialised by HOME_LOCK; restored before returning.
+    unsafe { std::env::set_var("XDG_DATA_HOME", &decoy) };
+    let seen = std::panic::catch_unwind(|| {
+        in_a_temp_support_dir_locked("settings-decoy", |support| support.to_path_buf())
+    });
+    match saved {
+        Some(x) => unsafe { std::env::set_var("XDG_DATA_HOME", x) },
+        None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    }
+    let support = seen.expect("isolation helper panicked");
+    assert!(
+        !support.starts_with(&decoy),
+        "tests would write to the exported XDG_DATA_HOME: {support:?}"
+    );
+}
+
+// Unknown keys (a newer build's fields, hand-added ones) must survive load->save;
+// dropping them is the downgrade data loss the flattened `extra` map prevents.
+#[test]
+fn unknown_settings_keys_survive_a_load_and_save() {
+    in_a_temp_support_dir("settings-extra", |support| {
+        let path = support.join("gui-settings.json");
+        let body = serde_json::json!({
+            "keyserver_url": "https://keys.example/api",
+            "a_future_setting": {"nested": [1, 2, 3]},
+            "hand_added": "keep me",
+        });
+        std::fs::write(&path, body.to_string()).unwrap();
+
+        Settings::load().save().expect("save into a writable home");
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["a_future_setting"], body["a_future_setting"]);
+        assert_eq!(saved["hand_added"], "keep me");
+        assert_eq!(saved["keyserver_url"], "https://keys.example/api");
     });
 }

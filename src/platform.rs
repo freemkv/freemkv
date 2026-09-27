@@ -28,7 +28,17 @@ pub fn home_dir() -> std::path::PathBuf {
 /// macOS, `%APPDATA%` on Windows. An app bundle / Program Files directory is not
 /// writable, so this must never be derived from the executable's location.
 pub fn support_dir() -> std::path::PathBuf {
-    imp::support_dir()
+    // Unit tests get a per-process temp dir so no test reads or renames the real settings.
+    #[cfg(test)]
+    {
+        std::env::temp_dir()
+            .join(format!("fmkv-unit-{}", std::process::id()))
+            .join("freemkv")
+    }
+    #[cfg(not(test))]
+    {
+        imp::support_dir()
+    }
 }
 
 /// The default output folder offered for rips — the OS's own video folder.
@@ -57,6 +67,7 @@ mod xdg {
         v.map(PathBuf::from).filter(|p| p.is_absolute())
     }
 
+    // Spelled via concat! so the leak-guard's private-TLD pattern does not flag the path.
     pub fn data_home(env: Option<OsString>, home: &Path) -> PathBuf {
         absolute(env).unwrap_or_else(|| home.join(concat!(".", "local")).join("share"))
     }
@@ -65,9 +76,9 @@ mod xdg {
         absolute(env).unwrap_or_else(|| home.join(".config"))
     }
 
-    /// `XDG_VIDEOS_DIR` from the environment, else from `user-dirs.dirs`
-    /// (`XDG_VIDEOS_DIR="$HOME/Videos"` or an absolute path), else `~/Videos`.
-    /// An entry equal to `$HOME` means "disabled" in xdg-user-dirs.
+    /// `XDG_VIDEOS_DIR` from `user-dirs.dirs` (`"$HOME/Videos"` or an absolute
+    /// path), else from the environment, else `~/Videos`. The file wins, as in
+    /// `xdg-user-dir`. An entry equal to `$HOME` means "disabled".
     pub fn videos_dir(env: Option<OsString>, user_dirs: Option<&str>, home: &Path) -> PathBuf {
         let from_file = || {
             user_dirs?.lines().find_map(|l| {
@@ -79,8 +90,8 @@ mod xdg {
                 }
             })
         };
-        absolute(env)
-            .or_else(from_file)
+        from_file()
+            .or_else(|| absolute(env))
             .filter(|p| p.as_path() != home)
             .unwrap_or_else(|| home.join("Videos"))
     }
@@ -287,7 +298,7 @@ mod tests {
         }
 
         let home = super::home_dir();
-        let support = super::support_dir();
+        let support = super::imp::support_dir();
         let dest = super::default_dest_dir();
 
         unsafe {
@@ -333,6 +344,24 @@ mod tests {
     fn a_bogus_path_is_none_not_a_panic() {
         let _ = super::free_space_bytes("");
         let _ = super::free_space_bytes("\0\0\0");
+    }
+
+    /// Unit tests build real `App`s (`Settings::load`, which renames an
+    /// unparseable file aside); they must never reach the user's real settings.
+    #[test]
+    fn unit_tests_never_resolve_the_real_support_dir() {
+        let support = super::support_dir();
+        assert!(
+            support.starts_with(std::env::temp_dir()),
+            "unit tests resolved a real support dir: {support:?}"
+        );
+    }
+
+    /// The real resolution (bypassed by the redirect above) is still sane.
+    #[test]
+    fn the_real_support_dir_is_absolute_and_ends_in_freemkv() {
+        let real = super::imp::support_dir();
+        assert!(real.is_absolute() && real.ends_with("freemkv"), "{real:?}");
     }
 }
 
@@ -386,8 +415,18 @@ mod xdg_tests {
         let h = Path::new(HOME);
         assert_eq!(
             xdg::videos_dir(env("/mnt/v"), Some(DIRS), h),
+            PathBuf::from("/srv/u/Vidéos"),
+            "user-dirs.dirs overrides a (possibly stale) exported variable"
+        );
+        assert_eq!(
+            xdg::videos_dir(env("/mnt/v"), Some("XDG_MUSIC_DIR=\"$HOME/M\"\n"), h),
             PathBuf::from("/mnt/v"),
-            "the environment wins over the file"
+            "the environment still applies when the file has no Videos entry"
+        );
+        assert_eq!(
+            xdg::videos_dir(env("/mnt/v"), Some("XDG_VIDEOS_DIR=\"$HOME\"\n"), h),
+            PathBuf::from("/srv/u/Videos"),
+            "a file entry disabling the dir overrides the environment too"
         );
         assert_eq!(
             xdg::videos_dir(None, Some("XDG_VIDEOS_DIR=\"/data/films\"\n"), h),
