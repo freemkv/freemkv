@@ -62,30 +62,28 @@ fn parse_logging_flags(args: &[String]) -> (Option<u8>, Option<String>, Vec<Pend
             // Both arms refuse a value that's itself a flag or a `scheme://` URL
             // (mirrors pipe::parse_flags's guard) — else e.g. `--log-file --raw`
             // would eat `--raw` as the path and silently drop the flag.
-            "--log-level" => {
-                match it.next_if(|s| !is_flag_token(s) && !crate::pipe::is_url_token(s)) {
-                    Some(s) => match s.parse::<u8>() {
-                        Ok(0) => diags.push(PendingDiag::new(
-                            "error.log_level_out_of_range",
-                            "--log-level: value 0 is out of range (1–4), ignored",
-                        )),
-                        Ok(n) => level_num = Some(n.clamp(1, 4)),
-                        Err(_) => diags.push(
-                            PendingDiag::new(
-                                "error.log_level_not_a_number",
-                                "--log-level: expected a number 1–4, got '{value}', ignored",
-                            )
-                            .with("value", s),
-                        ),
-                    },
-                    None => diags.push(PendingDiag::new(
-                        "error.log_level_needs_value",
-                        "--log-level: requires a value (1=warn, 2=info, 3=debug, 4=trace)",
+            "--log-level" => match it.next_if(|s| !is_flag_token(s) && !is_url_token(s)) {
+                Some(s) => match s.parse::<u8>() {
+                    Ok(0) => diags.push(PendingDiag::new(
+                        "error.log_level_out_of_range",
+                        "--log-level: value 0 is out of range (1–4), ignored",
                     )),
-                }
-            }
+                    Ok(n) => level_num = Some(n.clamp(1, 4)),
+                    Err(_) => diags.push(
+                        PendingDiag::new(
+                            "error.log_level_not_a_number",
+                            "--log-level: expected a number 1–4, got '{value}', ignored",
+                        )
+                        .with("value", s),
+                    ),
+                },
+                None => diags.push(PendingDiag::new(
+                    "error.log_level_needs_value",
+                    "--log-level: requires a value (1=warn, 2=info, 3=debug, 4=trace)",
+                )),
+            },
             "--log-file" => {
-                match it.next_if(|s| !is_flag_token(s) && !crate::pipe::is_url_token(s)) {
+                match it.next_if(|s| !is_flag_token(s) && !is_url_token(s)) {
                     Some(p) => log_file = Some(p.clone()),
                     // Symmetric with --log-level: a refused value must be reported, not
                     // silently dropped, so `run()` can emit it once locale is resolved.
@@ -239,7 +237,7 @@ pub fn run(args: Vec<String>) {
         // NOTE: deliberately no `remux`/conversion verb. The operation IS the
         // URL pair: `freemkv <source-url> <dest-url> [opts]` — source→dest is
         // the whole grammar, so a conversion "command" would be redundant.
-        "version" | "--version" | "-V" => println!("{}", libfreemkv::VERSION_LABEL),
+        "version" | "--version" | "-V" => println!("{}", env!("CARGO_PKG_VERSION")),
         // `freemkv help`, `freemkv --help`, `freemkv -h`: top-level usage.
         // `freemkv help <command>`: command-specific help.
         "help" | "--help" | "-h" => match args.get(2).map(|s| s.as_str()) {
@@ -291,8 +289,8 @@ pub fn run(args: Vec<String>) {
 }
 
 /// True if `s` looks like a stream URL (`scheme://...`).
-fn is_url(s: &str) -> bool {
-    s.contains("://")
+pub(crate) fn is_url_token(s: &str) -> bool {
+    freemkv::app_entry::is_url_token(s)
 }
 
 /// Whether two argv tokens name the SAME stream URL. Exact byte-equality first
@@ -444,7 +442,7 @@ fn collect_urls(args: &[String]) -> Vec<String> {
             // `--key-url`'s value is itself a URL (the key service) — always consumed.
             // For other value-flags, a value that looks like a stream URL is a
             // misplaced positional; reclassify it so `--keydb disc:// mkv://` rips.
-            if !consume_key_url && is_url(arg) {
+            if !consume_key_url && is_url_token(arg) {
                 urls.push(arg.clone());
             }
             continue;
@@ -606,7 +604,7 @@ fn info_cmd(args: &[String]) {
                 Err(e) => fatal("error.op_info", &crate::pipe::fmt_err(&e)),
             };
             if !flags.quiet {
-                println!("freemkv {}", libfreemkv::VERSION_LABEL);
+                println!("freemkv {}", env!("CARGO_PKG_VERSION"));
                 println!();
             }
             crate::disc_info::print_disc_titles(&disc, &flags);
@@ -696,7 +694,7 @@ const TRACK_SINK_URL_LINES: &[(&str, &str)] = &[
 ];
 
 fn usage() {
-    println!("freemkv {}", libfreemkv::VERSION_LABEL);
+    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
     println!();
     println!("{}", crate::strings::get("usage.synopsis_1"));
     println!("{}", crate::strings::get("usage.synopsis_2"));
@@ -804,7 +802,7 @@ fn wants_help(args: &[String]) -> bool {
 
 /// `freemkv info --help` / `freemkv help info`.
 fn help_info() {
-    println!("freemkv {}", libfreemkv::VERSION_LABEL);
+    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
     println!();
     println!("{}", crate::strings::get("help.info.usage"));
     println!();
@@ -823,7 +821,7 @@ fn help_info() {
 
 /// `freemkv update-keys --help` / `freemkv help update-keys`.
 fn help_update_keys() {
-    println!("freemkv {}", libfreemkv::VERSION_LABEL);
+    println!("freemkv {}", env!("CARGO_PKG_VERSION"));
     println!();
     println!("{}", crate::strings::get("help.update_keys.usage"));
     println!();
@@ -1347,8 +1345,8 @@ mod tests {
 #[cfg(test)]
 mod arg_tests {
     use super::{
-        PendingDiag, canon_url, drop_process_serial, is_flag_token, is_url, parse_logging_flags,
-        same_stream_url, split_log_path, strip_language_flag, wants_help,
+        PendingDiag, canon_url, drop_process_serial, is_flag_token, is_url_token,
+        parse_logging_flags, same_stream_url, split_log_path, strip_language_flag, wants_help,
     };
 
     fn v(items: &[&str]) -> Vec<String> {
@@ -1369,17 +1367,17 @@ mod arg_tests {
         assert!(!is_flag_token("-"));
     }
 
-    /// `is_url` is the schemeless-URL gate: anything carrying `://` is a
+    /// `is_url_token` is the schemeless-URL gate: anything carrying `://` is a
     /// positional stream URL, everything else (a keydb path, a bare number) is
     /// not — so a value-flag does not misread its value as a positional.
     #[test]
     fn is_url_matches_only_scheme_bearing_tokens() {
-        assert!(is_url("disc://"));
-        assert!(is_url("mkv://out.mkv"));
-        assert!(is_url("https://keys.example/api"));
-        assert!(!is_url("keydb.cfg"));
-        assert!(!is_url("/path/to/out.mkv"));
-        assert!(!is_url("3"));
+        assert!(is_url_token("disc://"));
+        assert!(is_url_token("mkv://out.mkv"));
+        assert!(is_url_token("https://keys.example/api"));
+        assert!(!is_url_token("keydb.cfg"));
+        assert!(!is_url_token("/path/to/out.mkv"));
+        assert!(!is_url_token("3"));
     }
 
     // Just the two REQUESTS; diagnostics are a separate axis with their own tests.

@@ -219,7 +219,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
 
     let out = Output::new(verbose, quiet);
 
-    out.raw(Normal, &format!("freemkv {}", libfreemkv::VERSION_LABEL));
+    out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
     out.blank(Normal);
     out.print(Normal, "drive.header");
     for line in drive_identity_lines(&raw_id, session.device_path(), mask) {

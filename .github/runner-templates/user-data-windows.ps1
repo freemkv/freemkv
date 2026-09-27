@@ -8,6 +8,8 @@ Start-Transcript -Path C:\freemkv-runner.log -Append
 Start-Job { Start-Sleep -Seconds 14400; Stop-Computer -Force }
 
 $ErrorActionPreference = "Stop"
+# Every exit path, including a setup error, reaches the finally and powers off.
+try {
 $tok  = Invoke-RestMethod -Method PUT -Uri "http://169.254.169.254/latest/api/token" -Headers @{"X-aws-ec2-metadata-token-ttl-seconds"="300"}
 $iid  = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/instance-id" -Headers @{"X-aws-ec2-metadata-token"=$tok}
 
@@ -21,7 +23,7 @@ $hdr    = @{"X-aws-ec2-metadata-token"=$tok}
 $param  = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/tags/instance/runner-token-param" -Headers $hdr
 $repo   = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/tags/instance/runner-repo"  -Headers $hdr
 $region = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/placement/region" -Headers $hdr
-if (-not $param -or -not $repo) { Write-Error "tags not visible via IMDS"; Stop-Computer -Force }
+if (-not $param -or -not $repo) { throw "tags not visible via IMDS" }
 
 # Toolchain: rustup + ffmpeg (the suite shells out to ffprobe).
 Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile C:\rustup-init.exe
@@ -79,7 +81,7 @@ $env:PATH = "$machine;$user;$env:ProgramFiles\Git\bin;$env:ProgramFiles\Git\usr\
 # Fail loudly here rather than 20 minutes later inside a rip.
 foreach ($t in @("git","ffprobe","aws","cargo")) {
   if (-not (Get-Command $t -ErrorAction SilentlyContinue)) {
-    Write-Error "FATAL: $t missing from PATH after install"; Stop-Computer -Force
+    throw "FATAL: $t missing from PATH after install"
   }
 }
 
@@ -88,7 +90,7 @@ foreach ($t in @("git","ffprobe","aws","cargo")) {
 # away so it never outlives this boot. The tag only ever held the NAME.
 $reg = (aws ssm get-parameter --region $region --name $param --with-decryption --query Parameter.Value --output text).Trim()
 aws ssm delete-parameter --region $region --name $param 2>$null
-if (-not $reg) { Write-Error "registration token not found in SSM ($param)"; Stop-Computer -Force }
+if (-not $reg) { throw "registration token not found in SSM ($param)" }
 
 $rv = (Invoke-RestMethod -Uri "https://api.github.com/repos/actions/runner/releases/latest").tag_name.TrimStart("v")
 New-Item -ItemType Directory -Force -Path C:\actions-runner | Out-Null
@@ -98,6 +100,7 @@ Expand-Archive -Path r.zip -DestinationPath . -Force; Remove-Item r.zip
 
 .\config.cmd --url "https://github.com/$repo" --token $reg --name "ephemeral-win-$iid" --labels freemkv-media,windows --unattended --ephemeral
 .\run.cmd
-
-Stop-Computer -Force
+} finally {
+  Stop-Computer -Force
+}
 </powershell>

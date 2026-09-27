@@ -6,6 +6,7 @@
 //!
 //! Batch (multiple titles) is just a for loop calling pipe() per title.
 
+use crate::cli_entry::is_url_token;
 use crate::disc_info::sanitize;
 use crate::output::{Level::Normal, Output};
 use crate::strings;
@@ -259,6 +260,11 @@ fn print_lossy_outcome(out: &Output, outcome: &libfreemkv::MuxOutcome, dest: &st
 pub fn fmt_err(e: &dyn std::fmt::Display) -> String {
     let s = e.to_string();
     fmt_err_str(&s)
+}
+
+/// `error.scan_failed` with its cause localized like every other error line.
+fn scan_failed_msg(e: &dyn std::fmt::Display) -> String {
+    strings::fmt("error.scan_failed", &[("detail", &fmt_err(e))])
 }
 
 fn fmt_err_str(s: &str) -> String {
@@ -731,7 +737,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         out = out.to_stderr();
     }
 
-    out.raw(Normal, &format!("freemkv {}", libfreemkv::VERSION_LABEL));
+    out.raw(Normal, &format!("freemkv {}", env!("CARGO_PKG_VERSION")));
     out.blank(Normal);
 
     // Fail loud and EARLY: validate the whole invocation before any drive
@@ -1339,10 +1345,7 @@ fn disc_title_identities(
             // `-t all` needs the disc's title list; a scan failure here must be
             // reported, not silently turned into "no titles" (which used to
             // masquerade as an empty selection). Surface the cause, then decline.
-            out.raw(
-                Normal,
-                &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
-            );
+            out.raw(Normal, &scan_failed_msg(&e));
             return None;
         }
     };
@@ -2053,6 +2056,376 @@ fn whole_image_decrypting_source<S: libfreemkv::SectorSource>(
     src
 }
 
+/// Every AACS content file's extents, one entry per file, in file order (K5):
+/// `/BDMV/STREAM` (m2ts before SSIF) or HD DVD `/HVDVD_TS/*.EVO`. A file that
+/// cannot be mapped fails the copy: it would otherwise go out as ciphertext.
+fn stream_file_extents(
+    reader: &mut dyn libfreemkv::SectorSource,
+) -> libfreemkv::error::Result<Vec<Vec<(u32, u32)>>> {
+    let fs = libfreemkv::read_filesystem(reader)?;
+    let (top, evo_only) = if fs.find_dir("/BDMV/STREAM").is_some() {
+        ("/BDMV/STREAM", false)
+    } else if fs.find_dir("/HVDVD_TS").is_some() {
+        ("/HVDVD_TS", true)
+    } else {
+        return Ok(Vec::new());
+    };
+    let mut paths = Vec::new();
+    let mut stack: Vec<_> = fs
+        .find_dir(top)
+        .map(|d| (top.to_string(), d))
+        .into_iter()
+        .collect();
+    while let Some((dir, entry)) = stack.pop() {
+        for e in &entry.entries {
+            let path = format!("{dir}/{}", e.name);
+            if e.is_dir {
+                stack.push((path, e));
+            } else if is_content_file(evo_only, &e.name) {
+                paths.push(path);
+            }
+        }
+    }
+    // SSIF re-lists m2ts extents; the m2ts keeps them (libfreemkv's BusMap rule).
+    paths.sort_by_key(|p| (p.to_ascii_uppercase().contains("/SSIF/"), p.clone()));
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let mut extents: Vec<(u32, u32)> = Vec::new();
+        for (lba, n) in fs.file_extents(reader, &path)? {
+            match extents.last_mut() {
+                Some(last) if n > 0 && last.0 as u64 + last.1 as u64 == lba as u64 => last.1 += n,
+                _ if n > 0 => extents.push((lba, n)),
+                _ => {}
+            }
+        }
+        if !extents.is_empty() {
+            files.push(extents);
+        }
+    }
+    Ok(files)
+}
+
+// Every file under `/BDMV/STREAM` is AACS content; under `/HVDVD_TS` only EVOs.
+fn is_content_file(evo_only: bool, name: &str) -> bool {
+    !evo_only || name.to_ascii_uppercase().ends_with(".EVO")
+}
+
+/// A content extent and the LBA its AACS unit grid is anchored at (the file's
+/// first sector, carried across extents); sorted and disjoint.
+type UnitSpan = (u32, u32, u64);
+
+/// The unit grid of every content extent: per file by file offset, else per
+/// title extent (never merged: adjacent files each start their own grid).
+fn unit_spans(files: &[Vec<(u32, u32)>], title_extents: &[(u32, u32)]) -> Vec<UnitSpan> {
+    let mut raw: Vec<(UnitSpan, usize)> = Vec::new();
+    if files.is_empty() {
+        for (i, &(lba, n)) in title_extents.iter().enumerate() {
+            raw.push(((lba, n, lba as u64), i));
+        }
+    } else {
+        for (i, file) in files.iter().enumerate() {
+            let mut off = 0u64;
+            let first = raw.len();
+            for &(lba, n) in file {
+                match raw[first..].last_mut() {
+                    Some(((l, c, _), _)) if *l as u64 + *c as u64 == lba as u64 => *c += n,
+                    _ => raw.push(((lba, n, (lba as u64).saturating_sub(off % 3)), i)),
+                }
+                off += n as u64;
+            }
+        }
+    }
+    raw.retain(|&((_, n, _), _)| n > 0);
+    raw.sort_by_key(|&((lba, _, _), i)| (lba, i));
+    let mut spans: Vec<UnitSpan> = Vec::with_capacity(raw.len());
+    let mut covered = 0u64;
+    for ((lba, n, anchor), _) in raw {
+        let end = lba as u64 + n as u64;
+        if end <= covered {
+            continue;
+        }
+        let start = (lba as u64).max(covered);
+        spans.push((start as u32, (end - start) as u32, anchor));
+        covered = end;
+    }
+    spans
+}
+
+/// What a whole-image AACS decrypt needs: the key map, the content gate, and
+/// the unit grid each read is aligned to.
+struct WholeImagePlan {
+    map: libfreemkv::decrypt::AacsKeyMap,
+    content: Vec<(u32, u32)>,
+    unit_spans: Vec<UnitSpan>,
+}
+
+/// K5: key every content file no kept title plays, ONE FILE AT A TIME (files
+/// in different CPS units may sit back to back). A key is kept only when it
+/// opens a real sample; an unprovable file is left unkeyed so it fails loud.
+fn whole_image_plan(
+    reader: &mut dyn libfreemkv::SectorSource,
+    title_map: libfreemkv::decrypt::AacsKeyMap,
+    title_extents: Vec<(u32, u32)>,
+    files: &[Vec<(u32, u32)>],
+    keys: &mut libfreemkv::decrypt::DecryptKeys,
+    format: libfreemkv::ContentFormat,
+) -> libfreemkv::error::Result<WholeImagePlan> {
+    let keyed: Vec<(u32, u32)> = title_map
+        .ranges()
+        .iter()
+        .map(|&(s, e, _, _)| (s, e))
+        .collect();
+    let single_key = matches!(
+        keys,
+        libfreemkv::decrypt::DecryptKeys::Aacs { unit_keys, .. } if unit_keys.len() == 1
+    );
+    let spans = unit_spans(files, &title_extents);
+    let mut ranges = title_map.ranges().to_vec();
+    for file in files {
+        let orphans = subtract_ranges(file, &keyed);
+        if orphans.is_empty() {
+            continue;
+        }
+        let mut title = libfreemkv::DiscTitle::empty();
+        title.content_format = format;
+        title.extents = orphans
+            .iter()
+            .map(|&(start_lba, sector_count)| libfreemkv::Extent {
+                start_lba,
+                sector_count,
+            })
+            .collect();
+        let map = libfreemkv::resolve_mux_key_map(reader, &title, keys, None, format, None)?;
+        for &(s, n) in &orphans {
+            let anchor = span_anchor(&spans, s).unwrap_or(s as u64);
+            if orphan_key_proven(reader, &map, keys, format, s, n, anchor)? || single_key {
+                let end = s.saturating_add(n);
+                ranges.extend(map.ranges().iter().filter(|r| r.0 < end && r.1 > s));
+            }
+        }
+    }
+    let mut content = title_extents;
+    content.extend(files.iter().flatten());
+    Ok(WholeImagePlan {
+        map: libfreemkv::decrypt::AacsKeyMap::from_ranges_phased(merge_key_ranges(ranges)),
+        content: merge_ranges(content),
+        unit_spans: spans,
+    })
+}
+
+// The unit-grid anchor of the span holding `lba`.
+fn span_anchor(spans: &[UnitSpan], lba: u32) -> Option<u64> {
+    let i = spans
+        .partition_point(|&(s, _, _)| s <= lba)
+        .checked_sub(1)?;
+    let (s, n, anchor) = spans[i];
+    ((lba as u64) < s as u64 + n as u64).then_some(anchor)
+}
+
+// Disjoint key ranges, as libfreemkv's `merge_content_key_ranges`: an overlap
+// with the same key and phase is unioned; a different-key overlap is dropped.
+fn merge_key_ranges(
+    mut ranges: Vec<(u32, u32, usize, libfreemkv::decrypt::Phase)>,
+) -> Vec<(u32, u32, usize, libfreemkv::decrypt::Phase)> {
+    ranges.sort_by_key(|r| r.0);
+    let mut merged: Vec<(u32, u32, usize, libfreemkv::decrypt::Phase)> = Vec::new();
+    for r in ranges {
+        match merged.last_mut() {
+            Some(last) if r.0 < last.1 => {
+                if r.2 == last.2 && r.3 == last.3 {
+                    last.1 = last.1.max(r.1);
+                }
+            }
+            _ => merged.push(r),
+        }
+    }
+    merged
+}
+
+/// Does `map`'s key for `[start, start+count)` open a real encrypted sample?
+/// Probes whole units on the file's grid (`anchor`); unreadable ones are skipped.
+/// `Ok(false)`: no encrypted sample found; `Err(DecryptFailed)`: none opened.
+fn orphan_key_proven(
+    reader: &mut dyn libfreemkv::SectorSource,
+    map: &libfreemkv::decrypt::AacsKeyMap,
+    keys: &libfreemkv::decrypt::DecryptKeys,
+    format: libfreemkv::ContentFormat,
+    start: u32,
+    count: u32,
+    anchor: u64,
+) -> libfreemkv::error::Result<bool> {
+    use libfreemkv::aacs::content::{aacs_unit_encrypted, decrypt_unit, is_clean};
+    const PROBES: u64 = 8;
+    let libfreemkv::decrypt::DecryptKeys::Aacs { unit_keys, .. } = keys else {
+        return Ok(false);
+    };
+    let head = start as u64 + (3 - (start as u64).saturating_sub(anchor) % 3) % 3;
+    let units = (start as u64 + count as u64).saturating_sub(head) / 3;
+    let mut seen = false;
+    let mut buf = vec![0u8; 6144];
+    for p in 1..=PROBES {
+        let unit = units * p / (PROBES + 1);
+        if unit >= units {
+            continue;
+        }
+        let Ok(lba) = u32::try_from(head + unit * 3) else {
+            continue;
+        };
+        match reader.read_sectors(lba, 3, &mut buf, false) {
+            Ok(n) if n == buf.len() && aacs_unit_encrypted(&buf, format) => {}
+            _ => continue,
+        }
+        seen = true;
+        match map.entry_for(lba) {
+            Some((idx, libfreemkv::decrypt::Phase::All, _)) => {
+                if let Some((_, key)) = unit_keys.get(idx) {
+                    decrypt_unit(&mut buf, key);
+                    if is_clean(&buf, format) {
+                        return Ok(true);
+                    }
+                }
+            }
+            // Forensic segment: libfreemkv verifies every such unit as it decrypts.
+            Some(_) => return Ok(true),
+            None => {}
+        }
+    }
+    if seen {
+        Err(libfreemkv::error::Error::DecryptFailed)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Reads a whole image on each content file's AACS unit grid: `write_image`
+/// batches are 2048 sectors, not a multiple of the 3-sector unit. A unit whose
+/// head lies outside its span (a non-contiguous straddle) fails loud.
+struct UnitAligned<S> {
+    inner: S,
+    spans: Vec<UnitSpan>,
+    scratch: Vec<u8>,
+}
+
+impl<S: libfreemkv::SectorSource> UnitAligned<S> {
+    fn new(inner: S, spans: Vec<UnitSpan>) -> Self {
+        Self {
+            inner,
+            spans,
+            scratch: Vec::new(),
+        }
+    }
+}
+
+impl<S: libfreemkv::SectorSource> libfreemkv::SectorSource for UnitAligned<S> {
+    fn capacity_sectors(&self) -> u32 {
+        self.inner.capacity_sectors()
+    }
+
+    fn read_sectors(
+        &mut self,
+        lba: u32,
+        count: u16,
+        buf: &mut [u8],
+        recovery: bool,
+    ) -> libfreemkv::error::Result<usize> {
+        const SECTOR: usize = 2048;
+        let end = lba as u64 + count as u64;
+        let mut cur = lba as u64;
+        while cur < end {
+            let off = (cur - lba as u64) as usize * SECTOR;
+            let i = self.spans.partition_point(|&(s, _, _)| s as u64 <= cur);
+            let hit = i
+                .checked_sub(1)
+                .map(|j| self.spans[j])
+                .filter(|&(s, n, _)| cur < s as u64 + n as u64);
+            let Some((s, n, anchor)) = hit else {
+                let next = self
+                    .spans
+                    .get(i)
+                    .map_or(end, |&(s, _, _)| end.min(s as u64));
+                let want = (next - cur) as usize * SECTOR;
+                let got = self.inner.read_sectors(
+                    cur as u32,
+                    (next - cur) as u16,
+                    &mut buf[off..off + want],
+                    recovery,
+                )?;
+                if got < want {
+                    return Ok(off + got);
+                }
+                cur = next;
+                continue;
+            };
+            let (s, e) = (s as u64, s as u64 + n as u64);
+            let piece_end = end.min(e);
+            let a0 = anchor + (cur - anchor) / 3 * 3;
+            if a0 < s {
+                return Err(libfreemkv::error::Error::DecryptFailed);
+            }
+            let a1 = e.min(a0 + (piece_end - a0).div_ceil(3) * 3);
+            let len = (a1 - a0) as usize * SECTOR;
+            self.scratch.resize(len, 0);
+            let sectors =
+                u16::try_from(a1 - a0).map_err(|_| libfreemkv::error::Error::DecryptFailed)?;
+            self.inner.set_unit_base(a0 as u32);
+            let got =
+                self.inner
+                    .read_sectors(a0 as u32, sectors, &mut self.scratch[..len], recovery)?;
+            let skip = (cur - a0) as usize * SECTOR;
+            let want = (piece_end - cur) as usize * SECTOR;
+            let have = got.saturating_sub(skip).min(want);
+            buf[off..off + have].copy_from_slice(&self.scratch[skip..skip + have]);
+            if have < want {
+                return Ok(off + have);
+            }
+            cur = piece_end;
+        }
+        Ok(count as usize * SECTOR)
+    }
+}
+
+// Sort and coalesce `(start, count)` ranges.
+fn merge_ranges(mut v: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    v.retain(|&(_, n)| n > 0);
+    v.sort_unstable();
+    let mut out: Vec<(u32, u32)> = Vec::with_capacity(v.len());
+    for (s, n) in v {
+        let e = s as u64 + n as u64;
+        match out.last_mut() {
+            Some((ls, ln)) if s as u64 <= *ls as u64 + *ln as u64 => {
+                *ln = (e.max(*ls as u64 + *ln as u64) - *ls as u64).min(u32::MAX as u64) as u32;
+            }
+            _ => out.push((s, n)),
+        }
+    }
+    out
+}
+
+// `(start, count)` ranges of `from` not covered by any `[start, end)` in `cut`.
+fn subtract_ranges(from: &[(u32, u32)], cut: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut cut = cut.to_vec();
+    cut.sort_unstable();
+    let mut out = Vec::new();
+    for &(s, n) in from {
+        let end = s as u64 + n as u64;
+        let mut cur = s as u64;
+        for &(cs, ce) in &cut {
+            let (cs, ce) = (cs as u64, ce as u64);
+            if ce <= cur || cs >= end {
+                continue;
+            }
+            if cs > cur {
+                out.push((cur as u32, (cs - cur) as u32));
+            }
+            cur = cur.max(ce);
+        }
+        if cur < end {
+            out.push((cur as u32, (end - cur) as u32));
+        }
+    }
+    out
+}
+
 fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
     let iso_path = match libfreemkv::parse_url(dest) {
         libfreemkv::StreamUrl::Iso { path } => path,
@@ -2098,19 +2471,40 @@ fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> boo
     // installed. A bare decorator here made every AACS decrypt abort on its
     // first batch — mirrors `freemkv-engine`'s own construction instead.
     let mut keys = disc.decrypt_keys();
-    let key_map = if matches!(keys, libfreemkv::decrypt::DecryptKeys::Aacs { .. }) {
-        match disc.resolve_content_key_map(reader.as_mut(), &mut keys, None, None) {
-            Ok(map) => Some(std::sync::Arc::new(map)),
-            Err(e) => {
-                out.raw(Normal, &render_error(&e));
-                return false;
+    let (key_map, content_ranges, unit_extents) =
+        if matches!(keys, libfreemkv::decrypt::DecryptKeys::Aacs { .. }) {
+            let plan = disc
+                .resolve_content_key_map(reader.as_mut(), &mut keys, None, None)
+                .and_then(|title_map| {
+                    let files = stream_file_extents(reader.as_mut())?;
+                    let title_extents = disc
+                        .titles
+                        .iter()
+                        .flat_map(|t| t.extents.iter().map(|e| (e.start_lba, e.sector_count)))
+                        .collect();
+                    whole_image_plan(
+                        reader.as_mut(),
+                        title_map,
+                        title_extents,
+                        &files,
+                        &mut keys,
+                        disc.content_format,
+                    )
+                });
+            match plan {
+                Ok(p) => (Some(std::sync::Arc::new(p.map)), p.content, p.unit_spans),
+                Err(e) => {
+                    out.raw(Normal, &render_error(&e));
+                    return false;
+                }
             }
-        }
-    } else {
-        None
-    };
-    let mut src =
-        whole_image_decrypting_source(reader, keys, key_map, disc.encrypted_content_ranges());
+        } else {
+            (None, disc.encrypted_content_ranges(), Vec::new())
+        };
+    let mut src = UnitAligned::new(
+        whole_image_decrypting_source(reader, keys, key_map, content_ranges),
+        unit_extents,
+    );
 
     let result = libfreemkv::write_image(&mut src, &iso_path, total_sectors, &halt, |_| {
         // `write_image` checks `halt` once per batch and this runs at the end of
@@ -2212,10 +2606,7 @@ fn disc_to_iso(
     let mut disc = match libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keys.keydb_path())) {
         Ok(d) => d,
         Err(e) => {
-            out.raw(
-                Normal,
-                &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
-            );
+            out.raw(Normal, &scan_failed_msg(&e));
             return false;
         }
     };
@@ -2448,10 +2839,7 @@ fn dir_to_extract(
                 match libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keys.keydb_path())) {
                     Ok(d) => d,
                     Err(e) => {
-                        out.raw(
-                            Normal,
-                            &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
-                        );
+                        out.raw(Normal, &scan_failed_msg(&e));
                         return false;
                     }
                 };
@@ -2478,10 +2866,7 @@ fn dir_to_extract(
             {
                 Ok(pair) => pair,
                 Err(e) => {
-                    out.raw(
-                        Normal,
-                        &strings::fmt("error.scan_failed", &[("detail", &e.to_string())]),
-                    );
+                    out.raw(Normal, &scan_failed_msg(&e));
                     return false;
                 }
             };
@@ -2922,10 +3307,6 @@ fn mp4_skip_reason_key(reason: &libfreemkv::Mp4SkipReason) -> &'static str {
     }
 }
 
-pub(crate) fn is_url_token(s: &str) -> bool {
-    s.contains("://")
-}
-
 fn is_keyserver_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
@@ -3033,12 +3414,13 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyConfig, PipeFail, build_jobs, build_key_sources_quiet, copy_should_continue,
-        dest_is_directory, disc_copy_recovered_data, disc_title_nums, fmt_disc_damage, fmt_err,
-        fmt_err_str, is_keyserver_url, is_metadata_sink, is_scheme_only_sink, is_url_token,
-        mp4_skip_reason_key, parse_error_code, parse_flags, parse_stream_spec, preflight_validate,
-        render_error, resolved_keydb_path, sanitize_name, title_in_range, validate_dir_input,
-        validate_file_dest, validate_iso_input, whole_image_decrypting_source,
+        KeyConfig, PipeFail, UnitAligned, build_jobs, build_key_sources_quiet,
+        copy_should_continue, dest_is_directory, disc_copy_recovered_data, disc_title_nums,
+        fmt_disc_damage, fmt_err, fmt_err_str, is_keyserver_url, is_metadata_sink,
+        is_scheme_only_sink, is_url_token, mp4_skip_reason_key, parse_error_code, parse_flags,
+        parse_stream_spec, preflight_validate, render_error, resolved_keydb_path, sanitize_name,
+        scan_failed_msg, title_in_range, validate_dir_input, validate_file_dest,
+        validate_iso_input, whole_image_decrypting_source, whole_image_plan,
     };
 
     /// freemkv#55: an `iso:// → iso://` decrypt walks the WHOLE image, so the
@@ -3109,6 +3491,419 @@ mod tests {
             inside[16..],
             expected[16..],
             "sectors inside the content extent must come out decrypted"
+        );
+    }
+
+    /// A synthetic image: `(start, count, key)` stream files hold AACS-encrypted
+    /// clear TS (each unit anchored at its file's start); every other sector is
+    /// filesystem filler.
+    struct SyntheticImage {
+        capacity: u32,
+        files: Vec<(u32, u32, [u8; 16])>,
+        /// When set, the file holding this LBA is clear except its unit here.
+        /// Files are anchored at their own start; a partial tail unit is clear.
+        sparse: Option<u32>,
+    }
+
+    impl SyntheticImage {
+        fn clear_unit(lba: u32) -> Vec<u8> {
+            let mut u: Vec<u8> = (0..6144u32)
+                .map(|i| (lba.wrapping_mul(7919).wrapping_add(i) % 251) as u8 | 1)
+                .collect();
+            for off in (4..6144).step_by(192) {
+                u[off] = 0x47;
+            }
+            u[0] &= 0x3F;
+            u
+        }
+
+        fn plain(&self, lba: u32) -> [u8; 2048] {
+            let mut out = [0u8; 2048];
+            match self
+                .files
+                .iter()
+                .find(|&&(s, n, _)| lba >= s && lba < s + n)
+            {
+                Some(&(s, _, _)) => {
+                    let base = s + (lba - s) / 3 * 3;
+                    let u = Self::clear_unit(base);
+                    let o = (lba - base) as usize * 2048;
+                    out.copy_from_slice(&u[o..o + 2048]);
+                }
+                None => {
+                    for (i, b) in out.iter_mut().enumerate() {
+                        *b = (lba as usize + i) as u8;
+                    }
+                    out[0] = 0xC0;
+                }
+            }
+            out
+        }
+    }
+
+    impl libfreemkv::SectorSource for SyntheticImage {
+        fn capacity_sectors(&self) -> u32 {
+            self.capacity
+        }
+        fn read_sectors(
+            &mut self,
+            lba: u32,
+            count: u16,
+            buf: &mut [u8],
+            _recovery: bool,
+        ) -> libfreemkv::error::Result<usize> {
+            for k in 0..count as u32 {
+                let l = lba + k;
+                let o = k as usize * 2048;
+                match self.files.iter().find(|&&(s, n, _)| l >= s && l < s + n) {
+                    Some(&(s, n, key)) => {
+                        let base = s + (l - s) / 3 * 3;
+                        let mut u = Self::clear_unit(base);
+                        // A trailing partial unit is clear, as on real discs.
+                        let clear = base + 3 > s + n
+                            || self
+                                .sparse
+                                .is_some_and(|x| x >= s && x < s + n && base != x);
+                        if !clear {
+                            u[0] |= 0xC0;
+                            assert!(libfreemkv::aacs::content::encrypt_unit(&mut u, &key));
+                        }
+                        let uo = (l - base) as usize * 2048;
+                        buf[o..o + 2048].copy_from_slice(&u[uo..uo + 2048]);
+                    }
+                    None => buf[o..o + 2048].copy_from_slice(&self.plain(l)),
+                }
+            }
+            Ok(count as usize * 2048)
+        }
+    }
+
+    /// The written image must be the plaintext: clear TS in every stream file,
+    /// every other sector untouched.
+    fn assert_image_decrypted(img: &SyntheticImage, bytes: &[u8]) {
+        assert_eq!(bytes.len(), img.capacity as usize * 2048);
+        for lba in 0..img.capacity {
+            let o = lba as usize * 2048;
+            let got = &bytes[o..o + 2048];
+            let want = img.plain(lba);
+            // A unit's first byte carries the CPI bits, which decrypt leaves set.
+            let unit_head = img
+                .files
+                .iter()
+                .any(|&(s, n, _)| lba >= s && lba < s + n && (lba - s) % 3 == 0);
+            let skip = usize::from(unit_head);
+            assert_eq!(
+                got[skip..],
+                want[skip..],
+                "sector {lba} not decrypted as expected"
+            );
+        }
+    }
+
+    /// Item 2: `write_image` reads 2048-sector batches, not 3-sector aligned; a
+    /// whole-image AACS decrypt must still succeed across batch boundaries.
+    #[test]
+    fn a_whole_image_decrypt_survives_write_image_batching() {
+        let key = [0x5A; 16];
+        let img = SyntheticImage {
+            capacity: 6200,
+            files: vec![(3000, 3000, key)],
+            sparse: None,
+        };
+        let keys = libfreemkv::decrypt::DecryptKeys::Aacs {
+            unit_keys: vec![(0, key)],
+            format: libfreemkv::ContentFormat::BdTs,
+        };
+        let map = std::sync::Arc::new(libfreemkv::decrypt::AacsKeyMap::from_ranges(vec![(
+            3000, 6000, 0,
+        )]));
+        let dir = std::env::temp_dir().join(format!("fmkv-wi-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("out.iso");
+        let mut src = UnitAligned::new(
+            whole_image_decrypting_source(
+                SyntheticImage {
+                    capacity: 6200,
+                    files: img.files.clone(),
+                    sparse: img.sparse,
+                },
+                keys,
+                Some(map),
+                vec![(3000, 3000)],
+            ),
+            vec![(3000, 3000, 3000)],
+        );
+        let halt = libfreemkv::halt::Halt::new();
+        let r = libfreemkv::write_image(&mut src, &dest, 6200, &halt, |_| {});
+        let bytes = std::fs::read(&dest).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        r.expect("whole-image AACS decrypt across write_image batches");
+        assert_image_decrypted(&img, &bytes);
+    }
+
+    /// Plan, wire and write a whole image the way `image_to_iso` does. The one
+    /// kept title plays the first stream file with pool key 0.
+    fn write_whole_image(
+        img: &SyntheticImage,
+        pool: &[[u8; 16]],
+    ) -> libfreemkv::error::Result<Vec<u8>> {
+        let (ts, tn, _) = img.files[0];
+        let files = img.files.iter().map(|&(s, n, _)| vec![(s, n)]).collect();
+        write_whole_image_with(img, pool, vec![(ts, tn)], files)
+    }
+
+    /// [`write_whole_image`] with explicit kept-title extents (all keyed by
+    /// pool key 0) and content files (empty = no `/BDMV/STREAM`).
+    fn write_whole_image_with(
+        img: &SyntheticImage,
+        pool: &[[u8; 16]],
+        title_extents: Vec<(u32, u32)>,
+        files: Vec<Vec<(u32, u32)>>,
+    ) -> libfreemkv::error::Result<Vec<u8>> {
+        let fresh = || SyntheticImage {
+            capacity: img.capacity,
+            files: img.files.clone(),
+            sparse: img.sparse,
+        };
+        let mut keys = libfreemkv::decrypt::DecryptKeys::Aacs {
+            unit_keys: pool
+                .iter()
+                .enumerate()
+                .map(|(i, k)| (i as u32, *k))
+                .collect(),
+            format: libfreemkv::ContentFormat::BdTs,
+        };
+        let title_map = libfreemkv::decrypt::AacsKeyMap::from_ranges(
+            title_extents.iter().map(|&(s, n)| (s, s + n, 0)).collect(),
+        );
+        let plan = whole_image_plan(
+            &mut fresh(),
+            title_map,
+            title_extents,
+            &files,
+            &mut keys,
+            libfreemkv::ContentFormat::BdTs,
+        )?;
+        let mut src = UnitAligned::new(
+            whole_image_decrypting_source(
+                fresh(),
+                keys,
+                Some(std::sync::Arc::new(plan.map)),
+                plan.content,
+            ),
+            plan.unit_spans,
+        );
+        let dir = std::env::temp_dir().join(format!(
+            "fmkv-wi-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("out.iso");
+        let halt = libfreemkv::halt::Halt::new();
+        let r = libfreemkv::write_image(&mut src, &dest, img.capacity, &halt, |_| {});
+        let bytes = std::fs::read(&dest).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        r.map(|_| bytes)
+    }
+
+    /// K5: a stream file no kept title plays is decrypted with the right key,
+    /// never written into a decrypted image as ciphertext.
+    #[test]
+    fn a_whole_image_decrypt_keys_stream_files_no_title_plays() {
+        let k = [0x5A; 16];
+        let img = SyntheticImage {
+            capacity: 1200,
+            files: vec![(300, 30, k), (601, 30, k)],
+            sparse: None,
+        };
+        let bytes = write_whole_image(&img, &[k]).expect("single-CPS disc keys every stream file");
+        assert_image_decrypted(&img, &bytes);
+    }
+
+    /// K5: back-to-back unplayed files in different CPS units each get their own
+    /// proven key (a merged range would key both with one).
+    #[test]
+    fn adjacent_unplayed_stream_files_in_different_cps_units_each_decrypt() {
+        let (k0, k1, k2) = ([0x11; 16], [0x22; 16], [0x33; 16]);
+        let img = SyntheticImage {
+            capacity: 1200,
+            files: vec![(300, 30, k0), (600, 30, k1), (630, 30, k2)],
+            sparse: None,
+        };
+        let bytes = write_whole_image(&img, &[k0, k1, k2]).expect("each file's key is held");
+        assert_image_decrypted(&img, &bytes);
+    }
+
+    /// K5: an unplayed stream file no held key opens fails the copy loud with
+    /// DecryptFailed (multi-CPS pool, and a wrong single key).
+    #[test]
+    fn a_whole_image_decrypt_fails_loud_on_an_unkeyable_stream_file() {
+        let (k0, k1, stranger) = ([0x11; 16], [0x22; 16], [0x77; 16]);
+        let img = SyntheticImage {
+            capacity: 1200,
+            files: vec![(300, 30, k0), (600, 30, stranger)],
+            sparse: None,
+        };
+        for pool in [&[k0, k1][..], &[k0][..]] {
+            match write_whole_image(&img, pool) {
+                Err(libfreemkv::error::Error::DecryptFailed) => {}
+                other => panic!(
+                    "pool of {}: expected DecryptFailed, got {:?}",
+                    pool.len(),
+                    other.map(|b| b.len())
+                ),
+            }
+        }
+    }
+
+    /// K5: every `/BDMV/STREAM` file maps to its own extent list, so files are
+    /// keyed one at a time, never as one merged run.
+    #[test]
+    fn stream_file_extents_lists_each_stream_file_separately() {
+        let root = std::env::temp_dir().join(format!("fmkv-wi-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let stream = root.join("BDMV/STREAM");
+        std::fs::create_dir_all(&stream).unwrap();
+        std::fs::write(stream.join("00001.m2ts"), vec![1u8; 6144 * 4]).unwrap();
+        std::fs::write(stream.join("00002.m2ts"), vec![2u8; 6144 * 2]).unwrap();
+        std::fs::write(stream.join("00003.m2ts"), vec![3u8; 6144]).unwrap();
+        std::fs::write(root.join("BDMV/index.bdmv"), b"INDX0200").unwrap();
+        let mut img = libfreemkv::DirImage::open(&root).expect("synthesize a UDF image");
+        let files = super::stream_file_extents(&mut img).expect("every stream file maps");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut sizes: Vec<u32> = files.iter().map(|f| f.iter().map(|e| e.1).sum()).collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![3, 6, 12], "{files:?}");
+    }
+
+    /// K5: an unplayed file whose probes find no ciphertext is left unkeyed on
+    /// a multi-CPS disc, so an encrypted unit in it fails the WALK, not the plan.
+    #[test]
+    fn an_unproven_unplayed_file_fails_the_walk_on_its_first_encrypted_unit() {
+        let (k0, k1) = ([0x11; 16], [0x22; 16]);
+        let img = SyntheticImage {
+            capacity: 1200,
+            files: vec![(300, 30, k0), (600, 30, k1)],
+            // Unit 0 of the 10-unit file: no evenly spaced probe lands on it.
+            sparse: Some(600),
+        };
+        match write_whole_image(&img, &[k0, k1]) {
+            Err(libfreemkv::error::Error::DecryptFailed) => {}
+            other => panic!("expected DecryptFailed, got {:?}", other.map(|b| b.len())),
+        }
+        // The plan itself succeeds: the failure is the walk's own gate.
+        let fresh = SyntheticImage {
+            capacity: img.capacity,
+            files: img.files.clone(),
+            sparse: img.sparse,
+        };
+        let mut keys = libfreemkv::decrypt::DecryptKeys::Aacs {
+            unit_keys: vec![(0, k0), (1, k1)],
+            format: libfreemkv::ContentFormat::BdTs,
+        };
+        let plan = whole_image_plan(
+            &mut { fresh },
+            libfreemkv::decrypt::AacsKeyMap::from_ranges(vec![(300, 330, 0)]),
+            vec![(300, 30)],
+            &[vec![(300, 30)], vec![(600, 30)]],
+            &mut keys,
+            libfreemkv::ContentFormat::BdTs,
+        )
+        .expect("an unprovable file is left unkeyed, not refused at plan time");
+        assert_eq!(
+            plan.map.entry_for(600),
+            None,
+            "unproven file must stay unkeyed"
+        );
+    }
+
+    /// HD DVD (no `/BDMV/STREAM`): back-to-back EVOs, the first not a multiple
+    /// of 3 sectors, each decrypt on their own grid, never the merged run's.
+    #[test]
+    fn adjacent_title_extents_without_stream_files_keep_their_own_unit_grid() {
+        let k = [0x5A; 16];
+        let img = SyntheticImage {
+            capacity: 1200,
+            files: vec![(300, 31, k), (331, 30, k)],
+            sparse: None,
+        };
+        let bytes = write_whole_image_with(&img, &[k], vec![(300, 31), (331, 30)], Vec::new())
+            .expect("each title extent keeps its own unit grid");
+        assert_image_decrypted(&img, &bytes);
+    }
+
+    /// A file split into extents whose lengths are not multiples of 3: the
+    /// unit straddling the (contiguous) extent boundary still decrypts.
+    #[test]
+    fn a_file_extent_not_a_multiple_of_three_keeps_the_file_grid() {
+        let k = [0x5A; 16];
+        let img = SyntheticImage {
+            capacity: 1200,
+            files: vec![(300, 30, k), (600, 100, k)],
+            sparse: None,
+        };
+        let files = vec![vec![(300, 30)], vec![(600, 52), (652, 48)]];
+        let bytes = write_whole_image_with(&img, &[k], vec![(300, 30)], files)
+            .expect("a contiguous straddling unit decrypts");
+        assert_image_decrypted(&img, &bytes);
+    }
+
+    /// A content file crossing a 2048-sector batch edge and ending mid-batch,
+    /// with a partial tail unit, followed by pass-through sectors.
+    #[test]
+    fn a_file_ending_mid_batch_is_followed_by_untouched_sectors() {
+        let k = [0x5A; 16];
+        let img = SyntheticImage {
+            capacity: 3000,
+            files: vec![(100, 30, k), (2040, 20, k)],
+            sparse: None,
+        };
+        let bytes = write_whole_image(&img, &[k]).expect("batch edge inside a file");
+        assert_image_decrypted(&img, &bytes);
+    }
+
+    /// K5 on HD DVD: every `/HVDVD_TS/*.EVO` is a content file; nav files are not.
+    #[test]
+    fn hd_dvd_content_files_are_the_evo_files() {
+        assert!(super::is_content_file(true, "FEATURE_1.EVO"));
+        assert!(super::is_content_file(true, "extra_2.evo"));
+        assert!(!super::is_content_file(true, "HVA00001.VTI"));
+        assert!(!super::is_content_file(true, "FEATURE_1.MAP"));
+        assert!(super::is_content_file(false, "00001.m2ts"));
+    }
+
+    #[test]
+    fn whole_image_range_helpers_merge_and_subtract() {
+        assert_eq!(
+            super::merge_ranges(vec![(10, 5), (0, 3), (3, 2), (12, 10), (40, 0)]),
+            vec![(0, 5), (10, 12)]
+        );
+        // `cut` is [start, end); pieces of `from` it misses survive.
+        assert_eq!(
+            super::subtract_ranges(&[(0, 30), (100, 3)], &[(5, 10), (20, 25), (100, 103)]),
+            vec![(0, 5), (10, 10), (25, 5)]
+        );
+        // SSIF re-lists an m2ts extent: the earlier file keeps it; a partial
+        // overlap is clipped but keeps its own grid anchor.
+        assert_eq!(
+            super::unit_spans(&[vec![(100, 30)], vec![(100, 30), (200, 30)]], &[]),
+            vec![(100, 30, 100), (200, 30, 200)]
+        );
+        assert_eq!(
+            super::unit_spans(&[vec![(100, 30)], vec![(110, 40)]], &[]),
+            vec![(100, 30, 100), (130, 20, 110)]
+        );
+        // Key ranges: same key+phase overlaps union; a different-key overlap drops.
+        use libfreemkv::decrypt::Phase::All;
+        assert_eq!(
+            super::merge_key_ranges(vec![(10, 20, 0, All), (0, 12, 0, All), (15, 30, 1, All)]),
+            vec![(0, 20, 0, All)]
+        );
+        // Contiguous extents of one file are one span on the file's grid.
+        assert_eq!(
+            super::unit_spans(&[vec![(600, 52), (652, 48)]], &[]),
+            vec![(600, 100, 600)]
         );
     }
 
@@ -3665,6 +4460,17 @@ mod tests {
         assert_eq!(rendered.matches("Error:").count(), 1);
     }
 
+    /// L4c: a scan failure's cause is localized, never the raw E-code Display.
+    #[test]
+    fn scan_failed_localizes_its_cause() {
+        let s = scan_failed_msg(&"E6000: 7476928 0x02/0x03/0x11/0x00");
+        assert!(!s.contains("0x"), "raw sense tail leaked: {s}");
+        assert!(
+            s.contains(&fmt_err_str("E6000: 7476928 0x02/0x03/0x11/0x00")),
+            "{s}"
+        );
+    }
+
     /// E6000 (DiscRead) Display is `E6000: <sector> 0x..status../0x..sense..`.
     /// The status/sense hex tail is diagnostic noise that must NOT reach the
     /// user — only the sector number is substituted into the localized message.
@@ -4165,6 +4971,13 @@ mod tests {
         assert!(parse_flags(&v(&["--key-auth"])).is_err());
         // A following stream URL means the token was omitted.
         assert!(parse_flags(&v(&["--key-auth", "disc://"])).is_err());
+    }
+
+    /// T13: `--key-auth --raw` must not swallow `--raw` as the bearer token.
+    #[test]
+    fn key_auth_followed_by_flag_gives_needs_value_error() {
+        let err = parse_flags(&v(&["--key-auth", "--raw"])).unwrap_err();
+        assert!(err.contains("requires a value"), "got: {err}");
     }
 
     /// Source assembly per the agreed design — local-first ordering, pinned via

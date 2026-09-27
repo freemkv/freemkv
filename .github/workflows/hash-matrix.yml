@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   media:
     runs-on: ubuntu-latest
@@ -104,7 +108,9 @@ jobs:
             macos-*)   brew install ffmpeg ;;
             windows-*) choco install ffmpeg -y --no-progress ;;
           esac
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with: { workspaces: freemkv }
       - run: cargo build --release --bin freemkv
@@ -129,7 +135,7 @@ jobs:
       - name: Run the CLI suite against the shared media
         shell: bash
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           BIN="$PWD/freemkv/target/release/freemkv"
           [ -f "$BIN.exe" ] && BIN="$BIN.exe"
           FMKV_BIN="$BIN" \
@@ -302,8 +308,10 @@ jobs:
             macos-*) brew install ffmpeg ;;
             windows-*) choco install ffmpeg -y --no-progress ;;
           esac
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         if: steps.creds.outputs.have == 'true'
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: steps.creds.outputs.have == 'true'
         with: { workspaces: freemkv }
