@@ -8,10 +8,9 @@
 pub fn run() -> i32 {
     let (cfg, loaded) = crate::settings::Settings::load_reporting();
 
-    // "Auto" language follows `$LANG` / `$LC_ALL`, same as macOS uses
-    // `NSLocale` and Windows uses `GetUserDefaultLocaleName`.
-    // Flatpak sandboxes forward `$LANG` too.
-    crate::app_entry::apply_locale(&cfg.language, crate::linux::system_locale_code);
+    // "Auto" leaves the choice to freemkv-i18n's own POSIX/GNU `LANGUAGE`
+    // detection, the one the CLI uses; Flatpak forwards the locale variables.
+    crate::app_entry::apply_locale(&cfg.language, || None);
 
     crate::app_entry::init_gui_logging(&cfg.log_level);
     // Any settings-file warning was queued before the tracing subscriber was

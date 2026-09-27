@@ -46,6 +46,9 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("freemkv-gui", json.dumps(manifest))
         desktop = (Path(prepare.__file__).parent / "org.freemkv.FreeMKV.desktop").read_text()
         self.assertIn("\nExec=freemkv\n", desktop)
+        # The app takes no file argument, so it must not offer itself in
+        # "Open With" for disc images or MKV files.
+        self.assertNotIn("MimeType=", desktop)
 
     def test_metadata_without_release_history_fails(self):
         with tempfile.TemporaryDirectory() as temp:

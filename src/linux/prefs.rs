@@ -40,7 +40,9 @@ impl LangRow {
 
     fn add_code(self: &Rc<Self>, code: &str) {
         let cb = gtk::CheckButton::new();
+        // Plain text: an unknown stored tag is shown verbatim, `&` and all.
         let r = adw::ActionRow::builder()
+            .use_markup(false)
             .title(crate::ui::lang_display_name(code))
             .activatable_widget(&cb)
             .build();
@@ -243,6 +245,14 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     let o2 = group(None);
     f.switch(&o2, "keep_iso", &g("gui.set.keep_iso"));
     f.switch(&o2, "auto_eject", &g("gui.set.auto_eject"));
+    f.switch(
+        &o2,
+        "notify_when_rip_finished",
+        &crate::strings::get_or(
+            "gui.set.notify_when_rip_finished",
+            "Notify when a rip finishes",
+        ),
+    );
     window.add(&page("gui.tab.output", "folder-videos-symbolic", &[o1, o2]));
 
     // ── Selection
@@ -266,7 +276,7 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     f.entry(&r1, "abort_lost_secs", &g("gui.set.abort_lost"));
     let r2 = group(Some(&g("gui.set.raw_note")));
     f.switch(&r2, "raw", &g("gui.set.keep_encrypted"));
-    let r3 = group(Some(&g("gui.set.capture_note")));
+    let r3 = group(None);
     f.switch(&r3, "force", &g("gui.set.overwrite"));
     window.add(&page(
         "gui.tab.recovery",
@@ -426,12 +436,9 @@ impl Prefs {
         let tab = self.window.visible_page_name().map(|s| s.to_string());
         self.commit(shell);
         let lang = shell.settings.borrow().language.clone();
-        // The LIVE switch (`set_locale`); `app_entry::apply_locale` is the
-        // pre-init one and refuses once strings are loaded.
-        match (crate::ui::locale_code(&lang), super::system_locale_code()) {
-            ("auto", Some(sys)) => crate::strings::set_locale(&sys),
-            (code, _) => crate::strings::set_locale(code),
-        }
+        // The LIVE switch; "auto" makes freemkv-i18n re-detect from the
+        // environment, exactly as the CLI and the startup path do.
+        crate::strings::set_locale(crate::ui::locale_code(&lang));
         self.window.close();
         shell.relocalize();
         show(shell, tab);
@@ -488,14 +495,12 @@ impl Prefs {
         std::thread::spawn(move || {
             // A panic must still push a terminal message, or Update stays
             // disabled for the rest of the session.
-            let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                match crate::settings::update_keydb(&url, &path) {
-                    Ok(m) => m,
-                    Err(e) => e,
-                }
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::settings::update_keydb(&url, &path)
             }))
-            .unwrap_or_else(|_| "keydb update failed — internal error".to_string());
-            inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+            .unwrap_or_else(|_| Err("keydb update failed — internal error".to_string()));
+            let line = glue::keydb_update_line(r);
+            inbox.lock().unwrap_or_else(|e| e.into_inner()).push(line);
         });
         shell.start_drain();
     }

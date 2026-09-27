@@ -10,7 +10,5 @@ Icon=org.freemkv.FreeMKV
 Terminal=false
 StartupNotify=true
 StartupWMClass=org.freemkv.FreeMKV
-# The Flatpak sandbox only exposes drives the manifest lets in; browsing
-# the ISO/MKV file the user picked lands via GtkFileDialog + portals.
-MimeType=application/x-cd-image;application/x-iso9660-image;video/x-matroska;
+# No MimeType: the window takes no file argument (use Open or drag and drop).
 Keywords=disc;dvd;bluray;bd;uhd;rip;iso;mkv;
