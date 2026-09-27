@@ -147,6 +147,24 @@ class Upload(unittest.TestCase):
         ):
             self.assertEqual(self._held(issue, trailer=trailer), "held", trailer)
 
+    def test_bullet_after_detailed_information_fails(self):
+        issue = f"(NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}"
+        trailer = "Detailed information: x\n- (REJECTED) raw-usb\n"
+        self.assertEqual(self._held(issue, trailer=trailer), "failed")
+
+    def test_second_issues_block_fails(self):
+        issue = f"(NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}"
+        trailer = (f"Full execution log: '/root/a.log'\n{sc.ISSUES_HEADER}\n"
+                   "- (REJECTED) declaration-snap-v2:plugs_installation:raw-usb\n")
+        self.assertEqual(self._held(issue, trailer=trailer), "failed")
+
+    def test_rejection_inside_detailed_information_fails(self):
+        issue = f"(NEEDS REVIEW) {PLUG} {sc.GRANT_REASON}"
+        for trailer in ("Detailed information: (REJECTED) raw-usb\n",
+                        "Detailed information: upload x\n[REJECTED] raw-usb\n",
+                        "Detailed information: the snap was rejected\n"):
+            self.assertEqual(self._held(issue, trailer=trailer), "failed", trailer)
+
     def test_unknown_line_before_a_trailer_fails(self):
         issue = f"(NEEDS REVIEW) {PLUG}"
         self.assertEqual(self._held(issue, trailer="something else\nRecommended resolution: x\n"), "failed")

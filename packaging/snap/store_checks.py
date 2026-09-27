@@ -31,6 +31,8 @@ ERROR_TRAILERS = (
     "For more information, check out:",
     "Full execution log:",
 )
+# After a trailer, a (TAG)/[TAG] marker means another finding, not trailer text.
+TAG_MARKER = re.compile(r"[(\[][A-Z][A-Z ]*[)\]]")
 
 HELD_STATUS = "will need manual review"
 ISSUES_HEADER = "Issues while processing snap:"
@@ -70,16 +72,28 @@ def upload_issues(log):
     """
     if ISSUES_HEADER not in log:
         return None
-    issues = []
+    issues, trailer = [], False
     for line in log.split(ISSUES_HEADER, 1)[1].splitlines():
         if not line.strip():
             continue
-        if line.startswith(ERROR_TRAILERS):
-            break
+        if trailer or line.startswith(ERROR_TRAILERS):
+            trailer = True
+            if ISSUES_HEADER in line or looks_like_a_finding(line):
+                return None
+            continue
         if not line.startswith("- "):
             return None
         issues.append(line[2:].strip())
     return issues
+
+
+def looks_like_a_finding(line):
+    """An issue bullet, an uppercase (TAG) or [TAG], or the word 'rejected'."""
+    return bool(
+        TAG_MARKER.search(line)
+        or re.search(r"\brejected\b", line, re.IGNORECASE)
+        or line.lstrip().startswith("- ")
+    )
 
 
 def is_known_grant_issue(issue):
