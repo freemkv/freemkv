@@ -59,6 +59,9 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
    `write: true` (the `optical-write` plug) for `freemkv`, explaining that
    ripping sends SCSI commands (SG_IO) to `/dev/sg*` and locks and ejects the
    tray. Precedent: <https://forum.snapcraft.io/t/write-access-to-optical-drive/8289>.
+   Also ask to allow the session `dbus` slot `freemkv-dbus`, which lets the
+   app own its GTK application id `org.freemkv.FreeMKV`; review-tools flags it
+   and `optical-write` as needing human review, and nothing else.
    In the same post, request auto-connection of `hardware-observe` and
    `removable-media`, and the auto-alias `freemkv-cli` for the
    `freemkv.freemkv-cli` app. Until granted, users connect these by hand
