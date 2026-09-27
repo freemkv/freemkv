@@ -40,7 +40,7 @@ def probe(path, packets=False, frames=False):
     entries = ("stream=index,codec_type,codec_name,channels,sample_rate,width,height:"
                "stream_tags=language:stream_disposition=forced:format=duration")
     if packets:
-        entries += ":packet=stream_index,pts_time,duration_time"
+        entries += ":packet=stream_index,pts_time,dts_time,duration_time"
     if frames:
         command += ["-flags2", "+skip_manual"]
         entries += ":frame=stream_index,pts_time,best_effort_timestamp_time,nb_samples"
@@ -67,12 +67,16 @@ def timeline(data, mode="strict"):
     by = {s["index"]: [] for s in streams}
     kinds = {s["index"]: s.get("codec_type") for s in streams}
     audio_duration = {i: 0.0 for i in by}
+    vfw = {s["index"] for s in streams if s.get("codec_name") == "vc1"}
     for packet in packets:
         index = packet.get("stream_index")
         if index not in by:
             raise ValidationError("packet references an unknown stream")
-        if packet.get("pts_time") not in (None, "N/A"):
-            by[index].append(number(packet["pts_time"]))
+        # Matroska V_MS/VFW/FOURCC (VC-1) block timestamps surface as DTS only.
+        keys = ("pts_time", "dts_time") if index in vfw else ("pts_time",)
+        stamp = next((packet[k] for k in keys if packet.get(k) not in (None, "N/A")), None)
+        if stamp is not None:
+            by[index].append(number(stamp))
         elif kinds[index] in ("audio", "video"):
             raise ValidationError(f"stream {index}: missing packet timestamp")
         if kinds[index] == "audio":
