@@ -59,7 +59,7 @@ jobs:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
           SKIP_MEDIA: ${{ inputs.skip_media }}
           PRERELEASE: ${{ inputs.prerelease }}
-          NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
+          NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|promote|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
         run: |
           set -uo pipefail
           if [ "$SKIP_MEDIA" = true ]; then
@@ -67,7 +67,8 @@ jobs:
             echo "::warning::Media evidence explicitly waived for this release"
           fi
           # Separate concurrency groups (a shared one would let a queued run silently replace
-          # another), so refuse while promote is queued or running instead.
+          # another), so refuse while promote is queued or running. This narrows the race but
+          # is not an atomic cross-workflow lock.
           for s in queued in_progress requested waiting pending; do
             n=$(gh api "repos/freemkv/freemkv/actions/workflows/promote.yml/runs?status=$s&per_page=1" -q .total_count)
             [ "$n" = 0 ] || { echo "::error::a promote run is $s — wait for it to finish, then retry"; exit 1; }
@@ -88,11 +89,12 @@ jobs:
             st=0; sha=$(ref_sha "$r" qa) || st=$?
             [ "$st" -ne 2 ] || { ref_err "$r" qa; fail=1; continue; }
             [ -n "$sha" ] || { echo "::error::$r has no qa branch"; fail=1; continue; }
-            # Only the newest run of each workflow per branch counts: a superseded or re-dispatched run must not gate.
+            # Only qa runs gate (qa may share its sha with main's scheduled runs), and only the newest
+            # run of each workflow: a superseded or re-dispatched run must not gate.
             runs=$(gh api "repos/freemkv/$r/actions/runs?head_sha=$sha&per_page=100" \
                      -q '[.workflow_runs[] | {name, head_branch, status, conclusion, created_at}]')
             gating=$(echo "$runs" | jq --arg re "$NON_GATING" \
-                       '[.[] | select(.name | test($re) | not)] | group_by([.name, .head_branch]) | map(max_by(.created_at))')
+                       '[.[] | select(.head_branch == "qa" and (.name | test($re) | not))] | group_by(.name) | map(max_by(.created_at))')
             [ "$(echo "$gating" | jq 'length')" != "0" ] || { echo "::error::$r: no qa run for ${sha:0:7}"; fail=1; continue; }
             [ "$(echo "$gating" | jq '[.[]|select(.status!="completed")]|length')" = "0" ] \
               || { echo "::error::$r: qa still running for ${sha:0:7}"; fail=1; continue; }
@@ -113,7 +115,8 @@ jobs:
               esac
             fi
             # dev must be ⊆ qa too: advance_main_to_release fast-forwards dev to the tag, after the tags
-            # are public. A prerelease never advances branches, so it is exempt.
+            # are public. A prerelease never advances branches, so it is exempt. dev pushes during the
+            # cascade itself can still abort that step; this only catches the ones before it.
             dev=""
             if [ "$PRERELEASE" != true ]; then
               st=0; dev=$(ref_sha "$r" dev) || st=$?

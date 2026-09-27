@@ -79,7 +79,8 @@ jobs:
         run: |
           set -uo pipefail
           # Separate concurrency groups (a shared one would let a queued run silently replace
-          # another), so refuse while release-orchestrate is queued or running instead.
+          # another), so refuse while release-orchestrate is queued or running. This narrows the
+          # race but is not an atomic cross-workflow lock.
           for s in queued in_progress requested waiting pending; do
             n=$(gh api "repos/freemkv/freemkv/actions/workflows/release-orchestrate.yml/runs?status=$s&per_page=1" -q .total_count)
             [ "$n" = 0 ] || { echo "::error::a release-orchestrate run is $s — wait for it to finish, then retry"; exit 1; }
@@ -204,33 +205,48 @@ jobs:
           # Re-run qa where a dependency's qa moved after the repo's own qa and its last run.
           # Derived from state, not from this run's pushes, so a retry after a failed push or
           # dispatch still catches it. REPOS is in dependency order.
+          # gh prints error bodies to stdout, so every value is validated; a bad read is a hard
+          # error (re-run promote), never a silent "fresh".
           now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          is_time() { [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; }
           moved_at() {
             local sha t
-            sha=$(gh api "repos/freemkv/$1/git/ref/heads/qa" -q .object.sha)
+            sha=$(gh api "repos/freemkv/$1/git/ref/heads/qa" -q .object.sha) || return 1
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
             t=$(gh api "repos/freemkv/$1/actions/runs?head_sha=$sha&branch=qa&per_page=100" \
-                  -q '[.workflow_runs[].created_at] | min // empty')
+                  -q '[.workflow_runs[].created_at] | min // empty') || return 1
+            [ -z "$t" ] || is_time "$t" || return 1
             echo "${t:-$now}"
           }
+          # Prints "<id> <created_at>" of the newest qa run ("0 " when there is none).
           last_run() {
-            gh api "repos/freemkv/$1/actions/workflows/$2/runs?branch=qa&per_page=1${3:+&event=$3}" \
-              -q '.workflow_runs[0] | "\(.id // 0) \(.created_at // "")"'
+            local out id t
+            out=$(gh api "repos/freemkv/$1/actions/workflows/$2/runs?branch=qa&per_page=1${3:+&event=$3}" \
+                    -q '.workflow_runs[0] | "\(.id // 0) \(.created_at // "")"') || return 1
+            read -r id t <<<"$out"
+            [[ "$id" =~ ^[0-9]+$ ]] || return 1
+            [ -z "$t" ] || is_time "$t" || return 1
+            echo "$id $t"
           }
+          unreadable() { echo "::error::$1: cannot read $2 — re-run promote"; exit 1; }
           upstream=""; stale=0
           for r in $REPOS; do
-            own=$(moved_at "$r")
+            own=$(moved_at "$r") || unreadable "$r" "its qa head or run history"
             wfs=qa.yml; [ "$r" != freemkv ] || wfs="qa.yml hash-matrix.yml"
             for wf in $wfs; do
-              read -r _ last <<<"$(last_run "$r" "$wf")"
+              out=$(last_run "$r" "$wf") || unreadable "$r" "its last $wf run"
+              read -r _ last <<<"$out"
               [ -n "$upstream" ] && [[ "$own" < "$upstream" && "$last" < "$upstream" ]] || continue
-              read -r before _ <<<"$(last_run "$r" "$wf" workflow_dispatch)"
+              out=$(last_run "$r" "$wf" workflow_dispatch) || unreadable "$r" "its $wf dispatches"
+              read -r before _ <<<"$out"
               echo "  ↻ $r: re-running $wf against the advanced dependencies"
               gh workflow run "$wf" --repo "freemkv/$r" --ref qa \
                 || { echo "::error::$r: could not dispatch $wf on qa — re-run promote"; stale=1; continue; }
               # Wait until the run exists, so a release dispatched next cannot see only the old green run.
               id=$before
               for _ in $(seq 60); do
-                read -r id _ <<<"$(last_run "$r" "$wf" workflow_dispatch)"
+                out=$(last_run "$r" "$wf" workflow_dispatch) || unreadable "$r" "its $wf dispatches"
+                read -r id _ <<<"$out"
                 [ "$id" = "$before" ] || break
                 sleep 5
               done

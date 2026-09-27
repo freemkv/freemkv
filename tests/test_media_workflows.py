@@ -44,6 +44,11 @@ def run_block(workflow, step):
     return '\n'.join(line[width:] for line in body)
 
 
+def workflow_env(workflow, name):
+    line = next(l for l in (WORKFLOWS / workflow).read_text().splitlines() if l.strip().startswith(f'{name}: '))
+    return line.split(': ', 1)[1].strip().strip("'")
+
+
 def git_in(path, *args):
     return subprocess.check_output(
         ['git', '-C', str(path), '-c', 'core.hooksPath=/nonexistent', '-c', 'commit.gpgsign=false',
@@ -211,7 +216,7 @@ class ReleaseBranchTests(unittest.TestCase):
 
 class ReleasePreflightTests(GhHarness):
     STEP = 'Preflight — qa green on all eight, main coherent, media evidence'
-    NON_GATING = '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
+    NON_GATING = workflow_env('release-orchestrate.yml', 'NON_GATING')
 
     def routes(self, qa='a' * 40):
         routes = idle('promote.yml')
@@ -273,6 +278,19 @@ class ReleasePreflightTests(GhHarness):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('a promote run is queued', result.stdout)
 
+    def test_only_qa_branch_gating_runs_count(self):
+        routes = self.routes()
+        key = f"repos/freemkv/freemkv/actions/runs?head_sha={'a' * 40}&per_page=100"
+        base = {'status': 'completed', 'conclusion': 'failure', 'created_at': '2026-09-02T00:00:00Z'}
+        routes[key]['workflow_runs'] += [dict(base, name='leak-scan', head_branch='main'),
+                                         dict(base, name='promote', head_branch='qa')]
+        result, _ = self.preflight(routes)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        routes[key]['workflow_runs'] = [dict(base, name='CI', head_branch='main', conclusion='success')]
+        result, _ = self.preflight(routes)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('freemkv: no qa run', result.stdout)
+
     def test_only_the_latest_run_of_each_workflow_gates(self):
         routes = self.routes()
         key = f"repos/freemkv/freemkv/actions/runs?head_sha={'a' * 40}&per_page=100"
@@ -307,7 +325,7 @@ class PromoteTests(GhHarness):
         return routes
 
     def check(self, routes):
-        env = {'REPOS': ' '.join(REPOS), 'NON_GATING': '^(promote)$'}
+        env = {'REPOS': ' '.join(REPOS), 'NON_GATING': workflow_env('promote.yml', 'NON_GATING')}
         return self.gh(routes, run_block('promote.yml', self.STEP), env=env)
 
     def test_green_set_is_ready(self):
@@ -353,12 +371,30 @@ class PromoteTests(GhHarness):
         routes['PATCH repos/freemkv/libfreemkv/git/refs/heads/qa'] = {'object': {'sha': 'd' * 40}}
         return routes
 
-    def rerun(self, routes, ready=()):
+    def rerun(self, routes, ready=(), ok=True):
         step = run_block('promote.yml', 'Promote dev → qa, in dependency order')
         shas = ''.join(f"{r} {'d' * 40} {'ready' if r in ready else 'already'}\n" for r in REPOS)
         result, log = self.gh(routes, step, env={'REPOS': ' '.join(REPOS)}, files={'shas': shas})
+        if not ok:
+            return result
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return sorted(line for line in log.splitlines() if line.startswith('workflow run'))
+
+    def test_rerun_state_lookup_errors_fail_closed(self):
+        moved = {r: '2026-09-01T00:00:00Z' for r in REPOS}
+        moved['libfreemkv'] = '2026-09-02T00:00:00Z'
+        sha = format(REPOS.index('freemkv'), 'x') * 40
+        broken = {'qa head': 'repos/freemkv/freemkv/git/ref/heads/qa',
+                  'run history': f'repos/freemkv/freemkv/actions/runs?head_sha={sha}&branch=qa&per_page=100',
+                  'last run': 'repos/freemkv/freemkv/actions/workflows/qa.yml/runs?branch=qa&per_page=1',
+                  'dispatch poll': 'repos/freemkv/freemkv/actions/workflows/qa.yml/runs?branch=qa&per_page=1&event=workflow_dispatch'}
+        for what, key in broken.items():
+            with self.subTest(what):
+                routes = self.rerun_routes(moved, {})
+                routes[key] = 502
+                result = self.rerun(routes, ok=False)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn('::error::freemkv:', result.stdout)
 
     def test_unchanged_dependents_rerun_qa_against_advanced_dependencies(self):
         old = {r: '2026-09-01T00:00:00Z' for r in REPOS}
@@ -452,7 +488,7 @@ class CascadeHelperTests(unittest.TestCase):
 
 
 class SuiteDiagnosticsTests(unittest.TestCase):
-    def run_suite(self, workflow, step, os_name, files, env):
+    def run_suite(self, workflow, step, os_name, files, env, target=''):
         temp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, temp)
         for name, text in files.items():
@@ -460,16 +496,17 @@ class SuiteDiagnosticsTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
             path.chmod(0o755)
-        script = run_block(workflow, step).replace('${{ matrix.os }}', os_name)
+        script = run_block(workflow, step).replace('${{ matrix.os }}', os_name).replace('${{ matrix.target }}', target)
         result = subprocess.run(['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', script],
                                 capture_output=True, text=True, cwd=temp, env=dict(os.environ, LF_SHA='abc1234', **env))
         return result, temp
 
     def test_qa_acceptance_failure_still_reports_and_records(self):
-        files = {'freemkv/target/release/freemkv': '',
+        files = {'freemkv/target/x86_64-unknown-linux-musl/release/freemkv': '',
                  'ci/scripts/cli-acceptance.sh': 'echo "  FAIL dvd remux"\nexit 3\n'}
         env = {'FMKV_KEY_URL': 'u', 'FMKV_KEY_AUTH': 'a', 'ISO_DIR': '/nonexistent', 'KEYDB_PATH': '/nonexistent'}
-        result, temp = self.run_suite('qa.yml', 'Run the full CLI acceptance suite', 'linux', files, env)
+        result, temp = self.run_suite('qa.yml', 'Run the full CLI acceptance suite', 'linux', files, env,
+                                      target='x86_64-unknown-linux-musl')
         self.assertEqual(result.returncode, 3, result.stderr)
         self.assertIn('FAIL dvd remux', result.stdout.split('every failing check', 1)[-1])
         self.assertIn('CLI acceptance failed on linux', result.stdout)
