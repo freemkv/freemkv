@@ -37,8 +37,9 @@ def number(value):
 
 def probe(path, packets=False, frames=False):
     command = ["ffprobe", "-v", "error"]
-    entries = ("stream=index,codec_type,codec_name,channels,sample_rate,width,height:"
-               "stream_tags=language:stream_disposition=forced:format=duration")
+    entries = ("stream=index,codec_type,codec_name,codec_tag_string,channels,sample_rate,"
+               "width,height:stream_tags=language:stream_disposition=forced:"
+               "format=duration,format_name")
     if packets:
         entries += ":packet=stream_index,pts_time,dts_time,duration_time"
     if frames:
@@ -67,7 +68,9 @@ def timeline(data, mode="strict"):
     by = {s["index"]: [] for s in streams}
     kinds = {s["index"]: s.get("codec_type") for s in streams}
     audio_duration = {i: 0.0 for i in by}
-    vfw = {s["index"] for s in streams if s.get("codec_name") == "vc1"}
+    matroska = "matroska" in data.get("format", {}).get("format_name", "")
+    vfw = {s["index"] for s in streams if matroska and s.get("codec_name") == "vc1"
+           and s.get("codec_tag_string") == "WVC1"}
     for packet in packets:
         index = packet.get("stream_index")
         if index not in by:
