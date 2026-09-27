@@ -140,7 +140,6 @@ fn every_os_ships_an_app_and_a_cli() {
         "freemkv-cli-amd64.deb",
         "freemkv-x86_64-linux.AppImage",
         "freemkv-x86_64-linux.flatpak",
-        "freemkv-amd64.snap",
     ] {
         assert!(
             e.current.iter().any(|n| n == must),
@@ -385,5 +384,36 @@ fn install_md_offers_every_current_asset() {
                 .lines()
                 .any(|l| l.contains(&format!("{stem}.")) && l.contains(&format!("`.{ext}`")));
         assert!(shorthand, "INSTALL.md never mentions {n}");
+    }
+}
+
+/// The `local freemkv_optional=(...)` list: verified with a warning, never a failure.
+fn optional() -> Vec<String> {
+    let yml = workflow("release-orchestrate.yml");
+    let start = yml
+        .find("freemkv_optional=(")
+        .expect("release-orchestrate.yml: no freemkv_optional=( array");
+    let body = &yml[start + "freemkv_optional=(".len()..];
+    body[..body.find(')').unwrap()]
+        .split_whitespace()
+        .map(String::from)
+        .collect()
+}
+
+#[test]
+fn optional_assets_are_the_snap_and_stay_off_the_required_list() {
+    let opt = optional();
+    assert_eq!(opt, ["freemkv-amd64.snap", "freemkv-amd64.snap.sha256"]);
+    let e = expected();
+    let made = produced();
+    let doc = read("INSTALL.md");
+    for n in &opt {
+        assert!(!e.all().any(|m| m == n), "{n} must not block a release");
+        assert!(!has_version(n), "{n}");
+        assert!(
+            made.contains(n),
+            "{n} is verified but no workflow uploads it"
+        );
+        assert!(doc.contains(n.as_str()), "INSTALL.md never mentions {n}");
     }
 }

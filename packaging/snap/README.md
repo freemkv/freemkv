@@ -15,8 +15,14 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
   `+qa.<sha>` (qa). A suffix makes the grade `devel`; release tags have none
   and build as `stable`.
 - The GitHub release asset is attached whether or not the store is set up.
-- Every store job is skipped, not failed, while `SNAPCRAFT_STORE_CREDENTIALS`
-  is unset.
+- The store upload is skipped while `SNAPCRAFT_STORE_CREDENTIALS` is unset.
+  With it set, an upload the store holds for manual review (expected until
+  step 4 below is granted) is a warning and a run-summary line, not a
+  failure; any other store error, or a failed arm64 build, fails the job.
+- The release asset needs only the build and the install/CLI checks
+  (`smoke`). The GUI launch and review-tools (`review`) gate publishing only,
+  so a Snap Store outage cannot block the release asset. The release
+  orchestrator treats the snap as optional: a missing one is a warning.
 - `dev`, `qa` and PR builds link the matching sibling branches; release tags
   build from the committed git-tag patches.
 - arm64 builds on Launchpad (`snapcraft remote-build`) on `qa`, tags and
@@ -55,17 +61,21 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
 
 4. Ask for store review of the drive interfaces on the
    [Snapcraft forum](https://forum.snapcraft.io/c/store-requests/19): a
-   "store-requests" post asking for auto-connection of `optical-drive` with
-   `write: true` (the `optical-write` plug) for `freemkv`, explaining that
-   ripping sends SCSI commands (SG_IO) to `/dev/sg*` and locks and ejects the
-   tray. Precedent: <https://forum.snapcraft.io/t/write-access-to-optical-drive/8289>.
+   "store-requests" post asking for **allow-connection and auto-connection**
+   of `optical-drive` with `write: true` (the `optical-write` plug) for
+   `freemkv`. snapd's base declaration denies both for `write: true`, so
+   without allow-connection a store install cannot connect it even by hand.
+   Explain that libfreemkv opens `/dev/sg*`/`/dev/sr*` read-write for SCSI
+   commands (SG_IO), so even reading a disc needs it, and that it locks and
+   ejects the tray. Precedent: <https://forum.snapcraft.io/t/write-access-to-optical-drive/8289>.
    Also ask to allow the session `dbus` slot `freemkv-dbus`, which lets the
    app own its GTK application id `org.freemkv.FreeMKV`; review-tools flags it
    and `optical-write` as needing human review, and nothing else.
    In the same post, request auto-connection of `hardware-observe` and
    `removable-media`, and the auto-alias `freemkv-cli` for the
-   `freemkv.freemkv-cli` app. Until granted, users connect these by hand
-   (see [INSTALL.md](../../INSTALL.md)).
+   `freemkv.freemkv-cli` app. Until granted, store uploads wait for manual
+   review, and only the direct download (`--dangerous`, connected by hand, see
+   [INSTALL.md](../../INSTALL.md)) is usable.
 
 5. Optional: set the repository variable `SNAP_PUBLISH_EDGE` to `true` to
    publish every `dev` push to `edge`:

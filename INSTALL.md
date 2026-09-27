@@ -139,13 +139,15 @@ behaviour on a bare launch, `freemkv.freemkv-cli`
 
 ```bash
 sudo snap install freemkv
-sudo snap connect freemkv:optical-write
 ```
 
-The snap is strictly confined. Reading discs uses the `optical-drive`
-interface, which connects automatically from the store. Ripping also sends
-drive commands that need write access to the drive node, the separate
-`optical-write` plug, which the store does not connect automatically. Connect
+The snap is strictly confined. freemkv opens the drive for read and write
+(its SCSI commands need both), so it needs the `optical-write` plug even just
+to read a disc; the read-only `optical-drive` plug alone is not enough. For a
+store install, the Snap Store must first allow that connection for freemkv,
+and the store listing will not exist before it does; once allowed it
+connects automatically. The direct download above connects with
+`snap connect` because `--dangerous` installs skip store policy. Connect
 `freemkv:removable-media` to save to drives under `/media` or `/mnt`, and
 `freemkv:hardware-observe` if drives are not listed. Output is limited to your
 home directory (not its hidden folders) and removable media. The snap keeps

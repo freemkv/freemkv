@@ -1860,7 +1860,6 @@ jobs:
               freemkv-amd64.deb
               freemkv-x86_64-linux.flatpak
               freemkv-flatpak-package.tar.gz
-              freemkv-amd64.snap
               # CLI
               freemkv-cli-aarch64-macos
               freemkv-cli-x86_64-macos
@@ -1941,6 +1940,21 @@ jobs:
                 fi
               done
             done
+
+            # Not on the download page yet and built after the tag, so a missing
+            # snap warns instead of failing a release whose tags are already public.
+            local freemkv_optional=(freemkv-amd64.snap freemkv-amd64.snap.sha256)
+            if ! $DRY_RUN; then
+              names=$(gh release view "v$VERSION" --repo "$GIT_ORG/freemkv" \
+                        --json assets --jq '.assets[].name' 2>/dev/null || true)
+              for want in "${freemkv_optional[@]}"; do
+                if printf '%s\n' "$names" | grep -Fxq "$want"; then
+                  printf '  %-34s OK (optional)\n' "$want"
+                else
+                  err "WARN: optional asset $want is not attached to freemkv v$VERSION"
+                fi
+              done
+            fi
 
             if [ "$missing" -gt 0 ]; then
               err "$missing download-page asset(s) MISSING — those buttons on /download/ are dead links"

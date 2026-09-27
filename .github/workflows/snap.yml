@@ -115,7 +115,8 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  test:
+  # Install and CLI checks: the release asset depends on these only.
+  smoke:
     needs: build
     runs-on: ubuntu-24.04
     steps:
@@ -158,54 +159,95 @@ jobs:
           done
           grep -Eq '^optical-drive +freemkv:optical-write ' connections.log \
             || { echo "::error::optical-write is not an optical-drive plug"; exit 1; }
-          # Manual connection must work: the store denies auto-connect for write.
+          # Manual connection works for a --dangerous install; a store install needs
+          # the store to allow the optical-write connection first.
           for plug in optical-write hardware-observe removable-media; do
             sudo snap connect "freemkv:$plug"
           done
           snap connections freemkv | tee connections-after.log
           grep -Eq '^optical-drive +freemkv:optical-write +:optical-drive ' connections-after.log
-      - name: Desktop app launches under a virtual display
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: snap-smoke
+          path: '*.log'
+          retention-days: 90
+
+  # GUI launch and store review checks. These fetch from the Snap Store and
+  # gate publishing, not the GitHub release asset.
+  review:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: snap-amd64, path: snap-package }
+      - name: Install the snap
+        run: |
+          set -euo pipefail
+          (cd snap-package && sha256sum -c freemkv-amd64.snap.sha256)
+          sudo snap install --dangerous ./snap-package/freemkv-amd64.snap
+          snap list freemkv
+      - name: Desktop app claims its bus name and opens a window
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb
+          sudo apt-get install -y -qq xvfb x11-utils libglib2.0-bin
           # `snap run` moves the app into a scope via the user's systemd, so start
           # a real user session rather than a bare dbus-run-session bus.
           sudo loginctl enable-linger "$USER"
           XDG_RUNTIME_DIR="/run/user/$(id -u)"
           export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
           for _ in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
-          status=0
-          xvfb-run --auto-servernum \
-            timeout 20s env GDK_BACKEND=x11 freemkv > gui-launch.log 2>&1 || status=$?
+          Xvfb :99 -screen 0 1280x800x24 > xvfb.log 2>&1 &
+          export DISPLAY=:99
+          for _ in $(seq 1 30); do xwininfo -root > /dev/null 2>&1 && break; sleep 1; done
+          GDK_BACKEND=x11 freemkv > gui-launch.log 2>&1 &
+          app=$!
+          owned=false window=false
+          for _ in $(seq 1 60); do
+            gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+              --method org.freedesktop.DBus.NameHasOwner org.freemkv.FreeMKV 2>/dev/null \
+              | grep -q true && owned=true
+            xwininfo -root -tree > windows.log 2>&1 || true
+            grep -qi 'freemkv' windows.log && window=true
+            if $owned && $window; then break; fi
+            kill -0 "$app" 2>/dev/null || break
+            sleep 1
+          done
+          kill "$app" 2>/dev/null || true
           cat gui-launch.log
-          [ "$status" -eq 124 ] || { echo "::error::GUI exited early (status $status)"; exit 1; }
+          grep -i freemkv windows.log || true
+          $owned || { echo "::error::org.freemkv.FreeMKV never appeared on the session bus"; exit 1; }
+          $window || { echo "::error::no freemkv window was mapped"; exit 1; }
       - name: Store review checks (review-tools)
         run: |
           set -euo pipefail
           sudo snap install review-tools
           status=0
           review-tools.snap-review --json snap-package/freemkv-amd64.snap > review.json || status=$?
+          echo "snap-review exit status: $status"
           python3 - <<'PY'
           import json, sys
           report = json.load(open("review.json"))
-          # Store policy (optical-drive write) needs a manual review, not a fix.
-          allowed = ("declaration-snap-v2",)
+          # Store policy, not defects: both need the store's manual grant (packaging/snap/README.md).
+          allowed = {
+              "declaration-snap-v2:plugs_connection:optical-write:optical-drive",
+              "declaration-snap-v2:slots_connection:freemkv-dbus:dbus",
+          }
           bad = []
           for section, results in report.items():
               for level in ("error", "warn"):
                   for check, detail in (results.get(level) or {}).items():
-                      tag = "ALLOWED" if check.startswith(allowed) else level.upper()
+                      tag = "ALLOWED" if check in allowed else level.upper()
                       print(f"{tag:8} {section} {check}: {detail.get('text', '')}")
                       if tag != "ALLOWED" and level == "error":
                           bad.append(check)
           sys.exit(1 if bad else 0)
           PY
-          echo "snap-review exit status: $status"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: snap-validation
+          name: snap-review
           path: |
             *.log
             review.json
@@ -271,7 +313,7 @@ jobs:
   # The direct download: attached to the GitHub release whether or not the
   # store is set up, so it ships before the store listing exists.
   release-asset:
-    needs: test
+    needs: [build, smoke]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
@@ -299,10 +341,13 @@ jobs:
           echo "Release $RELEASE_TAG was not created; the snap remains in this run."
           exit 1
 
+  # Uploads with the snapcraft CLI so a store "manual review" result can be told
+  # apart from a real failure: until the store grants optical-write and the
+  # dbus slot, uploads wait for review, which warns instead of failing.
   publish:
-    needs: [secrets, build, test, remote-build-arm64]
+    needs: [secrets, build, smoke, review, remote-build-arm64]
     if: >-
-      always() && needs.test.result == 'success' &&
+      always() && needs.smoke.result == 'success' && needs.review.result == 'success' &&
       needs.secrets.outputs.store == 'true' && github.event_name == 'push' &&
       (github.ref_type == 'tag' || github.ref_name == 'qa' ||
        (github.ref_name == 'dev' && vars.SNAP_PUBLISH_EDGE == 'true'))
@@ -330,12 +375,16 @@ jobs:
           GH_REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           for _ in $(seq 1 120); do
             pending=0
             for wf in ci.yml qa.yml; do
-              read -r status conclusion < <(gh api "repos/$GH_REPO/actions/workflows/$wf/runs?head_sha=$SHA&event=push&per_page=1" \
-                --jq '.workflow_runs[0] | "\(.status // "missing") \(.conclusion // "none")"')
+              # A transient API error is a pending poll, not a verdict.
+              if ! run=$(gh api "repos/$GH_REPO/actions/workflows/$wf/runs?head_sha=$SHA&event=push&per_page=1" \
+                    --jq '.workflow_runs[0] | "\(.status // "missing") \(.conclusion // "none")"'); then
+                echo "$wf: API error, retrying"; pending=1; continue
+              fi
+              status=${run%% *} conclusion=${run#* }
               echo "$wf: $status $conclusion"
               if [ "$status" != completed ]; then pending=1
               elif [ "$conclusion" != success ]; then
@@ -352,16 +401,32 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: needs.remote-build-arm64.result == 'success'
         with: { name: snap-arm64, path: snap-package }
-      - uses: canonical/action-publish@214b86e5ca036ead1668c79afb81e550e6c54d40 # v1.2.0
+      - name: Upload and release to the store
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
-        with:
-          snap: snap-package/freemkv-amd64.snap
-          release: ${{ steps.channel.outputs.channel }}
-      - uses: canonical/action-publish@214b86e5ca036ead1668c79afb81e550e6c54d40 # v1.2.0
-        if: needs.remote-build-arm64.result == 'success'
-        env:
-          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
-        with:
-          snap: snap-package/freemkv-arm64.snap
-          release: ${{ steps.channel.outputs.channel }}
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+          ARM64_BUILD: ${{ needs.remote-build-arm64.result }}
+        run: |
+          set -uo pipefail
+          sudo snap install snapcraft --classic
+          rc=0
+          for f in snap-package/freemkv-*.snap; do
+            if snapcraft upload --release="$CHANNEL" "$f" > upload.log 2>&1; then
+              cat upload.log
+              echo "- \`$(basename "$f")\` released to \`$CHANNEL\`" >> "$GITHUB_STEP_SUMMARY"
+            elif grep -qiE 'manual review|need_manual_review|human review' upload.log; then
+              cat upload.log
+              echo "::warning::$(basename "$f") is uploaded but waits for Snap Store manual review; it is not on $CHANNEL yet"
+              echo "- \`$(basename "$f")\` waits for store manual review, not released to \`$CHANNEL\`" >> "$GITHUB_STEP_SUMMARY"
+            else
+              cat upload.log
+              echo "::error::store upload of $(basename "$f") to $CHANNEL failed"
+              rc=1
+            fi
+          done
+          # A failed arm64 build must not leave arm64 silently on an older revision.
+          if [ "$ARM64_BUILD" = failure ]; then
+            echo "::error::the arm64 remote build failed; arm64 on $CHANNEL stays at its previous revision"
+            rc=1
+          fi
+          exit $rc

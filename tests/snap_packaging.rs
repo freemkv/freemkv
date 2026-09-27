@@ -71,7 +71,8 @@ fn publishing_is_gated_on_the_store_secret() {
     let wf = read(".github/workflows/snap.yml");
     let publish = &wf[wf.find("\n  publish:").expect("publish job")..];
     assert!(publish.contains("needs.secrets.outputs.store == 'true'"));
-    assert!(publish.contains("needs.test.result == 'success'"));
+    assert!(publish.contains("needs.smoke.result == 'success'"));
+    assert!(publish.contains("needs.review.result == 'success'"));
     for channel in ["c=stable", "c=beta", "c=edge"] {
         assert!(publish.contains(channel), "{channel}");
     }
@@ -88,4 +89,27 @@ fn app_may_own_its_bus_name() {
         "  freemkv-dbus:\n    interface: dbus\n    bus: session\n    name: org.freemkv.FreeMKV\n"
     ));
     assert!(snap.contains("    slots: [freemkv-dbus]\n"));
+}
+
+#[test]
+fn release_asset_does_not_wait_for_store_backed_checks() {
+    let wf = read(".github/workflows/snap.yml");
+    let job = &wf[wf.find("\n  release-asset:").expect("release-asset job")..];
+    let needs = job
+        .lines()
+        .find(|l| l.trim_start().starts_with("needs:"))
+        .unwrap();
+    assert_eq!(needs.trim(), "needs: [build, smoke]");
+}
+
+#[test]
+fn review_allows_only_the_two_store_grants() {
+    let wf = read(".github/workflows/snap.yml");
+    assert!(!wf.contains("startswith(allowed)"));
+    for check in [
+        "declaration-snap-v2:plugs_connection:optical-write:optical-drive",
+        "declaration-snap-v2:slots_connection:freemkv-dbus:dbus",
+    ] {
+        assert!(wf.contains(&format!("\"{check}\"")), "{check}");
+    }
 }

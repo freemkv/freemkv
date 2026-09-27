@@ -14,11 +14,13 @@ platforms:
 
 # Drive access, verified against snapd interfaces/builtin/optical_drive.go:
 # the plain `optical-drive` plug grants read on /dev/sr*, /dev/scd*, /dev/sg*
-# and auto-connects; `write: true` adds write on the same nodes (SG_IO
-# commands, tray lock, eject), but the base declaration denies its
-# auto-connection, so it stays manual (`snap connect freemkv:optical-write`)
-# until the store grants this snap auto-connect. The default seccomp
-# template does not filter ioctl by request, so SG_IO needs nothing more.
+# and auto-connects; `write: true` adds write on the same nodes. libfreemkv
+# opens the drive O_RDWR for SG_IO, so even reading a disc needs
+# `optical-write`. The base declaration has deny-connection AND
+# deny-auto-connection for `write: true`: a store install cannot connect it,
+# even by hand, until the store grants allow-connection (and auto-connection)
+# for this snap; a `--dangerous` install skips that policy, so `snap connect`
+# works there. The default seccomp template does not filter ioctl by request.
 plugs:
   optical-write:
     interface: optical-drive
