@@ -149,6 +149,8 @@ class ExactToolchainTests(unittest.TestCase):
             'inline': ('build = { rustflags = ["x"] }\n', True),
             'include': ('include = "other.toml"\n', True),
             'host': ('[host]\nlinker = "x"\n', True),
+            'literal-key': ("[ 'build' ]\nx = 1\n", True),
+            'literal-profile': ("['profile'.release]\nlto = false\n", True),
             'net': ('[net]\ngit-fetch-with-cli = true\n', False),
             'patch': ('[patch.crates-io]\nlibfreemkv = { path = "../libfreemkv" }\n', False),
         }

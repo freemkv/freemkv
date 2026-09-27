@@ -47,7 +47,7 @@ DIRTY_RE='^(FREEMKV_BUILD_LABEL|FREEMKV_GH_TOKEN|RUSTFLAGS|CARGO_ENCODED_RUSTFLA
 # Cargo config that changes the compiled code, in any TOML spelling: a table header
 # ([build], [[target…]]), a dotted or inline key (build.rustflags =, env = {…}), an
 # include, or a code-changing key under any table ([host] linker = …).
-CONFIG_RE='^[[:space:]]*(\[+[[:space:]]*"?(build|env|profile|target|host)\b|"?(build|env|profile|target|host|include)"?[[:space:]]*[.=])|(^|[.{,[:space:]])"?(rustflags|rustdocflags|linker|rustc|rustc-wrapper|rustc-workspace-wrapper|ar)"?[[:space:]]*='
+CONFIG_RE='^[[:space:]]*(\[+[[:space:]]*["'"'"']?(build|env|profile|target|host)\b|["'"'"']?(build|env|profile|target|host|include)["'"'"']?[[:space:]]*[.=])|(^|[.{,[:space:]])["'"'"']?(rustflags|rustdocflags|linker|rustc|rustc-wrapper|rustc-workspace-wrapper|ar)["'"'"']?[[:space:]]*='
 
 # The C compiler cc-rs resolves for the target, and its version.
 c_toolchain() {
