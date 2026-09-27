@@ -12,9 +12,9 @@ name: release-orchestrate
 # version bumps, the git-tag re-pin cascade, lockfile regen, tags in dependency
 # order, `main` advance, docs-site version. No clippy/test/media re-run here.
 #
-# Toolchain: read from ws/freemkv `rust-version` (single source of truth) and
-# installed on the runner — the lockfile regen is the only cargo the release
-# runs. The stale hardcoded 1.97 that failed a release is gone.
+# Toolchain: ws/freemkv `rust-version`, an exact X.Y.Z (the single source of
+# truth that qa.yml, hash-matrix and release.yml also build with), installed on
+# the runner — the lockfile regen is the only cargo the release runs.
 
 on:
   workflow_dispatch:
@@ -213,9 +213,13 @@ jobs:
       - name: Toolchain from the single source of truth (ws/freemkv rust-version)
         run: |
           set -euo pipefail
-          V=$(grep -m1 '^rust-version' ws/freemkv/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
-          [ -n "$V" ] || { echo "::error::could not read rust-version from ws/freemkv/Cargo.toml"; exit 1; }
-          rustup toolchain install "$V" --component clippy,rustfmt --profile minimal
+          V=$(sed -n -E 's/^rust-version[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' ws/freemkv/Cargo.toml | head -1)
+          # Exact only: rustup resolves a 2-part "1.98" to the newest 1.98.x at install time.
+          [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::ws/freemkv/Cargo.toml rust-version must be an exact X.Y.Z (got '$V')"; exit 1; }
+          rustup toolchain install "$V" --component clippy,rustfmt --profile minimal --no-self-update
+          got=$(rustc "+$V" -Vv | sed -n 's/^release: //p')
+          [ "$got" = "$V" ] || { echo "::error::rustc +$V reports release '$got'"; exit 1; }
           echo "TOOLCHAIN=$V" >> "$GITHUB_ENV"
           echo "release toolchain pinned to $V (from ws/freemkv/Cargo.toml)"
 
@@ -384,11 +388,9 @@ jobs:
           # git-deping the firmware crate; keysources followed since it deps libfreemkv).
           # Kept as an (empty) hook so the orchestration's publish step is a clean no-op.
           SCRIPT_PUBLISH_CRATES=""
-          # The toolchain the release builds and lockfile regens run on. It must
-          # build every crate, so it tracks the HIGHEST supported Rust (stable):
-          # the binaries pin no MSRV and the libraries' MSRV floors are all lower.
-          # Override via the TOOLCHAIN env for a pinned release if ever needed.
-          TOOLCHAIN="${TOOLCHAIN:-stable}"
+          # The toolchain the release builds and lockfile regens run on: the exact
+          # freemkv rust-version set by the toolchain step. Never a floating default.
+          : "${TOOLCHAIN:?TOOLCHAIN unset — the toolchain step must run first}"
           # Directory of this script — locates the security scanners (scan-tarball.sh,
           # scan-secrets.sh) that live alongside it. Only the disabled run_security_gate uses it.
           SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

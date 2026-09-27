@@ -56,12 +56,13 @@ jobs:
             b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171 linuxdeploy-plugin-gtk.sh \
             | sha256sum -c -
           chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
+      - name: Exact toolchain (freemkv rust-version)
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
+      - name: Clean build environment and C toolchain
+        run: bash freemkv/.github/scripts/exact-toolchain.sh assert-env x86_64-unknown-linux-gnu freemkv
       - name: Build release binary
         working-directory: freemkv
         run: cargo build --release --features gui --bin freemkv

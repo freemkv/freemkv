@@ -70,9 +70,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
+      - name: Exact toolchain (freemkv rust-version)
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -91,9 +91,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
+      - name: Exact toolchain (freemkv rust-version)
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -181,9 +181,9 @@ jobs:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
           self: freemkv
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
+      - name: Exact toolchain (freemkv rust-version)
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -401,10 +401,8 @@ jobs:
             # musl-tools: ring and mimalloc compile C for the musl target.
             sudo apt-get install -y -qq build-essential curl musl-tools
           fi
-          # One pinned toolchain: freemkv's rust-version, as release-orchestrate
-          # uses. Any rustup failure fails the job; never fall back to the AMI's.
-          V=$(sed -n -E 's/^rust-version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' freemkv/Cargo.toml | head -1)
-          [ -n "$V" ] || { echo "::error::could not read rust-version from freemkv/Cargo.toml"; exit 1; }
+          # One exact toolchain: freemkv's rust-version, as release.yml and
+          # release-orchestrate use. Any rustup failure fails the job; never fall back to the AMI's.
           if [ "${{ matrix.os }}" = "windows" ]; then
             cargo_bin="$(cygpath -u "$USERPROFILE")/.cargo/bin"
           else
@@ -424,9 +422,7 @@ jobs:
           # colon when Git-Bash re-parses PATH for the next step.
           export PATH="$cargo_bin:$PATH"
           echo "$cargo_bin" >> "$GITHUB_PATH"
-          rustup toolchain install "$V" --profile minimal --target "${{ matrix.target }}"
-          echo "RUSTUP_TOOLCHAIN=$V" >> "$GITHUB_ENV"
-          RUSTUP_TOOLCHAIN="$V" rustc --version
+          bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml "${{ matrix.target }}"
       # Catches the gui feature's crates leaking into the CLI build.
       - name: The CLI build has no UI dependencies
         shell: bash
@@ -441,6 +437,9 @@ jobs:
             echo "$ui"
             exit 1
           fi
+      - name: Clean build environment and C toolchain
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh assert-env "${{ matrix.target }}" freemkv
       - name: Build the CLI
         shell: bash
         working-directory: freemkv

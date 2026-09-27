@@ -108,9 +108,9 @@ jobs:
             macos-*)   brew install ffmpeg ;;
             windows-*) choco install ffmpeg -y --no-progress ;;
           esac
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: stable
+      - name: Exact toolchain (freemkv rust-version)
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with: { workspaces: freemkv }
       - run: cargo build --release --bin freemkv
@@ -308,10 +308,10 @@ jobs:
             macos-*) brew install ffmpeg ;;
             windows-*) choco install ffmpeg -y --no-progress ;;
           esac
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - name: Exact toolchain (freemkv rust-version)
         if: steps.creds.outputs.have == 'true'
-        with:
-          toolchain: stable
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: steps.creds.outputs.have == 'true'
         with: { workspaces: freemkv }
