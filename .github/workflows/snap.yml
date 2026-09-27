@@ -426,12 +426,15 @@ jobs:
             code=0
             snapcraft upload --verbosity=verbose --release="$CHANNEL" "$f" > upload.log 2>&1 || code=$?
             cat upload.log
-            case "$(python3 src/packaging/snap/store_checks.py upload "$code" upload.log)" in
+            case "$(python3 src/packaging/snap/store_checks.py upload "$code" "$CHANNEL" upload.log)" in
               released)
                 echo "- \`$name\` released to \`$CHANNEL\`" >> "$GITHUB_STEP_SUMMARY" ;;
               held)
                 echo "::warning::$name is uploaded but held for Snap Store manual review (optical-write / dbus grants); it is NOT on $CHANNEL"
                 echo "- \`$name\` held for store manual review, NOT released to \`$CHANNEL\`" >> "$GITHUB_STEP_SUMMARY" ;;
+              held-unreported)
+                echo "::warning::$name is uploaded but held for store manual review (reason not reported); it is NOT on $CHANNEL"
+                echo "- \`$name\` held for store manual review (reason not reported), NOT released to \`$CHANNEL\`" >> "$GITHUB_STEP_SUMMARY" ;;
               *)
                 echo "::error::store upload of $name to $CHANNEL failed"
                 rc=1 ;;

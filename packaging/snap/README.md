@@ -18,18 +18,25 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
 - The GitHub release asset is attached whether or not the store is set up.
 - The store upload is skipped while `SNAPCRAFT_STORE_CREDENTIALS` is unset.
   With it set, [`store_checks.py`](store_checks.py) judges each upload
-  against the exact lines snapcraft 9 prints, as an allowlist: progress
-  (`Uploading...`, `Status: ...`), then either one whole-line
-  `Revision N created for 'freemkv' ...` (released if the last status is
-  `ready to release!`, held if it is `will need manual review`), or, with
-  exit code 1, `Issues while processing snap:` followed only by
-  `(NEEDS REVIEW) <id>` items for the two grants in step 4 (optionally with
-  review-tools' reason and a full stop) and craft-cli's `Full execution log:`
-  / `For more information, check out:` lines. Held is a warning and a
-  run-summary line saying it was NOT released. Any other line, exit code or
-  finding, or an arm64 build that did not succeed (failed or cancelled),
-  fails the job. The first real upload shows whether the store's wording
-  matches; if not, it fails visibly and `store_checks.py` needs updating.
+  against the exact lines snapcraft 9 prints at `--verbosity=verbose`, as an
+  allowlist. First come startup lines (`Starting snapcraft, version ...`,
+  `Logging execution to '...'`, `Unsquashing snap file '...'.`) and progress
+  (`Uploading...`, `Status: ...`). Then either:
+  - exit 0, with `Revision N created for 'freemkv' and released to
+    '<channel>'` for the channel requested as the last line: released if the
+    last status is `ready to release!`, or held (reason not reported) if it
+    is `will need manual review`; or
+  - exit 1, a last status of `will need manual review`, then
+    `Issues while processing snap:` followed only by `(NEEDS REVIEW) <id>`
+    items for the two grants in step 4 (optionally with review-tools' reason
+    and a full stop) and craft-cli's `Full execution log:` /
+    `For more information, check out:` lines.
+
+  Held is a warning and a run-summary line saying it was NOT released. Any
+  other line, exit code, status or finding, or an arm64 build that did not
+  succeed (failed or cancelled), fails the job. The first real upload shows
+  whether the store's wording matches; if not, it fails visibly and
+  `store_checks.py` needs updating.
 - Snapcraft is pinned to the `9.x/stable` track (`SNAPCRAFT_CHANNEL`).
   review-tools only has a `latest` track, so the run records its version in
   the summary and `store_checks.py` fails on an unfamiliar report format.

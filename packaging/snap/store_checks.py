@@ -33,12 +33,17 @@ PROGRESS = re.compile(
     r"|Status: (?:processing|ready to release!|will need manual review"
     r"|error while processing delta|error while processing|[a-z_]+)"
 )
+# Printed before any progress at --verbosity=verbose: craft-cli's greeting and
+# log path (messages.py), craft-application's greeting text, and snapcraft
+# reading the snap (utils.py).
+STARTUP = re.compile(
+    r"Starting snapcraft, version \S+"
+    r"|Logging execution to '[^'\n]+'"
+    r"|Unsquashing snap file '[^'\n]+'\."
+)
+CHANNELS = ("edge", "beta", "candidate", "stable")
 HELD_STATUS = "Status: will need manual review"
 ISSUES_HEADER = "Issues while processing snap:"
-REVISION = re.compile(
-    r"Revision \d+ created for 'freemkv'"
-    r"(?: and released to '(?:edge|beta|candidate|stable)')?"
-)
 TRAILER = re.compile(
     r"Full execution log: '[^'\n]+'|For more information, check out: https://\S+"
 )
@@ -75,35 +80,47 @@ def is_known_grant_issue(issue):
     return m is not None and m["id"] in STORE_GRANT_IDS
 
 
-def _released_or_held(lines):
-    """Exit 0: progress lines and one revision line; the final status decides."""
-    statuses, revisions = [], 0
-    for line in lines:
-        if not line.strip():
-            continue
-        if PROGRESS.fullmatch(line):
-            if line.startswith("Status: "):
-                statuses.append(line)
-        elif REVISION.fullmatch(line):
-            revisions += 1
-        else:
-            return "failed"
-    if revisions != 1:
+def _preamble_line(line):
+    """A startup or progress line, allowed before the result or the issue list."""
+    return bool(STARTUP.fullmatch(line) or PROGRESS.fullmatch(line))
+
+
+def _last_status(lines):
+    statuses = [line for line in lines if line.startswith("Status: ")]
+    return statuses[-1] if statuses else None
+
+
+def _released_or_held(lines, channel):
+    """Exit 0: preamble, then the revision line for `channel` as the last line."""
+    content = [line for line in lines if line.strip()]
+    if not content:
         return "failed"
-    last = statuses[-1] if statuses else None
-    return {READY_STATUS: "released", HELD_STATUS: "held"}.get(last, "failed")
+    revision = re.compile(
+        r"Revision \d+ created for 'freemkv' and released to '" + re.escape(channel) + "'"
+    )
+    *preamble, last = content
+    if not revision.fullmatch(last) or not all(_preamble_line(line) for line in preamble):
+        return "failed"
+    return {READY_STATUS: "released", HELD_STATUS: "held-unreported"}.get(
+        _last_status(preamble), "failed"
+    )
 
 
 def _held_by_known_grants(lines):
-    """Exit 1: progress, the header, known-grant issues, then craft-cli trailers."""
-    state, issues = "progress", 0
+    """Exit 1: preamble ending in a manual-review status, the header,
+    known-grant issues, then craft-cli trailers."""
+    state, issues, preamble = "preamble", 0, []
     for line in lines:
         if not line.strip():
             continue
-        if state == "progress":
+        if state == "preamble":
             if line == ISSUES_HEADER:
+                if _last_status(preamble) != HELD_STATUS:
+                    return "failed"
                 state = "issues"
-            elif not PROGRESS.fullmatch(line):
+            elif _preamble_line(line):
+                preamble.append(line)
+            else:
                 return "failed"
         elif state == "issues" and line.startswith("- ") and is_known_grant_issue(line[2:]):
             issues += 1
@@ -114,13 +131,16 @@ def _held_by_known_grants(lines):
     return "held" if issues else "failed"
 
 
-def classify_upload(exit_code, log):
-    """'released', 'held' (waiting for the known store grants) or 'failed'."""
+def classify_upload(exit_code, log, channel):
+    """'released', 'held' (the known store grants), 'held-unreported' (held,
+    no reason given) or 'failed'."""
+    if channel not in CHANNELS:
+        return "failed"
     lines = log.splitlines()
     if exit_code == 0:
         if ISSUES_HEADER in log:
             return "failed"
-        return _released_or_held(lines)
+        return _released_or_held(lines, channel)
     if exit_code == 1:
         return _held_by_known_grants(lines)
     return "failed"
@@ -142,21 +162,21 @@ def main(argv):
             print(f"::error::snap-review exited {argv[2]}, but its report implies {want}")
             return 1
         return 1 if failures else 0
-    if len(argv) == 4 and argv[1] == "upload":
+    if len(argv) == 5 and argv[1] == "upload":
         try:
             code = int(argv[2])
         except ValueError:
             print(f"::error::snapcraft exit code {argv[2]!r} is not a number")
             return 2
         try:
-            with open(argv[3], encoding="utf-8") as f:
+            with open(argv[4], encoding="utf-8") as f:
                 log = f.read()
         except (OSError, UnicodeDecodeError) as e:
             print(f"::error::cannot read the snapcraft upload log: {e}")
             return 2
-        print(classify_upload(code, log))
+        print(classify_upload(code, log, argv[3]))
         return 0
-    print(f"usage: {argv[0]} review EXIT_CODE REPORT.json | upload EXIT_CODE LOG", file=sys.stderr)
+    print(f"usage: {argv[0]} review EXIT_CODE REPORT.json | upload EXIT_CODE CHANNEL LOG", file=sys.stderr)
     return 2
 
 

@@ -70,7 +70,12 @@ class ReviewExit(unittest.TestCase):
 
 
 BARE_PLUG, BARE_SLOT = (g.split(":", 1)[1] for g in sc.KNOWN_GRANTS)
-PRE = "Uploading...\nStatus: processing\nStatus: will need manual review\n"
+START = (
+    "Starting snapcraft, version 9.1.3\n"
+    "Logging execution to '/root/snapcraft-1.log'\n"
+    "Unsquashing snap file 'freemkv-amd64.snap'.\n"
+)
+PRE = START + "Uploading...\nStatus: processing\nStatus: will need manual review\n"
 HDR = sc.ISSUES_HEADER + "\n"
 LOG = "Full execution log: '/root/snapcraft-1.log'\n"
 DOCS = "For more information, check out: https://snapcraft.io/docs/store-review\n"
@@ -96,10 +101,10 @@ class UploadHeld(unittest.TestCase):
             "docs link and log": PRE + HDR + item(PLUG) + DOCS + LOG,
             "blank lines": PRE + "\n" + HDR + "\n" + item(PLUG) + "\n" + LOG,
             "CRLF": (PRE + HDR + item(PLUG) + item(SLOT) + LOG).replace("\n", "\r\n"),
-            "no progress lines": HDR + item(PLUG),
+            "held status only": "Status: will need manual review\n" + HDR + item(PLUG),
         }
         for name, log in cases.items():
-            self.assertEqual(sc.classify_upload(1, log), "held", name)
+            self.assertEqual(sc.classify_upload(1, log, "beta"), "held", name)
 
 
 class UploadAdversarial(unittest.TestCase):
@@ -115,6 +120,11 @@ class UploadAdversarial(unittest.TestCase):
         "header lowercase": HDR.lower() + item(PLUG),
         "no header": PRE + item(PLUG),
         "header only": PRE + HDR + LOG,
+        "no status before header": START + HDR + item(PLUG),
+        "rejected status before header": PRE + "Status: rejected\n" + HDR + item(PLUG),
+        "processing error status last": PRE + "Status: error while processing\n" + HDR + item(PLUG),
+        "startup line inside issues": PRE + HDR + item(PLUG) + "Starting snapcraft, version 9.1.3\n",
+        "startup line after trailer": PRE + HDR + item(PLUG) + LOG + "Logging execution to '/x'\n",
         # the issue lines
         "no status tag": HDR + f"- {PLUG}\n",
         "lowercase tag": HDR + f"- (needs review) {PLUG}\n",
@@ -150,24 +160,35 @@ class UploadAdversarial(unittest.TestCase):
     def test_every_adversarial_case_fails(self):
         self.assertGreaterEqual(len(self.CASES), 36)
         for name, log in self.CASES.items():
-            self.assertEqual(sc.classify_upload(1, log), "failed", name)
+            self.assertEqual(sc.classify_upload(1, log, "beta"), "failed", name)
+            # With a valid preamble, so each case fails for its own defect.
+            if log.startswith(HDR):
+                self.assertEqual(sc.classify_upload(1, PRE + log, "beta"), "failed", name)
 
     def test_held_needs_exit_code_one(self):
         for code in (2, 3, 127, -1):
-            self.assertEqual(sc.classify_upload(code, HELD), "failed", code)
+            self.assertEqual(sc.classify_upload(code, HELD, "beta"), "failed", code)
 
 
 class UploadSuccess(unittest.TestCase):
-    OK = "Uploading...\nStatus: processing\nStatus: ready to release!\n"
+    OK = START + "Uploading...\nStatus: processing\nStatus: ready to release!\n"
     REV = "Revision 12 created for 'freemkv' and released to 'beta'\n"
 
     def test_released(self):
-        self.assertEqual(sc.classify_upload(0, self.OK + self.REV), "released")
-        self.assertEqual(sc.classify_upload(0, (self.OK + self.REV).replace("\n", "\r\n")), "released")
+        self.assertEqual(sc.classify_upload(0, self.OK + self.REV, "beta"), "released")
+        self.assertEqual(sc.classify_upload(0, (self.OK + self.REV).replace("\n", "\r\n"), "beta"), "released")
 
     def test_held_status_is_not_released(self):
-        log = "Status: will need manual review\n" + self.REV
-        self.assertEqual(sc.classify_upload(0, log), "held")
+        log = START + "Status: will need manual review\n" + self.REV
+        self.assertEqual(sc.classify_upload(0, log, "beta"), "held-unreported")
+
+    def test_revision_must_name_the_requested_channel(self):
+        self.assertEqual(sc.classify_upload(0, self.OK + self.REV, "edge"), "failed")
+        rev = "Revision 12 created for 'freemkv' and released to 'stable'\n"
+        self.assertEqual(sc.classify_upload(0, self.OK + rev, "stable"), "released")
+
+    def test_unknown_channel_argument_fails(self):
+        self.assertEqual(sc.classify_upload(0, self.OK + self.REV, "beta,edge"), "failed")
 
     def test_success_cases_that_fail(self):
         cases = {
@@ -181,24 +202,29 @@ class UploadSuccess(unittest.TestCase):
             "no status": self.REV,
             "final status not ready": "Status: processing\n" + self.REV,
             "unknown channel": self.OK + "Revision 12 created for 'freemkv' and released to 'x'\n",
+            "no released-to clause": self.OK + "Revision 12 created for 'freemkv'\n",
+            "revision not last": self.OK + self.REV + "Status: processing\n",
+            "startup line after revision": self.OK + self.REV + "Starting snapcraft, version 9.1.3\n",
+            "startup line with suffix": "Starting snapcraft, version 9.1.3 (REJECTED)\n" + self.OK + self.REV,
+            "unsquashing without full stop": "Unsquashing snap file 'x.snap'\n" + self.OK + self.REV,
         }
         for name, log in cases.items():
-            self.assertEqual(sc.classify_upload(0, log), "failed", name)
+            self.assertEqual(sc.classify_upload(0, log, "beta"), "failed", name)
 
 
 class UploadMain(unittest.TestCase):
     def test_non_numeric_exit_code_is_a_numbered_failure(self):
-        self.assertEqual(sc.main(["store_checks.py", "upload", "oops", "/dev/null"]), 2)
+        self.assertEqual(sc.main(["store_checks.py", "upload", "oops", "beta", "/dev/null"]), 2)
 
     def test_unreadable_log_is_a_numbered_failure(self):
-        self.assertEqual(sc.main(["store_checks.py", "upload", "1", "/nonexistent/upload.log"]), 2)
+        self.assertEqual(sc.main(["store_checks.py", "upload", "1", "beta", "/nonexistent/upload.log"]), 2)
 
     def test_undecodable_log_is_a_numbered_failure(self):
         import os, tempfile
         with tempfile.NamedTemporaryFile("wb", delete=False) as f:
             f.write(b"\xff\xfe\xfa")
         try:
-            self.assertEqual(sc.main(["store_checks.py", "upload", "1", f.name]), 2)
+            self.assertEqual(sc.main(["store_checks.py", "upload", "1", "beta", f.name]), 2)
         finally:
             os.unlink(f.name)
 

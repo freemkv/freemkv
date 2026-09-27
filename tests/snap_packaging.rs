@@ -129,8 +129,9 @@ fn publish_runs_only_on_push_and_reports_honestly() {
         publish.contains("API error, retrying"),
         "a transient API error must retry"
     );
-    assert!(publish.contains("store_checks.py upload \"$code\" upload.log"));
+    assert!(publish.contains("store_checks.py upload \"$code\" \"$CHANNEL\" upload.log"));
     assert!(publish.contains("held for store manual review, NOT released"));
+    assert!(publish.contains("held for store manual review (reason not reported)"));
     assert!(
         publish.contains(r#"[ "$ARM64_BUILD" != success ] && [ "$ARM64_BUILD" != skipped ]"#),
         "arm64 that failed or was cancelled must fail the job"
