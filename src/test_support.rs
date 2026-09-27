@@ -82,6 +82,11 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
             have: 1_024,
             want: 4_096,
         },
+        Error::ImageEndsBeforeRead {
+            lba: 2_048,
+            have: 1_024,
+            want: 4_096,
+        },
         Error::AacsNoKeys,
         Error::AacsCertShort,
         Error::AacsAgidAlloc,
