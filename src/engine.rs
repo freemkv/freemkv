@@ -1849,23 +1849,7 @@ fn mux_selected_titles(
         // Destination per output kind: a per-title file for the container /
         // metadata / index sinks, or a demux directory (its own per-track
         // naming) for separate track files.
-        let (dest_url, target) = match kind {
-            OutKind::File(scheme) => {
-                let base = title_basename(&req.filename_template, &label, idx + 1);
-                let out = format!("{}/{}.{}", req.dest_dir, base, scheme);
-                (format!("{scheme}://{out}"), out)
-            }
-            OutKind::Demux(scheme) => {
-                let dir = if multi {
-                    format!("{}/t{:02}/", req.dest_dir, idx + 1)
-                } else {
-                    format!("{}/", req.dest_dir)
-                };
-                (format!("{scheme}://{dir}"), dir)
-            }
-            // Whole-disc kinds handled by their own callers.
-            OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
-        };
+        let (dest_url, target) = title_dest(req, kind, &label, idx, multi);
         let hint = disc.titles.get(idx).map(|t| t.size_bytes).unwrap_or(0);
         let input = title_input_options(set, req, idx);
         let mux = mux_opts(req);
@@ -2270,74 +2254,6 @@ fn recovery_raw(multipass: bool, want_iso: bool, user_raw: bool) -> Result<bool,
 /// type.
 pub use crate::title_identity::TitleIdentity;
 
-// Translate a selection made against the DRIVE scan into indices valid for the staged image's
-// scan. Position is not identity: a multipass recovery can shorten the title list.
-fn remap_titles_by_identity(
-    iso_path: &str,
-    titles: &[usize],
-    ids: &[TitleIdentity],
-) -> Result<Vec<usize>, String> {
-    // Nothing selected, or nothing captured at all: no scan needed, and
-    // `Selection::MainMovie` handles the empty case downstream.
-    if titles.is_empty() || ids.is_empty() {
-        return Ok(titles.to_vec());
-    }
-    remap_against(titles, ids, &scan_titles(iso_path)?)
-}
-
-// The decision half of remap_titles_by_identity, without the scan. Kept
-// separate so it's testable — the real call site needs a live drive and a
-// completed multipass recovery.
-fn remap_against(
-    titles: &[usize],
-    ids: &[TitleIdentity],
-    staged: &[TitleIdentity],
-) -> Result<Vec<usize>, String> {
-    let mut out = Vec::with_capacity(titles.len());
-    for &was in titles {
-        // No identity recorded for this number: nothing to disagree with, so
-        // it keeps its position — and only it does.
-        let Some(id) = ids.get(was) else {
-            out.push(was);
-            continue;
-        };
-        match staged.iter().position(|s| s == id) {
-            Some(now) => out.push(now),
-            None => {
-                return Err(format!(
-                    "Title {} ({}) is not in the recovered image — the damage \
-                     destroyed its playlist, so it cannot be muxed.",
-                    was + 1,
-                    id.describe()
-                ));
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// Re-key a per-title stream selection from the old (drive-scan) canonical
-/// indices to the new (staged-image) ones, via the same old->new mapping the
-/// title list was remapped through. `title_pids` is keyed by canonical title
-/// index; leaving it keyed by the drive-scan index while the titles are
-/// remapped to staged-image indices makes `stream_selection_for` miss and fall
-/// back to the union, muxing a deselected track on a damaged-disc multipass
-/// rip. Entries whose old index has no mapping (a title not in the remapped
-/// selection) are dropped: they describe a title that will not be muxed.
-fn remap_title_pids(
-    pids: &TitleStreams,
-    map: &std::collections::HashMap<usize, usize>,
-) -> TitleStreams {
-    match pids {
-        TitleStreams::PerTitle(per) => TitleStreams::PerTitle(
-            per.iter()
-                .filter_map(|(ti, a, s)| map.get(ti).map(|&now| (now, a.clone(), s.clone())))
-                .collect(),
-        ),
-        TitleStreams::Unspecified => TitleStreams::Unspecified,
-    }
-}
-
 // Confirm the title at `idx` in a FRESH scan is still the one the selection meant, before it is
 // muxed under that number. Verifies rather than remaps: a moved title list between two scans is
 // a disc/drive problem.
@@ -2378,16 +2294,6 @@ fn verify_selection_identity(
         verify_title_identity(picked.get(t), scanned, t)?;
     }
     Ok(())
-}
-
-/// The staged image's title identities, in order.
-fn scan_titles(iso_path: &str) -> Result<Vec<TitleIdentity>, String> {
-    let (disc, _reader) = libfreemkv::scan_iso(
-        std::path::Path::new(iso_path),
-        libfreemkv::ScanOptions::default(),
-    )
-    .map_err(|e| format!("could not re-scan the recovered image (E{}).", e.code()))?;
-    Ok(disc.titles.iter().map(TitleIdentity::of).collect())
 }
 
 /// A recovery that read nothing has nothing to mux. Separate from the caller so
@@ -2638,45 +2544,13 @@ fn run_disc_scanning(
             return iso_recovery_result(&result, &iso_path);
         }
 
-        // Title output: mux the selected titles from the recovered ISO via the
-        // ordinary ISO-source path. The staged image is encrypted (see
-        // `recovery_raw`), so `iso_req` carries this rip's set as its seed.
+        // Title output: mux the selected titles from the recovered (encrypted, see
+        // `recovery_raw`) ISO with this rip's set and the drive's scan.
         if recovery_produced_no_data(result.good_bytes) {
             let _ = std::fs::remove_file(&iso_path);
             return Err("Recovery produced no readable data — nothing to mux.".into());
         }
-        // Re-resolve the selection against the staged image before muxing.
-        let titles = match remap_titles_by_identity(&iso_path, &req.titles, &scanned_ids) {
-            Ok(t) => t,
-            Err(e) => {
-                return Err(format!("{e} The recovered image is kept: {iso_path}"));
-            }
-        };
-        // `title_pids` is keyed by the drive-scan canonical index, but the titles
-        // were just remapped to staged-image indices — re-key through the same
-        // positional old->new map (req.titles[i] -> titles[i]) or a track is lost.
-        let pid_map: std::collections::HashMap<usize, usize> = req
-            .titles
-            .iter()
-            .copied()
-            .zip(titles.iter().copied())
-            .collect();
-        let title_pids = remap_title_pids(&req.title_pids, &pid_map);
-        // KU §4.3 "GUI multipass: staged raw ISO → mux | The set from Start is reused for
-        // the mux (`open_image_with(Known)` or `Seeded`)": no second request.
-        let iso_req = RipRequest {
-            source: iso_path.clone(),
-            titles,
-            title_pids,
-            // The numbers above were just resolved BY IDENTITY against the
-            // staged image, so the drive scan's identities no longer apply —
-            // carrying them on would compare against the wrong title.
-            title_ids: Vec::new(),
-            seed: Some(set.clone()),
-            vid_from: None,
-            ..req.clone()
-        };
-        let mux = run_blocking(&iso_req, sink, state);
+        let mux = mux_staged_titles(req, &iso_path, disc, set, &indices, &label, sink, state);
         // The staged image is only disposable once the titles it was staged
         // for actually landed. `state.cancel` is the flag the Stop button
         // sets, read directly rather than inferred from the mux's summary.
@@ -2694,9 +2568,9 @@ fn run_disc_scanning(
                 "Cancelled — the recovered image is kept: {iso_path}"
             ));
         }
-        // The recursive mux above reports its own success text (titles
-        // written); it has no way to know THIS stage's recovery left residual
-        // damage under tolerance, so the note is appended out here instead.
+        // The mux above reports its own success text (titles written); it has no way
+        // to know THIS stage's recovery left residual damage under tolerance, so the
+        // note is appended out here instead.
         return mux.map(|s| {
             format!(
                 "{s}{}{}",
@@ -2725,22 +2599,7 @@ fn run_disc_scanning(
     let written = std::cell::Cell::new(0usize);
     let partial = std::cell::Cell::new(0usize);
     let outcome = fe::run_titles(&indices, !req.titles.is_empty(), sink, |idx| {
-        let (dest_url, target) = match kind {
-            OutKind::File(scheme) => {
-                let base = title_basename(&req.filename_template, &label, idx + 1);
-                let out = format!("{}/{}.{}", req.dest_dir, base, scheme);
-                (format!("{scheme}://{out}"), out)
-            }
-            OutKind::Demux(scheme) => {
-                let dir = if multi {
-                    format!("{}/t{:02}/", req.dest_dir, idx + 1)
-                } else {
-                    format!("{}/", req.dest_dir)
-                };
-                (format!("{scheme}://{dir}"), dir)
-            }
-            OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
-        };
+        let (dest_url, target) = title_dest(req, kind, &label, idx, multi);
         let hint = hints.get(idx).copied().unwrap_or(0);
 
         // KU §3.3: each title reopens the drive with `open_scan` (no key call) and reads
@@ -2864,6 +2723,145 @@ fn run_disc_scanning(
         indices.len(),
         &req.dest_dir,
     )
+}
+
+/// Mux `indices` out of a staged (raw) image with the rip's set, from the drive's scan:
+/// KU §4.3 "GUI multipass: staged raw ISO → mux | The set from Start is reused for the mux
+/// (`open_image_with(Known)` or `Seeded`)". `Seeded` only for Pending forensic keys (§5.4).
+#[allow(clippy::too_many_arguments)]
+fn mux_staged_titles(
+    req: &RipRequest,
+    iso_path: &str,
+    drive: libfreemkv::Disc,
+    set: KeySet,
+    indices: &[usize],
+    label: &str,
+    sink: &UiSink,
+    state: &Arc<RunState>,
+) -> Result<String, String> {
+    use std::sync::atomic::AtomicUsize;
+    // J14: "an image mux never rescans when the caller has a scanned disc", so the drive's
+    // title numbers (the user's picks) index the set and the image alike.
+    let keys = if set.forensic_pending() {
+        fe::KeyInput::Seeded(key_factory(&req.keys), set)
+    } else {
+        fe::KeyInput::Known(set)
+    };
+    let watch = CancelWatch::new(state);
+    let opts = fe::OpenImageOptions {
+        keys,
+        disc: Some(drive),
+        scope: Some(libfreemkv::keys::KeyScope::Titles(indices.to_vec())),
+        vid: None,
+        halt: Some(watch.halt.clone()),
+    };
+    let src = fe::ImageSource::Iso(iso_path.into());
+    let (opened, trace) = fe::open_image_with_traced(&src, opts);
+    drop(watch);
+    log_walk(&trace, sink);
+    let opened = opened.map_err(|e| key_refusal(&e, src.path(), state))?;
+    std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
+    let kind = out_kind(&req.format);
+    let multi = demux_needs_subdirs(indices.len());
+    let plan = fe::MuxPlan {
+        titles: indices.to_vec(),
+        explicit_selection: !req.titles.is_empty(),
+        streams: indices
+            .iter()
+            .map(|&i| (i, stream_selection_for(req, Some(i))))
+            .collect(),
+        mux: mux_opts(req),
+    };
+    let dest = |idx: usize| title_dest(req, kind, label, idx, multi).0;
+    // The per-title report `mux_selected_titles` makes, from the engine's title events.
+    struct Staged<'a> {
+        ui: &'a UiSink,
+        req: &'a RipRequest,
+        kind: OutKind,
+        label: &'a str,
+        multi: bool,
+        written: AtomicUsize,
+        partial: AtomicUsize,
+    }
+    impl fe::Sink for Staged<'_> {
+        fn log(&self, level: fe::Level, msg: &str) {
+            self.ui.log(level, msg);
+        }
+        fn progress(&self, p: &fe::Progress) {
+            self.ui.progress(p);
+        }
+        fn should_cancel(&self) -> bool {
+            self.ui.should_cancel()
+        }
+        fn event(&self, e: &fe::Event<'_>) {
+            self.ui.event(e);
+            let fe::Event::TitleDone { idx, result, .. } = e else {
+                return;
+            };
+            let target = title_dest(self.req, self.kind, self.label, *idx, self.multi).1;
+            let mut lines = self.ui.0.lines.lock().unwrap_or_else(|e| e.into_inner());
+            match result {
+                Ok(o) if !o.completed => {
+                    self.partial.fetch_add(1, Ordering::Relaxed);
+                    lines.push(format!(
+                        "title {} cancelled — partial output kept: {target}",
+                        idx + 1
+                    ));
+                }
+                Ok(o) => {
+                    lines.push(format!("title {} -> {target}", idx + 1));
+                    lines.extend(lossy_lines(o, &target));
+                    self.written.fetch_add(1, Ordering::Relaxed);
+                    self.ui.0.titles_done.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => lines.push(format!("Title {}: {}", idx + 1, explain(error_code(e)))),
+            }
+        }
+    }
+    let staged = Staged {
+        ui: sink,
+        req,
+        kind,
+        label,
+        multi,
+        written: AtomicUsize::new(0),
+        partial: AtomicUsize::new(0),
+    };
+    let outcome = fe::mux_image_titles(&opened, &plan, &dest, &staged);
+    summarize_outcome(
+        &outcome,
+        staged.written.load(Ordering::Relaxed),
+        staged.partial.load(Ordering::Relaxed),
+        indices.len(),
+        &req.dest_dir,
+    )
+}
+
+/// Title `idx`'s sink URL and the path the log names, for a file or demux output.
+fn title_dest(
+    req: &RipRequest,
+    kind: OutKind,
+    label: &str,
+    idx: usize,
+    multi: bool,
+) -> (String, String) {
+    match kind {
+        OutKind::File(scheme) => {
+            let base = title_basename(&req.filename_template, label, idx + 1);
+            let out = format!("{}/{}.{}", req.dest_dir, base, scheme);
+            (format!("{scheme}://{out}"), out)
+        }
+        OutKind::Demux(scheme) => {
+            let dir = if multi {
+                format!("{}/t{:02}/", req.dest_dir, idx + 1)
+            } else {
+                format!("{}/", req.dest_dir)
+            };
+            (format!("{scheme}://{dir}"), dir)
+        }
+        // Whole-disc kinds are handled by their own callers.
+        OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
+    }
 }
 
 /// Mux title `idx` live off a reopened drive through the rip's set (`mux_with_keys`,
@@ -3842,10 +3840,10 @@ mod routing_tests {
         DiscPlan, KeyConfig, OutKind, RipRequest, RunState, TitleIdentity, UiSink, damage_note,
         demux_needs_subdirs, disc_device, disc_raw_copy, fe, image_or_dir_scheme, is_disc_source,
         is_stream_source, iso_recovery_result, mux_opts, out_kind, recovery_plan,
-        recovery_produced_no_data, recovery_raw, remap_against, remap_title_pids,
-        run_disc_scanning, run_stream, should_delete_staging_iso, source_scheme,
-        staging_not_kept_note, stream_selection_for, title_input_options, title_session_mux_opts,
-        verify_selection_identity, verify_title_identity, whole_image_gate,
+        recovery_produced_no_data, recovery_raw, run_disc_scanning, run_stream,
+        should_delete_staging_iso, source_scheme, staging_not_kept_note, stream_selection_for,
+        title_input_options, title_session_mux_opts, verify_selection_identity,
+        verify_title_identity, whole_image_gate,
     };
     use std::sync::Arc;
 
@@ -3944,18 +3942,15 @@ mod routing_tests {
             "a scoped image is not kept"
         );
 
-        // 1b. The selection is re-resolved by identity before the staging mux.
-        //     Reached only after a completed recovery, so nothing else can
-        //     see it.
+        // 1b. The staging mux reuses the rip's set and the drive's scan (KU §4.3, J14):
+        //     no rescan, so the user's title numbers stay the drive's.
         let mux = slice(
-            "        // Re-resolve the selection against the staged image",
-            "        let mux = run_blocking(&iso_req, sink, state);",
+            "        let mux = mux_staged_titles(",
+            "        // The staged image is only disposable",
         );
         assert!(
-            mux.contains("remap_titles_by_identity(&iso_path, &req.titles"),
-            "the staging mux must re-resolve the user's titles against the \
-             recovered image; positions alone address a different title once \
-             damage has removed a playlist"
+            mux.contains("mux_staged_titles(req, &iso_path, disc, set, &indices"),
+            "the staging mux must mux the drive's picks from the drive's scan"
         );
 
         // 2. The drive -> ISO destination (the most-travelled label seam).
@@ -4479,38 +4474,6 @@ mod routing_tests {
         })
     }
 
-    /// The whole point: a title that MOVED is followed to its new index.
-    #[test]
-    fn a_selection_follows_its_titles_when_the_rescan_renumbers_them() {
-        // Drive scan: [feature, extra, trailer]; the user picked 0 and 2.
-        // `ids` is the whole scan, indexed by title number — the extra is in
-        // it even though nobody picked it, because that is what an index means.
-        let picked = vec![0usize, 2];
-        let ids = vec![
-            id("00800.mpls", 1000),
-            id("00001.mpls", 5000),
-            id("00003.mpls", 13000),
-        ];
-        // The recovered image lost 00001.mpls, so everything after it shifts.
-        let staged = vec![id("00800.mpls", 1000), id("00003.mpls", 13000)];
-        assert_eq!(
-            remap_against(&picked, &ids, &staged),
-            Ok(vec![0, 1]),
-            "the trailer moved from index 2 to 1 and must be followed"
-        );
-    }
-
-    // Duplicate playlist names are legitimate on real discs, and so are
-    // duplicate DURATIONS. What tells the pair apart is the sectors each is
-    // read from; matching on the name alone would pick the first of the pair.
-    #[test]
-    fn duplicate_playlist_names_are_told_apart_by_their_sectors() {
-        let picked = vec![1usize];
-        let ids = vec![id("00800.mpls", 1000), id("00800.mpls", 9000)];
-        let staged = vec![id("00800.mpls", 1000), id("00800.mpls", 9000)];
-        assert_eq!(remap_against(&picked, &ids, &staged), Ok(vec![1]));
-    }
-
     // ── The case the project's own rule names ── titles can legitimately
     // share playlist, duration, and size; only the SECTORS tell them apart.
     // Both fixtures below differ in exactly one field, `extents[0].start_lba`.
@@ -4533,31 +4496,6 @@ mod routing_tests {
             content_format: libfreemkv::ContentFormat::BdTs,
             codec_privates: Vec::new(),
         }
-    }
-
-    /// The GUI's remap path must follow the title the user actually picked,
-    /// not the first playlist of the same name and length.
-    #[test]
-    fn a_duplicate_playlist_of_the_same_length_is_still_told_apart_by_its_sectors() {
-        let first = TitleIdentity::of(&dup_title(1000));
-        let second = TitleIdentity::of(&dup_title(9000));
-        assert_ne!(
-            first, second,
-            "same name and duration, different sectors — not the same title"
-        );
-
-        // The user picked the SECOND of the pair (index 1). The staged scan
-        // still lists both, in the same order, so the answer is the literal 1.
-        assert_eq!(
-            remap_against(
-                &[1],
-                &[first.clone(), second.clone()],
-                &[first, second.clone()]
-            ),
-            Ok(vec![1]),
-            "the second of a duplicate pair must remap to index 1, not to the \
-             first playlist that happens to share its name and length"
-        );
     }
 
     /// The GUI's live-drive verify must refuse the same pair swapped, instead
@@ -4651,115 +4589,6 @@ mod routing_tests {
         let rescan = vec![id("00001.mpls", 300)];
         let e = verify_title_identity(picked.first(), &rescan, 0).expect_err("must refuse");
         assert!(!e.contains('\u{1b}'), "ESC survived into the UI: {e:?}");
-    }
-
-    /// A title that is GONE is a hard error. Muxing the survivors quietly
-    /// would deliver a subset under the same success summary.
-    #[test]
-    fn a_title_destroyed_by_the_damage_is_refused_not_skipped() {
-        let picked = vec![0usize, 1];
-        let ids = vec![id("00800.mpls", 7530), id("00001.mpls", 300)];
-        let staged = vec![id("00800.mpls", 7530)];
-        let e = remap_against(&picked, &ids, &staged).expect_err("must refuse");
-        assert!(
-            e.contains("00001.mpls") && e.contains("2"),
-            "the message must name the title the user asked for: {e}"
-        );
-    }
-
-    /// Nothing selected means `Selection::MainMovie` downstream — there is
-    /// nothing to remap and the empty list must pass through untouched.
-    #[test]
-    fn an_empty_selection_is_left_alone() {
-        assert_eq!(remap_against(&[], &[], &[]), Ok(vec![]));
-    }
-
-    // A title with NO captured identity must cost only itself. Indexed by canonical title
-    // number, so "nothing recorded for title 3" is a per-title answer, not a disarm of the
-    // whole selection.
-    #[test]
-    fn an_uncaptured_title_does_not_disarm_the_rest_of_the_selection() {
-        // The user picked all three titles; identities are known for the first
-        // two only.
-        let picked = vec![0usize, 1, 2];
-        let ids = vec![id("00800.mpls", 1000), id("00001.mpls", 300)];
-        // The recovered image lists the pair the other way round.
-        let staged = vec![
-            id("00001.mpls", 300),
-            id("00800.mpls", 1000),
-            id("00003.mpls", 13000),
-        ];
-        assert_eq!(
-            remap_against(&picked, &ids, &staged),
-            Ok(vec![1, 0, 2]),
-            "the two titles WITH an identity must be followed to their new \
-             positions; only the one with no identity falls back to its number"
-        );
-    }
-
-    // The multipass-recovery defect: `titles` were remapped by identity to the
-    // staged image's indices, but `title_pids` stayed keyed by the drive-scan
-    // index. `stream_selection_for` then missed and fell back to the union,
-    // muxing a track the user had unticked. `remap_title_pids` re-keys through
-    // the same old->new mapping so the per-title selection follows its title.
-    #[test]
-    fn per_title_pids_follow_their_title_through_the_remap() {
-        use std::collections::HashMap;
-        // Drive scan had titles [0,1,2]; the staged image reordered them so
-        // old 0->new 2, old 1->new 0, old 2->new 1.
-        let map: HashMap<usize, usize> = [(0usize, 2usize), (1, 0), (2, 1)].into_iter().collect();
-        let pids = crate::engine::TitleStreams::PerTitle(vec![
-            (0, vec![0x1100u16], vec![0x1200u16]),
-            (1, vec![], vec![]),
-            (2, vec![0x1101], vec![]),
-        ]);
-        let remapped = remap_title_pids(&pids, &map);
-        assert_eq!(
-            remapped.for_title(Some(2)),
-            Some(([0x1100u16].as_slice(), [0x1200u16].as_slice())),
-            "old title 0's selection must now answer under new index 2"
-        );
-        // The unticked title (empty lists) must stay an authoritative empty
-        // selection under its new index, NOT vanish into the union.
-        assert_eq!(
-            remapped.for_title(Some(0)),
-            Some(([].as_slice(), [].as_slice())),
-            "old title 1 kept nothing; that must survive the remap under new index 0"
-        );
-        assert_eq!(
-            remapped.for_title(Some(1)),
-            Some(([0x1101u16].as_slice(), [].as_slice()))
-        );
-    }
-
-    // An entry whose old index is not in the remapped selection describes a
-    // title that will not be muxed, and is dropped rather than mis-keyed.
-    #[test]
-    fn per_title_pids_for_a_dropped_title_are_discarded() {
-        use std::collections::HashMap;
-        let map: HashMap<usize, usize> = [(0usize, 0usize)].into_iter().collect();
-        let pids = crate::engine::TitleStreams::PerTitle(vec![
-            (0, vec![0x1100u16], vec![]),
-            (5, vec![0x9999], vec![]),
-        ]);
-        let remapped = remap_title_pids(&pids, &map);
-        match remapped {
-            crate::engine::TitleStreams::PerTitle(per) => {
-                assert_eq!(per, vec![(0usize, vec![0x1100u16], vec![])]);
-            }
-            _ => panic!("expected PerTitle"),
-        }
-    }
-
-    // Unspecified carries no per-title breakdown, so the remap is a no-op.
-    #[test]
-    fn remapping_an_unspecified_selection_is_a_no_op() {
-        use std::collections::HashMap;
-        let map: HashMap<usize, usize> = [(0usize, 1usize)].into_iter().collect();
-        assert_eq!(
-            remap_title_pids(&crate::engine::TitleStreams::Unspecified, &map),
-            crate::engine::TitleStreams::Unspecified
-        );
     }
 
     // ── The selection is made against a scan the rip never sees ──
@@ -5979,7 +5808,16 @@ mod ku_gui_tests {
         let r = req(&iso, &out, vec![0, 1]);
         let path = iso.display().to_string();
         let done = with_sources(f, || {
-            mux_staged_titles(&r, &path, rescan(&fx), set, &[0, 1], "DISC", &UiSink(st.clone()), &st)
+            mux_staged_titles(
+                &r,
+                &path,
+                rescan(&fx),
+                set,
+                &[0, 1],
+                "DISC",
+                &UiSink(st.clone()),
+                &st,
+            )
         });
         done.expect("both titles mux from the drive's scan");
         assert_eq!(calls.len(), 1, "only Start's resolve asked");
