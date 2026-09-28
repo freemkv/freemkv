@@ -200,8 +200,8 @@ fn drive_not_ready_message_is_actionable() {
 #[test]
 fn aacs_no_keys_message_points_at_update_keys() {
     // The known-good remediation pattern: an AACS-needs-keys failure must guide
-    // the user to fetch a key database, not just state the fact.
-    let m = en_msg(7000);
+    // the user to fetch a key database, not just state the fact (the CLI names its command).
+    let m = en_cli_msg(7000);
     assert!(m.contains("AACS"), "E7000 must name AACS: {m}");
     assert!(
         m.contains("update-keys"),
