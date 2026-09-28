@@ -134,6 +134,7 @@ struct Live {
     running: Option<Running>,
     // The job whose lines the console shows: the running one, else the last.
     job: u64,
+    job_title: String,
 }
 
 /// What the last scan of the library and ISO folders found. Built off the
@@ -416,6 +417,18 @@ impl Library {
         complete
     }
 
+    /// Forget the audits of `paths` (every file when `None`) and wake the
+    /// indexer to redo them. Returns how many cached audits were dropped.
+    pub fn reaudit(&self, paths: Option<&[PathBuf]>) -> usize {
+        let n = match paths {
+            Some(ps) => ps.iter().filter(|p| self.probes.forget_audit(p)).count(),
+            None => self.probes.forget_all_audits(),
+        };
+        self.touch_index();
+        self.wake_indexer();
+        n
+    }
+
     /// A remux just wrote `target`: record its stamp and fold it into the
     /// snapshot so its row is current before the next scan.
     pub fn note_landed(&self, target: &Path, writing_app: Option<String>) {
@@ -590,6 +603,11 @@ impl Library {
         self.touch_live();
     }
 
+    /// The newest console line's sequence number (0 when empty).
+    pub fn last_seq(&self) -> u64 {
+        self.live().lines.back().map_or(0, |l| l.seq)
+    }
+
     /// Console lines after `seq`, oldest first.
     pub fn console_since(&self, seq: u64) -> Vec<ConsoleLine> {
         self.live()
@@ -600,14 +618,21 @@ impl Library {
             .collect()
     }
 
-    /// The job the console follows (running, else the last one) and its lines.
-    pub fn console_job(&self) -> (u64, Vec<ConsoleLine>) {
+    /// The job the console follows (running, else the last one), its title
+    /// and its lines.
+    pub fn console_job(&self) -> (u64, String, Vec<ConsoleLine>) {
         let l = self.live();
         let job = l.running.as_ref().map_or(l.job, |r| r.job_id);
         (
             job,
+            l.job_title.clone(),
             l.lines.iter().filter(|x| x.job == job).cloned().collect(),
         )
+    }
+
+    /// The title of the job the console follows.
+    pub fn job_title(&self) -> String {
+        self.live().job_title.clone()
     }
 
     pub fn running(&self) -> Option<Running> {
@@ -618,8 +643,9 @@ impl Library {
         {
             let mut l = self.live();
             f(&mut l.running);
-            if let Some(r) = &l.running {
-                l.job = r.job_id;
+            if let Some((id, title)) = l.running.as_ref().map(|r| (r.job_id, r.title.clone())) {
+                l.job = id;
+                l.job_title = title;
             }
         }
         self.touch_live();

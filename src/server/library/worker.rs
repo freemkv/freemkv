@@ -209,7 +209,7 @@ pub(crate) fn finish(
                     finished_at: now,
                 },
             );
-            sink.line(LineKind::Err, format!("Error: {message}"));
+            sink.line(LineKind::Err, format!("{}: {message}", error_word()));
             if job.replace {
                 sink.line(LineKind::Out, "The old MKV is unchanged.".into());
             }
@@ -228,10 +228,18 @@ fn error_text(e: &std::io::Error) -> String {
     if text == key {
         return raw;
     }
-    format!(
-        "E{code} {}",
-        crate::strings::fmt(&key, &[("detail", data), ("hash", data)])
-    )
+    let text = crate::strings::fmt(&key, &[("detail", data), ("hash", data)]);
+    let level = format!("{}: ", error_word());
+    format!("E{code} {}", text.strip_prefix(&level).unwrap_or(&text))
+}
+
+fn error_word() -> String {
+    crate::strings::get(crate::messaging::Level::Error.locale_key())
+}
+
+// The CLI's `render_error`: the level word once, then the coded message.
+fn error_line(e: &std::io::Error) -> String {
+    format!("{}: {}", error_word(), error_text(e))
 }
 
 fn hms(secs: u64) -> String {
@@ -388,7 +396,9 @@ impl Sink for JobSink<'_> {
             Level::Trace | Level::Debug => self.emit(LineKind::Debug, msg.to_string()),
             Level::Warn => self.emit(LineKind::Warn, msg.to_string()),
             Level::Error => self.emit(LineKind::Err, msg.to_string()),
-            Level::Info => self.emit(LineKind::Out, msg.to_string()),
+            // The engine's own progress notes are not what the CLI prints.
+            Level::Info if self.debug => self.emit(LineKind::Debug, msg.to_string()),
+            Level::Info => {}
         }
     }
 
@@ -456,7 +466,7 @@ impl Sink for JobSink<'_> {
                         };
                         self.emit(kind, transcript::complete_line(o.bytes_written, secs));
                     }
-                    Err(err) => self.emit(LineKind::Err, format!("Error: {}", error_text(err))),
+                    Err(err) => self.emit(LineKind::Err, error_line(err)),
                 }
             }
             Event::Verify {

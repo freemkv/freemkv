@@ -350,6 +350,14 @@ impl ProbeCache {
         self.lock_audits().remove(path).is_some()
     }
 
+    /// Drop every cached audit. Returns how many there were.
+    pub fn forget_all_audits(&self) -> usize {
+        let mut a = self.lock_audits();
+        let n = a.len();
+        a.clear();
+        n
+    }
+
     /// Record a known stamp for `path` at `sig` (a remux just wrote it).
     pub fn record_at(&self, path: &Path, sig: FileSig, writing_app: Option<String>) {
         self.lock_stamps()

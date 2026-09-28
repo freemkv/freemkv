@@ -96,6 +96,36 @@ pub fn handle(
             lib.wake_indexer();
             json_response(request, 200, r#"{"ok":true}"#);
         }
+        (_, true, "/api/library/reaudit") => {
+            let Ok((request, body)) = read_json_body(request) else {
+                return None;
+            };
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let n = if v.get("all").and_then(|a| a.as_bool()) == Some(true) {
+                lib.reaudit(None)
+            } else {
+                let paths: Vec<PathBuf> = v
+                    .get("paths")
+                    .and_then(|p| p.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|p| p.as_str())
+                            .map(PathBuf::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if paths.is_empty() {
+                    err(request, 400, "missing paths");
+                    return None;
+                }
+                lib.reaudit(Some(&paths))
+            };
+            json_response(
+                request,
+                200,
+                &json!({"ok": true, "requeued": n}).to_string(),
+            );
+        }
         (_, true, "/api/library/queue/add") => {
             let Ok((request, body)) = read_json_body(request) else {
                 return None;
@@ -228,9 +258,10 @@ pub fn library_json(lib: &Library, cfg: &Config) -> String {
 }
 
 fn console_json(lib: &Library) -> String {
-    let (job, lines) = lib.console_job();
+    let (job, title, lines) = lib.console_job();
     json!({
         "job": job,
+        "title": title,
         "running": lib.running(),
         "lines": lines,
         "queue": queue_json(lib),
@@ -263,12 +294,18 @@ fn log_tail(lib: &Library, title: &str) -> String {
 pub struct SseCursor {
     generation: (u64, u64, u64),
     seq: u64,
+    started: bool,
 }
 
 /// A `library` event for the SSE stream when anything moved since `cursor`.
 /// Named, so a page that only listens for the rip state never sees it.
 pub fn sse_frame(cursor: &mut SseCursor) -> Option<String> {
     let lib = super::get()?;
+    if !cursor.started {
+        // A new client fetches the console once; the stream only adds to it.
+        cursor.started = true;
+        cursor.seq = lib.last_seq();
+    }
     let (q, live) = lib.generation();
     let generation = (q, live, lib.index_generation());
     if generation == cursor.generation {
@@ -285,6 +322,7 @@ pub fn sse_frame(cursor: &mut SseCursor) -> Option<String> {
         "index_generation": generation.2,
         "indexing": lib.indexing(),
         "running": lib.running(),
+        "job_title": lib.job_title(),
         "paused": snap.paused,
         "queued": snap.count(JobState::Queued),
         "lines": lines,
