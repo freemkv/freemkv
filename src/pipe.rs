@@ -2032,6 +2032,9 @@ fn image_to_iso(
         return false;
     };
     let total_sectors = opened.disc.capacity_sectors;
+    let Some(lock) = hold_iso_lock(std::path::Path::new(&iso_path), halt, out) else {
+        return false;
+    };
     let start = std::time::Instant::now();
     let result = write_decrypted_image(
         &opened.disc,
@@ -2041,7 +2044,7 @@ fn image_to_iso(
         halt,
     );
 
-    match result {
+    let ok = match result {
         Ok(0) => {
             // Wrote ZERO bytes: nothing was recovered, so the ISO on disk is
             // unusable. Don't print "Complete" over it — fail like the disc→ISO
@@ -2082,7 +2085,29 @@ fn image_to_iso(
             out.raw(Normal, &render_error(&e));
             false
         }
-    }
+    };
+    crate::artifact_lock::release(lock, ok);
+    ok
+}
+
+/// Take `<iso>.lock` for the whole write (stop design v5 §2.5), or say why not: a Ctrl-C
+/// while waiting is an interrupt, a frozen holder is `stop.artifact_lock_failed` (E9073).
+fn hold_iso_lock(
+    iso: &std::path::Path,
+    halt: &libfreemkv::Halt,
+    out: &Output,
+) -> Option<libfreemkv::io::ArtifactLock> {
+    let e = match crate::artifact_lock::hold_iso(iso, halt) {
+        Ok(lock) => return Some(lock),
+        Err(e) => e,
+    };
+    let text = match (&e, crate::artifact_lock::lock_failed(&e, iso)) {
+        (libfreemkv::Error::Halted, _) => strings::get("rip.interrupted"),
+        (_, Some(text)) => text,
+        _ => render_error(&e),
+    };
+    out.raw(Normal, &text);
+    None
 }
 
 /// The process exit code: 0 on a complete copy, `DISC_COPY_DAMAGED_EXIT` on a copy that is
@@ -2202,6 +2227,16 @@ fn disc_to_iso(
         speed_est: &speed_est,
     };
 
+    let lock = match is_null {
+        true => None,
+        false => match hold_iso_lock(&iso_path, crate::cli_stop::token(), out) {
+            Some(lock) => Some(lock),
+            None => {
+                drive.unlock_tray();
+                return 1;
+            }
+        },
+    };
     let copy_opts = disc_copy_options(
         (!raw).then_some(&set),
         raw,
@@ -2209,7 +2244,9 @@ fn disc_to_iso(
         &progress,
         crate::cli_stop::token(),
     );
-    let exit_code = match freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts) {
+    let copied = freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts);
+    let done = matches!(&copied, Ok(r) if matches!(copy_verdict(r), CopyVerdict::Complete | CopyVerdict::Lossy));
+    let exit_code = match copied {
         Ok(r) if copy_verdict(&r) == CopyVerdict::Interrupted => {
             // Ctrl-C halted the copy. Don't print "Complete" over a partial
             // ISO — report interrupted/failure so exit is non-zero. Mapfile
@@ -2309,6 +2346,9 @@ fn disc_to_iso(
     };
 
     drive.unlock_tray();
+    if let Some(lock) = lock {
+        crate::artifact_lock::release(lock, done);
+    }
     exit_code
 }
 

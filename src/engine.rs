@@ -2154,13 +2154,18 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             job.raw = req.raw;
             job.mode = fe::RipMode::Single;
             job.keys = Some(set);
-            let result = fe::recover_to_iso(&disc, reader.as_mut(), &dest, &job, sink)
-                .map_err(|e| format!("image decrypt failed: {e}"))?;
-            if recovery_produced_no_data(result.bytes_good) {
-                let _ = std::fs::remove_file(&dest);
-                return Err("No readable data — no image was written.".into());
-            }
-            return Ok(summarize_image_decrypt(&result, &dest));
+            let lock = hold_iso_lock(&dest, state)?;
+            let res = fe::recover_to_iso(&disc, reader.as_mut(), &dest, &job, sink)
+                .map_err(|e| format!("image decrypt failed: {e}"))
+                .and_then(|result| {
+                    if recovery_produced_no_data(result.bytes_good) {
+                        let _ = std::fs::remove_file(&dest);
+                        return Err("No readable data — no image was written.".into());
+                    }
+                    Ok(summarize_image_decrypt(&result, &dest))
+                });
+            release_iso_lock(lock, &res, &dest, state);
+            return res;
         }
         _ => {}
     }
@@ -2170,6 +2175,32 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     // scan and key resolution.
     let src_url = format!("{}://{}", image_or_dir_scheme(&req.source), req.source);
     mux_selected_titles(&disc, &src_url, req, &indices, &set, sink, state)
+}
+
+// Take `<iso>.lock` for the whole write under the run's Stop (stop design v5 §2.5); a
+// frozen holder reads as `stop.artifact_lock_failed` (E9073), a Stop as a cancel.
+fn hold_iso_lock(
+    iso: &std::path::Path,
+    state: &Arc<RunState>,
+) -> Result<libfreemkv::io::ArtifactLock, String> {
+    let watch = CancelWatch::new(state);
+    crate::artifact_lock::hold_iso(iso, &watch.halt).map_err(|e| {
+        crate::artifact_lock::lock_failed(&e, iso)
+            .unwrap_or_else(|| format!("E{} {}", e.code(), explain(e.code())))
+    })
+}
+
+// §2.5: "Deleted on success … Kept after Stop, a failure or a crash"; an image this run
+// removed guards nothing, so its sidecar goes too.
+fn release_iso_lock(
+    lock: libfreemkv::io::ArtifactLock,
+    res: &Result<String, String>,
+    iso: &std::path::Path,
+    state: &Arc<RunState>,
+) {
+    let cancelled = state.cancel.load(Ordering::SeqCst);
+    let done = (res.is_ok() && !cancelled) || !iso.exists();
+    crate::artifact_lock::release(lock, done);
 }
 
 /// Open the rip's image and resolve its keys once (`rip_keys::open_image`), seeded with
@@ -2625,71 +2656,79 @@ fn run_disc_scanning(
             fe::mkv_staging_scope(&disc, reader.as_mut(), &indices, req.keep_iso)
                 .map_err(|e| format!("recovery failed: {e}"))?
         };
-        let result = fe::multipass_rip_staged(
-            &disc,
-            reader.as_mut(),
-            std::path::Path::new(&iso_path),
-            &job,
-            &opts,
-            staging.as_deref(),
-            sink,
-        )
-        .map_err(|e| format!("recovery failed: {e}"))?;
-        drop(reader);
-        // Read phase done: the deliverable (ISO) or the mux source is on disk,
-        // so the drive is no longer needed — eject now, exactly like autorip
-        // (which ejects at read-complete and muxes from the staged ISO).
-        if req.auto_eject {
-            eject_disc(&device, sink);
-        }
-
-        // Recovery verdicts are checked for BOTH output kinds, before the
-        // want_iso split — the recovered image is kept in every case, so an
-        // abort never throws away the read. See `recovery_terminal_result`.
-        if let Some(terminal) =
-            recovery_terminal_result(result.halted, result.aborted_for_loss, want_iso, &iso_path)
-        {
-            return terminal;
-        }
-
-        if want_iso {
-            return iso_recovery_result(&result, &iso_path);
-        }
-
-        // Title output: mux the selected titles from the recovered (encrypted, see
-        // `recovery_raw`) ISO with this rip's set and the drive's scan.
-        if recovery_produced_no_data(result.good_bytes) {
-            let _ = std::fs::remove_file(&iso_path);
-            return Err("Recovery produced no readable data — nothing to mux.".into());
-        }
-        let mux = mux_staged_titles(req, &iso_path, disc, set, &indices, &label, sink, state);
-        // The staged image is only disposable once the titles it was staged
-        // for actually landed. `state.cancel` is the flag the Stop button
-        // sets, read directly rather than inferred from the mux's summary.
-        let cancelled = state.cancel.load(std::sync::atomic::Ordering::SeqCst);
-        // A scoped staging image is not a disc image, so it is never kept (JUDGEMENT).
-        let keep = req.keep_iso && staging.is_none();
-        if should_delete_staging_iso(keep, mux.is_ok(), cancelled) {
-            let _ = std::fs::remove_file(&iso_path);
-        }
-        if let Err(e) = &mux {
-            return Err(format!("{e} — the recovered image is kept: {iso_path}"));
-        }
-        if cancelled {
-            return Ok(format!(
-                "Cancelled — the recovered image is kept: {iso_path}"
-            ));
-        }
-        // The mux above reports its own success text (titles written); it has no way
-        // to know THIS stage's recovery left residual damage under tolerance, so the
-        // note is appended out here instead.
-        return mux.map(|s| {
-            format!(
-                "{s}{}{}",
-                damage_note(&result),
-                staging_not_kept_note(req.keep_iso, staging.is_some())
+        let lock = hold_iso_lock(std::path::Path::new(&iso_path), state)?;
+        let res = (|| -> Result<String, String> {
+            let result = fe::multipass_rip_staged(
+                &disc,
+                reader.as_mut(),
+                std::path::Path::new(&iso_path),
+                &job,
+                &opts,
+                staging.as_deref(),
+                sink,
             )
-        });
+            .map_err(|e| format!("recovery failed: {e}"))?;
+            drop(reader);
+            // Read phase done: the deliverable (ISO) or the mux source is on disk,
+            // so the drive is no longer needed — eject now, exactly like autorip
+            // (which ejects at read-complete and muxes from the staged ISO).
+            if req.auto_eject {
+                eject_disc(&device, sink);
+            }
+
+            // Recovery verdicts are checked for BOTH output kinds, before the
+            // want_iso split — the recovered image is kept in every case, so an
+            // abort never throws away the read. See `recovery_terminal_result`.
+            if let Some(terminal) = recovery_terminal_result(
+                result.halted,
+                result.aborted_for_loss,
+                want_iso,
+                &iso_path,
+            ) {
+                return terminal;
+            }
+
+            if want_iso {
+                return iso_recovery_result(&result, &iso_path);
+            }
+
+            // Title output: mux the selected titles from the recovered (encrypted, see
+            // `recovery_raw`) ISO with this rip's set and the drive's scan.
+            if recovery_produced_no_data(result.good_bytes) {
+                let _ = std::fs::remove_file(&iso_path);
+                return Err("Recovery produced no readable data — nothing to mux.".into());
+            }
+            let mux = mux_staged_titles(req, &iso_path, disc, set, &indices, &label, sink, state);
+            // The staged image is only disposable once the titles it was staged
+            // for actually landed. `state.cancel` is the flag the Stop button
+            // sets, read directly rather than inferred from the mux's summary.
+            let cancelled = state.cancel.load(std::sync::atomic::Ordering::SeqCst);
+            // A scoped staging image is not a disc image, so it is never kept (JUDGEMENT).
+            let keep = req.keep_iso && staging.is_none();
+            if should_delete_staging_iso(keep, mux.is_ok(), cancelled) {
+                let _ = std::fs::remove_file(&iso_path);
+            }
+            if let Err(e) = &mux {
+                return Err(format!("{e} — the recovered image is kept: {iso_path}"));
+            }
+            if cancelled {
+                return Ok(format!(
+                    "Cancelled — the recovered image is kept: {iso_path}"
+                ));
+            }
+            // The mux above reports its own success text (titles written); it has no way
+            // to know THIS stage's recovery left residual damage under tolerance, so the
+            // note is appended out here instead.
+            mux.map(|s| {
+                format!(
+                    "{s}{}{}",
+                    damage_note(&result),
+                    staging_not_kept_note(req.keep_iso, staging.is_some())
+                )
+            })
+        })();
+        release_iso_lock(lock, &res, std::path::Path::new(&iso_path), state);
+        return res;
     }
 
     if indices.is_empty() {
@@ -4031,7 +4070,7 @@ mod routing_tests {
         );
         let staged = slice(
             "        let result = fe::multipass_rip_staged(",
-            "        .map_err(|e| format!(\"recovery failed: {e}\"))?;\n        drop(reader);",
+            "        .map_err(|e| format!(\"recovery failed: {e}\"))?;\n            drop(reader);",
         );
         assert!(
             staged.contains("staging.as_deref()"),
@@ -4245,7 +4284,7 @@ mod routing_tests {
             .expect("the ISO-image arm is still there");
         let end = start
             + src[start..]
-                .find("\n            let result = fe::recover_to_iso(")
+                .find("fe::recover_to_iso(")
                 .expect("the decrypt call still closes the arm's setup");
         let body = &src[start..end];
         assert!(
