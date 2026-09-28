@@ -2867,8 +2867,8 @@ fn run_disc_scanning(
 }
 
 /// Mux title `idx` live off a reopened drive through the rip's set (`mux_with_keys`,
-/// `MuxSource::Session`), with the engine's progress and Stop bridging onto the Sink.
-/// The engine has no keyed `mux_title_session` yet (JUDGEMENT: bridged here until it does).
+/// `MuxSource::Session`), bridged onto the Sink by [`with_session_bridge`]. The engine has
+/// no keyed `mux_title_session` yet (JUDGEMENT: bridged here until it does).
 fn mux_session_title(
     session: &mut libfreemkv::DiscSession,
     idx: usize,
@@ -2879,33 +2879,73 @@ fn mux_session_title(
     sink: &UiSink,
 ) -> std::io::Result<libfreemkv::MuxOutcome> {
     use fe::Sink as _;
-    struct Latest(Mutex<Option<(u64, u64)>>);
-    impl libfreemkv::MuxEvents for Latest {
-        fn on_write_progress(&self, done: u64, total: u64) {
-            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((done, total));
-        }
-    }
-    // Stores `true` on drop, so an unwinding mux still ends the progress thread.
-    struct Done<'a>(&'a AtomicBool);
-    impl Drop for Done<'_> {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
     sink.log(
         fe::Level::Info,
         &format!("mux: disc title {} -> {dest} (~{hint} bytes)", idx + 1),
     );
-    let latest = Arc::new(Latest(Mutex::new(None)));
+    with_session_bridge(sink, dest, |halt, events| {
+        let source = libfreemkv::MuxSource::Session {
+            session,
+            title_index: idx,
+        };
+        libfreemkv::mux_with_keys(source, Some(set), dest, opts, halt, events)
+    })
+}
+
+/// The engine's mux watcher, for a mux the GUI starts itself: the output opening (the
+/// excluded-tracks note, `Event::OutputOpened`) ahead of any progress, progress sampled
+/// once per tick, and the Stop button as the `Halt`.
+fn with_session_bridge<T>(
+    sink: &UiSink,
+    dest: &str,
+    f: impl FnOnce(&libfreemkv::Halt, Arc<dyn libfreemkv::MuxEvents>) -> T,
+) -> T {
+    use fe::Sink as _;
+    #[derive(Default)]
+    struct Events {
+        latest: Mutex<Option<(u64, u64)>>,
+        opened: Mutex<Vec<libfreemkv::DiscTitle>>,
+    }
+    impl libfreemkv::MuxEvents for Events {
+        fn on_write_progress(&self, done: u64, total: u64) {
+            *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some((done, total));
+        }
+        fn on_output_opened(&self, title: &libfreemkv::DiscTitle) {
+            self.opened
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(title.clone());
+        }
+    }
+    // Stores `true` on drop, so an unwinding mux still ends the watcher.
+    struct Done<'a>(&'a AtomicBool);
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let events = Arc::new(Events::default());
+    let opened = || {
+        let titles = std::mem::take(&mut *events.opened.lock().unwrap_or_else(|e| e.into_inner()));
+        for title in &titles {
+            sink.event(&fe::Event::OutputOpened { dest, title });
+        }
+    };
     let watch = CancelWatch::new(&sink.0);
     let done = AtomicBool::new(false);
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            // One sample per tick, from the latest total: per-event samples measure
-            // microseconds against a batch and read as absurd speeds (the engine's rule).
             let mut speed = fe::SpeedEstimator::new();
-            while !done.load(Ordering::SeqCst) {
-                let last = latest.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+            loop {
+                // The opening first: it precedes every write-progress tick (the engine's order).
+                opened();
+                // One sample per tick, from the latest total: per-event samples measure
+                // microseconds against a batch and read as absurd speeds (the engine's rule).
+                let last = events
+                    .latest
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
                 if let Some((bytes_done, bytes_total)) = last {
                     let (speed_bps, eta_secs) = speed.sample(bytes_done, bytes_total);
                     sink.progress(&fe::Progress {
@@ -2917,15 +2957,16 @@ fn mux_session_title(
                         eta_secs,
                     });
                 }
+                if done.load(Ordering::Acquire) {
+                    // A mux that returned before this poll: its opening is not lost.
+                    opened();
+                    break;
+                }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
         });
         let _done = Done(&done);
-        let source = libfreemkv::MuxSource::Session {
-            session,
-            title_index: idx,
-        };
-        libfreemkv::mux_with_keys(source, Some(set), dest, opts, &watch.halt, latest.clone())
+        f(&watch.halt, events.clone())
     })
 }
 
@@ -4883,13 +4924,19 @@ mod routing_tests {
         };
         let state = Arc::new(RunState::default());
         let sink = UiSink(state.clone());
-        with_session_bridge(&sink, "mp4:///out/x.mp4", |_, events| {
+        super::with_session_bridge(&sink, "mp4:///out/x.mp4", |_, events| {
             events.on_output_opened(&title);
             events.on_write_progress(10, 100);
         });
-        let lines = state.lines.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let lines = state
+            .lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         assert!(
-            lines.iter().any(|l| l.contains("left out") && l.contains("MP4")),
+            lines
+                .iter()
+                .any(|l| l.contains("left out") && l.contains("MP4")),
             "the excluded note reaches the run log, got: {lines:?}"
         );
     }

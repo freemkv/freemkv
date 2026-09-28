@@ -35,8 +35,8 @@ mod messaging;
 mod output;
 mod pipe;
 // Also declared in `lib.rs`: the CLI and the GUI route container sources by one table.
-mod sources;
 mod rip_keys;
+mod sources;
 mod strings;
 // Also declared in `lib.rs`: `pipe` (here) and `engine` (GUI) both re-scan
 // between picking a title and muxing it, and need ONE shared answer type.
