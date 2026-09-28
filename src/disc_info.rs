@@ -1437,18 +1437,14 @@ mod tests {
     // while the non-secret facts (source, count, hash, MKB, VID) still do.
     #[test]
     fn the_aacs_block_never_renders_key_material() {
-        let aacs = libfreemkv::AacsState {
-            version: 1,
-            bus_encryption: false,
-            mkb_version: Some(77),
-            disc_hash: "0xfeedface".into(),
-            key_source: libfreemkv::KeyOrigin::KeyDb,
-            vuk: Some([0xEE; 16]),
-            unit_keys: vec![(3, [0x11; 16]), (7, [0x22; 16])],
-            volume_id: [0x9C; 16],
-            uk_ro: Vec::new(),
-            mkb: Vec::new(),
-        };
+        let aacs = libfreemkv::test_util::aacs_state()
+            .mkb_version(Some(77))
+            .disc_hash("0xfeedface")
+            .key_source(libfreemkv::KeyOrigin::KeyDb)
+            .vuk(Some([0xEE; 16]))
+            .unit_keys(vec![(3, [0x11; 16]), (7, [0x22; 16])])
+            .volume_id([0x9C; 16])
+            .build();
         let ((), text) = crate::output::capture(|| {
             emit_aacs_block(&Output::new(true, false), &aacs);
         });
