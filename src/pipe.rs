@@ -6943,6 +6943,9 @@ mod image_copy_tests {
     const K2: [u8; 16] = [0x33; 16];
     const STRANGER: [u8; 16] = [0x77; 16];
 
+    /// The plaintext of every encrypted fixture unit: a TS sync byte at offset 4 of each
+    /// 192-byte packet, and CPI 11₂ on packet 0, flagged before `encrypt_unit`. Decryption
+    /// may clear that CPI (KU §5.4), so outputs are compared CPI-masked: [`cpi_masked_eq`].
     fn clear_unit() -> Vec<u8> {
         let mut u = vec![0u8; 6144];
         for off in (4..6144).step_by(192) {
@@ -6950,6 +6953,53 @@ mod image_copy_tests {
         }
         u[0] |= 0xC0;
         u
+    }
+
+    /// `got == fx.expected` except the CPI bits of each stream-file source packet.
+    /// Per spec; do not change without a spec citation proving otherwise.
+    fn cpi_masked_eq(fx: &Fixture, got: &[u8]) -> bool {
+        // KS-6 AACS BD §3.10.2 Table 3-34: "TP_extra_header { Copy_permission_indicator 2
+        // uimsbf Arrival_time_stamp 30 uimsbf }": mask only the 2 CPI bits (byte0 & 0x3F).
+        let mask = |img: &[u8]| {
+            let mut img = img.to_vec();
+            for &(start, n) in &fx.files {
+                let (at, end) = (start as usize * SECTOR, (start + n) as usize * SECTOR);
+                for off in (at..end.min(img.len())).step_by(192) {
+                    img[off] &= 0x3F;
+                }
+            }
+            img
+        };
+        got.len() == fx.expected.len() && mask(got) == mask(&fx.expected)
+    }
+
+    /// The mask hides only the CPI bits of stream-file packets: a cleared CPI still
+    /// matches, but an ATS bit, a payload byte or a flag outside the files does not.
+    /// Per spec; do not change without a spec citation proving otherwise.
+    #[test]
+    fn the_cpi_mask_ignores_only_the_cpi_bits_of_stream_packets() {
+        let fx = fixture("cpimask", [K0, K1]);
+        let pkt = fx.files[1].0 as usize * SECTOR + 5 * 192;
+        // KS-5 AACS BD §3.10.2: "… or shall be set to 00₂ if the data is not encrypted".
+        let mut cleared = fx.expected.clone();
+        cleared[fx.files[0].0 as usize * SECTOR] &= 0x3F;
+        cleared[pkt] |= 0xC0;
+        assert!(
+            cpi_masked_eq(&fx, &cleared),
+            "CPI-only differences are masked"
+        );
+        for (at, bit) in [(pkt, 0x20), (pkt + 1, 0x01), (pkt + 4, 0x01), (0, 0xC0)] {
+            let mut other = fx.expected.clone();
+            other[at] ^= bit;
+            assert!(
+                !cpi_masked_eq(&fx, &other),
+                "byte {at} bit {bit:#x} must count"
+            );
+        }
+        assert!(
+            !cpi_masked_eq(&fx, &fx.expected[..SECTOR]),
+            "length must count"
+        );
     }
 
     /// A UDF image with two 30-sector stream files; `keys[i]` encrypts file `i`.
@@ -7122,8 +7172,8 @@ mod image_copy_tests {
         let (dest, r) = copy(&fx, &disc(&fx, 1, &[K0]), Some((o, o + n)), None);
         r.expect("a declared single-CPS disc keys the file with its one key");
         assert!(
-            std::fs::read(&dest).unwrap() == fx.expected,
-            "decrypted image"
+            cpi_masked_eq(&fx, &std::fs::read(&dest).unwrap()),
+            "decrypted image (CPI-masked)"
         );
         let (_, r) = copy(&fx, &disc(&fx, 2, &[K0]), Some((o, o + n)), None);
         assert!(
@@ -7186,8 +7236,8 @@ mod image_copy_tests {
         let (dest, r) = copy(&fx, &disc(&fx, 3, &[K0, K2]), None, Some(&fetch));
         r.unwrap_or_else(|e| panic!("the fetched key must decrypt the file, got {e}"));
         assert!(
-            std::fs::read(&dest).unwrap() == fx.expected,
-            "decrypted image"
+            cpi_masked_eq(&fx, &std::fs::read(&dest).unwrap()),
+            "decrypted image (CPI-masked)"
         );
     }
 }
