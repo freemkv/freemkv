@@ -7056,6 +7056,57 @@ mod ku_cli_tests {
         assert_no_secret_on_disk(dir.path(), &[K1, K2, VID]);
     }
 
+    /// M2: Ctrl-C during the up-front resolve prints the interrupt, not a bare E6010.
+    #[test]
+    fn a_ctrl_c_during_the_resolve_reads_as_interrupted() {
+        let out = crate::output::Output::new(false, false);
+        let (set, text) =
+            crate::output::capture(|| super::report_keys(Err(libfreemkv::Error::Halted), &out));
+        assert!(set.is_none());
+        assert!(
+            text.contains(&crate::strings::get("rip.interrupted")),
+            "{text}"
+        );
+        assert!(!text.contains("E6010"), "{text}");
+    }
+
+    /// FK3 (KU §7.3): the CLI reaches the shared table's requests and verdicts; the GUI's
+    /// `engine` test checks the same table, so the two shells never deviate.
+    #[test]
+    fn cli_and_gui_same_requests_same_verdicts() {
+        for case in fk3_cases() {
+            let dir = TempDir::new(case.name);
+            let iso = case.image(dir.path());
+            let calls = Calls::default();
+            let src = format!("iso://{}", iso.display());
+            let dest = format!("mkv://{}/", dir.path().join("out").display());
+            let (code, text) = with_sources(case.sources(&calls), || {
+                run_cli(&src, &dest, &["-t", "all"])
+            });
+            assert_eq!(calls.len(), case.requests, "{}: {text}", case.name);
+            match case.code {
+                None => assert_eq!(code, 0, "{}: {text}", case.name),
+                Some(c) => assert_eq!(named_code(&text), Some(c), "{}: {text}", case.name),
+            }
+        }
+    }
+
+    /// FK7 (KU §2.5: "Raw copy (`--raw`, …) | `None`: no key call"): the disc→ISO copy
+    /// scans with `open_scan(.., raw)` and resolves only on its decrypting arm (a live
+    /// drive is needed to run it, so this reads the wiring; `rip_keys` proves the rest).
+    #[test]
+    fn raw_disc_copy_makes_no_key_request() {
+        let src = include_str!("pipe.rs").replace("\r\n", "\n");
+        let a = src.find("\nfn disc_to_iso(").expect("disc_to_iso");
+        let body = &src[a..a + src[a..].find("\nfn dir_to_extract(").expect("next fn")];
+        assert!(body.contains("open_scan(device_target(source), credentials, raw)"));
+        let keyed = body.find("disc_rip_keys(").expect("the decrypting resolve");
+        assert!(
+            body[..keyed].contains("let set = if raw {"),
+            "resolve only when decrypting"
+        );
+    }
+
     /// FK11, CLI half (KU §4.2, J11/J12; USER 2026-09-28: no `--vid-from`): an image whose
     /// key only the VID derives (KS-16 "Kvu = AES-G(Km, IDv)") asks once, then exits with
     /// the shared E7034 text before any output. Nothing key-shaped is written.

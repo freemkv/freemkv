@@ -5824,6 +5824,25 @@ mod ku_gui_tests {
         assert_eq!(files_under(&out).len(), 2);
     }
 
+    /// M2 (KU §2.3 step 13 "Halt is checked before each piece, probe and request"): a Stop
+    /// during the up-front resolve is a cancel, never a failure; any other error still fails.
+    #[test]
+    fn a_stop_during_the_resolve_reads_as_cancelled() {
+        let halted = format!("{}", libfreemkv::Error::Halted);
+        let (text, verdict) = run_verdict(Err(halted.clone()), true);
+        assert_eq!(verdict, RunOutcome::Cancelled);
+        assert_eq!(text, crate::strings::get("rip.interrupted"));
+        assert_eq!(run_verdict(Err(halted), false).1, RunOutcome::Failed);
+        assert_eq!(
+            run_verdict(Ok("done".into()), true).1,
+            RunOutcome::Cancelled
+        );
+        assert_eq!(
+            run_verdict(Ok("done".into()), false).1,
+            RunOutcome::Completed
+        );
+    }
+
     /// FK3 (KU §7.3): the GUI reaches the shared table's requests and verdicts, the same
     /// table the CLI's test checks.
     #[test]
