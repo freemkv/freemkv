@@ -497,13 +497,13 @@ pub(crate) fn issue_body(disc: &Disc, summary: &DiscSummary, zip_b64: &str) -> (
 mod aacs_diag_tests {
     use super::*;
     use libfreemkv::disc::DiscRegion;
-    use libfreemkv::{AacsState, Disc, DiscFormat, KeyOrigin};
+    use libfreemkv::{AacsState, Disc, DiscFormat};
 
-    // Distinctive secret byte fills — if any leak into a profile artifact the
-    // no-key-material assertions below will catch their hex.
-    const SECRET_VUK: [u8; 16] = [0xAB; 16];
-    const SECRET_UNIT_KEY: [u8; 16] = [0xCD; 16];
+    // Distinctive secrets. The unit key is the rip's (it encrypts the fixture image),
+    // never the disc's; the VID and MKB bytes sit in the scanned `AacsState`.
+    const SECRET_UNIT_KEY: [u8; 16] = *b"\xC1unit-key-KU-P1!";
     const SECRET_VID: [u8; 16] = [0xEF; 16];
+    const SECRET_MKB: [u8; 4] = [0x78, 0x9a, 0xbc, 0xde];
 
     fn disc_with(aacs: Option<AacsState>) -> Disc {
         Disc {
@@ -524,21 +524,18 @@ mod aacs_diag_tests {
         }
     }
 
-    // An AACS state carrying a real disc hash AND every secret field populated,
-    // so profile output can be checked to leak the hash but none of the secrets.
+    // A scanned AACS state: a real disc hash plus the known VID, MKB and
+    // `Unit_Key_RO.inf` bytes, so artifacts can leak the hash but none of those.
     fn aacs_with_secrets(disc_hash: &str) -> AacsState {
-        AacsState {
-            version: 2,
-            bus_encryption: true,
-            mkb_version: Some(77),
-            disc_hash: disc_hash.to_string(),
-            key_source: KeyOrigin::ExternalUk,
-            vuk: Some(SECRET_VUK),
-            unit_keys: vec![(0, SECRET_UNIT_KEY)],
-            volume_id: SECRET_VID,
-            uk_ro: vec![0x12, 0x34, 0x56],
-            mkb: vec![0x78, 0x9a],
-        }
+        libfreemkv::test_util::aacs_state()
+            .version(2)
+            .bus_encryption(true)
+            .mkb_version(Some(77))
+            .disc_hash(disc_hash)
+            .volume_id(SECRET_VID)
+            .uk_ro(vec![0x12, 0x34, 0x56])
+            .mkb(SECRET_MKB.to_vec())
+            .build()
     }
 
     #[test]
@@ -607,41 +604,94 @@ mod aacs_diag_tests {
         assert!(sel.contains("\"libfreemkv\": "), "{sel}");
     }
 
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// FK9 (KU design §3.3, §7.3): the full `--share` capture of a disc whose streams
+    /// are encrypted under the rip's key writes no key, raw VID or MKB bytes anywhere.
     #[test]
-    fn no_key_material_is_ever_emitted() {
-        let raw = "0x1111111111111111111111111111111111111111";
-        let disc = disc_with(Some(aacs_with_secrets(raw)));
+    fn bug_report_capture_leaks_no_key_vid_or_mkb() {
+        use libfreemkv::aacs::mkb::AacsVersion;
+        use libfreemkv::test_util::{BdFile, decrypt_unit, encrypted_bd_image, unit_key_ro};
 
-        // Every artifact a reporter could paste to a public issue.
-        let json = aacs_json(&disc);
+        let uk_ro = unit_key_ro(AacsVersion::V10, &[[0x42; 16]], &[1]);
+        let img = encrypted_bd_image(
+            &[
+                BdFile::new("BDMV/PLAYLIST/00000.mpls", 3, None),
+                BdFile::new("BDMV/CLIPINF/00001.clpi", 3, None),
+                BdFile::new("BDMV/STREAM/00001.m2ts", 6, Some(SECRET_UNIT_KEY)),
+            ],
+            &uk_ro,
+        );
+        // The key is live: it opens the stream's first aligned unit (CPI masked).
+        let at = img.files[2].0 as usize * 2048;
+        let mut unit = img.image[at..at + 6144].to_vec();
+        assert_ne!(unit, img.plain[at..at + 6144], "the stream is encrypted");
+        decrypt_unit(&mut unit, &SECRET_UNIT_KEY);
+        let mask = |u: &[u8]| -> Vec<u8> {
+            let mut u = u.to_vec();
+            u.chunks_mut(192).for_each(|p| p[0] &= 0x3F);
+            u
+        };
+        assert_eq!(mask(&unit), mask(&img.plain[at..at + 6144]));
+
+        // The capture, as `run` does it: selection + AACS JSON, the folded
+        // structure, the zip, and the issue body carrying the zip's base64.
+        let disc = disc_with(Some(aacs_with_secrets(
+            "0x1111111111111111111111111111111111111111",
+        )));
+        let dir = std::env::temp_dir().join(format!("fmkv-fk9-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("profile dir");
+        let mut written = Vec::new();
         let sel = selection_json(&disc);
-        let body = issue_body(
-            &disc,
-            &DiscSummary {
-                file_count: 1,
-                total_bytes: 1,
-                skipped: Vec::new(),
-            },
-            "QUJD",
-        )
-        .0;
+        save_bin(&dir, "selection.json", sel.as_bytes(), &mut written);
+        save_bin(&dir, "aacs.json", aacs_json(&disc).as_bytes(), &mut written);
+        let summary = fold_structure(&dir, &mut written, &mut img.source())
+            .expect("structure read")
+            .expect("structure files");
+        assert_eq!(summary.file_count, 2, "{written:?}");
+        let zip = zip_files(&dir, &written).expect("zip");
+        let (body, _) = issue_body(&disc, &summary, &base64_encode(&zip));
 
-        // Hex of each secret fill and the raw uk_ro / mkb bytes.
-        let leaks = [
-            "abababab", // VUK
-            "cdcdcdcd", // unit key
-            "efefefef", // raw Volume ID
-            "123456",   // uk_ro bytes
-            "789a",     // mkb bytes
+        let mut artifacts: Vec<(String, Vec<u8>)> = written
+            .iter()
+            .map(|n| (n.clone(), std::fs::read(dir.join(n)).expect("artifact")))
+            .collect();
+        artifacts.push(("profile.zip".into(), zip));
+        artifacts.push(("issue body".into(), body.into_bytes()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let secrets: [(&str, &[u8]); 4] = [
+            ("unit key", &SECRET_UNIT_KEY),
+            ("raw Volume ID", &SECRET_VID),
+            ("MKB bytes", &SECRET_MKB),
+            ("uk_ro bytes", &[0x12, 0x34, 0x56]),
         ];
-        for artifact in [&json, &sel, &body] {
-            let lower = artifact.to_ascii_lowercase();
-            for needle in leaks {
+        for (name, data) in &artifacts {
+            let text = String::from_utf8_lossy(data).to_ascii_lowercase();
+            for (what, secret) in secrets {
                 assert!(
-                    !lower.contains(needle),
-                    "secret material {needle:?} leaked into a shared artifact:\n{artifact}"
+                    !text.contains(&hex(secret)),
+                    "{what} hex leaked into {name}"
+                );
+                assert!(
+                    !data.windows(secret.len()).any(|w| w == secret),
+                    "{what} bytes leaked into {name}"
                 );
             }
+        }
+    }
+
+    /// FK9 structural half: the capture API is handed only a `Disc` and a raw reader,
+    /// never the rip's key set (KU design §3.3).
+    #[test]
+    fn the_capture_api_takes_no_key_set() {
+        let src = include_str!("disc_capture.rs");
+        let api = &src[..src.find("#[cfg(test)]").expect("test module")];
+        for banned in ["ResolvedKeySet", "KeyFetch", "DecryptKeys"] {
+            assert!(!api.contains(banned), "disc_capture API names {banned}");
         }
     }
 }
