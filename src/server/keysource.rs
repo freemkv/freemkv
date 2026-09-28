@@ -657,6 +657,14 @@ fn render_key_step(step: &libfreemkv::aacs::trace::KeyStep, disc_hash: &str) -> 
         };
     }
 
+    // MATCHED, KEY NEEDS THE VID: the entry derives the key only with the disc's Volume ID,
+    // which no drive supplied (an image resume after a restart: insert the disc).
+    if step.outcome == KO::MissingVid && step.path.first() == Some(&KeyNode::MatchedDisc) {
+        return format!(
+            "{who} > matched disc > key needs the disc's Volume ID, not in hand > MISSING VID"
+        );
+    }
+
     // MATCHED BUT NO KEY: the disc WAS found; say WHY nothing derived.
     if step.outcome == KO::NoKey && step.path.first() == Some(&KeyNode::MatchedDisc) {
         if step.path.contains(&KeyNode::NoVid) {
@@ -1550,6 +1558,23 @@ mod tests {
     /// Issue #46: a MATCHED-but-underivable (no VID) keydb hit renders the
     /// actionable verdict `matched disc > no VID available > NO KEY`, never the
     /// misleading `no entry`.
+    // KU-E1: a matched entry whose key needs the VID reads as such, not as a bare node walk.
+    #[test]
+    fn matched_missing_vid_says_the_key_needs_the_volume_id() {
+        use libfreemkv::aacs::trace::{KeyNode, KeyOutcome, KeyStep};
+        let step = KeyStep {
+            who: "keydb".into(),
+            path: vec![KeyNode::MatchedDisc, KeyNode::FoundMediaKey, KeyNode::NoVid],
+            outcome: KeyOutcome::MissingVid,
+            matched_entry: None,
+            store_entries: None,
+        };
+        assert_eq!(
+            render_key_step(&step, "0xAB"),
+            "keydb > matched disc > key needs the disc's Volume ID, not in hand > MISSING VID"
+        );
+    }
+
     #[test]
     fn matched_no_vid_renders_distinctly_from_a_true_miss() {
         use libfreemkv::aacs::trace::{KeyNode, KeyOutcome, KeyStep, ResolutionTrace};
@@ -1844,6 +1869,31 @@ mod ku_e1_tests {
         assert!(
             out.lines().any(|l| l.contains("online >")),
             "the refused walk is logged: {out}"
+        );
+    }
+
+    // An online key service that is down is an outage, never Missing: E7028, even with the
+    // disc's VID fingerprint on the sidecar (never E7034 "insert the disc"). `localhost` is
+    // refused at the first query, with no network.
+    #[test]
+    fn a_down_key_service_is_e7028_not_missing() {
+        let fx = bd_image();
+        let dir = tempfile::tempdir().unwrap();
+        let iso = fx.write(dir.path(), "disc.iso");
+        write_sidecar(&fx, &iso, true);
+        let cfg = Config {
+            keydb_path: Some(dir.path().join("none.cfg").to_string_lossy().into_owned()),
+            keyserver_url: "https://localhost:9/decode".into(),
+            ..Config::default()
+        };
+        let keys = StagedKeys::Resolve { vid: None };
+        let Err(e) = open_staged_image(&cfg, &iso, fx.scan(), &[0], keys, None) else {
+            panic!("a down key service keys nothing");
+        };
+        assert_eq!(
+            e.code(),
+            libfreemkv::error::E_KEY_SERVICE_UNAVAILABLE,
+            "{e}"
         );
     }
 

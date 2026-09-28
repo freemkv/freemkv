@@ -4079,7 +4079,7 @@ mod vid_needs_disc_tests {
     // worker then holds (never re-dispatched), with the ISO and mapfile untouched.
     #[test]
     fn a_resume_whose_keys_need_the_disc_is_held_not_retried() {
-        let (staging, outcome, _t) = resume_after_restart(true);
+        let (staging, outcome, _t) = resume_after_restart(Keys::MediaKeyOnly);
         assert!(!outcome.success);
         assert!(outcome.failure_needs_disc, "held for the disc");
         assert!(!outcome.failure_retryable && !outcome.failure_finalize);
@@ -4111,7 +4111,7 @@ mod vid_needs_disc_tests {
     // a restart is a plain "no key yet" (E7022): the retryable keyless deferral, never held.
     #[test]
     fn a_resume_no_vid_would_help_is_a_retryable_deferral() {
-        let (staging, outcome, _t) = resume_after_restart(false);
+        let (staging, outcome, _t) = resume_after_restart(Keys::None);
         assert!(!outcome.success);
         assert!(!outcome.failure_needs_disc);
         assert!(
@@ -4126,10 +4126,47 @@ mod vid_needs_disc_tests {
         );
     }
 
-    // A `.ripped` KU fixture resumed by the mux worker with no set in memory (a restart): the
-    // keydb holds only a media key (`media_key`), or nothing.
+    // An online key service that is down is an outage (E7028), never Missing: the resume
+    // defers retryably (the worker re-asks next tick), never holds for the disc or fails.
+    #[test]
+    fn a_resume_with_the_key_service_down_is_a_retryable_outage() {
+        let (staging, outcome, _t) = resume_after_restart(Keys::ServiceDown);
+        assert!(!outcome.success);
+        assert!(
+            !outcome.failure_needs_disc,
+            "an outage is never 'insert the disc'"
+        );
+        assert!(outcome.failure_retryable, "the worker retries it");
+        assert!(!outcome.failure_finalize);
+        let reason = outcome.failure_reason.unwrap_or_default();
+        assert!(
+            reason.starts_with("Ripped to ISO — no keys, mux deferred"),
+            "{reason}"
+        );
+        let snap = staging::snapshot_staging_disc(&staging).unwrap();
+        assert!(
+            !snap.needs_disc && !snap.has_failed,
+            "never held, never .failed"
+        );
+        assert_eq!(
+            crate::server::muxer::mux_dispatch_verdict(Some(&snap)),
+            crate::server::muxer::MuxVerdict::Dispatch
+        );
+    }
+
+    // The key chain a restarted resume has.
+    enum Keys {
+        // A keydb entry with only a media key: the VID would finish it (J23).
+        MediaKeyOnly,
+        // No key source holds anything.
+        None,
+        // An online service that refuses at the first query (E7028).
+        ServiceDown,
+    }
+
+    // A `.ripped` KU fixture resumed by the mux worker with no set in memory (a restart).
     fn resume_after_restart(
-        media_key: bool,
+        keys: Keys,
     ) -> (std::path::PathBuf, MuxHandoffOutcome, tempfile::TempDir) {
         let _guard = crate::server::log::env_guard();
         let _g = crate::server::mover::TEST_STATE_LOCK
@@ -4146,9 +4183,14 @@ mod vid_needs_disc_tests {
         let iso = fx.write(&staging, "KU_Disc.iso");
         let mapfile = write_sidecar(&fx, &iso, true);
         let keydb = t.path().join("keydb.cfg");
-        if media_key {
+        if matches!(keys, Keys::MediaKeyOnly) {
             crate::ku_fixture::write_media_key_keydb(&fx, &keydb);
         }
+        // `localhost` resolves to a private address: refused at the first query, no network.
+        let keyserver_url = match keys {
+            Keys::ServiceDown => "https://localhost:9/decode".to_string(),
+            _ => String::new(),
+        };
         let before = (
             std::fs::read(&iso).unwrap(),
             std::fs::read(&mapfile).unwrap(),
@@ -4183,6 +4225,7 @@ mod vid_needs_disc_tests {
         let cfg = Arc::new(RwLock::new(Config {
             staging_dir: staging.parent().unwrap().to_string_lossy().into_owned(),
             keydb_path: Some(keydb.to_string_lossy().into_owned()),
+            keyserver_url,
             ..Config::default()
         }));
 
