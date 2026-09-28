@@ -2928,6 +2928,14 @@ mod tests {
         );
     }
 
+    // Case-sensitive pickers only show a DVD's upper-case MPEG files if the list names them.
+    #[test]
+    fn the_picker_lists_upper_case_mpeg_extensions() {
+        for ext in ["MPG", "MPEG", "VOB"] {
+            assert!(SOURCE_EXTS.contains(&ext), "{ext} missing from the picker");
+        }
+    }
+
     // Design §6: "output_formats(disc_source, mp4_ok, mpg_ok) adds Selected titles → MPG";
     // J24: MPG carries MPEG-1/2 video only.
     #[test]
