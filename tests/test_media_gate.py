@@ -4,6 +4,7 @@ import base64
 import copy
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -18,6 +19,21 @@ import media_gate as mg  # noqa: E402
 ROOT = Path(__file__).parents[1]
 POLICY = mg.load_policy()
 RUN_ID = 424242
+QA_TIP = 'd' * 40          # refs/heads/qa of freemkv in the fake API
+
+
+def _run_start():
+    import datetime
+    # A week ago, relative to now: evidence expires at max_age_days, so fixed dates would rot.
+    return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)).replace(microsecond=0)
+
+
+RUN_START = _run_start()
+
+
+def stamp(base, **delta):
+    import datetime
+    return (base + datetime.timedelta(**delta)).strftime('%Y-%m-%dT%H:%M:%SZ')
 SIB_SHA = {r: f'{i + 1:x}' * 40 for i, r in enumerate(mg.FIRST_PARTY)}
 
 LOCK_PACKAGES = [
@@ -184,7 +200,7 @@ FEATURES = {'x86_64-unknown-linux-musl': [['serde_json', '1.0.151', 'default,std
 EXTERNALS = {
     'fixtures': {k: {'version_id': f'v-{k}', 'etag': f'"{k}"'} for k in POLICY['fixtures']},
     'launch_templates': {k: {'version': 3, 'image_id': 'ami-1', 'instance_type': 'c7i.4xlarge',
-                             'user_data_sha256': 'u'} for k in POLICY['launch_templates']},
+                             'user_data_sha256': 'u'} for k in mg.launch_templates(POLICY)},
 }
 
 
@@ -467,7 +483,7 @@ class FingerprintTests(unittest.TestCase):
                             (('fixtures', 'bd.iso', 'version_id'), 'v2'),
                             (('launch_templates', 'freemkv-runner-linux', 'version'), 4),
                             (('launch_templates', 'freemkv-runner-windows', 'image_id'), 'ami-2'),
-                            (('launch_templates', 'freemkv-runner-linux-perf', 'instance_type'), 'c6i.4xlarge')):
+                            (('launch_templates', 'freemkv-runner-windows', 'instance_type'), 'c6i.4xlarge')):
             ext = copy.deepcopy(EXTERNALS)
             ext[path[0]][path[1]][path[2]] = value
             with self.subTest(external=path):
@@ -550,11 +566,15 @@ class Evidence:
         self.ev = {'schema': mg.SCHEMA, 'fingerprint': self.f, 'inputs': self.inputs, 'revisions': revisions,
                    'lock_sha256': mg.sha256(self.lock), 'run_id': RUN_ID,
                    'legs': {leg: leg_record(leg) for leg in mg.legs(policy)}}
-        self.run = {'id': RUN_ID, 'path': '.github/workflows/qa.yml', 'event': 'workflow_dispatch',
-                    'head_branch': 'dev', 'head_sha': revisions['freemkv'],
+        self.run = {'id': RUN_ID, 'path': '.github/workflows/qa.yml', 'event': 'push',
+                    'head_branch': 'qa', 'head_sha': revisions['freemkv'],
                     'repository': {'full_name': 'freemkv/freemkv'},
                     'head_repository': {'full_name': 'freemkv/freemkv'},
-                    'created_at': '2026-09-20T00:00:00Z'}
+                    'status': 'completed', 'conclusion': 'success',
+                    'created_at': stamp(RUN_START), 'updated_at': stamp(RUN_START, hours=2)}
+        # The tag object as record-media-evidence writes it through GITHUB_TOKEN.
+        self.tag = {'tag': f'media-evidence/{self.f}/{RUN_ID}', 'object': {'sha': 'c1', 'type': 'commit'},
+                    'tagger': dict(mg.ACTIONS_BOT, date=stamp(RUN_START, hours=1, minutes=50))}
         self.jobs = [{'name': n, 'conclusion': 'success', 'runner_name': None, 'labels': []}
                      for n in mg.required_jobs(policy)]
         for leg in mg.legs(policy):
@@ -563,6 +583,11 @@ class Evidence:
                        labels=['self-hosted', 'freemkv-media', leg.split('-')[0], f'run-{RUN_ID}'])
         self.error = None
         self.tags = None
+        # What run RUN_ID's own plan-media uploaded: the candidate it planned (no legs yet).
+        self.plans = [{k: v for k, v in self.ev.items() if k != 'legs'}]
+        self.plan_origin = {'id': RUN_ID, 'head_sha': revisions['freemkv'], 'head_branch': 'qa'}
+        # compare/{QA_TIP}...{head_sha}: the qa branch contains the run's commit.
+        self.qa_compare = {'status': 'behind', 'ahead_by': 0, 'behind_by': 3}
 
     def job(self, name):
         return next(j for j in self.jobs if j['name'] == name)
@@ -576,7 +601,7 @@ class Evidence:
         routes = {
             f'git/matching-refs/tags/media-evidence/{self.f}/': self.tags if self.tags is not None else [
                 {'ref': f'refs/tags/media-evidence/{self.f}/{RUN_ID}', 'object': {'sha': 't1', 'type': 'tag'}}],
-            'git/tags/t1': {'object': {'sha': 'c1', 'type': 'commit'}},
+            'git/tags/t1': self.tag,
             'git/commits/c1': {'parents': [], 'tree': {'sha': 'tr1'}},
             'git/trees/tr1': {'tree': [{'path': 'evidence.json', 'type': 'blob', 'sha': 'b1', 'size': 10},
                                        {'path': 'Cargo.lock', 'type': 'blob', 'sha': 'b2', 'size': 10}]},
@@ -584,13 +609,41 @@ class Evidence:
             'git/blobs/b2': blob(self.lock),
             f'actions/runs/{RUN_ID}': self.run,
             f'actions/runs/{RUN_ID}/jobs?filter=latest&per_page=100': {'jobs': self.jobs},
+            f'actions/runs/{RUN_ID}/artifacts?name=media-plan&per_page=100': {'artifacts': [
+                {'id': 900 + i, 'name': 'media-plan', 'expired': False, 'size_in_bytes': 1000,
+                 'workflow_run': dict(self.plan_origin)}
+                for i in range(len(self.plans))]},
+            'git/ref/heads/qa': {'ref': 'refs/heads/qa', 'object': {'sha': QA_TIP, 'type': 'commit'}},
+            f'compare/{QA_TIP}...{self.run.get("head_sha")}': self.qa_compare,
         }
         if path not in routes:
             raise RuntimeError(f'HTTP 404 {endpoint}')
         return routes[path]
 
-    def found(self, perf_check=None):
-        return mg.find_evidence(self.f, self.policy, self.request, perf_check, log=lambda *_: None)
+    def download(self, endpoint):
+        """The zip of media-plan artifact 900+i."""
+        import io
+        import zipfile
+        m = re.fullmatch(r'repos/freemkv/freemkv/actions/artifacts/(\d+)/zip', endpoint)
+        if not m or not 0 <= int(m.group(1)) - 900 < len(self.plans):
+            raise RuntimeError(f'HTTP 404 {endpoint}')
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, 'w') as z:
+            z.writestr('evidence.json', json.dumps(self.plans[int(m.group(1)) - 900]))
+            z.writestr('Cargo.lock', self.lock)
+        return out.getvalue()
+
+    def forge(self, change):
+        """Evidence for another F, naming this (real, successful) run: what a tag pusher can write."""
+        ev = copy.deepcopy(self.ev)
+        change(ev['inputs'])
+        ev['fingerprint'] = mg.fingerprint(ev['inputs'])
+        self.f, self.ev = ev['fingerprint'], ev
+        self.tag['tag'] = f'media-evidence/{self.f}/{RUN_ID}'
+        self.tags = None
+
+    def found(self, perf_check=None, log=lambda *_: None):
+        return mg.find_evidence(self.f, self.policy, self.request, perf_check, log=log, download=self.download)
 
 
 class DecideTests(unittest.TestCase):
@@ -618,6 +671,10 @@ class DecideTests(unittest.TestCase):
             'run not found': lambda e: setattr(e, 'run', {}),
             'pull_request event': lambda e: e.run.update(event='pull_request'),
             'feature branch': lambda e: e.run.update(head_branch='feature-x'),
+            'dev branch': lambda e: e.run.update(head_branch='dev'),
+            'run still in progress': lambda e: e.run.update(status='in_progress', conclusion=None),
+            'run failed': lambda e: e.run.update(conclusion='failure'),
+            'run cancelled': lambda e: e.run.update(conclusion='cancelled'),
             'wrong workflow': lambda e: e.run.update(path='.github/workflows/ci.yml'),
             'fork': lambda e: e.run.update(head_repository={'full_name': 'evil/freemkv'}),
             'head sha': lambda e: e.run.update(head_sha='f' * 40),
@@ -658,26 +715,237 @@ class DecideTests(unittest.TestCase):
         e.job('cli-perf (linux)')['runner_name'] = 'ephemeral-linux-i-0123456789abcdef0'
         self.assertIsNone(e.found(lambda r, p: True), 'perf leg on a functional runner')
 
+    def test_forged_tags_are_rejected(self):
+        """A tag anyone but a real, successful qa.yml run wrote, whose commit is the qa tip or an
+        ancestor of it, is never evidence."""
+        human = {'name': 'Matthew Jackson', 'email': '1085847+MattJackson@users.noreply.github.com'}
+        cases = {
+            'pushed by a person': lambda e: e.tag.update(tagger=dict(human, date=stamp(RUN_START, hours=1))),
+            'bot name, other email': lambda e: e.tag['tagger'].update(email='github-actions@example.com'),
+            'no tagger': lambda e: e.tag.pop('tagger'),
+            'tag object under another name': lambda e: e.tag.update(tag=f'media-evidence/{e.f}/{RUN_ID + 1}'),
+            'dated before the run': lambda e: e.tag['tagger'].update(date=stamp(RUN_START, seconds=-1)),
+            'dated after the run': lambda e: e.tag['tagger'].update(date=stamp(RUN_START, days=1)),
+            'undated': lambda e: e.tag['tagger'].pop('date'),
+            'run id that does not exist': lambda e: e.tags.__setitem__(0, {
+                'ref': f'refs/tags/media-evidence/{e.f}/{RUN_ID + 7}', 'object': {'sha': 't1', 'type': 'tag'}}),
+            'run of another workflow': lambda e: e.run.update(path='.github/workflows/release.yml'),
+            'run at another sha': lambda e: e.run.update(head_sha='e' * 40),
+            'run on dev': lambda e: e.run.update(head_branch='dev', event='workflow_dispatch'),
+            'run that failed': lambda e: e.run.update(conclusion='failure'),
+        }
+        for name, apply in cases.items():
+            with self.subTest(name=name):
+                e = Evidence(self)
+                e.tags = [{'ref': f'refs/tags/media-evidence/{e.f}/{RUN_ID}', 'object': {'sha': 't1', 'type': 'tag'}}]
+                apply(e)
+                self.assertIsNone(e.found(), name)
+        # The same fixture untouched is accepted, so each case above fails on its own change.
+        self.assertIsNotNone(Evidence(self).found())
+
+    def test_forged_fingerprint_on_a_real_run_is_rejected(self):
+        """Review FB1: a real successful qa run R, and evidence for any F the tag pusher likes
+        (here: a libfreemkv file hash nobody tested). Every tag field checks out; R's own plan
+        says it tested something else."""
+        e = Evidence(self)
+        real_f = e.f
+        e.forge(lambda inputs: inputs['files'][0].__setitem__(2, 'b' * 64))
+        self.assertNotEqual(e.f, real_f)
+        logs = []
+        self.assertIsNone(e.found(log=logs.append))
+        self.assertTrue(any("run's own media-plan" in line for line in logs), logs)
+
+    def test_a_run_on_a_tag_named_qa_is_not_a_qa_run(self):
+        """Review 2 item 1. Someone who can push creates refs/tags/qa on their own commit, dispatches
+        qa.yml on it, and so owns run R: head_branch is "qa" (a run on a tag reports the tag name
+        there), R uploads its own media-plan matching the forged evidence, R is successful, and the
+        bot tagger and dates are theirs to write. The qa BRANCH does not contain R's commit."""
+        for status, ahead in (('diverged', 2), ('ahead', 1)):
+            with self.subTest(compare=status):
+                e = Evidence(self)
+                e.run.update(event='workflow_dispatch', head_branch='qa')
+                e.qa_compare.update(status=status, ahead_by=ahead)
+                logs = []
+                self.assertIsNone(e.found(log=logs.append))
+                self.assertTrue(any('is not on the qa branch' in line for line in logs), logs)
+
+    def test_the_qa_branch_must_contain_the_run(self):
+        # GitHub REST API compare, status enum ["diverged", "ahead", "behind", "identical"]; BASE is
+        # the qa tip, HEAD the run's commit: contained means "identical" or "behind" with ahead_by 0.
+        for status, ahead, ok in (('identical', 0, True), ('behind', 0, True), ('ahead', 1, False),
+                                  ('diverged', 1, False), ('behind', 1, False), (None, None, False)):
+            with self.subTest(status=status, ahead_by=ahead):
+                e = Evidence(self)
+                e.qa_compare.clear()
+                if status:
+                    e.qa_compare.update(status=status, ahead_by=ahead)
+                self.assertEqual(e.found() is not None, ok)
+        e = Evidence(self)
+        e.request_error = None
+        routes = e.request
+
+        def no_branch(endpoint):
+            if endpoint.endswith('git/ref/heads/qa'):
+                raise RuntimeError('HTTP 404')
+            return routes(endpoint)
+        self.assertIsNone(mg.find_evidence(e.f, e.policy, no_branch, log=lambda *_: None, download=e.download))
+
+    def test_the_branch_read_must_be_the_branch(self):
+        """GitHub REST API "Get a reference" answers {"ref": "refs/heads/qa", "object": {"sha": ...}};
+        anything else (a tag's ref, a malformed sha) is not the qa branch."""
+        for tip in ({'ref': 'refs/tags/qa', 'object': {'sha': QA_TIP}},
+                    {'ref': 'refs/heads/qa', 'object': {'sha': 'not-a-sha'}}, {}):
+            with self.subTest(tip=tip):
+                e = Evidence(self)
+                routes = e.request
+
+                def request(endpoint, tip=tip):
+                    return tip if endpoint.endswith('git/ref/heads/qa') else routes(endpoint)
+                self.assertIsNone(mg.find_evidence(e.f, e.policy, request, log=lambda *_: None, download=e.download))
+
+    def test_on_qa_branch_compares_shas_not_names(self):
+        calls = []
+
+        def request(endpoint):
+            calls.append(endpoint)
+            if endpoint.endswith('git/ref/heads/qa'):
+                return {'ref': 'refs/heads/qa', 'object': {'sha': QA_TIP}}
+            return {'status': 'identical', 'ahead_by': 0}
+        mg.on_qa_branch(SIB_SHA['freemkv'], request)
+        self.assertEqual(calls, ['repos/freemkv/freemkv/git/ref/heads/qa',
+                                 f'repos/freemkv/freemkv/compare/{QA_TIP}...{SIB_SHA["freemkv"]}'])
+
+    def test_the_plan_artifact_must_come_from_the_run(self):
+        """The artifact schema's workflow_run {id, head_sha} must name this run at this commit."""
+        for field, value in (('id', RUN_ID + 1), ('head_sha', 'e' * 40), ('id', None)):
+            with self.subTest(field=field):
+                e = Evidence(self)
+                e.plan_origin[field] = value
+                self.assertIsNone(e.found())
+        e = Evidence(self)
+        e.plan_origin.clear()
+        self.assertIsNone(e.found(), 'an artifact without workflow_run is not bound to the run')
+
+    def test_evidence_binding_needs_the_runs_plan(self):
+        cases = {
+            'plan artifact expired': lambda e: e.plans.clear(),
+            'plan names other revisions': lambda e: e.plans[0].update(revisions=dict(SIB_SHA, libfreemkv='9' * 40)),
+            'plan has another lock': lambda e: e.plans[0].update(lock_sha256='0' * 64),
+            'plan is of another run': lambda e: e.plans[0].update(run_id=RUN_ID + 1),
+        }
+        for name, apply in cases.items():
+            with self.subTest(name=name):
+                e = Evidence(self)
+                apply(e)
+                self.assertIsNone(e.found(), name)
+        e = Evidence(self)
+        e.plans.insert(0, dict(e.plans[0], fingerprint='0' * 64))
+        self.assertIsNotNone(e.found(), 'a re-run attempt\'s other plan does not hide the matching one')
+
+    def test_forged_tag_with_otherwise_perfect_evidence_is_rejected(self):
+        """Copying a real run's evidence byte for byte does not help a tag the bot did not write."""
+        e = Evidence(self)
+        e.tag['tagger'] = {'name': 'github-actions', 'email': mg.ACTIONS_BOT['email'], 'date': stamp(RUN_START, hours=1)}
+        logs = []
+        self.assertIsNone(e.found(log=logs.append))
+        self.assertTrue(any('not created by github-actions[bot]' in line for line in logs), logs)
+
     def test_newest_valid_tag_wins_and_a_bad_one_never_blocks(self):
         e = Evidence(self)
         e.tags = [{'ref': f'refs/tags/media-evidence/{e.f}/{RUN_ID - 1}', 'object': {'sha': 'bad', 'type': 'tag'}},
                   {'ref': f'refs/tags/media-evidence/{e.f}/{RUN_ID}', 'object': {'sha': 't1', 'type': 'tag'}}]
         self.assertEqual(e.found()['run_id'], RUN_ID)
 
-    def test_age_is_informational(self):
+    def test_evidence_expires_explicitly_at_max_age(self):
+        """Review 2 item 4: at 90 days evidence is expired, and says so; it is not 'still valid'."""
+        import datetime
+
+        def at(days):
+            e = Evidence(self)
+            t = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days, hours=1)
+            e.run['created_at'] = t.strftime('%Y-%m-%dT%H:%M:%SZ')
+            e.run['updated_at'] = (t + datetime.timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            e.tag['tagger']['date'] = (t + datetime.timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            logs = []
+            return e.found(log=logs.append), logs
+        limit = POLICY['max_age_days']
+        self.assertEqual(limit, 90)
+        got, _ = at(10)
+        self.assertEqual(got['warnings'], [])
+        got, _ = at(limit - 5)
+        self.assertTrue(any('expires at 90 days (in 5)' in w for w in got['warnings']), got['warnings'])
+        for days in (limit, limit + 400):
+            got, logs = at(days)
+            self.assertIsNone(got)
+            self.assertTrue(any('evidence expired' in line and 'counts for 90 days' in line for line in logs), logs)
+            self.assertFalse(any('still valid' in line for line in logs))
         e = Evidence(self)
-        e.run['created_at'] = '2025-01-01T00:00:00Z'
-        got = e.found()
+        e.run.pop('created_at')
+        self.assertIsNone(e.found())
+
+    def age_run(self, age):
+        """Evidence whose run was created `age` (a timedelta) ago."""
+        import datetime
+        e = Evidence(self)
+        t = datetime.datetime.now(datetime.timezone.utc) - age
+        e.run['created_at'] = t.strftime('%Y-%m-%dT%H:%M:%SZ')
+        e.run['updated_at'] = (t + datetime.timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        e.tag['tagger']['date'] = (t + datetime.timedelta(minutes=20)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        logs = []
+        return e.found(log=logs.append), logs
+
+    def test_the_last_hour_before_expiry_is_accepted_with_a_warning(self):
+        import datetime
+        got, logs = self.age_run(datetime.timedelta(days=89, hours=23))
+        self.assertIsNotNone(got, logs)
+        self.assertTrue(any('89 days old and expires at 90 days (in 1)' in w for w in got['warnings']),
+                        got['warnings'])
+        got, logs = self.age_run(datetime.timedelta(days=90, minutes=5))
+        self.assertIsNone(got)
+        self.assertTrue(any('evidence expired: it is 90 days old' in line for line in logs), logs)
+
+    def test_the_warning_window_opens_at_76_days(self):
+        """max_age_days 90, EXPIRY_NOTICE_DAYS 14: whole days of age >= 76 warn, below do not."""
+        import datetime
+        self.assertEqual((POLICY['max_age_days'], mg.EXPIRY_NOTICE_DAYS), (90, 14))
+        got, _ = self.age_run(datetime.timedelta(days=75, hours=23))
         self.assertIsNotNone(got)
-        self.assertTrue(any('days old' in w for w in got['warnings']))
+        self.assertEqual(got['warnings'], [], '75 days 23 h: no warning yet')
+        got, _ = self.age_run(datetime.timedelta(days=76, minutes=5))
+        self.assertIsNotNone(got)
+        self.assertEqual(len(got['warnings']), 1)
+        self.assertIn('76 days old and expires at 90 days (in 14)', got['warnings'][0])
+
+    def test_expiry_matches_the_plan_artifact_retention(self):
+        import yaml
+        qa = yaml.safe_load((ROOT / '.github/workflows/qa.yml').read_text())
+        upload = next(s for s in qa['jobs']['plan-media']['steps'] if s.get('with', {}).get('name') == 'media-plan')
+        self.assertEqual(upload['with']['retention-days'], POLICY['max_age_days'])
 
     def test_canary(self):
-        policy = with_policy(canary={'probes': [{'name': 'uhd', 'expected_sha256': mg.sha256(b'key')}]})
-        self.assertTrue(mg.canary(policy, lambda p: b'key'))
-        self.assertFalse(mg.canary(policy, lambda p: b'other'))
-        self.assertFalse(mg.canary(policy, lambda p: (_ for _ in ()).throw(OSError('down'))))
+        policy = with_policy(canary={'probes': [{'fixture': 'uhd.iso'}]})
+        ok = {'ok': True, 'probes': [{'fixture': 'uhd.iso', 'ok': True, 'reason': 'known key returned'}]}
+        self.assertEqual(mg.canary(policy, ok, 'refs/heads/qa'), (True, '', None))
+        failed = {'ok': False, 'probes': [{'fixture': 'uhd.iso', 'ok': False, 'reason': 'HTTP 503'}]}
+        self.assertEqual(mg.canary(policy, failed, 'refs/heads/qa')[:2], (False, 'uhd.iso: HTTP 503'))
+        for name, result in {'no result': None, 'not a dict': ['ok'], 'probe skipped': {'ok': True, 'probes': []},
+                             'probe not ok': {'ok': True, 'probes': [{'fixture': 'uhd.iso', 'ok': 'yes'}]},
+                             'crashed': {'ok': False, 'probes': [], 'error': 'KeyError'}}.items():
+            with self.subTest(name=name):
+                self.assertFalse(mg.canary(policy, result, 'refs/heads/qa')[0])
+        ok_dev, _, note = mg.canary(policy, None, 'refs/heads/dev')
+        self.assertTrue(ok_dev, 'the canary runs where the gate runs (qa), not on dev')
+        self.assertIn('qa branch only', note)
+        self.assertIn('qa branch only', mg.canary(policy, None, 'refs/tags/qa')[2], 'a tag named qa is not qa')
+        self.assertEqual(mg.canary(with_policy(canary={'probes': []}), None, 'refs/heads/qa'), (True, '', None))
         self.assertEqual(mg.decide(False, canary_ok=False)[:2], ('canary-failed', False))
         self.assertEqual(mg.decide(True, run_media=True, canary_ok=False)[:2], ('canary-failed', False))
+        self.assertIn('HTTP 503', mg.decide(False, canary_ok=False, canary_why='uhd.iso: HTTP 503')[2])
+
+    def test_the_canary_is_configured(self):
+        """Decision 15 is enforced by the checked-in policy, not waiting on an operator."""
+        self.assertIn({'fixture': 'uhd.iso'}, POLICY['canary']['probes'])
+        self.assertIn('tests/media_canary.py', POLICY['control_plane'], 'the canary is part of F')
 
     def test_decide_order(self):
         self.assertEqual(mg.decide(False)[:2], ('run', True))
@@ -816,17 +1084,41 @@ class PlanTests(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({'packages': packages}), stderr='')
         self.run = run
 
-    def plan(self, request=lambda e, **kw: [], **env):
+    def plan(self, request=lambda e, **kw: [], download=None, **env):
         base = {'REVISIONS': json.dumps(SIB_SHA), 'GITHUB_RUN_ID': str(RUN_ID)}
         return mg.plan(self.ws.root, POLICY, dict(base, **env), EXTERNALS, request=request, run=self.run,
-                       tree=lambda root, k, run: FEATURES)[0]
+                       tree=lambda root, k, run: FEATURES, download=download)[0]
 
     def test_matching_evidence_is_reused(self):
         e = Evidence(self)
-        out = self.plan(request=e.request)
+        out = self.plan(request=e.request, download=e.download)
         self.assertEqual(out['fingerprint'], e.f, 'plan and evidence must fingerprint the same candidate alike')
         self.assertEqual((out['status'], out['run']), ('reuse', 'false'))
         self.assertIn(str(RUN_ID), out['evidence_url'])
+
+    def test_plan_on_qa_runs_the_canary_verdict(self):
+        base = {'REVISIONS': json.dumps(SIB_SHA), 'GITHUB_RUN_ID': str(RUN_ID), 'GITHUB_REF': 'refs/heads/qa'}
+
+        def plan(result):
+            return mg.plan(self.ws.root, POLICY, base, EXTERNALS, request=lambda e, **kw: [], run=self.run,
+                           canary_result=result, tree=lambda root, k, run: FEATURES)[0]
+        ok = plan({'ok': True, 'probes': [{'fixture': 'uhd.iso', 'ok': True, 'reason': 'known key returned'}]})
+        self.assertEqual((ok['status'], ok['run']), ('run', 'true'))
+        self.assertFalse([w for w in ok['warnings'] if 'canary' in w], 'no canary warning once it is active')
+        self.assertEqual(ok['notices'], [])
+        bad = plan({'ok': False, 'probes': [{'fixture': 'uhd.iso', 'ok': False, 'reason': 'no key'}]})
+        self.assertEqual((bad['status'], bad['run']), ('canary-failed', 'false'), 'red immediately, no EC2')
+        self.assertIn('no key', bad['reason'])
+        self.assertEqual(plan(None)['status'], 'canary-failed', 'a canary that never reported fails closed')
+
+    def test_plan_off_qa_notes_the_canary_did_not_run(self):
+        out = self.plan(GITHUB_REF='refs/heads/dev')
+        self.assertEqual(out['status'], 'run')
+        self.assertFalse([w for w in out['warnings'] if 'canary' in w])
+        self.assertTrue(any('qa branch only' in n for n in out['notices']))
+
+    def test_plan_names_the_legs_to_launch(self):
+        self.assertEqual(json.loads(self.plan()['legs']), ['linux', 'windows'])
 
     def test_env_driven_decisions(self):
         self.assertEqual(self.plan()['status'], 'run')
@@ -835,8 +1127,8 @@ class PlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.plan(SKIP_MEDIA='true', SKIP_REASON='')
         e = Evidence(self)
-        self.assertEqual(self.plan(request=e.request, RUN_MEDIA='true')['status'], 'run')
-        self.assertEqual(self.plan(request=e.request, HEAD_MESSAGE='[skip-media]')['status'], 'reuse')
+        self.assertEqual(self.plan(request=e.request, download=e.download, RUN_MEDIA='true')['status'], 'run')
+        self.assertEqual(self.plan(request=e.request, download=e.download, HEAD_MESSAGE='[skip-media]')['status'], 'reuse')
         self.assertEqual(self.plan(SUPERSEDED='true')['status'], 'superseded')
 
     def test_outputs_cannot_be_injected(self):
