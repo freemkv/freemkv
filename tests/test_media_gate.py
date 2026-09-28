@@ -789,6 +789,31 @@ class DecideTests(unittest.TestCase):
             return routes(endpoint)
         self.assertIsNone(mg.find_evidence(e.f, e.policy, no_branch, log=lambda *_: None, download=e.download))
 
+    def test_the_branch_read_must_be_the_branch(self):
+        """GitHub REST API "Get a reference" answers {"ref": "refs/heads/qa", "object": {"sha": ...}};
+        anything else (a tag's ref, a malformed sha) is not the qa branch."""
+        for tip in ({'ref': 'refs/tags/qa', 'object': {'sha': QA_TIP}},
+                    {'ref': 'refs/heads/qa', 'object': {'sha': 'not-a-sha'}}, {}):
+            with self.subTest(tip=tip):
+                e = Evidence(self)
+                routes = e.request
+
+                def request(endpoint, tip=tip):
+                    return tip if endpoint.endswith('git/ref/heads/qa') else routes(endpoint)
+                self.assertIsNone(mg.find_evidence(e.f, e.policy, request, log=lambda *_: None, download=e.download))
+
+    def test_on_qa_branch_compares_shas_not_names(self):
+        calls = []
+
+        def request(endpoint):
+            calls.append(endpoint)
+            if endpoint.endswith('git/ref/heads/qa'):
+                return {'ref': 'refs/heads/qa', 'object': {'sha': QA_TIP}}
+            return {'status': 'identical', 'ahead_by': 0}
+        mg.on_qa_branch(SIB_SHA['freemkv'], request)
+        self.assertEqual(calls, ['repos/freemkv/freemkv/git/ref/heads/qa',
+                                 f'repos/freemkv/freemkv/compare/{QA_TIP}...{SIB_SHA["freemkv"]}'])
+
     def test_the_plan_artifact_must_come_from_the_run(self):
         """The artifact schema's workflow_run {id, head_sha} must name this run at this commit."""
         for field, value in (('id', RUN_ID + 1), ('head_sha', 'e' * 40), ('id', None)):

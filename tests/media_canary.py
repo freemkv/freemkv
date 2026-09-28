@@ -475,6 +475,7 @@ def _post_once(url, headers, body, opener):
         with (opener or no_redirect_opener())(req, timeout=TIMEOUT) as resp:
             data = resp.read(MAX_RESPONSE + 1)
     except urllib.error.HTTPError as exc:
+        exc.close()             # the error response body is never read (it could echo the request)
         if 300 <= exc.code < 400:
             raise CanaryError(f'the key service answered HTTP {exc.code} (a redirect: not followed, '
                               'so the token goes nowhere else; fix FMKV_KEY_URL)') from None

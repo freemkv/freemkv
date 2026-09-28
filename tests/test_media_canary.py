@@ -359,11 +359,15 @@ class SecretTests(unittest.TestCase):
 
 
 class RedirectTests(unittest.TestCase):
-    """Review 2 item 2: urllib's default HTTPRedirectHandler follows 301/302/303 for a POST (docs:
-    "the default implementation reproduces this behavior") and copies every header but
-    Content-Length/Content-Type, Authorization included, to the new URL, whatever its host or
-    scheme. The canary must never do that. Two real HTTP servers on the loopback: one redirects,
-    the other records whatever reaches it."""
+    """Review 2 item 2. Python 3.12 urllib.request docs, HTTPRedirectHandler.redirect_request note:
+    "The default implementation of this method does not strictly follow RFC 2616, which says that
+    301 and 302 responses to POST requests must not be automatically redirected without
+    confirmation by the user. In reality, browsers do allow automatic redirection of these
+    responses, changing the POST to a GET, and the default implementation reproduces this
+    behavior." CPython 3.12 Lib/urllib/request.py copies the headers into the new request:
+    `newheaders = {k: v for k, v in req.headers.items() if k.lower() not in CONTENT_HEADERS}`,
+    Authorization included, to whatever host and scheme Location names. The canary must never do
+    that. Two real HTTP servers on the loopback: one redirects, the other records what reaches it."""
 
     @classmethod
     def setUpClass(cls):
@@ -439,7 +443,36 @@ class RedirectTests(unittest.TestCase):
             mc.post_decode('https://k/d', 'tok', {}, opener, sleep=sleeps.append)
         self.assertEqual((len(calls), sleeps), (1, []))
 
+    def test_other_3xx_are_refused_not_retried(self):
+        """300/304/305 never reach redirect_request; the HTTPError path refuses every 3xx."""
+        for code in (300, 304, 305):
+            with self.subTest(code=code):
+                calls = []
+
+                def opener(req, timeout):
+                    calls.append(req)
+                    raise urllib.error.HTTPError(req.full_url, code, 'x', {}, io.BytesIO(b''))
+                with self.assertRaisesRegex(mc.CanaryError, f'HTTP {code} .*not followed'):
+                    mc.post_decode('https://k/d', 't', {}, opener, sleep=lambda s: None)
+                self.assertEqual(len(calls), 1)
+
+    def test_post_decode_uses_the_no_redirect_opener_by_default(self):
+        seen = []
+        real = mc.no_redirect_opener
+
+        def spy():
+            seen.append(1)
+            return lambda req, timeout: (_ for _ in ()).throw(urllib.error.URLError('offline'))
+        with unittest.mock.patch.object(mc, 'no_redirect_opener', spy):
+            with self.assertRaises(mc.CanaryError):
+                mc.post_decode('https://k/d', 't', {}, sleep=lambda s: None)
+        self.assertEqual(len(seen), mc.ATTEMPTS)
+        self.assertIs(mc.no_redirect_opener, real)
+
     def test_the_default_opener_has_no_following_redirect_handler(self):
+        """Python 3.12 docs, build_opener: "Instances of the following classes will be in front of
+        the handlers, unless the handlers contain them, instances of them or subclasses of them:
+        ... HTTPRedirectHandler ...". NoRedirect is a subclass, so it is the only one."""
         opener = urllib.request.build_opener(mc.NoRedirect)
         handlers = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPRedirectHandler)]
         self.assertEqual([type(h) for h in handlers], [mc.NoRedirect])
