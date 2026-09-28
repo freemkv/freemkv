@@ -194,9 +194,10 @@ impl CliMuxEvents {
 
 impl MuxEvents for CliMuxEvents {
     fn on_output_opened(&self, title: &libfreemkv::DiscTitle) {
-        // The stream-info block and the excluded-track note, from the resolved title.
-        print_stream_info(&self.out, title);
+        // The excluded-track note first, as the GUI logs it before the mux starts;
+        // MuxEvents has no hook earlier than this one that carries the title.
         print_excluded(&self.out, &self.dest, title);
+        print_stream_info(&self.out, title);
         // The destination open notice (the sink is already open here).
         self.out.raw_inline(
             Normal,
