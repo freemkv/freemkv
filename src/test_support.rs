@@ -87,6 +87,11 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
             have: 1_024,
             want: 4_096,
         },
+        // E6021/E6022 carry a path list / an image path as `{detail}`.
+        Error::BusStreamUnmapped {
+            files: "/BDMV/STREAM/00002.m2ts (E6000: 12345)".into(),
+        },
+        Error::ImageScoped { path: p() },
         Error::AacsNoKeys,
         Error::AacsCertShort,
         Error::AacsAgidAlloc,
