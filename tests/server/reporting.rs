@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use freemkv_autorip::ripper::make_drive_event_fn;
+use freemkv::server::ripper::make_drive_event_fn;
 use libfreemkv::event::{Event, EventKind};
 
 /// The drive-level handler must forward `BytesRead.bytes` into the shared

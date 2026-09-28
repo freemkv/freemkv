@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use freemkv_autorip::ripper;
+use freemkv::server::ripper;
 
 // Catches missing halt.cancel() (workers never exit, joins time out) and a per-device timeout
 // regression (N-drive shutdown blocking N×timeout).

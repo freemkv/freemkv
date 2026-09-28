@@ -8,7 +8,9 @@
 //!
 //! Two builds of this one binary ship, both named `freemkv`. The CLI build has no desktop shell
 //! at all; the app build (`--features gui`) opens the window on a bare launch and runs the CLI for
-//! any arguments, via `freemkv::app_entry::wants_gui`.
+//! any arguments, via `freemkv::app_entry::wants_gui`. A third build, the server
+//! (`--features server`), adds `freemkv server`: the unattended rip daemon of the container image
+//! (`freemkv::server`); every other invocation is the CLI.
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -52,6 +54,14 @@ mod ui;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // Server build only: `freemkv server ...` runs the daemon; its arguments are
+    // the daemon's own (`--bootstrap`, `--healthcheck`, ...), not the CLI's.
+    #[cfg(feature = "server")]
+    if args.get(1).map(String::as_str) == Some("server") {
+        freemkv::server::run(args[2..].to_vec());
+        return;
+    }
 
     // App build only: a bare launch opens the desktop shell; everything else
     // is the CLI. Linux is glibc only (the musl CLI has no GTK4).

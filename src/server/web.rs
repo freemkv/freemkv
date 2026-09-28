@@ -1,5 +1,5 @@
-use crate::config::{self, Config, WebhookEntry};
-use crate::ripper;
+use crate::server::config::{self, Config, WebhookEntry};
+use crate::server::ripper;
 use once_cell::sync::Lazy;
 use std::io::{Read as _, Write as _};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -1432,7 +1432,7 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
             // Bind failure is unrecoverable — without a UI we have a dead
             // daemon. Signal SHUTDOWN so main exits non-zero and the
             // container restart policy recovers us.
-            crate::log::syslog(&format!(
+            crate::server::log::syslog(&format!(
                 "FATAL: web server bind failed on {}: {} — signalling shutdown",
                 addr, e
             ));
@@ -1441,15 +1441,15 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
                 error = %e,
                 "web bind failed; signalling shutdown so the container restart policy recovers us"
             );
-            crate::SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+            crate::server::SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
             return;
         }
     };
-    crate::log::syslog(&format!("Web server listening on {}", addr));
+    crate::server::log::syslog(&format!("Web server listening on {}", addr));
     tracing::info!(address = %addr, "web server listening");
 
     for request in server.incoming_requests() {
-        if crate::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+        if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
         // Bound concurrent handlers so a flood can't fork the container.
@@ -1616,7 +1616,7 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         json_response(
             request,
             200,
-            &format!("{{\"version\":\"{}\"}}", crate::VERSION_LABEL),
+            &format!("{{\"version\":\"{}\"}}", crate::server::VERSION_LABEL),
         );
     } else if is_get && url == "/api/settings" {
         // Snapshot and drop the guard: rendering stats the keydb path, and
@@ -1638,7 +1638,7 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     } else if is_get && url == "/api/system" {
         handle_system_info(request, cfg);
     } else if is_post && url == "/api/move-errors/clear-all" {
-        crate::mover::clear_all_move_errors();
+        crate::server::mover::clear_all_move_errors();
         json_response(request, 200, r#"{"ok":true}"#);
     } else if is_post && url.starts_with("/api/move-errors/clear?") {
         // Clear ONE move error by path. The path carries slashes/spaces, so it
@@ -1652,10 +1652,10 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         if target.is_empty() {
             return json_response(request, 400, r#"{"ok":false,"error":"missing path"}"#);
         }
-        crate::mover::clear_move_error(&target);
+        crate::server::mover::clear_move_error(&target);
         json_response(request, 200, r#"{"ok":true}"#);
     } else if is_post && url == "/api/mux-errors/clear-all" {
-        crate::muxer::clear_all_mux_errors();
+        crate::server::muxer::clear_all_mux_errors();
         json_response(request, 200, r#"{"ok":true}"#);
     } else if is_post && url.starts_with("/api/mux-errors/clear?") {
         // Clear ONE mux error by path (percent-encoded `path=` query param).
@@ -1668,7 +1668,7 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         if target.is_empty() {
             return json_response(request, 400, r#"{"ok":false,"error":"missing path"}"#);
         }
-        crate::muxer::clear_mux_error(&target);
+        crate::server::muxer::clear_mux_error(&target);
         json_response(request, 200, r#"{"ok":true}"#);
     } else if is_get && url.starts_with("/api/logs/") {
         let device = url.trim_start_matches("/api/logs/");
@@ -1730,7 +1730,7 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
             .unwrap_or_else(|e| e.into_inner())
             .staging_dir
             .clone();
-        let items = crate::review::list_held(&staging);
+        let items = crate::server::review::list_held(&staging);
         json_response(
             request,
             200,
@@ -1829,7 +1829,7 @@ fn handle_title_override(request: tiny_http::Request, device: &str) {
     let tmdb_id = v["tmdb_id"].as_u64().unwrap_or(0);
     ripper::set_title_override(
         device,
-        crate::tmdb::TmdbResult {
+        crate::server::tmdb::TmdbResult {
             title: title.clone(),
             year,
             poster_url: poster.clone(),
@@ -1872,8 +1872,8 @@ fn handle_review_resolve(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
         .staging_dir
         .clone();
     let action = match v["action"].as_str().unwrap_or("") {
-        "proceed" => crate::review::Resolve::Proceed,
-        "cancel" => crate::review::Resolve::Cancel,
+        "proceed" => crate::server::review::Resolve::Proceed,
+        "cancel" => crate::server::review::Resolve::Cancel,
         "retitle" => {
             let title = clamp_chars(v["title"].as_str().unwrap_or("").trim(), 300);
             if title.is_empty() {
@@ -1883,11 +1883,11 @@ fn handle_review_resolve(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
                 .as_u64()
                 .and_then(|y| u16::try_from(y).ok())
                 .unwrap_or(0);
-            crate::review::Resolve::Retitle { title, year }
+            crate::server::review::Resolve::Retitle { title, year }
         }
         _ => return json_response(request, 400, r#"{"ok":false,"error":"bad action"}"#),
     };
-    match crate::review::resolve(&staging, &dir, action) {
+    match crate::server::review::resolve(&staging, &dir, action) {
         Ok(()) => json_response(request, 200, r#"{"ok":true}"#),
         Err(e) => {
             // Build the error payload with serde so backslashes, newlines,
@@ -1933,7 +1933,7 @@ fn handle_tmdb_search(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, ur
         .unwrap_or_else(|e| e.into_inner())
         .tmdb_api_key
         .clone();
-    let results = crate::tmdb::search(q, &key, 8);
+    let results = crate::server::tmdb::search(q, &key, 8);
     json_response(
         request,
         200,
@@ -1946,7 +1946,7 @@ fn handle_tmdb_search(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, ur
 fn serve_html(request: tiny_http::Request) {
     let header =
         Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
-    let html = DASHBOARD_HTML.replace("{VERSION}", crate::VERSION_LABEL);
+    let html = DASHBOARD_HTML.replace("{VERSION}", crate::server::VERSION_LABEL);
     // The dashboard IS the app shell (single self-contained HTML+CSS+JS
     // page); serve it non-cacheable so browsers don't keep running the
     // OLD UI after a deploy. no-store forces a fresh fetch on every load.
@@ -2162,7 +2162,7 @@ fn settings_json_redacted(c: &Config) -> String {
     // Operator-facing, NOT persisted (serde drops it on POST): the ACTUAL path
     // the keydb reads resolve to + whether a file is present there, so the
     // Settings UI shows exactly where autorip looks for keys (issue #46).
-    let rp = crate::keysource::keydb_path(c);
+    let rp = crate::server::keysource::keydb_path(c);
     v["keydb_resolved"] = serde_json::json!(format!(
         "{}  —  {}",
         rp.display(),
@@ -2865,7 +2865,7 @@ mod web_tests {
             "EACCES on the staging dir must not be treated as 'no staging dir'"
         );
         // An unreadable state.json must not read as "not muxing" either.
-        let state = dir.join(crate::ripper::staging::STATE_FILE);
+        let state = dir.join(crate::server::ripper::staging::STATE_FILE);
         std::fs::write(&state, b"{}").unwrap();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000)).unwrap();
         let verdict = accept_loss_entry_for(&dir);
@@ -2896,10 +2896,10 @@ mod web_tests {
         };
 
         // Step 1: fresh hand-off — `.ripped` only. In the Mux queue, not Move.
-        crate::muxer::write_marker(
+        crate::server::muxer::write_marker(
             &disc,
-            &crate::muxer::RippedMarker {
-                schema_version: crate::muxer::RIPPED_MARKER_SCHEMA,
+            &crate::server::muxer::RippedMarker {
+                schema_version: crate::server::muxer::RIPPED_MARKER_SCHEMA,
                 iso_path: "/x/Border_Town/Border_Town.iso".into(),
                 mapfile_path: "/x/Border_Town/Border_Town.iso.mapfile".into(),
                 display_name: "Border Town".into(),
@@ -2933,7 +2933,7 @@ mod web_tests {
 
         // Step 2: mux in flight — `.muxing` added. Out of the Mux queue
         // (shown as the live `_mux` device), still not in Move.
-        crate::ripper::staging::write_muxing_marker(&disc);
+        crate::server::ripper::staging::write_muxing_marker(&disc);
         let (mux, mv, _, _) = build_queue_views(&staging);
         assert!(
             mux.is_empty(),
@@ -2941,12 +2941,12 @@ mod web_tests {
         );
         assert!(mv.is_empty());
         assert!(!both_contain(&mux, &mv));
-        crate::ripper::staging::clear_muxing_marker(&disc);
+        crate::server::ripper::staging::clear_muxing_marker(&disc);
 
         // Step 3: mux done — hand-off to `state: Done` (mover hand-off),
         // `.completed` not yet written. THIS is the double-listing bug
         // window: it must be in the Move queue ONLY.
-        crate::ripper::staging::mark_handoff(&disc, true, |_s| {}).unwrap();
+        crate::server::ripper::staging::mark_handoff(&disc, true, |_s| {}).unwrap();
         let (mux, mv, _, _) = build_queue_views(&staging);
         assert!(
             mux.is_empty(),
@@ -2959,7 +2959,7 @@ mod web_tests {
         );
 
         // Step 4: terminal `.completed` lands — still Move-only, never both.
-        crate::ripper::staging::write_completed_marker(&disc);
+        crate::server::ripper::staging::write_completed_marker(&disc);
         let (mux, mv, _, _) = build_queue_views(&staging);
         assert!(mux.is_empty());
         assert_eq!(mv.len(), 1);
@@ -2973,7 +2973,7 @@ mod web_tests {
     fn build_queue_views_excludes_the_actively_moving_dir() {
         use std::fs;
         // Serialize against every test that touches the global move statics.
-        let _g = crate::mover::TEST_STATE_LOCK
+        let _g = crate::server::mover::TEST_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
 
@@ -2990,14 +2990,14 @@ mod web_tests {
         fs::write(other.join(".done"), b"{}").unwrap();
 
         // Nothing moving yet: both dirs are queued.
-        *crate::mover::ACTIVE_MOVE_DIR
+        *crate::server::mover::ACTIVE_MOVE_DIR
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         let (_, mv, _, _) = build_queue_views(&staging);
         assert_eq!(mv.len(), 2, "with nothing moving, both .done dirs queue");
 
         // Mark X-Men as the actively-moving dir (by its on-disk basename).
-        *crate::mover::ACTIVE_MOVE_DIR
+        *crate::server::mover::ACTIVE_MOVE_DIR
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some("X-Men_Apocalypse".to_string());
         let (_, mv, _, full) = build_queue_views(&staging);
@@ -3012,7 +3012,7 @@ mod web_tests {
         );
 
         // Clear so no other test observes a stale active dir.
-        *crate::mover::ACTIVE_MOVE_DIR
+        *crate::server::mover::ACTIVE_MOVE_DIR
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
     }
@@ -3023,10 +3023,10 @@ mod web_tests {
 
     /// Build a schema-valid `.ripped` marker for `display_name` whose
     /// `origin_device` is `origin`. Keeps the lifecycle tests terse.
-    fn ripped_marker_for(display_name: &str, origin: &str) -> crate::muxer::RippedMarker {
+    fn ripped_marker_for(display_name: &str, origin: &str) -> crate::server::muxer::RippedMarker {
         let safe = display_name.replace(' ', "_");
-        crate::muxer::RippedMarker {
-            schema_version: crate::muxer::RIPPED_MARKER_SCHEMA,
+        crate::server::muxer::RippedMarker {
+            schema_version: crate::server::muxer::RIPPED_MARKER_SCHEMA,
             iso_path: format!("/x/{safe}/{safe}.iso"),
             mapfile_path: format!("/x/{safe}/{safe}.iso.mapfile"),
             display_name: display_name.into(),
@@ -3077,10 +3077,10 @@ mod web_tests {
         let device = "sg_lifecycle_dev";
 
         // --- Stage 0: sweep in progress. `.sweeping` marker, tile=ripping.
-        crate::ripper::staging::write_sweeping_marker(&disc);
-        crate::ripper::update_state(
+        crate::server::ripper::staging::write_sweeping_marker(&disc);
+        crate::server::ripper::update_state(
             device,
-            crate::ripper::RipState {
+            crate::server::ripper::RipState {
                 device: device.to_string(),
                 status: "ripping".to_string(),
                 disc_name: "Mercy".to_string(),
@@ -3097,10 +3097,10 @@ mod web_tests {
         // --- Stage 1: `.ripped` hand-off. The read is DONE: tile=done(100%),
         // disc enters the Mux queue ONLY. (`write_marker` also clears
         // `.sweeping`.)
-        crate::muxer::write_marker(&disc, &ripped_marker_for("Mercy", device)).unwrap();
-        crate::ripper::update_state(
+        crate::server::muxer::write_marker(&disc, &ripped_marker_for("Mercy", device)).unwrap();
+        crate::server::ripper::update_state(
             device,
-            crate::ripper::RipState {
+            crate::server::ripper::RipState {
                 device: device.to_string(),
                 status: "done".to_string(),
                 progress_pct: 100,
@@ -3121,7 +3121,7 @@ mod web_tests {
 
         // --- Stage 2: mux in flight. `.muxing` lock; disc leaves the static
         // Mux queue (it's the live `_mux` device now); tile stays done.
-        crate::ripper::staging::write_muxing_marker(&disc);
+        crate::server::ripper::staging::write_muxing_marker(&disc);
         let (mux, mv, _, _) = build_queue_views(&staging);
         assert!(
             mux.is_empty(),
@@ -3130,12 +3130,12 @@ mod web_tests {
         assert!(mv.is_empty());
         assert!(!in_both_queues(&mux, &mv));
         assert_eq!(device_status(device), Some("done".into()));
-        crate::ripper::staging::clear_muxing_marker(&disc);
+        crate::server::ripper::staging::clear_muxing_marker(&disc);
 
         // --- Stage 3: mux success. Hand-off to `state: Done` written BEFORE
         // `.completed`. Disc moves to the Move queue ONLY — the
         // double-listing bug window.
-        crate::ripper::staging::mark_handoff(&disc, true, |_s| {}).unwrap();
+        crate::server::ripper::staging::mark_handoff(&disc, true, |_s| {}).unwrap();
         let (mux, mv, _, _) = build_queue_views(&staging);
         assert!(
             mux.is_empty(),
@@ -3146,7 +3146,7 @@ mod web_tests {
         assert_eq!(device_status(device), Some("done".into()));
 
         // --- Stage 4: `.completed` lands (terminal). Still Move-only.
-        crate::ripper::staging::write_completed_marker(&disc);
+        crate::server::ripper::staging::write_completed_marker(&disc);
         let (mux, mv, _, _) = build_queue_views(&staging);
         assert!(mux.is_empty());
         assert_eq!(
@@ -3156,7 +3156,7 @@ mod web_tests {
         );
         assert!(!in_both_queues(&mux, &mv));
 
-        crate::ripper::STATE.lock().unwrap().remove(device);
+        crate::server::ripper::STATE.lock().unwrap().remove(device);
     }
 
     // LOW-CONFIDENCE lifecycle: the mux writes .review (not .done) for an
@@ -3170,13 +3170,13 @@ mod web_tests {
         let disc = tmp.path().join("Held_Title");
         fs::create_dir_all(&disc).unwrap();
 
-        crate::muxer::write_marker(&disc, &ripped_marker_for("Held Title", "sg0")).unwrap();
+        crate::server::muxer::write_marker(&disc, &ripped_marker_for("Held Title", "sg0")).unwrap();
         let (mux, _, _, _) = build_queue_views(&staging);
         assert_eq!(mux.len(), 1, "fresh .ripped is queued for mux");
 
         // Low-confidence mux success: hand-off to `state: Review` instead of
         // `state: Done`, then `.completed`.
-        crate::ripper::staging::mark_handoff(&disc, false, |_s| {}).unwrap();
+        crate::server::ripper::staging::mark_handoff(&disc, false, |_s| {}).unwrap();
         let (mux, mv, _, _) = build_queue_views(&staging);
         assert!(mux.is_empty(), "a .review dir must leave the Mux queue");
         assert!(
@@ -3184,7 +3184,7 @@ mod web_tests {
             "never in both queues on the review path"
         );
 
-        crate::ripper::staging::write_completed_marker(&disc);
+        crate::server::ripper::staging::write_completed_marker(&disc);
         let (mux, mv, _, _) = build_queue_views(&staging);
         assert!(mux.is_empty());
         assert!(!in_both_queues(&mux, &mv));
@@ -3202,18 +3202,19 @@ mod web_tests {
         fs::create_dir_all(&disc).unwrap();
         let device = "sg_abort_dev";
 
-        crate::muxer::write_marker(&disc, &ripped_marker_for("Lossy Disc", device)).unwrap();
+        crate::server::muxer::write_marker(&disc, &ripped_marker_for("Lossy Disc", device))
+            .unwrap();
         let (mux, _, _, _) = build_queue_views(&staging);
         assert_eq!(mux.len(), 1);
 
         // A terminal mux failure quarantines: `.failed`, tile=error.
-        crate::ripper::staging::write_failed_marker(
+        crate::server::ripper::staging::write_failed_marker(
             &disc,
             "mux finalize failed (unseekable output)",
         );
-        crate::ripper::update_state(
+        crate::server::ripper::update_state(
             device,
-            crate::ripper::RipState {
+            crate::server::ripper::RipState {
                 device: device.to_string(),
                 status: "error".to_string(),
                 disc_name: "Lossy Disc".to_string(),
@@ -3229,7 +3230,7 @@ mod web_tests {
         );
         assert_eq!(device_status(device), Some("error".into()));
 
-        crate::ripper::STATE.lock().unwrap().remove(device);
+        crate::server::ripper::STATE.lock().unwrap().remove(device);
     }
 
     /// CONCURRENT devices: two drives, each with its own staged job at a
@@ -3247,10 +3248,10 @@ mod web_tests {
         // Disc A: freshly handed off → Mux queue, tile A = done.
         let disc_a = tmp.path().join("Alpha");
         fs::create_dir_all(&disc_a).unwrap();
-        crate::muxer::write_marker(&disc_a, &ripped_marker_for("Alpha", dev_a)).unwrap();
-        crate::ripper::update_state(
+        crate::server::muxer::write_marker(&disc_a, &ripped_marker_for("Alpha", dev_a)).unwrap();
+        crate::server::ripper::update_state(
             dev_a,
-            crate::ripper::RipState {
+            crate::server::ripper::RipState {
                 device: dev_a.to_string(),
                 status: "done".to_string(),
                 progress_pct: 100,
@@ -3262,12 +3263,12 @@ mod web_tests {
         // Disc B: mux finished → Move queue, tile B = done.
         let disc_b = tmp.path().join("Beta");
         fs::create_dir_all(&disc_b).unwrap();
-        crate::muxer::write_marker(&disc_b, &ripped_marker_for("Beta", dev_b)).unwrap();
-        crate::ripper::staging::mark_handoff(&disc_b, true, |_s| {}).unwrap();
-        crate::ripper::staging::write_completed_marker(&disc_b);
-        crate::ripper::update_state(
+        crate::server::muxer::write_marker(&disc_b, &ripped_marker_for("Beta", dev_b)).unwrap();
+        crate::server::ripper::staging::mark_handoff(&disc_b, true, |_s| {}).unwrap();
+        crate::server::ripper::staging::write_completed_marker(&disc_b);
+        crate::server::ripper::update_state(
             dev_b,
-            crate::ripper::RipState {
+            crate::server::ripper::RipState {
                 device: dev_b.to_string(),
                 status: "done".to_string(),
                 progress_pct: 100,
@@ -3302,8 +3303,8 @@ mod web_tests {
         assert_eq!(device_status(dev_a), Some("done".into()));
         assert_eq!(device_status(dev_b), Some("done".into()));
 
-        crate::ripper::STATE.lock().unwrap().remove(dev_a);
-        crate::ripper::STATE.lock().unwrap().remove(dev_b);
+        crate::server::ripper::STATE.lock().unwrap().remove(dev_a);
+        crate::server::ripper::STATE.lock().unwrap().remove(dev_b);
     }
 
     // get_state_json END-TO-END: the serialized live payload (SSE/dashboard
@@ -3320,10 +3321,10 @@ mod web_tests {
         for (name, finished) in [("Queued", false), ("Moving", true), ("AlsoQueued", false)] {
             let d = tmp.path().join(name);
             fs::create_dir_all(&d).unwrap();
-            crate::muxer::write_marker(&d, &ripped_marker_for(name, "sg0")).unwrap();
+            crate::server::muxer::write_marker(&d, &ripped_marker_for(name, "sg0")).unwrap();
             if finished {
-                crate::ripper::staging::mark_handoff(&d, true, |_s| {}).unwrap();
-                crate::ripper::staging::write_completed_marker(&d);
+                crate::server::ripper::staging::mark_handoff(&d, true, |_s| {}).unwrap();
+                crate::server::ripper::staging::write_completed_marker(&d);
             }
         }
 
@@ -3369,7 +3370,7 @@ mod web_tests {
         let staging_a = tmp_a.path().to_string_lossy().to_string();
         let disc1 = tmp_a.path().join("First");
         fs::create_dir_all(&disc1).unwrap();
-        crate::muxer::write_marker(&disc1, &ripped_marker_for("First", "sg0")).unwrap();
+        crate::server::muxer::write_marker(&disc1, &ripped_marker_for("First", "sg0")).unwrap();
 
         let (mux1, _, _, _) = build_queue_views_cached(&staging_a);
         assert!(
@@ -3392,7 +3393,7 @@ mod web_tests {
         // return the STALE (pre-addition) view.
         let disc2 = tmp_a.path().join("Second");
         fs::create_dir_all(&disc2).unwrap();
-        crate::muxer::write_marker(&disc2, &ripped_marker_for("Second", "sg1")).unwrap();
+        crate::server::muxer::write_marker(&disc2, &ripped_marker_for("Second", "sg1")).unwrap();
         let (mux2, _, _, _) = build_queue_views_cached(&staging_a);
         assert!(
             !mux2.iter().any(|s| s.contains("Second")),
@@ -3426,7 +3427,7 @@ mod web_tests {
         let staging = tmp.path().to_string_lossy().to_string();
         let disc = tmp.path().join("Primed");
         std::fs::create_dir_all(&disc).unwrap();
-        crate::muxer::write_marker(&disc, &ripped_marker_for("Primed", "sg0")).unwrap();
+        crate::server::muxer::write_marker(&disc, &ripped_marker_for("Primed", "sg0")).unwrap();
 
         // Prime the cache with a fast scan (the steady state on the rig:
         // /api/state has been polled once a second for the container's life).
@@ -3484,7 +3485,7 @@ mod web_tests {
         let a = tmp_a.path().to_string_lossy().to_string();
         let disc = tmp_a.path().join("Kept");
         std::fs::create_dir_all(&disc).unwrap();
-        crate::muxer::write_marker(&disc, &ripped_marker_for("Kept", "sg0")).unwrap();
+        crate::server::muxer::write_marker(&disc, &ripped_marker_for("Kept", "sg0")).unwrap();
         let (primed, _, _, _) = build_queue_views_cached(&a);
         assert!(
             primed.iter().any(|s| s.contains("Kept")),
@@ -3526,7 +3527,7 @@ mod web_tests {
         let staging = tmp.path().to_string_lossy().to_string();
         let disc = tmp.path().join("Solo");
         std::fs::create_dir_all(&disc).unwrap();
-        crate::muxer::write_marker(&disc, &ripped_marker_for("Solo", "sg0")).unwrap();
+        crate::server::muxer::write_marker(&disc, &ripped_marker_for("Solo", "sg0")).unwrap();
 
         // Armed BEFORE the first call: this dir has never been scanned, so
         // every caller below is a cold miss racing every other one.
@@ -3605,7 +3606,8 @@ mod web_tests {
         let staging = tmp.path().to_string_lossy().to_string();
         let first = tmp.path().join("WedgeFirst");
         std::fs::create_dir_all(&first).unwrap();
-        crate::muxer::write_marker(&first, &ripped_marker_for("WedgeFirst", "sg0")).unwrap();
+        crate::server::muxer::write_marker(&first, &ripped_marker_for("WedgeFirst", "sg0"))
+            .unwrap();
 
         // Steady state: the cache is warm, as it is on the rig after the
         // first second of /api/state polling.
@@ -3631,7 +3633,8 @@ mod web_tests {
         // Reality moves on underneath the wedged refresher.
         let second = tmp.path().join("WedgeSecond");
         std::fs::create_dir_all(&second).unwrap();
-        crate::muxer::write_marker(&second, &ripped_marker_for("WedgeSecond", "sg1")).unwrap();
+        crate::server::muxer::write_marker(&second, &ripped_marker_for("WedgeSecond", "sg1"))
+            .unwrap();
         // ...and the mount comes back for anyone who tries again. The
         // original refresher is still parked in its 60 s `read_dir`.
         queue_scan_probe::arm(&staging, 0);
@@ -3672,7 +3675,7 @@ mod web_tests {
         let staging = tmp.path().to_string_lossy().to_string();
         let disc = tmp.path().join("ColdWedge");
         std::fs::create_dir_all(&disc).unwrap();
-        crate::muxer::write_marker(&disc, &ripped_marker_for("ColdWedge", "sg0")).unwrap();
+        crate::server::muxer::write_marker(&disc, &ripped_marker_for("ColdWedge", "sg0")).unwrap();
 
         // Armed before the first ever call: this key is genuinely cold, so
         // there is no snapshot to fall back on.
@@ -3936,7 +3939,7 @@ mod web_tests {
     // concurrent cfg.read() (the 0.20.8 lock stall) — pinned against source.
     #[test]
     fn settings_post_saves_outside_the_config_write_guard() {
-        let src = crate::util::source_lf(include_str!("web.rs"));
+        let src = crate::server::util::source_lf(include_str!("web.rs"));
         // Leading newline so this does not match the literal on this line.
         let start = src
             .find("\nfn handle_settings_post(")
@@ -4678,7 +4681,7 @@ mod web_tests {
     fn guarded_get_rejects_rfc1918_before_connecting() {
         // guarded_get must run the SSRF guard FIRST, so an RFC1918/loopback/
         // metadata literal is rejected with no socket ever opened — the
-        // guard main.rs's KEYDB fetch paths route through, not bare ureq::get.
+        // guard daemon.rs's KEYDB fetch paths route through, not bare ureq::get.
         assert!(guarded_get(&format!("http://{}.{}.{}.{}/keydb.zip", 10, 0, 0, 5)).is_err());
         assert!(guarded_get(&format!("http://{}.{}.{}.{}/keydb.zip", 192, 168, 1, 10)).is_err());
         assert!(guarded_get(&format!("http://{}.{}.{}.{}/keydb.zip", 172, 20, 0, 1)).is_err());
@@ -5158,7 +5161,7 @@ mod web_tests {
     // reaching autorip.jsonl and unauthenticated GET /api/debug.
     #[test]
     fn the_keydb_update_handler_masks_its_ureq_error() {
-        let src = crate::util::source_lf(include_str!("web.rs"));
+        let src = crate::server::util::source_lf(include_str!("web.rs"));
         // Anchored on the DEFINITION, not the name (this test mentions it
         // too). Both ends are `expect`ed — an anchor that stops matching
         // would otherwise silently widen the slice to other handlers' logs.
@@ -5186,7 +5189,7 @@ mod web_tests {
     // STATE-locking test.
     #[test]
     fn get_state_json_recovers_a_poisoned_state_lock() {
-        let src = crate::util::source_lf(include_str!("web.rs"));
+        let src = crate::server::util::source_lf(include_str!("web.rs"));
         // Anchored on the DEFINITION (leading newline) so this test's own
         // mention of the name cannot match, and both ends are `expect`ed so a
         // stale anchor fails loudly instead of silently widening the slice.
@@ -5223,7 +5226,7 @@ mod web_tests {
         // Source-pin for the INFLIGHT-leak fix: the decrement must NOT be a
         // bare `INFLIGHT.fetch_sub(...)` in the resolver closure (leaked on
         // panic) — it must flow through a ConnGuard whose Drop always runs.
-        let src = crate::util::source_lf(include_str!("web.rs"));
+        let src = crate::server::util::source_lf(include_str!("web.rs"));
         let start = src
             .find("pub(crate) fn resolve_with_timeout")
             .expect("resolve_with_timeout present");
@@ -5464,7 +5467,7 @@ mod web_tests {
             let (code, body) = roundtrip(&cfg, "GET", "/api/version", None, &[]);
             assert_eq!(code, 200);
             assert!(
-                body.contains(&format!("\"version\":\"{}\"", crate::VERSION_LABEL)),
+                body.contains(&format!("\"version\":\"{}\"", crate::server::VERSION_LABEL)),
                 "GET /api/version must serve the running version, got: {body}"
             );
         }
@@ -5530,7 +5533,7 @@ mod web_tests {
                     "a nonexistent device must not be accepted for scanning"
                 );
                 assert!(
-                    !crate::ripper::device_known(dev),
+                    !crate::server::ripper::device_known(dev),
                     "no STATE entry may be created for unknown device {dev}"
                 );
             }
@@ -5539,7 +5542,7 @@ mod web_tests {
             // the per-iteration check above and still leak all 25.
             let leaked: Vec<&String> = devices
                 .iter()
-                .filter(|d| crate::ripper::device_known(d))
+                .filter(|d| crate::server::ripper::device_known(d))
                 .collect();
             assert!(
                 leaked.is_empty(),
@@ -5556,7 +5559,7 @@ mod web_tests {
                 let (code, body) =
                     roundtrip(&cfg, "POST", &format!("/api/{route}/{dev}"), None, &[]);
                 assert_eq!(code, 404, "/api/{route} on an unknown device: {body}");
-                assert!(!crate::ripper::device_known(&dev));
+                assert!(!crate::server::ripper::device_known(&dev));
             }
         }
 
@@ -5709,7 +5712,7 @@ mod web_tests {
         fn settings_post_rejects_non_bool_webhook_flag() {
             let tmp = tempfile::TempDir::new().unwrap();
             let cfg = cfg_in_tempdir(tmp.path());
-            let stored = vec![crate::config::WebhookEntry {
+            let stored = vec![crate::server::config::WebhookEntry {
                 url: "https://discord.com/api/webhooks/1/secretA".into(),
                 post_rip: true,
                 post_mux: true,
@@ -5911,7 +5914,7 @@ mod web_tests {
 
             let staging_dir = {
                 let c = cfg.read().unwrap();
-                c.staging_device_dir(&crate::util::sanitize_path_compact(disc_name))
+                c.staging_device_dir(&crate::server::util::sanitize_path_compact(disc_name))
             };
             let dir = std::path::Path::new(&staging_dir);
             std::fs::create_dir_all(dir).unwrap();
@@ -6073,7 +6076,7 @@ mod web_tests {
                  tmdb_media_type (tv), not fall back to movie"
             );
 
-            crate::ripper::STATE.lock().unwrap().remove(device);
+            crate::server::ripper::STATE.lock().unwrap().remove(device);
         }
 
         #[test]
@@ -6105,7 +6108,7 @@ mod web_tests {
                 "with no detected media_type, omission must fall back to movie"
             );
 
-            crate::ripper::STATE.lock().unwrap().remove(device);
+            crate::server::ripper::STATE.lock().unwrap().remove(device);
         }
 
         #[test]
@@ -6140,7 +6143,7 @@ mod web_tests {
                  over the detected tmdb_media_type"
             );
 
-            crate::ripper::STATE.lock().unwrap().remove(device);
+            crate::server::ripper::STATE.lock().unwrap().remove(device);
         }
 
         // ── handle_settings_post: pre-write-guard validation rejections ──
@@ -6369,7 +6372,7 @@ mod web_tests {
         fn device_log_route_serves_logged_lines_for_a_valid_device() {
             // A unique device name so parallel tests can't share the ring.
             let device = "zzweblogdev01";
-            crate::log::device_log(device, "unit-test-device-log-marker");
+            crate::server::log::device_log(device, "unit-test-device-log-marker");
             let cfg = Arc::new(RwLock::new(Config::default()));
             let (code, body) = roundtrip(&cfg, "GET", &format!("/api/logs/{device}"), None, &[]);
             assert_eq!(code, 200, "a valid device log must be served");
@@ -6385,7 +6388,7 @@ mod web_tests {
         fn error_clear_endpoints_dispatch() {
             // Clear-all wipes process-global MOVE_ERRORS/MUX_ERRORS; hold the
             // shared lock so parallel mover/muxer/resume tests aren't wiped.
-            let _g = crate::mover::TEST_STATE_LOCK
+            let _g = crate::server::mover::TEST_STATE_LOCK
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let cfg = Arc::new(RwLock::new(Config::default()));
@@ -6877,7 +6880,7 @@ fn get_state_json(staging_dir: &str) -> String {
     // `_move` is now an ARRAY of per-artifact bars (movie file + companion ISO
     // get one each); clone the whole Vec (empty = nothing moving). Recover on
     // poison (MOVE_STATE convention) — `.ok()` would drop live bars process-wide.
-    let move_state = crate::mover::MOVE_STATE
+    let move_state = crate::server::mover::MOVE_STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
@@ -6910,7 +6913,7 @@ const QUEUE_DISPLAY_CAP: usize = 100;
 // handle_system_info so both derive from one place. Mutual exclusion comes from state.json
 // itself.
 fn build_queue_views(staging_dir: &str) -> (Vec<String>, Vec<String>, usize, usize) {
-    let active_move_dir = crate::mover::ACTIVE_MOVE_DIR
+    let active_move_dir = crate::server::mover::ACTIVE_MOVE_DIR
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
@@ -6923,8 +6926,8 @@ fn build_queue_views(staging_dir: &str) -> (Vec<String>, Vec<String>, usize, usi
                 .filter_map(|e| e.ok())
                 .filter(|e| {
                     e.path().is_dir()
-                        && crate::ripper::staging::read_state(&e.path())
-                            .map(|s| s.state == crate::ripper::staging::StagingState::Done)
+                        && crate::server::ripper::staging::read_state(&e.path())
+                            .map(|s| s.state == crate::server::ripper::staging::StagingState::Done)
                             .unwrap_or_else(|| e.path().join(".done").exists())
                 })
                 .filter(|e| {
@@ -6939,7 +6942,7 @@ fn build_queue_views(staging_dir: &str) -> (Vec<String>, Vec<String>, usize, usi
         .unwrap_or_default();
     // Mux queue: staging dirs with a `.ripped` hand-off and no terminal /
     // move-queue / in-flight marker (see `pending_queue`).
-    let mut mux_queue = crate::muxer::pending_queue(std::path::Path::new(staging_dir));
+    let mut mux_queue = crate::server::muxer::pending_queue(std::path::Path::new(staging_dir));
     // Uncapped totals captured before truncation so "+N more" math shares this
     // one snapshot with the displayed lists.
     let move_full_count = move_queue.len();
@@ -6973,7 +6976,7 @@ fn handle_system_info(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     let (mux_queue, move_queue, mux_full_count, move_full_count) = build_queue_views(&staging_dir);
 
     // Mover errors: stuck staging dirs the user needs to act on.
-    let move_errors: Vec<crate::mover::MoverError> = crate::mover::MOVE_ERRORS
+    let move_errors: Vec<crate::server::mover::MoverError> = crate::server::mover::MOVE_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .values()
@@ -6982,7 +6985,7 @@ fn handle_system_info(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
 
     let truncation_count = move_full_count.saturating_sub(QUEUE_DISPLAY_CAP)
         + mux_full_count.saturating_sub(QUEUE_DISPLAY_CAP);
-    let mux_errors: Vec<crate::muxer::MuxerError> = crate::muxer::MUX_ERRORS
+    let mux_errors: Vec<crate::server::muxer::MuxerError> = crate::server::muxer::MUX_ERRORS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .values()
@@ -7023,7 +7026,7 @@ fn handle_device_log(request: tiny_http::Request, _cfg: &Arc<RwLock<Config>>, de
         text_response(request, "invalid device");
         return;
     }
-    let lines = crate::log::get_device_log(device, 2000);
+    let lines = crate::server::log::get_device_log(device, 2000);
     text_response(request, &lines.join("\n"));
 }
 
@@ -7082,7 +7085,7 @@ fn handle_debug_log(request: tiny_http::Request, url: &str) {
         .filter(|s| s.bytes().all(|b| (0x20..=0x7E).contains(&b)))
         .cloned();
 
-    let path = crate::observe::json_log_path();
+    let path = crate::server::observe::json_log_path();
     let content = match tail_file(&path, DEBUG_TAIL_BYTES) {
         Ok(s) => s,
         Err(e) => {
@@ -7694,8 +7697,8 @@ fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
     // Fail-loud-EARLY destination check: warn NOW if a configured directory
     // is missing/unwritable, rather than only discovering the dead mount
     // hours later at move time. Non-blocking — the save still succeeds.
-    for (root, reason) in crate::mover::check_configured_destinations(&snapshot) {
-        crate::log::syslog(&format!(
+    for (root, reason) in crate::server::mover::check_configured_destinations(&snapshot) {
+        crate::server::log::syslog(&format!(
             "WARNING: configured destination '{root}' is not usable: {reason}. \
              Rips will be PRESERVED in staging (not moved) until this is fixed."
         ));
@@ -7843,7 +7846,7 @@ fn handle_scan(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &
         }))
         .is_err()
         {
-            crate::log::device_log(&dev, "Scan thread panicked");
+            crate::server::log::device_log(&dev, "Scan thread panicked");
             ripper::update_state(
                 &dev,
                 ripper::RipState {
@@ -7912,7 +7915,7 @@ fn spawn_rip_after_claim(
         }))
         .is_err()
         {
-            crate::log::device_log(&dev, "Rip thread panicked");
+            crate::server::log::device_log(&dev, "Rip thread panicked");
             ripper::update_state(
                 &dev,
                 ripper::RipState {
@@ -7963,7 +7966,7 @@ enum AcceptLossEntry {
 // closed as StagingUnreadable (503, retry).
 fn accept_loss_entry_for(dir: &std::path::Path) -> AcceptLossEntry {
     match std::fs::metadata(dir) {
-        Ok(_) => match crate::ripper::staging::muxing_status(dir) {
+        Ok(_) => match crate::server::ripper::staging::muxing_status(dir) {
             Ok(muxing) => accept_loss_entry_verdict(true, muxing),
             Err(_) => AcceptLossEntry::StagingUnreadable,
         },
@@ -8056,7 +8059,7 @@ fn handle_accept_loss(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, de
     let _ = std::fs::remove_file(dir.join(ripper::staging::FAILED_MARKER));
     ripper::staging::clear_aborted_loss_marker(dir);
     ripper::staging::clear_restart_count(dir);
-    crate::log::device_log(
+    crate::server::log::device_log(
         device,
         "Accept-damage requested — re-muxing the existing ISO with the loss override.",
     );
@@ -8068,7 +8071,7 @@ fn handle_accept_loss(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, de
         // just armed — the same stale-override hazard the claim-before-write
         // ordering above prevents, reached by the other door. Disarm.
         ripper::staging::clear_accept_loss_marker(dir);
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             "Accept-damage override disarmed: the rip thread could not be spawned, so no run will consume it.",
         );
@@ -8158,7 +8161,7 @@ mod worker_panic_tests {
     // on panic; the scan site once lacked this, 409ing a device forever.
     #[test]
     fn every_worker_spawn_site_catches_its_panic() {
-        let src = crate::util::source_lf(include_str!("web.rs"));
+        let src = crate::server::util::source_lf(include_str!("web.rs"));
         // Match the production call shape only. (This file's test modules are
         // interleaved with production code, so a bare name match would also
         // count this test's own string literals.)
@@ -8187,7 +8190,7 @@ mod accept_loss_spawn_failure_tests {
     // a refused thread must disarm it or the next rip inherits stale consent.
     #[test]
     fn a_failed_spawn_disarms_the_accept_loss_override() {
-        let src = crate::util::source_lf(include_str!("web.rs"));
+        let src = crate::server::util::source_lf(include_str!("web.rs"));
         let start = src
             .find("fn handle_accept_loss(")
             .expect("handle_accept_loss must exist");
@@ -8219,7 +8222,7 @@ mod dashboard_button_tests {
     // answer, so a 409 (claim held by an unwinding worker) read as success.
     #[test]
     fn no_device_action_button_discards_the_servers_answer() {
-        let src = crate::util::source_lf(include_str!("web.rs"));
+        let src = crate::server::util::source_lf(include_str!("web.rs"));
         let code: Vec<&str> = src
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
@@ -8449,7 +8452,7 @@ fn handle_update_keydb(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
             // that leaks server config. Keep detail in the log only, through
             // `ureq_error_kind`, since `ureq::Error`'s Display isn't URL-free.
             tracing::warn!(
-                origin = %crate::webhook::webhook_url_origin(&keydb_url),
+                origin = %crate::server::webhook::webhook_url_origin(&keydb_url),
                 error_kind = %ureq_error_kind(&e),
                 "keydb update: could not connect to configured KEYDB server"
             );
@@ -8465,7 +8468,7 @@ fn handle_update_keydb(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     // Write to the service-canonical keydb path, NOT libfreemkv's exe-local
     // default — otherwise "Update KEYDB" reports success while every AACS
     // rip keeps failing because the read side looks elsewhere.
-    let saved = crate::keysource::save_keydb(cfg, &body);
+    let saved = crate::server::keysource::save_keydb(cfg, &body);
     match saved {
         Ok(result) => {
             let body = serde_json::json!({
@@ -8510,7 +8513,7 @@ fn handle_eject(request: tiny_http::Request, device: &str) {
         );
     }
     let device_path = format!("/dev/{}", device);
-    crate::ripper::eject_drive(&device_path);
+    crate::server::ripper::eject_drive(&device_path);
     ripper::update_state(
         device,
         ripper::RipState {
@@ -8539,7 +8542,7 @@ fn handle_stop(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &
              running and this device stays held until it exits (a worker wedged \
              in a blocking drive ioctl needs a container restart)"
         );
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             "Stop: the rip thread did not exit within 60s. It is still running, so \
              this drive stays busy until it does — scan/rip/eject will be refused. \
@@ -8656,7 +8659,7 @@ fn handle_debug_toggle(request: tiny_http::Request) {
     // Swap the EnvFilter so libfreemkv's `tracing::debug!` events actually
     // surface in docker logs while debug is on — without this the toggle only
     // flips autorip's own checks and the library stays at warn.
-    let filter_swapped = crate::observe::set_debug(enabled);
+    let filter_swapped = crate::server::observe::set_debug(enabled);
 
     tracing::info!(enabled, filter_swapped, "debug logging toggled");
     json_response(

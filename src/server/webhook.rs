@@ -1,4 +1,4 @@
-use crate::config::{Config, WebhookEntry};
+use crate::server::config::{Config, WebhookEntry};
 
 /// Which pipeline stage a dispatch is for. Each configured [`WebhookEntry`]
 /// opts in to the rip-, mux-, and move-complete stages independently, so
@@ -73,8 +73,8 @@ pub fn send_rich(cfg: &Config, event: WebhookEvent, ev: &RipEvent) {
         "elapsed_secs": ev.elapsed_secs.round() as u64,
         "output_path": ev.output_path,
         "errors": ev.errors,
-        "lost_video_secs": (ev.lost_video_secs * crate::util::MILLIS_PER_SEC).round()
-            / crate::util::MILLIS_PER_SEC,
+        "lost_video_secs": (ev.lost_video_secs * crate::server::util::MILLIS_PER_SEC).round()
+            / crate::server::util::MILLIS_PER_SEC,
     });
     fire(cfg, &payload, event);
 }
@@ -158,7 +158,7 @@ fn fire(cfg: &Config, payload: &serde_json::Value, event: WebhookEvent) {
     let body = payload.to_string();
 
     if !try_acquire_slot(&INFLIGHT, MAX_INFLIGHT) {
-        crate::log::syslog("Webhook dropped: too many concurrent deliveries in flight");
+        crate::server::log::syslog("Webhook dropped: too many concurrent deliveries in flight");
         return;
     }
 
@@ -181,14 +181,14 @@ fn fire(cfg: &Config, payload: &serde_json::Value, event: WebhookEvent) {
         // The guard was moved into the closure that never ran, so the slot is
         // already released by the failed spawn's drop — nothing leaks. Say so
         // and carry on: a notification is not worth taking the rip down for.
-        crate::log::syslog("Webhook dropped: could not spawn a delivery thread");
+        crate::server::log::syslog("Webhook dropped: could not spawn a delivery thread");
     }
 }
 
 // POST one payload to one URL. Split out of `fire` so the one HTTP call in this module can be
 // tested against a loopback stub.
 fn deliver(url: &str, body: &str) -> bool {
-    let agent = crate::web::webhook_agent();
+    let agent = crate::server::web::webhook_agent();
     match agent
         .post(url)
         .header("Content-Type", "application/json")
@@ -199,11 +199,11 @@ fn deliver(url: &str, body: &str) -> bool {
         // to log "sent" while nothing delivered. This closes that gap.
         Ok(r) if r.status().is_success() => {
             // Log only the origin — the path may contain a secret token.
-            crate::log::syslog(&format!("Webhook sent to {}", webhook_url_origin(url)));
+            crate::server::log::syslog(&format!("Webhook sent to {}", webhook_url_origin(url)));
             true
         }
         Ok(r) => {
-            crate::log::syslog(&format!(
+            crate::server::log::syslog(&format!(
                 "Webhook not accepted {}: HTTP {}",
                 webhook_url_origin(url),
                 r.status().as_u16()
@@ -214,8 +214,8 @@ fn deliver(url: &str, body: &str) -> bool {
             // Summarise WITHOUT embedding `e` directly: `ureq_error_kind` is
             // the one place the URL-free guarantee is stated, since `BadUri`
             // does embed the URI and would else be one refactor from the log.
-            let summary = crate::web::ureq_error_kind(&e);
-            crate::log::syslog(&format!(
+            let summary = crate::server::web::ureq_error_kind(&e);
+            crate::server::log::syslog(&format!(
                 "Webhook failed {}: {}",
                 webhook_url_origin(url),
                 summary

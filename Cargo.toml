@@ -4,7 +4,7 @@ version = "1.7.7"
 edition = "2024"
 rust-version = "1.98.1"
 license = "MIT"
-description = "freemkv disc ripper: command-line tool, plus the desktop app with the gui feature"
+description = "freemkv disc ripper: command-line tool, plus the desktop app with the gui feature and the rip server with the server feature"
 
 [lib]
 name = "freemkv"
@@ -22,9 +22,52 @@ name = "freemkv-gui"
 path = "src/bin/freemkv-gui.rs"
 required-features = ["gui"]
 
-# The desktop app. Without it the build is the CLI, with no UI dependencies.
+# The server shell's integration tests, carried over from the daemon's own
+# suite. They live in tests/server/ (not auto-discovered) so the CLI and app
+# builds never try to compile them.
+[[test]]
+name = "server_end_to_end"
+path = "tests/server/end_to_end.rs"
+required-features = ["server"]
+
+[[test]]
+name = "server_halt_drain"
+path = "tests/server/halt_drain.rs"
+required-features = ["server"]
+
+[[test]]
+name = "server_join_all_drain"
+path = "tests/server/join_all_drain.rs"
+required-features = ["server"]
+
+[[test]]
+name = "server_reporting"
+path = "tests/server/reporting.rs"
+required-features = ["server"]
+
+[[test]]
+name = "server_resume_remux"
+path = "tests/server/resume_remux.rs"
+required-features = ["server"]
+
+[[test]]
+name = "server_spawn_registration"
+path = "tests/server/spawn_registration.rs"
+required-features = ["server"]
+
+[[test]]
+name = "server_watchdog"
+path = "tests/server/watchdog.rs"
+required-features = ["server"]
+
+# The desktop app (`gui`) and the unattended rip server (`server`). Without
+# either the build is the CLI, with no UI and no server dependencies.
 [features]
 default = []
+# `freemkv server`: the rip daemon + web UI that runs in the container image.
+# Only adds crates; `mimalloc/secure` hardens the allocator of a process that
+# runs privileged and parses untrusted disc payloads unattended.
+server = ["dep:tiny_http", "dep:once_cell", "tracing-subscriber/json", "mimalloc/secure"]
 gui = ["dep:winsafe", "dep:windows", "dep:gtk4", "dep:libadwaita",
        "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation",
        "dep:objc2-user-notifications", "dep:block2"]
@@ -44,6 +87,13 @@ tracing-appender = "0.2"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 libc = "0.2"
 mimalloc = "0.1"
+
+# ── Server shell (`--features server`) ─────────────────────────────────────
+tiny_http = { version = "0.12", optional = true }
+once_cell = { version = "1", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
 
 # ── Windows desktop shell ───────────────────────────────────────────────────
 # `winsafe` is idiomatic safe Win32 with ZERO dependencies — it owns the message

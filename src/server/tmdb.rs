@@ -93,7 +93,7 @@ fn fetch_multi(query: &str, api_key: &str) -> Option<serde_json::Value> {
             // Do NOT log `e` directly: the URL has the api_key in its query
             // string, and `BadUri`'s Display still prints the rejected URI,
             // so masking stays even though ureq 3 is URL-free elsewhere.
-            let error_kind = crate::web::ureq_error_kind(&e);
+            let error_kind = crate::server::web::ureq_error_kind(&e);
             tracing::warn!(query = %query, error_kind = %error_kind, "tmdb: request failed (network/transport)");
             None
         }
@@ -119,7 +119,9 @@ fn warn_bad_key_throttled() {
             "tmdb: API key rejected (HTTP 401) — check the TMDB_API_KEY in Settings; \
              titles will fall through to the needs-review queue until it is fixed"
         );
-        crate::log::syslog("TMDB API key rejected (HTTP 401) — check TMDB_API_KEY in Settings");
+        crate::server::log::syslog(
+            "TMDB API key rejected (HTTP 401) — check TMDB_API_KEY in Settings",
+        );
     }
 }
 
@@ -664,7 +666,7 @@ pub fn season_episodes(tv_id: u64, season: u16, api_key: &str) -> Vec<Episode> {
             Vec::new()
         }
         Err(e) => {
-            let error_kind = crate::web::ureq_error_kind(&e);
+            let error_kind = crate::server::web::ureq_error_kind(&e);
             tracing::warn!(tv_id, season, error_kind = %error_kind, "tmdb: season fetch failed");
             Vec::new()
         }

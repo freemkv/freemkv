@@ -7,7 +7,7 @@
 //! Two entry points, one inner engine: [`mux_iso`] (multipass/resume) and [`mux_live`] (live
 //! single-pass), both mapped via `map_iso_mux_outcome`.
 
-use crate::util::{BYTES_PER_GIB, BYTES_PER_MIB, MILLIS_PER_SEC};
+use crate::server::util::{BYTES_PER_GIB, BYTES_PER_MIB, MILLIS_PER_SEC};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -50,7 +50,7 @@ pub fn watchdog_bump_restart_count(device: &str, staging_disc_dir: &std::path::P
         "autorip-watchdog-counter-bump",
         WATCHDOG_BUMP_DEADLINE,
         move || {
-            let _ = crate::ripper::staging::increment_restart_count(&bump_dir);
+            let _ = crate::server::ripper::staging::increment_restart_count(&bump_dir);
         },
     );
     if !done {
@@ -280,7 +280,7 @@ fn push_mux_state(
     lost_video_secs: f64,
     errors: u32,
 ) {
-    if crate::web::debug_enabled() {
+    if crate::server::web::debug_enabled() {
         eprintln!(
             "[DEBUG] MuxSink::push_state: pct={}, bytes_done={:.2}GB, speed={}MB/s",
             pct,
@@ -444,7 +444,7 @@ fn spawn_mux_watchdog(
             if !active.load(Ordering::Relaxed) {
                 break;
             }
-            let now = crate::util::epoch_secs();
+            let now = crate::server::util::epoch_secs();
             let last = last_frame.load(Ordering::Relaxed);
             let stall_secs = now.saturating_sub(last);
 
@@ -503,7 +503,7 @@ fn spawn_mux_watchdog(
                 let should_log = !was_stalled || stall_secs >= last_log_secs + 60;
                 if should_log {
                     last_log_secs = stall_secs;
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         &wd_device,
                         &format!(
                             "Drive stalled at {:.1} GB ({}%) — waiting for read ({})",
@@ -541,7 +541,7 @@ fn spawn_mux_watchdog(
                 });
                 was_stalled = true;
             } else if was_stalled {
-                crate::log::device_log(&wd_device, "Drive recovered — reads resumed");
+                crate::server::log::device_log(&wd_device, "Drive recovered — reads resumed");
                 was_stalled = false;
                 last_log_secs = 0;
             }
@@ -604,7 +604,7 @@ struct AutoripMuxEvents {
 impl libfreemkv::MuxEvents for AutoripMuxEvents {
     fn on_output_opened(&self, _title: &libfreemkv::DiscTitle) {
         self.opened.store(true, Ordering::Relaxed);
-        crate::log::device_log(&self.ui.device, "Output opened — muxing");
+        crate::server::log::device_log(&self.ui.device, "Output opened — muxing");
         // Reset the throttles so the first progress tick lands promptly after
         // the sink opens (matches the pre-migration `start`-relative cadence).
         let now = Instant::now();
@@ -618,7 +618,7 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
         // read-ahead position the UI prefers over write-lagged output.
         self.atomics
             .wd_last_frame
-            .store(crate::util::epoch_secs(), Ordering::Relaxed);
+            .store(crate::server::util::epoch_secs(), Ordering::Relaxed);
         self.atomics
             .latest_bytes_read
             .store(bytes_read, Ordering::Relaxed);
@@ -630,7 +630,7 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
         // `spawn_mux_watchdog`), then push throttled UI state.
         self.atomics
             .wd_last_frame
-            .store(crate::util::epoch_secs(), Ordering::Relaxed);
+            .store(crate::server::util::epoch_secs(), Ordering::Relaxed);
         self.atomics
             .wd_bytes
             .store(bytes_written, Ordering::Relaxed);
@@ -707,7 +707,7 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
                 };
                 if self.ui.total_bytes > 0 {
                     let total_gb = self.ui.total_bytes as f64 / BYTES_PER_GIB;
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         &self.ui.device,
                         &format!(
                             "{:.1} GB / {:.1} GB ({}%) {}{}",
@@ -715,7 +715,10 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
                         ),
                     );
                 } else {
-                    crate::log::device_log(&self.ui.device, &format!("{:.1} GB {}", gb, speed_str));
+                    crate::server::log::device_log(
+                        &self.ui.device,
+                        &format!("{:.1} GB {}", gb, speed_str),
+                    );
                 }
             }
         }
@@ -745,7 +748,7 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
     fn on_sector_skipped(&self, lba: u32) {
         self.atomics
             .wd_last_frame
-            .store(crate::util::epoch_secs(), Ordering::Relaxed);
+            .store(crate::server::util::epoch_secs(), Ordering::Relaxed);
         // Store the skipped LBA into `rip_last_lba` (UI last_sector/playhead)
         // and log the per-skip line — fires on the LIVE inline single-pass path
         // from `DiscStream::fill_extents`; `input_errors` bump surfaces the skip count.
@@ -753,7 +756,7 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
             .rip_last_lba
             .store(lba as u64, Ordering::Relaxed);
         self.atomics.input_errors.fetch_add(1, Ordering::Relaxed);
-        crate::log::device_log(
+        crate::server::log::device_log(
             &self.ui.device,
             &format!("Sector {} skipped (zero-filled)", lba),
         );
@@ -770,7 +773,7 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
             libfreemkv::event::BatchSizeReason::Shrunk => "shrunk",
             libfreemkv::event::BatchSizeReason::Probed => "probed up",
         };
-        crate::log::device_log(
+        crate::server::log::device_log(
             &self.ui.device,
             &format!("Batch size → {} ({})", batch, label),
         );
@@ -779,7 +782,7 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
     fn on_read_error(&self, _lba: u32) {
         self.atomics
             .wd_last_frame
-            .store(crate::util::epoch_secs(), Ordering::Relaxed);
+            .store(crate::server::util::epoch_secs(), Ordering::Relaxed);
     }
 }
 
@@ -853,7 +856,10 @@ fn map_iso_mux_outcome(
             // export despite `completed == true`. Dormant today (only the
             // `mp4://` sink populates it), but log loudly the moment it's not.
             if !o.undelivered_streams.is_empty() {
-                crate::log::device_log(device, &undelivered_streams_note(&o.undelivered_streams));
+                crate::server::log::device_log(
+                    device,
+                    &undelivered_streams_note(&o.undelivered_streams),
+                );
             }
             Ok(MuxOutcome {
                 completed: true,
@@ -870,7 +876,7 @@ fn map_iso_mux_outcome(
         Ok(o) => {
             // A clean operator stop (halt) or a join-timeout wedge: resumable,
             // no error marker — the orchestrator's "stopped" path handles it.
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 "Mux did not complete (operator stop or wedge) — staging preserved for resume",
             );
@@ -897,7 +903,7 @@ fn map_iso_mux_outcome(
                 // quarantine via the orchestrator's `!output_opened` path.
                 let msg =
                     format!("Header resolution or mux setup failed before output opened ({e})");
-                crate::log::device_log(device, &format!("Mux failed: {msg}"));
+                crate::server::log::device_log(device, &format!("Mux failed: {msg}"));
                 return Ok(MuxOutcome {
                     completed: false,
                     bytes_done: 0,
@@ -914,7 +920,7 @@ fn map_iso_mux_outcome(
             if code == Some(libfreemkv::error::E_NO_STREAMS) {
                 // Empty / undecryptable output — structural, quarantine.
                 let msg = "mux produced no frames (empty/undecryptable output)".to_string();
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "Mux produced no frames/bytes — refusing to mark complete (empty/undecryptable output)",
                 );
@@ -939,7 +945,7 @@ fn map_iso_mux_outcome(
                     // Mapfile …). The MKV is truncated but the disc stays
                     // resumable — same as the old producer-read-error path.
                     let cause = producer_read_error_cause(&e);
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         device,
                         &format!("Mux incomplete: read error mid-stream — {cause} (MKV truncated)"),
                     );
@@ -959,7 +965,7 @@ fn map_iso_mux_outcome(
                     // A finalize / IO error (output.finish() failed, write
                     // error, unseekable MKV): structural, quarantine.
                     let msg = format!("{e}");
-                    crate::log::device_log(device, &format!("Mux pipeline failed: {msg}"));
+                    crate::server::log::device_log(device, &format!("Mux pipeline failed: {msg}"));
                     Ok(MuxOutcome {
                         completed: false,
                         bytes_done: partial_bytes,
@@ -1052,7 +1058,7 @@ pub(crate) fn mux_iso(
         selection: Default::default(),
     };
 
-    crate::log::device_log(
+    crate::server::log::device_log(
         inputs.device,
         &format!("Opening output: {}", inputs.dest_url),
     );
@@ -1194,7 +1200,7 @@ pub(crate) fn mux_live(
         selection: Default::default(),
     };
 
-    crate::log::device_log(
+    crate::server::log::device_log(
         inputs.device,
         &format!("Opening output: {}", inputs.dest_url),
     );
@@ -1238,7 +1244,7 @@ mod tests {
     // (tests/watchdog.rs covers its timeout) before `exit(1)`, never inline.
     #[test]
     fn hard_watchdog_bumps_via_the_bounded_helper_before_exit() {
-        let src = crate::util::source_lf(include_str!("mux.rs"));
+        let src = crate::server::util::source_lf(include_str!("mux.rs"));
         let start = src
             .find("fn spawn_mux_watchdog(")
             .expect("watchdog spawner");
@@ -1809,7 +1815,7 @@ mod tests {
         // REPORTED, not merely carried: the device log is where this reaches
         // the operator. Exactly once — zero is a silent lossy "success", two
         // is the duplicate-wording bug this replaced.
-        let logged = crate::log::get_device_log(device, 50);
+        let logged = crate::server::log::get_device_log(device, 50);
         let notes: Vec<&String> = logged
             .iter()
             .filter(|l| l.contains("could not be delivered into the output"))
@@ -1831,8 +1837,8 @@ mod tests {
     // spellings across mux.rs and mod.rs.
     #[test]
     fn the_undelivered_streams_note_has_a_single_emitter() {
-        let mux_src = crate::util::source_lf(include_str!("mux.rs"));
-        let mod_src = crate::util::source_lf(include_str!("mod.rs"));
+        let mux_src = crate::server::util::source_lf(include_str!("mux.rs"));
+        let mod_src = crate::server::util::source_lf(include_str!("mod.rs"));
         assert!(
             mux_src.contains("fn undelivered_streams_note("),
             "the note's wording must live in one shared function"

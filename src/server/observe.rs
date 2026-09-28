@@ -7,6 +7,12 @@
 //!
 //! Filter level via `AUTORIP_LOG_LEVEL` (env-filter syntax). Default
 //! `autorip=info,libfreemkv=warn`.
+//!
+//! The daemon's own events carry the module-path target `freemkv::server::…`
+//! (they were `autorip::…` when it was its own crate), so every `autorip`
+//! directive — built in or operator-supplied — is mirrored onto
+//! `freemkv::server` (see [`with_server_targets`]). Explicit
+//! `target: "autorip::…"` events are unchanged.
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling;
@@ -15,11 +21,32 @@ use tracing_subscriber::{EnvFilter, Registry, fmt, layer::SubscriberExt, util::S
 
 // EnvFilter directive used when /api/debug is OFF (the normal state). prod = warnings only; dev
 // = full debug (see FILTER_ON).
-const FILTER_OFF: &str = "autorip=info,libfreemkv=warn,freemkv=warn";
+const FILTER_OFF: &str = "autorip=info,freemkv::server=info,libfreemkv=warn,freemkv=warn";
 
 // EnvFilter directive used when /api/debug is ON: debug globally, plus mux/stream/freemkv
 // targets needed for drive + mux forensics.
-const FILTER_ON: &str = "autorip=debug,libfreemkv=debug,freemkv=debug,mux=debug,stream=debug";
+const FILTER_ON: &str =
+    "autorip=debug,freemkv::server=debug,libfreemkv=debug,freemkv=debug,mux=debug,stream=debug";
+
+/// Mirror every `autorip` directive in `spec` onto `freemkv::server`, so an
+/// operator's `AUTORIP_LOG_LEVEL=autorip=debug` still reaches the daemon's
+/// module-path events. Other directives pass through untouched.
+fn with_server_targets(spec: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for d in spec.split(',') {
+        out.push(d.to_string());
+        let t = d.trim();
+        if let Some(rest) = t.strip_prefix("autorip")
+            && (rest.is_empty()
+                || rest.starts_with('=')
+                || rest.starts_with("::")
+                || rest.starts_with('['))
+        {
+            out.push(format!("freemkv::server{rest}"));
+        }
+    }
+    out.join(",")
+}
 
 /// Worker guards for the non-blocking file appenders. Must outlive the
 /// process — flushed on drop. Stored in a static so `init()` can be called
@@ -51,7 +78,8 @@ pub fn init() {
         .ok()
         .filter(|s| !s.is_empty());
     let initial_filter = match env_override.as_deref() {
-        Some(s) => EnvFilter::try_new(s).unwrap_or_else(|_| EnvFilter::new(FILTER_OFF)),
+        Some(s) => EnvFilter::try_new(with_server_targets(s))
+            .unwrap_or_else(|_| EnvFilter::new(FILTER_OFF)),
         None => EnvFilter::new(FILTER_OFF),
     };
     let (filter, reload_handle) = reload::Layer::new(initial_filter);
@@ -128,7 +156,7 @@ pub fn set_debug(enabled: bool) -> bool {
 fn log_dir() -> String {
     // AUTORIP_DIR, else writable /config (Docker), else ~/.config/autorip
     // (bare run) — matches config/log so all sinks agree on one writable base.
-    format!("{}/logs", crate::config::default_autorip_dir())
+    format!("{}/logs", crate::server::config::default_autorip_dir())
 }
 
 /// Path of the JSONL stream — exposed so the web `/api/debug` endpoint
@@ -273,6 +301,47 @@ mod tests {
         assert!(
             !out.contains("title_key=\"") || out.contains("title_key=\"<redacted>\""),
             "title_key must never carry a real value; got:\n{out}"
+        );
+    }
+
+    // The daemon's events are `freemkv::server::…` now; an operator's
+    // `autorip` directive must still reach them, and `freemkv=warn` (for
+    // libfreemkv's `freemkv::*` targets) must not swallow them.
+    #[test]
+    fn autorip_directives_reach_the_server_module_targets() {
+        assert_eq!(
+            with_server_targets("autorip=debug,libfreemkv=warn"),
+            "autorip=debug,freemkv::server=debug,libfreemkv=warn"
+        );
+        assert_eq!(
+            with_server_targets("autorip::ripper=trace"),
+            "autorip::ripper=trace,freemkv::server::ripper=trace"
+        );
+        assert_eq!(with_server_targets("warn"), "warn");
+        assert_eq!(with_server_targets("autoripper=info"), "autoripper=info");
+
+        use tracing_subscriber::layer::SubscriberExt;
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        struct Count(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Count {
+            fn on_event(
+                &self,
+                _: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let subscriber = tracing_subscriber::registry()
+            .with(EnvFilter::try_new(FILTER_OFF).unwrap())
+            .with(Count(hits.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("a daemon info event under this module's own target");
+        });
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "FILTER_OFF must let the daemon's own info events through"
         );
     }
 

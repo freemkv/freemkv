@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use freemkv_autorip::ripper;
+use freemkv::server::ripper;
 
 #[test]
 fn spawn_rip_thread_registers_handle() {

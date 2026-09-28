@@ -104,7 +104,7 @@ where
     // Per-thread span carrying build + device for the worker's whole life;
     // tracing spans are thread-local, so events from this crate AND from
     // libfreemkv (called synchronously here) can be attributed to a build.
-    let span_build = crate::VERSION_LABEL;
+    let span_build = crate::server::VERSION_LABEL;
     let span_device = device.to_string();
     let span_role = role.to_string();
     // Registration gate (see doc): `recv()` is `Ok` only if we won the slot;
@@ -370,11 +370,11 @@ pub(super) struct DriveSession {
     pub(super) disc: Option<libfreemkv::Disc>,
     pub(super) scanned: bool,
     pub(super) probed: bool,
-    pub(super) tmdb: Option<crate::tmdb::TmdbResult>,
+    pub(super) tmdb: Option<crate::server::tmdb::TmdbResult>,
     pub(super) device_path: String,
     /// scan_disc's final key-service verdict for a still-keyless disc, so rip_disc
     /// classifies from the real `/decode` answer instead of re-probing.
-    pub(super) key_verdict: Option<crate::keysource::ServiceReachability>,
+    pub(super) key_verdict: Option<crate::server::keysource::ServiceReachability>,
 }
 
 /// Global drive sessions — one per device.
@@ -683,7 +683,7 @@ fn candidate_identity_confirmed(probed: Option<&str>, expected: &str) -> bool {
 // A disc-supplied UDF Volume Identifier, made safe to put in a log field — these `tracing`
 // fields reach `autorip.log`/stderr unescaped, so a crafted disc could inject ANSI.
 fn vid_for_log(vid: &str) -> String {
-    crate::log::sanitize_log_msg(vid)
+    crate::server::log::sanitize_log_msg(vid)
 }
 
 // Read the UDF Volume Identifier of the disc in the drive at `path`, for

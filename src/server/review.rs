@@ -27,7 +27,7 @@ pub struct HeldRip {
 /// Display metadata for a held rip, from the unified `state.json` when present,
 /// else the legacy `.review` JSON body.
 fn read_marker(dir: &Path) -> serde_json::Value {
-    if let Some(st) = crate::ripper::staging::read_state(dir) {
+    if let Some(st) = crate::server::ripper::staging::read_state(dir) {
         return serde_json::json!({
             "title": st.title,
             "year": st.year,
@@ -44,8 +44,8 @@ fn read_marker(dir: &Path) -> serde_json::Value {
 /// Is `dir` a held-for-review rip? `state == Review` in the unified store, or a
 /// legacy `.review` marker with no `.done`.
 fn is_held(dir: &Path) -> bool {
-    if let Some(st) = crate::ripper::staging::read_state(dir) {
-        return st.state == crate::ripper::staging::StagingState::Review;
+    if let Some(st) = crate::server::ripper::staging::read_state(dir) {
+        return st.state == crate::server::ripper::staging::StagingState::Review;
     }
     dir.join(".review").exists() && !dir.join(".done").exists()
 }
@@ -146,7 +146,7 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
         return Err("not a held rip".into());
     }
     // Unified store when present; else operate on the legacy marker files.
-    let unified = crate::ripper::staging::read_state(&d).is_some();
+    let unified = crate::server::ripper::staging::read_state(&d).is_some();
     match action {
         Resolve::Proceed => {
             // Promote the held rip to the mover-facing state, carrying the
@@ -154,8 +154,8 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
             // which wouldn't fsync the dirent).
             if unified {
                 let mut ok = false;
-                crate::ripper::staging::mutate_state_if_present(&d, |s| {
-                    s.state = crate::ripper::staging::StagingState::Done;
+                crate::server::ripper::staging::mutate_state_if_present(&d, |s| {
+                    s.state = crate::server::ripper::staging::StagingState::Done;
                     s.title_confident = true;
                     ok = true;
                 });
@@ -164,7 +164,7 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
                 }
             } else {
                 let body = std::fs::read(&review).map_err(|e| e.to_string())?;
-                crate::ripper::staging::write_handoff_marker(&d.join(".done"), &body)
+                crate::server::ripper::staging::write_handoff_marker(&d.join(".done"), &body)
                     .map_err(|e| e.to_string())?;
                 std::fs::remove_file(&review).map_err(|e| e.to_string())?;
             }
@@ -175,7 +175,7 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
             }
             if unified {
                 let mut ok = false;
-                crate::ripper::staging::mutate_state_if_present(&d, |s| {
+                crate::server::ripper::staging::mutate_state_if_present(&d, |s| {
                     s.title = title.clone();
                     s.year = year;
                     // A non-movie (TV) media_type must survive a retitle; only
@@ -183,7 +183,7 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
                     if s.media_type.is_empty() {
                         s.media_type = "movie".into();
                     }
-                    s.state = crate::ripper::staging::StagingState::Done;
+                    s.state = crate::server::ripper::staging::StagingState::Done;
                     s.title_confident = true;
                     ok = true;
                 });
@@ -201,7 +201,7 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
                     m["media_type"] = serde_json::json!("movie");
                 }
                 let serialized = serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?;
-                crate::ripper::staging::write_handoff_marker(
+                crate::server::ripper::staging::write_handoff_marker(
                     &d.join(".done"),
                     serialized.as_bytes(),
                 )
@@ -214,20 +214,21 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
             // propagating a write error and preserving held state on failure,
             // so use the fallible transition, not `write_failed_marker`.
             if unified {
-                let mut st = crate::ripper::staging::read_state(&d)
+                let mut st = crate::server::ripper::staging::read_state(&d)
                     .ok_or_else(|| "state.json vanished".to_string())?;
-                st.state = crate::ripper::staging::StagingState::Failed;
+                st.state = crate::server::ripper::staging::StagingState::Failed;
                 st.failure_reason = Some("cancelled by operator".to_string());
                 st.muxing = false;
-                crate::ripper::staging::try_write_state(&d, &st).map_err(|e| e.to_string())?;
+                crate::server::ripper::staging::try_write_state(&d, &st)
+                    .map_err(|e| e.to_string())?;
             } else {
                 let failed_body = serde_json::json!({
                     "reason": "cancelled by operator",
-                    "timestamp": crate::util::format_iso_datetime(),
+                    "timestamp": crate::server::util::format_iso_datetime(),
                 });
                 let failed_str =
                     serde_json::to_string_pretty(&failed_body).map_err(|e| e.to_string())?;
-                crate::ripper::staging::write_handoff_marker(
+                crate::server::ripper::staging::write_handoff_marker(
                     &d.join(".failed"),
                     failed_str.as_bytes(),
                 )
@@ -450,7 +451,7 @@ mod tests {
         // M2: the `.failed` marker is valid JSON carrying a machine-readable
         // reason, so `read_failed_reason` recovers it (the legacy non-JSON
         // body parsed to None, defeating reason-keyed terminal checks).
-        let reason = crate::ripper::staging::read_failed_reason(&held);
+        let reason = crate::server::ripper::staging::read_failed_reason(&held);
         assert_eq!(
             reason.as_deref(),
             Some("cancelled by operator"),
@@ -480,7 +481,7 @@ mod tests {
     /// outputs, so the unified branches in `resolve` actually run (rather
     /// than the legacy `.review`-file path).
     fn write_review_state(dir: &Path, media_type: &str) {
-        use crate::ripper::staging::{DiscState, Output, StagingState};
+        use crate::server::ripper::staging::{DiscState, Output, StagingState};
         std::fs::create_dir_all(dir).unwrap();
         let mut st = DiscState::new(StagingState::Review);
         st.title = "Guess".into();
@@ -509,12 +510,12 @@ mod tests {
                 moved: false,
             },
         ];
-        crate::ripper::staging::write_state(dir, &st);
+        crate::server::ripper::staging::write_state(dir, &st);
     }
 
     #[test]
     fn unified_proceed_transitions_review_to_done() {
-        use crate::ripper::staging::{StagingState, read_state};
+        use crate::server::ripper::staging::{StagingState, read_state};
         let tmp = std::env::temp_dir().join(format!(
             "autorip-review-unified-proceed-{}-{:?}",
             std::process::id(),
@@ -547,7 +548,7 @@ mod tests {
 
     #[test]
     fn unified_retitle_sets_title_and_keeps_tv_media_type() {
-        use crate::ripper::staging::{StagingState, read_state};
+        use crate::server::ripper::staging::{StagingState, read_state};
         let tmp = std::env::temp_dir().join(format!(
             "autorip-review-unified-retitle-tv-{}-{:?}",
             std::process::id(),
@@ -582,7 +583,7 @@ mod tests {
 
     #[test]
     fn unified_retitle_defaults_empty_media_type_to_movie() {
-        use crate::ripper::staging::read_state;
+        use crate::server::ripper::staging::read_state;
         let tmp = std::env::temp_dir().join(format!(
             "autorip-review-unified-retitle-empty-{}-{:?}",
             std::process::id(),
@@ -611,7 +612,7 @@ mod tests {
 
     #[test]
     fn unified_cancel_transitions_review_to_failed() {
-        use crate::ripper::staging::{StagingState, read_state};
+        use crate::server::ripper::staging::{StagingState, read_state};
         let tmp = std::env::temp_dir().join(format!(
             "autorip-review-unified-cancel-{}-{:?}",
             std::process::id(),
@@ -636,7 +637,7 @@ mod tests {
 
     #[test]
     fn unified_retitle_rejects_blank_title() {
-        use crate::ripper::staging::{StagingState, read_state};
+        use crate::server::ripper::staging::{StagingState, read_state};
         let tmp = std::env::temp_dir().join(format!(
             "autorip-review-unified-retitle-blank-{}-{:?}",
             std::process::id(),

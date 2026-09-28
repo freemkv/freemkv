@@ -1,13 +1,13 @@
 //! Background mux worker — pipelines mux behind the drive thread.
 //!
-//! Mirrors [`crate::mover`]: a 10-second tick loop polls the staging dir for
+//! Mirrors [`crate::server::mover`]: a 10-second tick loop polls the staging dir for
 //! disc state, dispatching each `state: Ripped` dir (`mux_dispatch_verdict`)
 //! through the resume-mux path, then transitioning to `Done`/`Review` via
 //! `staging::mark_handoff`. On failure it records a `MuxerError` and leaves
 //! the dir `Ripped` for next-tick retry / operator inspection. Single-pass
 //! live-disc rips (`cfg.max_retries == 0`) stay inline; this worker no-ops.
 
-use crate::config::Config;
+use crate::server::config::Config;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
@@ -75,23 +75,23 @@ pub fn write_marker(staging_dir: &Path, marker: &RippedMarker) -> std::io::Resul
     // The `.ripped` hand-off is now `state: Ripped` in `state.json`. Fold the
     // marker in (preserving accumulated data / a TV caller's `outputs`) and
     // persist; propagate I/O errors so eject can be refused on a failed hand-off.
-    let mut st = crate::ripper::staging::state_for_write(staging_dir, RIPPED_STATE)?;
+    let mut st = crate::server::ripper::staging::state_for_write(staging_dir, RIPPED_STATE)?;
     st.state = RIPPED_STATE;
     st.apply_ripped(marker);
-    crate::ripper::staging::try_write_state(staging_dir, &st)?;
+    crate::server::ripper::staging::try_write_state(staging_dir, &st)?;
     // The hand-off supersedes the in-progress `.sweeping` state; clearing is a
     // no-op on `state.json` now that `state == Ripped`, but it strips any legacy
     // `.sweeping` file on a migrated dir.
-    crate::ripper::staging::clear_sweeping_marker(staging_dir);
+    crate::server::ripper::staging::clear_sweeping_marker(staging_dir);
     Ok(())
 }
 
-const RIPPED_STATE: crate::ripper::staging::StagingState =
-    crate::ripper::staging::StagingState::Ripped;
+const RIPPED_STATE: crate::server::ripper::staging::StagingState =
+    crate::server::ripper::staging::StagingState::Ripped;
 
 pub fn read_marker(staging_dir: &Path) -> std::io::Result<RippedMarker> {
     // Unified store wins: reconstruct the `RippedMarker` the mux path deals in.
-    if let Some(st) = crate::ripper::staging::read_state(staging_dir) {
+    if let Some(st) = crate::server::ripper::staging::read_state(staging_dir) {
         return Ok(st.to_ripped_marker());
     }
     // Legacy fallback: a pre-migration `.ripped` file.
@@ -183,7 +183,7 @@ fn record_error_announced(path: &str, reason: &str, hint: &str, announce: bool) 
         same_reason
     };
     if announce && !same_reason {
-        crate::log::syslog(&format!("Mux blocked: {} — {}", path, reason));
+        crate::server::log::syslog(&format!("Mux blocked: {} — {}", path, reason));
     }
 }
 
@@ -314,7 +314,7 @@ fn definitely_absent(path: &str) -> bool {
 pub fn run(cfg: &Arc<RwLock<Config>>) {
     use std::sync::atomic::Ordering;
     tracing::info!("mux loop starting");
-    while !crate::SHUTDOWN.load(Ordering::Relaxed) {
+    while !crate::server::SHUTDOWN.load(Ordering::Relaxed) {
         // A poisoned RwLock never un-poisons, so a bare `is_err()` here would
         // spin forever (worker never muxes/exits, /api/state stays "healthy").
         // Recover from poison instead (see check_and_mux's `into_inner`).
@@ -322,7 +322,7 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
         // SHUTDOWN-responsive sleep — same pattern as the mover so
         // SIGTERM doesn't have to wait the full 10 s tick.
         for _ in 0..100 {
-            if crate::SHUTDOWN.load(Ordering::Relaxed) {
+            if crate::server::SHUTDOWN.load(Ordering::Relaxed) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -364,7 +364,7 @@ pub(crate) enum MuxVerdict {
 // None→SkipUnknown, terminal→SkipTerminal, unreadable state.json→SkipUnreadableState,
 // aborted-loss→SkipAbortedLoss, no marker→SkipNoMarker, else→Dispatch.
 pub(crate) fn mux_dispatch_verdict(
-    snap: Option<&crate::ripper::staging::StagingSnapshot>,
+    snap: Option<&crate::server::ripper::staging::StagingSnapshot>,
 ) -> MuxVerdict {
     let Some(snap) = snap else {
         return MuxVerdict::SkipUnknown;
@@ -397,7 +397,7 @@ struct MuxingGuard<'a>(&'a Path);
 
 impl Drop for MuxingGuard<'_> {
     fn drop(&mut self) {
-        crate::ripper::staging::clear_muxing_marker(self.0);
+        crate::server::ripper::staging::clear_muxing_marker(self.0);
     }
 }
 
@@ -422,15 +422,15 @@ pub(crate) fn mux_failure_is_terminal(class: MuxFailureClass) -> bool {
 // Persist the terminal `.failed` quarantine; if the state.json write does NOT land, surface it
 // LOUD (syslog + operator card) instead of silently leaving the dir re-dispatching forever.
 pub(crate) fn persist_terminal_mux_quarantine(path_str: &str, dir: &Path, reason: &str) -> bool {
-    let landed = crate::ripper::staging::write_failed_marker(dir, reason);
+    let landed = crate::server::ripper::staging::write_failed_marker(dir, reason);
     if !landed {
-        if let crate::ripper::staging::StateRead::Unreadable(u) =
-            crate::ripper::staging::read_state_checked(dir)
+        if let crate::server::ripper::staging::StateRead::Unreadable(u) =
+            crate::server::ripper::staging::read_state_checked(dir)
         {
             record_error(path_str, &u.held_reason(), u.hint());
             return false;
         }
-        crate::log::syslog(&format!(
+        crate::server::log::syslog(&format!(
             "Mux quarantine FAILED to persist (state.json write error) — {path_str} will keep re-dispatching until the staging mount recovers"
         ));
         record_error(
@@ -498,7 +498,7 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
         // Never re-mux a finished dir: if `.ripped` survives a failed
         // post-mux delete, `.completed` (via the primed/retried
         // `snapshot_staging_disc`) still breaks the loop, per `mux_dispatch_verdict`.
-        let snap = crate::ripper::staging::snapshot_staging_disc(&dir);
+        let snap = crate::server::ripper::staging::snapshot_staging_disc(&dir);
         let verdict = mux_dispatch_verdict(snap.as_ref());
         if !matches!(
             verdict,
@@ -506,7 +506,7 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
         ) {
             clear_error_with_prefix(
                 &dir.to_string_lossy(),
-                crate::ripper::staging::STATE_HELD_PREFIX,
+                crate::server::ripper::staging::STATE_HELD_PREFIX,
             );
         }
         match verdict {
@@ -514,7 +514,7 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
                 // Stamp `.muxing` the INSTANT Dispatch commits (before reading the
                 // marker) so `muxing_status` covers the whole dispatch — writing it later
                 // left a TOCTOU where a web entry raced the state.json read-modify-write.
-                crate::ripper::staging::write_muxing_marker(&dir);
+                crate::server::ripper::staging::write_muxing_marker(&dir);
             }
             MuxVerdict::SkipAbortedLoss => {
                 // Delivered loss exceeded threshold — DON'T re-mux (deterministic,
@@ -562,13 +562,13 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
         // Sanitised once here, feeding three sinks below (two tracing fields +
         // syslog): `display_name` falls back to the disc's own raw meta_title /
         // volume_id — attacker-controlled bytes — when no TMDB match was found.
-        let title = crate::log::sanitize_log_msg(&marker.display_name);
+        let title = crate::server::log::sanitize_log_msg(&marker.display_name);
         tracing::info!(
             staging = %dir.display(),
             title = %title,
             "mux worker: dispatching .ripped marker"
         );
-        crate::log::syslog(&format!("Muxing: {} (worker)", title));
+        crate::server::log::syslog(&format!("Muxing: {} (worker)", title));
         // Exclusion lock for the mux duration (stamped at verdict-commit, owned
         // by `_guard`) blocks concurrent re-inserts/double-mux until `.completed`/
         // `.failed`/`.ripped` take over; also clear any stale error card now.
@@ -577,23 +577,24 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
         // A fresh dispatch may produce a new/different error — lift any prior
         // operator dismissal so a genuinely new failure can surface again.
         undismiss(&dir.to_string_lossy());
-        let outcome = crate::ripper::resume::remux_from_ripped_marker(cfg_arc, &dir, &marker);
+        let outcome =
+            crate::server::ripper::resume::remux_from_ripped_marker(cfg_arc, &dir, &marker);
         if outcome.success {
             clear_error(&dir.to_string_lossy());
             tracing::info!(staging = %dir.display(), title = %title, "mux worker: completed");
-            crate::log::syslog(&format!("Muxed: {}", title));
+            crate::server::log::syslog(&format!("Muxed: {}", title));
             // Defensive: drive the origin device to "done" ONLY if it's still
             // "ripping" (a no-op on the normal path; fires for the inline-mux
             // fallback). Never reverts a real "done" tile or a reused device.
             let origin = &marker.origin_device;
             if !origin.is_empty() {
-                let origin_status = crate::ripper::STATE
+                let origin_status = crate::server::ripper::STATE
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .get(origin.as_str())
                     .map(|rs| rs.status.clone());
                 if should_revert_origin_to_done(origin, origin_status.as_deref()) {
-                    crate::ripper::update_state(
+                    crate::server::ripper::update_state(
                         origin,
                         origin_done_state(origin, &marker, &outcome),
                     );
@@ -604,7 +605,7 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
             // Surface the ACTUAL failure reason: prefer `outcome.failure_reason`
             // over a stale `.aborted-loss` marker, but check `.aborted-loss`
             // FIRST (read once) since a completed-but-over-threshold mux needs it.
-            let aborted_loss = crate::ripper::staging::read_aborted_loss(&dir);
+            let aborted_loss = crate::server::ripper::staging::read_aborted_loss(&dir);
             let (reason, hint) = if let Some((r, _)) = &aborted_loss {
                 (r.clone(), ABORTED_LOSS_HINT.to_string())
             } else if let Some(r) = outcome.failure_reason.clone() {
@@ -614,8 +615,8 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
                 // Defensive fallback (no reason came back from the worker):
                 // read the staging markers as before, falling through to
                 // `read_failed_reason` or a generic message.
-                let reason =
-                    crate::ripper::staging::read_failed_reason(&dir).unwrap_or_else(|| {
+                let reason = crate::server::ripper::staging::read_failed_reason(&dir)
+                    .unwrap_or_else(|| {
                         "mux worker dispatch did not complete (see _mux device log)".to_string()
                     });
                 (
@@ -644,9 +645,9 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
 fn origin_done_state(
     origin: &str,
     marker: &RippedMarker,
-    outcome: &crate::ripper::resume::MuxHandoffOutcome,
-) -> crate::ripper::RipState {
-    crate::ripper::RipState {
+    outcome: &crate::server::ripper::resume::MuxHandoffOutcome,
+) -> crate::server::ripper::RipState {
+    crate::server::ripper::RipState {
         device: origin.to_string(),
         status: "done".to_string(),
         disc_present: true,
@@ -744,7 +745,7 @@ pub fn pending_queue(staging_dir: &Path) -> Vec<String> {
         // Route queue membership through the unified state snapshot, not bare
         // `.exists()`: "(queued)" iff `Ripped`, not muxing, and not terminal /
         // handed to the mover (`has_done`/`has_review` catch the legacy crash window).
-        let Some(snap) = crate::ripper::staging::snapshot_staging_disc(&dir) else {
+        let Some(snap) = crate::server::ripper::staging::snapshot_staging_disc(&dir) else {
             continue;
         };
         if !snap.has_ripped
@@ -795,7 +796,7 @@ mod tests {
     // locked while it runs.
     #[test]
     fn prune_stale_errors_probes_without_holding_locks() {
-        let _g = crate::mover::TEST_STATE_LOCK
+        let _g = crate::server::mover::TEST_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let err_path = "/x/staging/prune-lock-err";
@@ -808,8 +809,8 @@ mod tests {
         let probed = Mutex::new(Vec::<(String, bool, bool)>::new());
         prune_stale_errors_with(|p| {
             if p == err_path || p == dis_path {
-                let e = crate::mover::test_lock_is_free(&MUX_ERRORS);
-                let d = crate::mover::test_lock_is_free(&MUX_DISMISSED);
+                let e = crate::server::mover::test_lock_is_free(&MUX_ERRORS);
+                let d = crate::server::mover::test_lock_is_free(&MUX_DISMISSED);
                 probed.lock().unwrap().push((p.to_string(), e, d));
                 return true;
             }
@@ -835,7 +836,7 @@ mod tests {
     // test's own paths so it can't prune other tests' fake /x/staging entries.
     #[test]
     fn prune_stale_errors_drops_only_absent_dirs() {
-        let _g = crate::mover::TEST_STATE_LOCK
+        let _g = crate::server::mover::TEST_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().unwrap();
@@ -900,7 +901,7 @@ mod tests {
 
     #[test]
     fn record_and_clear_error_round_trip() {
-        let _g = crate::mover::TEST_STATE_LOCK
+        let _g = crate::server::mover::TEST_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         record_error("/x/staging/Foo", "test reason", "test hint");
@@ -919,7 +920,7 @@ mod tests {
     // bad state.json left untouched — with or without a legacy `.ripped` remnant.
     #[test]
     fn unreadable_state_json_is_held_once_not_redispatched() {
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let tmp = TempDir::new().unwrap();
         // SAFETY: env access in tests, serialized by env_guard.
         unsafe {
@@ -930,7 +931,11 @@ mod tests {
         let bare = root.join("Bare_Show");
         for d in [&legacy, &bare] {
             std::fs::create_dir_all(d).unwrap();
-            std::fs::write(d.join(crate::ripper::staging::STATE_FILE), b"{ torn").unwrap();
+            std::fs::write(
+                d.join(crate::server::ripper::staging::STATE_FILE),
+                b"{ torn",
+            )
+            .unwrap();
         }
         std::fs::write(
             legacy.join(RIPPED_MARKER_NAME),
@@ -938,7 +943,7 @@ mod tests {
         )
         .unwrap();
         for d in [&legacy, &bare] {
-            let snap = crate::ripper::staging::snapshot_staging_disc(d);
+            let snap = crate::server::ripper::staging::snapshot_staging_disc(d);
             assert_eq!(
                 mux_dispatch_verdict(snap.as_ref()),
                 MuxVerdict::SkipUnreadableState,
@@ -957,7 +962,7 @@ mod tests {
         let card = card.expect("the held dir must raise an operator card");
         assert!(
             card.reason
-                .starts_with(crate::ripper::staging::STATE_HELD_PREFIX)
+                .starts_with(crate::server::ripper::staging::STATE_HELD_PREFIX)
         );
         assert!(card.hint.contains("state.json"), "hint: {}", card.hint);
         assert!(
@@ -976,15 +981,17 @@ mod tests {
             "a held dir must not be re-dispatched (which undismisses the card)"
         );
         assert_eq!(
-            std::fs::read(legacy.join(crate::ripper::staging::STATE_FILE)).unwrap(),
+            std::fs::read(legacy.join(crate::server::ripper::staging::STATE_FILE)).unwrap(),
             b"{ torn",
             "the unreadable state.json must be left for the operator"
         );
 
         // Repaired state.json → the held card clears on the next tick.
-        crate::ripper::staging::write_state(
+        crate::server::ripper::staging::write_state(
             &bare,
-            &crate::ripper::staging::DiscState::new(crate::ripper::staging::StagingState::Sweeping),
+            &crate::server::ripper::staging::DiscState::new(
+                crate::server::ripper::staging::StagingState::Sweeping,
+            ),
         );
         check_and_mux(&cfg);
         assert!(
@@ -1000,7 +1007,7 @@ mod tests {
     // A dismiss for a path with no recorded error must not grow MUX_DISMISSED.
     #[test]
     fn clearing_an_unrecorded_path_does_not_dismiss_it() {
-        let _g = crate::mover::TEST_STATE_LOCK
+        let _g = crate::server::mover::TEST_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let junk = "/etc/hostname/not-a-staging-dir-webcaps-l2";
@@ -1015,7 +1022,7 @@ mod tests {
     // concurrent prune can't lift the dismissal mid-test.
     #[test]
     fn dismissing_a_recorded_error_suppresses_rerecording() {
-        let _g = crate::mover::TEST_STATE_LOCK
+        let _g = crate::server::mover::TEST_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().unwrap();
@@ -1036,13 +1043,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("Torn");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(crate::ripper::staging::STATE_FILE), b"{ torn").unwrap();
+        std::fs::write(
+            dir.join(crate::server::ripper::staging::STATE_FILE),
+            b"{ torn",
+        )
+        .unwrap();
         let path = dir.to_string_lossy().to_string();
         assert!(!persist_terminal_mux_quarantine(&path, &dir, "E6008"));
         let card = MUX_ERRORS.lock().unwrap().remove(&path).expect("card");
         assert!(
             card.reason
-                .starts_with(crate::ripper::staging::STATE_HELD_PREFIX),
+                .starts_with(crate::server::ripper::staging::STATE_HELD_PREFIX),
             "{}",
             card.reason
         );
@@ -1132,7 +1143,7 @@ mod tests {
         let json = serde_json::to_vec(&marker).unwrap();
         std::fs::write(tmp.path().join(RIPPED_MARKER_NAME), json).unwrap();
         assert!(
-            crate::ripper::staging::read_state(tmp.path()).is_none(),
+            crate::server::ripper::staging::read_state(tmp.path()).is_none(),
             "no state.json must exist for this to exercise the legacy fallback"
         );
         let err = read_marker(tmp.path()).unwrap_err();
@@ -1173,9 +1184,9 @@ mod tests {
         let movie = tmp.path().join("Border_Town");
         std::fs::create_dir_all(&movie).unwrap();
         write_marker(&movie, &sample_marker()).unwrap();
-        crate::ripper::staging::write_completed_marker(&movie);
+        crate::server::ripper::staging::write_completed_marker(&movie);
 
-        let snap = crate::ripper::staging::snapshot_staging_disc(&movie)
+        let snap = crate::server::ripper::staging::snapshot_staging_disc(&movie)
             .expect("a populated dir must yield a snapshot");
         assert!(
             snap.completed,
@@ -1193,7 +1204,7 @@ mod tests {
         let movie = tmp.path().join("Border_Town");
         std::fs::create_dir_all(&movie).unwrap();
         write_marker(&movie, &sample_marker()).unwrap();
-        crate::ripper::staging::write_completed_marker(&movie);
+        crate::server::ripper::staging::write_completed_marker(&movie);
 
         let q = pending_queue(tmp.path());
         assert!(
@@ -1211,12 +1222,12 @@ mod tests {
         let movie = tmp.path().join("Border_Town");
         std::fs::create_dir_all(&movie).unwrap();
         write_marker(&movie, &sample_marker()).unwrap();
-        crate::ripper::staging::write_failed_marker(
+        crate::server::ripper::staging::write_failed_marker(
             &movie,
             "mux finalize failed (unseekable output)",
         );
 
-        let snap = crate::ripper::staging::snapshot_staging_disc(&movie)
+        let snap = crate::server::ripper::staging::snapshot_staging_disc(&movie)
             .expect("a populated dir must yield a snapshot");
         assert!(!snap.completed, ".failed dir is not .completed");
         assert!(
@@ -1238,7 +1249,7 @@ mod tests {
         // The mover hand-off marker is present but `.completed` is NOT yet
         // (the gap between the two durable writes). This dir is in the Move
         // queue; it must be absent from the Mux queue.
-        crate::ripper::staging::mark_handoff(&movie, true, |_s| {}).unwrap();
+        crate::server::ripper::staging::mark_handoff(&movie, true, |_s| {}).unwrap();
 
         let q = pending_queue(tmp.path());
         assert!(
@@ -1256,7 +1267,7 @@ mod tests {
         let movie = tmp.path().join("Border_Town");
         std::fs::create_dir_all(&movie).unwrap();
         write_marker(&movie, &sample_marker()).unwrap();
-        crate::ripper::staging::mark_handoff(&movie, false, |_s| {}).unwrap();
+        crate::server::ripper::staging::mark_handoff(&movie, false, |_s| {}).unwrap();
 
         let q = pending_queue(tmp.path());
         assert!(q.is_empty(), "a .review dir must be skipped, got {q:?}");
@@ -1271,7 +1282,7 @@ mod tests {
         let movie = tmp.path().join("Border_Town");
         std::fs::create_dir_all(&movie).unwrap();
         write_marker(&movie, &sample_marker()).unwrap();
-        crate::ripper::staging::write_muxing_marker(&movie);
+        crate::server::ripper::staging::write_muxing_marker(&movie);
 
         let q = pending_queue(tmp.path());
         assert!(
@@ -1287,9 +1298,9 @@ mod tests {
     fn mux_worker_does_not_revert_done_origin_device() {
         let device = "sg_test_origin_already_done";
         // Hand-off set the real device straight to "done" (the new contract).
-        crate::ripper::update_state(
+        crate::server::ripper::update_state(
             device,
-            crate::ripper::RipState {
+            crate::server::ripper::RipState {
                 device: device.to_string(),
                 status: "done".to_string(),
                 progress_pct: 100,
@@ -1298,7 +1309,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let status = crate::ripper::STATE
+        let status = crate::server::ripper::STATE
             .lock()
             .unwrap()
             .get(device)
@@ -1308,7 +1319,7 @@ mod tests {
             "a device already 'done' at hand-off must not be reverted by the mux worker"
         );
         // Cleanup so the synthetic entry doesn't leak into other tests.
-        crate::ripper::STATE.lock().unwrap().remove(device);
+        crate::server::ripper::STATE.lock().unwrap().remove(device);
     }
 
     // Companion (bug #1, other half): on the INLINE-MUX FALLBACK path (marker
@@ -1317,9 +1328,9 @@ mod tests {
     #[test]
     fn mux_worker_reverts_ripping_origin_on_inline_fallback() {
         let device = "sg_test_origin_still_ripping";
-        crate::ripper::update_state(
+        crate::server::ripper::update_state(
             device,
-            crate::ripper::RipState {
+            crate::server::ripper::RipState {
                 device: device.to_string(),
                 status: "ripping".to_string(),
                 disc_name: "Border Town".to_string(),
@@ -1327,7 +1338,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let status = crate::ripper::STATE
+        let status = crate::server::ripper::STATE
             .lock()
             .unwrap()
             .get(device)
@@ -1336,7 +1347,7 @@ mod tests {
             should_revert_origin_to_done(device, status.as_deref()),
             "a still-'ripping' origin device (inline-mux fallback) MUST be reverted to done"
         );
-        crate::ripper::STATE.lock().unwrap().remove(device);
+        crate::server::ripper::STATE.lock().unwrap().remove(device);
     }
 
     // The revert predicate edge cases: empty origin, synthetic origin, and a
@@ -1372,7 +1383,7 @@ mod tests {
         let movie = tmp.path().join("Border_Town");
         std::fs::create_dir_all(&movie).unwrap();
         write_marker(&movie, &sample_marker()).unwrap();
-        crate::ripper::staging::write_failed_marker(
+        crate::server::ripper::staging::write_failed_marker(
             &movie,
             "mux finalize failed (unseekable output)",
         );
@@ -1394,7 +1405,7 @@ mod tests {
         marker.sweep_total_lost_ms = 10.0;
         marker.sweep_num_bad_ranges = 3;
         marker.sweep_largest_gap_ms = 7.0;
-        let outcome = crate::ripper::resume::MuxHandoffOutcome {
+        let outcome = crate::server::ripper::resume::MuxHandoffOutcome {
             success: true,
             errors: 42,
             total_lost_ms: 3500.0,
@@ -1407,8 +1418,8 @@ mod tests {
         };
 
         let rs = origin_done_state(device, &marker, &outcome);
-        crate::ripper::update_state(device, rs);
-        let got = crate::ripper::STATE.lock().unwrap().remove(device);
+        crate::server::ripper::update_state(device, rs);
+        let got = crate::server::ripper::STATE.lock().unwrap().remove(device);
 
         let rs = got.expect("device state must exist");
         assert_eq!(
@@ -1447,9 +1458,9 @@ mod tests {
         marker.sweep_num_bad_ranges = 3;
         marker.sweep_largest_gap_ms = 1200.0;
 
-        crate::ripper::update_state(
+        crate::server::ripper::update_state(
             device,
-            crate::ripper::RipState {
+            crate::server::ripper::RipState {
                 device: device.to_string(),
                 status: "done".to_string(),
                 disc_present: true,
@@ -1465,7 +1476,7 @@ mod tests {
             },
         );
 
-        let s = crate::ripper::STATE.lock().unwrap();
+        let s = crate::server::ripper::STATE.lock().unwrap();
         let rs = s.get(device).expect("device state must exist");
         assert_eq!(rs.status, "done");
         assert_eq!(rs.errors, 42, "errors must carry through to done state");
@@ -1490,7 +1501,7 @@ mod tests {
     fn ripped_marker_name_matches_staging_constant() {
         assert_eq!(
             RIPPED_MARKER_NAME,
-            crate::ripper::staging::RIPPED_MARKER,
+            crate::server::ripper::staging::RIPPED_MARKER,
             "the muxer's .ripped marker name and the staging-scan constant must agree"
         );
     }
@@ -1529,19 +1540,20 @@ mod tests {
                     // indistinguishable from a true hand-off).
                     write_marker(&dir, &sample_marker()).unwrap();
                 }
-                M::Completed => crate::ripper::staging::write_completed_marker(&dir),
+                M::Completed => crate::server::ripper::staging::write_completed_marker(&dir),
                 M::Failed => {
-                    let _ = crate::ripper::staging::write_failed_marker(&dir, "test failure");
+                    let _ =
+                        crate::server::ripper::staging::write_failed_marker(&dir, "test failure");
                 }
                 M::FailedNonJson => {
                     // Legacy review.rs wrote a non-JSON `.failed` whose reason
                     // didn't parse; reproduce that by leaving `failure_reason`
                     // unset rather than writing a raw file `snapshot` would ignore.
-                    crate::ripper::staging::mutate_state(
+                    crate::server::ripper::staging::mutate_state(
                         &dir,
-                        crate::ripper::staging::StagingState::Failed,
+                        crate::server::ripper::staging::StagingState::Failed,
                         |s| {
-                            s.state = crate::ripper::staging::StagingState::Failed;
+                            s.state = crate::server::ripper::staging::StagingState::Failed;
                             s.failure_reason = None;
                             s.muxing = false;
                         },
@@ -1554,7 +1566,7 @@ mod tests {
                 M::Mapfile => std::fs::write(dir.join("Disc.iso.mapfile"), b"x").unwrap(),
                 M::Mkv => std::fs::write(dir.join("Disc.mkv"), b"x").unwrap(),
                 M::AbortedLoss => {
-                    crate::ripper::staging::write_aborted_loss_marker(
+                    crate::server::ripper::staging::write_aborted_loss_marker(
                         &dir,
                         "aborted: 0.44s lost at mux, decrypt/codec (threshold 0s)",
                         1,
@@ -1562,7 +1574,7 @@ mod tests {
                 }
             }
         }
-        let snap = crate::ripper::staging::snapshot_staging_disc(&dir);
+        let snap = crate::server::ripper::staging::snapshot_staging_disc(&dir);
         mux_dispatch_verdict(snap.as_ref())
     }
 
@@ -1779,7 +1791,7 @@ mod tests {
     // false-quarantined resumable reads).
     #[test]
     fn resumable_worker_failure_not_quarantined_finalize_is() {
-        use crate::ripper::resume::MuxHandoffOutcome;
+        use crate::server::ripper::resume::MuxHandoffOutcome;
         // A mid-mux read error: worker reason present, retryable=false (NOT a
         // keyless deferral), finalize=false. Resumable — must stay re-muxable.
         let read_error = MuxHandoffOutcome {
@@ -1826,7 +1838,7 @@ mod tests {
         write_marker(&dir, &sample_marker()).unwrap();
         std::fs::write(dir.join("Decoy_Feature_3.iso"), b"x").unwrap();
 
-        let s1 = crate::ripper::staging::snapshot_staging_disc(&dir);
+        let s1 = crate::server::ripper::staging::snapshot_staging_disc(&dir);
         assert_eq!(
             mux_dispatch_verdict(s1.as_ref()),
             MuxVerdict::Dispatch,
@@ -1835,12 +1847,12 @@ mod tests {
 
         // Exactly the transition the failure branch performs when
         // `mux_failure_is_terminal` returns true.
-        crate::ripper::staging::write_failed_marker(
+        crate::server::ripper::staging::write_failed_marker(
             &dir,
             "mux produced no frames (empty/undecryptable output)",
         );
 
-        let s2 = crate::ripper::staging::snapshot_staging_disc(&dir);
+        let s2 = crate::server::ripper::staging::snapshot_staging_disc(&dir);
         assert_eq!(
             mux_dispatch_verdict(s2.as_ref()),
             MuxVerdict::SkipTerminal,
@@ -1852,12 +1864,12 @@ mod tests {
     // `read_marker`, so a concurrent web entry's `muxing_status` guard covers the whole dispatch.
     #[test]
     fn muxing_marker_stamped_before_marker_read() {
-        let src = crate::util::source_lf(include_str!("muxer.rs"));
+        let src = crate::server::util::source_lf(include_str!("muxer.rs"));
         let start = src
             .find("let verdict = mux_dispatch_verdict(snap.as_ref());")
             .expect("muxer.rs should dispatch on the verdict");
         let end = src[start..]
-            .find("let outcome = crate::ripper::resume::remux_from_ripped_marker")
+            .find("let outcome = crate::server::ripper::resume::remux_from_ripped_marker")
             .map(|i| start + i)
             .expect("muxer.rs should dispatch to remux_from_ripped_marker");
         let region = &src[start..end];
@@ -1879,16 +1891,18 @@ mod tests {
     // silently re-dispatching forever.
     #[test]
     fn persist_terminal_mux_quarantine_alarms_when_write_fails() {
-        let _g = crate::mover::TEST_STATE_LOCK
+        let _g = crate::server::mover::TEST_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // Happy path: a writable dir goes terminal, returns true, raises no card.
         let ok_tmp = TempDir::new().unwrap();
         let ok_dir = ok_tmp.path().join("Writable");
         std::fs::create_dir_all(&ok_dir).unwrap();
-        crate::ripper::staging::write_state(
+        crate::server::ripper::staging::write_state(
             &ok_dir,
-            &crate::ripper::staging::DiscState::new(crate::ripper::staging::StagingState::Ripped),
+            &crate::server::ripper::staging::DiscState::new(
+                crate::server::ripper::staging::StagingState::Ripped,
+            ),
         );
         let ok_path = ok_dir.to_string_lossy().to_string();
         clear_error(&ok_path);
@@ -1897,8 +1911,8 @@ mod tests {
             "a writable staging dir must persist the terminal quarantine"
         );
         assert_eq!(
-            crate::ripper::staging::read_state(&ok_dir).map(|s| s.state),
-            Some(crate::ripper::staging::StagingState::Failed),
+            crate::server::ripper::staging::read_state(&ok_dir).map(|s| s.state),
+            Some(crate::server::ripper::staging::StagingState::Failed),
             "the terminal write must land → state Failed"
         );
         assert!(
@@ -1912,7 +1926,7 @@ mod tests {
         let bad_tmp = TempDir::new().unwrap();
         let bad_dir = bad_tmp.path().join("Unwritable");
         std::fs::create_dir_all(&bad_dir).unwrap();
-        std::fs::create_dir_all(bad_dir.join(crate::ripper::staging::STATE_FILE)).unwrap();
+        std::fs::create_dir_all(bad_dir.join(crate::server::ripper::staging::STATE_FILE)).unwrap();
         let bad_path = bad_dir.to_string_lossy().to_string();
         clear_error(&bad_path);
         assert!(
@@ -1938,15 +1952,15 @@ mod tests {
         std::fs::write(dir.join("Disc.iso"), b"x").unwrap();
 
         // State 1: fresh hand-off → Dispatch.
-        let s1 = crate::ripper::staging::snapshot_staging_disc(&dir);
+        let s1 = crate::server::ripper::staging::snapshot_staging_disc(&dir);
         assert_eq!(mux_dispatch_verdict(s1.as_ref()), MuxVerdict::Dispatch);
 
         // Mux succeeds, writes .completed, but the .ripped delete fails
         // (simulated by leaving .ripped in place).
-        crate::ripper::staging::write_completed_marker(&dir);
+        crate::server::ripper::staging::write_completed_marker(&dir);
 
         // State 2: terminal → SkipTerminal (loop broken).
-        let s2 = crate::ripper::staging::snapshot_staging_disc(&dir);
+        let s2 = crate::server::ripper::staging::snapshot_staging_disc(&dir);
         assert_eq!(
             mux_dispatch_verdict(s2.as_ref()),
             MuxVerdict::SkipTerminal,
@@ -1964,16 +1978,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write_marker(&dir, &sample_marker()).unwrap();
 
-        let s1 = crate::ripper::staging::snapshot_staging_disc(&dir);
+        let s1 = crate::server::ripper::staging::snapshot_staging_disc(&dir);
         assert_eq!(mux_dispatch_verdict(s1.as_ref()), MuxVerdict::Dispatch);
 
         // A terminal mux failure quarantines the dir.
-        crate::ripper::staging::write_failed_marker(
+        crate::server::ripper::staging::write_failed_marker(
             &dir,
             "mux finalize failed (unseekable output)",
         );
 
-        let s2 = crate::ripper::staging::snapshot_staging_disc(&dir);
+        let s2 = crate::server::ripper::staging::snapshot_staging_disc(&dir);
         assert_eq!(
             mux_dispatch_verdict(s2.as_ref()),
             MuxVerdict::SkipTerminal,
@@ -2040,7 +2054,7 @@ mod tests {
     // source-pin since an NFS ESTALE on one entry can't be synthesised locally.
     #[test]
     fn pending_queue_does_not_flatten_away_a_per_entry_error() {
-        let src = crate::util::source_lf(include_str!("muxer.rs"));
+        let src = crate::server::util::source_lf(include_str!("muxer.rs"));
         let start = src
             .find("\npub fn pending_queue(staging_dir: &Path) -> Vec<String> {")
             .expect("muxer.rs must define pending_queue");

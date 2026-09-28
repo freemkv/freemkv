@@ -47,6 +47,38 @@ fn an_argument_that_is_not_a_url_fails() {
     assert!(!text(&out).trim().is_empty());
 }
 
+// `freemkv server` is the daemon only in the server build; everywhere else it
+// is an ordinary (non-URL) CLI argument and must never start anything.
+#[cfg(feature = "server")]
+mod server_build {
+    use super::*;
+
+    #[test]
+    fn server_version_is_the_daemon_label() {
+        let out = run(&["server", "--version"]);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.starts_with(concat!("freemkv server ", env!("CARGO_PKG_VERSION"))),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_server_argument_exits_2() {
+        let out = run(&["server", "--no-such-flag"]);
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+    }
+}
+
+#[cfg(not(feature = "server"))]
+#[test]
+fn server_is_not_a_command_outside_the_server_build() {
+    let out = run(&["server", "--version"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("freemkv server"));
+}
+
 #[cfg(not(feature = "gui"))]
 mod cli_build {
     use super::*;

@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 
 /// `output_format` value that means "deliver the whole-disc ISO image" rather
 /// than a muxed title. The one place this literal lives — compare through it
-/// (or [`crate::ripper::output_is_iso_image`]), never a bare `== "iso"`.
+/// (or [`crate::server::ripper::output_is_iso_image`]), never a bare `== "iso"`.
 pub(crate) const OUTPUT_FORMAT_ISO: &str = "iso";
 pub(crate) const OUTPUT_FORMAT_NETWORK: &str = "network";
 
@@ -1210,7 +1210,7 @@ mod tests {
     // serialize/deserialize self-roundtrip, so a dropped/mis-keyed field fails.
     #[test]
     fn real_settings_json_fixture_parses_field_by_field() {
-        const FIXTURE: &str = include_str!("../tests/fixtures/settings.json");
+        const FIXTURE: &str = include_str!("../../tests/server/fixtures/settings.json");
         let d = scratch("fixture");
         let cfg = load_with(&d, FIXTURE);
 

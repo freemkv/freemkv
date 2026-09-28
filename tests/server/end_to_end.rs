@@ -6,7 +6,7 @@
 //! Route dispatch + device-name validation are NOT tested here: that coverage now lives against
 //! the real `handle_request` in the in-crate `web::web_tests::http` module instead.
 
-use freemkv_autorip::ripper::{BadRange, RipState};
+use freemkv::server::ripper::{BadRange, RipState};
 
 #[test]
 fn test_state_json_serialization_round_trip() {

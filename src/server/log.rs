@@ -18,7 +18,7 @@ fn log_dir() -> String {
     // Same resolution as config: AUTORIP_DIR, else writable /config (Docker),
     // else ~/.config/autorip (bare run) — so logs land somewhere writable
     // without a container mount.
-    crate::config::default_autorip_dir()
+    crate::server::config::default_autorip_dir()
 }
 
 // Neutralize a device string into a safe single path component for the log filename, so no
@@ -63,7 +63,7 @@ pub fn device_log(device: &str, msg: &str) {
     // tracing event below) gets the escape-free text — not just the file line.
     let msg = sanitize_log_msg(msg);
     let msg = msg.as_str();
-    let ts = crate::util::format_iso_datetime();
+    let ts = crate::server::util::format_iso_datetime();
     let line = format!("[{}] {}", ts, msg);
 
     // In-memory ring (last RING_CAP lines/device, O(1) VecDeque eviction).
@@ -95,7 +95,7 @@ pub fn device_log(device: &str, msg: &str) {
                     f,
                     "[{}] ▸ autorip {} — log session start",
                     ts,
-                    crate::VERSION_LABEL
+                    crate::server::VERSION_LABEL
                 );
             }
             if let Err(e) = writeln!(f, "{}", line) {
@@ -110,7 +110,7 @@ pub fn device_log(device: &str, msg: &str) {
     // Structured event into the central log stream. `device` enables
     // `jq 'select(.fields.device == "sg4")'`; `build` stamps the binary on
     // every event so the central log is self-identifying across redeploys.
-    tracing::info!(device = %device, build = %crate::VERSION_LABEL, "{}", msg);
+    tracing::info!(device = %device, build = %crate::server::VERSION_LABEL, "{}", msg);
 }
 
 /// Get the most recent `lines` log lines for a device, oldest-first.
@@ -158,7 +158,7 @@ pub fn archive_device_log(device: &str) {
                 "{}/{}_{}.log",
                 rips_dir,
                 sanitize_device(device),
-                crate::util::format_iso_datetime_filename(),
+                crate::server::util::format_iso_datetime_filename(),
             );
             match std::fs::rename(&current, &archive) {
                 Ok(()) => archived_ok = true,
@@ -206,7 +206,7 @@ pub fn syslog(msg: &str) {
 /// `SYSTEM_LOG_ROTATE_BYTES`. Unlike per-device logs (archived on each
 /// scan/eject boundary), the system log has no natural archive point, so
 /// without this it grows unbounded for the container's lifetime. Called at
-/// startup and re-checked on the log-prune tick (main.rs) so a long-uptime
+/// startup and re-checked on the log-prune tick (daemon.rs) so a long-uptime
 /// daemon still bounds it; reuses `archive_device_log`'s rename-into-rips
 /// behaviour. Best-effort and never propagates — logging must not break startup.
 pub fn rotate_system_log_if_large() {
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn device_log_writes_iso_timestamped_line() {
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let d = tmpdir("iso_ts");
         // Route the test's logs to the tempdir.
         // SAFETY: env access in single-threaded tests.
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn new_session_writes_build_banner_to_file_not_ring() {
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let d = tmpdir("build_banner");
         unsafe {
             std::env::set_var("AUTORIP_DIR", &d);
@@ -318,7 +318,7 @@ mod tests {
         // build label is present so the slice is attributable.
         let content = std::fs::read_to_string(device_log_path(&dev)).unwrap();
         assert!(
-            content.contains("log session start") && content.contains(crate::VERSION_LABEL),
+            content.contains("log session start") && content.contains(crate::server::VERSION_LABEL),
             "file must carry a build banner: {content}"
         );
         assert_eq!(
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn archive_device_log_moves_to_rips_dir() {
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let d = tmpdir("archive_move");
         unsafe {
             std::env::set_var("AUTORIP_DIR", &d);
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn archive_device_log_no_op_when_empty() {
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let d = tmpdir("archive_empty");
         unsafe {
             std::env::set_var("AUTORIP_DIR", &d);
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn archive_device_log_clears_in_memory_buffer() {
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let d = tmpdir("archive_buf");
         unsafe {
             std::env::set_var("AUTORIP_DIR", &d);
@@ -419,7 +419,7 @@ mod tests {
         // If the on-disk archive fails, the in-memory ring MUST survive so
         // the live UI doesn't go empty while the log is still on disk. Force
         // create_dir_all("logs/rips") to fail via a regular file in its place.
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let d = tmpdir("archive_fail");
         unsafe {
             std::env::set_var("AUTORIP_DIR", &d);
@@ -451,7 +451,7 @@ mod tests {
     fn forget_device_clears_ring_without_archiving() {
         // Hot-unplug eviction: forget_device drops the in-memory ring but
         // leaves the on-disk device log in place (no archive).
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let d = tmpdir("forget");
         unsafe {
             std::env::set_var("AUTORIP_DIR", &d);
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn get_device_log_respects_line_limit() {
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let d = tmpdir("line_limit");
         unsafe {
             std::env::set_var("AUTORIP_DIR", &d);
@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn ring_evicts_oldest_past_cap() {
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let d = tmpdir("ring_cap");
         unsafe {
             std::env::set_var("AUTORIP_DIR", &d);
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn rotate_system_log_archives_only_when_large() {
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let d = tmpdir("sys_rotate");
         unsafe {
             std::env::set_var("AUTORIP_DIR", &d);

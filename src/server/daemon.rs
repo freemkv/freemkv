@@ -1,52 +1,35 @@
-mod config;
-mod keysource;
-mod log;
-mod mover;
-mod muxer;
-mod observe;
-mod review;
-mod ripper;
-mod tmdb;
-mod util;
-mod web;
-mod webhook;
+//! The daemon entry: `freemkv server [--bootstrap | --healthcheck | serve]`.
 
-/// Full build label: package version + git short hash (e.g. `1.1.1 (g2014a41)`),
-/// the same shape libfreemkv stamps into every MKV. Surfaced in `--version`,
-/// the UI footer, `/api/version`, and the startup log so the running build is
-/// always identifiable — a hand-deployed test build no longer hides behind a
-/// bare package version. Built by `build.rs`.
-pub const VERSION_LABEL: &str = concat!(env!("AUTORIP_VERSION"), env!("GIT_SUFFIX"));
+use super::{SHUTDOWN, VERSION_LABEL, config, keysource, log, mover, muxer, observe, ripper, web};
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-
-fn main() {
+/// Run the server shell. `argv` is everything after `freemkv server`.
+///
+/// Every terminal path either exits the process (`--healthcheck`,
+/// `--version`, `--help`, an unknown argument) or returns once the daemon has
+/// drained after SIGTERM/SIGINT.
+pub fn run(argv: Vec<String>) {
     // v0.25.7: tiny built-in subcommands so the image doesn't need curl or a
     // separate entrypoint script. Each exits before observe::init so they
     // don't spam the tracing sinks on every 30-second healthcheck.
-    let argv: Vec<String> = std::env::args().skip(1).collect();
     match argv.first().map(String::as_str) {
         Some("--healthcheck") => {
             std::process::exit(run_healthcheck());
         }
         Some("--version") | Some("-V") => {
-            println!("autorip {}", VERSION_LABEL);
+            println!("freemkv server {}", VERSION_LABEL);
             std::process::exit(0);
         }
         Some("--help") | Some("-h") => {
             println!(
-                "autorip {} — automated optical-disc rip service\n\n\
+                "freemkv server {} — automated optical-disc rip service\n\n\
                  Usage:\n  \
-                   autorip                  Run the daemon (bare — config under ~/.config/autorip)\n  \
-                   autorip serve            Same as no-arg: run the daemon without container bootstrap\n  \
-                   autorip --bootstrap      Initialize container env (NFS mount), then run the daemon\n  \
-                   autorip --healthcheck    Probe http://127.0.0.1:$PORT/api/state (exit 0/1)\n  \
-                   autorip --version        Print version and exit",
+                   freemkv server                  Run the daemon (bare — config under ~/.config/autorip)\n  \
+                   freemkv server serve            Same as no-arg: run the daemon without container bootstrap\n  \
+                   freemkv server --bootstrap      Initialize container env (NFS mount), then run the daemon\n  \
+                   freemkv server --healthcheck    Probe http://127.0.0.1:$PORT/api/state (exit 0/1)\n  \
+                   freemkv server --version        Print version and exit",
                 VERSION_LABEL
             );
             std::process::exit(0);
@@ -58,13 +41,13 @@ fn main() {
             #[cfg(unix)]
             run_bootstrap();
             #[cfg(not(unix))]
-            eprintln!("autorip: --bootstrap is Linux-only; running the daemon directly");
+            eprintln!("freemkv server: --bootstrap is Linux-only; running the daemon directly");
         }
         // Bare run (no Docker): daemon without container bootstrap, config
         // defaults under ~/.config/autorip. `serve` is an explicit alias.
         Some("serve") => {}
         Some(other) => {
-            eprintln!("autorip: unknown argument '{other}' (try --help)");
+            eprintln!("freemkv server: unknown argument '{other}' (try --help)");
             std::process::exit(2);
         }
         None => {}
@@ -192,7 +175,7 @@ fn main() {
                 }
                 Err(e) => log::syslog(&format!(
                     "KEYDB download failed for {}: {e}",
-                    crate::webhook::webhook_url_origin(&url)
+                    crate::server::webhook::webhook_url_origin(&url)
                 )),
             }
         }
@@ -243,7 +226,7 @@ fn main() {
                 if online || url.is_empty() {
                     continue;
                 }
-                tracing::info!(url_origin = %crate::webhook::webhook_url_origin(&url), "keydb: starting daily update");
+                tracing::info!(url_origin = %crate::server::webhook::webhook_url_origin(&url), "keydb: starting daily update");
                 // SSRF-guarded fetch (see web::guarded_get) — the daily
                 // refresh must not bypass the address allow-list that the
                 // settings save and manual update already enforce.
@@ -274,7 +257,7 @@ fn main() {
                     }
                     Err(e) => log::syslog(&format!(
                         "KEYDB update failed for {}: {e}",
-                        crate::webhook::webhook_url_origin(&url)
+                        crate::server::webhook::webhook_url_origin(&url)
                     )),
                 }
             }
@@ -725,7 +708,7 @@ fn prune_old_logs(log_dir: &str, retention_days: u64) {
     // The tracing daily appender holds `autorip.log.<today>` (UTC) open; if the
     // daemon logged nothing for > retention_days its mtime can fall before the
     // cutoff, so never prune the active appender file (see active_log_filenames).
-    let active = active_log_filenames(&crate::util::format_date());
+    let active = active_log_filenames(&crate::server::util::format_date());
     // Recurse so the archive subdir (logs/rips/, where archive_device_log
     // writes per-rip files — the dir that actually grows over time) is
     // pruned too, not just the top-level live logs.
@@ -803,14 +786,14 @@ mod tests {
     // same thread as `prune_old_logs`) also re-checks the rotation size.
     #[test]
     fn log_prune_thread_rechecks_system_log_rotation() {
-        let src = crate::util::source_lf(include_str!("main.rs"));
+        let src = crate::server::util::source_lf(include_str!("daemon.rs"));
         let start = src
             .find("Log prune thread")
-            .expect("main.rs should have the log prune thread");
+            .expect("daemon.rs should have the log prune thread");
         let end = src[start..]
             .find("Main loop: poll drives")
             .map(|i| start + i)
-            .expect("main.rs should have the main poll loop after the prune thread");
+            .expect("daemon.rs should have the main poll loop after the prune thread");
         assert!(
             src[start..end].contains("rotate_system_log_if_large()"),
             "the log-prune tick must re-check the system log's rotation size, \
@@ -967,10 +950,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
 
-        // Read the clock exactly once: reusing crate::util::format_date() here
+        // Read the clock exactly once: reusing crate::server::util::format_date() here
         // and again for active_log_filenames() could straddle a UTC-midnight
         // rollover and disagree on "today", flaking the assertions below.
-        let today = crate::util::format_date();
+        let today = crate::server::util::format_date();
 
         // Today's rolled human log — the file the daily appender holds open.
         let active_name = format!("autorip.log.{today}");
@@ -1248,7 +1231,9 @@ mod tests {
             }
         }
 
-        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("server");
         let mut files = Vec::new();
         collect(&src_root, &mut files);
         files.sort();
@@ -1257,7 +1242,7 @@ mod tests {
         let mut all = Vec::new();
         for f in &files {
             let src = std::fs::read_to_string(f).unwrap();
-            let src = crate::util::source_lf(&src).into_owned();
+            let src = crate::server::util::source_lf(&src).into_owned();
             let code = strip_test_items(&blank_comments_and_strings(&src));
             all.extend(violations(f, &code));
         }

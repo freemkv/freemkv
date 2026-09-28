@@ -1,5 +1,5 @@
-use crate::config::Config;
-use crate::tmdb;
+use crate::server::config::Config;
+use crate::server::tmdb;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
@@ -111,7 +111,7 @@ pub static MOVE_ERRORS: once_cell::sync::Lazy<Mutex<BTreeMap<String, MoverError>
     once_cell::sync::Lazy::new(|| Mutex::new(BTreeMap::new()));
 
 fn record_error(path: &str, reason: &str, hint: &str) {
-    record_error_with(path, reason, hint, crate::log::syslog);
+    record_error_with(path, reason, hint, crate::server::log::syslog);
 }
 
 // record_error with the log sink injected. The MOVE_ERRORS guard is dropped
@@ -302,12 +302,12 @@ fn copy_counting(
     written: &std::sync::atomic::AtomicU64,
 ) -> std::io::Result<u64> {
     copy_counting_cancellable(src, dest, written, &|| {
-        crate::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
+        crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
     })
 }
 
 // copy_counting with the abort signal injected, for testability without touching the
-// process-global crate::SHUTDOWN (which every mover test shares).
+// process-global crate::server::SHUTDOWN (which every mover test shares).
 fn copy_counting_cancellable(
     src: &Path,
     dest: &Path,
@@ -587,7 +587,7 @@ fn mover_tick(cfg: &Arc<RwLock<Config>>, do_move: impl FnOnce(&Config)) -> bool 
 pub fn run(cfg: &Arc<RwLock<Config>>) {
     use std::sync::atomic::Ordering;
     tracing::info!("mover loop starting");
-    while !crate::SHUTDOWN.load(Ordering::Relaxed) {
+    while !crate::server::SHUTDOWN.load(Ordering::Relaxed) {
         if !mover_tick(cfg, check_and_move) {
             std::thread::sleep(std::time::Duration::from_secs(10));
             continue;
@@ -595,7 +595,7 @@ pub fn run(cfg: &Arc<RwLock<Config>>) {
         // SHUTDOWN-responsive sleep — break early on signal so SIGTERM
         // doesn't have to wait the full 10 s tick.
         for _ in 0..100 {
-            if crate::SHUTDOWN.load(Ordering::Relaxed) {
+            if crate::server::SHUTDOWN.load(Ordering::Relaxed) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -642,7 +642,7 @@ fn classify_done_absence(err_kind: std::io::ErrorKind, dir: &Path) -> DoneAbsenc
         // `.sweeping`/`.muxing` mean "not ready", not stranded `Fault` (else
         // a 182-warn flood on one healthy disc). Use retrying
         // `snapshot_staging_disc`, not bare `exists()`, to dodge cold-NFS false negatives.
-        let governed = crate::ripper::staging::snapshot_staging_disc(dir)
+        let governed = crate::server::ripper::staging::snapshot_staging_disc(dir)
             .map(|s| {
                 s.has_sweeping
                     || s.has_muxing
@@ -710,76 +710,78 @@ fn check_and_move(cfg: &Config) {
         // Readiness comes from `state.json` when present: a dir is the
         // mover's to file iff `state == Done`; every other state is "not
         // mine yet". Legacy dirs with no `state.json` fall back to `.done`.
-        let (marker, state_outputs): (serde_json::Value, Vec<crate::ripper::staging::Output>) =
-            match crate::ripper::staging::read_state(&dir) {
-                Some(st) => {
-                    if st.state != crate::ripper::staging::StagingState::Done {
-                        // Not handed off to the mover (in progress, held for
-                        // review, terminal, or completed) — by-design "not
-                        // ready", so keep it quiet: no per-tick WARN spam.
-                        tracing::debug!(
-                            dir = %dir.display(),
-                            state = ?st.state,
-                            "mover: staging dir not in Done state; skipping"
-                        );
-                        continue;
-                    }
-                    (mover_marker_value(&st), st.outputs.clone())
+        let (marker, state_outputs): (
+            serde_json::Value,
+            Vec<crate::server::ripper::staging::Output>,
+        ) = match crate::server::ripper::staging::read_state(&dir) {
+            Some(st) => {
+                if st.state != crate::server::ripper::staging::StagingState::Done {
+                    // Not handed off to the mover (in progress, held for
+                    // review, terminal, or completed) — by-design "not
+                    // ready", so keep it quiet: no per-tick WARN spam.
+                    tracing::debug!(
+                        dir = %dir.display(),
+                        state = ?st.state,
+                        "mover: staging dir not in Done state; skipping"
+                    );
+                    continue;
                 }
-                None => {
-                    // Legacy `.done` file path. No pre-flight exists() check: it
-                    // races with the read (the file can appear/disappear between
-                    // syscalls); the read arms are the atomic gate.
-                    match std::fs::read_to_string(&marker_path) {
-                        Ok(data) => match serde_json::from_str(&data) {
-                            Ok(v) => (v, Vec::new()),
-                            Err(e) => {
-                                // Empty/torn `.done` → NOT READY: skip rather than
-                                // blind-move under a garbage name.
-                                tracing::warn!(
-                                    marker = %marker_path.display(),
-                                    error = %e,
-                                    "mover: .done marker is empty/unparsable; skipping staging dir (not ready)"
-                                );
-                                continue;
-                            }
-                        },
+                (mover_marker_value(&st), st.outputs.clone())
+            }
+            None => {
+                // Legacy `.done` file path. No pre-flight exists() check: it
+                // races with the read (the file can appear/disappear between
+                // syscalls); the read arms are the atomic gate.
+                match std::fs::read_to_string(&marker_path) {
+                    Ok(data) => match serde_json::from_str(&data) {
+                        Ok(v) => (v, Vec::new()),
                         Err(e) => {
-                            // An ABSENT `.done` on a governed dir is expected
-                            // in-progress state — quiet debug, skip (the
-                            // 182-warn bug). Only a stranded dir is a fault.
-                            if classify_done_absence(e.kind(), &dir) == DoneAbsence::InProgress {
-                                tracing::debug!(
-                                    dir = %dir.display(),
-                                    "mover: staging dir in progress (no .done yet); skipping"
-                                );
-                                continue;
-                            }
-                            // Stranded/unreadable dir (Fault). WARN ONCE per
-                            // dir — the mover rescans every ~10s and would
-                            // otherwise re-WARN forever. First → WARN, then debug.
-                            let first = STRANDED_WARNED
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .insert(dir.to_string_lossy().to_string());
-                            if first {
-                                tracing::warn!(
-                                    marker = %marker_path.display(),
-                                    error = %e,
-                                    "mover: failed to read .done marker; skipping staging dir (stranded: no state.json/.done; further per-tick warns for this dir suppressed)"
-                                );
-                            } else {
-                                tracing::debug!(
-                                    marker = %marker_path.display(),
-                                    error = %e,
-                                    "mover: stranded staging dir (no state.json/.done); still skipping"
-                                );
-                            }
+                            // Empty/torn `.done` → NOT READY: skip rather than
+                            // blind-move under a garbage name.
+                            tracing::warn!(
+                                marker = %marker_path.display(),
+                                error = %e,
+                                "mover: .done marker is empty/unparsable; skipping staging dir (not ready)"
+                            );
                             continue;
                         }
+                    },
+                    Err(e) => {
+                        // An ABSENT `.done` on a governed dir is expected
+                        // in-progress state — quiet debug, skip (the
+                        // 182-warn bug). Only a stranded dir is a fault.
+                        if classify_done_absence(e.kind(), &dir) == DoneAbsence::InProgress {
+                            tracing::debug!(
+                                dir = %dir.display(),
+                                "mover: staging dir in progress (no .done yet); skipping"
+                            );
+                            continue;
+                        }
+                        // Stranded/unreadable dir (Fault). WARN ONCE per
+                        // dir — the mover rescans every ~10s and would
+                        // otherwise re-WARN forever. First → WARN, then debug.
+                        let first = STRANDED_WARNED
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(dir.to_string_lossy().to_string());
+                        if first {
+                            tracing::warn!(
+                                marker = %marker_path.display(),
+                                error = %e,
+                                "mover: failed to read .done marker; skipping staging dir (stranded: no state.json/.done; further per-tick warns for this dir suppressed)"
+                            );
+                        } else {
+                            tracing::debug!(
+                                marker = %marker_path.display(),
+                                error = %e,
+                                "mover: stranded staging dir (no state.json/.done); still skipping"
+                            );
+                        }
+                        continue;
                     }
                 }
-            };
+            }
+        };
 
         let disc_name = marker["disc_name"].as_str().unwrap_or("").to_string();
         let display_name = marker["title"].as_str().unwrap_or(&disc_name).to_string();
@@ -821,7 +823,8 @@ fn check_and_move(cfg: &Config) {
         // Find ripped files. `keep_iso=false` means don't promote the
         // intermediate ISO (pre-0.25.10 moved 90+ GB ISOs live); filtered
         // here, except `output_format == "iso"`, where it IS the deliverable.
-        let move_iso = cfg.keep_iso || crate::ripper::output_is_iso_image(&cfg.output_format);
+        let move_iso =
+            cfg.keep_iso || crate::server::ripper::output_is_iso_image(&cfg.output_format);
         let (mut ripped_files, listing_complete): (Vec<std::path::PathBuf>, bool) =
             match std::fs::read_dir(&dir) {
                 Ok(entries) => {
@@ -895,7 +898,7 @@ fn check_and_move(cfg: &Config) {
         // gives disc 2 `Title (Year)_2.mkv` instead of a collision. ONE variant
         // covers the whole file set (MKV+ISO matched); a STAT failure aborts as `uncertain`.
         let mut uncertain = false;
-        let variant = crate::util::disc_variant(|n| {
+        let variant = crate::server::util::disc_variant(|n| {
             if uncertain {
                 return false;
             }
@@ -925,7 +928,7 @@ fn check_and_move(cfg: &Config) {
                 // Every one of the 64 variants is held by a DIFFERENT file.
                 // Leave base names in place: the collision guard below then
                 // refuses the move and surfaces the error. Never overwrite.
-                crate::log::syslog(&format!(
+                crate::server::log::syslog(&format!(
                     "Move blocked ({}): every disc-variant destination name is taken by a \
                      different file — resolve the library conflict manually",
                     display_name
@@ -961,7 +964,7 @@ fn check_and_move(cfg: &Config) {
                  mover will NOT auto-create the root — fix the mount, then it \
                  retries on the next tick.",
             );
-            crate::log::syslog(&format!(
+            crate::server::log::syslog(&format!(
                 "Move BLOCKED — destination root {} unavailable: {} (output preserved in staging: {})",
                 absolute_for_log(&dest_root),
                 reason,
@@ -1005,7 +1008,7 @@ fn check_and_move(cfg: &Config) {
                     progress_pct: 0,
                     progress_gb: 0.0,
                     total_gb: fresh_metadata(src).map(|m| m.len()).unwrap_or(0) as f64
-                        / crate::util::BYTES_PER_GIB,
+                        / crate::server::util::BYTES_PER_GIB,
                     speed_mbs: 0.0,
                     eta: String::new(),
                 })
@@ -1040,7 +1043,7 @@ fn check_and_move(cfg: &Config) {
                 Ok(d) => Some(d),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                 Err(e) => {
-                    crate::log::syslog(&format!(
+                    crate::server::log::syslog(&format!(
                         "Move deferred (could not stat destination {}): {} — will retry next tick",
                         dest, e
                     ));
@@ -1055,7 +1058,7 @@ fn check_and_move(cfg: &Config) {
                 let s = match fresh_metadata(src) {
                     Ok(s) => s,
                     Err(e) => {
-                        crate::log::syslog(&format!(
+                        crate::server::log::syslog(&format!(
                             "Move deferred (destination {} exists but could not stat source {:?}): {} — will retry next tick",
                             dest, src, e
                         ));
@@ -1072,7 +1075,7 @@ fn check_and_move(cfg: &Config) {
                         !same_head_and_tail(src, Path::new(dest))
                     };
                     if collision {
-                        crate::log::syslog(&format!(
+                        crate::server::log::syslog(&format!(
                             "Move blocked (destination exists, different file): {} ({} B) vs existing {} ({} B)",
                             src.display(),
                             s.len(),
@@ -1108,7 +1111,7 @@ fn check_and_move(cfg: &Config) {
                 }
                 MoveOutcome::Moved => {
                     if !announced_moving {
-                        crate::log::syslog(&format!(
+                        crate::server::log::syslog(&format!(
                             "Moving: {} ({} files)",
                             display_name,
                             ripped_files.len()
@@ -1118,7 +1121,7 @@ fn check_and_move(cfg: &Config) {
                     // Log the FULL ABSOLUTE destination so the operator can
                     // see exactly where bytes landed — never a cwd-relative
                     // path that could hide a wrong-filesystem write (Mercy incident).
-                    crate::log::syslog(&format!(
+                    crate::server::log::syslog(&format!(
                         "Moved {} → {}",
                         src.file_name().unwrap_or_default().to_string_lossy(),
                         absolute_for_log(dest)
@@ -1126,34 +1129,34 @@ fn check_and_move(cfg: &Config) {
                 }
                 MoveOutcome::MovedDirty => {
                     if !announced_moving {
-                        crate::log::syslog(&format!(
+                        crate::server::log::syslog(&format!(
                             "Moving: {} ({} files)",
                             display_name,
                             ripped_files.len()
                         ));
                         announced_moving = true;
                     }
-                    crate::log::syslog(&format!(
+                    crate::server::log::syslog(&format!(
                         "Moved {} → {} but source could not be removed",
                         src.file_name().unwrap_or_default().to_string_lossy(),
                         absolute_for_log(dest)
                     ));
                 }
                 MoveOutcome::Failed => {
-                    crate::log::syslog(&format!(
+                    crate::server::log::syslog(&format!(
                         "Failed to move {} → {}",
                         src.display(),
                         absolute_for_log(dest)
                     ));
                 }
                 MoveOutcome::SizeMismatch => {
-                    crate::log::syslog(&format!(
+                    crate::server::log::syslog(&format!(
                         "Move blocked (post-cp size mismatch): {:?} -> {}",
                         src, dest
                     ));
                 }
                 MoveOutcome::PostCopyInvalid => {
-                    crate::log::syslog(&format!(
+                    crate::server::log::syslog(&format!(
                         "Move blocked (post-cp validation failed — structural/unreadable): {:?} -> {}",
                         src, dest
                     ));
@@ -1221,7 +1224,7 @@ fn check_and_move(cfg: &Config) {
         // listing error drops an entry the destructive remove_dir_all teardown would then
         // silently delete. Treat like a failed copy: leave the dir and retry next tick.
         if !listing_complete {
-            crate::log::syslog(&format!(
+            crate::server::log::syslog(&format!(
                 "Staging teardown skipped — directory could not be fully listed: {}",
                 dir.display()
             ));
@@ -1235,7 +1238,7 @@ fn check_and_move(cfg: &Config) {
 
         if cleanup_err.is_none() {
             clear_error(&dir_str);
-            crate::log::syslog(&format!("Move complete: {}", display_name));
+            crate::server::log::syslog(&format!("Move complete: {}", display_name));
         } else if any_dirty {
             record_error(
                 &dir_str,
@@ -1254,7 +1257,7 @@ fn check_and_move(cfg: &Config) {
         // Skipped-only ticks are no-ops and must not re-notify.
         if any_actively_moved {
             let dest_path = planned_moves.last().map(|(_, d)| d.as_str()).unwrap_or("");
-            crate::webhook::send_move(cfg, &display_name, dest_path);
+            crate::server::webhook::send_move(cfg, &display_name, dest_path);
         }
 
         // MOVE_STATE is cleared by `_move_state`'s Drop as this iteration
@@ -1337,7 +1340,7 @@ fn dest_with_variant(dest: &str, variant: u32) -> String {
     let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
         return dest.to_string();
     };
-    let suffixed = crate::util::disc_variant_name(stem, variant);
+    let suffixed = crate::server::util::disc_variant_name(stem, variant);
     let name = match p.extension().and_then(|e| e.to_str()) {
         Some(ext) => format!("{suffixed}.{ext}"),
         None => suffixed,
@@ -1392,10 +1395,10 @@ fn is_iso_file(filename: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("iso"))
 }
 
-/// Build the legacy-shaped mover metadata `Value` from a unified [`crate::ripper::staging::DiscState`],
+/// Build the legacy-shaped mover metadata `Value` from a unified [`crate::server::ripper::staging::DiscState`],
 /// so the rest of `check_and_move` reads `marker["title"]`/`["season"]`/… exactly
 /// as it did from the old `.done` JSON body.
-fn mover_marker_value(st: &crate::ripper::staging::DiscState) -> serde_json::Value {
+fn mover_marker_value(st: &crate::server::ripper::staging::DiscState) -> serde_json::Value {
     serde_json::json!({
         "title": st.title,
         "disc_name": st.disc_name,
@@ -1416,7 +1419,7 @@ fn mover_marker_value(st: &crate::ripper::staging::DiscState) -> serde_json::Val
 // build_destination folders it under "Show (Year)/Season NN/".
 fn tv_episode_leaf(
     tmdb: &Option<tmdb::TmdbResult>,
-    outputs: &[crate::ripper::staging::Output],
+    outputs: &[crate::server::ripper::staging::Output],
     filename: &str,
     season: Option<u16>,
 ) -> Option<String> {
@@ -1431,14 +1434,14 @@ fn tv_episode_leaf(
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("mkv");
-    let safe_title = crate::util::sanitize_path_display(&result.title);
+    let safe_title = crate::server::util::sanitize_path_display(&result.title);
     if out.episode_name.is_empty() {
         Some(format!("{safe_title} S{season:02}E{episode:02}.{ext}"))
     } else {
         // Sanitize the episode name too: it comes from TMDB and can carry path
         // separators / reserved chars (e.g. "Part 1/2", ":") that would escape
         // the season folder or break the write, just like the title.
-        let safe_episode = crate::util::sanitize_path_display(&out.episode_name);
+        let safe_episode = crate::server::util::sanitize_path_display(&out.episode_name);
         Some(format!(
             "{safe_title} S{season:02}E{episode:02} - {safe_episode}.{ext}"
         ))
@@ -1458,7 +1461,7 @@ fn build_destination(
         let root = resolve_media_root(&cfg.output_dir, &cfg.iso_dir);
         let leaf = match tmdb {
             Some(result) => {
-                let safe_title = crate::util::sanitize_path_display(&result.title);
+                let safe_title = crate::server::util::sanitize_path_display(&result.title);
                 let year_str = if result.year > 0 {
                     format!(" ({})", result.year)
                 } else {
@@ -1468,7 +1471,7 @@ fn build_destination(
             }
             // No TMDB match: keep the (sanitized) source filename, mirroring the
             // no-tmdb fall-through the movie/tv branches use.
-            None => crate::util::sanitize_path_display(filename),
+            None => crate::server::util::sanitize_path_display(filename),
         };
         return join_path(&root, &leaf);
     }
@@ -1480,7 +1483,7 @@ fn build_destination(
         .and_then(|e| e.to_str())
         .unwrap_or("mkv");
     if let Some(result) = tmdb {
-        let safe_title = crate::util::sanitize_path_display(&result.title);
+        let safe_title = crate::server::util::sanitize_path_display(&result.title);
         match routing_media_type(result) {
             "movie" if !cfg.movie_dir.is_empty() => {
                 let year_str = if result.year > 0 {
@@ -1516,7 +1519,7 @@ fn build_destination(
                 // Sanitize the leaf too: the movie branch derives its leaf from a sanitized
                 // title, but this branch used the RAW source filename, so a path separator or
                 // traversal sequence could escape tv_dir.
-                let safe_filename = crate::util::sanitize_path_display(filename);
+                let safe_filename = crate::server::util::sanitize_path_display(filename);
                 join_path(&dir, &safe_filename)
             }
             _ => {
@@ -1525,14 +1528,14 @@ fn build_destination(
                 // so e.g. "..mkv" would reach output_dir verbatim).
                 join_path(
                     &cfg.output_dir,
-                    &crate::util::sanitize_path_display(filename),
+                    &crate::server::util::sanitize_path_display(filename),
                 )
             }
         }
     } else {
         join_path(
             &cfg.output_dir,
-            &crate::util::sanitize_path_display(filename),
+            &crate::server::util::sanitize_path_display(filename),
         )
     }
 }
@@ -1730,13 +1733,13 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
                 clear_stale_dest_error(dest);
                 return MoveOutcome::Skipped;
             }
-            crate::log::syslog(&format!(
+            crate::server::log::syslog(&format!(
                 "Pre-existing destination failed post-copy validation; re-copying: {:?}",
                 dest
             ));
             // Fall through to the copy path below.
         } else {
-            crate::log::syslog(&format!(
+            crate::server::log::syslog(&format!(
                 "Move blocked (destination same size but different content): {:?} vs {:?}",
                 src, dest
             ));
@@ -1770,7 +1773,7 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
     let dest_absent_before =
         matches!(&dest_meta, Err(e) if e.kind() == std::io::ErrorKind::NotFound);
     let src_size = src_meta.as_ref().map(|m| m.len()).unwrap_or(0);
-    let total_gb = src_size as f64 / crate::util::BYTES_PER_GIB;
+    let total_gb = src_size as f64 / crate::server::util::BYTES_PER_GIB;
 
     // In-process copy on a worker thread (`copy_counting`), counting bytes
     // for live progress — not NFS stat(), which lags and would pin the bar
@@ -1794,7 +1797,7 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
                 // mkv, TS-sync for m2ts, fresh-FD stat for iso) so the NFS
                 // attribute cache can't phantom-fail it. Runs before unlink.
                 if let Err(e) = check_post_copy(src, Path::new(&dest_str)) {
-                    crate::log::syslog(&format!(
+                    crate::server::log::syslog(&format!(
                         "Post-cp validation failed for {}: {}",
                         dest_str, e
                     ));
@@ -1839,12 +1842,12 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
                         }
                     }
                 } else {
-                    crate::log::syslog(&format!(
+                    crate::server::log::syslog(&format!(
                         "Copy failed; leaving pre-existing destination in place: {}",
                         dest_str
                     ));
                 }
-                crate::log::syslog(&format!("fs::copy failed for {}: {}", dest_str, e));
+                crate::server::log::syslog(&format!("fs::copy failed for {}: {}", dest_str, e));
                 return MoveOutcome::Failed;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -1854,14 +1857,14 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
                 if dest_absent_before {
                     let _ = std::fs::remove_file(&dest_str);
                 }
-                crate::log::syslog(&format!("fs::copy thread panicked for {}", dest_str));
+                crate::server::log::syslog(&format!("fs::copy thread panicked for {}", dest_str));
                 return MoveOutcome::Failed;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 // Honor SIGTERM mid-copy: run()'s shutdown sleep only gates BETWEEN ticks, so
                 // a copy would otherwise run until docker stop's grace expires and SIGKILL
                 // lands mid-write. Join is bounded to one chunk.
-                if crate::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                if crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                     let _ = copy_handle.join();
                     // Drop the partial destination so a restart's first tick doesn't wedge on
                     // a size-mismatch Collision — but only if this attempt could have created
@@ -1869,7 +1872,10 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
                     if dest_absent_before {
                         let _ = std::fs::remove_file(&dest_str);
                     }
-                    crate::log::syslog(&format!("Move aborted (shutdown) mid-copy: {}", dest_str));
+                    crate::server::log::syslog(&format!(
+                        "Move aborted (shutdown) mid-copy: {}",
+                        dest_str
+                    ));
                     return MoveOutcome::Failed;
                 }
                 // Progress straight from the bytes we've written — no NFS stat,
@@ -1882,9 +1888,9 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
                 } else {
                     0
                 };
-                let gb = done as f64 / crate::util::BYTES_PER_GIB;
+                let gb = done as f64 / crate::server::util::BYTES_PER_GIB;
                 let speed_mbs = if elapsed > 0.0 {
-                    (done as f64 / elapsed) / crate::util::BYTES_PER_MIB
+                    (done as f64 / elapsed) / crate::server::util::BYTES_PER_MIB
                 } else {
                     0.0
                 };
@@ -1895,7 +1901,7 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
     }
 }
 
-// `sanitize_dir_name` moved to `crate::util::sanitize_path_display` in 0.13.0.
+// `sanitize_dir_name` moved to `crate::server::util::sanitize_path_display` in 0.13.0.
 // Single source of truth shared with the staging path in `ripper`.
 
 #[cfg(test)]
@@ -1956,7 +1962,7 @@ mod tests {
         }
     }
 
-    use crate::ripper::staging::Output;
+    use crate::server::ripper::staging::Output;
 
     fn ep_output(filename: &str, episode: Option<u16>, episode_name: &str) -> Output {
         Output {
@@ -2124,16 +2130,19 @@ mod tests {
     #[test]
     fn sanitize_dir_name_strips_unsafe_characters() {
         assert_eq!(
-            crate::util::sanitize_path_display("Aurora: Drift Two"),
+            crate::server::util::sanitize_path_display("Aurora: Drift Two"),
             "Aurora Drift Two"
         );
-        assert_eq!(crate::util::sanitize_path_display("M*A*S*H"), "MASH");
         assert_eq!(
-            crate::util::sanitize_path_display("Alien/Predator"),
+            crate::server::util::sanitize_path_display("M*A*S*H"),
+            "MASH"
+        );
+        assert_eq!(
+            crate::server::util::sanitize_path_display("Alien/Predator"),
             "AlienPredator"
         );
         assert_eq!(
-            crate::util::sanitize_path_display("What's Up, Doc?"),
+            crate::server::util::sanitize_path_display("What's Up, Doc?"),
             "What's Up Doc"
         );
     }
@@ -2141,11 +2150,11 @@ mod tests {
     #[test]
     fn sanitize_dir_name_keeps_allowed_punctuation() {
         assert_eq!(
-            crate::util::sanitize_path_display("Side Quest - A Long Journey"),
+            crate::server::util::sanitize_path_display("Side Quest - A Long Journey"),
             "Side Quest - A Long Journey"
         );
         assert_eq!(
-            crate::util::sanitize_path_display("Director_Cut.2019"),
+            crate::server::util::sanitize_path_display("Director_Cut.2019"),
             "Director_Cut.2019"
         );
     }
@@ -2153,7 +2162,7 @@ mod tests {
     #[test]
     fn sanitize_dir_name_trims_whitespace() {
         assert_eq!(
-            crate::util::sanitize_path_display("  spaced title  "),
+            crate::server::util::sanitize_path_display("  spaced title  "),
             "spaced title"
         );
     }
@@ -3434,8 +3443,9 @@ mod tests {
         let disc_dir = staging.join("Endeavour_S05");
         std::fs::create_dir_all(&disc_dir).unwrap();
 
-        let mut st =
-            crate::ripper::staging::DiscState::new(crate::ripper::staging::StagingState::Done);
+        let mut st = crate::server::ripper::staging::DiscState::new(
+            crate::server::ripper::staging::StagingState::Done,
+        );
         st.title = "Endeavour".to_string();
         st.disc_name = "Endeavour".to_string();
         st.year = 2012;
@@ -3446,7 +3456,7 @@ mod tests {
             ep_output("Endeavour_S05E01.mkv", Some(1), "Muse"),
             ep_output("Endeavour_S05E02.mkv", Some(2), "Cartouche"),
         ];
-        crate::ripper::staging::write_state(&disc_dir, &st);
+        crate::server::ripper::staging::write_state(&disc_dir, &st);
 
         // Two planned episodes, plus a leftover partial NOT in outputs[].
         std::fs::write(disc_dir.join("Endeavour_S05E01.mkv"), vec![0x11u8; 4096]).unwrap();
@@ -3506,8 +3516,9 @@ mod tests {
         let disc_dir = staging.join("Endeavour_S05");
         std::fs::create_dir_all(&disc_dir).unwrap();
 
-        let mut st =
-            crate::ripper::staging::DiscState::new(crate::ripper::staging::StagingState::Done);
+        let mut st = crate::server::ripper::staging::DiscState::new(
+            crate::server::ripper::staging::StagingState::Done,
+        );
         st.title = "Endeavour".to_string();
         st.disc_name = "Endeavour".to_string();
         st.year = 2012;
@@ -3515,7 +3526,7 @@ mod tests {
         st.tmdb_id = 12345;
         st.season = Some(5);
         st.outputs = vec![ep_output("Endeavour_S05E01.mkv", Some(1), "Muse")];
-        crate::ripper::staging::write_state(&disc_dir, &st);
+        crate::server::ripper::staging::write_state(&disc_dir, &st);
 
         // The planned episode, plus the intermediate ISO (kept via keep_iso,
         // never listed in outputs[]).
@@ -3583,7 +3594,10 @@ mod tests {
         // Same rendering as the staging-directory rule — one policy.
         assert_eq!(
             dest_with_variant("/a/b/Title.mkv", 2),
-            format!("/a/b/{}.mkv", crate::util::disc_variant_name("Title", 2))
+            format!(
+                "/a/b/{}.mkv",
+                crate::server::util::disc_variant_name("Title", 2)
+            )
         );
     }
 
@@ -3888,7 +3902,7 @@ mod tests {
         // Regression for the line-349 doc bug: the MKV tail comment used to claim it reads 64
         // KiB and confirms a well-formed EBML close — neither is true (it reads 8 tail bytes).
         // Source-pin the corrected comment.
-        let src = crate::util::source_lf(include_str!("mover.rs"));
+        let src = crate::server::util::source_lf(include_str!("mover.rs"));
         let start = src
             .find("fn check_post_copy_mkv")
             .expect("check_post_copy_mkv present");
@@ -4422,7 +4436,7 @@ mod tests {
             .is_empty();
         // The active-move marker must be cleared too, so the Move queue no
         // longer excludes this dir once the pass has ended.
-        let active_cleared = crate::mover::ACTIVE_MOVE_DIR
+        let active_cleared = crate::server::mover::ACTIVE_MOVE_DIR
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_none();
@@ -4515,7 +4529,7 @@ mod tests {
     // wiring at source level instead.
     #[test]
     fn the_teardown_is_gated_on_a_complete_listing() {
-        let src = crate::util::source_lf(include_str!("mover.rs"));
+        let src = crate::server::util::source_lf(include_str!("mover.rs"));
         let guard = src
             .find("if !listing_complete {")
             .expect("check_and_move must refuse to tear down an incompletely-listed staging dir");
@@ -4771,9 +4785,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("disc-sweeping");
         std::fs::create_dir_all(&dir).unwrap();
-        crate::ripper::staging::write_sweeping_marker(&dir);
+        crate::server::ripper::staging::write_sweeping_marker(&dir);
         // The same snapshot the governed check now consults sees the marker.
-        let snap = crate::ripper::staging::snapshot_staging_disc(&dir).expect("snapshot");
+        let snap = crate::server::ripper::staging::snapshot_staging_disc(&dir).expect("snapshot");
         assert!(snap.has_sweeping);
         assert_eq!(
             classify_done_absence(ErrorKind::NotFound, &dir),

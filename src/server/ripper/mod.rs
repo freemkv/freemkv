@@ -14,7 +14,7 @@ pub mod staging;
 pub mod state;
 pub mod tv;
 
-// Re-export every symbol the crate/tests address as `crate::ripper::*`.
+// Re-export every symbol the crate/tests address as `crate::server::ripper::*`.
 // `#[allow(unused_imports)]` stays: the binary build doesn't use every
 // re-export, but `lib.rs` and `tests/` do.
 #[allow(unused_imports)]
@@ -36,14 +36,14 @@ pub use state::{
 // file. Sub-module-private helpers (`pub(super)`) are reachable from
 // here because we are the parent of `state` / `session` / `staging`.
 
-use crate::util::{BYTES_PER_GIB, BYTES_PER_MIB, MILLIS_PER_SEC};
+use crate::server::util::{BYTES_PER_GIB, BYTES_PER_MIB, MILLIS_PER_SEC};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use crate::config::Config;
+use crate::server::config::Config;
 
-use crate::keysource::DriveAccess;
+use crate::server::keysource::DriveAccess;
 
 // Live-drive structure scan options: lookup-free, plus AACS host credentials for the
 // handshake. With capture_without_keys an unreadable AACS key file does not stop the
@@ -51,7 +51,7 @@ use crate::keysource::DriveAccess;
 pub(crate) fn scan_opts_for(cfg: &Config) -> libfreemkv::ScanOptions {
     libfreemkv::ScanOptions {
         raw_copy: cfg.capture_without_keys,
-        ..crate::keysource::drive_scan_opts(cfg)
+        ..crate::server::keysource::drive_scan_opts(cfg)
     }
 }
 
@@ -92,7 +92,7 @@ impl ScanWatchdog {
                         last_phase,
                         "scan still running"
                     );
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         &device,
                         &format!(
                             "Still scanning ({}s elapsed, phase={})...",
@@ -180,10 +180,10 @@ fn resolve_keys_from_drive(
     cfg: &Config,
     drive: &mut libfreemkv::Drive,
     disc: libfreemkv::Disc,
-) -> (libfreemkv::Disc, crate::keysource::KeyOutcome) {
-    let sources = crate::keysource::build_sources(cfg);
+) -> (libfreemkv::Disc, crate::server::keysource::KeyOutcome) {
+    let sources = crate::server::keysource::build_sources(cfg);
     let mut access = DriveAccess::new(drive);
-    crate::keysource::resolve_keys(sources, &mut access, disc)
+    crate::server::keysource::resolve_keys(sources, &mut access, disc)
 }
 
 // Human-readable key readiness for the dashboard tile: "Ready to rip", "Capture without keys —
@@ -191,11 +191,11 @@ fn resolve_keys_from_drive(
 // prefix.
 fn key_readiness(
     disc: &libfreemkv::Disc,
-    outcome: crate::keysource::KeyOutcome,
+    outcome: crate::server::keysource::KeyOutcome,
     capture_without_keys: bool,
-    online: Option<crate::keysource::ServiceReachability>,
+    online: Option<crate::server::keysource::ServiceReachability>,
 ) -> String {
-    use crate::keysource::KeyOutcome;
+    use crate::server::keysource::KeyOutcome;
     let no_keys =
         disc.encrypted && matches!(disc.decrypt_keys(), libfreemkv::decrypt::DecryptKeys::None);
     if !no_keys {
@@ -388,8 +388,10 @@ fn key_service_backoff(attempt: u32) -> std::time::Duration {
 /// `None` for every verdict that IS an answer about this disc (including the
 /// definitive 422 no-key): those are not outages and must not borrow outage
 /// wording. See [`key_service_no_key_reason`] for their text.
-fn key_service_transient_status(reach: crate::keysource::ServiceReachability) -> Option<String> {
-    use crate::keysource::ServiceReachability;
+fn key_service_transient_status(
+    reach: crate::server::keysource::ServiceReachability,
+) -> Option<String> {
+    use crate::server::keysource::ServiceReachability;
     match reach {
         ServiceReachability::Unreachable => Some(KEY_SERVICE_UNREACHABLE_STATUS.to_string()),
         ServiceReachability::ServerError(code) => Some(key_service_server_error_status(code)),
@@ -407,8 +409,10 @@ fn key_service_transient_status(reach: crate::keysource::ServiceReachability) ->
 /// reason clause shown after the "Missing keys — " prefix. `None` for an ordinary 2xx no-key
 /// (keep the generic text) and for the transient verdicts, which get
 /// [`key_service_transient_status`] instead.
-fn key_service_no_key_reason(reach: crate::keysource::ServiceReachability) -> Option<String> {
-    use crate::keysource::ServiceReachability;
+fn key_service_no_key_reason(
+    reach: crate::server::keysource::ServiceReachability,
+) -> Option<String> {
+    use crate::server::keysource::ServiceReachability;
     match reach {
         ServiceReachability::NoKeyForDisc => Some(KEY_SERVICE_NO_KEY_REASON.to_string()),
         ServiceReachability::NotLicensed => Some(KEY_SERVICE_UNLICENSED_REASON.to_string()),
@@ -425,7 +429,7 @@ fn key_service_no_key_reason(reach: crate::keysource::ServiceReachability) -> Op
 // Record a TERMINAL key-service verdict structurally, status code and all —
 // the machine-greppable copy of what the user-facing string carries in its
 // trailing parenthetical.
-fn log_terminal_key_verdict(reach: crate::keysource::ServiceReachability) {
+fn log_terminal_key_verdict(reach: crate::server::keysource::ServiceReachability) {
     tracing::info!(
         phase = "key_resolve",
         verdict = ?reach,
@@ -442,17 +446,18 @@ fn retry_online_keys_on_outage(
     cfg: &Config,
     drive: &mut libfreemkv::Drive,
     mut disc: libfreemkv::Disc,
-    decode_reach: Option<crate::keysource::ServiceReachability>,
+    decode_reach: Option<crate::server::keysource::ServiceReachability>,
 ) -> (
     libfreemkv::Disc,
-    crate::keysource::KeyOutcome,
-    Option<crate::keysource::ServiceReachability>,
+    crate::server::keysource::KeyOutcome,
+    Option<crate::server::keysource::ServiceReachability>,
 ) {
-    use crate::keysource::KeyOutcome;
+    use crate::server::keysource::KeyOutcome;
     // Classify from the REAL decode's HTTP outcome — no second empty probe (its
     // 0-byte POST to the POST-only `/decode` logged a spurious `404` after every
     // real no-key). Probe only when the decode made no HTTP answer (`None`).
-    let reach = decode_reach.unwrap_or_else(|| crate::keysource::probe_online_reachability(cfg));
+    let reach =
+        decode_reach.unwrap_or_else(|| crate::server::keysource::probe_online_reachability(cfg));
     if !reach.is_transient() {
         // The service ANSWERED about this disc (or could never be asked). No
         // retry — a 422 "no key for this disc" took the server ~30s of
@@ -460,17 +465,17 @@ fn retry_online_keys_on_outage(
         log_terminal_key_verdict(reach);
         return (disc, KeyOutcome::NoKey, Some(reach));
     }
-    crate::log::device_log(
+    crate::server::log::device_log(
         device,
         "Online key service appears DOWN (not a missing key) — retrying key resolution.",
     );
     let mut last_reach = reach;
     for attempt in 1..=KEY_SERVICE_RETRY_ATTEMPTS {
-        if crate::SHUTDOWN.load(Ordering::Relaxed) {
+        if crate::server::SHUTDOWN.load(Ordering::Relaxed) {
             break;
         }
         let backoff = key_service_backoff(attempt);
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!(
                 "Key-service retry {attempt}/{KEY_SERVICE_RETRY_ATTEMPTS} in {}s...",
@@ -485,18 +490,21 @@ fn retry_online_keys_on_outage(
         // Consume THIS retry's decode outcome immediately (before the next loop
         // overwrites it), so the re-classify below reads the real POST rather
         // than a fresh empty probe.
-        let retry_reach = crate::keysource::take_online_decode_reachability();
+        let retry_reach = crate::server::keysource::take_online_decode_reachability();
         if outcome == KeyOutcome::Resolved {
-            crate::log::device_log(device, "Key service recovered — keys resolved on retry.");
+            crate::server::log::device_log(
+                device,
+                "Key service recovered — keys resolved on retry.",
+            );
             return (disc, KeyOutcome::Resolved, None);
         }
         // Still no key — re-classify from the retry's decode outcome: is the
         // service back (genuine no-key now) or still down (keep the transient,
         // retryable state)? Probe only if the retry made no HTTP answer.
         last_reach =
-            retry_reach.unwrap_or_else(|| crate::keysource::probe_online_reachability(cfg));
+            retry_reach.unwrap_or_else(|| crate::server::keysource::probe_online_reachability(cfg));
         if !last_reach.is_transient() {
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 "Key service answered but has no key — genuine missing key for this disc.",
             );
@@ -504,7 +512,7 @@ fn retry_online_keys_on_outage(
             return (disc, KeyOutcome::NoKey, Some(last_reach));
         }
     }
-    crate::log::device_log(
+    crate::server::log::device_log(
         device,
         "Key service still unavailable after retries — leaving disc in a retryable state \
          (a later insert / rescan will pick it up). Not ejecting.",
@@ -515,19 +523,19 @@ fn retry_online_keys_on_outage(
 // Verdict rip_disc seeds the outage classifier with: this rip's fresh decode verdict, else
 // the one scan_disc banked on the reused session. `None` makes the classifier probe.
 fn rip_seed_verdict(
-    fresh_decode: Option<crate::keysource::ServiceReachability>,
-    scanned: Option<crate::keysource::ServiceReachability>,
-) -> Option<crate::keysource::ServiceReachability> {
+    fresh_decode: Option<crate::server::keysource::ServiceReachability>,
+    scanned: Option<crate::server::keysource::ServiceReachability>,
+) -> Option<crate::server::keysource::ServiceReachability> {
     fresh_decode.or(scanned)
 }
 
 // Does the rip need one fresh resolve before classifying? Only for a config-class verdict
 // BANKED by the scan (Settings may have changed since); never after rip_disc's own resolve.
 fn seed_needs_reresolve(
-    fresh_decode: Option<crate::keysource::ServiceReachability>,
-    banked: Option<crate::keysource::ServiceReachability>,
+    fresh_decode: Option<crate::server::keysource::ServiceReachability>,
+    banked: Option<crate::server::keysource::ServiceReachability>,
 ) -> bool {
-    use crate::keysource::ServiceReachability as R;
+    use crate::server::keysource::ServiceReachability as R;
     fresh_decode.is_none()
         && matches!(
             banked,
@@ -584,7 +592,7 @@ fn forget_removed_device(device: &str) -> bool {
     // No eject/scan boundary fires here, so the device's in-memory log
     // ring would otherwise linger for the container's lifetime. Evict it
     // like archive_device_log does on the planned-eject path.
-    crate::log::forget_device(device);
+    crate::server::log::forget_device(device);
     // Evict the remaining per-device maps so nothing accumulates as device
     // paths churn; `forget_device_state`'s doc has the authoritative inventory.
     state::forget_device_state(device);
@@ -682,10 +690,10 @@ fn auto_resume_action(resumable: Option<Resumable>) -> AutoResumeAction {
     }
 }
 
-fn auto_insert_rip_mode(on_insert: &str) -> Option<crate::web::ResumeMode> {
+fn auto_insert_rip_mode(on_insert: &str) -> Option<crate::server::web::ResumeMode> {
     match on_insert {
-        "rip" => Some(crate::web::ResumeMode::Fresh),
-        "resume" => Some(crate::web::ResumeMode::Prefer),
+        "rip" => Some(crate::server::web::ResumeMode::Fresh),
+        "resume" => Some(crate::server::web::ResumeMode::Prefer),
         _ => None,
     }
 }
@@ -827,7 +835,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
         "drive poll loop starting"
     );
 
-    while !crate::SHUTDOWN.load(Ordering::Relaxed) {
+    while !crate::server::SHUTDOWN.load(Ordering::Relaxed) {
         probe_fail.begin_tick();
         // Periodic hot-plug reconcile: re-enumerate drives and diff against
         // the cached path list. New devices start being polled; removed devices
@@ -1072,7 +1080,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
                                 device = %device_for_thread,
                                 "scan/rip thread panicked"
                             );
-                            crate::log::device_log(&device_for_thread, "Thread panicked");
+                            crate::server::log::device_log(&device_for_thread, "Thread panicked");
                             drop_session(&device_for_thread);
                             unregister_halt(&device_for_thread);
                             update_state(
@@ -1110,7 +1118,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
         // SHUTDOWN-responsive sleep — break early on signal so SIGTERM
         // doesn't have to wait the full 5 s tick to take effect.
         for _ in 0..(POLL_INTERVAL_SECS * 10) {
-            if crate::SHUTDOWN.load(Ordering::Relaxed) {
+            if crate::server::SHUTDOWN.load(Ordering::Relaxed) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1124,7 +1132,7 @@ pub fn drive_poll_loop(cfg: &Arc<RwLock<Config>>) {
 // Push an "error" state after a poisoned config lock forced an early
 // return; without this the tile stays wedged in "scanning" forever.
 fn mark_config_lock_poisoned(device: &str, op: &str) {
-    crate::log::device_log(device, &format!("{op} aborted: config lock poisoned"));
+    crate::server::log::device_log(device, &format!("{op} aborted: config lock poisoned"));
     update_state(
         device,
         RipState {
@@ -1160,13 +1168,13 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         },
     );
 
-    crate::log::archive_device_log(device);
-    crate::log::device_log(device, "Opening drive...");
+    crate::server::log::archive_device_log(device);
+    crate::server::log::device_log(device, "Opening drive...");
 
     // Drive open + SCSI bring-up now runs inside DiscSession::open; the owned
     // drive comes back out after the scan (into_drive), so the rest of
     // scan_disc is untouched.
-    crate::log::device_log(device, "Initializing...");
+    crate::server::log::device_log(device, "Initializing...");
     let mut session = match libfreemkv::DiscSession::open(
         libfreemkv::DeviceTarget::Path(std::path::PathBuf::from(device_path)),
         libfreemkv::KeySpec::default(),
@@ -1174,7 +1182,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         Ok(s) => s,
         Err(e) => {
             let msg = format_lib_error("Cannot open drive", &e);
-            crate::log::device_log(device, &msg);
+            crate::server::log::device_log(device, &msg);
             update_state(
                 device,
                 RipState {
@@ -1189,12 +1197,12 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     };
 
     // Fast identify — disc name only, no playlists
-    crate::log::device_log(device, "Identifying disc...");
+    crate::server::log::device_log(device, "Identifying disc...");
     let disc_id = match session.identify() {
         Ok(id) => id,
         Err(e) => {
             let msg = format_lib_error("Could not read the disc", &e);
-            crate::log::device_log(device, &msg);
+            crate::server::log::device_log(device, &msg);
             update_state(
                 device,
                 RipState {
@@ -1210,10 +1218,10 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
 
     let id_name = disc_id.name().to_string();
 
-    crate::log::device_log(device, &format!("Disc: {}", id_name));
+    crate::server::log::device_log(device, &format!("Disc: {}", id_name));
 
     // TMDB lookup — fast, user sees poster while full scan runs
-    let tmdb = crate::tmdb::lookup(&id_name, &cfg_read.tmdb_api_key);
+    let tmdb = crate::server::tmdb::lookup(&id_name, &cfg_read.tmdb_api_key);
     let display_name = tmdb
         .as_ref()
         .map(|t| t.title.clone())
@@ -1247,7 +1255,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     );
 
     // Full scan — titles, streams, AACS keys
-    crate::log::device_log(device, "Scanning titles...");
+    crate::server::log::device_log(device, "Scanning titles...");
     let scan_opts = scan_opts_for(&cfg_read);
     // Arm the scan-phase watchdog: WARNs every 15s while scan/resolve runs,
     // torn down by the drop-guard when this block returns.
@@ -1256,7 +1264,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     tracing::info!(device = %device, "scan: begin");
     if let Err(e) = session.scan(scan_opts) {
         let msg = format_lib_error("Disc scan", &e);
-        crate::log::device_log(device, &msg);
+        crate::server::log::device_log(device, &msg);
         update_state(
             device,
             RipState {
@@ -1272,7 +1280,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     // scan_disc (resolve_keys_from_drive, unlocker matrix, store_session) uses.
     let Some(disc) = session.take_disc() else {
         let msg = "Disc scan failed: the scan produced no disc".to_string();
-        crate::log::device_log(device, &msg);
+        crate::server::log::device_log(device, &msg);
         update_state(
             device,
             RipState {
@@ -1291,7 +1299,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         Ok(d) => d,
         Err(e) => {
             let msg = format_lib_error("Disc scan", &e);
-            crate::log::device_log(device, &msg);
+            crate::server::log::device_log(device, &msg);
             update_state(
                 device,
                 RipState {
@@ -1315,7 +1323,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
             .map(|(name, ok)| format!("{name}: {}", if ok { "yes" } else { "no" }))
             .collect::<Vec<_>>()
             .join(", ");
-        crate::log::device_log(device, &format!("Unlockers — {matrix}"));
+        crate::server::log::device_log(device, &format!("Unlockers — {matrix}"));
     }
 
     // Sample-based key resolve (online path can take a minute or two — status
@@ -1323,10 +1331,10 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     // resolve entirely or the scan reads it as AACS/UHD and stalls.
     let (disc, key_outcome, key_reach) = if matches!(disc.format, libfreemkv::DiscFormat::Dvd) {
         tracing::info!(device = %device, "resolve_keys: skipped (DVD/CSS — no AACS)");
-        (disc, crate::keysource::KeyOutcome::Resolved, None)
+        (disc, crate::server::keysource::KeyOutcome::Resolved, None)
     } else {
-        if crate::keysource::uses_online(&cfg_read) {
-            crate::log::device_log(device, "Communicating with online keyserver...");
+        if crate::server::keysource::uses_online(&cfg_read) {
+            crate::server::log::device_log(device, "Communicating with online keyserver...");
             update_state_with(device, |s| {
                 s.key_status = "Communicating with online keyserver…".to_string();
             });
@@ -1338,15 +1346,15 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         // Capture the real decode's reachability now, before anything else can
         // overwrite the per-thread slot — it classifies a no-key without a
         // second empty probe.
-        let decode_reach = crate::keysource::take_online_decode_reachability();
+        let decode_reach = crate::server::keysource::take_online_decode_reachability();
         tracing::info!(device = %device, elapsed_ms = resolve_t0.elapsed().as_millis() as u64, "resolve_keys: end");
         // Down-vs-no-key: bounded-retry a transient online outage rather than
         // reporting a permanent "no keys found". `key_reach` is `Some` only
         // when the service never recovered — drives the status below.
         let no_keys =
             disc.encrypted && matches!(disc.decrypt_keys(), libfreemkv::decrypt::DecryptKeys::None);
-        if crate::keysource::uses_online(&cfg_read)
-            && outcome == crate::keysource::KeyOutcome::NoKey
+        if crate::server::keysource::uses_online(&cfg_read)
+            && outcome == crate::server::keysource::KeyOutcome::NoKey
             && no_keys
         {
             retry_online_keys_on_outage(device, &cfg_read, &mut drive, disc, decode_reach)
@@ -1378,7 +1386,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     }
     .to_string();
 
-    crate::log::device_log(
+    crate::server::log::device_log(
         device,
         &format!(
             "Scanned: {} ({}, {} titles)",
@@ -1392,7 +1400,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     let duration = disc
         .titles
         .first()
-        .map(|t| crate::util::format_duration_hm(t.duration_secs))
+        .map(|t| crate::server::util::format_duration_hm(t.duration_secs))
         .unwrap_or_default();
     let codecs = disc.titles.first().map(format_codecs).unwrap_or_default();
 
@@ -1471,7 +1479,7 @@ pub fn handle_rip_request(
     cfg: &Arc<RwLock<Config>>,
     device: &str,
     device_path: &str,
-    mode: crate::web::ResumeMode,
+    mode: crate::server::web::ResumeMode,
 ) {
     // Skip the scan if already scanned since insertion — a redundant scan
     // clears the UI poster/title and re-runs TMDB for no benefit. Eject +
@@ -1479,7 +1487,7 @@ pub fn handle_rip_request(
     if !session_is_scanned(device) {
         scan_disc(cfg, device, device_path);
     } else {
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             "Skipping redundant scan — disc already identified since insertion.",
         );
@@ -1498,10 +1506,10 @@ fn dispatch_rip_request(
     cfg: &Arc<RwLock<Config>>,
     device: &str,
     device_path: &str,
-    mode: crate::web::ResumeMode,
+    mode: crate::server::web::ResumeMode,
 ) {
     match mode {
-        crate::web::ResumeMode::Require => {
+        crate::server::web::ResumeMode::Require => {
             if resume_refused_by_staging(cfg, device) {
                 return;
             }
@@ -1509,7 +1517,7 @@ fn dispatch_rip_request(
                 // Continue Pass N from the mapfile, re-reading only not-good
                 // ranges instead of the whole disc; `passes = N` is the
                 // recovery budget, nothing is ever abandoned as "dead".
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "Resume requested: continuing partial sweep from mapfile",
                 );
@@ -1517,11 +1525,11 @@ fn dispatch_rip_request(
             } else if let Some(class) = find_resumable_for_disc(cfg, device) {
                 // Mapfile is 100% recovered — just re-mux the staged ISO, no
                 // disc reads.
-                crate::log::device_log(device, "Resume requested: re-muxing existing ISO");
+                crate::server::log::device_log(device, "Resume requested: re-muxing existing ISO");
                 resume::resume_remux(cfg, device, class);
                 drop_session(device);
             } else {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "Resume requested but no resumable staging state found for this disc",
                 );
@@ -1539,7 +1547,7 @@ fn dispatch_rip_request(
                 drop_session(device);
             }
         }
-        crate::web::ResumeMode::Prefer => {
+        crate::server::web::ResumeMode::Prefer => {
             // A loss-aborted disc may take another (non-destructive) resume pass;
             // every fresh fallback below re-guards without that allowance.
             let resumable = resumable_for_device(cfg, device);
@@ -1553,7 +1561,7 @@ fn dispatch_rip_request(
             }
             match auto_resume_action(resumable) {
                 AutoResumeAction::Sweep => {
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         device,
                         "Auto-resume: continuing partial sweep from mapfile",
                     );
@@ -1561,7 +1569,10 @@ fn dispatch_rip_request(
                 }
                 AutoResumeAction::Remux => {
                     if let Some(class) = find_resumable_for_disc(cfg, device) {
-                        crate::log::device_log(device, "Auto-resume: re-muxing existing ISO");
+                        crate::server::log::device_log(
+                            device,
+                            "Auto-resume: re-muxing existing ISO",
+                        );
                         resume::resume_remux(cfg, device, class);
                         drop_session(device);
                     } else {
@@ -1571,12 +1582,12 @@ fn dispatch_rip_request(
                 AutoResumeAction::Fresh => auto_rip_fresh(cfg, device, device_path),
             }
         }
-        crate::web::ResumeMode::Wipe => {
+        crate::server::web::ResumeMode::Wipe => {
             // Never wipe a dir the mux worker is actively reading: an
             // in-flight `remove_dir_all` yanks the ISO out from under it,
             // permanently losing the staging dir with no retry possible.
             if disc_owned_by_worker(cfg, device) {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "Refusing to wipe staging: the mux worker is reading this disc's staged ISO (.ripped/.muxing). Wait for the mux to finish, then retry.",
                 );
@@ -1592,8 +1603,8 @@ fn dispatch_rip_request(
             wipe_staging_for_disc(cfg, device);
             rip_disc(cfg, device, device_path, false);
         }
-        crate::web::ResumeMode::Fresh => auto_rip_fresh(cfg, device, device_path),
-        crate::web::ResumeMode::Default => {
+        crate::server::web::ResumeMode::Fresh => auto_rip_fresh(cfg, device, device_path),
+        crate::server::web::ResumeMode::Default => {
             if !staging_hold_stands_down(cfg, device, GuardFor::InPlace) {
                 rip_disc(cfg, device, device_path, false);
             }
@@ -1641,7 +1652,7 @@ fn staging_hold_stands_down(cfg: &Arc<RwLock<Config>>, device: &str, purpose: Gu
     };
     let why = match hold {
         StagingHold::Completed => {
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 "Disc already ripped (.completed marker present) — skipping unattended re-rip. Click Rip to force a fresh rip.",
             );
@@ -1698,7 +1709,7 @@ fn staging_hold_stands_down(cfg: &Arc<RwLock<Config>>, device: &str, purpose: Gu
             "This disc's staging dir lists as empty but could not be removed (stale network-share listing?) — NOT wiping it. Retry once staging is readable, or use Rip to start over."
         }
     };
-    crate::log::device_log(device, why);
+    crate::server::log::device_log(device, why);
     // The UI renders Accept/Resume on loss_aborted && !active.
     stand_down_idle(device, hold == StagingHold::LossAborted);
     true
@@ -1716,7 +1727,7 @@ fn resume_refused_by_staging(cfg: &Arc<RwLock<Config>>, device: &str) -> bool {
         }
         _ => return false,
     };
-    crate::log::device_log(device, why);
+    crate::server::log::device_log(device, why);
     update_state_with(device, |s| {
         s.status = "error".to_string();
         s.last_error = why.to_string();
@@ -2126,7 +2137,7 @@ fn wipe_staging_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) {
     // segment that escapes the staging root — else `join("..")` +
     // `remove_dir_all` would delete its parent.
     if !is_safe_staging_segment(&sanitized) {
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!("Refusing to wipe staging: unsafe sanitized dir name {sanitized:?}"),
         );
@@ -2137,7 +2148,7 @@ fn wipe_staging_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) {
     // Belt-and-braces: confirm the join stays strictly inside the
     // staging root before removing anything.
     if path.parent() != Some(staging_root) {
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!(
                 "Refusing to wipe staging: {} is not a direct child of {}",
@@ -2149,11 +2160,11 @@ fn wipe_staging_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) {
     }
     if path.exists() {
         match std::fs::remove_dir_all(&path) {
-            Ok(_) => crate::log::device_log(
+            Ok(_) => crate::server::log::device_log(
                 device,
                 &format!("Wiped staging dir for fresh rip: {}", path.display()),
             ),
-            Err(e) => crate::log::device_log(
+            Err(e) => crate::server::log::device_log(
                 device,
                 &format!("Failed to wipe staging dir {}: {}", path.display(), e),
             ),
@@ -2273,13 +2284,13 @@ pub fn make_drive_event_fn(
     latest_bytes_read: Arc<AtomicU64>,
 ) -> impl Fn(libfreemkv::event::Event) + Send + 'static {
     move |event| {
-        wdf.store(crate::util::epoch_secs(), Ordering::Relaxed);
+        wdf.store(crate::server::util::epoch_secs(), Ordering::Relaxed);
         match event.kind {
             libfreemkv::event::EventKind::BytesRead { bytes, .. } => {
                 latest_bytes_read.store(bytes, Ordering::Relaxed);
             }
             libfreemkv::event::EventKind::ReadError { sector, .. } => {
-                crate::log::device_log(&dev, &format!("Read error at sector {}", sector));
+                crate::server::log::device_log(&dev, &format!("Read error at sector {}", sector));
             }
             _ => {}
         }
@@ -2295,7 +2306,7 @@ fn install_rip_halt(device: &str) {
 // Report a post-mux failure that leaves the staging dir RESUMABLE (not `.failed`), and set a
 // terminal `status` so `is_busy()` doesn't stick true forever.
 fn abort_post_mux_preserving_staging(device: &str, log_line: &str, last_error: &str) {
-    crate::log::device_log(device, log_line);
+    crate::server::log::device_log(device, log_line);
     update_state_with(device, |s| {
         // "error", not "failed": `failed` pairs with a `.failed` marker, and
         // neither call site here writes one. Matches the mux-time loss-abort
@@ -2330,10 +2341,10 @@ fn fire_rip_complete_webhook(
     let size_gb = std::fs::metadata(iso_path_str)
         .map(|m| m.len() as f64 / BYTES_PER_GIB)
         .unwrap_or(0.0);
-    crate::webhook::send_rich(
+    crate::server::webhook::send_rich(
         cfg,
-        crate::webhook::WebhookEvent::Rip,
-        &crate::webhook::RipEvent {
+        crate::server::webhook::WebhookEvent::Rip,
+        &crate::server::webhook::RipEvent {
             event: "rip_complete",
             title: display_name,
             year: tmdb_year,
@@ -2426,11 +2437,11 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
     // Reachability of the fresh-scan decode POST, set below when this rip
     // resolves keys just now. A reused session carries scan_disc's verdict instead.
-    let mut resume_decode_reach: Option<crate::keysource::ServiceReachability> = None;
+    let mut resume_decode_reach: Option<crate::server::keysource::ServiceReachability> = None;
     // Take the existing session, or open fresh
     let mut session = match take_session(device) {
         Some(s) if s.scanned => {
-            crate::log::device_log(device, "Reusing drive session");
+            crate::server::log::device_log(device, "Reusing drive session");
             s
         }
         existing => {
@@ -2438,12 +2449,12 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             if existing.is_some() {
                 drop_session(device);
             }
-            crate::log::device_log(device, "Opening drive...");
+            crate::server::log::device_log(device, "Opening drive...");
             let mut drive = match libfreemkv::Drive::open(std::path::Path::new(device_path)) {
                 Ok(d) => d,
                 Err(e) => {
                     let msg = format_lib_error("Cannot open drive", &e);
-                    crate::log::device_log(device, &msg);
+                    crate::server::log::device_log(device, &msg);
                     update_state(
                         device,
                         RipState {
@@ -2459,7 +2470,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             if let Err(e) = drive.wait_ready() {
                 tracing::warn!(device = %device, error = %e, "drive wait_ready failed (continuing)");
             }
-            crate::log::device_log(device, "Initializing...");
+            crate::server::log::device_log(device, "Initializing...");
             if let Err(e) = drive.init() {
                 tracing::warn!(device = %device, error = %e, "drive init failed (continuing)");
             }
@@ -2469,7 +2480,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             }
 
             let scan_opts = scan_opts_for(&cfg_read);
-            crate::log::device_log(device, "Scanning titles...");
+            crate::server::log::device_log(device, "Scanning titles...");
             // Scan-phase watchdog (same as scan_disc): WARNs every 15s while
             // scan/resolve runs, torn down by the drop-guard.
             let scan_wd = ScanWatchdog::arm(device);
@@ -2479,7 +2490,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 Ok(d) => d,
                 Err(e) => {
                     let msg = format_lib_error("Disc scan", &e);
-                    crate::log::device_log(device, &msg);
+                    crate::server::log::device_log(device, &msg);
                     update_state(
                         device,
                         RipState {
@@ -2504,7 +2515,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 // Capture the real decode's reachability from this fresh resolve
                 // so the outage retry below classifies a no-key without a second
                 // empty probe.
-                resume_decode_reach = crate::keysource::take_online_decode_reachability();
+                resume_decode_reach = crate::server::keysource::take_online_decode_reachability();
                 disc
             };
             drop(scan_wd);
@@ -2515,7 +2526,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 .unwrap_or(&disc.volume_id)
                 .to_string();
 
-            let tmdb = crate::tmdb::lookup(&disc_name, &cfg_read.tmdb_api_key);
+            let tmdb = crate::server::tmdb::lookup(&disc_name, &cfg_read.tmdb_api_key);
 
             DriveSession {
                 drive,
@@ -2536,7 +2547,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 device = %device,
                 "DriveSession had no disc — every code path that builds a session must set Some(disc); reaching this branch is a logic bug"
             );
-            crate::log::device_log(device, "Internal error: session has no disc");
+            crate::server::log::device_log(device, "Internal error: session has no disc");
             update_state(
                 device,
                 RipState {
@@ -2579,7 +2590,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // A picked title is trusted (treated as confident → no review hold).
     let title_override = take_title_override(device);
     let overridden = title_override.is_some();
-    let tmdb_owned: Option<crate::tmdb::TmdbResult> =
+    let tmdb_owned: Option<crate::server::tmdb::TmdbResult> =
         title_override.or_else(|| session.tmdb.clone());
     let tmdb = &tmdb_owned;
     let tmdb_title = tmdb.as_ref().map(|t| t.title.clone()).unwrap_or_default();
@@ -2619,7 +2630,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         tmdb_year,
     );
 
-    crate::log::device_log(
+    crate::server::log::device_log(
         device,
         &format!(
             "Disc: {} ({}, {} titles)",
@@ -2630,7 +2641,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     );
 
     if disc.titles.is_empty() {
-        crate::log::device_log(device, "No titles found");
+        crate::server::log::device_log(device, "No titles found");
         update_state(
             device,
             RipState {
@@ -2643,7 +2654,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         return;
     }
 
-    let duration = crate::util::format_duration_hm(disc.titles[0].duration_secs);
+    let duration = crate::server::util::format_duration_hm(disc.titles[0].duration_secs);
     let codecs = format_codecs(&disc.titles[0]);
     let title = disc.titles[0].clone();
 
@@ -2656,9 +2667,9 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     let keyless =
         disc.encrypted && matches!(disc.decrypt_keys(), libfreemkv::decrypt::DecryptKeys::None);
     // Runs under capture-without-keys too: the fixed setting may still find the key.
-    if reresolve && keyless && crate::keysource::uses_online(&cfg_read) {
+    if reresolve && keyless && crate::server::keysource::uses_online(&cfg_read) {
         // The operator may have fixed Settings since the scan: resolve once with the current config.
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             "Re-resolving keys with the current key-service settings...",
         );
@@ -2667,13 +2678,13 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         });
         let (rdisc, outcome) = resolve_keys_from_drive(&cfg_read, &mut session.drive, disc);
         disc = rdisc;
-        seed_verdict = crate::keysource::take_online_decode_reachability();
+        seed_verdict = crate::server::keysource::take_online_decode_reachability();
         let status = key_readiness(&disc, outcome, cfg_read.capture_without_keys, seed_verdict);
         update_state_with(device, |s| s.key_status = status);
     }
-    let mut key_verdict: Option<crate::keysource::ServiceReachability> = None;
+    let mut key_verdict: Option<crate::server::keysource::ServiceReachability> = None;
     if should_retry_online_keys(
-        crate::keysource::uses_online(&cfg_read),
+        crate::server::keysource::uses_online(&cfg_read),
         cfg_read.capture_without_keys,
         disc.encrypted,
         matches!(disc.decrypt_keys(), libfreemkv::decrypt::DecryptKeys::None),
@@ -2697,7 +2708,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         // state so a later insert/rescan retries. ONLY transient verdicts park —
         // a definitive answer falls through below, re-asking cannot change it.
         if let Some(status_msg) = key_verdict.and_then(key_service_transient_status) {
-            crate::log::device_log(device, &format!("Not ripping now — {status_msg}"));
+            crate::server::log::device_log(device, &format!("Not ripping now — {status_msg}"));
             update_state_with(device, |s| {
                 s.status = "idle".to_string();
                 s.key_status = status_msg.clone();
@@ -2713,14 +2724,14 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             None => keyless_failure_message(&disc),
         };
         if cfg_read.capture_without_keys {
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!(
                     "{msg}\nNo keys yet — capturing to ISO; mux deferred until keys are available."
                 ),
             );
         } else {
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!(
                     "{msg}\nNo keys — not ripping. Enable \"capture without keys\" to save an ISO for later."
@@ -2737,7 +2748,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
     // Probe for speed — only needed for rip, not scan
     if !session.probed {
-        crate::log::device_log(device, "Probing disc speed...");
+        crate::server::log::device_log(device, "Probing disc speed...");
         let _ = session.drive.probe_disc();
         session.probed = true;
     }
@@ -2754,7 +2765,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // streams only the selected title and never produces a whole-disc ISO.
     // Refuse the incoherent combination and point at multi-pass instead.
     if iso_output_needs_multipass(&output_format, cfg_read.max_retries) {
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             "ISO output requires multi-pass mode — single-pass streams only the \
              selected title and cannot capture a whole-disc image. Enable multi-pass \
@@ -2785,7 +2796,10 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         // Bail loudly instead of pressing on: a missing staging dir
         // makes the free-space preflight skip its check and the sweep
         // later dies with a confusing ENOENT/EACCES far from the cause.
-        crate::log::device_log(device, &format!("Cannot create staging dir {staging}: {e}"));
+        crate::server::log::device_log(
+            device,
+            &format!("Cannot create staging dir {staging}: {e}"),
+        );
         update_state_with(device, |s| {
             s.status = "error".to_string();
             if s.last_error.is_empty() {
@@ -2803,14 +2817,14 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // without it a crash mid-sweep leaves the dir ungoverned (restart-count
     // toward `.failed`, mover WARN-floods). Replaced by `.ripped`/`.failed`.
     if let Some(why) = staging::seed_sweeping_for_live_rip(std::path::Path::new(&staging)) {
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!(
                 "Replaced an unreadable state.json ({why}); the plan is rebuilt from the disc. The old file is kept as {}.",
                 staging::UNREADABLE_STATE_ASIDE
             ),
         );
-        crate::muxer::clear_error_with_prefix(&staging, staging::STATE_HELD_PREFIX);
+        crate::server::muxer::clear_error_with_prefix(&staging, staging::STATE_HELD_PREFIX);
     }
     // RAII cleanup for `.sweeping`: terminal-marker writers clear it first,
     // so this only fires on error/panic, preventing a stale `.sweeping` from
@@ -2823,14 +2837,17 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // and the mover's TV/fallback delivery both key off this exact form.
     let filename = format!(
         "{}.{}",
-        crate::util::sanitize_path_compact(&display_name),
+        crate::server::util::sanitize_path_compact(&display_name),
         ext
     );
     let output_path = format!("{}/{}", staging, filename);
     // Intermediate-ISO + mapfile paths for multipass, derived once here
     // (previously rebuilt at ~5 scattered sites). Plain title, no disc
     // suffix — same reasoning as `filename` above.
-    let iso_filename = format!("{}.iso", crate::util::sanitize_path_compact(&display_name));
+    let iso_filename = format!(
+        "{}.iso",
+        crate::server::util::sanitize_path_compact(&display_name)
+    );
     let iso_path_str = format!("{staging}/{iso_filename}");
     let mapfile_path_str = format!("{iso_path_str}.mapfile");
     let dest_url = if staging::is_network_output(&output_format, &cfg_read.network_target) {
@@ -2841,7 +2858,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         format!("{}://{}", output_scheme_for(&output_format), output_path)
     };
 
-    crate::log::device_log(device, &format!("Ripping {} to {}", display_name, filename));
+    crate::server::log::device_log(device, &format!("Ripping {} to {}", display_name, filename));
 
     update_state(
         device,
@@ -2881,7 +2898,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // Shared state read by event callbacks and the rip loop (copies atomics
     // into RipState every ~1s). The watchdog timestamp updates on ANY sector
     // event, not just frame writes, so skipped sectors aren't seen as stalled.
-    let wd_last_frame = Arc::new(AtomicU64::new(crate::util::epoch_secs()));
+    let wd_last_frame = Arc::new(AtomicU64::new(crate::server::util::epoch_secs()));
     let latest_bytes_read = Arc::new(AtomicU64::new(0));
     let rip_last_lba = Arc::new(AtomicU64::new(0));
     let rip_current_batch = Arc::new(AtomicU16::new(batch));
@@ -3049,7 +3066,9 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             > = std::sync::Arc::new(move || {
                 // Recover if the config lock was poisoned rather than
                 // panicking this rip thread — matches the file's convention.
-                crate::keysource::build_sources(&cfg.read().unwrap_or_else(|e| e.into_inner()))
+                crate::server::keysource::build_sources(
+                    &cfg.read().unwrap_or_else(|e| e.into_inner()),
+                )
             });
             libfreemkv::keysource::key_fetch(inputs, make)
         });
@@ -3063,7 +3082,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         // the sweep polls — a Stop exits cleanly with no `.failed` marker.
         let gate_stopped = || -> bool {
             if halt.load(Ordering::Relaxed) {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "Rip stopped by user during FMTS key resolution — staging preserved.",
                 );
@@ -3112,20 +3131,23 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 // reader is handed `keys` directly (stale pool → DecryptFailed).
                 keys = disc.decrypt_keys();
                 fmts_key_map = resolved_map.ok().map(std::sync::Arc::new);
-                crate::log::device_log(device, "FMTS: complete forensic key map resolved pre-rip.");
+                crate::server::log::device_log(
+                    device,
+                    "FMTS: complete forensic key map resolved pre-rip.",
+                );
             }
             FmtsGate::CaptureOnly => {
                 // `defer_forensic_mux` is now set, so the mux-skip below (or
                 // resume_remux's re-defer) arranges the deferral this log
                 // promises — previously a no-op that muxed base-only garbage.
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "FMTS: forensic keys unavailable — capturing raw ISO now \
                          (Capture Discs Without Keys is on); mux deferred until keys arrive.",
                 );
             }
             FmtsGate::Skip => {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "FMTS: forensic keys missing — not ripping. Enable \
                          \"capture without keys\" to save an ISO for later.",
@@ -3164,7 +3186,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         if bytes_total_disc == 0 && !skip_diskcheck {
             // read_capacity() returned 0/unknown, so the image size is
             // uncomputable; tell the operator why the check didn't run.
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 "disk-space preflight skipped: drive reported unknown capacity (read_capacity=0); \
                  a too-small staging volume will ENOSPC mid-rip",
@@ -3195,7 +3217,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             if let Some(avail) = staging_free_bytes(&staging) {
                 if avail < required {
                     let msg = disk_space_preflight_message(required, &staging, avail);
-                    crate::log::device_log(device, &msg);
+                    crate::server::log::device_log(device, &msg);
                     update_state_with(device, |s| {
                         s.status = "error".to_string();
                         s.last_error = msg.clone();
@@ -3208,7 +3230,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 // statvfs failed (missing path / unmounted volume / non-POSIX
                 // fs), so free space can't be computed; tell the operator why
                 // rather than silently skipping. Mirrors the unknown-capacity branch.
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "disk-space preflight skipped: could not read free space at {} \
@@ -3242,7 +3264,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
         // Pass 1: disc → ISO (fast sweep, skip-forward on failure).
         let pass_label = format!("Pass 1/{total_passes}: disc → ISO");
-        crate::log::device_log(device, &pass_label);
+        crate::server::log::device_log(device, &pass_label);
         set_pass_progress(
             &pass_ctx,
             1,
@@ -3285,7 +3307,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         'pass1: loop {
             attempt += 1;
             if attempt > MAX_PASS1_ATTEMPTS {
-                crate::log::device_log(device, "Pass 1: max attempts reached");
+                crate::server::log::device_log(device, "Pass 1: max attempts reached");
                 break;
             }
 
@@ -3318,7 +3340,10 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 }
                 Err(e) => {
                     if halt.load(Ordering::Relaxed) {
-                        crate::log::device_log(device, &format!("Pass 1 cancelled (halt): {e}"));
+                        crate::server::log::device_log(
+                            device,
+                            &format!("Pass 1 cancelled (halt): {e}"),
+                        );
                         // `_halt_guard` unregisters this device's Halt token on
                         // drop (i.e. on this `return`); no explicit call needed.
                         return;
@@ -3327,7 +3352,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     let is_transport = e.is_scsi_transport_failure();
 
                     if !is_transport {
-                        crate::log::device_log(device, &format!("Pass 1 failed: {e}"));
+                        crate::server::log::device_log(device, &format!("Pass 1 failed: {e}"));
                         let user_msg = format_pass_error("Pass 1", &e);
                         update_state(
                             device,
@@ -3358,7 +3383,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
                     // Drop stale drive, wait for USB re-enumeration, re-open
                     // on new path.
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         device,
                         &format!(
                             "Pass 1 attempt {attempt}: transport failure (bridge crash), waiting for USB re-enumeration"
@@ -3379,7 +3404,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                         None
                     };
                     if recovery_halt.is_cancelled() {
-                        crate::log::device_log(
+                        crate::server::log::device_log(
                             device,
                             "Pass 1 cancelled (halt) during transport-failure recovery",
                         );
@@ -3387,7 +3412,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     }
                     match (new_path.as_deref(), &device_path) {
                         (Some(p), _) if p != device_path => {
-                            crate::log::device_log(
+                            crate::server::log::device_log(
                                 device,
                                 &format!(
                                     "Pass 1 attempt {attempt}: drive rediscovered at {p} (original={}), attempting re-open",
@@ -3407,7 +3432,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                             };
 
                             if let Err(e) = drive.wait_ready() {
-                                crate::log::device_log(
+                                crate::server::log::device_log(
                                     device,
                                     &format!(
                                         "Pass 1 attempt {attempt}: Drive::wait_ready({}) failed strategy=transport_failure_recovery error={} — recovery path exhausted",
@@ -3422,7 +3447,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                                     &format!("ERROR_CODE_{}", e.code())
                                 };
 
-                                crate::log::device_log(
+                                crate::server::log::device_log(
                                     device,
                                     &format!(
                                         "STRATEGY_FAILURE: transport_failure_recovery FAILED at Drive::wait_ready category={} error_code={}",
@@ -3435,7 +3460,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                             }
 
                             if let Err(e) = drive.init() {
-                                crate::log::device_log(
+                                crate::server::log::device_log(
                                     device,
                                     &format!(
                                         "Pass 1 attempt {attempt}: Drive::init({}) failed strategy=transport_failure_recovery error={} sense_key={:?} ASC={:?} — recovery path exhausted",
@@ -3461,7 +3486,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                             session.drive = drive;
                             session.device_path = p.to_string();
 
-                            crate::log::device_log(
+                            crate::server::log::device_log(
                                 device,
                                 &format!(
                                     "PASS 1/{}: transport_failure_recovery SUCCESS — resuming from mapfile at {}",
@@ -3472,7 +3497,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                         }
 
                         (Some(p), _) if p == device_path => {
-                            crate::log::device_log(
+                            crate::server::log::device_log(
                                 device,
                                 &format!(
                                     "Pass 1 attempt {attempt}: drive still at original path {}, attempting re-open",
@@ -3494,7 +3519,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                             };
 
                             if let Err(e) = drive.wait_ready() {
-                                crate::log::device_log(
+                                crate::server::log::device_log(
                                     device,
                                     &format!(
                                         "Pass 1 attempt {attempt}: Drive::wait_ready({}) failed strategy=transport_failure_recovery error={} — recovery path exhausted",
@@ -3509,7 +3534,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                                     &format!("ERROR_CODE_{}", e.code())
                                 };
 
-                                crate::log::device_log(
+                                crate::server::log::device_log(
                                     device,
                                     &format!(
                                         "STRATEGY_FAILURE: transport_failure_recovery FAILED at Drive::wait_ready category={} error_code={}",
@@ -3522,7 +3547,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                             }
 
                             if let Err(e) = drive.init() {
-                                crate::log::device_log(
+                                crate::server::log::device_log(
                                     device,
                                     &format!(
                                         "Pass 1 attempt {attempt}: Drive::init({}) failed strategy=transport_failure_recovery error={} sense_key={:?} ASC={:?} — recovery path exhausted",
@@ -3551,7 +3576,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                             session.drive = drive;
                             session.device_path = p.to_string();
 
-                            crate::log::device_log(
+                            crate::server::log::device_log(
                                 device,
                                 &format!(
                                     "PASS 1/{}: transport_failure_recovery SUCCESS — resuming from mapfile at {}",
@@ -3562,7 +3587,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                         }
 
                         (None, _) => {
-                            crate::log::device_log(
+                            crate::server::log::device_log(
                                 device,
                                 "Pass 1: could not re-discover drive after transport failure strategy=usb_re_enumeration FAILED",
                             );
@@ -3576,7 +3601,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                                 })
                                 .unwrap_or(-1);
 
-                            crate::log::device_log(
+                            crate::server::log::device_log(
                                 device,
                                 &format!(
                                     "usb_re_enumeration strategy tried probe paths: sg{} (original), sg{}, sg{}, sg{}, sg{}, sg{}, sg{}",
@@ -3590,7 +3615,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                                 ),
                             );
 
-                            crate::log::device_log(
+                            crate::server::log::device_log(
                                 device,
                                 "STRATEGY_FAILURE: usb_re_enumeration FAILED — no valid drive path found after USB re-enumeration",
                             );
@@ -3600,7 +3625,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
                         // Fallback for any other case (shouldn't happen but compiler requires exhaustiveness)
                         _ => {
-                            crate::log::device_log(
+                            crate::server::log::device_log(
                                 device,
                                 "STRATEGY_FAILURE: usb_re_enumeration FAILED — unexpected match state",
                             );
@@ -3624,7 +3649,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     "unrecoverable_error".to_string()
                 };
 
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "Pass 1: recovery failed at attempt {}/{}, strategy={}",
@@ -3666,7 +3691,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
                 // Log recovery guidance for user action based on failure type
                 if failure_reason == "transport_failure_recovery_exhausted" {
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         device,
                         &format!(
                             "RECOVERY_GUIDANCE: Transport failure recovery exhausted after {} attempts. Check logs for specific error category (SCSI_ERROR, DEVICE_ERROR). If ILLEGAL REQUEST errors present, drive firmware wedged — eject disc and power-cycle USB drive before retrying.",
@@ -3674,14 +3699,14 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                         ),
                     );
 
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         device,
                         &format!(
                             "NEXT_STEPS: 1) Check /api/logs/{device} for STRATEGY_FAILURE entries. 2) Identify which phase failed (Drive::open/wait_ready/init). 3) If firmware wedged, power-cycle the drive and retry.",
                         ),
                     );
                 } else {
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         device,
                         "RECOVERY_GUIDANCE: Unrecoverable error occurred before transport failure recovery could complete. Check logs for first ERROR entry to identify root cause.",
                     );
@@ -3693,7 +3718,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         };
         // Drop the Pass 1 watcher so its thread exits before Pass 2 spawns its own.
         drop(_pass1_guard);
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!(
                 "Pass 1 done: {:.2} GB good, {:.2} MB unreadable, {:.2} MB pending",
@@ -3716,7 +3741,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         // ties the retry-loop bound to the same pure plan `total_passes` uses.
         let patch_passes = plan_passes(cfg_read.max_retries).patch_passes;
 
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!(
                 "PASS 2-{}: retry loop starting max_retries={} bytes_pending={}",
@@ -3726,7 +3751,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         for retry_n in 1..=patch_passes {
             // If user hit stop, bail.
             if user_halt.load(Ordering::Relaxed) {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!("PASS {} STOPPED: user halt before retry pass", retry_n + 1),
                 );
@@ -3762,7 +3787,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 } else {
                     "muxed title"
                 };
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "PASS {} SKIPPED: {} is 100% recovered in mapfile — proceeding to mux",
@@ -3813,7 +3838,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 );
             }
 
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!(
                     "PASS {}/{total_passes}: retrying bad ranges (bpt=1) bytes_pending={}",
@@ -3856,7 +3881,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 // spin_cycle's SCSI command failed (dead bus / file-backed resume).
                 // Fall back to a short passive idle for SOME recovery time — a
                 // bridge transport fault self-recovers in ~15s of idle.
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "drive spin-cycle before pass {pass} failed ({e}); settling 15 s instead"
@@ -3870,7 +3895,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     std::thread::sleep(std::time::Duration::from_secs(1));
                 }
             } else {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!("drive spin-cycled (soft un-wedge, no eject) before pass {pass}"),
                 );
@@ -3897,7 +3922,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     });
 
                     if user_halt.load(Ordering::Relaxed) {
-                        crate::log::device_log(
+                        crate::server::log::device_log(
                             device,
                             &format!(
                                 "PASS {} CANCELLED: user halt category={} error_code={}",
@@ -3908,10 +3933,10 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                         );
 
                         if let Some(info) = sense_info {
-                            crate::log::device_log(device, &info);
+                            crate::server::log::device_log(device, &info);
                         }
                     } else {
-                        crate::log::device_log(
+                        crate::server::log::device_log(
                             device,
                             &format!(
                                 "PASS {} FAILED: strategy=patch_recovery category={} error_code={} {}",
@@ -3923,7 +3948,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                         );
 
                         // Log which recovery phase failed
-                        crate::log::device_log(
+                        crate::server::log::device_log(
                             device,
                             &format!(
                                 "STRATEGY_FAILURE: patch_recovery FAILED at disc.patch() with category={} (sense_key={:?}, ASC={:?})",
@@ -3935,7 +3960,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
                         // Provide actionable guidance based on error type
                         if e.code() == 4000 && e.is_scsi_transport_failure() {
-                            crate::log::device_log(
+                            crate::server::log::device_log(
                                 device,
                                 "ACTION_REQUIRED: Transport failure detected — USB bridge crashed. Eject disc and power-cycle drive before retrying.",
                             );
@@ -3944,14 +3969,14 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                                 .map(|s| s.is_hardware_error())
                                 .unwrap_or(false)
                         {
-                            crate::log::device_log(
+                            crate::server::log::device_log(
                                 device,
                                 "ACTION_REQUIRED: Drive hardware error detected — drive may be failing. Consider replacing optical drive.",
                             );
                         } else if e.code() == 4000
                             && e.scsi_sense().map(|s| s.asc == 0x20).unwrap_or(false)
                         {
-                            crate::log::device_log(
+                            crate::server::log::device_log(
                                 device,
                                 "ACTION_REQUIRED: ILLEGAL REQUEST (ASC=0x20) — drive firmware wedged. Power-cycle USB drive to clear state.",
                             );
@@ -3976,7 +4001,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // Report all three buckets — recovered this pass, still-pending, and
             // given-up unreadable. The old line showed only `unreadable` (0 until
             // post-loop promotion), so a failed pass read as "told you nothing".
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!(
                     "Pass {pass} done: recovered {:.2} MB this pass; {:.2} MB still bad, {:.2} MB unreadable{exit_str}",
@@ -3996,7 +4021,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // drive state will help. Give up retries early so we still
             // mux on what we have.
             if !patch_made_progress(recovered) {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "PASS {} STOPPED: strategy=patch_recovery exhausted — no progress (recovered={} MB) after all retry attempts",
@@ -4005,12 +4030,12 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     ),
                 );
 
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "STRATEGY_FAILURE: patch_recovery exhausted — drive cannot recover more data from bad sectors with current settings",
                 );
 
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "RECOVERY_GUIDANCE: Consider increasing max_retries or abort_on_lost_secs if tolerating some data loss is acceptable.",
                 );
@@ -4022,7 +4047,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         // End-of-recovery promotion (multi-pass only) happens below; a user STOP skips it so
         // un-retried ranges stay resumable.
         if user_halt.load(Ordering::Relaxed) {
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 "Rip stopped by user — preserving partial sweep for resume.",
             );
@@ -4141,7 +4166,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 // Fail-safe: the mapfile couldn't load, so we can't measure loss.
                 // The 0 initializers would let the gate conclude "no loss" and
                 // deliver a lossy rip as perfect — mark NaN so `loss_aborts` fires.
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "Recovery mapfile could not be loaded to verify loss — forcing abort (cannot confirm a clean rip)",
                 );
@@ -4162,7 +4187,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 main_lost_ms_for_history,
                 effective_abort,
             ) {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "ABORT: strategy=abort_check triggered — {:.2}s lost in main movie (threshold: {}s)",
@@ -4171,7 +4196,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     ),
                 );
 
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "STRATEGY_FAILURE: abort_check FAILED — data loss ({:.2}s) exceeds threshold ({}s)",
@@ -4180,7 +4205,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     ),
                 );
 
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &if output_is_iso_image(&cfg_read.output_format) {
                         "RECOVERY_GUIDANCE: ISO output is a whole-disc image and requires 100% — abort_on_lost_secs does not apply (it is a MUXED-output setting, ignored for ISO). The loss is unrecoverable media: clean or replace the disc, or choose MKV output to tolerate non-title damage.".to_string()
@@ -4220,7 +4245,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     ),
                 );
                 if terminal {
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         device,
                         "Abort-on-loss retry budget exhausted — quarantining (.failed).",
                     );
@@ -4230,7 +4255,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             }
 
             if main_lost_ms_for_history > 0.0 {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "Main movie loss after retries: {:.2}s (threshold: {}s)",
@@ -4239,13 +4264,13 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     ),
                 );
             } else {
-                crate::log::device_log(device, "All data recovered — proceeding with mux.");
+                crate::server::log::device_log(device, "All data recovered — proceeding with mux.");
             }
         }
 
         // Mux gating: skip mux + return cleanly if user pressed stop.
         if user_halt.load(Ordering::Relaxed) {
-            crate::log::device_log(device, "Rip cancelled — skipping mux.");
+            crate::server::log::device_log(device, "Rip cancelled — skipping mux.");
             unregister_halt(device);
             return;
         }
@@ -4257,7 +4282,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // `.done` pointing at a page-cache-only ISO. If fsync fails, withhold
             // the markers and preserve staging for retry.
             if !staging::durability_gate_passes(false, || staging::fsync_output_file(iso_path)) {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "Durability gate failed: could not fsync ISO image to stable storage; \
                      withholding .done/.completed and preserving staging for retry",
@@ -4287,14 +4312,14 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 s.tmdb_id = tmdb_id;
                 s.tmdb_poster = tmdb_poster.clone();
                 s.tmdb_overview = tmdb_overview.clone();
-                s.season = crate::tmdb::season_from_label(&disc_name);
-                s.disc_number = crate::tmdb::disc_from_label(&disc_name);
+                s.season = crate::server::tmdb::season_from_label(&disc_name);
+                s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
                 s.outputs = vec![staging::Output {
                     filename: iso_leaf,
                     ..Default::default()
                 }];
             }) {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "{marker_name} state write failed ({e}); ISO is staged but the mover cannot pick it up"
@@ -4310,7 +4335,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             }
             staging::write_completed_marker(staging_path);
             staging::clear_restart_count(staging_path);
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!("ISO output complete — disc image staged as {iso_filename}"),
             );
@@ -4360,8 +4385,8 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 largest_gap_ms: rs.largest_gap_ms,
             })
         };
-        let marker = crate::muxer::RippedMarker {
-            schema_version: crate::muxer::RIPPED_MARKER_SCHEMA,
+        let marker = crate::server::muxer::RippedMarker {
+            schema_version: crate::server::muxer::RIPPED_MARKER_SCHEMA,
             iso_path: iso_path_str.clone(),
             mapfile_path: mapfile_path_str.clone(),
             display_name: display_name.clone(),
@@ -4401,11 +4426,11 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             title_confident,
         };
         let staging_path = std::path::Path::new(&staging);
-        if let Err(e) = crate::muxer::write_marker(staging_path, &marker) {
+        if let Err(e) = crate::server::muxer::write_marker(staging_path, &marker) {
             // Couldn't hand off — fall back to the inline mux below
             // by NOT taking the early-return branch. Log the failure
             // so the cause is on the device log.
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!(".ripped marker write failed ({e}); falling back to inline mux"),
             );
@@ -4424,11 +4449,11 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             staging::mutate_state_if_present(staging_path, |s| {
                 s.tmdb_id = tmdb_id;
                 s.disc_name = disc_name.clone();
-                s.season = crate::tmdb::season_from_label(&disc_name);
-                s.disc_number = crate::tmdb::disc_from_label(&disc_name);
+                s.season = crate::server::tmdb::season_from_label(&disc_name);
+                s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
                 s.outputs = plan;
             });
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 "Sweep + patch complete; handed off to mux worker via .ripped marker.",
             );
@@ -4528,7 +4553,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
         // Fallback inline-mux path (only reached if the marker write
         // above failed). Closes drive, opens ISO, runs mux as before.
-        crate::log::device_log(device, "Drive released; muxing ISO → MKV.");
+        crate::server::log::device_log(device, "Drive released; muxing ISO → MKV.");
         // Rip stage done even on the fallback path: the drive is released here,
         // before the inline mux runs, so fire the drive-free hook now (the
         // inline mux fires mux_complete when the .mkv is written, below).
@@ -4550,7 +4575,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             match libfreemkv::FileSectorSource::open(std::path::Path::new(&iso_path_str)) {
                 Ok(r) => {
                     use libfreemkv::sector::SectorSource;
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         device,
                         &format!("ISO opened successfully: {} sectors", r.capacity_sectors()),
                     );
@@ -4558,7 +4583,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 }
                 Err(e) => {
                     let msg = format_lib_error("Open ISO", &e);
-                    crate::log::device_log(device, &msg);
+                    crate::server::log::device_log(device, &msg);
                     // Cannot open the ISO for mux — if the sweep was interrupted
                     // and `.ripped` also failed, this ENOENT repeats every startup.
                     // Quarantine with `.failed` so restart classifies it terminal.
@@ -4655,7 +4680,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     format!("Ripped to ISO — no keys, mux deferred. {msg}"),
                 )
             };
-            crate::log::device_log(device, &log_line);
+            crate::server::log::device_log(device, &log_line);
             update_state_with(device, |s| {
                 s.status = "idle".to_string();
                 s.last_error = state_err;
@@ -4681,7 +4706,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     ),
                 )
             };
-            crate::log::device_log(device, &log_line);
+            crate::server::log::device_log(device, &log_line);
             update_state_with(device, |s| {
                 s.status = "error".to_string();
                 s.last_error = state_err;
@@ -4747,7 +4772,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             keys,
             // Fresh-key-on-failure fetch (recover a 2nd/Nth CPS-unit key mid-mux)
             // — the SAME closure the pre-migration build_iso_pipeline call took.
-            key_fetch: crate::keysource::build_iso_key_fetch(
+            key_fetch: crate::server::keysource::build_iso_key_fetch(
                 &cfg_read,
                 std::path::Path::new(&iso_path_str),
             ),
@@ -4760,7 +4785,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 // A Stop pressed during the CSS crack surfaces as `Error::Halted`
                 // — a user halt, not structural: preserve staging, no `.failed`.
                 if is_halt_error(&e) {
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         device,
                         "Rip stopped by user during mux setup — staging preserved for resume.",
                     );
@@ -4773,7 +4798,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 let msg = format!(
                     "Mux setup failed — the disc's title or stream layout could not be prepared for muxing. The source may be damaged or use an unsupported format ({e})."
                 );
-                crate::log::device_log(device, &msg);
+                crate::server::log::device_log(device, &msg);
                 let staging_disc_path = std::path::Path::new(&staging);
                 quarantine_or_log(device, staging_disc_path, &msg);
                 staging::clear_restart_count(staging_disc_path);
@@ -4805,7 +4830,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 // during the CSS crack surfaces as `Error::Halted` — a user
                 // halt, not structural: preserve staging, no `.failed`.
                 if is_halt_error(&e) {
-                    crate::log::device_log(
+                    crate::server::log::device_log(
                         device,
                         "Rip stopped by user during mux setup — staging preserved for resume.",
                     );
@@ -4819,7 +4844,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 let msg = format!(
                     "Mux setup failed — the disc's title or stream layout could not be prepared for muxing. The source may be damaged or use an unsupported format ({e})."
                 );
-                crate::log::device_log(device, &msg);
+                crate::server::log::device_log(device, &msg);
                 let staging_disc_path = std::path::Path::new(&staging);
                 quarantine_or_log(device, staging_disc_path, &msg);
                 staging::clear_restart_count(staging_disc_path);
@@ -4844,7 +4869,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     if let HeaderPhase::ResumableStop | HeaderPhase::Failed(_) = header_phase {
         unregister_halt(device);
         if let HeaderPhase::Failed(reason) = header_phase {
-            crate::log::device_log(device, &format!("Mux failed: {reason}"));
+            crate::server::log::device_log(device, &format!("Mux failed: {reason}"));
             let staging_disc_path = std::path::Path::new(&staging);
             quarantine_or_log(
                 device,
@@ -4929,7 +4954,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // enforcement point). Emit a final summary line so the log ends
     // clean, not on a stale progress tick; history snapshot reads LOGS.
     if completed {
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!(
                 "Mux complete: {:.1} GB in {}s ({:.1} MB/s avg)",
@@ -4939,7 +4964,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             ),
         );
     } else if let Some(reason) = finalize_error.as_ref() {
-        crate::log::device_log(device, &format!("Mux failed: {reason}"));
+        crate::server::log::device_log(device, &format!("Mux failed: {reason}"));
     }
 
     // ── Mux-time loss gate (a loss is a loss) ─────────────────────────────
@@ -4957,7 +4982,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             demux_lost_secs,
             effective_abort,
         ) {
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!(
                     "ABORT: mux-time loss — {:.2}s missing in main movie (decrypt/codec) exceeds threshold ({}s). A loss is a loss.",
@@ -5025,8 +5050,8 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 s.tmdb_id = tmdb_id;
                 s.tmdb_poster = tmdb_poster.clone();
                 s.tmdb_overview = tmdb_overview.clone();
-                s.season = crate::tmdb::season_from_label(&disc_name);
-                s.disc_number = crate::tmdb::disc_from_label(&disc_name);
+                s.season = crate::server::tmdb::season_from_label(&disc_name);
+                s.disc_number = crate::server::tmdb::disc_from_label(&disc_name);
                 s.outputs = vec![staging::Output {
                     filename: mkv_leaf,
                     ..Default::default()
@@ -5047,7 +5072,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 return;
             }
             if !title_confident {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "Held for review: uncertain title match for \"{}\" — confirm/correct in the UI",
@@ -5079,7 +5104,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         // otherwise fall through to "stopped → idle" (halt/write error/wedge).
         let (log_prefix, ui_status, ui_failure_reason) =
             incomplete_mux_status(finalize_error.as_deref(), read_error.as_deref());
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!(
                 "{}: {:.1} GB in {:.0}s ({:.0} MB/s), {} skipped (~{:.3}s lost)",
@@ -5132,7 +5157,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             )
         };
 
-    crate::log::device_log(
+    crate::server::log::device_log(
         device,
         &format!(
             "Complete: {:.1} GB in {:.0}s ({:.0} MB/s), {} skipped (~{:.3}s lost)",
@@ -5202,14 +5227,14 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         retain_intermediate_iso(cfg_read.keep_iso, &cfg_read.output_format),
     );
 
-    crate::log::device_log(device, "Mux complete");
+    crate::server::log::device_log(device, "Mux complete");
     // Mux stage: the `.mkv` now exists. In this inline-fallback path the rip
     // (drive-free) webhook already fired before the mux began; this is the
     // separate mux_complete notification.
-    crate::webhook::send_rich(
+    crate::server::webhook::send_rich(
         &cfg_read,
-        crate::webhook::WebhookEvent::Mux,
-        &crate::webhook::RipEvent {
+        crate::server::webhook::WebhookEvent::Mux,
+        &crate::server::webhook::RipEvent {
             event: "mux_complete",
             title: &display_name,
             year: tmdb_year,
@@ -5256,19 +5281,19 @@ pub fn eject_drive(device_path: &str) {
     }
     drop_session(dev);
     unregister_halt(dev);
-    crate::log::archive_device_log(dev);
+    crate::server::log::archive_device_log(dev);
     // Pre-0.25.2 both branches here used `let _ =` and any failure was
     // invisible: the user-facing symptom was "auto_eject is set but the
     // disc stayed put, no log line, no idea why". Surface both.
     match libfreemkv::Drive::open(std::path::Path::new(device_path)) {
         Ok(mut session) => {
             if let Err(e) = session.eject() {
-                crate::log::device_log(dev, &format!("eject failed: {e}"));
+                crate::server::log::device_log(dev, &format!("eject failed: {e}"));
                 tracing::warn!(device = %dev, error = %e, "eject command failed");
             }
         }
         Err(e) => {
-            crate::log::device_log(dev, &format!("eject skipped — drive open failed: {e}"));
+            crate::server::log::device_log(dev, &format!("eject skipped — drive open failed: {e}"));
             tracing::warn!(device = %dev, error = %e, "eject skipped — drive open failed");
         }
     }
@@ -5413,7 +5438,7 @@ pub(super) fn done_card_lost_ms(
     if multipass {
         snapshot_lost_ms + demux_extra_ms
     } else {
-        final_lost_secs * crate::util::MILLIS_PER_SEC
+        final_lost_secs * crate::server::util::MILLIS_PER_SEC
     }
 }
 
@@ -5428,7 +5453,7 @@ fn title_is_confident(
 ) -> bool {
     tmdb_api_key.trim().is_empty()
         || overridden
-        || crate::tmdb::is_confident_match(disc_name, display_name, tmdb_year)
+        || crate::server::tmdb::is_confident_match(disc_name, display_name, tmdb_year)
 }
 
 // Quarantine a staging dir as `.failed`; if that did not persist (state.json
@@ -5436,7 +5461,7 @@ fn title_is_confident(
 // silently carrying on as if the dir were terminal.
 fn quarantine_or_log(device: &str, staging_disc_path: &std::path::Path, reason: &str) {
     if !staging::write_failed_marker(staging_disc_path, reason) {
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!(
                 "The .failed quarantine for {} did not persist (state.json unreadable or staging unwritable); the dir is left as-is for the operator.",
@@ -5462,7 +5487,7 @@ fn fanout_episode_indices(
     media_type: &str,
     disc_name: &str,
 ) -> Vec<usize> {
-    let is_tv = media_type == "tv" || crate::tmdb::season_from_label(disc_name).is_some();
+    let is_tv = media_type == "tv" || crate::server::tmdb::season_from_label(disc_name).is_some();
     if !cfg.tv_auto || !is_tv {
         return Vec::new();
     }
@@ -5529,21 +5554,23 @@ fn plan_mux_outputs(
     if indices.is_empty() {
         return one_output();
     }
-    let season_num = crate::tmdb::season_from_label(disc_name).unwrap_or(1);
+    let season_num = crate::server::tmdb::season_from_label(disc_name).unwrap_or(1);
     let title_secs: Vec<f64> = indices.iter().map(|&i| titles[i].duration_secs).collect();
     // Multi-disc offset: start from the uniform-split guess `(disc-1)*count+1`,
     // then let `align_disc_offset` repair uneven splits when runtimes carry
     // signal. With no signal it ties and returns this same fallback (never worse).
-    let disc_num = crate::tmdb::disc_from_label(disc_name).unwrap_or(1).max(1);
+    let disc_num = crate::server::tmdb::disc_from_label(disc_name)
+        .unwrap_or(1)
+        .max(1);
     let fallback_start = 1u16.saturating_add(
         disc_num
             .saturating_sub(1)
             .saturating_mul(indices.len() as u16),
     );
     // TMDB episode list, best-effort (empty on any failure → sequential naming).
-    let episodes = crate::tmdb::season_episodes(tmdb_id, season_num, &cfg.tmdb_api_key);
-    let start = crate::tmdb::align_disc_offset(&title_secs, &episodes, fallback_start);
-    let assignments = crate::tmdb::map_episodes(&title_secs, &episodes, start);
+    let episodes = crate::server::tmdb::season_episodes(tmdb_id, season_num, &cfg.tmdb_api_key);
+    let start = crate::server::tmdb::align_disc_offset(&title_secs, &episodes, fallback_start);
+    let assignments = crate::server::tmdb::map_episodes(&title_secs, &episodes, start);
     // Staging leaves derive from the movie leaf's stem + extension so they share
     // the output format and stay unique per episode. The mover renames each to
     // `Show S{NN}E{MM}[ - Name].ext` at file time (see `mover::tv_episode_leaf`).
@@ -5566,7 +5593,7 @@ fn plan_mux_outputs(
 // Whether the rip's deliverable is the whole-disc ISO itself rather than a muxed MKV/M2TS
 // title. Single predicate every deliverable / prune / mux-skip decision keys off.
 pub(crate) fn output_is_iso_image(output_format: &str) -> bool {
-    output_format == crate::config::OUTPUT_FORMAT_ISO
+    output_format == crate::server::config::OUTPUT_FORMAT_ISO
 }
 
 // Effective main-movie-loss tolerance for the abort gate. ISO output must be byte-complete, so
@@ -5581,10 +5608,10 @@ fn effective_abort_secs(output_format: &str, configured: u64) -> u64 {
 fn fmt_loss(lost_ms: f64) -> String {
     if !lost_ms.is_finite() {
         "an unknown amount".to_string()
-    } else if lost_ms < crate::util::MILLIS_PER_SEC {
+    } else if lost_ms < crate::server::util::MILLIS_PER_SEC {
         format!("{:.0} ms", lost_ms.max(0.0))
     } else {
-        format!("{:.2}s", lost_ms / crate::util::MILLIS_PER_SEC)
+        format!("{:.2}s", lost_ms / crate::server::util::MILLIS_PER_SEC)
     }
 }
 
@@ -5665,9 +5692,9 @@ fn prune_intermediate_iso(
         return;
     }
     match std::fs::remove_file(iso_path) {
-        Ok(_) => crate::log::device_log(device, "Pruned intermediate ISO"),
+        Ok(_) => crate::server::log::device_log(device, "Pruned intermediate ISO"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => crate::log::device_log(device, &format!("ISO prune warning: {e}")),
+        Err(e) => crate::server::log::device_log(device, &format!("ISO prune warning: {e}")),
     }
     // Mirror the ISO arm: a lingering mapfile in staging could be misread as a
     // partial rip by the resume classifier on next startup, so surface any
@@ -5675,7 +5702,7 @@ fn prune_intermediate_iso(
     match std::fs::remove_file(mapfile_path) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => crate::log::device_log(device, &format!("mapfile prune warning: {e}")),
+        Err(e) => crate::server::log::device_log(device, &format!("mapfile prune warning: {e}")),
     }
 }
 
@@ -5747,14 +5774,15 @@ fn keyless_failure_message(disc: &libfreemkv::Disc) -> String {
 pub(crate) fn deferred_keyless_texts(
     cfg: &Config,
     disc: &libfreemkv::Disc,
-    decode_reach: Option<crate::keysource::ServiceReachability>,
+    decode_reach: Option<crate::server::keysource::ServiceReachability>,
 ) -> (String, String) {
     const LEAD: &str = "Ripped to ISO — no keys, mux deferred";
-    let reach = (cfg.key_source == "online")
-        .then(|| decode_reach.unwrap_or_else(|| crate::keysource::probe_online_reachability(cfg)));
+    let reach = (cfg.key_source == "online").then(|| {
+        decode_reach.unwrap_or_else(|| crate::server::keysource::probe_online_reachability(cfg))
+    });
     // A 422 here is not terminal: the ISO is kept, and a later key-DB update may bring the key.
     let terminal = reach
-        .filter(|r| *r != crate::keysource::ServiceReachability::NoKeyForDisc)
+        .filter(|r| *r != crate::server::keysource::ServiceReachability::NoKeyForDisc)
         .and_then(key_service_no_key_reason);
     if let Some(reason) = terminal {
         return (
@@ -5766,7 +5794,7 @@ pub(crate) fn deferred_keyless_texts(
         );
     }
     let msg = match reach {
-        Some(crate::keysource::ServiceReachability::NoKeyForDisc) => {
+        Some(crate::server::keysource::ServiceReachability::NoKeyForDisc) => {
             KEY_SERVICE_NO_KEY_DEFERRED.to_string()
         }
         r => r
@@ -6290,7 +6318,7 @@ fn open_drive_with_backoff(
             Ok(d) => return Some(d),
             Err(e) if retry < 2 => {
                 let backoff_secs = transport_recovery_delay_secs * (1u64 << retry);
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "Pass 1 attempt {attempt}: Drive::open({}) failed, retrying in {}s: error={} sense_key={:?} ASC={:?}",
@@ -6304,7 +6332,7 @@ fn open_drive_with_backoff(
                 std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
             }
             Err(e) => {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "Pass 1 attempt {attempt}: Drive::open({}) failed strategy=transport_failure_recovery error={} sense_key={:?} ASC={:?} — recovery path exhausted",
@@ -6323,7 +6351,7 @@ fn open_drive_with_backoff(
                     &format!("ERROR_CODE_{}", e.code())
                 };
 
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "STRATEGY_FAILURE: transport_failure_recovery FAILED at Drive::open category={} error_code={}",
@@ -6350,11 +6378,11 @@ fn log_init_recovery_failure(device: &str, e: &libfreemkv::Error) {
         e.code() == 4000 && e.scsi_sense().map(|s| s.asc == 0x20).unwrap_or(false);
 
     if is_wedged_firmware {
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             "STRATEGY_FAILURE: transport_failure_recovery FAILED at Drive::init with ILLEGAL_REQUEST (ASC=0x20) — drive firmware wedged",
         );
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             "USER_ACTION_REQUIRED: Eject disc and physically power-cycle USB optical drive to clear firmware state before retrying",
         );
@@ -6365,7 +6393,7 @@ fn log_init_recovery_failure(device: &str, e: &libfreemkv::Error) {
             format!("ERROR_CODE_{}", e.code())
         };
 
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!(
                 "STRATEGY_FAILURE: transport_failure_recovery FAILED at Drive::init category={} error_code={}",
@@ -6430,10 +6458,10 @@ mod tests {
         staging_dir_matches_disc, staging_disc_owned_by_worker, staging_free_bytes,
         sweep_transport_retry,
     };
-    use crate::ripper::session::device_halt;
-    use crate::ripper::staging;
-    use crate::ripper::state::Resumable;
-    use crate::util::MILLIS_PER_SEC;
+    use crate::server::ripper::session::device_halt;
+    use crate::server::ripper::staging;
+    use crate::server::ripper::state::Resumable;
+    use crate::server::util::MILLIS_PER_SEC;
     use libfreemkv::{Error, ScsiSense};
 
     /// Build a single-title `Disc` whose main-feature title carries the given
@@ -7961,7 +7989,7 @@ mod tests {
     // never gave an answer about this disc may claim to be a temporary outage.
     #[test]
     fn key_service_transient_status_mapping() {
-        use crate::keysource::ServiceReachability;
+        use crate::server::keysource::ServiceReachability;
         // Never reached at all → the only honest "temporary, will retry".
         let down = super::key_service_transient_status(ServiceReachability::Unreachable)
             .expect("Unreachable is transient");
@@ -8010,7 +8038,7 @@ mod tests {
     // retrying helps, and carry its HTTP status — and none may claim an outage.
     #[test]
     fn terminal_key_service_verdicts_never_claim_an_outage() {
-        use crate::keysource::ServiceReachability;
+        use crate::server::keysource::ServiceReachability;
 
         let no_key = super::key_service_no_key_reason(ServiceReachability::NoKeyForDisc)
             .expect("422 is a definitive answer with its own wording");
@@ -8087,7 +8115,7 @@ mod tests {
     // verdict; dropping it re-fires the empty probe, which reads a 422 as Answered.
     #[test]
     fn rip_seed_verdict_carries_the_scan_verdict_for_a_reused_session() {
-        use crate::keysource::ServiceReachability as R;
+        use crate::server::keysource::ServiceReachability as R;
         assert_eq!(
             super::rip_seed_verdict(None, Some(R::NoKeyForDisc)),
             Some(R::NoKeyForDisc),
@@ -8104,8 +8132,8 @@ mod tests {
     // probe's. Empty keyserver_url makes the probe say NotAsked, so a 422 is visible.
     #[test]
     fn deferred_keyless_texts_use_the_decode_verdict() {
-        use crate::keysource::ServiceReachability as R;
-        let cfg = crate::config::Config {
+        use crate::server::keysource::ServiceReachability as R;
+        let cfg = crate::server::config::Config {
             key_source: "online".into(),
             keyserver_url: String::new(),
             ..Default::default()
@@ -8127,7 +8155,7 @@ mod tests {
     // not the "does not recognise ... check the key-service address" wording.
     #[test]
     fn unauthorized_decode_verdict_names_the_credentials() {
-        use crate::keysource::ServiceReachability as R;
+        use crate::server::keysource::ServiceReachability as R;
         for code in [401u16, 403] {
             let reason = super::key_service_no_key_reason(R::Unauthorized(code))
                 .expect("401/403 has its own wording");
@@ -8145,9 +8173,10 @@ mod tests {
     // last_error must not double the "No keys — " prefix.
     #[test]
     fn keyless_not_ripping_error_has_one_prefix() {
-        let reason =
-            super::key_service_no_key_reason(crate::keysource::ServiceReachability::NoKeyForDisc)
-                .expect("422 reason");
+        let reason = super::key_service_no_key_reason(
+            crate::server::keysource::ServiceReachability::NoKeyForDisc,
+        )
+        .expect("422 reason");
         let err = super::keyless_not_ripping_error(&format!("No keys — {reason}"));
         assert_eq!(err.matches("No keys").count(), 1, "doubled prefix: {err}");
         assert!(err.starts_with("No keys — not ripping"), "{err}");
@@ -8161,7 +8190,7 @@ mod tests {
     // trigger one fresh resolve; per-disc answers and outages must not.
     #[test]
     fn config_class_seed_verdicts_reresolve_once() {
-        use crate::keysource::ServiceReachability as R;
+        use crate::server::keysource::ServiceReachability as R;
         for v in [
             R::Unauthorized(401),
             R::NotAsked,
@@ -8188,7 +8217,7 @@ mod tests {
     #[test]
     fn scan_opts_raw_copy_follows_capture_without_keys() {
         for capture in [true, false] {
-            let cfg = crate::config::Config {
+            let cfg = crate::server::config::Config {
                 capture_without_keys: capture,
                 keydb_path: Some("/nonexistent/autorip-test/keydb.cfg".into()),
                 ..Default::default()
@@ -8201,7 +8230,7 @@ mod tests {
     // and a config-class seed re-resolves before the outage classifier runs.
     #[test]
     fn scan_verdict_is_banked_and_read_by_rip() {
-        let all = crate::util::source_lf(include_str!("mod.rs"));
+        let all = crate::server::util::source_lf(include_str!("mod.rs"));
         let src = &all[..all.find("mod tests {").expect("test module")];
         assert!(
             src.contains("key_verdict: key_reach,"),
@@ -8226,8 +8255,8 @@ mod tests {
     // verdict must not promise an automatic mux that waiting can never deliver.
     #[test]
     fn deferred_keyless_texts_match_the_verdict() {
-        use crate::keysource::ServiceReachability as R;
-        let cfg = crate::config::Config {
+        use crate::server::keysource::ServiceReachability as R;
+        let cfg = crate::server::config::Config {
             key_source: "online".into(),
             keyserver_url: String::new(),
             ..Default::default()
@@ -8264,7 +8293,7 @@ mod tests {
     // must NOT (the disc is parked, not failed).
     #[test]
     fn key_readiness_reports_the_key_service_verdict() {
-        use crate::keysource::{KeyOutcome, ServiceReachability};
+        use crate::server::keysource::{KeyOutcome, ServiceReachability};
         let mut disc = encrypted_keyless_disc();
         // The precise shape of the bug: the library stamped E7028 ("could not be
         // reached") on a disc the service definitively answered about.
@@ -9219,12 +9248,12 @@ mod tests {
     #[test]
     fn resumable_for_disc_detects_partial_sweep() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let cfg = crate::config::Config {
+        let cfg = crate::server::config::Config {
             staging_dir: tmp.path().to_string_lossy().into_owned(),
             ..Default::default()
         };
         let display_name = "Test Disc";
-        let sanitized = crate::util::sanitize_path_compact(display_name);
+        let sanitized = crate::server::util::sanitize_path_compact(display_name);
 
         // Build a real staging layout: <staging>/<sanitized>/<sanitized>.iso
         // plus its `<...>.iso.mapfile`. A freshly created mapfile is one big
@@ -9247,11 +9276,11 @@ mod tests {
     #[test]
     fn resumable_for_disc_blocked_by_failed_or_review() {
         let display_name = "Stranded Disc";
-        let sanitized = crate::util::sanitize_path_compact(display_name);
+        let sanitized = crate::server::util::sanitize_path_compact(display_name);
 
         for marker in [".failed", ".review"] {
             let tmp = tempfile::TempDir::new().unwrap();
-            let cfg = crate::config::Config {
+            let cfg = crate::server::config::Config {
                 staging_dir: tmp.path().to_string_lossy().into_owned(),
                 ..Default::default()
             };
@@ -9283,11 +9312,11 @@ mod tests {
     #[test]
     fn resumable_for_disc_blocked_when_owned_by_mux_worker() {
         let display_name = "Mid Mux Disc";
-        let sanitized = crate::util::sanitize_path_compact(display_name);
+        let sanitized = crate::server::util::sanitize_path_compact(display_name);
 
         for marker in [".ripped", ".muxing"] {
             let tmp = tempfile::TempDir::new().unwrap();
-            let cfg = crate::config::Config {
+            let cfg = crate::server::config::Config {
                 staging_dir: tmp.path().to_string_lossy().into_owned(),
                 ..Default::default()
             };
@@ -9396,7 +9425,7 @@ mod tests {
         std::fs::write(disc.join(".completed"), b"").unwrap();
         std::fs::write(disc.join("Held_Movie.mkv"), b"x").unwrap();
 
-        let held = crate::review::list_held(tmp.path().to_str().unwrap());
+        let held = crate::server::review::list_held(tmp.path().to_str().unwrap());
         assert_eq!(held.len(), 1, "a .completed+.review dir is still held");
         assert_eq!(held[0].dir, "Held_Movie");
     }
@@ -9411,8 +9440,8 @@ mod tests {
         let dir = staging_disc_with_markers(tmp.path(), san, &["Owned.iso", "Owned.iso.mapfile"]);
         assert!(!staging_disc_owned_by_worker(tmp.path(), san));
         // Ripped → owned.
-        let marker = crate::muxer::RippedMarker {
-            schema_version: crate::muxer::RIPPED_MARKER_SCHEMA,
+        let marker = crate::server::muxer::RippedMarker {
+            schema_version: crate::server::muxer::RIPPED_MARKER_SCHEMA,
             iso_path: dir.join("Owned.iso").to_string_lossy().into_owned(),
             mapfile_path: dir.join("Owned.iso.mapfile").to_string_lossy().into_owned(),
             display_name: "Owned".into(),
@@ -9437,7 +9466,7 @@ mod tests {
             sweep_largest_gap_ms: 0.0,
             title_confident: false,
         };
-        crate::muxer::write_marker(&dir, &marker).unwrap();
+        crate::server::muxer::write_marker(&dir, &marker).unwrap();
         assert!(
             staging_disc_owned_by_worker(tmp.path(), san),
             "Ripped state must mark the dir owned by the mux worker"
@@ -9492,7 +9521,7 @@ mod tests {
             for m in markers {
                 std::fs::write(d.join(m), b"{}").unwrap();
             }
-            crate::ripper::staging::snapshot_staging_disc(&d).unwrap()
+            crate::server::ripper::staging::snapshot_staging_disc(&d).unwrap()
         };
 
         // Plain ISO+mapfile, no governing marker → NOT blocked (resumable).
@@ -9506,7 +9535,7 @@ mod tests {
         let failed =
             staging_disc_with_markers(tmp.path(), "Failed", &["Failed.iso", "Failed.iso.mapfile"]);
         std::fs::write(failed.join(".failed"), b"cancelled by operator\n").unwrap();
-        let snap = crate::ripper::staging::snapshot_staging_disc(&failed).unwrap();
+        let snap = crate::server::ripper::staging::snapshot_staging_disc(&failed).unwrap();
         assert!(snap.has_failed && snap.failed_reason.is_none());
         assert!(
             resumable_dir_blocked(&snap),
@@ -10027,14 +10056,14 @@ mod tests {
     }
 
     fn already_completed(
-        cfg: &std::sync::Arc<std::sync::RwLock<crate::config::Config>>,
+        cfg: &std::sync::Arc<std::sync::RwLock<crate::server::config::Config>>,
         device: &str,
     ) -> bool {
         super::disc_staging_hold(cfg, device, false) == Some(super::StagingHold::Completed)
     }
 
     fn loss_aborted(
-        cfg: &std::sync::Arc<std::sync::RwLock<crate::config::Config>>,
+        cfg: &std::sync::Arc<std::sync::RwLock<crate::server::config::Config>>,
         device: &str,
     ) -> bool {
         super::disc_staging_hold(cfg, device, false) == Some(super::StagingHold::LossAborted)
@@ -10046,7 +10075,7 @@ mod tests {
         device: &str,
         disc_name: &str,
         staging_root: &std::path::Path,
-    ) -> std::sync::Arc<std::sync::RwLock<crate::config::Config>> {
+    ) -> std::sync::Arc<std::sync::RwLock<crate::server::config::Config>> {
         super::STATE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -10058,7 +10087,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-        std::sync::Arc::new(std::sync::RwLock::new(crate::config::Config {
+        std::sync::Arc::new(std::sync::RwLock::new(crate::server::config::Config {
             staging_dir: staging_root.to_string_lossy().into_owned(),
             ..Default::default()
         }))
@@ -10072,7 +10101,7 @@ mod tests {
         disc_name: &str,
         disc_label: &str,
         staging_root: &std::path::Path,
-    ) -> std::sync::Arc<std::sync::RwLock<crate::config::Config>> {
+    ) -> std::sync::Arc<std::sync::RwLock<crate::server::config::Config>> {
         let cfg = seed_scanned_disc(device, disc_name, staging_root);
         super::STATE
             .lock()
@@ -10101,7 +10130,7 @@ mod tests {
         };
         assert_eq!(
             base1,
-            crate::util::sanitize_path_compact(title),
+            crate::server::util::sanitize_path_compact(title),
             "the first disc keeps the plain TMDB-title dir — display and output \
              naming must not change"
         );
@@ -10151,7 +10180,7 @@ mod tests {
         let root = tmp.path();
         let device = "sg_boxset_legacy_test";
         let title = "Legacy Movie";
-        let sanitized = crate::util::sanitize_path_compact(title);
+        let sanitized = crate::server::util::sanitize_path_compact(title);
 
         // Pre-upgrade staging: `.completed`, no `.disc-label`.
         staging_disc_with_markers(root, &sanitized, &[".completed"]);
@@ -10317,7 +10346,7 @@ mod tests {
         let device = "sg_loss_aborted_wrapper_test";
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg = seed_scanned_disc(device, "Damaged Disc", tmp.path());
-        let sanitized = crate::util::sanitize_path_compact("Damaged Disc");
+        let sanitized = crate::server::util::sanitize_path_compact("Damaged Disc");
 
         // No staging dir at all → nothing to protect.
         assert!(
@@ -10351,7 +10380,7 @@ mod tests {
         let device = "sg_already_completed_wrapper_test";
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg = seed_scanned_disc(device, "Finished Disc", tmp.path());
-        let sanitized = crate::util::sanitize_path_compact("Finished Disc");
+        let sanitized = crate::server::util::sanitize_path_compact("Finished Disc");
 
         assert!(
             !already_completed(&cfg, device),
@@ -10390,7 +10419,7 @@ mod tests {
         let device = "sg_owned_by_worker_wrapper_test";
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg = seed_scanned_disc(device, "Owned Disc", tmp.path());
-        let sanitized = crate::util::sanitize_path_compact("Owned Disc");
+        let sanitized = crate::server::util::sanitize_path_compact("Owned Disc");
 
         staging_disc_with_markers(tmp.path(), &sanitized, &["Owned_Disc.iso"]);
         assert!(
@@ -10424,7 +10453,7 @@ mod tests {
         let device = "sg_resume_gate_poison_test";
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg = seed_scanned_disc(device, "Poisoned Disc", tmp.path());
-        let sanitized = crate::util::sanitize_path_compact("Poisoned Disc");
+        let sanitized = crate::server::util::sanitize_path_compact("Poisoned Disc");
 
         // Arm both states the gates protect (one state.json: legacy markers would upgrade to one).
         let dir = staging_disc_with_markers(tmp.path(), &sanitized, &[]);
@@ -10460,13 +10489,15 @@ mod tests {
     fn dispatch_over_staged_disc(
         device: &str,
         name: &str,
-        mode: crate::web::ResumeMode,
+        mode: crate::server::web::ResumeMode,
         arm: impl FnOnce(&std::path::Path),
     ) -> (tempfile::TempDir, std::path::PathBuf, super::RipState) {
         let tmp = tempfile::TempDir::new().unwrap();
         let cfg = seed_scanned_disc(device, name, tmp.path());
         super::update_state_with(device, |s| s.status = "scanning".to_string());
-        let dir = tmp.path().join(crate::util::sanitize_path_compact(name));
+        let dir = tmp
+            .path()
+            .join(crate::server::util::sanitize_path_compact(name));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Sentinel.iso"), b"precious").unwrap();
         arm(&dir);
@@ -10575,7 +10606,7 @@ mod tests {
                 "resume",
                 super::auto_insert_rip_mode("resume").expect("mode"),
             ),
-            ("default", crate::web::ResumeMode::Default),
+            ("default", crate::server::web::ResumeMode::Default),
         ];
         for (label, mode) in modes {
             let device = format!("sg_insert_unreadable_{label}_test");
@@ -10625,7 +10656,7 @@ mod tests {
         super::update_state_with(device, |s| s.status = "scanning".to_string());
         let dir = tmp
             .path()
-            .join(crate::util::sanitize_path_compact("Twin Disc"));
+            .join(crate::server::util::sanitize_path_compact("Twin Disc"));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Sentinel.iso"), b"precious").unwrap();
         staging::write_sweeping_marker(&dir);
@@ -10661,11 +10692,11 @@ mod tests {
     fn dispatch_over_empty_dir(
         device: &str,
         root: &std::path::Path,
-        mode: crate::web::ResumeMode,
+        mode: crate::server::web::ResumeMode,
     ) -> (std::path::PathBuf, Option<String>) {
         let cfg = seed_scanned_disc(device, "Empty Disc", root);
         super::update_state_with(device, |s| s.status = "scanning".to_string());
-        let dir = root.join(crate::util::sanitize_path_compact("Empty Disc"));
+        let dir = root.join(crate::server::util::sanitize_path_compact("Empty Disc"));
         std::fs::create_dir_all(&dir).unwrap();
         super::dispatch_rip_request(&cfg, device, "/nonexistent/autorip-test-drive", mode);
         let status = super::STATE
@@ -10687,7 +10718,7 @@ mod tests {
                 "resume",
                 super::auto_insert_rip_mode("resume").expect("mode"),
             ),
-            ("default", crate::web::ResumeMode::Default),
+            ("default", crate::server::web::ResumeMode::Default),
         ] {
             let tmp = tempfile::TempDir::new().unwrap();
             let device = format!("sg_insert_empty_dir_{label}_test");
@@ -10756,12 +10787,12 @@ mod tests {
         let cfg = seed_scanned_disc(device, "Busy Disc", tmp.path());
         let dir = tmp
             .path()
-            .join(crate::util::sanitize_path_compact("Busy Disc"));
+            .join(crate::server::util::sanitize_path_compact("Busy Disc"));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Sentinel.iso"), b"precious").unwrap();
         stage_partial_sweep(&dir);
         staging::write_sweeping_marker(&dir);
-        let mode = crate::web::ResumeMode::Require;
+        let mode = crate::server::web::ResumeMode::Require;
         super::dispatch_rip_request(&cfg, device, "/nonexistent/autorip-test-drive", mode);
         let st = super::STATE
             .lock()
@@ -10782,7 +10813,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = crate::web::ResumeMode::Require;
+            let mode = crate::server::web::ResumeMode::Require;
             let (_tmp, dir, st) =
                 dispatch_over_staged_disc("sg_require_unreadable_test", "Cold Disc", mode, |d| {
                     stage_partial_sweep(d);
@@ -10808,7 +10839,7 @@ mod tests {
     #[test]
     fn resumable_for_disc_refuses_finished_rips() {
         let display_name = "Finished Resume Disc";
-        let sanitized = crate::util::sanitize_path_compact(display_name);
+        let sanitized = crate::server::util::sanitize_path_compact(display_name);
         let arms: Vec<(&str, Arm)> = vec![
             ("completed", |d| staging::write_completed_marker(d)),
             ("done", |d| staging::mark_handoff(d, true, |_| {}).unwrap()),
@@ -10818,7 +10849,7 @@ mod tests {
         ];
         for (label, arm) in arms {
             let tmp = tempfile::TempDir::new().unwrap();
-            let cfg = crate::config::Config {
+            let cfg = crate::server::config::Config {
                 staging_dir: tmp.path().to_string_lossy().into_owned(),
                 ..Default::default()
             };
@@ -10841,7 +10872,7 @@ mod tests {
     fn default_rip_dispatch_never_resweeps_protected_staging() {
         for (label, arm) in protected_staging_arms() {
             let device = format!("sg_default_guard_{label}_test");
-            let mode = crate::web::ResumeMode::Default;
+            let mode = crate::server::web::ResumeMode::Default;
             let (_tmp, dir, st) = dispatch_over_staged_disc(&device, "Guarded Disc", mode, arm);
             assert!(dir.join("Sentinel.iso").exists(), "{label} dir removed");
             assert_eq!(
@@ -10885,7 +10916,7 @@ mod tests {
     // The operator's explicit "Rip"/"Start over" (?resume=no) keeps its clean-slate wipe.
     #[test]
     fn operator_wipe_dispatch_still_clears_finished_staging() {
-        let mode = crate::web::ResumeMode::Wipe;
+        let mode = crate::server::web::ResumeMode::Wipe;
         let (_tmp, dir, st) =
             dispatch_over_staged_disc("sg_operator_wipe_completed_test", "Redo Disc", mode, |d| {
                 staging::write_completed_marker(d)
@@ -10957,7 +10988,7 @@ mod tests {
     // log) and route the eject through should_auto_eject.
     #[test]
     fn the_completion_tail_logs_and_notifies_before_ejecting() {
-        let src = crate::util::source_lf(include_str!("mod.rs"));
+        let src = crate::server::util::source_lf(include_str!("mod.rs"));
         // Scan just the fresh-rip completion tail (unique anchors), so the
         // ordering checked below is this tail's, not some other eject site's.
         let start = src
@@ -10968,10 +10999,10 @@ mod tests {
             .expect("should_auto_eject must still be documented below the tail");
         let tail = &src[start..end];
         let log_line = tail
-            .find(r#"crate::log::device_log(device, "Mux complete");"#)
+            .find(r#"crate::server::log::device_log(device, "Mux complete");"#)
             .expect("the inline-mux completion tail must log \"Mux complete\"");
         let webhook = tail
-            .find("crate::webhook::send_rich(")
+            .find("crate::server::webhook::send_rich(")
             .expect("the completion tail must fire the mux_complete webhook");
         let eject = tail
             .find("eject_drive(device_path);")
@@ -11083,11 +11114,11 @@ mod insert_tick_tests {
     fn insert_rip_modes_distinguish_fresh_from_prefer_resume() {
         assert_eq!(
             auto_insert_rip_mode("rip"),
-            Some(crate::web::ResumeMode::Fresh)
+            Some(crate::server::web::ResumeMode::Fresh)
         );
         assert_eq!(
             auto_insert_rip_mode("resume"),
-            Some(crate::web::ResumeMode::Prefer)
+            Some(crate::server::web::ResumeMode::Prefer)
         );
         assert_eq!(auto_insert_rip_mode("scan"), None);
     }
@@ -11191,7 +11222,7 @@ mod teardown_poison_tests {
     // `forget_removed_device`, which silently skips removal on a poisoned STATE.
     #[test]
     fn forget_removed_device_recovers_a_poisoned_state_lock() {
-        let src = crate::util::source_lf(include_str!("mod.rs"));
+        let src = crate::server::util::source_lf(include_str!("mod.rs"));
         let start = src
             .find("fn forget_removed_device(device: &str) -> bool {")
             .expect("forget_removed_device must exist");
@@ -11315,8 +11346,11 @@ mod tv_plan_tests {
         );
         // ISO output / network sink: nothing muxed lands in staging.
         for (fmt, target) in [
-            (crate::config::OUTPUT_FORMAT_ISO, ""),
-            (crate::config::OUTPUT_FORMAT_NETWORK, "sink.example:9000"),
+            (crate::server::config::OUTPUT_FORMAT_ISO, ""),
+            (
+                crate::server::config::OUTPUT_FORMAT_NETWORK,
+                "sink.example:9000",
+            ),
         ] {
             let c = Config {
                 output_format: fmt.to_string(),
@@ -11530,7 +11564,7 @@ mod probe_failure_tests {
 
     #[test]
     fn forget_removed_device_shares_the_busy_predicate() {
-        let src = crate::util::source_lf(include_str!("mod.rs"));
+        let src = crate::server::util::source_lf(include_str!("mod.rs"));
         let start = src
             .find("fn forget_removed_device(device: &str) -> bool {")
             .expect("forget_removed_device must exist");
@@ -11548,7 +11582,7 @@ mod quarantine_persist_tests {
     // Production source of this file: every `#[cfg(test)] mod` block removed
     // (brace-matched), so the pins below see only non-test code.
     fn production_src() -> String {
-        let src = crate::util::source_lf(include_str!("mod.rs"));
+        let src = crate::server::util::source_lf(include_str!("mod.rs"));
         let mut out = String::new();
         let mut rest: &str = &src;
         while let Some(i) = rest.find("#[cfg(test)]\nmod ") {

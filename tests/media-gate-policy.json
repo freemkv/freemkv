@@ -17,7 +17,8 @@
   "gui_features": ["gui"],
   "rerun_exempt": {
     "libfreemkv": {".git/*": "GIT_SUFFIX stamp only; version metadata is excluded from comparison"},
-    "freemkv": {"res/freemkv.ico": "icon: the Windows app icon resource, not code"}
+    "freemkv": {"res/freemkv.ico": "icon: the Windows app icon resource, not code",
+                ".git/*": "server build's GIT_SUFFIX stamp only; version metadata, not code"}
   },
   "allowed_crate_callees": {
     "cli_entry": "argument parsing (VALUE_FLAGS, is_flag_token); covered by cli-integration and hash-matrix",

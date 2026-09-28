@@ -5,7 +5,7 @@
 //! Lifted verbatim from the monolithic `ripper.rs` as part of the 0.18
 //! prep split — no semantic changes.
 
-use crate::util::{BYTES_PER_GIB, BYTES_PER_MIB, MILLIS_PER_SEC, SECTOR_BYTES};
+use crate::server::util::{BYTES_PER_GIB, BYTES_PER_MIB, MILLIS_PER_SEC, SECTOR_BYTES};
 use std::sync::Mutex;
 
 /// One contiguous bad range as seen in the UI. Derived from the mapfile
@@ -305,11 +305,11 @@ pub static STATE: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, 
 /// where it takes precedence over the scan's auto-match so the rip files under
 /// the operator's pick (and counts as confident → no review hold).
 pub static TITLE_OVERRIDES: once_cell::sync::Lazy<
-    Mutex<std::collections::HashMap<String, crate::tmdb::TmdbResult>>,
+    Mutex<std::collections::HashMap<String, crate::server::tmdb::TmdbResult>>,
 > = once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// Record an operator title override for `device` (from the Ripper card picker).
-pub fn set_title_override(device: &str, r: crate::tmdb::TmdbResult) {
+pub fn set_title_override(device: &str, r: crate::server::tmdb::TmdbResult) {
     // Recover-and-proceed on poison (same convention as is_busy/update_state):
     // silently dropping the override would lose the operator's title pick.
     let mut m = TITLE_OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
@@ -317,7 +317,7 @@ pub fn set_title_override(device: &str, r: crate::tmdb::TmdbResult) {
 }
 
 /// Take (and clear) the operator title override for `device`, if any.
-pub fn take_title_override(device: &str) -> Option<crate::tmdb::TmdbResult> {
+pub fn take_title_override(device: &str) -> Option<crate::server::tmdb::TmdbResult> {
     let mut m = TITLE_OVERRIDES.lock().unwrap_or_else(|e| e.into_inner());
     m.remove(device)
 }
@@ -423,7 +423,7 @@ pub fn update_state(device: &str, mut state: RipState) {
             state.started_epoch_secs = prev_started;
         } else if now_active {
             // Transition into active — stamp now
-            state.started_epoch_secs = crate::util::epoch_secs();
+            state.started_epoch_secs = crate::server::util::epoch_secs();
         }
         // else: idle / done / error / failed → leave at 0 (clears
         // the elapsed-counter in the UI)
@@ -903,7 +903,7 @@ pub(super) fn push_pass_state(
             } else {
                 String::new()
             };
-            crate::log::device_log(
+            crate::server::log::device_log(
                 &ctx.device,
                 &format!(
                     "Pass {pass}/{total_passes}: swept {:.1} GB / {:.1} GB ({}%), good {:.1} GB, {}{}",
@@ -1088,7 +1088,7 @@ mod tests {
     /// The post-Stop cooldown must be measured on the monotonic clock, not the wall clock.
     #[test]
     fn the_stop_cooldown_is_not_measured_on_the_wall_clock() {
-        let src = crate::util::source_lf(include_str!("state.rs"));
+        let src = crate::server::util::source_lf(include_str!("state.rs"));
         // Start at the STATIC, not at `set_stop_cooldown`: the stored TYPE is
         // half the guarantee (an `Instant` map cannot hold a wall-clock
         // deadline at all), and it is declared above the setter.
@@ -1535,7 +1535,7 @@ mod tests {
         let dev = "/dev/sg-forget-test";
         set_title_override(
             dev,
-            crate::tmdb::TmdbResult {
+            crate::server::tmdb::TmdbResult {
                 title: "Test".to_string(),
                 year: 2000,
                 poster_url: String::new(),
@@ -1844,7 +1844,7 @@ mod tests {
         // either function would pass the whole suite today.
         let dev = format!("/dev/test-override-{}", std::process::id());
         assert!(take_title_override(&dev).is_none(), "no override set yet");
-        let picked = crate::tmdb::TmdbResult {
+        let picked = crate::server::tmdb::TmdbResult {
             title: "Override Title".to_string(),
             year: 1999,
             poster_url: String::new(),

@@ -9,7 +9,7 @@
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
-use freemkv_autorip::ripper::{bounded_call, staging, watchdog_bump_restart_count};
+use freemkv::server::ripper::{bounded_call, staging, watchdog_bump_restart_count};
 
 #[test]
 fn watchdog_counter_bump_happy_path_increments() {

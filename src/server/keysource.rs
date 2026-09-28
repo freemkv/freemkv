@@ -15,7 +15,7 @@ use freemkv_keysources::{KeySource, KeydbSource, OnlineSource};
 use libfreemkv::aacs::trace::ResolutionTrace;
 use libfreemkv::keysource::resolve_and_apply_traced;
 
-use crate::config::Config;
+use crate::server::config::Config;
 
 // The keyserver URL gate is `freemkv_keysources::validate_keyserver_url` (https-only + SSRF):
 // settings save, `build_sources` and the probe all call it so they agree. web.rs keeps its own
@@ -107,7 +107,7 @@ fn legacy_keydb_under(home: Option<std::ffi::OsString>) -> Option<PathBuf> {
 
 /// Does autorip's keydb already exist at the service-canonical path?
 ///
-/// The startup gate (main.rs) MUST use this — not an exe-local default — so the
+/// The startup gate (daemon.rs) MUST use this — not an exe-local default — so the
 /// "already have a keydb, skip download" decision is made against the file the
 /// rip will actually load. Using the same resolver as the reads keeps the gate,
 /// the writes, and the reads on one path. (Bug f750a5e fixed the reads but left
@@ -154,7 +154,7 @@ pub fn keyserver_url_startup_warning(cfg: &Config) -> Option<String> {
     }
     Some(format!(
         "WARNING: the stored Keyserver URL ({}) is not https://, so the online key source is DISABLED for every rip. Re-enter an https:// URL in Settings.",
-        crate::webhook::webhook_url_origin(url)
+        crate::server::webhook::webhook_url_origin(url)
     ))
 }
 
@@ -215,7 +215,7 @@ fn build_sources_with(
                 Err(e) if url_error_is_transient(&e) => {
                     tracing::warn!(
                         phase = "key_resolve",
-                        url_origin = %crate::webhook::webhook_url_origin(url),
+                        url_origin = %crate::server::webhook::webhook_url_origin(url),
                         "keyserver host lookup failed: {e} — will retry at request time"
                     );
                     sources.push(online());
@@ -225,7 +225,7 @@ fn build_sources_with(
                 Err(e) => {
                     tracing::error!(
                         phase = "key_resolve",
-                        url_origin = %crate::webhook::webhook_url_origin(url),
+                        url_origin = %crate::server::webhook::webhook_url_origin(url),
                         "keyserver URL rejected: {e} — online key source disabled for this rip"
                     );
                 }
@@ -451,7 +451,7 @@ const KEYSOURCES_DNS_CAP_MSG: &str = "too many concurrent DNS resolutions in fli
 // True when a keyserver-URL validation error (keysources' or web's) is a failed lookup, not a
 // permanent verdict on the URL. The ONE classifier for both `build_sources` and the probe.
 fn url_error_is_transient(err: &str) -> bool {
-    crate::web::is_transient_resolve_error(err) || err == KEYSOURCES_DNS_CAP_MSG
+    crate::server::web::is_transient_resolve_error(err) || err == KEYSOURCES_DNS_CAP_MSG
 }
 
 // What a URL we could not even validate says about the key SERVICE: a permanent verdict (bad
@@ -490,14 +490,14 @@ pub fn probe_online_reachability(cfg: &Config) -> ServiceReachability {
     // Pin DNS for the probe POST itself (anti-rebind between validate and
     // connect); `validate_fetch_url` re-resolves and returns the addresses to
     // pin the guarded agent to.
-    let pinned = match crate::web::validate_fetch_url(url) {
+    let pinned = match crate::server::web::validate_fetch_url(url) {
         Ok(addrs) => addrs,
         Err(e) => return reachability_for_unprobeable_url(&e),
     };
     // Same pinned-resolver hardening as every operator-URL fetch in autorip
     // (`guarded_agent` owns it). This probe keeps its own short idle bound —
     // a longer shared default would defeat the point of this call site.
-    let agent = crate::web::guarded_agent_with_timeouts(
+    let agent = crate::server::web::guarded_agent_with_timeouts(
         pinned,
         std::time::Duration::from_secs(4),
         std::time::Duration::from_secs(PROBE_TIMEOUT_SECS),
@@ -1729,9 +1729,9 @@ mod tests {
     #[test]
     fn web_resolve_failures_are_unreachable() {
         for msg in [
-            crate::web::RESOLVE_TIMEOUT_MSG.to_string(),
-            crate::web::RESOLVE_NO_ADDRS_MSG.to_string(),
-            format!("{}EAI_AGAIN", crate::web::RESOLVE_FAILED_PREFIX),
+            crate::server::web::RESOLVE_TIMEOUT_MSG.to_string(),
+            crate::server::web::RESOLVE_NO_ADDRS_MSG.to_string(),
+            format!("{}EAI_AGAIN", crate::server::web::RESOLVE_FAILED_PREFIX),
         ] {
             assert_eq!(
                 reachability_for_unprobeable_url(&msg),

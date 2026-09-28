@@ -9,8 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
-use freemkv_autorip::ripper::resume::{ResumeClass, classify_resume, delete_partial_output};
-use freemkv_autorip::ripper::staging::{self, RESTART_COUNT_FILE, ResumeAction, StagingResumeHint};
+use freemkv::server::ripper::resume::{ResumeClass, classify_resume, delete_partial_output};
+use freemkv::server::ripper::staging::{self, RESTART_COUNT_FILE, ResumeAction, StagingResumeHint};
 
 fn tmpdir() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")

@@ -30,7 +30,7 @@ pub const FAILED_MARKER: &str = ".failed";
 /// run another recovery pass).
 pub const ABORTED_LOSS_MARKER: &str = ".aborted-loss";
 /// Hand-off marker written by `rip_disc` and consumed by the mux worker.
-/// Kept here (duplicated from `crate::muxer::RIPPED_MARKER_NAME`) so the
+/// Kept here (duplicated from `crate::server::muxer::RIPPED_MARKER_NAME`) so the
 /// startup-scan vocabulary is self-contained; a `debug_assert` in the mux
 /// worker tests pins the two equal.
 pub const RIPPED_MARKER: &str = ".ripped";
@@ -445,13 +445,13 @@ pub fn mutate_state_if_present(staging_disc_dir: &Path, f: impl FnOnce(&mut Disc
 }
 
 impl DiscState {
-    /// Reconstruct the mux worker's [`crate::muxer::RippedMarker`] from this
+    /// Reconstruct the mux worker's [`crate::server::muxer::RippedMarker`] from this
     /// state so the mux/resume path can keep dealing in `RippedMarker` while the
     /// persistence layer is unified `state.json`. `mkv_filename` comes from the
     /// first output (movies have exactly one; TV outputs are muxed per entry).
-    pub fn to_ripped_marker(&self) -> crate::muxer::RippedMarker {
-        crate::muxer::RippedMarker {
-            schema_version: crate::muxer::RIPPED_MARKER_SCHEMA,
+    pub fn to_ripped_marker(&self) -> crate::server::muxer::RippedMarker {
+        crate::server::muxer::RippedMarker {
+            schema_version: crate::server::muxer::RIPPED_MARKER_SCHEMA,
             iso_path: self.iso_path.clone(),
             mapfile_path: self.mapfile_path.clone(),
             display_name: self.title.clone(),
@@ -482,11 +482,11 @@ impl DiscState {
         }
     }
 
-    /// Fold a [`crate::muxer::RippedMarker`]'s fields into this state (used when
+    /// Fold a [`crate::server::muxer::RippedMarker`]'s fields into this state (used when
     /// the fresh-rip hand-off writes `state: Ripped`). Leaves lifecycle
     /// annotations (`restart_count`, `muxing`, …) untouched; the caller sets
     /// `state`.
-    pub fn apply_ripped(&mut self, m: &crate::muxer::RippedMarker) {
+    pub fn apply_ripped(&mut self, m: &crate::server::muxer::RippedMarker) {
         self.iso_path = m.iso_path.clone();
         self.mapfile_path = m.mapfile_path.clone();
         self.disc_format = m.disc_format.clone();
@@ -1042,7 +1042,7 @@ pub fn mark_handoff(
     st.state = state;
     st.title_confident = title_confident;
     if st.date.is_empty() {
-        st.date = crate::util::format_date();
+        st.date = crate::server::util::format_date();
     }
     apply(&mut st);
     // Propagate the write error so a completion path can refuse to declare the
@@ -1077,7 +1077,7 @@ pub fn handoff_label(title_confident: bool) -> &'static str {
 /// a mutation run flipped `==` to `!=`, `&&` to `||`, and dropped the `!` in
 /// each, and nothing failed.
 pub fn is_network_output(output_format: &str, network_target: &str) -> bool {
-    output_format == crate::config::OUTPUT_FORMAT_NETWORK && !network_target.is_empty()
+    output_format == crate::server::config::OUTPUT_FORMAT_NETWORK && !network_target.is_empty()
 }
 
 /// The durability gate: may a success marker be written yet? `false` means the output is not
@@ -1427,7 +1427,7 @@ fn upgrade_legacy_to_state(dir: &Path, obs: &ScanObservations) {
     // Rich metadata: the `.ripped` RippedMarker (mux inputs) then the
     // `.done`/`.review` body (mover metadata) — the latter wins where both
     // carry a field, matching the legacy read precedence.
-    if let Ok(m) = crate::muxer::read_marker(dir) {
+    if let Ok(m) = crate::server::muxer::read_marker(dir) {
         st.apply_ripped(&m);
     }
     apply_legacy_handoff_body(dir, &mut st);
@@ -1540,11 +1540,11 @@ pub fn staging_name_for_disc(staging_root: &Path, base: &str, raw_label: &str) -
     // The suffix policy itself lives in `util::disc_variant` — shared with the
     // mover's output naming, so the two can't drift. All this supplies is what
     // "claimable" means for a staging dir: free, or carrying this disc's label.
-    crate::util::disc_variant(|n| {
-        let path = staging_root.join(crate::util::disc_variant_name(base, n));
+    crate::server::util::disc_variant(|n| {
+        let path = staging_root.join(crate::server::util::disc_variant_name(base, n));
         !path.exists() || dir_is_same_disc(&path, raw_label)
     })
-    .map(|n| crate::util::disc_variant_name(base, n))
+    .map(|n| crate::server::util::disc_variant_name(base, n))
     // Every variant belongs to a different disc. Fall back to the plain title:
     // the caller's own `.completed` / collision checks then run against it, so
     // this degrades to the pre-existing behaviour rather than inventing a name.
@@ -1561,7 +1561,7 @@ pub fn staging_name_for_disc(staging_root: &Path, base: &str, raw_label: &str) -
 /// out inline at ten call sites, so hardening any one of them fixed nothing.
 /// Do not re-derive a staging basename anywhere else; call this.
 pub fn staging_basename(staging_root: &Path, display_name: &str, raw_label: &str) -> String {
-    let base = crate::util::sanitize_path_compact(display_name);
+    let base = crate::server::util::sanitize_path_compact(display_name);
     staging_name_for_disc(staging_root, &base, raw_label)
 }
 
@@ -1823,7 +1823,7 @@ pub fn resume_or_quarantine_staging(staging_dir: &str) -> Vec<StagingResumeHint>
         // restart-loop-quarantine over it (G6). The mux worker keeps the card.
         if let Some(u) = &snap.state_unreadable {
             tracing::error!(path = %path.display(), reason = %u.log_text(), "staging entry has an unreadable state.json — held for operator");
-            crate::muxer::record_error(&path.to_string_lossy(), &u.held_reason(), u.hint());
+            crate::server::muxer::record_error(&path.to_string_lossy(), &u.held_reason(), u.hint());
             hints.push(StagingResumeHint {
                 dir: snap.dir,
                 action: ResumeAction::HeldUnreadableState {
@@ -2005,7 +2005,7 @@ mod tests {
         let p = base.join(format!(
             "autorip-staging-test-{}-{}",
             std::process::id(),
-            crate::util::epoch_secs()
+            crate::server::util::epoch_secs()
         ));
         fs::create_dir_all(&p).unwrap();
         // Fresh subdir even when two tests land on the same epoch second: a
@@ -2077,7 +2077,7 @@ mod tests {
         untouched(&d, "write_sweeping_marker");
         let d = seed();
         let m = DiscState::new(StagingState::Ripped).to_ripped_marker();
-        assert!(crate::muxer::write_marker(&d, &m).is_err());
+        assert!(crate::server::muxer::write_marker(&d, &m).is_err());
         untouched(&d, "muxer::write_marker");
     }
 
@@ -2096,7 +2096,7 @@ mod tests {
         assert_eq!(fs::read(d.join(UNREADABLE_STATE_ASIDE)).unwrap(), b"{ torn");
         let m = DiscState::new(StagingState::Ripped).to_ripped_marker();
         assert!(
-            crate::muxer::write_marker(&d, &m).is_ok(),
+            crate::server::muxer::write_marker(&d, &m).is_ok(),
             "hand-off refused"
         );
         assert!(
@@ -2147,11 +2147,14 @@ mod tests {
             );
             let path = d.to_string_lossy().to_string();
             assert!(
-                crate::muxer::MUX_ERRORS.lock().unwrap().contains_key(&path),
+                crate::server::muxer::MUX_ERRORS
+                    .lock()
+                    .unwrap()
+                    .contains_key(&path),
                 "{} must raise the held card",
                 d.display()
             );
-            crate::muxer::clear_error_with_prefix(&path, STATE_HELD_PREFIX);
+            crate::server::muxer::clear_error_with_prefix(&path, STATE_HELD_PREFIX);
         }
     }
 

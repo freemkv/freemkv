@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64};
 use std::sync::{Arc, RwLock};
 
-use crate::config::Config;
+use crate::server::config::Config;
 
 use super::staging::{self, ResumeAction, StagingResumeHint};
 
@@ -408,7 +408,7 @@ fn handle_resume_fsync_failure(device: &str, staging_dir: &Path, output_desc: &s
     if count >= staging::RESTART_LIMIT {
         let reason =
             format!("{output_desc} fsync failed repeatedly ({count} attempts); giving up",);
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!("Auto-resume: {reason} — quarantining staging (.failed)."),
         );
@@ -416,11 +416,11 @@ fn handle_resume_fsync_failure(device: &str, staging_dir: &Path, output_desc: &s
         // staging), do NOT tear down the restart cap and do NOT drop `.ripped`:
         // preserved-for-retry, which is what it actually is.
         if !staging::write_failed_marker(staging_dir, &reason) {
-            crate::log::syslog(&format!(
+            crate::server::log::syslog(&format!(
                 "Auto-resume fsync-failure quarantine FAILED to persist (state.json write error) — {} will keep retrying until the staging mount recovers",
                 staging_dir.display()
             ));
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!(
                     "Auto-resume: {reason}, but the terminal quarantine could NOT be written (staging unwritable) — restart cap preserved; will retry until the mount recovers."
@@ -430,7 +430,7 @@ fn handle_resume_fsync_failure(device: &str, staging_dir: &Path, output_desc: &s
             // dropped terminal-write (`persist_terminal_mux_quarantine` in
             // `check_and_mux`, so it has no downstream card without this call.
             if device != "_mux" {
-                crate::muxer::record_error(
+                crate::server::muxer::record_error(
                     &staging_dir.to_string_lossy(),
                     &reason,
                     "the terminal quarantine could not be written to state.json (staging mount full / unwritable); auto-resume will keep retrying until the mount recovers — free space or fix permissions on the staging share",
@@ -441,7 +441,7 @@ fn handle_resume_fsync_failure(device: &str, staging_dir: &Path, output_desc: &s
         staging::clear_restart_count(staging_dir);
         // Drop the `.ripped` hand-off so the mux worker can't re-queue this
         // now-terminal dir (belt-and-suspenders with the `.failed` guard).
-        if let Err(e) = crate::muxer::delete_marker(staging_dir) {
+        if let Err(e) = crate::server::muxer::delete_marker(staging_dir) {
             tracing::warn!(
                 staging = %staging_dir.display(),
                 error = %e,
@@ -458,12 +458,12 @@ fn handle_resume_fsync_failure(device: &str, staging_dir: &Path, output_desc: &s
 // dropped terminal-write, on a dropped `.aborted-loss` write — so a
 // persistent write failure can't cause silent infinite re-dispatch.
 fn record_loss_abort_write_failure(device: &str, staging_dir: &Path, reason: &str) {
-    crate::log::syslog(&format!(
+    crate::server::log::syslog(&format!(
         "Auto-resume loss-abort quarantine FAILED to persist (state.json write error) — {} will keep retrying until the staging mount recovers",
         staging_dir.display()
     ));
     if device != "_mux" {
-        crate::muxer::record_error(
+        crate::server::muxer::record_error(
             &staging_dir.to_string_lossy(),
             reason,
             "the loss-abort quarantine could not be written to state.json (staging mount full / unwritable); auto-resume will keep retrying until the mount recovers — free space or fix permissions on the staging share",
@@ -481,7 +481,7 @@ fn hold_unreadable_plan(
     why: &staging::StateUnreadable,
 ) {
     let reason = why.held_reason();
-    crate::log::device_log(
+    crate::server::log::device_log(
         device,
         &format!(
             "{}{} — not re-muxing, since the deliverable plan (movie vs. TV episodes) is unknown. Staging and the ISO are kept ({}).",
@@ -491,7 +491,7 @@ fn hold_unreadable_plan(
         ),
     );
     if device != "_mux" {
-        crate::muxer::record_error(&staging_dir.to_string_lossy(), &reason, why.hint());
+        crate::server::muxer::record_error(&staging_dir.to_string_lossy(), &reason, why.hint());
     }
     reset_status_after_ripping(device, "error", display_name, "", "", Some(reason));
 }
@@ -566,7 +566,7 @@ fn remux_space_shortfall(
     if avail.saturating_add(existing_output_bytes) >= required {
         return None;
     }
-    let gib = |b: u64| b as f64 / crate::util::BYTES_PER_GIB;
+    let gib = |b: u64| b as f64 / crate::server::util::BYTES_PER_GIB;
     Some(format!(
         "Not enough staging disk space to mux the saved disc image — need ≥ {:.1} GiB free at {} for the planned outputs, have {:.1} GiB. Free up space or set Staging Directory in Settings to a larger volume; the disc image is kept for a retry.",
         gib(required.saturating_sub(existing_output_bytes)),
@@ -640,7 +640,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     // Archive the prior session's per-device log so the live log shows only this
     // resumed-mux operation (as scan_disc / fresh-rip do); otherwise it interleaves
     // with the prior scan's log, making errors hard to correlate.
-    crate::log::archive_device_log(device);
+    crate::server::log::archive_device_log(device);
 
     let cfg_read = match cfg.read() {
         Ok(c) => c.clone(),
@@ -648,7 +648,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             // status="ripping" is not set yet here so there is no stuck
             // gate, but leave a trace so the silently-vanished resume is
             // diagnosable instead of disappearing with zero explanation.
-            crate::log::device_log(device, "Auto-resume aborted: config lock poisoned");
+            crate::server::log::device_log(device, "Auto-resume aborted: config lock poisoned");
             return;
         }
     };
@@ -669,7 +669,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             return;
         }
     };
-    crate::muxer::clear_error_with_prefix(
+    crate::server::muxer::clear_error_with_prefix(
         &staging_dir.to_string_lossy(),
         staging::STATE_HELD_PREFIX,
     );
@@ -680,13 +680,13 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     // only at the hand-off (not at entry) so a transient failure doesn't lose it.
     let accept_loss = staging::accept_loss_requested(&staging_dir);
     if accept_loss {
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             "Operator accepted the recorded loss — delivering the existing rip despite over-threshold damage.",
         );
     }
 
-    crate::log::device_log(
+    crate::server::log::device_log(
         device,
         &format!(
             "Auto-resume: re-muxing ISO from staging ({})",
@@ -705,11 +705,11 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     // 2. Open + scan the ISO via the library's `scan_iso` entry point (opens a
     //    FileSectorSource, reads capacity, runs the structure scan). A later
     //    key-fetch closure opens its own handle for ciphertext sampling.
-    let struct_opts = crate::keysource::iso_scan_opts();
+    let struct_opts = crate::server::keysource::iso_scan_opts();
     let disc = match libfreemkv::scan_iso(&iso_path, struct_opts) {
         Ok((d, _reader)) => d,
         Err(e) => {
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!(
                     "Auto-resume aborted: {}",
@@ -739,7 +739,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         .map(|t| t.duration_secs > 0.0)
         .unwrap_or(false);
     if !title_ok {
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             "Auto-resume aborted: scan_image produced no usable title",
         );
@@ -762,7 +762,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         remux_space_refusal(&cfg_read, &staging_dir, &disc.titles, &plan_outputs)
     {
         if note_space_refusal(&staging_dir, required) {
-            crate::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
+            crate::server::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
         }
         reset_status_after_ripping(device, "error", &display_name, "", "", Some(msg));
         super::update_state_with(device, |s| s.failure_space = true);
@@ -775,7 +775,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     // with it so decryption keys populate. No-op for a local source.
     let (disc, _key_outcome) = resolve_keys_from_iso(&cfg_read, &iso_path, &mapfile_path, disc);
     // Consume the real decode's verdict now; the keyless deferral below reports it.
-    let decode_reach = crate::keysource::take_online_decode_reachability();
+    let decode_reach = crate::server::keysource::take_online_decode_reachability();
 
     // Real-bitrate re-validation: recompute bytes-bad-in-title (vs the
     // classifier's whole-disc estimate) and re-check abort_on_lost_secs.
@@ -788,7 +788,10 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     let title = match disc.titles.get(primary_index) {
         Some(t) => t.clone(),
         None => {
-            crate::log::device_log(device, "Auto-resume aborted: no title after key resolution");
+            crate::server::log::device_log(
+                device,
+                "Auto-resume aborted: no title after key resolution",
+            );
             reset_status_after_ripping(
                 device,
                 "idle",
@@ -821,7 +824,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         libfreemkv::DiscFormat::Unknown => "unknown",
     }
     .to_string();
-    let duration = crate::util::format_duration_hm(title.duration_secs);
+    let duration = crate::server::util::format_duration_hm(title.duration_secs);
     let map = match freemkv_engine::Mapfile::load(&mapfile_path) {
         Ok(m) => m,
         Err(e) => {
@@ -831,7 +834,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             let msg = format!(
                 "Could not read this disc's saved recovery map, so remaining data loss cannot be re-checked — start a fresh rip to rebuild it ({e})."
             );
-            crate::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
+            crate::server::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
             reset_status_after_ripping(
                 device,
                 "idle",
@@ -853,7 +856,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         let lost_bytes = super::abort_lost_bytes(output_is_iso, &title, &bad_ranges);
         let lost_secs =
             super::abort_lost_ms(output_is_iso, &title, &bad_ranges, title_bytes_per_sec)
-                / crate::util::MILLIS_PER_SEC;
+                / crate::server::util::MILLIS_PER_SEC;
         // ISO output is whole-disc and must be byte-complete: the per-title
         // tolerance is ignored (forced to 0), matching the fresh-rip gate.
         // `.accept-loss` raises the threshold to unlimited for the override.
@@ -867,7 +870,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         // silently deliver it — the two completion routes must not diverge.
         if super::loss_aborts(
             lost_bytes,
-            lost_secs * crate::util::MILLIS_PER_SEC,
+            lost_secs * crate::server::util::MILLIS_PER_SEC,
             effective_abort,
         ) {
             // "disc loss" for raw ISO (whole-disc scope), "title loss" for a
@@ -878,7 +881,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             } else {
                 "title"
             };
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!(
                     "Auto-resume aborted: {scope} loss {:.2}s exceeds threshold {}s",
@@ -924,7 +927,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         && !super::output_is_iso_image(&cfg_read.output_format)
     {
         let (log_line, reason) = super::deferred_keyless_texts(&cfg_read, &disc, decode_reach);
-        crate::log::device_log(device, &log_line);
+        crate::server::log::device_log(device, &log_line);
         // We have not set status="ripping" yet (that happens via the
         // update_state call further below). reset_status_after_ripping
         // deferral reason without flagging a hard failure.
@@ -973,7 +976,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             // `register_halt` no-ops when the HALTS mutex is poisoned, so
             // device_halt then returns None. The fallback token below was
             // the degraded stop guarantee is at least visible in the log.
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 "Warning: halt registry unavailable (poisoned); this resume mux will not be stoppable via /api/stop",
             );
@@ -1004,7 +1007,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             let msg = format!(
                 "Could not re-open the saved disc image to finish muxing — the staging file may have been moved or the staging volume is unavailable ({e})."
             );
-            crate::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
+            crate::server::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
             // Reset from "ripping" (set above) → "error" so the next
             // /api/rip isn't blocked by the "already ripping" gate.
             reset_status_after_ripping(
@@ -1029,11 +1032,11 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         let main_title_bad = map.ranges_with(&[SectorStatus::Unreadable]);
         let main_title_bad_bytes = libfreemkv::disc::bytes_bad_in_title(&title, &main_title_bad);
         let main_lost_ms = if title_bytes_per_sec > 0.0 {
-            main_title_bad_bytes as f64 * crate::util::MILLIS_PER_SEC / title_bytes_per_sec
+            main_title_bad_bytes as f64 * crate::server::util::MILLIS_PER_SEC / title_bytes_per_sec
         } else {
             0.0
         };
-        let errors = (map.stats().bytes_unreadable / crate::util::SECTOR_BYTES) as u32;
+        let errors = (map.stats().bytes_unreadable / crate::server::util::SECTOR_BYTES) as u32;
         super::mux::SweepDamageSnapshot {
             errors,
             total_lost_ms,
@@ -1059,7 +1062,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     let latest_bytes_read = Arc::new(AtomicU64::new(0));
     let rip_last_lba = Arc::new(AtomicU64::new(0));
     let rip_current_batch = Arc::new(AtomicU16::new(batch));
-    let wd_last_frame = Arc::new(AtomicU64::new(crate::util::epoch_secs()));
+    let wd_last_frame = Arc::new(AtomicU64::new(crate::server::util::epoch_secs()));
     let mux_input_errors = Arc::new(AtomicU32::new(0));
 
     // STEP 4c-i: the resume mux routes through `libfreemkv::mux_stream` (via
@@ -1072,7 +1075,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         keys,
         // Fresh-key-on-failure fetch (recover a 2nd/Nth CPS-unit key MID-MUX) —
         // the SAME closure the pre-migration build_iso_pipeline call took.
-        key_fetch: crate::keysource::build_iso_key_fetch(&cfg_read, &iso_path),
+        key_fetch: crate::server::keysource::build_iso_key_fetch(&cfg_read, &iso_path),
         raw: false,
         skip_errors: false,
     };
@@ -1085,7 +1088,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         .unwrap_or_else(|e| e.into_inner())
         .get(device)
         .cloned();
-    let marker_tmdb = crate::muxer::read_marker(&staging_dir).ok();
+    let marker_tmdb = crate::server::muxer::read_marker(&staging_dir).ok();
     let state_codecs = state_tmdb
         .as_ref()
         .map(|rs| rs.codecs.clone())
@@ -1151,7 +1154,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             } else {
                 "ISO image not durable (fsync failed); preserved for retry"
             };
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!(
                     "Auto-resume: durability gate failed (could not fsync ISO image); {detail}."
@@ -1190,7 +1193,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 ..Default::default()
             }];
         }) {
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!(
                     "Auto-resume: {} state write failed ({}). Preserving staging for retry.",
@@ -1220,7 +1223,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!("Auto-resume: ISO output complete — disc image staged as {iso_name}"),
         );
@@ -1284,7 +1287,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             // leave staging intact (the .ripped marker + ISO + mapfile stay) so
             // the next resume retries, without flagging a spurious error.
             if super::is_halt_error(&e) {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "Auto-resume mux stopped by user; staging preserved.",
                 );
@@ -1295,7 +1298,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             // forensic index keys did not (`Error::FmtsKeyMissing`). Muxing now
             // the mux worker re-attempts once a keydb/online update supplies keys.
             if super::is_fmts_key_missing_error(&e) {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     "Auto-resume: FMTS forensic keys unavailable — mux deferred. Staging \
                      preserved; will mux automatically once keys are available.",
@@ -1316,7 +1319,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             let msg = format!(
                 "Mux setup failed — the disc's title or stream layout could not be prepared for muxing. The source may be damaged or use an unsupported format ({e})."
             );
-            crate::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
+            crate::server::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
             reset_status_after_ripping(
                 device,
                 "error",
@@ -1340,7 +1343,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             mux_outcome.finalize_error.as_deref(),
             mux_outcome.read_error.as_deref(),
         );
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!(
                 "Auto-resume mux did not complete ({log_prefix}) — preserving partial state for next restart",
@@ -1353,7 +1356,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         let landed = quarantine_incomplete_mux(&staging_dir, mux_outcome.finalize_error.as_deref());
         if let Some(finalize) = mux_outcome.finalize_error.as_deref() {
             if landed {
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "Auto-resume mux finalize failed ({finalize}) — quarantined (state → Failed); staging preserved for inspection",
@@ -1363,11 +1366,11 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 // Terminal write dropped (staging full / unwritable). Surface it the
                 // same LOUD way the worker site does; the dir keeps its prior state
                 // and retries until the mount recovers.
-                crate::log::syslog(&format!(
+                crate::server::log::syslog(&format!(
                     "Auto-resume mux quarantine FAILED to persist (state.json write error) — {} will keep re-dispatching until the staging mount recovers",
                     staging_dir.display()
                 ));
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "Auto-resume mux finalize failed ({finalize}) but the terminal quarantine could NOT be written (staging unwritable) — the mux will retry until the mount recovers",
@@ -1404,7 +1407,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     // decrypt/codec skips at mux), so they add.
     let done_errors = done_sweep_damage.errors.saturating_add(mux_outcome.errors);
     let done_lost_video_secs =
-        done_sweep_damage.main_lost_ms / crate::util::MILLIS_PER_SEC + demux_lost_secs;
+        done_sweep_damage.main_lost_ms / crate::server::util::MILLIS_PER_SEC + demux_lost_secs;
 
     // Mux-time loss gate (a loss is a loss). Gate the total in-title loss
     // (sweep + mux-time decrypt/codec) against abort_on_lost_secs before filing
@@ -1425,7 +1428,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             demux_lost_secs,
             effective_abort,
         ) {
-            crate::log::device_log(
+            crate::server::log::device_log(
                 device,
                 &format!(
                     "Auto-resume ABORT: mux-time loss — {:.2}s missing in main movie (decrypt/codec) exceeds threshold ({}s). A loss is a loss.",
@@ -1467,7 +1470,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         } else {
             "mux output not durable (fsync failed); preserved for retry"
         };
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!("Auto-resume: durability gate failed (could not fsync mux output); {detail}."),
         );
@@ -1489,7 +1492,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     // files and there's no mover step to relocate local ones, so don't fan out
     // for a network target: deliver the primary episode only.
     if is_fanout && is_network {
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             "TV disc with network output — delivering the first episode only (a network sink takes a single stream).",
         );
@@ -1501,7 +1504,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             // so a failed episode is never left on disk for the mover to file.
             let drop_partial = |reason: &str| {
                 let _ = std::fs::remove_file(&ep_output_path);
-                crate::log::device_log(
+                crate::server::log::device_log(
                     device,
                     &format!(
                         "TV episode E{:02} {reason} — dropped (best-guess auto)",
@@ -1538,7 +1541,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 tmdb_year,
                 tmdb_poster: tmdb_poster.clone(),
                 tmdb_overview: tmdb_overview.clone(),
-                duration: crate::util::format_duration_hm(ep_title.duration_secs),
+                duration: crate::server::util::format_duration_hm(ep_title.duration_secs),
                 codecs: state_codecs.clone(),
                 filename: extra.filename.clone(),
                 total_bytes,
@@ -1559,7 +1562,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 title: ep_title,
                 format: disc.content_format,
                 keys: disc.decrypt_keys(),
-                key_fetch: crate::keysource::build_iso_key_fetch(&cfg_read, &iso_path),
+                key_fetch: crate::server::keysource::build_iso_key_fetch(&cfg_read, &iso_path),
                 raw: false,
                 skip_errors: false,
             };
@@ -1567,7 +1570,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 latest_bytes_read: Arc::new(AtomicU64::new(0)),
                 rip_last_lba: Arc::new(AtomicU64::new(0)),
                 rip_current_batch: Arc::new(AtomicU16::new(batch)),
-                wd_last_frame: Arc::new(AtomicU64::new(crate::util::epoch_secs())),
+                wd_last_frame: Arc::new(AtomicU64::new(crate::server::util::epoch_secs())),
                 wd_bytes: Arc::new(AtomicU64::new(0)),
                 input_errors: Arc::new(AtomicU32::new(0)),
             };
@@ -1578,7 +1581,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                     // possibly-truncated episode to the mover.
                     if staging::fsync_output_file(std::path::Path::new(&ep_output_path)) {
                         delivered.push(extra.clone());
-                        crate::log::device_log(
+                        crate::server::log::device_log(
                             device,
                             &format!(
                                 "TV episode E{:02} muxed → {}",
@@ -1627,7 +1630,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         // The hand-off marker is what the mover / review UI keys on. If it
         // fails to write (NFS / perms), do NOT write .completed or clear
         // never sees.
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             &format!(
                 "Auto-resume: {} state write failed ({}). \
@@ -1654,7 +1657,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         staging::clear_accept_loss_marker(&staging_dir);
     }
     if !title_confident {
-        crate::log::device_log(
+        crate::server::log::device_log(
             device,
             "Auto-resume: title match not confident — held for operator review (.review)",
         );
@@ -1711,9 +1714,9 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             errors: done_errors,
             lost_video_secs: done_lost_video_secs,
             total_lost_ms: done_sweep_damage.total_lost_ms
-                + demux_lost_secs * crate::util::MILLIS_PER_SEC,
+                + demux_lost_secs * crate::server::util::MILLIS_PER_SEC,
             main_lost_ms: done_sweep_damage.main_lost_ms
-                + demux_lost_secs * crate::util::MILLIS_PER_SEC,
+                + demux_lost_secs * crate::server::util::MILLIS_PER_SEC,
             bad_ranges: done_sweep_damage.bad_ranges.clone(),
             num_bad_ranges: done_sweep_damage.num_bad_ranges,
             bad_ranges_truncated: done_sweep_damage.bad_ranges_truncated,
@@ -1721,15 +1724,15 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             ..Default::default()
         },
     );
-    crate::log::device_log(device, "Auto-resume complete");
+    crate::server::log::device_log(device, "Auto-resume complete");
 
     // Fire the mux-stage webhook, mirroring rip_disc's terminal
     // branch. Both the cold auto-resume (`?resume=yes`) path and the
     // `.ripped` hand-off — this is the distinct mux_complete stage.
-    crate::webhook::send_rich(
+    crate::server::webhook::send_rich(
         &cfg_read,
-        crate::webhook::WebhookEvent::Mux,
-        &crate::webhook::RipEvent {
+        crate::server::webhook::WebhookEvent::Mux,
+        &crate::server::webhook::RipEvent {
             event: "mux_complete",
             title: &display_name,
             year: tmdb_year,
@@ -1737,7 +1740,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             poster_url: &tmdb_poster,
             duration: &duration,
             codecs: &done_codecs,
-            size_gb: mux_outcome.bytes_done as f64 / crate::util::BYTES_PER_GIB,
+            size_gb: mux_outcome.bytes_done as f64 / crate::server::util::BYTES_PER_GIB,
             speed_mbs: mux_outcome.speed_mbs,
             elapsed_secs: mux_outcome.elapsed_secs,
             output_path: &staging_str,
@@ -1787,7 +1790,7 @@ pub(crate) struct MuxHandoffOutcome {
 // Whether resume_remux finished this staging dir cleanly (.completed written). Probes via
 // snapshot_staging_disc, not a bare Path::exists(), to avoid an NFS cold-cache false-negative.
 pub(crate) fn mux_handoff_success(staging_dir: &std::path::Path) -> bool {
-    crate::ripper::staging::snapshot_staging_disc(staging_dir)
+    crate::server::ripper::staging::snapshot_staging_disc(staging_dir)
         .map(|s| s.completed)
         .unwrap_or(false)
 }
@@ -1804,7 +1807,7 @@ fn build_mux_handoff_outcome(success: bool) -> MuxHandoffOutcome {
 pub(crate) fn remux_from_ripped_marker(
     cfg: &Arc<RwLock<Config>>,
     staging_dir: &std::path::Path,
-    marker: &crate::muxer::RippedMarker,
+    marker: &crate::server::muxer::RippedMarker,
 ) -> MuxHandoffOutcome {
     let iso_path = std::path::PathBuf::from(&marker.iso_path);
     let mapfile_path = std::path::PathBuf::from(&marker.mapfile_path);
@@ -1846,7 +1849,7 @@ pub(crate) fn remux_from_ripped_marker(
         // Hand-off consumed. Drop the marker so this dir doesn't get
         // re-queued on the next muxer tick. If the delete fails, surface
         // marker is still worth a warning so the operator can clear it.
-        if let Err(e) = crate::muxer::delete_marker(staging_dir) {
+        if let Err(e) = crate::server::muxer::delete_marker(staging_dir) {
             tracing::warn!(
                 staging = %staging_dir.display(),
                 error = %e,
@@ -1892,14 +1895,14 @@ pub(crate) fn remux_from_ripped_marker(
 }
 
 /// Resolve keys for a resumed disc via the configured source. A thin ISO/mapfile
-/// binding over [`crate::keysource::resolve_keys`]; returns the disc re-scanned
+/// binding over [`crate::server::keysource::resolve_keys`]; returns the disc re-scanned
 /// with the key (sample-based source) or unchanged (local / no key).
 fn resolve_keys_from_iso(
     cfg: &Config,
     iso_path: &Path,
     mapfile_path: &Path,
     mut disc: libfreemkv::Disc,
-) -> (libfreemkv::Disc, crate::keysource::KeyOutcome) {
+) -> (libfreemkv::Disc, crate::server::keysource::KeyOutcome) {
     // On resume / deferred mux the keys are re-resolved from the configured
     // source (keydb / online). Most AACS inputs (inf/MKB/version/hash) come from
     // correctly; a genuinely-unkeyed disc returns NoKey.
@@ -1911,9 +1914,9 @@ fn resolve_keys_from_iso(
     {
         a.volume_id = vid;
     }
-    let sources = crate::keysource::build_sources(cfg);
-    let mut access = crate::keysource::IsoAccess::new(iso_path);
-    crate::keysource::resolve_keys(sources, &mut access, disc)
+    let sources = crate::server::keysource::build_sources(cfg);
+    let mut access = crate::server::keysource::IsoAccess::new(iso_path);
+    crate::server::keysource::resolve_keys(sources, &mut access, disc)
 }
 
 // Tests live in `tests/resume_remux.rs` (integration tests) — they
@@ -1968,10 +1971,10 @@ mod remux_space_tests {
 
     #[test]
     fn space_refusal_threads_ripstate_to_the_worker_outcome() {
-        let rs = crate::ripper::RipState {
+        let rs = crate::server::ripper::RipState {
             last_error: "Not enough staging disk space".to_string(),
             failure_space: true,
-            ..crate::ripper::RipState::default()
+            ..crate::server::ripper::RipState::default()
         };
         let mut outcome = super::MuxHandoffOutcome::default();
         super::apply_failure_fields(&mut outcome, &rs);
@@ -1983,7 +1986,7 @@ mod remux_space_tests {
     // the key round-trip, and flags the refusal on RipState.
     #[test]
     fn resume_remux_checks_space_before_key_resolution() {
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         let body = &src[src.find("\nfn remux_space_refusal(").unwrap()..];
         let body = &body[..body.find("\n}\n").unwrap()];
         assert!(body.contains("super::mux_reserve_for(cfg, titles, &fanout, primary)"));
@@ -2083,7 +2086,7 @@ mod find_iso_tests {
 mod failure_retryability_tests {
     use super::*;
 
-    fn state_of(device: &str) -> crate::ripper::RipState {
+    fn state_of(device: &str) -> crate::server::ripper::RipState {
         super::super::STATE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2161,7 +2164,7 @@ mod failure_retryability_tests {
     }
 
     // A non-success with NO recorded error records nothing at all, so
-    // crate::muxer's Some("")-vs-None dispatch falls through to its own
+    // crate::server::muxer's Some("")-vs-None dispatch falls through to its own
     // .aborted-loss / failed-reason fallbacks instead of a blank card.
     #[test]
     fn a_non_success_without_a_recorded_error_reports_no_reason() {
@@ -2187,7 +2190,7 @@ mod failure_retryability_tests {
     // call sites.
     #[test]
     fn the_non_success_branch_routes_through_apply_failure_fields() {
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         let start = src
             .find("pub(crate) fn remux_from_ripped_marker(")
             .expect("remux_from_ripped_marker must exist");
@@ -2281,7 +2284,7 @@ mod title_confidence_routing_tests {
     // source level as a stopgap against a silent argument swap.
     #[test]
     fn resume_remux_calls_resume_title_confident_with_disc_label_then_match_title() {
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         assert!(
             src.contains(
                 "resume_title_confident(\n        &cfg_read.tmdb_api_key,\n        carried_confident,\n        &disc_label,\n        &title_for_match,\n        tmdb_year,\n    )"
@@ -2296,7 +2299,7 @@ mod title_confidence_routing_tests {
     // handoff_marker_name, not keep its own .done/.review ternary.
     #[test]
     fn iso_completion_uses_handoff_marker_name() {
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         let start = src
             .find("ISO output: deliver the whole-disc image")
             .expect("resume.rs should have the ISO completion branch");
@@ -2320,7 +2323,7 @@ mod title_confidence_routing_tests {
 // that matter.
 #[cfg(test)]
 mod completion_detection_tests {
-    use crate::ripper::staging;
+    use crate::server::ripper::staging;
 
     fn tmpdir() -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -2400,8 +2403,8 @@ mod resume_abort_scope_tests {
         let title = title_lba(1000, 1000);
         let bad = vec![(0u64, 50 * 2048)];
         let lost_secs =
-            crate::ripper::abort_lost_ms(/* output_is_iso */ true, &title, &bad, bps)
-                / crate::util::MILLIS_PER_SEC;
+            crate::server::ripper::abort_lost_ms(/* output_is_iso */ true, &title, &bad, bps)
+                / crate::server::util::MILLIS_PER_SEC;
         assert!(
             lost_secs > 0.0,
             "iso resume must count whole-disc (out-of-title) loss"
@@ -2416,8 +2419,8 @@ mod resume_abort_scope_tests {
         let title = title_lba(1000, 1000);
         let bad = vec![(0u64, 50 * 2048)];
         let lost_secs =
-            crate::ripper::abort_lost_ms(/* output_is_iso */ false, &title, &bad, bps)
-                / crate::util::MILLIS_PER_SEC;
+            crate::server::ripper::abort_lost_ms(/* output_is_iso */ false, &title, &bad, bps)
+                / crate::server::util::MILLIS_PER_SEC;
         assert_eq!(
             lost_secs, 0.0,
             "mkv resume must ignore out-of-title loss (in-title scope)"
@@ -2452,7 +2455,7 @@ mod resume_remux_log_archive_tests {
         // Held for the whole test: AUTORIP_DIR is process-wide and cargo runs
         // tests in parallel, so re-pointing it without this guard corrupts
         // concurrent tests. `env_guard()` also RESTORES the prior value on drop.
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let d = tmpdir();
         // Route logs to the tempdir for this test. SAFETY: env access in
         // tests; the assertion that matters reads the in-memory ring
@@ -2464,9 +2467,9 @@ mod resume_remux_log_archive_tests {
         let dev = format!("test_resume_archive_sg_{}", std::process::id());
 
         // Seed a prior session's log line, as a scan/rip would leave behind.
-        crate::log::device_log(&dev, "PRIOR-SESSION-SCAN-LINE");
+        crate::server::log::device_log(&dev, "PRIOR-SESSION-SCAN-LINE");
         assert!(
-            crate::log::get_device_log(&dev, 100)
+            crate::server::log::get_device_log(&dev, 100)
                 .iter()
                 .any(|l| l.contains("PRIOR-SESSION-SCAN-LINE")),
             "prior line should be present before resume"
@@ -2484,7 +2487,7 @@ mod resume_remux_log_archive_tests {
 
         resume_remux(&cfg, &dev, class);
 
-        let live = crate::log::get_device_log(&dev, 100);
+        let live = crate::server::log::get_device_log(&dev, 100);
         assert!(
             !live.iter().any(|l| l.contains("PRIOR-SESSION-SCAN-LINE")),
             "prior session line must be archived out of the live log, got: {:?}",
@@ -2523,9 +2526,9 @@ mod resume_remux_unreadable_plan_tests {
     // A state.json that EXISTS but can't be trusted must hold the dir: no mux, no
     // partial-output delete, state.json left for the operator, an error surfaced.
     fn assert_held(state_bytes: &[u8], tag: &str) {
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         // Then the mover/muxer statics lock: this asserts on MUX_ERRORS and STATE.
-        let _g = crate::mover::TEST_STATE_LOCK
+        let _g = crate::server::mover::TEST_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let d = tmpdir();
@@ -2549,7 +2552,7 @@ mod resume_remux_unreadable_plan_tests {
         let cfg = Arc::new(RwLock::new(Config::default()));
         resume_remux(&cfg, &dev, class);
 
-        let live = crate::log::get_device_log(&dev, 200);
+        let live = crate::server::log::get_device_log(&dev, 200);
         assert!(
             !live.iter().any(|l| l.contains("Auto-resume: re-muxing")),
             "an unreadable plan must not proceed to the mux, got: {live:?}"
@@ -2564,12 +2567,16 @@ mod resume_remux_unreadable_plan_tests {
             state_bytes,
             "the unreadable state.json must be preserved for the operator"
         );
-        let rs = crate::ripper::STATE.lock().unwrap().remove(&dev);
+        let rs = crate::server::ripper::STATE.lock().unwrap().remove(&dev);
         let rs = rs.expect("device state must be set");
         assert_eq!(rs.status, "error");
         assert!(rs.last_error.contains("state.json"), "{}", rs.last_error);
         let path = staging.to_string_lossy().to_string();
-        let card = crate::muxer::MUX_ERRORS.lock().unwrap().get(&path).cloned();
+        let card = crate::server::muxer::MUX_ERRORS
+            .lock()
+            .unwrap()
+            .get(&path)
+            .cloned();
         let card = card.expect("an operator error card must be raised for the held dir");
         // A parse/schema failure is not transient: point at repair, and warn
         // that deleting state.json delivers a TV disc as one title.
@@ -2592,9 +2599,12 @@ mod resume_remux_unreadable_plan_tests {
                 title_confident: None,
             },
         );
-        crate::ripper::STATE.lock().unwrap().remove(&dev);
+        crate::server::ripper::STATE.lock().unwrap().remove(&dev);
         assert!(
-            !crate::muxer::MUX_ERRORS.lock().unwrap().contains_key(&path),
+            !crate::server::muxer::MUX_ERRORS
+                .lock()
+                .unwrap()
+                .contains_key(&path),
             "a readable state.json must clear the held card"
         );
         let _ = std::fs::remove_dir_all(&d);
@@ -2747,7 +2757,7 @@ mod resume_remux_scan_gate_tests {
     // handle_rip's "already ripping" gate doesn't wedge later /api/rip.
     #[test]
     fn resume_remux_aborts_when_scanned_iso_has_no_usable_title() {
-        let _guard = crate::log::env_guard();
+        let _guard = crate::server::log::env_guard();
         let d = tmpdir();
         // SAFETY: env access in tests, serialized by env_guard; the assertions
         // read the in-memory STATE + device-log ring, not the env-routed file.
@@ -2763,9 +2773,9 @@ mod resume_remux_scan_gate_tests {
         let dev = format!("test_resume_scangate_sg_{}", std::process::id());
         // The live dispatch would already have moved this device to "scanning";
         // seed that so the abort's scanning→idle reset is observable.
-        crate::ripper::update_state(
+        crate::server::ripper::update_state(
             &dev,
-            crate::ripper::RipState {
+            crate::server::ripper::RipState {
                 device: dev.clone(),
                 status: "scanning".to_string(),
                 disc_present: true,
@@ -2783,12 +2793,12 @@ mod resume_remux_scan_gate_tests {
 
         resume_remux(&cfg, &dev, class);
 
-        let live = crate::log::get_device_log(&dev, 200);
+        let live = crate::server::log::get_device_log(&dev, 200);
         assert!(
             live.iter().any(|l| l.contains("no usable title")),
             "the title-gate abort line must be logged, got: {live:?}"
         );
-        let status = crate::ripper::STATE
+        let status = crate::server::ripper::STATE
             .lock()
             .unwrap()
             .get(&dev)
@@ -2799,7 +2809,7 @@ mod resume_remux_scan_gate_tests {
             "a title-gate abort must reset scanning → idle so the rip gate unwedges"
         );
 
-        crate::ripper::STATE.lock().unwrap().remove(&dev);
+        crate::server::ripper::STATE.lock().unwrap().remove(&dev);
         let _ = std::fs::remove_dir_all(&d);
     }
 }
@@ -2810,7 +2820,7 @@ mod resume_remux_webhook_tests {
     // does (both cold auto-resume and the _mux hand-off go through it). Pinned at source level.
     #[test]
     fn success_path_fires_completion_webhook() {
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         let start = src
             .find("Auto-resume complete")
             .expect("resume.rs should log \"Auto-resume complete\" on the success path");
@@ -2822,7 +2832,7 @@ mod resume_remux_webhook_tests {
             .unwrap_or(src.len());
         let region = &src[start..end];
         assert!(
-            region.contains("crate::webhook::send_rich"),
+            region.contains("crate::server::webhook::send_rich"),
             "resume_remux success path must fire send_rich (the mux_complete \
              webhook), matching rip_disc; none found between \"Auto-resume \
              complete\" and the auto_eject branch"
@@ -2842,7 +2852,7 @@ mod resume_iso_auto_eject_tests {
     // terminal does (pre-fix it returned without ejecting). Pinned at source level.
     #[test]
     fn resume_iso_success_path_honors_auto_eject() {
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         let start = src
             .find("Auto-resume: ISO output complete")
             .expect("resume.rs should log \"Auto-resume: ISO output complete\" on the ISO path");
@@ -2873,7 +2883,7 @@ mod resume_iso_auto_eject_tests {
     // that would let the _mux worker re-eject the physical drive.
     #[test]
     fn resume_mkv_terminal_gates_eject_through_predicate() {
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         let start = src
             .find("Honor auto_eject after a successful resume")
             .expect("resume.rs should have the MKV terminal auto_eject comment");
@@ -2893,7 +2903,7 @@ mod resume_handoff_contract_tests {
     //! success the dir writes `.done`/`.review` + `.completed` and deletes
     //! `.ripped`, landing in the Move queue only. These tests pin the
     //! marker-state outcomes without standing up a real ISO + mux pipeline.
-    use crate::ripper::staging;
+    use crate::server::ripper::staging;
     use tempfile::TempDir;
 
     // On a CONFIDENT resume success the dir holds .done + .completed
@@ -2909,7 +2919,7 @@ mod resume_handoff_contract_tests {
 
         // Mux queue: must NOT contain it (no .ripped, and .done/.completed
         // are terminal/move-queue markers anyway).
-        let mux = crate::muxer::pending_queue(tmp.path());
+        let mux = crate::server::muxer::pending_queue(tmp.path());
         assert!(
             mux.is_empty(),
             "a resumed-and-completed dir must not be (queued) for mux"
@@ -2931,10 +2941,10 @@ mod resume_handoff_contract_tests {
         let tmp = TempDir::new().unwrap();
         let disc = tmp.path().join("Resumed_Title");
         std::fs::create_dir_all(&disc).unwrap();
-        crate::muxer::write_marker(
+        crate::server::muxer::write_marker(
             &disc,
-            &crate::muxer::RippedMarker {
-                schema_version: crate::muxer::RIPPED_MARKER_SCHEMA,
+            &crate::server::muxer::RippedMarker {
+                schema_version: crate::server::muxer::RIPPED_MARKER_SCHEMA,
                 iso_path: "/x/Resumed_Title/Resumed_Title.iso".into(),
                 mapfile_path: "/x/Resumed_Title/Resumed_Title.iso.mapfile".into(),
                 display_name: "Resumed Title".into(),
@@ -2964,15 +2974,15 @@ mod resume_handoff_contract_tests {
         std::fs::write(disc.join(staging::DONE_MARKER), b"{}").unwrap();
         staging::write_completed_marker(&disc);
 
-        let mux = crate::muxer::pending_queue(tmp.path());
+        let mux = crate::server::muxer::pending_queue(tmp.path());
         assert!(
             mux.is_empty(),
             "a completed resume must be Move-queue only even if .ripped lingers, got {mux:?}"
         );
         let snap = staging::snapshot_staging_disc(&disc).expect("snapshot");
         assert_eq!(
-            crate::muxer::mux_dispatch_verdict(Some(&snap)),
-            crate::muxer::MuxVerdict::SkipTerminal,
+            crate::server::muxer::mux_dispatch_verdict(Some(&snap)),
+            crate::server::muxer::MuxVerdict::SkipTerminal,
             "the mux worker must treat a completed dir as terminal, never re-dispatch"
         );
     }
@@ -2987,7 +2997,7 @@ mod resume_handoff_contract_tests {
         std::fs::write(disc.join(staging::REVIEW_MARKER), b"{}").unwrap();
         staging::write_completed_marker(&disc);
 
-        let mux = crate::muxer::pending_queue(tmp.path());
+        let mux = crate::server::muxer::pending_queue(tmp.path());
         assert!(
             mux.is_empty(),
             "a .review+.completed resume must not be (queued) for mux"
@@ -3004,7 +3014,7 @@ mod post_mux_loss_reporting_tests {
     // mapfile alone (previously demux-time loss was invisible). Pinned at source level.
     #[test]
     fn resume_reports_demux_loss_on_accepted_rip() {
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         // Bound to the accepted-success region: from the combined-loss
         // (sweep + demux) computation up to the auto-eject tail.
         let start = src
@@ -3024,7 +3034,7 @@ mod post_mux_loss_reporting_tests {
         );
         assert!(
             region.contains(
-                "done_sweep_damage.main_lost_ms / crate::util::MILLIS_PER_SEC + demux_lost_secs"
+                "done_sweep_damage.main_lost_ms / crate::server::util::MILLIS_PER_SEC + demux_lost_secs"
             ),
             "accepted resume must add demux lost seconds to sweep main loss"
         );
@@ -3041,7 +3051,7 @@ mod post_mux_loss_reporting_tests {
         // Guard against regressing to the sweep-only webhook figures.
         assert!(
             !region.contains(
-                "lost_video_secs: done_sweep_damage.main_lost_ms / crate::util::MILLIS_PER_SEC"
+                "lost_video_secs: done_sweep_damage.main_lost_ms / crate::server::util::MILLIS_PER_SEC"
             ),
             "webhook must not report sweep-only loss, hiding demux loss"
         );
@@ -3052,7 +3062,7 @@ mod post_mux_loss_reporting_tests {
     // silent idle/None verdict indistinguishable from /api/stop.
     #[test]
     fn resume_incomplete_mux_surfaces_read_error_not_silent_idle() {
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         // Bound to the mux-incomplete early-return: from the guard up to the
         // "A loss is a loss" mux-time-loss note that immediately follows it. The
         // new anchor brackets just the ~35-line guard block.
@@ -3097,8 +3107,10 @@ mod post_mux_loss_reporting_tests {
     // terminal Failed/SkipTerminal; read_error -> stays resumable/Dispatch).
     #[test]
     fn incomplete_mux_finalize_quarantines_read_error_stays_resumable() {
-        use crate::muxer::{MuxVerdict, mux_dispatch_verdict};
-        use crate::ripper::staging::{self, DiscState, StagingState, snapshot_staging_disc};
+        use crate::server::muxer::{MuxVerdict, mux_dispatch_verdict};
+        use crate::server::ripper::staging::{
+            self, DiscState, StagingState, snapshot_staging_disc,
+        };
 
         let tmp = tempfile::TempDir::new().unwrap();
 
@@ -3152,7 +3164,7 @@ mod post_mux_loss_reporting_tests {
     // merely whether the failure was a finalize — an unwritable mount must return false.
     #[test]
     fn quarantine_incomplete_mux_returns_false_when_write_dropped() {
-        use crate::ripper::staging::{self, StagingState};
+        use crate::server::ripper::staging::{self, StagingState};
 
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("Unwritable");
@@ -3177,17 +3189,19 @@ mod post_mux_loss_reporting_tests {
     // apply_failure_fields to the worker's terminal gate and a persisted Failed state.
     #[test]
     fn finalize_finalize_threads_ripstate_to_worker_gate_and_persists_failed() {
-        use crate::muxer::{MuxFailureClass, mux_failure_is_terminal};
-        use crate::muxer::{MuxVerdict, mux_dispatch_verdict};
-        use crate::ripper::staging::{self, DiscState, StagingState, snapshot_staging_disc};
+        use crate::server::muxer::{MuxFailureClass, mux_failure_is_terminal};
+        use crate::server::muxer::{MuxVerdict, mux_dispatch_verdict};
+        use crate::server::ripper::staging::{
+            self, DiscState, StagingState, snapshot_staging_disc,
+        };
 
         // 1. A terminal finalize failure as `resume_remux` records it on the `_mux`
         //    RipState: a real error string + the structural-finalize bit.
-        let rs = crate::ripper::RipState {
+        let rs = crate::server::ripper::RipState {
             last_error: "mux finalize failed: E6008 no muxable frames".to_string(),
             failure_finalize: true,
             failure_deferred: false,
-            ..crate::ripper::RipState::default()
+            ..crate::server::ripper::RipState::default()
         };
 
         // 2. The handoff builder threads it into the outcome the worker consumes.
@@ -3223,7 +3237,7 @@ mod post_mux_loss_reporting_tests {
             MuxVerdict::Dispatch,
             "a fresh Ripped hand-off dispatches before the quarantine"
         );
-        assert!(crate::muxer::persist_terminal_mux_quarantine(
+        assert!(crate::server::muxer::persist_terminal_mux_quarantine(
             &dir.to_string_lossy(),
             &dir,
             outcome.failure_reason.as_deref().unwrap(),
@@ -3247,7 +3261,7 @@ mod post_mux_loss_reporting_tests {
     #[test]
     fn sweep_loss_abort_quarantines_to_resumable_aborted_loss() {
         // (a) Source-level: the §3 sweep-loss abort block quarantines via the marker.
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         let start = src
             .find("\"disc loss\" for raw ISO (whole-disc scope)")
             .expect("resume.rs should have the §3 sweep-loss scope note");
@@ -3267,8 +3281,10 @@ mod post_mux_loss_reporting_tests {
 
         // (b) Behavioural: the marker the §3 path now writes flips the worker's
         //     dispatch verdict to SkipAbortedLoss, stopping the re-dispatch loop.
-        use crate::muxer::{MuxVerdict, mux_dispatch_verdict};
-        use crate::ripper::staging::{self, DiscState, StagingState, snapshot_staging_disc};
+        use crate::server::muxer::{MuxVerdict, mux_dispatch_verdict};
+        use crate::server::ripper::staging::{
+            self, DiscState, StagingState, snapshot_staging_disc,
+        };
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("Sweep_Loss");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3293,7 +3309,7 @@ mod post_mux_loss_reporting_tests {
     // abort_on_lost_secs just like read-time loss, reported always, never silently dropped.
     #[test]
     fn completed_mux_with_loss_gated_by_abort_on_lost_secs() {
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         // The completed-mux success region: from the "A loss is a loss" mux-time-
         // loss note through the auto-eject tail.
         let start = src
@@ -3341,8 +3357,8 @@ mod sweep_damage_marker_tests {
     // Verifies the round-trip serialization of those fields.
     #[test]
     fn ripped_marker_sweep_fields_round_trip() {
-        let marker = crate::muxer::RippedMarker {
-            schema_version: crate::muxer::RIPPED_MARKER_SCHEMA,
+        let marker = crate::server::muxer::RippedMarker {
+            schema_version: crate::server::muxer::RIPPED_MARKER_SCHEMA,
             iso_path: "/staging/Foo/Foo.iso".into(),
             mapfile_path: "/staging/Foo/Foo.iso.mapfile".into(),
             display_name: "Foo".into(),
@@ -3370,7 +3386,8 @@ mod sweep_damage_marker_tests {
 
         // Serialize then deserialize (mirrors write_marker / read_marker).
         let json = serde_json::to_string(&marker).expect("serialize");
-        let back: crate::muxer::RippedMarker = serde_json::from_str(&json).expect("deserialize");
+        let back: crate::server::muxer::RippedMarker =
+            serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(back.sweep_errors, 77);
         assert!((back.sweep_total_lost_ms - 2500.0).abs() < 0.001);
@@ -3403,7 +3420,7 @@ mod sweep_damage_marker_tests {
             "rip_last_sector": 0,
             "origin_device": "sg0"
         }"#;
-        let marker: crate::muxer::RippedMarker =
+        let marker: crate::server::muxer::RippedMarker =
             serde_json::from_str(json).expect("old marker must deserialize");
         // schema_version check is done by read_marker, not serde; skip it here.
         assert_eq!(marker.sweep_errors, 0, "missing field must default to 0");
@@ -3433,8 +3450,8 @@ mod sweep_damage_marker_tests {
     // auto-files into.done. Before the fix RippedMarker didn't carry the verdict.
     #[test]
     fn ripped_marker_title_confident_round_trips() {
-        let mut marker = crate::muxer::RippedMarker {
-            schema_version: crate::muxer::RIPPED_MARKER_SCHEMA,
+        let mut marker = crate::server::muxer::RippedMarker {
+            schema_version: crate::server::muxer::RIPPED_MARKER_SCHEMA,
             iso_path: "/staging/Baz/Baz.iso".into(),
             mapfile_path: "/staging/Baz/Baz.iso.mapfile".into(),
             display_name: "Operator Chosen Title".into(),
@@ -3460,7 +3477,8 @@ mod sweep_damage_marker_tests {
             title_confident: true,
         };
         let json = serde_json::to_string(&marker).expect("serialize");
-        let back: crate::muxer::RippedMarker = serde_json::from_str(&json).expect("deserialize");
+        let back: crate::server::muxer::RippedMarker =
+            serde_json::from_str(&json).expect("deserialize");
         assert!(
             back.title_confident,
             "operator-confident verdict must survive the .ripped hand-off"
@@ -3469,7 +3487,8 @@ mod sweep_damage_marker_tests {
         // And the low-confidence case round-trips as false.
         marker.title_confident = false;
         let json = serde_json::to_string(&marker).expect("serialize");
-        let back: crate::muxer::RippedMarker = serde_json::from_str(&json).expect("deserialize");
+        let back: crate::server::muxer::RippedMarker =
+            serde_json::from_str(&json).expect("deserialize");
         assert!(!back.title_confident);
     }
 
@@ -3612,7 +3631,7 @@ mod sweep_damage_marker_tests {
 #[cfg(test)]
 mod resume_lock_and_fsync_tests {
     use super::*;
-    use crate::ripper::staging;
+    use crate::server::ripper::staging;
 
     fn tmpdir() -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -3765,7 +3784,7 @@ mod resume_lock_and_fsync_tests {
     // raise an operator card (record_error) the same way the muxer site does.
     #[test]
     fn fsync_dropped_write_raises_operator_card() {
-        let _g = crate::mover::TEST_STATE_LOCK
+        let _g = crate::server::mover::TEST_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let d = tmpdir();
@@ -3779,7 +3798,7 @@ mod resume_lock_and_fsync_tests {
         )
         .unwrap();
         let path_key = d.to_string_lossy().to_string();
-        crate::muxer::clear_error(&path_key);
+        crate::server::muxer::clear_error(&path_key);
 
         // A REAL device (cold operator-resume), not the `"_mux"` worker.
         let quarantined = handle_resume_fsync_failure("sg0", &d, "mux output");
@@ -3789,7 +3808,7 @@ mod resume_lock_and_fsync_tests {
             "a dropped terminal write must still report NOT quarantined"
         );
         assert!(
-            crate::muxer::MUX_ERRORS
+            crate::server::muxer::MUX_ERRORS
                 .lock()
                 .unwrap()
                 .contains_key(&path_key),
@@ -3797,35 +3816,35 @@ mod resume_lock_and_fsync_tests {
              an operator card (MUX_ERRORS) — syslog/device_log alone are not \
              visible on the System page"
         );
-        crate::muxer::clear_error(&path_key);
+        crate::server::muxer::clear_error(&path_key);
     }
 
     // Mirrors `fsync_dropped_write_raises_operator_card`: a dropped `.aborted-loss` write must
     // also raise an operator card, not just silently retry forever.
     #[test]
     fn loss_abort_dropped_write_raises_operator_card() {
-        let _g = crate::mover::TEST_STATE_LOCK
+        let _g = crate::server::mover::TEST_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let d = tmpdir();
         // Force the state.json write to fail (a dir can't be renamed over).
         std::fs::create_dir(d.join(staging::STATE_FILE)).unwrap();
         let path_key = d.to_string_lossy().to_string();
-        crate::muxer::clear_error(&path_key);
+        crate::server::muxer::clear_error(&path_key);
 
         let landed = staging::mark_aborted_on_loss_reporting_landed(&d, "loss exceeds threshold");
         assert!(!landed, "the forced write failure must report landed=false");
         record_loss_abort_write_failure("sg0", &d, "loss exceeds threshold");
 
         assert!(
-            crate::muxer::MUX_ERRORS
+            crate::server::muxer::MUX_ERRORS
                 .lock()
                 .unwrap()
                 .contains_key(&path_key),
             "a dropped .aborted-loss write on a real device must raise an \
              operator card (MUX_ERRORS)"
         );
-        crate::muxer::clear_error(&path_key);
+        crate::server::muxer::clear_error(&path_key);
     }
 }
 
@@ -3865,7 +3884,7 @@ mod accept_loss_override_tests {
     // effective_abort_secs may be named exactly once (comments stripped).
     #[test]
     fn resume_has_exactly_one_threshold_computation() {
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         // Production code only: the test modules below name these same
         // functions, and counting them would make this pin count itself.
         let src = &src[..src.find("#[cfg(test)]").expect("this file has tests")];
@@ -3890,7 +3909,7 @@ mod accept_loss_override_tests {
     // follow ITS OWN path's completion-marker write, with nothing risky between.
     #[test]
     fn the_accept_loss_marker_is_consumed_only_once_the_rip_is_delivered() {
-        let src = crate::util::source_lf(include_str!("resume.rs"));
+        let src = crate::server::util::source_lf(include_str!("resume.rs"));
         // Production code only: the test modules below name these same
         // functions, and counting them would make this pin count itself.
         let src = &src[..src.find("#[cfg(test)]").expect("this file has tests")];

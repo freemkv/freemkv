@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use freemkv_autorip::ripper;
+use freemkv::server::ripper;
 use libfreemkv::Halt;
 
 #[test]
