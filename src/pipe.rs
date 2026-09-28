@@ -472,12 +472,10 @@ fn parse_stream_spec(spec: &str) -> freemkv_engine::StreamFilter {
 
 /// Where the CLI looks up AACS keys for a disc, assembled from the key flags.
 ///
-/// libfreemkv does no lookup — the CLI resolves a [`libfreemkv::Key`] from these
-/// sources and hands it to `Disc::decrypt_with`. When both `--keydb` and
-/// `--key-url` are given, the keydb is consulted first (local-first), so an
-/// offline hit never makes a key-service round-trip. Passing `--key-url` alone
-/// bypasses the keydb entirely. See [`build_key_sources_quiet`] for the full
-/// source-list policy.
+/// Every rip asks these sources once, up front, through the one resolve (KU §2.1). When
+/// both `--keydb` and `--key-url` are given, the keydb is consulted first (local-first),
+/// so an offline hit never makes a key-service round-trip. Passing `--key-url` alone
+/// bypasses the keydb entirely. See [`key_params`] for the full source-list policy.
 #[derive(Default, Debug, Clone)]
 pub struct KeyConfig {
     /// `--keydb PATH` — local `keydb.cfg` (else the standard location).
