@@ -324,7 +324,9 @@ fn the_same_disc_runs_once_a_key_source_is_configured() {
         !(keys.keydb_path.trim().is_empty() && keys.keyserver_url.trim().is_empty()),
         "configure a keydb path or keyserver URL in settings to run this test"
     );
-    let blocked =
-        freemkv::engine::preflight_with_keys(&iso, "/tmp", &[], &keys).expect("preflight ran");
+    // Open resolves once; preflight reuses its set (KU §2.5), making no request.
+    let sc = freemkv::engine::scan_with_keys(&iso, &keys).expect("scan ran");
+    let blocked = freemkv::engine::preflight_with_keys(&iso, "/tmp", &[], sc.keys.as_ref())
+        .expect("preflight ran");
     assert!(blocked.is_empty(), "expected Ready, blocked by {blocked:?}");
 }

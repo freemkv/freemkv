@@ -1765,6 +1765,10 @@ pub struct App {
     /// can name the file that will actually appear. It goes nowhere near a
     /// path without `sanitize_label`, which `title_basename` applies.
     pub disc_label: String,
+    /// The key set Open resolved: the rip's seed (KU §2.5). Memory only.
+    seed: Option<crate::engine::KeySet>,
+    /// Open or the last run refused E7034: the next Start is the insert-the-disc Retry.
+    vid_retry: bool,
     /// The launch probe's in-flight scan, if one is running.
     ///
     /// Its OWN slot, deliberately not `run`. `run` means "a rip is in
@@ -1863,6 +1867,8 @@ impl App {
             video_codecs: Vec::new(),
             title_ids: Vec::new(),
             disc_label: String::new(),
+            seed: None,
+            vid_retry: false,
             probe: None,
             opening: None,
             pending: None,
@@ -2166,10 +2172,12 @@ impl App {
             .name("open-source".into())
             .spawn(move || {
                 let scanned = scan(&path, &keys);
+                // The preflight reuses Open's key set: no second key request (KU §2.5).
+                let seed = scanned.as_ref().ok().and_then(|sc| sc.keys.as_ref());
                 let preflight = (scanned.is_ok()
                     && !is_container(&path)
                     && !crate::engine::is_disc_source(&path))
-                .then(|| crate::engine::preflight_with_keys(&path, "/tmp", &[], &keys));
+                .then(|| crate::engine::preflight_with_keys(&path, "/tmp", &[], seed));
                 let _ = tx.send(OpenedSource {
                     path,
                     scanned,
@@ -2200,6 +2208,9 @@ impl App {
         self.tree = Tree::default();
         self.source.clear();
         self.disc_label.clear();
+        // The key set lives in memory for this source only (KU §2.1 invariant 5).
+        self.seed = None;
+        self.vid_retry = false;
         self.page = Page::Empty;
     }
 
@@ -2371,6 +2382,13 @@ impl App {
                 // can carry it to the engine's own (later) scan.
                 self.title_ids = sc.title_ids.clone();
                 self.disc_label = sc.volume_id.clone();
+                // KU §2.5: Open's key set seeds the rip; E7034 arms the insert-the-disc Retry
+                // (KU §4.2), so Start scans a drive instead of asking again without the VID.
+                self.seed = sc.keys.clone();
+                self.vid_retry = sc.needs_disc;
+                if sc.needs_disc {
+                    self.say(LogKind::Notice, &crate::engine::insert_disc_retry());
+                }
                 let min_secs = self
                     .settings
                     .min_title_secs
@@ -2397,12 +2415,7 @@ impl App {
                     self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"));
                 } else {
                     match preflight.unwrap_or_else(|| {
-                        crate::engine::preflight_with_keys(
-                            path,
-                            "/tmp",
-                            &[],
-                            &KeyConfig::from_settings(&self.settings),
-                        )
+                        crate::engine::preflight_with_keys(path, "/tmp", &[], sc.keys.as_ref())
                     }) {
                         Ok(v) if v.is_empty() => {
                             self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"))
@@ -2494,6 +2507,15 @@ impl App {
                 ),
             );
         }
+        // The Retry after E7034 reads the disc's Volume ID from a drive (KU §4.2 Q4).
+        let vid_from = if self.vid_retry && !drive_source {
+            match self.disc_source(true) {
+                Some(drive) => Some(drive),
+                None => return vec![Effect::Redraw],
+            }
+        } else {
+            None
+        };
         let state = Arc::new(RunState::default());
         self.run = Some(state.clone());
         self.reported_bad = 0;
@@ -2547,6 +2569,8 @@ impl App {
                 keep_iso: self.settings.keep_iso,
                 auto_eject: self.settings.auto_eject,
                 keys: KeyConfig::from_settings(&self.settings),
+                seed: self.seed.clone(),
+                vid_from,
             },
             state,
         );
@@ -2682,6 +2706,7 @@ impl App {
             // verdict matters, and `unwrap_or_default()` turned that into
             // `RunOutcome::Completed` plus an empty summary.
             let sum = st.summary_now();
+            self.vid_retry = st.needs_disc.load(std::sync::atomic::Ordering::SeqCst);
             self.say(LogKind::Result, &sum);
             self.result_summary = sum;
             self.result_outcome = st.outcome_now();
@@ -4063,6 +4088,8 @@ mod tests {
                 title_ids: vec![],
                 rows: vec![],
                 details: vec![],
+                keys: None,
+                needs_disc: false,
             },
             "Main film only",
             0.0,

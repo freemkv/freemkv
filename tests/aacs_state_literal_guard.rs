@@ -343,7 +343,7 @@ fn banned_uses(src: &str, is_test: bool) -> Vec<(usize, &'static str)> {
         view[s..e].copy_from_slice(&bare[s..e]);
     }
     let mut hits = Vec::new();
-    let helper = imports_test_util_decrypt_unit(&bare_text);
+    let helper = uses_the_test_util_helper(&bare_text);
     for word in BANNED {
         for at in 0..view.len() {
             if !view[at..].starts_with(word.as_bytes()) {
@@ -366,7 +366,7 @@ fn banned_uses(src: &str, is_test: bool) -> Vec<(usize, &'static str)> {
 }
 
 /// Whether `code` brings in `libfreemkv::test_util::decrypt_unit` (by path or a `use`).
-fn imports_test_util_decrypt_unit(code: &str) -> bool {
+fn uses_the_test_util_helper(code: &str) -> bool {
     code.contains("test_util::decrypt_unit")
         || code.match_indices("test_util::{").any(|(at, _)| {
             let group = &code[at..];

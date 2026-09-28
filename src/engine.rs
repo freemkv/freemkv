@@ -74,6 +74,11 @@ pub struct Scanned {
     /// the one window `verify_title_identity` could not cover, because it
     /// begins before the engine is called at all.
     pub title_ids: Vec<TitleIdentity>,
+    /// The key set Open resolved for the main title (KU §2.5 "GUI open | `Titles([main])`
+    /// for status. The result seeds the rip's `resolve`"): memory only, never written.
+    pub keys: Option<libfreemkv::keys::ResolvedKeySet>,
+    /// Open refused E7034: only the disc's Volume ID can finish the key (KU §4.2).
+    pub needs_disc: bool,
 }
 
 fn fmt_dur(secs: f64) -> String {
@@ -308,6 +313,8 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
         title_ids: vec![TitleIdentity::of(t)],
         rows,
         details,
+        keys: None,
+        needs_disc: false,
     })
 }
 
@@ -320,25 +327,45 @@ pub fn scan(path: &str) -> Result<Scanned, String> {
     scan_with_keys(path, &KeyConfig::default())
 }
 
-/// Scan, then consult the key sources so the key strip reflects a real
-/// resolution rather than the scan-time placeholder. Key bytes are never
-/// logged, at any verbosity.
+/// Scan an image and resolve its main title's keys once (KU §2.5 "GUI open"), so the key
+/// strip reflects a real resolution; the set seeds the rip. Key bytes are never logged.
 pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
-    // A FOLDER is an image-level source too — `scan_dir` synthesizes a UDF
-    // volume over an extracted disc tree, returning the same (Disc, reader)
-    // pair `scan_iso` does (needed for "Open Folder" / drag-and-drop).
-    let p = std::path::Path::new(path);
-    let scan = if p.is_dir() {
-        libfreemkv::scan_dir
-    } else {
-        libfreemkv::scan_iso
+    // A FOLDER is an image-level source too: "Open Folder" / drag-and-drop.
+    let src = fe::ImageSource::from_path(path);
+    let (disc, _reader) = fe::scan_image(&src).map_err(|e| format!("E{} scan failed", e.code()))?;
+    let main = fe::resolve_selection(&disc, &fe::Selection::MainMovie);
+    let o = crate::rip_keys::ImageOpen {
+        scope: libfreemkv::keys::KeyScope::Titles(main),
+        seed: None,
+        drive_disc: None,
+        halt: None,
     };
-    let (mut disc, mut reader) = scan(p, libfreemkv::ScanOptions::default())
-        .map_err(|e| format!("E{} scan failed", e.code()))?;
+    let (opened, trace) =
+        crate::rip_keys::open_image(&src, crate::rip_keys::sources(&key_params(keys)), o);
+    Ok(scanned_with_keys(&disc, opened.map(|o| o.keys), &trace))
+}
 
-    let won = resolve_disc_keys(&mut disc, reader.as_mut(), keys);
-    let summary = key_summary(&disc, won.as_deref());
-    Ok(scanned_from_disc(&disc, summary))
+/// A scan's display rows, plus its key set or refusal and the walk behind it.
+fn scanned_with_keys(
+    disc: &libfreemkv::Disc,
+    keys: libfreemkv::Result<libfreemkv::keys::ResolvedKeySet>,
+    trace: &crate::rip_keys::Trace,
+) -> Scanned {
+    let set = keys.as_ref().ok();
+    let mut sc = scanned_from_disc(disc, key_summary(disc, set));
+    sc.details.extend(crate::rip_keys::render_trace(trace));
+    if let Some(note) = set.and_then(|s| crate::rip_keys::best_effort_note(&s.status())) {
+        sc.details.push(note);
+    }
+    match keys {
+        Ok(set) => sc.keys = Some(set),
+        Err(e) => {
+            sc.needs_disc = crate::rip_keys::needs_disc(&e);
+            sc.details
+                .push(format!("E{} {}", e.code(), explain(e.code())));
+        }
+    }
+    sc
 }
 
 /// The `freemkv info -v` detail block for a scanned disc/ISO — the same facts
@@ -478,6 +505,8 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
         title_ids: disc.titles.iter().map(TitleIdentity::of).collect(),
         rows,
         details,
+        keys: None,
+        needs_disc: false,
     }
 }
 
@@ -564,8 +593,7 @@ pub fn eject_source(source: &str) -> Result<String, String> {
 }
 
 /// Host certs / credentials for the AACS bus handshake, from the keydb — the
-/// same input the CLI's `drive_credentials` builds. Passed to the shared
-/// `fe::open_scan_resolve`.
+/// same input the CLI's `drive_credentials` builds. Passed to the shared `fe::open_scan`.
 fn session_credentials(keys: &KeyConfig) -> Option<libfreemkv::DriveCredentials> {
     let host_certs = freemkv_keysources::KeydbSource::new(keys.keydb_path.clone()).host_certs();
     (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs })
@@ -589,75 +617,81 @@ fn key_params(keys: &KeyConfig) -> freemkv_engine::KeyParams {
     }
 }
 
-/// The key-source factory used to resolve a disc's AACS keys (same sources the
-/// ISO path uses, built from the user's settings).
+/// The key sources a rip asks, from the user's settings (the same ones the ISO path uses).
 fn key_factory(keys: &KeyConfig) -> libfreemkv::KeySourceFactory {
-    freemkv_engine::key_source_factory(&key_params(keys))
+    crate::rip_keys::sources(&key_params(keys))
 }
 
-/// Which key source won, from a resolution trace (for the key strip).
-fn won_from_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> Option<String> {
-    freemkv_engine::won_source(trace)
-}
-
-/// Scan a live optical drive (`disc://<device>` or bare `disc://` autodetect)
-/// and resolve its keys, returning the SAME `Scanned` shape the ISO path does —
-/// so the title tree renders identically. Mirrors the CLI's `pipe_disc` scan.
-/// NEEDS HARDWARE to exercise; the session flow matches the proven CLI path.
+/// Scan a live optical drive (`disc://<device>` or bare `disc://` autodetect) with no key
+/// call, then resolve the main title's keys once (KU §2.5 "GUI open"): the SAME `Scanned`
+/// shape the ISO path returns, seed set included. NEEDS HARDWARE to exercise.
 pub fn scan_disc_with_keys(source: &str, keys: &KeyConfig) -> Result<Scanned, String> {
-    // The shared drive bring-up (open + lock + scan + resolve) — the SAME core
-    // the CLI's pipe_disc uses; the GUI just renders the result.
-    let (session, trace) = fe::open_scan_resolve(
-        disc_target(source),
-        session_credentials(keys),
-        key_factory(keys),
-    )
-    .map_err(|e| match &e {
+    let (disc, mut reader) = drive_scan(source, keys, false)?;
+    let main = fe::resolve_selection(&disc, &fe::Selection::MainMovie);
+    let scope = libfreemkv::keys::KeyScope::Titles(main);
+    let (set, trace) = crate::rip_keys::resolve(
+        &disc,
+        reader.as_mut(),
+        scope,
+        &key_factory(keys),
+        None,
+        None,
+    );
+    Ok(scanned_with_keys(&disc, set, &trace))
+}
+
+/// Open and scan the drive behind `source` with NO key call (`fe::open_scan`): the disc
+/// and its raw reader. The drive is released when the reader drops.
+fn drive_scan(
+    source: &str,
+    keys: &KeyConfig,
+    raw_copy: bool,
+) -> Result<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>), String> {
+    let session = fe::open_scan(disc_target(source), session_credentials(keys), raw_copy)
+        .map_err(|e| drive_error(&e))?;
+    staged(session)
+}
+
+/// A scanned session's disc and its drive, staged as the raw reader.
+fn staged(
+    mut session: libfreemkv::DiscSession,
+) -> Result<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>), String> {
+    let disc = session.take_disc().ok_or("scan produced no disc")?;
+    session.stage_drive_as_reader();
+    let reader = session.take_reader().ok_or("could not stage the drive")?;
+    Ok((disc, reader))
+}
+
+// "No optical drive found" for autodetect with nothing attached; else the error itself.
+fn drive_error(e: &libfreemkv::Error) -> String {
+    match e {
         libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
             "No optical drive found. Connect a Blu-ray/DVD drive with a disc.".to_string()
         }
         _ => format!("{e}"),
-    })?;
-    let won = won_from_trace(&trace);
-    let disc = session.disc().ok_or("scan produced no disc")?;
-    let summary = key_summary(disc, won.as_deref());
-    Ok(scanned_from_disc(disc, summary))
+    }
 }
 
 /// Ask the engine whether a job can run, without executing it.
 // See `scan` above: used by the integration/platform tests, dead in the bin.
 #[allow(dead_code)]
 pub fn preflight(path: &str, dest: &str, titles: &[usize]) -> Result<Vec<String>, String> {
-    preflight_with_keys(path, dest, titles, &KeyConfig::default())
+    preflight_with_keys(path, dest, titles, None)
 }
 
-/// Preflight against the user's configured key sources.
-///
-/// The keys must be resolved BEFORE asking. A fresh scan leaves only a VID-only
-/// placeholder AACS state, which the engine correctly reports as unresolved —
-/// so preflighting an unscanned-for-keys disc always answers "no key", even
-/// when the user has a keydb that would unlock it. Resolving first is what
-/// makes the answer reflect reality; the decrypt judgment itself stays in the
-/// engine.
+/// Preflight with the key set Open resolved (`seed`), making NO key request: KU §2.5, the
+/// Open result "seeds the rip's `resolve`", so Open, preflight and Run resolve once. With
+/// no set the engine reports the missing key; the decrypt judgment stays in the engine.
 pub fn preflight_with_keys(
     path: &str,
     dest: &str,
     titles: &[usize],
-    keys: &KeyConfig,
+    seed: Option<&libfreemkv::keys::ResolvedKeySet>,
 ) -> Result<Vec<String>, String> {
-    // Folder OR image — the third place this dispatch was needed. A preflight
-    // that cannot open a folder reports a spurious failure for a source the
-    // rip itself handles.
-    let p = std::path::Path::new(path);
-    let scan = if p.is_dir() {
-        libfreemkv::scan_dir
-    } else {
-        libfreemkv::scan_iso
-    };
-    let (mut disc, mut reader) =
-        scan(p, libfreemkv::ScanOptions::default()).map_err(|e| format!("E{}", e.code()))?;
-    resolve_disc_keys(&mut disc, reader.as_mut(), keys);
-    let disc = disc;
+    // Folder OR image: a preflight that cannot open a folder reports a spurious failure
+    // for a source the rip itself handles.
+    let (disc, _reader) =
+        fe::scan_image(&fe::ImageSource::from_path(path)).map_err(|e| format!("E{}", e.code()))?;
     let sel = if titles.is_empty() {
         fe::Selection::MainMovie
     } else {
@@ -666,10 +700,9 @@ pub fn preflight_with_keys(
     // Folder OR image — the scan above already dispatches on it, and a
     // preflight run against `iso://<folder>` answers about a source that does
     // not exist in that form.
-    let job =
+    let mut job =
         fe::Job::new(format!("{}://{path}", image_or_dir_scheme(path)), dest).with_selection(sel);
-    // No decrypt gate of our own: the engine's `preflight` delegates that to
-    // `resolve_keys`, so a second check here could only drift from it.
+    job.keys = seed.cloned();
     match fe::preflight(&disc, &job) {
         fe::Preflight::Ready => Ok(vec![]),
         fe::Preflight::Blocked(rs) => Ok(rs.iter().map(|r| r.key.to_string()).collect()),
@@ -719,6 +752,9 @@ pub struct RunState {
     /// The typed verdict for [`Self::summary`]. Written in the same place the
     /// summary is, so the two can never disagree.
     pub outcome: Mutex<RunOutcome>,
+    /// The run refused E7034: only the disc's Volume ID can finish the key (KU §4.2), so
+    /// the shell's next Start is the insert-the-disc Retry.
+    pub needs_disc: AtomicBool,
 }
 
 impl RunState {
@@ -814,40 +850,24 @@ impl fe::Sink for UiSink {
     }
 }
 
-/// Resolve AACS keys onto a scanned disc. Without this the mux fails E7022 on
-/// every encrypted title — scanning alone does not consult any key source.
-/// Returns the label of the source that actually produced the key
-/// (`"keydb"` / `"online"`), or `None` when nothing resolved.
-pub fn resolve_disc_keys(
-    disc: &mut libfreemkv::Disc,
-    reader: &mut dyn libfreemkv::SectorSource,
-    keys: &KeyConfig,
-) -> Option<String> {
-    // The trace is the ONLY authoritative record of which source won.
-    // `Disc::aacs.key_source` is `ExternalUk` for every caller-supplied key —
-    // and is also the scan-time placeholder — so it cannot answer this.
-    freemkv_engine::resolve_disc_keys(disc, reader, &key_params(keys))
-}
-
-// Describe the disc's key state honestly. `resolve_keys` reports resolved
-// off `KeyOrigin::ExternalUk` alone, but that origin is stamped as a
-// placeholder before any source runs — gate on real key material instead.
-pub(crate) fn key_summary(disc: &libfreemkv::Disc, won: Option<&str>) -> String {
+// Describe the disc's key state from the resolved set (KU §11.6: "The key count in `info`
+// and the GUI comes from the resolved set"), never from keys banked on the disc.
+pub(crate) fn key_summary(
+    disc: &libfreemkv::Disc,
+    set: Option<&libfreemkv::keys::ResolvedKeySet>,
+) -> String {
     if !disc.encrypted {
         return "unencrypted".into();
     }
     if disc.css.is_some() {
         return "CSS (DVD)".into();
     }
-    let have_key = disc
-        .aacs
-        .as_ref()
-        .map(|a| !a.unit_keys.is_empty() || a.vuk.is_some())
-        .unwrap_or(false);
-    match (have_key, won) {
-        (true, Some(w)) => format!("unlocked via {w}"),
-        (true, None) => "unlocked".into(),
-        (false, _) => "locked — no key yet".into(),
+    match set.filter(|s| s.is_aacs() && s.is_for(disc)) {
+        Some(s) => match s.status().origin {
+            Some(w) => format!("unlocked via {w}"),
+            None => "unlocked".into(),
+        },
+        None => "locked — no key yet".into(),
     }
 }
 
@@ -1148,6 +1168,9 @@ pub fn summarize_extract(res: &libfreemkv::ExtractResult, dest: &std::path::Path
     }
 }
 
+/// A rip's up-front AACS key set (KU §2.1), held in memory only.
+pub type KeySet = libfreemkv::keys::ResolvedKeySet;
+
 /// Key configuration taken from the user's settings.
 #[derive(Clone, Default)]
 pub struct KeyConfig {
@@ -1285,6 +1308,11 @@ pub struct RipRequest {
     /// last title is muxed off the drive.
     pub auto_eject: bool,
     pub keys: KeyConfig,
+    /// The key set Open resolved: the rip asks only for what it lacks (KU §2.5).
+    pub seed: Option<libfreemkv::keys::ResolvedKeySet>,
+    /// The insert-the-disc Retry after E7034 (KU §4.2 Q4): the `disc://` drive holding
+    /// the image's disc, scanned with no key call for its Volume ID.
+    pub vid_from: Option<String>,
 }
 
 /// Run the real rip on a worker thread: engine title loop + per-title mux.
@@ -1384,6 +1412,7 @@ fn run_extract_folder(
     disc: &libfreemkv::Disc,
     reader: &mut dyn libfreemkv::SectorSource,
     label: &str,
+    set: &libfreemkv::keys::ResolvedKeySet,
     sink: &UiSink,
     state: &Arc<RunState>,
 ) -> Result<String, String> {
@@ -1399,7 +1428,7 @@ fn run_extract_folder(
             "extracting decrypted file tree → {}",
             dest.display()
         ));
-    match fe::extract_tree(disc, reader, &dest, req.force, sink) {
+    match fe::extract_tree_with(disc, reader, &dest, req.force, Some(set), sink) {
         Ok(res) => {
             for f in &res.files {
                 if f.bytes_unreadable > 0 {
@@ -1774,19 +1803,15 @@ fn demux_needs_subdirs(title_count: usize) -> bool {
 
 // The per-title mux input for `idx`. Named function (not a struct literal in
 // a closure) because three fields fail silently if missing: title_index
-// (wrong title muxed), unit_keys (E7022), selection (wrong tracks kept).
+// (wrong title muxed), keys (E7022), selection (wrong tracks kept).
 fn title_input_options(
-    disc: &libfreemkv::Disc,
+    set: &libfreemkv::keys::ResolvedKeySet,
     req: &RipRequest,
     idx: usize,
 ) -> libfreemkv::InputOptions {
     libfreemkv::InputOptions {
         title_index: Some(idx),
-        unit_keys: disc
-            .aacs
-            .as_ref()
-            .map(|a| a.unit_keys.clone())
-            .unwrap_or_default(),
+        keys: Some(set.clone()),
         selection: stream_selection_for(req, Some(idx)),
         ..Default::default()
     }
@@ -1800,6 +1825,7 @@ fn mux_selected_titles(
     source_url: &str,
     req: &RipRequest,
     indices: &[usize],
+    set: &libfreemkv::keys::ResolvedKeySet,
     sink: &UiSink,
     state: &Arc<RunState>,
 ) -> Result<String, String> {
@@ -1841,7 +1867,7 @@ fn mux_selected_titles(
             OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
         };
         let hint = disc.titles.get(idx).map(|t| t.size_bytes).unwrap_or(0);
-        let input = title_input_options(disc, req, idx);
+        let input = title_input_options(set, req, idx);
         let mux = mux_opts(req);
         match fe::mux_title(source_url, &dest_url, input, &mux, hint, sink) {
             Ok(o) => {
@@ -1968,17 +1994,48 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     // moment the user pressed Rip.
     let src_path = std::path::Path::new(&req.source);
     whole_image_gate(&req.format, src_path)?;
-    let scan = if src_path.is_dir() {
-        libfreemkv::scan_dir
-    } else {
-        libfreemkv::scan_iso
-    };
-    let (mut disc, mut reader) = scan(src_path, libfreemkv::ScanOptions::default())
-        .map_err(|e| format!("E{} scan failed", e.code()))?;
-    // Resolve decryption keys onto the disc BEFORE muxing.
-    resolve_disc_keys(&mut disc, reader.as_mut(), &req.keys);
-
+    let src = fe::ImageSource::from_path(src_path);
+    let (disc, _reader) = fe::scan_image(&src).map_err(|e| format!("E{} scan failed", e.code()))?;
     let kind = out_kind(&req.format);
+    let whole = matches!(kind, OutKind::DecryptedFolder | OutKind::IsoImage);
+    let indices = if whole {
+        Vec::new()
+    } else {
+        // The ticked numbers were resolved against `Ui::open`'s scan; this is a
+        // different one, taken now — a re-authored image would renumber titles
+        // under a stale selection.
+        let scanned: Vec<TitleIdentity> = disc.titles.iter().map(TitleIdentity::of).collect();
+        verify_selection_identity(&req.titles, &req.title_ids, &scanned)?;
+        let sel = if req.titles.is_empty() {
+            fe::Selection::MainMovie
+        } else {
+            fe::Selection::Titles(req.titles.clone())
+        };
+        let indices = fe::resolve_selection(&disc, &sel);
+        // A staged image holds only the titles it was staged for (checked by extents, so the
+        // staging mux's re-mapped selection passes); anything else would mux zero-fill.
+        fe::ensure_titles_staged(src_path, &disc, &indices).map_err(|e| gui_error(&e, src_path))?;
+        state
+            .lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(format!("selection resolved to titles {indices:?}"));
+        if indices.is_empty() {
+            return Err("Nothing selected to rip.".into());
+        }
+        indices
+    };
+    // KU §2.1 invariant 1: ONE resolve over what this rip decrypts, before any output,
+    // seeded with Open's set; the Retry after E7034 brings the drive's scan (its VID).
+    let scope = if whole {
+        libfreemkv::keys::KeyScope::WholeDisc
+    } else {
+        libfreemkv::keys::KeyScope::Titles(indices.clone())
+    };
+    let opened = open_rip_image(req, &src, scope, sink, state)?;
+    let set = opened.keys.clone();
+    let disc = opened.disc;
+    let mut reader = opened.reader;
     let label = if disc.volume_id.is_empty() {
         "disc".to_string()
     } else {
@@ -1990,7 +2047,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     match kind {
         OutKind::DecryptedFolder => {
             std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
-            return run_extract_folder(req, &disc, reader.as_mut(), &label, sink, state);
+            return run_extract_folder(req, &disc, reader.as_mut(), &label, &set, sink, state);
         }
         OutKind::IsoImage => {
             // Decrypt an image without the disc: `iso://In.iso iso://Out.iso`.
@@ -2024,6 +2081,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             );
             job.raw = req.raw;
             job.mode = fe::RipMode::Single;
+            job.keys = Some(set);
             let result = fe::recover_to_iso(&disc, reader.as_mut(), &dest, &job, sink)
                 .map_err(|e| format!("image decrypt failed: {e}"))?;
             if recovery_produced_no_data(result.bytes_good) {
@@ -2034,42 +2092,124 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
         }
         _ => {}
     }
-    let disc = disc;
-
-    // The ticked numbers were resolved against `Ui::open`'s scan; this is a
-    // different one, taken now — a re-authored image would renumber titles
-    // under a stale selection. Checked here, after the whole-disc arms above.
-    verify_selection_identity(
-        &req.titles,
-        &req.title_ids,
-        &disc
-            .titles
-            .iter()
-            .map(TitleIdentity::of)
-            .collect::<Vec<_>>(),
-    )?;
-    let sel = if req.titles.is_empty() {
-        fe::Selection::MainMovie
-    } else {
-        fe::Selection::Titles(req.titles.clone())
-    };
-    let indices = fe::resolve_selection(&disc, &sel);
-    // A staged image holds only the titles it was staged for (checked by extents, so the
-    // staging mux's re-mapped selection passes); anything else would mux zero-fill.
-    fe::ensure_titles_staged(src_path, &disc, &indices).map_err(|e| gui_error(&e, src_path))?;
-    state
-        .lines
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(format!("selection resolved to titles {indices:?}"));
-    if indices.is_empty() {
-        return Err("Nothing selected to rip.".into());
-    }
+    drop(reader);
     // A folder is `dir://`, an image `iso://`. Hardcoding `iso://` here meant
     // the mux re-opened a folder as an image file and failed after a successful
     // scan and key resolution.
     let src_url = format!("{}://{}", image_or_dir_scheme(&req.source), req.source);
-    mux_selected_titles(&disc, &src_url, req, &indices, sink, state)
+    mux_selected_titles(&disc, &src_url, req, &indices, &set, sink, state)
+}
+
+/// Open the rip's image and resolve its keys once (`rip_keys::open_image`), seeded with
+/// Open's set; the Retry's drive scan supplies the VID. A refusal is logged with its
+/// walk; E7034 also says to insert the disc and flags the Retry.
+fn open_rip_image(
+    req: &RipRequest,
+    src: &fe::ImageSource,
+    scope: libfreemkv::keys::KeyScope,
+    sink: &UiSink,
+    state: &Arc<RunState>,
+) -> Result<fe::OpenedImage, String> {
+    let drive_disc = match &req.vid_from {
+        Some(drive) => Some(
+            crate::rip_keys::drive_scan(drive, session_credentials(&req.keys))
+                .map_err(|e| drive_error(&e))?,
+        ),
+        None => None,
+    };
+    let watch = CancelWatch::new(state);
+    let o = crate::rip_keys::ImageOpen {
+        scope,
+        seed: req.seed.clone(),
+        drive_disc,
+        halt: Some(watch.halt.clone()),
+    };
+    let (opened, trace) = crate::rip_keys::open_image(src, key_factory(&req.keys), o);
+    drop(watch);
+    log_walk(&trace, sink);
+    let opened = opened.map_err(|e| key_refusal(&e, src.path(), state))?;
+    note_best_effort(&opened.keys, state);
+    Ok(opened)
+}
+
+/// The resolution's per-source walk, in the run log: "why no key" (labels only).
+fn log_walk(trace: &crate::rip_keys::Trace, sink: &UiSink) {
+    use fe::Sink as _;
+    for line in crate::rip_keys::render_trace(trace) {
+        sink.log(fe::Level::Info, &line);
+    }
+}
+
+/// KU §2.6: an HD DVD set applied without proof says so in the run log.
+fn note_best_effort(set: &libfreemkv::keys::ResolvedKeySet, state: &Arc<RunState>) {
+    if let Some(note) = crate::rip_keys::best_effort_note(&set.status()) {
+        state
+            .lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(note);
+    }
+}
+
+/// A key refusal as the run's error text; E7034 adds the insert-the-disc step (KU §4.2)
+/// and flags the shell's Retry.
+fn key_refusal(e: &libfreemkv::Error, src: &std::path::Path, state: &Arc<RunState>) -> String {
+    let msg = gui_error(e, src);
+    if !crate::rip_keys::needs_disc(e) {
+        return msg;
+    }
+    state.needs_disc.store(true, Ordering::SeqCst);
+    format!("{msg}\n{}", insert_disc_retry())
+}
+
+/// E7034's next step in the app (KU §4.2 Q4: "An 'Insert the disc' prompt … and Retry").
+pub fn insert_disc_retry() -> String {
+    crate::strings::get_or(
+        "gui.log.insert_disc_retry",
+        "Insert the disc into a drive, then choose “Start rip” again. Only its Volume ID is \
+         read; it is not ripped again.",
+    )
+}
+
+/// A `Halt` that follows the run's Stop button (`RunState::cancel`) until dropped, so a
+/// resolve or a mux the GUI starts outside the engine stops like one inside it.
+struct CancelWatch {
+    halt: libfreemkv::Halt,
+    done: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CancelWatch {
+    fn new(state: &Arc<RunState>) -> Self {
+        let halt = libfreemkv::Halt::new();
+        let done = Arc::new(AtomicBool::new(false));
+        let (h, d, st) = (halt.clone(), done.clone(), state.clone());
+        let thread = std::thread::spawn(move || {
+            while !d.load(Ordering::SeqCst) {
+                if st.cancel.load(Ordering::SeqCst) {
+                    h.cancel();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+        if state.cancel.load(Ordering::SeqCst) {
+            halt.cancel();
+        }
+        CancelWatch {
+            halt,
+            done,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for CancelWatch {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 /// What a `disc://` rip does with the drive, once the whole-disc extract case
@@ -2320,17 +2460,45 @@ fn iso_recovery_result(result: &fe::MultipassResult, iso_path: &str) -> Result<S
     Ok(format!("ISO image written to {iso_path}{note}"))
 }
 
-// Rip from a live optical drive (disc://). Scans once to resolve titles and keys, then runs the
-// chosen sink via fe::run_titles (same loop the ISO path uses). NEEDS HARDWARE VALIDATION
-// end-to-end.
+// Rip from a live optical drive (disc://). Scans once (no key call), resolves the rip's keys
+// once, then runs the chosen sink via fe::run_titles (same loop the ISO path uses). NEEDS
+// HARDWARE VALIDATION end-to-end.
 fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
-    run_disc_scanning(req, sink, state, fe::open_scan_resolve_with)
+    run_disc_scanning(req, sink, state, fe::open_scan)
+}
+
+/// What a whole-disc output of a drive decrypts (KU §2.5): nothing for a raw ISO copy
+/// ("GUI 'Keep encrypted', GUI `raw_copy` | `None`: no key call"), else the whole disc.
+fn disc_copy_scope(kind: OutKind, raw: bool) -> libfreemkv::keys::KeyScope {
+    crate::rip_keys::copy_scope(disc_raw_copy(kind, raw))
+}
+
+/// The rip's one resolve over the drive (KU §2.1 invariant 1), seeded with Open's set and
+/// stopped by the Stop button; its walk and any HD DVD note go to the run log.
+fn disc_rip_keys(
+    disc: &libfreemkv::Disc,
+    reader: &mut dyn libfreemkv::SectorSource,
+    scope: libfreemkv::keys::KeyScope,
+    req: &RipRequest,
+    sink: &UiSink,
+    state: &Arc<RunState>,
+) -> Result<libfreemkv::keys::ResolvedKeySet, String> {
+    let watch = CancelWatch::new(state);
+    let sources = key_factory(&req.keys);
+    let seed = req.seed.as_ref();
+    let (set, trace) =
+        crate::rip_keys::resolve(disc, reader, scope, &sources, seed, Some(&watch.halt));
+    drop(watch);
+    log_walk(&trace, sink);
+    let set = set.map_err(|e| key_refusal(&e, std::path::Path::new(&req.source), state))?;
+    note_best_effort(&set, state);
+    Ok(set)
 }
 
 /// [`run_disc`] with the drive scan as an injectable seam. Production always scans via
-/// `fe::open_scan_resolve_with` (needs a live drive, so THAT path is untestable here); a
-/// test can stub it and observe the exact `raw_copy` `run_disc` handed it — proving the
-/// wiring is real, not just that `disc_raw_copy`'s own logic is right.
+/// `fe::open_scan` (needs a live drive, so THAT path is untestable here); a test can stub
+/// it and observe the exact `raw_copy` `run_disc` handed it — proving the wiring is real,
+/// not just that `disc_raw_copy`'s own logic is right.
 fn run_disc_scanning(
     req: &RipRequest,
     sink: &UiSink,
@@ -2338,39 +2506,26 @@ fn run_disc_scanning(
     scan: impl FnOnce(
         libfreemkv::DeviceTarget,
         Option<libfreemkv::DriveCredentials>,
-        libfreemkv::KeySourceFactory,
         bool,
-    ) -> Result<
-        (
-            libfreemkv::DiscSession,
-            libfreemkv::aacs::trace::ResolutionTrace,
-        ),
-        libfreemkv::Error,
-    >,
+    ) -> Result<libfreemkv::DiscSession, libfreemkv::Error>,
 ) -> Result<String, String> {
     if req.decrypt_threads > 0 {
         libfreemkv::set_decrypt_threads(req.decrypt_threads);
     }
     let kind = out_kind(&req.format);
 
-    // Scan once (shared drive core): titles, label, key state, per-disc name.
+    // Scan once (shared drive core, no key call): titles, label, per-disc name.
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
-    let (mut session, _trace) = scan(
+    let session = scan(
         disc_target(&req.source),
         session_credentials(&req.keys),
-        key_factory(&req.keys),
         disc_raw_copy(kind, req.raw),
     )
-    .map_err(|e| match &e {
-        libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
-            "No optical drive found. Connect a Blu-ray/DVD drive with a disc.".to_string()
-        }
-        _ => format!("{e}"),
-    })?;
+    .map_err(|e| drive_error(&e))?;
     // The resolved device path (autodetect included) — captured now so we can
     // eject after the drive is done being read, whichever branch runs.
     let device = session.device_path().to_string();
-    let disc = session.disc().ok_or("scan produced no disc")?;
+    let (disc, mut reader) = staged(session)?;
     let label = if disc.volume_id.is_empty() {
         "disc".to_string()
     } else {
@@ -2384,18 +2539,31 @@ fn run_disc_scanning(
     // the SELECTION was made against — everything between ticking titles and
     // pressing Start (a swapped disc, say) happened without a check until now.
     verify_selection_identity(&req.titles, &req.title_ids, &scanned_ids)?;
+    // Which titles to rip — same Selection/resolve_selection the ISO path
+    // uses, so a live-drive rip gets the same main-title default and
+    // out-of-range filtering.
+    let sel = if req.titles.is_empty() {
+        fe::Selection::MainMovie
+    } else {
+        fe::Selection::Titles(req.titles.clone())
+    };
+    let indices = fe::resolve_selection(&disc, &sel);
+    let whole = matches!(kind, OutKind::DecryptedFolder | OutKind::IsoImage);
+    let scope = if whole {
+        disc_copy_scope(kind, req.raw)
+    } else {
+        libfreemkv::keys::KeyScope::Titles(indices.clone())
+    };
+    // KU §2.1 invariant 1: every key this rip reads with, from ONE resolve, up front.
+    let set = disc_rip_keys(&disc, reader.as_mut(), scope.clone(), req, sink, state)?;
 
     // Decrypted folder: extract the UDF tree off the staged drive into a
     // per-disc subdir (same helper the ISO path uses).
     if matches!(kind, OutKind::DecryptedFolder) {
-        session.stage_drive_as_reader();
-        let mut reader = session
-            .take_reader()
-            .ok_or("could not stage the drive for extraction")?;
-        let disc = session.disc().ok_or("scan produced no disc")?;
-        let result = run_extract_folder(req, disc, reader.as_mut(), &label, sink, state);
+        crate::rip_keys::gate(&disc, false, Some(&set), &scope)
+            .map_err(|e| gui_error(&e, std::path::Path::new(&req.source)))?;
+        let result = run_extract_folder(req, &disc, reader.as_mut(), &label, &set, sink, state);
         drop(reader);
-        drop(session);
         if req.auto_eject {
             eject_disc(&device, sink);
         }
@@ -2414,16 +2582,18 @@ fn run_disc_scanning(
             .join(format!("{}.iso", sanitize_label(&label)))
             .to_string_lossy()
             .into_owned();
-        session.stage_drive_as_reader();
-        let mut reader = session
-            .take_reader()
-            .ok_or("could not stage the drive for recovery")?;
-        let disc = session.disc().ok_or("scan produced no disc")?;
         // The user picked title NUMBERS against a scan; the re-scanned staged
         // image may list titles differently if damage dropped a playlist, so
         // `scanned_ids` lets the selection re-resolve by identity.
         let mut job = fe::Job::new(format!("disc://{}", req.source), iso_path.clone());
         job.raw = recovery_raw(req.multipass, want_iso, req.raw)?;
+        // A decrypting copy reads through the set and refuses up front on anything it
+        // lacks (E7026 for Pending forensic keys, KU §5.4); a raw one has no keys at all.
+        if !job.raw {
+            crate::rip_keys::gate(&disc, false, Some(&set), &scope)
+                .map_err(|e| gui_error(&e, std::path::Path::new(&req.source)))?;
+            job.keys = Some(set.clone());
+        }
         let opts = fe::MultipassOpts {
             max_passes: req.max_passes,
             abort_on_lost_secs: req.abort_lost_secs,
@@ -2431,30 +2601,23 @@ fn run_disc_scanning(
         };
         // An MKV deliverable stages only nav/UDF + the chosen titles (never bus-encrypted,
         // AACS BD Pre-recorded 0.953 §3.7) unless a kept, whole image can be made.
-        let scope = if want_iso {
+        let staging = if want_iso {
             None
         } else {
-            let sel = if req.titles.is_empty() {
-                fe::Selection::MainMovie
-            } else {
-                fe::Selection::Titles(req.titles.clone())
-            };
-            let indices = fe::resolve_selection(disc, &sel);
-            fe::mkv_staging_scope(disc, reader.as_mut(), &indices, req.keep_iso)
+            fe::mkv_staging_scope(&disc, reader.as_mut(), &indices, req.keep_iso)
                 .map_err(|e| format!("recovery failed: {e}"))?
         };
         let result = fe::multipass_rip_staged(
-            disc,
+            &disc,
             reader.as_mut(),
             std::path::Path::new(&iso_path),
             &job,
             &opts,
-            scope.as_deref(),
+            staging.as_deref(),
             sink,
         )
         .map_err(|e| format!("recovery failed: {e}"))?;
         drop(reader);
-        drop(session);
         // Read phase done: the deliverable (ISO) or the mux source is on disk,
         // so the drive is no longer needed — eject now, exactly like autorip
         // (which ejects at read-complete and muxes from the staged ISO).
@@ -2477,7 +2640,7 @@ fn run_disc_scanning(
 
         // Title output: mux the selected titles from the recovered ISO via the
         // ordinary ISO-source path. The staged image is encrypted (see
-        // `recovery_raw`), so `iso_req` inherits this request's `KeyConfig`.
+        // `recovery_raw`), so `iso_req` carries this rip's set as its seed.
         if recovery_produced_no_data(result.good_bytes) {
             let _ = std::fs::remove_file(&iso_path);
             return Err("Recovery produced no readable data — nothing to mux.".into());
@@ -2499,6 +2662,8 @@ fn run_disc_scanning(
             .zip(titles.iter().copied())
             .collect();
         let title_pids = remap_title_pids(&req.title_pids, &pid_map);
+        // KU §4.3 "GUI multipass: staged raw ISO → mux | The set from Start is reused for
+        // the mux (`open_image_with(Known)` or `Seeded`)": no second request.
         let iso_req = RipRequest {
             source: iso_path.clone(),
             titles,
@@ -2507,6 +2672,8 @@ fn run_disc_scanning(
             // staged image, so the drive scan's identities no longer apply —
             // carrying them on would compare against the wrong title.
             title_ids: Vec::new(),
+            seed: Some(set.clone()),
+            vid_from: None,
             ..req.clone()
         };
         let mux = run_blocking(&iso_req, sink, state);
@@ -2515,7 +2682,7 @@ fn run_disc_scanning(
         // sets, read directly rather than inferred from the mux's summary.
         let cancelled = state.cancel.load(std::sync::atomic::Ordering::SeqCst);
         // A scoped staging image is not a disc image, so it is never kept (JUDGEMENT).
-        let keep = req.keep_iso && scope.is_none();
+        let keep = req.keep_iso && staging.is_none();
         if should_delete_staging_iso(keep, mux.is_ok(), cancelled) {
             let _ = std::fs::remove_file(&iso_path);
         }
@@ -2534,33 +2701,23 @@ fn run_disc_scanning(
             format!(
                 "{s}{}{}",
                 damage_note(&result),
-                staging_not_kept_note(req.keep_iso, scope.is_some())
+                staging_not_kept_note(req.keep_iso, staging.is_some())
             )
         });
     }
 
-    // Which titles to rip — same Selection/resolve_selection the ISO path
-    // uses, so a live-drive rip gets the same main-title default and
-    // out-of-range filtering.
-    let sel = if req.titles.is_empty() {
-        fe::Selection::MainMovie
-    } else {
-        fe::Selection::Titles(req.titles.clone())
-    };
-    let indices = fe::resolve_selection(disc, &sel);
     if indices.is_empty() {
         return Err("Nothing selected to rip.".into());
     }
     let multi = demux_needs_subdirs(indices.len());
-    // Byte-size hints per title, banked before the scan session is dropped
-    // (releasing the drive) — each title's mux reopens its own session,
-    // mirroring the CLI.
+    // Byte-size hints per title, banked before the scan's drive is released —
+    // each title's mux reopens its own session, mirroring the CLI.
     let hints: Vec<u64> = disc.titles.iter().map(|t| t.size_bytes).collect();
     // What each selected NUMBER refers to on THIS scan, banked before the
-    // session drops. Each title below re-scans, so the index alone doesn't
+    // drive is released. Each title below re-scans, so the index alone doesn't
     // prove the mux is about to read the title picked. See `verify_title_identity`.
     let picked_ids = scanned_ids;
-    drop(session);
+    drop(reader);
 
     // The engine owns the per-title loop (skip/abort policy); we only supply
     // "mux one title" — exactly the ISO path's shape, but each title reopens
@@ -2586,13 +2743,13 @@ fn run_disc_scanning(
         };
         let hint = hints.get(idx).copied().unwrap_or(0);
 
-        // Shared drive bring-up (open + lock + scan + resolve) — same core as
-        // the CLI's pipe_disc. A fresh session per title matches it (the
-        // staged reader is consumed by one mux).
-        let (mut session, _trace) = match fe::open_scan_resolve(
+        // KU §3.3: each title reopens the drive with `open_scan` (no key call) and reads
+        // through the rip's one set, after `is_for`. A fresh session per title matches the
+        // CLI (the staged reader is consumed by one mux).
+        let mut session = match fe::open_scan(
             disc_target(&req.source),
             session_credentials(&req.keys),
-            key_factory(&req.keys),
+            false,
         ) {
             Ok(v) => v,
             // Same bypass as the identity check below: an `Err` returned
@@ -2626,6 +2783,22 @@ fn run_disc_scanning(
                 .push(msg.clone());
             return Err(std::io::Error::other(msg));
         }
+        // The rescan must be the disc the set is for, and the set must open this title
+        // (KU §3.5, the one gate; CSS from the disc).
+        if let Some(d) = session.disc() {
+            let title = libfreemkv::keys::KeyScope::Titles(vec![idx]);
+            let checked = crate::rip_keys::check_reopened(&set, d)
+                .and_then(|()| crate::rip_keys::gate(d, false, Some(&set), &title));
+            if let Err(e) = checked {
+                let msg = format!("Title {}: {}", idx + 1, explain(e.code()));
+                state
+                    .lines
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(msg);
+                return Err(e.into());
+            }
+        }
         session.stage_drive_as_reader();
 
         // Session arm reads selection from MuxOptions (unlike the Url arm),
@@ -2633,7 +2806,7 @@ fn run_disc_scanning(
         // unticked under this title whenever a sibling title shared the PID.
         let opts = title_session_mux_opts(req, idx);
 
-        match fe::mux_title_session(&mut session, idx, &dest_url, &opts, hint, sink) {
+        match mux_session_title(&mut session, idx, &set, &dest_url, &opts, hint, sink) {
             Ok(o) => {
                 if !o.completed {
                     // Cancelled or truncated: a partial file is on disk — keep
@@ -2691,6 +2864,69 @@ fn run_disc_scanning(
         indices.len(),
         &req.dest_dir,
     )
+}
+
+/// Mux title `idx` live off a reopened drive through the rip's set (`mux_with_keys`,
+/// `MuxSource::Session`), with the engine's progress and Stop bridging onto the Sink.
+/// The engine has no keyed `mux_title_session` yet (JUDGEMENT: bridged here until it does).
+fn mux_session_title(
+    session: &mut libfreemkv::DiscSession,
+    idx: usize,
+    set: &libfreemkv::keys::ResolvedKeySet,
+    dest: &str,
+    opts: &libfreemkv::MuxOptions,
+    hint: u64,
+    sink: &UiSink,
+) -> std::io::Result<libfreemkv::MuxOutcome> {
+    use fe::Sink as _;
+    struct Latest(Mutex<Option<(u64, u64)>>);
+    impl libfreemkv::MuxEvents for Latest {
+        fn on_write_progress(&self, done: u64, total: u64) {
+            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((done, total));
+        }
+    }
+    // Stores `true` on drop, so an unwinding mux still ends the progress thread.
+    struct Done<'a>(&'a AtomicBool);
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    sink.log(
+        fe::Level::Info,
+        &format!("mux: disc title {} -> {dest} (~{hint} bytes)", idx + 1),
+    );
+    let latest = Arc::new(Latest(Mutex::new(None)));
+    let watch = CancelWatch::new(&sink.0);
+    let done = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            // One sample per tick, from the latest total: per-event samples measure
+            // microseconds against a batch and read as absurd speeds (the engine's rule).
+            let mut speed = fe::SpeedEstimator::new();
+            while !done.load(Ordering::SeqCst) {
+                let last = latest.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some((bytes_done, bytes_total)) = last {
+                    let (speed_bps, eta_secs) = speed.sample(bytes_done, bytes_total);
+                    sink.progress(&fe::Progress {
+                        pass: std::borrow::Cow::Borrowed("mux"),
+                        bytes_done,
+                        bytes_total,
+                        sectors_bad: 0,
+                        speed_bps,
+                        eta_secs,
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+        let _done = Done(&done);
+        let source = libfreemkv::MuxSource::Session {
+            session,
+            title_index: idx,
+        };
+        libfreemkv::mux_with_keys(source, Some(set), dest, opts, &watch.halt, latest.clone())
+    })
 }
 
 // The engine→front-end outcome contract: run_titles emits NoKey/Failed in
@@ -3344,9 +3580,9 @@ mod key_summary_tests {
         assert_eq!(key_summary(&d, None), "CSS (DVD)");
     }
 
-    /// The regression that started this: `ExternalUk` + empty `unit_keys` is
-    /// the pre-resolution placeholder, NOT a resolved key. It must never read
-    /// as unlocked, and must never name a source.
+    /// The regression that started this: `ExternalUk` + empty `unit_keys` is the
+    /// pre-resolution placeholder. With no resolved set it must never read as unlocked,
+    /// and must never name a source.
     #[test]
     fn placeholder_origin_with_no_keys_reads_as_locked() {
         let mut d = disc(true);
@@ -3356,34 +3592,17 @@ mod key_summary_tests {
         assert!(!s.contains("online") && !s.contains("keydb"));
     }
 
-    /// Same placeholder origin, but real key material present — and the trace
-    /// says which source won. The origin is identical in both tests; only the
-    /// key material and the trace differ, which is the whole point.
+    /// KU §11.6: the key state "comes from the resolved set". Keys banked on the disc
+    /// (a resume-injected unit key, a VUK) never read as unlocked without one.
     #[test]
-    fn real_keys_name_the_winning_source() {
+    fn banked_keys_never_unlock_without_a_set() {
         let mut d = disc(true);
-        d.aacs = Some(aacs(vec![(1, [0x5A; 16])]));
-        assert_eq!(key_summary(&d, Some("keydb")), "unlocked via keydb");
-        assert_eq!(key_summary(&d, Some("online")), "unlocked via online");
-    }
-
-    /// Keys banked but no trace step (e.g. a resume-injected unit key): still
-    /// unlocked, but we do NOT invent a source we cannot evidence.
-    #[test]
-    fn keys_without_a_trace_do_not_invent_a_source() {
-        let mut d = disc(true);
-        d.aacs = Some(aacs(vec![(1, [0x5A; 16])]));
-        assert_eq!(key_summary(&d, None), "unlocked");
-    }
-
-    /// A VUK alone (no pre-decrypted unit keys) is still real key material.
-    #[test]
-    fn a_vuk_alone_counts_as_unlocked() {
-        let mut d = disc(true);
-        let mut a = aacs(vec![]);
+        let mut a = aacs(vec![(1, [0x5A; 16])]);
         a.vuk = Some([0x11; 16]);
         d.aacs = Some(a);
-        assert_eq!(key_summary(&d, Some("keydb")), "unlocked via keydb");
+        assert_eq!(key_summary(&d, None), "locked — no key yet");
+        let none = libfreemkv::keys::ResolvedKeySet::none();
+        assert_eq!(key_summary(&d, Some(&none)), "locked — no key yet");
     }
 
     // error_code must parse the digit run, not the whole Display string.
@@ -3585,7 +3804,7 @@ mod routing_tests {
         recovery_produced_no_data, recovery_raw, remap_against, remap_title_pids,
         run_disc_scanning, run_stream, should_delete_staging_iso, source_scheme,
         staging_not_kept_note, stream_selection_for, title_input_options, title_session_mux_opts,
-        verify_selection_identity, verify_title_identity, whole_image_gate, won_from_trace,
+        verify_selection_identity, verify_title_identity, whole_image_gate,
     };
     use std::sync::Arc;
 
@@ -3648,7 +3867,7 @@ mod routing_tests {
         // 0. An image source for an ISO/folder output is checked before the scan.
         let blocking = slice(
             "\nfn run_blocking(",
-            "    let scan = if src_path.is_dir() {",
+            "    let src = fe::ImageSource::from_path(src_path);",
         );
         assert!(blocking.contains("whole_image_gate(&req.format, src_path)?;"));
         let titles = slice(
@@ -3664,7 +3883,7 @@ mod routing_tests {
         //     kept (AACS BD Pre-recorded 0.953 §3.7: nothing else is safe to read).
         assert!(
             recover
-                .contains("fe::mkv_staging_scope(disc, reader.as_mut(), &indices, req.keep_iso)"),
+                .contains("fe::mkv_staging_scope(&disc, reader.as_mut(), &indices, req.keep_iso)"),
             "the MKV staging must be scoped through mkv_staging_scope"
         );
         let staged = slice(
@@ -3672,11 +3891,11 @@ mod routing_tests {
             "        .map_err(|e| format!(\"recovery failed: {e}\"))?;\n        drop(reader);",
         );
         assert!(
-            staged.contains("scope.as_deref()"),
+            staged.contains("staging.as_deref()"),
             "the scope reaches the passes"
         );
         let keep = slice(
-            "        let keep = req.keep_iso && scope.is_none();",
+            "        let keep = req.keep_iso && staging.is_none();",
             "            let _ = std::fs::remove_file(&iso_path);",
         );
         assert!(
@@ -3701,7 +3920,7 @@ mod routing_tests {
         // 2. The drive -> ISO destination (the most-travelled label seam).
         let dest = slice(
             "        let iso_path = std::path::Path::new(&req.dest_dir)",
-            "        session.stage_drive_as_reader();",
+            "        let mut job = fe::Job::new(",
         );
         assert!(
             dest.contains("sanitize_label(&label)"),
@@ -3752,7 +3971,7 @@ mod routing_tests {
         //     reason the same way — "no disc in the drive" also arrives as
         //     "Write failed (Other)."
         let bringup = slice(
-            "        let (mut session, _trace) = match fe::open_scan_resolve(",
+            "        let mut session = match fe::open_scan(",
             "        // This is a DIFFERENT scan",
         );
         assert!(
@@ -3762,7 +3981,7 @@ mod routing_tests {
 
         let session_mux = slice(
             "        // Session arm reads selection from MuxOptions",
-            "        match fe::mux_title_session(",
+            "        match mux_session_title(",
         );
         assert!(
             session_mux.contains("title_session_mux_opts(req, idx)"),
@@ -3950,7 +4169,7 @@ mod routing_tests {
 
         // 4. The live-drive per-title loop.
         let disc_loop = slice(
-            "        match fe::mux_title_session(&mut session, idx, &dest_url, &opts, hint, sink) {",
+            "        match mux_session_title(&mut session, idx, &set, &dest_url, &opts, hint, sink) {",
             "            Err(e) => {",
         );
         assert!(
@@ -4118,6 +4337,8 @@ mod routing_tests {
             video_codecs: vec!["H.264".into(); 2],
             title_ids: Vec::new(),
             details: vec![],
+            keys: None,
+            needs_disc: false,
         }
     }
 
@@ -4690,6 +4911,8 @@ mod routing_tests {
             keep_iso: false,
             auto_eject: false,
             keys: KeyConfig::default(),
+            seed: None,
+            vid_from: None,
         }
     }
 
@@ -4988,9 +5211,15 @@ mod routing_tests {
     /// key, or a discarded track selection, each under the right filename.
     #[test]
     fn per_title_input_options_carry_the_index_the_keys_and_the_selection() {
-        let mut disc = super::key_summary_tests::disc(true);
-        let keys = vec![(0u32, [7u8; 16]), (1u32, [9u8; 16])];
-        disc.aacs = Some(super::key_summary_tests::aacs(keys.clone()));
+        use crate::ku_fixtures::*;
+        let fx = bd_image(&[Some(K1)], 1);
+        let set = resolve(
+            &fx,
+            libfreemkv::keys::KeyScope::Titles(vec![0]),
+            &[(Answer::Keydb, &[K1])],
+            &Calls::default(),
+        )
+        .unwrap();
 
         let mut r = req();
         r.explicit_streams = true;
@@ -5004,17 +5233,16 @@ mod routing_tests {
         ]);
 
         for idx in [0usize, 3] {
-            let input = title_input_options(&disc, &r, idx);
+            let input = title_input_options(&set, &r, idx);
             assert_eq!(
                 input.title_index,
                 Some(idx),
                 "a missing title_index muxes title 0 under title {}'s name",
                 idx + 1
             );
-            assert_eq!(
-                input.unit_keys, keys,
-                "the resolved AACS keys must be passed"
-            );
+            let keys = input.keys.as_ref().expect("the rip's set must be passed");
+            assert!(keys.is_aacs() && keys.is_for(&fx.disc), "the rip's own set");
+            assert!(input.unit_keys.is_empty(), "never a raw key");
             // PER TITLE, not the union: the union encoded the defect where a
             // PID unticked under one title was still written whenever a
             // sibling kept it ticked. `want` is written out, not re-derived.
@@ -5033,10 +5261,6 @@ mod routing_tests {
                 other => panic!("an explicit selection must be a PidFilter::Only, got {other:?}"),
             }
         }
-
-        // An unencrypted disc contributes no keys — and no placeholder either.
-        let clear = super::key_summary_tests::disc(false);
-        assert!(title_input_options(&clear, &r, 0).unit_keys.is_empty());
     }
 
     /// One title fans out into the destination directory; two or more each get
@@ -5118,38 +5342,25 @@ mod routing_tests {
         assert!(!should_delete_staging_iso(false, false, true));
     }
 
-    /// The key strip names the source that unlocked the disc. It is read from
-    /// the trace, not passed in — so `None` here means a disc that WAS unlocked
-    /// reports no source, and a constant means every disc names the same one.
+    /// The key strip names the source whose key the rip's set proved (`status().origin`),
+    /// read from the set Open resolved: `None` from a disc that WAS unlocked reports no
+    /// source, and a constant names every disc's source the same.
     #[test]
-    fn the_winning_key_source_is_read_from_the_trace() {
-        use libfreemkv::aacs::trace::{KeyOutcome, KeyStep, ResolutionTrace};
-        let step = |who: &str, outcome| KeyStep {
-            who: who.to_string(),
-            path: vec![],
-            outcome,
-            matched_entry: None,
-            store_entries: None,
-        };
-
-        let won = ResolutionTrace {
-            unlock: vec![],
-            keys: vec![
-                step("online", KeyOutcome::NoKey),
-                step("keydb", KeyOutcome::Resolved),
-            ],
-        };
-        assert_eq!(won_from_trace(&won).as_deref(), Some("keydb"));
-
-        let lost = ResolutionTrace {
-            unlock: vec![],
-            keys: vec![
-                step("keydb", KeyOutcome::NoKey),
-                step("online", KeyOutcome::MissingVid),
-            ],
-        };
-        assert_eq!(won_from_trace(&lost), None);
-        assert_eq!(won_from_trace(&ResolutionTrace::new()), None);
+    fn the_winning_key_source_is_read_from_the_set() {
+        use crate::ku_fixtures::*;
+        use libfreemkv::keys::KeyScope;
+        let fx = bd_image(&[Some(K1)], 1);
+        for (answer, who) in [(Answer::Keydb, "keydb"), (Answer::Online, "online")] {
+            let set = resolve(
+                &fx,
+                KeyScope::Titles(vec![0]),
+                &[(answer, &[K1])],
+                &Calls::default(),
+            );
+            let set = set.unwrap();
+            let got = super::key_summary(&fx.disc, Some(&set));
+            assert_eq!(got, format!("unlocked via {who}"));
+        }
     }
 
     // The GUI raw disc→ISO copy must scan with raw_copy, exactly as the CLI's `--raw` does.
@@ -5175,7 +5386,7 @@ mod routing_tests {
         let state = Arc::new(RunState::default());
         let sink = UiSink(state.clone());
         let seen = std::cell::Cell::new(None);
-        let _ = run_disc_scanning(&r, &sink, &state, |_, _, _, raw_copy| {
+        let _ = run_disc_scanning(&r, &sink, &state, |_, _, raw_copy| {
             seen.set(Some(raw_copy));
             Err(libfreemkv::Error::DeviceNotFound {
                 path: String::new(),

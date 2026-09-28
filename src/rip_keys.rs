@@ -127,21 +127,6 @@ pub fn open_image(
     fe::open_image_with_traced(src, opts)
 }
 
-/// Open an image with a set already held, making no key request (`KeyInput::Known`, EK14).
-// The GUI's preflight; the CLI binary builds this module without the GUI off macOS.
-#[allow(dead_code)]
-pub fn open_known(
-    src: &fe::ImageSource,
-    set: ResolvedKeySet,
-    scope: KeyScope,
-) -> libfreemkv::Result<fe::OpenedImage> {
-    let opts = fe::OpenImageOptions {
-        scope: Some(scope),
-        ..fe::OpenImageOptions::known(set)
-    };
-    fe::open_image_with(src, opts)
-}
-
 /// A per-title reopen rescans the drive with no key call; the rescan must be the disc the
 /// set was resolved for. KU §6: "A set used on the wrong disc … | E7013, plus an `error!`".
 pub fn check_reopened(set: &ResolvedKeySet, disc: &Disc) -> Result<(), Error> {

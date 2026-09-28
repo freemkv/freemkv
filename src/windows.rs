@@ -4436,6 +4436,8 @@ mod tests {
             // check is inert, which is what a synthetic disc wants.
             title_ids: Vec::new(),
             details: vec![],
+            keys: None,
+            needs_disc: false,
         }
     }
 

@@ -305,6 +305,9 @@ fn dev_harness() -> bool {
                 // unless asked (FMKV_EJECT set).
                 auto_eject: std::env::var("FMKV_EJECT").is_ok(),
                 keys: engine::KeyConfig::from_settings(&settings::Settings::load()),
+                // No Open ran: the rip resolves its own keys, once.
+                seed: None,
+                vid_from: None,
             },
             st.clone(),
         );
@@ -365,12 +368,7 @@ fn dev_harness() -> bool {
                         r.desc
                     );
                 }
-                match engine::preflight_with_keys(
-                    &p,
-                    "/tmp/out",
-                    &[],
-                    &engine::KeyConfig::from_settings(&settings::Settings::load()),
-                ) {
+                match engine::preflight_with_keys(&p, "/tmp/out", &[], sc.keys.as_ref()) {
                     Ok(v) if v.is_empty() => println!("preflight: READY"),
                     Ok(v) => println!("preflight blocked: {v:?}"),
                     Err(e) => println!("preflight err: {e}"),
