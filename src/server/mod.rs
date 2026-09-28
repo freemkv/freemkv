@@ -28,6 +28,7 @@ pub mod muxer;
 pub mod observe;
 pub mod review;
 pub mod ripper;
+pub mod settings_schema;
 pub mod tmdb;
 pub mod util;
 pub mod web;

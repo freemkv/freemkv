@@ -74,7 +74,7 @@ impl WebhookEntry {
 
     // Loader form: a malformed element is dropped (with a warning), as is a
     // blank URL.
-    fn from_json(i: usize, v: &serde_json::Value) -> Option<Self> {
+    pub(crate) fn from_json(i: usize, v: &serde_json::Value) -> Option<Self> {
         match Self::parse(i, v) {
             Ok(entry) => (!entry.url.trim().is_empty()).then_some(entry),
             Err(field) => {
@@ -294,46 +294,13 @@ fn default_port() -> u16 {
 }
 
 impl Default for Config {
-    // Hardcoded first-boot defaults, overlaid by `settings.json`. No
-    // env-var sourcing here — `PORT`/`AUTORIP_DIR` are spliced in by
-    // [`load`], the only two knobs that come from env.
+    // First-boot defaults, from the settings schema. `PORT`/`AUTORIP_DIR` are
+    // spliced in by [`load`], the only two knobs that come from env.
     fn default() -> Self {
-        Self {
-            port: 8080,
-            staging_dir: "/staging".into(),
-            output_dir: "/output".into(),
-            movie_dir: String::new(),
-            tv_dir: String::new(),
-            min_length_secs: 600,
-            main_feature: true,
-            tv_auto: true,
-            auto_eject: true,
-            on_insert: "scan".into(),
-            output_format: "mkv".into(),
-            network_target: String::new(),
-            on_read_error: "stop".into(),
-            max_retries: 1,
-            keep_iso: false,
-            iso_dir: String::new(),
-            abort_on_lost_secs: 0,
-            capture_without_keys: false,
-            max_rip_duration_secs: 28_800, // 8h cap for UHD with heavy recovery
-            min_pass_budget_secs: 5_400,   // 90 min per pass
-            transport_recovery_delay_secs: 5,
-            tmdb_api_key: String::new(),
-            keydb_path: None,
-            keydb_url: String::new(),
-            key_source: "local".into(),
-            keyserver_url: String::new(),
-            keyserver_secret: String::new(),
-            webhook_urls: Vec::new(),
-            autorip_dir: "/config".into(),
-            decrypt_threads: 0, // 0 = auto-detect cores
-            log_retention_days: 30,
-            library_dir: String::new(),
-            library_iso_dir: String::new(),
-            library_iso_subfolders: false,
-        }
+        let mut m = crate::server::settings_schema::defaults();
+        m.insert("autorip_dir".into(), serde_json::json!("/config"));
+        serde_json::from_value(serde_json::Value::Object(m))
+            .expect("the settings schema defaults form a Config")
     }
 }
 
@@ -520,161 +487,8 @@ fn load_saved(mut cfg: Config) -> Config {
             return cfg;
         }
     };
-    // Overlay saved settings onto defaults. Each field is independently
-    // gated so a settings.json missing a field (or with a wrong type)
-    // doesn't wipe the rest.
-    if let Some(v) = saved.get("staging_dir").and_then(|v| v.as_str()) {
-        cfg.staging_dir = v.to_string();
-    }
-    if let Some(v) = saved.get("output_dir").and_then(|v| v.as_str()) {
-        cfg.output_dir = v.to_string();
-    }
-    if let Some(v) = saved.get("movie_dir").and_then(|v| v.as_str()) {
-        cfg.movie_dir = v.to_string();
-    }
-    if let Some(v) = saved.get("tv_dir").and_then(|v| v.as_str()) {
-        cfg.tv_dir = v.to_string();
-    }
-    if let Some(v) = saved.get("iso_dir").and_then(|v| v.as_str()) {
-        cfg.iso_dir = v.to_string();
-    }
-    if let Some(v) = saved.get("library_dir").and_then(|v| v.as_str()) {
-        cfg.library_dir = v.to_string();
-    }
-    if let Some(v) = saved.get("library_iso_dir").and_then(|v| v.as_str()) {
-        cfg.library_iso_dir = v.to_string();
-    }
-    if let Some(v) = saved
-        .get("library_iso_subfolders")
-        .and_then(|v| v.as_bool())
-    {
-        cfg.library_iso_subfolders = v;
-    }
-    if let Some(v) = saved.get("tmdb_api_key").and_then(|v| v.as_str()) {
-        cfg.tmdb_api_key = v.to_string();
-    }
-    if let Some(v) = saved.get("keydb_url").and_then(|v| v.as_str()) {
-        cfg.keydb_url = v.to_string();
-    }
-    if let Some(v) = saved.get("keydb_path").and_then(|v| v.as_str()) {
-        cfg.keydb_path = Some(v.to_string());
-    }
-    if let Some(v) = saved.get("key_source").and_then(|v| v.as_str()) {
-        if matches!(v, "local" | "online") {
-            cfg.key_source = v.to_string();
-        } else {
-            tracing::warn!(value = %v, "settings.json key_source has unknown value - using default");
-        }
-    }
-    if let Some(v) = saved.get("keyserver_url").and_then(|v| v.as_str()) {
-        cfg.keyserver_url = v.to_string();
-    }
-    if let Some(v) = saved.get("keyserver_secret").and_then(|v| v.as_str()) {
-        cfg.keyserver_secret = v.to_string();
-    }
-    // Operator-edited numeric knobs are clamped to sane ceilings at the
-    // settings.json trust boundary (like max_retries/decrypt_threads),
-    // so a pathological value can't defeat the "no infinite hangs" purpose.
-    const MAX_DURATION_SECS: u64 = 30 * 24 * 3600; // 30 days
-    const MAX_RETENTION_DAYS: u64 = 3650; // 10 years
-    if let Some(v) = saved.get("min_length_secs").and_then(|v| v.as_u64()) {
-        cfg.min_length_secs = v.min(MAX_DURATION_SECS);
-    }
-    if let Some(v) = saved.get("main_feature").and_then(|v| v.as_bool()) {
-        cfg.main_feature = v;
-    }
-    if let Some(v) = saved.get("tv_auto").and_then(|v| v.as_bool()) {
-        cfg.tv_auto = v;
-    }
-    if let Some(v) = saved.get("auto_eject").and_then(|v| v.as_bool()) {
-        cfg.auto_eject = v;
-    }
-    // String-enum fields are validated at this same trust boundary as the
-    // numeric clamps: a corrupt value (e.g. output_format="garbage") would
-    // otherwise load and misbehave downstream. Unknown values keep the default.
-    if let Some(v) = saved.get("on_insert").and_then(|v| v.as_str()) {
-        if matches!(v, "nothing" | "scan" | "rip" | "resume") {
-            cfg.on_insert = v.to_string();
-        } else {
-            tracing::warn!(value = %v, "settings.json on_insert has unknown value - using default");
-        }
-    }
-    if let Some(v) = saved.get("output_format").and_then(|v| v.as_str()) {
-        if matches!(v, "mkv" | "m2ts" | "iso" | "network") {
-            cfg.output_format = v.to_string();
-        } else {
-            tracing::warn!(value = %v, "settings.json output_format has unknown value - using default");
-        }
-    }
-    if let Some(v) = saved.get("network_target").and_then(|v| v.as_str()) {
-        cfg.network_target = v.to_string();
-    }
-    // Collapsed double-lookup: read on_read_error once, validate it, and
-    // record presence in the same pass (the flag still gates the legacy
-    // abort_on_error migration below).
-    let on_read_error_present = if let Some(v) = saved.get("on_read_error").and_then(|v| v.as_str())
-    {
-        if matches!(v, "stop" | "skip") {
-            cfg.on_read_error = v.to_string();
-        } else {
-            tracing::warn!(value = %v, "settings.json on_read_error has unknown value - using default");
-        }
-        true
-    } else {
-        false
-    };
-    if let Some(v) = saved.get("max_retries").and_then(|v| v.as_u64()) {
-        cfg.max_retries = (v.min(10)) as u8;
-    }
-    if let Some(v) = saved.get("keep_iso").and_then(|v| v.as_bool()) {
-        cfg.keep_iso = v;
-    }
-    if let Some(v) = saved.get("abort_on_lost_secs").and_then(|v| v.as_u64()) {
-        cfg.abort_on_lost_secs = v.min(MAX_DURATION_SECS);
-    }
-    if let Some(v) = saved.get("capture_without_keys").and_then(|v| v.as_bool()) {
-        cfg.capture_without_keys = v;
-    }
-    if let Some(v) = saved.get("max_rip_duration_secs").and_then(|v| v.as_u64()) {
-        cfg.max_rip_duration_secs = v.min(MAX_DURATION_SECS);
-    }
-    if let Some(v) = saved.get("min_pass_budget_secs").and_then(|v| v.as_u64()) {
-        cfg.min_pass_budget_secs = v.min(MAX_DURATION_SECS);
-    }
-    if let Some(v) = saved
-        .get("transport_recovery_delay_secs")
-        .and_then(|v| v.as_u64())
-    {
-        cfg.transport_recovery_delay_secs = v.min(MAX_DURATION_SECS);
-    }
-    if let Some(v) = saved.get("decrypt_threads").and_then(|v| v.as_u64()) {
-        // Clamp on load, mirroring max_retries above: libfreemkv's internal
-        // cap is implicit, so make the trust-boundary bound explicit here too.
-        cfg.decrypt_threads = (v as usize).min(256);
-    }
-    if let Some(v) = saved.get("log_retention_days").and_then(|v| v.as_u64()) {
-        cfg.log_retention_days = v.min(MAX_RETENTION_DAYS);
-    }
-    // Migrate legacy `abort_on_error` bool to `on_read_error` string (mirrors
-    // web.rs's POST-time migration), only when `on_read_error` is absent, so
-    // it always wins and a re-saved file with the stale key doesn't flip back.
-    if !on_read_error_present {
-        match saved.get("abort_on_error").and_then(|v| v.as_bool()) {
-            Some(true) => cfg.on_read_error = "stop".to_string(),
-            Some(false) => cfg.on_read_error = "skip".to_string(),
-            None => {}
-        }
-    }
-    if let Some(arr) = saved.get("webhook_urls").and_then(|v| v.as_array()) {
-        // Accept the legacy bare-string form and the modern {url, post_rip,
-        // post_mux, post_move} object; a bare string (or an object missing a flag)
-        // fires on ALL THREE stages (rip, mux, move), preserving prior behaviour.
-        cfg.webhook_urls = arr
-            .iter()
-            .enumerate()
-            .filter_map(|(i, v)| WebhookEntry::from_json(i, v))
-            .collect();
-    }
+    // Overlay saved settings onto defaults, each field on its own (see the schema).
+    crate::server::settings_schema::load_into(&mut cfg, &saved);
     cfg
 }
 

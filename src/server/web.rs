@@ -1743,6 +1743,12 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         };
         let json = settings_json_redacted(&c);
         json_response(request, 200, &json);
+    } else if is_get && url == "/api/settings/schema" {
+        json_response(
+            request,
+            200,
+            &crate::server::settings_schema::schema_json().to_string(),
+        );
     } else if is_post && url == "/api/settings" {
         handle_settings_post(request, cfg);
     } else if is_get && url == "/api/system" {
@@ -2107,12 +2113,12 @@ pub(crate) fn json_response(request: tiny_http::Request, status: u16, body: &str
 // Sentinel returned in place of a stored secret on GET /api/settings; a
 // POST field carrying exactly this value is treated as "unchanged" so the
 // UI can round-trip the redacted form without clobbering the real secret.
-const SECRET_SENTINEL: &str = "********";
+use crate::server::settings_schema::SECRET_SENTINEL;
 
 // Mask a webhook URL for display: keep the origin (scheme://host[:port])
 // but replace the path/query — where the secret token lives — with the
 // sentinel; a value containing the sentinel round-trips as "unchanged".
-fn mask_webhook_url(url: &str) -> String {
+pub(crate) fn mask_webhook_url(url: &str) -> String {
     // Origin = everything up to the first '/', '?', or '#' after `scheme://`.
     // Treating '?' and '#' as terminators prevents a token carried in a query
     // string (`https://host?token=SECRET`) from slipping through unredacted.
@@ -2144,7 +2150,7 @@ fn mask_webhook_url(url: &str) -> String {
 // Mask a webhook URL, appending a stable `#<idx>` (its index in
 // `webhook_urls`) so POST resolves by identity, not origin — two hooks
 // sharing an origin would otherwise mask identically and collide.
-fn mask_webhook_url_indexed(url: &str, idx: usize) -> String {
+pub(crate) fn mask_webhook_url_indexed(url: &str, idx: usize) -> String {
     format!("{}#{idx}", mask_webhook_url(url))
 }
 
@@ -2164,19 +2170,12 @@ fn is_masked_webhook(s: &str) -> bool {
 }
 
 // One webhook as it arrives on POST /api/settings: a (possibly masked) URL
-// plus its per-event flags. `resolve_webhook_entries` turns these into
-// stored `WebhookEntry`s, unmasking the URL while keeping the flags.
-struct IncomingWebhook {
-    /// May be a real URL (newly entered) or a masked placeholder to resolve.
-    url: String,
-    post_rip: bool,
-    post_mux: bool,
-    post_move: bool,
-}
+// plus its per-event flags.
+type IncomingWebhook = WebhookEntry;
 
 // Resolve an incoming webhook_urls array against stored entries, unmasking each placeholder by
 // stable #idx (falling back to origin) — never by array position, since rows can be reordered.
-fn resolve_webhook_entries(
+pub(crate) fn resolve_webhook_entries(
     incoming: &[IncomingWebhook],
     existing: &[WebhookEntry],
 ) -> Result<Vec<WebhookEntry>, String> {
@@ -2231,62 +2230,7 @@ fn resolve_webhook_entries(
 // no route is authenticated and the server binds 0.0.0.0, so cleartext
 // keyserver_secret/tmdb_api_key would hand any LAN client the operator's key.
 fn settings_json_redacted(c: &Config) -> String {
-    let mut v = serde_json::to_value(c).unwrap_or_else(|_| serde_json::json!({}));
-    for field in ["keyserver_secret", "tmdb_api_key"] {
-        if let Some(s) = v.get(field).and_then(|x| x.as_str())
-            && !s.is_empty()
-        {
-            v[field] = serde_json::json!(SECRET_SENTINEL);
-        }
-    }
-    // keyserver_url/keydb_url may carry auth tokens in the path/query; mask
-    // with the origin-preserving helper so the operator sees the host but
-    // not the secret. A masked value round-trips on POST.
-    for field in ["keyserver_url", "keydb_url"] {
-        if let Some(s) = v.get(field).and_then(|x| x.as_str())
-            && !s.is_empty()
-        {
-            v[field] = serde_json::json!(mask_webhook_url(s));
-        }
-    }
-    // keydb_path is an absolute container path; leaking it would expose the
-    // internal filesystem layout, so return only the filename component.
-    if let Some(s) = v.get("keydb_path").and_then(|x| x.as_str())
-        && !s.is_empty()
-    {
-        let name = std::path::Path::new(s)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        v["keydb_path"] = serde_json::json!(name);
-    }
-    // Each entry serializes as {url, post_rip, post_mux, post_move}. Mask the token in
-    // `url` (keeping the origin + stable `#idx` for round-trip resolution) and
-    // pass the boolean flags through untouched.
-    if let Some(arr) = v.get_mut("webhook_urls").and_then(|x| x.as_array_mut()) {
-        for (idx, entry) in arr.iter_mut().enumerate() {
-            if let Some(u) = entry.get("url").and_then(|x| x.as_str())
-                && !u.is_empty()
-            {
-                let masked = mask_webhook_url_indexed(u, idx);
-                entry["url"] = serde_json::json!(masked);
-            }
-        }
-    }
-    // Operator-facing, NOT persisted (serde drops it on POST): the ACTUAL path
-    // the keydb reads resolve to + whether a file is present there, so the
-    // Settings UI shows exactly where autorip looks for keys (issue #46).
-    let rp = crate::server::keysource::keydb_path(c);
-    v["keydb_resolved"] = serde_json::json!(format!(
-        "{}  —  {}",
-        rp.display(),
-        if rp.exists() {
-            "file present"
-        } else {
-            "NOT FOUND (autorip will report NO KEY here)"
-        }
-    ));
-    v.to_string()
+    crate::server::settings_schema::redacted(c).to_string()
 }
 
 // Cap on a request body read fully into memory. POST bodies are small JSON
@@ -5614,7 +5558,9 @@ mod web_tests {
 
             let c = cfg.read().unwrap().clone();
             let library = crate::server::library::instance(&c);
-            assert!(library.index_now(&crate::server::library::dirs(&c)));
+            // Another test's settings save may wake the shared indexer mid-pass.
+            let d = crate::server::library::dirs(&c);
+            assert!((0..20).any(|_| library.index_now(&d)));
             // Indexed: the answer comes from memory, even with the folders gone.
             let moved = dir.path().join("moved-away");
             std::fs::rename(&lib, &moved).unwrap();
@@ -7512,254 +7458,29 @@ fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
         }
     };
 
-    // Validate every outbound URL/target BEFORE taking the write guard:
-    // these do synchronous DNS, and running under `cfg.write()` would block
-    // every concurrent `cfg.read()` for the duration (the 0.20.8 lock-stall).
-    if let Some(v) = patch.get("keydb_url").and_then(|v| v.as_str()) {
-        // SSRF guard at store time (handle_update_keydb re-validates at
-        // fetch time). Empty clears the URL; a sentinel-bearing value is a
-        // masked "unchanged" placeholder from GET — skip re-validating it.
-        if !v.trim().is_empty()
-            && !v.contains(SECRET_SENTINEL)
-            && let Err(e) = validate_fetch_url(v)
-        {
+    // Validate the whole patch against the schema BEFORE taking the write
+    // guard: URL checks resolve DNS, and a refused field must leave nothing
+    // half-applied.
+    let current = match cfg.read() {
+        Ok(c) => c.clone(),
+        Err(_) => {
             return json_response(
                 request,
-                400,
-                &serde_json::json!({
-                    "ok": false,
-                    "error": format!("keydb_url rejected: {e}")
-                })
-                .to_string(),
+                500,
+                r#"{"ok":false,"error":"config lock poisoned"}"#,
             );
         }
-    }
-    if let Some(v) = patch.get("keyserver_url").and_then(|v| v.as_str()) {
-        // The SAME gate the rip applies (https-only + SSRF), so a URL that saves
-        // is one the rip will use. Empty disables the online source; a sentinel
-        // value skips re-validation.
-        if !v.trim().is_empty()
-            && !v.contains(SECRET_SENTINEL)
-            && let Err(e) = freemkv_keysources::validate_keyserver_url(v.trim())
-        {
-            return json_response(
-                request,
-                400,
-                &serde_json::json!({
-                    "ok": false,
-                    "error": format!("keyserver_url rejected: {e}")
-                })
-                .to_string(),
-            );
-        }
-    }
-    if let Some(v) = patch.get("network_target").and_then(|v| v.as_str()) {
-        // SSRF guard: at rip time libfreemkv streams decrypted disc content
-        // to this bare `host:port`; without a check a POST could beacon
-        // plaintext to an internal host. Empty clears the target.
-        if !v.trim().is_empty()
-            && let Err(e) = validate_network_target(v)
-        {
-            return json_response(
-                request,
-                400,
-                &serde_json::json!({
-                    "ok": false,
-                    "error": format!("network_target rejected: {e}")
-                })
-                .to_string(),
-            );
-        }
-    }
-    // webhook_urls are intentionally NOT SSRF-validated (fire-and-forget;
-    // LAN targets are intended — see webhook_agent). Resolved here, BEFORE
-    // the write guard, so a rejected entry can't leave fields already mutated.
-    let webhook_urls_resolved: Option<Vec<WebhookEntry>> = if let Some(arr) =
-        patch.get("webhook_urls").and_then(|v| v.as_array())
-    {
-        // Each element is the modern object, or a bare string (legacy client)
-        // treated as fire-on-all; a missing flag defaults to true. A malformed
-        // element or non-bool flag is a 400, never a silent drop.
-        let mut incoming: Vec<IncomingWebhook> = Vec::with_capacity(arr.len());
-        for (i, v) in arr.iter().enumerate() {
-            match WebhookEntry::parse(i, v) {
-                Ok(e) => incoming.push(IncomingWebhook {
-                    url: e.url,
-                    post_rip: e.post_rip,
-                    post_mux: e.post_mux,
-                    post_move: e.post_move,
-                }),
-                Err(field) => {
-                    return json_response(
-                        request,
-                        400,
-                        &serde_json::json!({
-                            "ok": false,
-                            "error": format!("{field}: flags must be booleans and url a string")
-                        })
-                        .to_string(),
-                    );
-                }
-            }
-        }
-        let existing = match cfg.read() {
-            Ok(c) => c.webhook_urls.clone(),
-            Err(_) => {
-                return json_response(
-                    request,
-                    500,
-                    r#"{"ok":false,"error":"config lock poisoned"}"#,
-                );
-            }
-        };
-        match resolve_webhook_entries(&incoming, &existing) {
-            Ok(urls) => Some(urls),
-            Err(_) => {
-                // A masked entry matched 0 (deleted row) or >1 (shared
-                // origin) stored secrets — refuse to guess. Returned BEFORE
-                // the write guard so no other field in the patch mutates either.
-                return json_response(
-                    request,
-                    400,
-                    r#"{"ok":false,"error":"ambiguous masked webhook entry; re-enter the full webhook URL"}"#,
-                );
-            }
-        }
-    } else {
-        None
     };
-    if let Some(v) = patch.get("port").and_then(|v| v.as_u64()) {
-        // Reject out-of-range BEFORE taking the write guard: validating
-        // inside it left a partial update behind when a bad port 400'd. A
-        // raw POST can carry any value (e.g. 70000 truncates to 4464 as u16).
-        if !(1..=65535).contains(&v) {
+    let parsed = match crate::server::settings_schema::parse_patch(&patch, &current) {
+        Ok(p) => p,
+        Err(e) => {
             return json_response(
                 request,
                 400,
-                r#"{"ok":false,"error":"port must be 1..=65535"}"#,
+                &serde_json::json!({"ok": false, "error": e}).to_string(),
             );
         }
-    }
-
-    // Validate string-enum fields BEFORE the write guard: a raw POST can
-    // carry any value, and silently storing e.g. output_format="garbage"
-    // would load cleanly and misbehave downstream. Sets mirror `config::load_saved`.
-    for (field, allowed) in [
-        ("key_source", &["local", "online"][..]),
-        ("on_insert", &["nothing", "scan", "rip", "resume"][..]),
-        ("on_read_error", &["stop", "skip"][..]),
-        ("output_format", &["mkv", "m2ts", "iso", "network"][..]),
-        ("rip_mode", &["single", "multi"][..]),
-    ] {
-        if let Some(v) = patch.get(field).and_then(|v| v.as_str())
-            && !allowed.contains(&v)
-        {
-            return json_response(
-                request,
-                400,
-                &format!(r#"{{"ok":false,"error":"invalid value for {field}"}}"#),
-            );
-        }
-    }
-
-    // Validate directory-path fields BEFORE the write guard: these become
-    // filesystem roots autorip enumerates, so a raw POST must not point them
-    // anywhere arbitrary. Require an absolute path with no `..`; empty is unset.
-    let has_parent_dir = |p: &std::path::Path| {
-        p.components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
     };
-    // output_dir / staging_dir are MOUNT ROOTS: they must be absolute (a real
-    // mount point) and may not climb with `..`.
-    for field in ["output_dir", "staging_dir"] {
-        if let Some(v) = patch.get(field).and_then(|v| v.as_str()) {
-            if v.is_empty() {
-                continue;
-            }
-            let p = std::path::Path::new(v);
-            if !p.is_absolute() || has_parent_dir(p) {
-                return json_response(
-                    request,
-                    400,
-                    &format!(
-                        r#"{{"ok":false,"error":"{field} must be an absolute path with no '..'"}}"#
-                    ),
-                );
-            }
-        }
-    }
-    // movie_dir / tv_dir are SUB-DIRECTORY names UNDER output_dir. Relative
-    // is the norm; only reject `..` so they can't escape the output root.
-    // An absolute override is also permitted.
-    for field in ["movie_dir", "tv_dir", "iso_dir"] {
-        if let Some(v) = patch.get(field).and_then(|v| v.as_str()) {
-            if v.is_empty() {
-                continue;
-            }
-            if has_parent_dir(std::path::Path::new(v)) {
-                return json_response(
-                    request,
-                    400,
-                    &format!(r#"{{"ok":false,"error":"{field} must not contain '..'"}}"#),
-                );
-            }
-        }
-    }
-
-    // The Library folders are absolute (they are not filed under output_dir).
-    for field in ["library_dir", "library_iso_dir"] {
-        if let Some(v) = patch.get(field).and_then(|v| v.as_str())
-            && !v.is_empty()
-            && (!std::path::Path::new(v).is_absolute() || has_parent_dir(std::path::Path::new(v)))
-        {
-            return json_response(
-                request,
-                400,
-                &format!(
-                    r#"{{"ok":false,"error":"{field} must be an absolute path with no '..'"}}"#
-                ),
-            );
-        }
-    }
-
-    // Validate keydb_path BEFORE the write guard: require an absolute path,
-    // no `..`, and a `.cfg` extension. Exempt: "" (unset) and the redacted
-    // basename round-trip (GET returns just the filename, which must survive).
-    if let Some(v) = patch.get("keydb_path").and_then(|v| v.as_str()) {
-        let is_redacted_roundtrip = !v.is_empty() && !v.contains('/') && {
-            let stored = cfg
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .keydb_path
-                .clone();
-            stored.as_deref().is_some_and(|s| {
-                std::path::Path::new(s)
-                    .file_name()
-                    .map(|n| n == std::ffi::OsStr::new(v))
-                    .unwrap_or(false)
-            })
-        };
-        if !v.is_empty() && !is_redacted_roundtrip {
-            let p = std::path::Path::new(v);
-            let bad = !p.is_absolute()
-                || p.components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-                || p.extension().and_then(|e| e.to_str()) != Some("cfg");
-            if bad {
-                return json_response(
-                    request,
-                    400,
-                    r#"{"ok":false,"error":"keydb_path must be an absolute .cfg path with no '..'"}"#,
-                );
-            }
-        }
-    }
-
-    // Numeric clamps applied below mirror `config::load_saved`'s trust-boundary
-    // ceilings so the live in-memory value can't diverge from what a restart
-    // would load.
-    const MAX_DURATION_SECS: u64 = 30 * 24 * 3600; // 30 days
-    const MAX_RETENTION_DAYS: u64 = 3650; // 10 years
 
     // Mutate inside the write guard, then snapshot+drop it BEFORE the save
     // (fs I/O can hang on NFS). `save_gen` is taken under the guard so save
@@ -7776,170 +7497,11 @@ fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
                 );
             }
         };
-        if let Some(v) = patch.get("output_dir").and_then(|v| v.as_str()) {
-            c.output_dir = v.to_string();
-        }
-        if let Some(v) = patch.get("staging_dir").and_then(|v| v.as_str()) {
-            c.staging_dir = v.to_string();
-        }
-        if let Some(v) = patch.get("movie_dir").and_then(|v| v.as_str()) {
-            c.movie_dir = v.to_string();
-        }
-        if let Some(v) = patch.get("tv_dir").and_then(|v| v.as_str()) {
-            c.tv_dir = v.to_string();
-        }
-        if let Some(v) = patch.get("iso_dir").and_then(|v| v.as_str()) {
-            c.iso_dir = v.to_string();
-        }
-        if let Some(v) = patch.get("tmdb_api_key").and_then(|v| v.as_str()) {
-            // Ignore the redaction sentinel so a round-trip of the GET
-            // response doesn't wipe the stored key.
-            if v != SECRET_SENTINEL {
-                c.tmdb_api_key = v.to_string();
-            }
-        }
-        if let Some(v) = patch.get("keydb_url").and_then(|v| v.as_str()) {
-            // Validated above the write guard (SSRF). Ignore any value
-            // containing the sentinel — it is the masked form from GET
-            // /api/settings and must not clobber the stored token-bearing URL.
-            if !v.contains(SECRET_SENTINEL) {
-                c.keydb_url = v.to_string();
-            }
-        }
-        if let Some(v) = patch.get("key_source").and_then(|v| v.as_str()) {
-            c.key_source = v.to_string();
-        }
-        if let Some(v) = patch.get("keyserver_url").and_then(|v| v.as_str()) {
-            // Validated above the write guard (SSRF). Ignore any value
-            // containing the sentinel — it is the masked form from GET
-            // /api/settings and must not clobber the stored token-bearing URL.
-            if !v.contains(SECRET_SENTINEL) {
-                c.keyserver_url = v.trim().to_string();
-            }
-        }
-        if let Some(v) = patch.get("keyserver_secret").and_then(|v| v.as_str())
-            && v != SECRET_SENTINEL
-        {
-            c.keyserver_secret = v.to_string();
-        }
-        if let Some(v) = patch.get("keydb_path").and_then(|v| v.as_str()) {
-            // GET redacts keydb_path to its filename to avoid leaking the
-            // container path. A bare value matching the stored basename is
-            // that redacted form round-tripping — don't clobber it.
-            let is_redacted_roundtrip = !v.is_empty()
-                && !v.contains('/')
-                && c.keydb_path.as_deref().is_some_and(|stored| {
-                    std::path::Path::new(stored)
-                        .file_name()
-                        .map(|n| n == std::ffi::OsStr::new(v))
-                        .unwrap_or(false)
-                });
-            if !is_redacted_roundtrip {
-                c.keydb_path = if v.is_empty() {
-                    None
-                } else {
-                    Some(v.to_string())
-                };
-            }
-        }
-        if let Some(v) = patch.get("capture_without_keys").and_then(|v| v.as_bool()) {
-            c.capture_without_keys = v;
-        }
-        if let Some(v) = patch.get("on_insert").and_then(|v| v.as_str()) {
-            c.on_insert = v.to_string();
-        }
-        if let Some(v) = patch.get("main_feature").and_then(|v| v.as_bool()) {
-            c.main_feature = v;
-        }
-        if let Some(v) = patch.get("auto_eject").and_then(|v| v.as_bool()) {
-            c.auto_eject = v;
-        }
-        // Presence is not the question — VALIDITY is. Gating on `.is_some()`
-        // while assignment requires `.as_str()` meant a non-string value
-        // applied neither the field nor the legacy migration, yet answered 200.
-        let on_read_error_in_patch = patch
-            .get("on_read_error")
-            .and_then(|v| v.as_str())
-            .is_some();
-        if let Some(v) = patch.get("on_read_error").and_then(|v| v.as_str()) {
-            c.on_read_error = v.to_string();
-        }
-        // Legacy: migrate abort_on_error bool to on_read_error string.
-        // An explicit on_read_error in the PATCH always wins (mirrors config.rs::load_saved).
-        if !on_read_error_in_patch {
-            if let Some(false) = patch.get("abort_on_error").and_then(|v| v.as_bool()) {
-                c.on_read_error = "skip".to_string();
-            }
-            if let Some(true) = patch.get("abort_on_error").and_then(|v| v.as_bool()) {
-                c.on_read_error = "stop".to_string();
-            }
-        }
-        if let Some(v) = patch.get("output_format").and_then(|v| v.as_str()) {
-            c.output_format = v.to_string();
-        }
-        if let Some(v) = patch.get("network_target").and_then(|v| v.as_str()) {
-            // Validated above the write guard (SSRF); empty clears it.
-            c.network_target = v.to_string();
-        }
-        if let Some(v) = patch.get("min_length_secs").and_then(|v| v.as_u64()) {
-            c.min_length_secs = v.min(MAX_DURATION_SECS);
-        }
-        if let Some(v) = patch.get("port").and_then(|v| v.as_u64()) {
-            // Range-validated above the write guard (1..=65535) so a bad
-            // value can't leave a partial in-memory mutation behind.
-            c.port = v as u16;
-        }
-        if let Some(v) = patch.get("max_retries").and_then(|v| v.as_u64()) {
-            c.max_retries = v.min(10) as u8;
-        }
-        if let Some(v) = patch.get("library_dir").and_then(|v| v.as_str()) {
-            c.library_dir = v.to_string();
-        }
-        if let Some(v) = patch.get("library_iso_dir").and_then(|v| v.as_str()) {
-            c.library_iso_dir = v.to_string();
-        }
-        if let Some(v) = patch
-            .get("library_iso_subfolders")
-            .and_then(|v| v.as_bool())
-        {
-            c.library_iso_subfolders = v;
-        }
-        if let Some(v) = patch.get("keep_iso").and_then(|v| v.as_bool()) {
-            c.keep_iso = v;
-        }
-        if let Some(v) = patch.get("abort_on_lost_secs").and_then(|v| v.as_u64()) {
-            c.abort_on_lost_secs = v.min(MAX_DURATION_SECS);
-        }
-        if let Some(rip_mode) = patch.get("rip_mode").and_then(|v| v.as_str()) {
-            // "multi" with zero retries is meaningless — clamp to at least 1.
-            // Do NOT re-derive keep_iso from the mode here: it's handled
-            // explicitly above, and clobbering it overrode the operator's choice.
-            if rip_mode == "single" {
-                c.max_retries = 0;
-            } else if c.max_retries == 0 {
-                c.max_retries = 1;
-            }
-        }
-        if let Some(urls) = webhook_urls_resolved {
-            // Resolved (SSRF-validated + masked-placeholder-resolved) above
-            // the write guard, so applying it here is infallible — any
-            // ambiguity already returned 400 before any field mutated.
-            c.webhook_urls = urls;
-        }
-        // decrypt_threads + log_retention_days: operator-tunable from the
-        // Settings page.
-        if let Some(v) = patch.get("decrypt_threads").and_then(|v| v.as_u64()) {
-            // Match config::load's .min(256) clamp so the live/on-disk
-            // value can't diverge from what a restart would load (and
-            // libfreemkv caps the effective pool at 64 regardless).
-            c.decrypt_threads = (v as usize).min(256);
-        }
-        if let Some(v) = patch.get("log_retention_days").and_then(|v| v.as_u64()) {
-            c.log_retention_days = v.min(MAX_RETENTION_DAYS);
-        }
+        crate::server::settings_schema::apply(&mut c, &parsed);
         save_gen = config::next_save_generation();
         c.clone()
     }; // <-- write guard dropped here; readers unblock immediately
+    crate::server::library::wake();
 
     // Apply the decrypt-thread setting LIVE: swaps libfreemkv's rayon pool;
     // in-flight work uses the old pool, the next rip picks up the new size.
