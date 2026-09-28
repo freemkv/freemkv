@@ -1952,15 +1952,27 @@ fn copy_verdict(r: &freemkv_engine::CopyResult) -> CopyVerdict {
 }
 
 fn disc_copy_options<'a>(
+    disc: &libfreemkv::Disc,
     raw: bool,
     multipass: bool,
     progress: &'a dyn libfreemkv::progress::Progress,
 ) -> freemkv_engine::CopyOptions<'a> {
+    // Mirrors `recover_to_iso`'s wiring (the GUI's path): persist the resolved
+    // keys (or the VID, if unresolved) into the mapfile so a later resume can
+    // decrypt directly instead of re-scanning.
+    let vid = disc.aacs.as_ref().map(|a| a.volume_id);
+    let unit_keys = disc
+        .aacs
+        .as_ref()
+        .map(|a| a.unit_keys.clone())
+        .unwrap_or_default();
     freemkv_engine::CopyOptions {
         decrypt: !raw,
         multipass,
         halt: None,
         progress: Some(progress),
+        vid,
+        unit_keys,
         ..Default::default()
     }
 }
@@ -2292,7 +2304,7 @@ fn disc_to_iso(
         speed_est: &speed_est,
     };
 
-    let copy_opts = disc_copy_options(raw, multipass, &progress);
+    let copy_opts = disc_copy_options(&disc, raw, multipass, &progress);
     let success = match freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts) {
         Ok(r) if copy_verdict(&r) == CopyVerdict::Interrupted => {
             // Ctrl-C halted the copy. Don't print "Complete" over a partial
@@ -5488,7 +5500,8 @@ mod verdict_tests {
     fn the_disc_copy_options_honour_raw_multipass_and_progress() {
         let nop = |_: &libfreemkv::progress::PassProgress| true;
 
-        let default_flags = disc_copy_options(false, false, &nop);
+        let d = super::iso_key_tests::disc(None, false);
+        let default_flags = disc_copy_options(&d, false, false, &nop);
         assert!(
             default_flags.decrypt,
             "a plain disc->iso rip must DECRYPT; ciphertext is only ever --raw"
@@ -5500,13 +5513,31 @@ mod verdict_tests {
         );
         assert!(default_flags.halt.is_none());
 
-        let raw = disc_copy_options(true, true, &nop);
+        let raw = disc_copy_options(&d, true, true, &nop);
         assert!(!raw.decrypt, "--raw is ciphertext passthrough");
         assert!(
             raw.multipass,
             "--multipass must reach the copy or recovery never runs"
         );
         assert!(raw.progress.is_some());
+    }
+
+    // The GUI's copy persists the scanned AACS keys (or the VID) in the mapfile; so must the CLI's.
+    #[test]
+    fn the_disc_copy_options_persist_the_scanned_aacs_keys() {
+        use super::iso_key_tests::{aacs, disc};
+        let nop = |_: &libfreemkv::progress::PassProgress| true;
+        let keyed = disc(Some(aacs(vec![(1, [7u8; 16])])), true);
+        let o = disc_copy_options(&keyed, true, false, &nop);
+        assert_eq!(
+            o.unit_keys,
+            vec![(1, [7u8; 16])],
+            "resolved keys reach the mapfile"
+        );
+        assert_eq!(o.vid, Some([0u8; 16]));
+        let clear = disc(None, false);
+        let o = disc_copy_options(&clear, true, false, &nop);
+        assert!(o.unit_keys.is_empty() && o.vid.is_none());
     }
 
     #[test]
@@ -5686,7 +5717,7 @@ mod iso_key_tests {
         }
     }
 
-    fn disc(aacs: Option<libfreemkv::AacsState>, encrypted: bool) -> libfreemkv::Disc {
+    pub(super) fn disc(aacs: Option<libfreemkv::AacsState>, encrypted: bool) -> libfreemkv::Disc {
         libfreemkv::Disc {
             volume_id: "TEST".into(),
             meta_title: None,
@@ -5705,7 +5736,7 @@ mod iso_key_tests {
         }
     }
 
-    fn aacs(unit_keys: Vec<(u32, [u8; 16])>) -> libfreemkv::AacsState {
+    pub(super) fn aacs(unit_keys: Vec<(u32, [u8; 16])>) -> libfreemkv::AacsState {
         libfreemkv::AacsState {
             version: 1,
             bus_encryption: false,

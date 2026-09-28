@@ -2255,6 +2255,35 @@ fn should_delete_staging_iso(keep_iso: bool, mux_succeeded: bool, cancelled: boo
     !keep_iso && mux_succeeded && !cancelled
 }
 
+// Twin of the CLI's `disc_copy_scan_opts`: only a raw whole-disc ISO copy scans on past an
+// unreadable AACS key file.
+fn disc_raw_copy(kind: OutKind, raw: bool) -> bool {
+    matches!(kind, OutKind::IsoImage) && raw
+}
+
+// A recovered ISO's result. Single-pass takes the CLI's `copy_verdict`: no data or a holed
+// image is a failure. Multipass damage under the lost-seconds tolerance stays a success.
+fn iso_recovery_result(
+    result: &fe::MultipassResult,
+    single_pass: bool,
+    iso_path: &str,
+) -> Result<String, String> {
+    if recovery_produced_no_data(result.good_bytes) {
+        let _ = std::fs::remove_file(iso_path);
+        return Err("Recovery produced no readable data — nothing to keep.".into());
+    }
+    if single_pass && (result.unreadable_bytes > 0 || result.pending_bytes > 0) {
+        return Err(format!(
+            "ISO copy incomplete — unreadable sectors remain (re-run with --multipass to \
+             retry them); partial ISO kept: {iso_path}"
+        ));
+    }
+    Ok(format!(
+        "ISO image written to {iso_path}{}",
+        damage_note(result)
+    ))
+}
+
 // Rip from a live optical drive (disc://). Scans once to resolve titles and keys, then runs the
 // chosen sink via fe::run_titles (same loop the ISO path uses). NEEDS HARDWARE VALIDATION
 // end-to-end.
@@ -2266,10 +2295,11 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
 
     // Scan once (shared drive core): titles, label, key state, per-disc name.
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
-    let (mut session, _trace) = fe::open_scan_resolve(
+    let (mut session, _trace) = fe::open_scan_resolve_with(
         disc_target(&req.source),
         session_credentials(&req.keys),
         key_factory(&req.keys),
+        disc_raw_copy(kind, req.raw),
     )
     .map_err(|e| match &e {
         libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
@@ -2367,10 +2397,8 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         }
 
         if want_iso {
-            return Ok(format!(
-                "ISO image written to {iso_path}{}",
-                damage_note(&result)
-            ));
+            let single_pass = !fe::plan_passes(req.max_passes.min(u8::MAX as u32) as u8).multipass;
+            return iso_recovery_result(&result, single_pass, &iso_path);
         }
 
         // Title output: mux the selected titles from the recovered ISO via the
@@ -3475,10 +3503,11 @@ mod disc_details_tests {
 mod routing_tests {
     use super::{
         DiscPlan, KeyConfig, OutKind, RipRequest, TitleIdentity, damage_note, demux_needs_subdirs,
-        disc_device, fe, image_or_dir_scheme, is_disc_source, is_stream_source, mux_opts, out_kind,
-        recovery_plan, recovery_produced_no_data, recovery_raw, remap_against, remap_title_pids,
-        should_delete_staging_iso, source_scheme, stream_selection_for, title_input_options,
-        title_session_mux_opts, verify_selection_identity, verify_title_identity, won_from_trace,
+        disc_device, disc_raw_copy, fe, image_or_dir_scheme, is_disc_source, is_stream_source,
+        iso_recovery_result, mux_opts, out_kind, recovery_plan, recovery_produced_no_data,
+        recovery_raw, remap_against, remap_title_pids, should_delete_staging_iso, source_scheme,
+        stream_selection_for, title_input_options, title_session_mux_opts,
+        verify_selection_identity, verify_title_identity, won_from_trace,
     };
 
     // ── The recovery job's `raw` flag ── `multipass_rip` refuses a real
@@ -3492,7 +3521,7 @@ mod routing_tests {
     fn the_shipped_defaults_produce_a_recovery_the_engine_accepts() {
         let multipass = crate::ui::wants_multipass("Multi-pass", 5);
         let want_iso = matches!(out_kind("Selected titles → MKV"), OutKind::IsoImage);
-        let user_raw = crate::ui::raw_applies(false, want_iso);
+        let user_raw = crate::ui::raw_applies(false, want_iso, true);
         assert!(multipass, "the default rip mode is a multipass plan");
         assert!(!user_raw, "raw does not apply to a title output");
 
@@ -4883,6 +4912,61 @@ mod routing_tests {
         };
         assert_eq!(won_from_trace(&lost), None);
         assert_eq!(won_from_trace(&ResolutionTrace::new()), None);
+    }
+
+    // The GUI raw disc→ISO copy must scan with raw_copy, exactly as the CLI's `--raw` does.
+    #[test]
+    fn the_gui_raw_disc_to_iso_scan_requests_raw_copy() {
+        let iso = out_kind("Whole disc → ISO image");
+        assert!(
+            disc_raw_copy(iso, true),
+            "a raw ISO copy must scan with raw_copy"
+        );
+        assert!(
+            !disc_raw_copy(iso, false),
+            "a decrypting ISO keeps the fatal E7031"
+        );
+        assert!(!disc_raw_copy(out_kind("Selected titles → MKV"), true));
+
+        let src = include_str!("engine.rs").replace("\r\n", "\n");
+        let start = src.find("fn run_disc(").expect("run_disc");
+        let end = start + src[start..].find("let device = ").expect("device");
+        let scan = &src[start..end];
+        assert!(
+            scan.contains("fe::open_scan_resolve_with(")
+                && scan.contains("disc_raw_copy(kind, req.raw)"),
+            "run_disc must hand disc_raw_copy to the drive scan"
+        );
+    }
+
+    // Single-pass ISO: the CLI's verdict. No data and a holed image fail; clean succeeds.
+    #[test]
+    fn a_single_pass_iso_takes_the_cli_copy_verdict() {
+        assert!(iso_recovery_result(&clean_result(), true, "/x.iso").is_ok());
+        let no_data = fe::MultipassResult {
+            good_bytes: 0,
+            unreadable_bytes: 1_048_576,
+            complete: false,
+            ..clean_result()
+        };
+        assert!(
+            iso_recovery_result(&no_data, true, "/x.iso").is_err(),
+            "no data is a failure"
+        );
+        let holed = fe::MultipassResult {
+            unreadable_bytes: 1_048_576,
+            complete: false,
+            ..clean_result()
+        };
+        assert!(
+            iso_recovery_result(&holed, true, "/x.iso").is_err(),
+            "a holed image fails"
+        );
+        assert!(
+            iso_recovery_result(&holed, false, "/x.iso").is_ok(),
+            "multipass damage under tolerance stays a success"
+        );
+        assert!(iso_recovery_result(&no_data, false, "/x.iso").is_err());
     }
 
     // ── damage under tolerance is still disclosed ───────────────────────────

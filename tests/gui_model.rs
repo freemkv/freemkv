@@ -1271,14 +1271,17 @@ fn multipass_needs_both_the_mode_and_a_pass_budget() {
     assert!(!wants_multipass("multi-pass", 5));
 }
 
-/// Ciphertext passthrough only applies to a whole-disc ISO. Forwarded to a mux
-/// it writes encrypted bytes into a container that claims to hold video.
+/// Ciphertext passthrough only applies to a whole-disc ISO copied off a live
+/// drive. Forwarded to a mux it writes encrypted bytes into a container that
+/// claims to hold video; forwarded to an image source there is no drive to
+/// keep raw bytes from.
 #[test]
-fn raw_only_applies_to_an_iso_output() {
-    assert!(raw_applies(true, true));
-    assert!(!raw_applies(true, false));
-    assert!(!raw_applies(false, true));
-    assert!(!raw_applies(false, false));
+fn raw_only_applies_to_a_drive_to_iso_copy() {
+    assert!(raw_applies(true, true, true));
+    assert!(!raw_applies(true, false, true));
+    assert!(!raw_applies(true, true, false));
+    assert!(!raw_applies(false, true, true));
+    assert!(!raw_applies(false, false, false));
 }
 
 /// Unticking every track is allowed but never silent — a file with no audio is
