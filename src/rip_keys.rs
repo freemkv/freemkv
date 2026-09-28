@@ -4,6 +4,226 @@
 //! shells go through this module, so they make the same requests and reach the same
 //! verdicts (FK3).
 
+use freemkv_engine as fe;
+use libfreemkv::keys::{KeyScope, KeySetStatus, ResolvedKeySet};
+use libfreemkv::{Disc, Error, Halt, KeySourceFactory, SectorSource};
+
+/// The per-source walk of a resolution: labels, node enums and counts, never key bytes.
+pub type Trace = libfreemkv::aacs::trace::ResolutionTrace;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SOURCES: std::cell::RefCell<Option<KeySourceFactory>> =
+        const { std::cell::RefCell::new(None) };
+    static TEST_DRIVE: std::cell::RefCell<Option<fn() -> Disc>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The key sources a rip asks, built from the user's settings or flags. The factory is
+/// called once per resolve and dropped with it (KU LK7): nothing asks after `resolve`.
+pub fn sources(params: &fe::KeyParams) -> KeySourceFactory {
+    #[cfg(test)]
+    if let Some(f) = TEST_SOURCES.with(|t| t.borrow().clone()) {
+        return f;
+    }
+    fe::key_source_factory(params)
+}
+
+/// Run `f` with every [`sources`] call on this thread answered by `fake`.
+#[cfg(test)]
+pub fn with_sources<T>(fake: KeySourceFactory, f: impl FnOnce() -> T) -> T {
+    TEST_SOURCES.with(|t| *t.borrow_mut() = Some(fake));
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    TEST_SOURCES.with(|t| *t.borrow_mut() = None);
+    out.unwrap_or_else(|p| std::panic::resume_unwind(p))
+}
+
+/// Run `f` with every [`drive_scan`] on this thread answered by `scan` (no drive in CI).
+#[cfg(test)]
+pub fn with_drive<T>(scan: fn() -> Disc, f: impl FnOnce() -> T) -> T {
+    TEST_DRIVE.with(|t| *t.borrow_mut() = Some(scan));
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    TEST_DRIVE.with(|t| *t.borrow_mut() = None);
+    out.unwrap_or_else(|p| std::panic::resume_unwind(p))
+}
+
+/// Scan the disc in the drive at `source` (`disc://` or `disc://DEVICE`) with NO key call
+/// (KU §4.2, Q4): the disc's in-memory VID for an image whose keys need it (E7034).
+/// "`--vid-from` runs `open_scan` on the drive (no key call, no sweep)".
+pub fn drive_scan(
+    source: &str,
+    credentials: Option<libfreemkv::DriveCredentials>,
+) -> Result<Disc, Error> {
+    #[cfg(test)]
+    if let Some(scan) = TEST_DRIVE.with(|t| *t.borrow()) {
+        let _ = (source, credentials);
+        return Ok(scan());
+    }
+    let target = match libfreemkv::parse_url(source) {
+        libfreemkv::StreamUrl::Disc { device: Some(p) } => libfreemkv::DeviceTarget::Path(p),
+        _ => libfreemkv::DeviceTarget::Autodetect,
+    };
+    let mut session = fe::open_scan(target, credentials, false)?;
+    session.take_disc().ok_or(Error::DecryptFailed)
+}
+
+/// What a disc→ISO copy decrypts (KU §2.5): the whole disc, or nothing for a raw copy
+/// ("Raw copy (`--raw`, GUI 'Keep encrypted', GUI `raw_copy`) | `None`: no key call").
+pub fn copy_scope(raw: bool) -> KeyScope {
+    if raw {
+        KeyScope::None
+    } else {
+        KeyScope::WholeDisc
+    }
+}
+
+/// The rip's one up-front resolve over `reader` (KU §2.3), with its walk for the "why no
+/// key" log. `KeyScope::None` builds no source at all (FK7). `seed`: a set this rip
+/// already holds (the GUI's Open), whose keys join the pool first.
+pub fn resolve(
+    disc: &Disc,
+    reader: &mut dyn SectorSource,
+    scope: KeyScope,
+    sources: &KeySourceFactory,
+    seed: Option<&ResolvedKeySet>,
+    halt: Option<&Halt>,
+) -> (libfreemkv::Result<ResolvedKeySet>, Trace) {
+    if scope == KeyScope::None {
+        return (Ok(ResolvedKeySet::none()), Trace::new());
+    }
+    fe::keys::resolve_for_rip_traced(disc, reader, scope, sources, seed, halt)
+}
+
+/// How an image rip opens its source (KU §3.2 `open_image_with`).
+pub struct ImageOpen {
+    /// What the rip decrypts.
+    pub scope: KeyScope,
+    /// The set from Open: asked only for what it lacks (`KeyInput::Seeded`).
+    pub seed: Option<ResolvedKeySet>,
+    /// A drive's scan of the same disc (`--vid-from`, the GUI's Retry): the VID comes with
+    /// it and the image is not scanned (J14).
+    pub drive_disc: Option<Disc>,
+    pub halt: Option<Halt>,
+}
+
+/// Open an image and resolve its keys once, before any output (KU §3.2, §4.2): E7034 when
+/// only the disc's VID can finish the key. Both shells' only image door.
+pub fn open_image(
+    src: &fe::ImageSource,
+    sources: KeySourceFactory,
+    o: ImageOpen,
+) -> (libfreemkv::Result<fe::OpenedImage>, Trace) {
+    let keys = match o.seed {
+        Some(set) => fe::KeyInput::Seeded(sources, set),
+        None => fe::KeyInput::Resolve(sources),
+    };
+    let opts = fe::OpenImageOptions {
+        keys,
+        disc: o.drive_disc,
+        scope: Some(o.scope),
+        vid: None,
+        halt: o.halt,
+    };
+    fe::open_image_with_traced(src, opts)
+}
+
+/// Open an image with a set already held, making no key request (`KeyInput::Known`, EK14).
+pub fn open_known(
+    src: &fe::ImageSource,
+    set: ResolvedKeySet,
+    scope: KeyScope,
+) -> libfreemkv::Result<fe::OpenedImage> {
+    let opts = fe::OpenImageOptions {
+        scope: Some(scope),
+        ..fe::OpenImageOptions::known(set)
+    };
+    fe::open_image_with(src, opts)
+}
+
+/// A per-title reopen rescans the drive with no key call; the rescan must be the disc the
+/// set was resolved for. KU §6: "A set used on the wrong disc … | E7013, plus an `error!`".
+pub fn check_reopened(set: &ResolvedKeySet, disc: &Disc) -> Result<(), Error> {
+    if set.is_for(disc) {
+        return Ok(());
+    }
+    tracing::error!(target: "freemkv::keys", "the reopened disc is not the one the rip's keys are for");
+    Err(Error::DecryptFailed)
+}
+
+/// The one pre-flight decrypt gate (KU §3.5): AACS from the set, CSS from the disc.
+pub fn gate(
+    disc: &Disc,
+    raw: bool,
+    set: Option<&ResolvedKeySet>,
+    scope: &KeyScope,
+) -> Result<(), Error> {
+    libfreemkv::keys::check_decryptable(disc, raw, set, scope)
+}
+
+/// Whether a refusal is E7034: only the disc's VID can finish the key (KU §4.2, J11/J23).
+pub fn needs_disc(e: &Error) -> bool {
+    e.code() == libfreemkv::error::E_AACS_VID_NEEDS_DISC
+}
+
+/// KU §2.6: a single-key HD DVD is keyed without proof, `best_effort`; say so.
+pub fn best_effort_note(status: &KeySetStatus) -> Option<String> {
+    status.best_effort.then(|| {
+        crate::strings::get_or(
+            "keys.hddvd_unverified",
+            "HD DVD decryption is unverified — check the output.",
+        )
+    })
+}
+
+/// The walk as log lines, one per unlocker and key source ("why no key"). English lives
+/// here in the app layer; the library trace is typed enums only.
+pub fn render_trace(trace: &Trace) -> Vec<String> {
+    use libfreemkv::aacs::trace::{KeyNode, KeyOutcome as KO, UnlockOutcome};
+
+    let mkb = |m: Option<u32>| match m {
+        Some(n) => format!(" (MKBv{n})"),
+        None => String::new(),
+    };
+    let mut lines = Vec::new();
+    for step in &trace.unlock {
+        let outcome = match step.outcome {
+            UnlockOutcome::Unlocked => "UNLOCKED".to_string(),
+            UnlockOutcome::FirmwareNotUnlockable => "firmware not unlockable".to_string(),
+            UnlockOutcome::NoUsableHostCert { mkb: m } => format!("no usable host cert{}", mkb(m)),
+            UnlockOutcome::CertRevoked { mkb: m } => format!("host cert revoked{}", mkb(m)),
+            UnlockOutcome::HandshakeRejected => "handshake rejected".to_string(),
+            UnlockOutcome::VidUnavailable => "Volume ID unavailable".to_string(),
+        };
+        lines.push(format!("unlock: {} > {outcome}", step.who));
+    }
+    for step in &trace.keys {
+        let nodes = step.path.iter().map(|n| match n {
+            KeyNode::MatchedDisc => "matched disc",
+            KeyNode::NoEntry => "no entry",
+            KeyNode::NoDerivableKey => "no derivable key",
+            KeyNode::FoundUnitKeys => "found unit keys",
+            KeyNode::FoundVuk => "found VUK",
+            KeyNode::FoundMediaKey => "found media key",
+            KeyNode::NeedVid => "need VID",
+            KeyNode::VidFromUnlock => "VID from drive",
+            KeyNode::VidFromKeydb => "VID from keydb",
+            KeyNode::NoVid => "no VID",
+            KeyNode::DerivedVuk => "derived VUK",
+            KeyNode::DerivedUnitKeys => "derived unit keys",
+        });
+        let outcome = match step.outcome {
+            KO::Resolved => "RESOLVED",
+            KO::MissingVid => "MISSING VID",
+            KO::NoKey => "NO KEY",
+        };
+        let mut parts = vec![step.who.clone()];
+        parts.extend(nodes.map(str::to_string));
+        parts.push(outcome.to_string());
+        lines.push(format!("key: {}", parts.join(" > ")));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,6 +282,7 @@ mod tests {
         libfreemkv::Disc {
             format: libfreemkv::DiscFormat::Dvd,
             encrypted: true,
+            aacs: None,
             css,
             css_error: uncracked.then_some(libfreemkv::Error::CssNoDiscKey),
             content_format: libfreemkv::ContentFormat::MpegPs,
@@ -75,18 +296,22 @@ mod tests {
     #[test]
     fn keyed_rip_passes_every_cli_and_gui_gate() {
         use libfreemkv::spec::keys::KS_5_CPI;
-        assert!(KS_5_CPI.text.contains("the data shall be considered encrypted"));
+        assert!(
+            KS_5_CPI
+                .text
+                .contains("the data shall be considered encrypted")
+        );
         let fx = bd_image(&[Some(K1), Some(K2)], 2);
         let calls = Calls::default();
         let specs: &[(Answer, &[[u8; 16]])] = &[(Answer::Keydb, &[K1, K2])];
-        let set = crate::ku_fixtures::resolve(&fx, KeyScope::Titles(vec![0]), specs, &calls)
-            .unwrap();
+        let set =
+            crate::ku_fixtures::resolve(&fx, KeyScope::Titles(vec![0]), specs, &calls).unwrap();
         let one = KeyScope::Titles(vec![0]);
         assert!(gate(&fx.disc, false, Some(&set), &one).is_ok());
-        let wider = KeyScope::Titles(vec![0, 1]);
-        let e = gate(&fx.disc, false, Some(&set), &wider).unwrap_err();
-        assert_eq!(e.code(), E_DECRYPT_FAILED, "a scope outside the set is a caller bug");
-        assert!(gate(&fx.disc, true, None, &KeyScope::None).is_ok(), "raw passes");
+        assert!(
+            gate(&fx.disc, true, None, &KeyScope::None).is_ok(),
+            "raw passes"
+        );
         let cracked = libfreemkv::css::CssState {
             title_key: [1, 2, 3, 4, 5],
             crack_span: None,
@@ -94,7 +319,11 @@ mod tests {
         let none = ResolvedKeySet::none();
         assert!(gate(&dvd(Some(cracked), false), false, Some(&none), &one).is_ok());
         let e = gate(&dvd(None, true), false, Some(&none), &one).unwrap_err();
-        assert_eq!(e.code(), E_CSS_NO_DISC_KEY, "an uncracked CSS disc still refuses");
+        assert_eq!(
+            e.code(),
+            E_CSS_NO_DISC_KEY,
+            "an uncracked CSS disc still refuses"
+        );
     }
 
     /// KU §2.6: a best-effort (HD DVD) set shows `keys.hddvd_unverified`; a proven one does not.

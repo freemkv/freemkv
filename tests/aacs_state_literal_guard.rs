@@ -257,7 +257,9 @@ fn blank(src: &str, strings: bool) -> Vec<u8> {
             match hashes {
                 Some(h) => {
                     let close = format!("\"{}", "#".repeat(h));
-                    i = src[i..].find(&close).map_or(b.len(), |n| i + n + close.len());
+                    i = src[i..]
+                        .find(&close)
+                        .map_or(b.len(), |n| i + n + close.len());
                 }
                 None => {
                     while i < b.len() && b[i] != b'"' {
@@ -290,9 +292,8 @@ fn char_literal_len(b: &[u8]) -> Option<usize> {
     if b.get(1) == Some(&b'\\') {
         return b.get(3..)?.iter().position(|&c| c == b'\'').map(|p| p + 4);
     }
-    let text = std::str::from_utf8(&b[1..b.len().min(5)]).unwrap_or_else(|e| {
-        std::str::from_utf8(&b[1..1 + e.valid_up_to()]).unwrap_or("")
-    });
+    let text = std::str::from_utf8(&b[1..b.len().min(5)])
+        .unwrap_or_else(|e| std::str::from_utf8(&b[1..1 + e.valid_up_to()]).unwrap_or(""));
     let c = text.chars().next()?;
     (b.get(1 + c.len_utf8()) == Some(&b'\'')).then_some(2 + c.len_utf8())
 }
@@ -354,7 +355,10 @@ fn banned_uses(src: &str, is_test: bool) -> Vec<(usize, &'static str)> {
             if *word == "decrypt_unit(" && in_test && helper {
                 continue;
             }
-            hits.push((view[..at].iter().filter(|&&c| c == b'\n').count() + 1, *word));
+            hits.push((
+                view[..at].iter().filter(|&&c| c == b'\n').count() + 1,
+                *word,
+            ));
         }
     }
     hits.sort();
@@ -403,7 +407,10 @@ fn the_structural_guard_skips_comments_and_test_strings() {
     let fetch = ["Key", "Fetch"].concat();
     let caught = [
         format!("fn f(x: Option<libfreemkv::sector::{fetch}>) {{}}"),
-        format!("fn f() {{ let s = \"# {}: 00\"; }}", ["freemkv", "-uk"].concat()),
+        format!(
+            "fn f() {{ let s = \"# {}: 00\"; }}",
+            ["freemkv", "-uk"].concat()
+        ),
         format!("#[cfg(test)]\nmod t {{\n    fn g() {{ let _ = {fetch}::unit_only; }}\n}}"),
         format!("fn f() {{ disc{}; }}", [".decrypt", "_keys()"].concat()),
     ];
@@ -422,9 +429,21 @@ fn the_structural_guard_skips_comments_and_test_strings() {
     }
     assert!(banned_uses(&format!("const B: &str = \"{fetch}\";"), true).is_empty());
     let unit = ["decrypt", "_unit"].concat();
-    let helper = format!("use libfreemkv::test_util::{{BdFile, {unit}}};\nfn t() {{ {unit}(&mut u, &k); }}");
-    assert!(banned_uses(&helper, true).is_empty(), "the test_util helper");
+    let helper =
+        format!("use libfreemkv::test_util::{{BdFile, {unit}}};\nfn t() {{ {unit}(&mut u, &k); }}");
+    assert!(
+        banned_uses(&helper, true).is_empty(),
+        "the test_util helper"
+    );
     let door = format!("use libfreemkv::aacs::content::{unit};\nfn t() {{ {unit}(&mut u, &k); }}");
-    assert_eq!(banned_uses(&door, true).len(), 1, "the library door, even in a test");
-    assert_eq!(banned_uses(&helper, false).len(), 1, "never in production code");
+    assert_eq!(
+        banned_uses(&door, true).len(),
+        1,
+        "the library door, even in a test"
+    );
+    assert_eq!(
+        banned_uses(&helper, false).len(),
+        1,
+        "never in production code"
+    );
 }

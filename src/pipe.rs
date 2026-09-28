@@ -5708,7 +5708,10 @@ mod verdict_tests {
             assert!(o.keys.is_some(), "the rip's set rides in memory");
             assert!(o.unit_keys.is_empty(), "no key reaches the mapfile");
             assert_eq!(o.vid, None, "no raw VID reaches the mapfile");
-            assert!(o.key_fetch.is_none(), "no mid-rip lookup (KU §2.1 invariant 4)");
+            assert!(
+                o.key_fetch.is_none(),
+                "no mid-rip lookup (KU §2.1 invariant 4)"
+            );
         }
     }
 

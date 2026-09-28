@@ -410,7 +410,6 @@ pub fn resolve(
     .map(|r| r.keys)
 }
 
-
 /// A temp directory removed on drop (freemkv has no `tempfile` dev-dependency).
 pub struct TempDir(PathBuf);
 
@@ -483,7 +482,11 @@ pub fn assert_no_secret_on_disk(dir: &Path, secrets: &[[u8; 16]]) {
         let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
         for s in secrets {
             let hex: String = s.iter().map(|b| format!("{b:02x}")).collect();
-            assert!(!bytes.windows(16).any(|w| w == s), "raw secret in {}", f.display());
+            assert!(
+                !bytes.windows(16).any(|w| w == s),
+                "raw secret in {}",
+                f.display()
+            );
             assert!(!text.contains(&hex), "secret hex in {}", f.display());
         }
     }
