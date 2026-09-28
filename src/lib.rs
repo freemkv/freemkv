@@ -62,9 +62,8 @@ pub mod win_menu;
 pub mod linux_glue;
 
 // ── Server shell — `--features server` ONLY ─────────────────────────────────
-// The rip daemon + web UI (`freemkv server`). Lives in the lib, like the Win32
-// shell, so the binary and the integration tests under tests/server/ share one
-// module graph.
+// The rip daemon + web UI (`freemkv server`), in the lib so the binary and the
+// integration tests under tests/server/ share one module graph.
 #[cfg(feature = "server")]
 pub mod server;
 
