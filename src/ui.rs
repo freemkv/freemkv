@@ -3853,6 +3853,51 @@ mod tests {
         assert!(!app.vid_retry, "a new source starts afresh");
     }
 
+    /// B2 (KU-F1 review; KU §2.1 invariant 4, "never call the key service twice"): Open's
+    /// answered refusal is shown again at Start with no request, unless the key settings
+    /// changed, the keydb was updated, Start wants more than Open resolved, or Open's
+    /// failure was transport-class.
+    #[test]
+    fn an_answered_refusal_at_open_is_shown_again_not_asked_again() {
+        let out = std::env::temp_dir().join(format!("fmkv-b2-{}", std::process::id()));
+        let refused = |transport: bool, titles: Vec<usize>| {
+            let mut app = App::new();
+            app.output_dir = out.display().to_string();
+            let mut sc = probe_scan();
+            sc.refusal = Some(crate::engine::KeyRefusal {
+                code: 7022,
+                text: "E7022 no key for this disc".into(),
+                titles,
+                transport,
+            });
+            app.apply_scan("/nonexistent/b2.iso", Ok(sc), false);
+            app
+        };
+        let mut app = refused(false, vec![0]);
+        app.start_run();
+        assert!(app.run.is_none(), "no second ask of an answered refusal");
+        let said = app
+            .log
+            .iter()
+            .filter(|l| l.text.contains("no key for this disc"))
+            .count();
+        assert_eq!(said, 2, "Open said it, and Start says it again");
+        app.settings.keyserver_url = "https://keys.test/decode".into();
+        app.start_run();
+        assert!(app.run.is_some(), "a key-settings change asks again");
+
+        let mut app = refused(true, vec![0]);
+        app.start_run();
+        assert!(app.run.is_some(), "a transport-class failure asks again");
+
+        let mut app = refused(false, vec![]);
+        app.start_run();
+        assert!(
+            app.run.is_some(),
+            "Start wants a title Open did not resolve"
+        );
+    }
+
     fn app_with_titles(codecs: &[&str]) -> App {
         let mut sc = probe_scan();
         sc.rows = (0..codecs.len())
