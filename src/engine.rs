@@ -5746,8 +5746,52 @@ mod ku_gui_tests {
         assert_no_secret_on_disk(dir.path(), &[K1, K2, VID]);
     }
 
-    fn drive() -> libfreemkv::Disc {
-        drive_disc(&bd_image(&[Some(K1)], 1))
+    fn drive() -> Result<libfreemkv::Disc, libfreemkv::Error> {
+        Ok(drive_disc(&bd_image(&[Some(K1)], 1)))
+    }
+
+    fn no_drive() -> Result<libfreemkv::Disc, libfreemkv::Error> {
+        Err(libfreemkv::Error::DeviceNotFound {
+            path: String::new(),
+        })
+    }
+
+    fn other_disc() -> Result<libfreemkv::Disc, libfreemkv::Error> {
+        let mut d = drive_disc(&bd_image(&[Some(K2)], 1));
+        d.aacs.as_mut().unwrap().disc_hash = "ab".repeat(20);
+        Ok(d)
+    }
+
+    /// M1 (KU §4.2 "Retry does the same `open_scan` and re-open"): a Retry that fails before
+    /// its resolve (no drive, the wrong disc, a Stop) stays the Retry; one the key sources
+    /// answered does not.
+    #[test]
+    fn a_retry_that_never_resolved_stays_armed() {
+        let fx = bd_image(&[Some(K1)], 1);
+        let dir = TempDir::new("m1");
+        let iso = fx.write(dir.path(), "capture.iso");
+        sidecar(&fx, &iso, true);
+        let out = dir.path().join("out");
+        let mut retry = req(&iso, &out, vec![0]);
+        retry.vid_from = Some("disc://".into());
+        let retry_with = |scan: fn() -> Result<libfreemkv::Disc, libfreemkv::Error>, stop: bool| {
+            let calls = Calls::default();
+            let f = factory(&[(Answer::OnlineNeedsVid, &[K1])], &calls);
+            let st = Arc::new(RunState::default());
+            st.cancel.store(stop, Ordering::SeqCst);
+            let r = with_drive(scan, || {
+                with_sources(f, || run_blocking(&retry, &UiSink(st.clone()), &st))
+            });
+            (r, st.needs_disc.load(Ordering::SeqCst))
+        };
+        let (r, armed) = retry_with(no_drive, false);
+        assert!(r.is_err() && armed, "no drive: {r:?}");
+        let (r, armed) = retry_with(other_disc, false);
+        assert!(r.is_err() && armed, "the wrong disc: {r:?}");
+        let (r, armed) = retry_with(drive, true);
+        assert!(r.is_err() && armed, "a Stop: {r:?}");
+        let (r, armed) = retry_with(drive, false);
+        assert!(r.is_ok() && !armed, "the disc's VID finished it: {r:?}");
     }
 
     /// FK11 (KU §4.2 "GUI … An 'Insert the disc' prompt with a drive picker and Retry"):

@@ -15,7 +15,7 @@ pub type Trace = libfreemkv::aacs::trace::ResolutionTrace;
 thread_local! {
     static TEST_SOURCES: std::cell::RefCell<Option<KeySourceFactory>> =
         const { std::cell::RefCell::new(None) };
-    static TEST_DRIVE: std::cell::RefCell<Option<fn() -> Disc>> =
+    static TEST_DRIVE: std::cell::RefCell<Option<fn() -> Result<Disc, Error>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -41,7 +41,7 @@ pub fn with_sources<T>(fake: KeySourceFactory, f: impl FnOnce() -> T) -> T {
 /// Run `f` with every [`drive_scan`] on this thread answered by `scan` (no drive in CI).
 #[cfg(test)]
 #[allow(dead_code)] // GUI tests only
-pub fn with_drive<T>(scan: fn() -> Disc, f: impl FnOnce() -> T) -> T {
+pub fn with_drive<T>(scan: fn() -> Result<Disc, Error>, f: impl FnOnce() -> T) -> T {
     TEST_DRIVE.with(|t| *t.borrow_mut() = Some(scan));
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     TEST_DRIVE.with(|t| *t.borrow_mut() = None);
@@ -60,7 +60,7 @@ pub fn drive_scan(
     #[cfg(test)]
     if let Some(scan) = TEST_DRIVE.with(|t| *t.borrow()) {
         let _ = (source, credentials);
-        return Ok(scan());
+        return scan();
     }
     let target = match libfreemkv::parse_url(source) {
         libfreemkv::StreamUrl::Disc { device: Some(p) } => libfreemkv::DeviceTarget::Path(p),
