@@ -128,6 +128,8 @@ pub fn open_image(
 }
 
 /// Open an image with a set already held, making no key request (`KeyInput::Known`, EK14).
+// The GUI's preflight; the CLI binary builds this module without the GUI off macOS.
+#[allow(dead_code)]
 pub fn open_known(
     src: &fe::ImageSource,
     set: ResolvedKeySet,

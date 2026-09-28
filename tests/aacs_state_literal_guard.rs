@@ -377,6 +377,28 @@ fn imports_test_util_decrypt_unit(code: &str) -> bool {
         })
 }
 
+/// `src/<name>.rs` of every module the crate roots declare only under `#[cfg(test)]`.
+fn test_only_modules(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for crate_root in ["src/lib.rs", "src/main.rs"] {
+        let text = std::fs::read_to_string(root.join(crate_root)).expect("crate root");
+        let mut test_attr = false;
+        for line in text.lines().map(str::trim) {
+            if line == "#[cfg(test)]" {
+                test_attr = true;
+            } else if let Some(name) = line.strip_prefix("mod ").and_then(|l| l.strip_suffix(';')) {
+                if test_attr {
+                    out.push(Path::new("src").join(format!("{name}.rs")));
+                }
+                test_attr = false;
+            } else if !line.starts_with("#[") {
+                test_attr = false;
+            }
+        }
+    }
+    out
+}
+
 /// FK8 (KU §2.2): no legacy key API anywhere in freemkv's `src/` or `tests/`, with no
 /// allow-path: every rip reads through its up-front `ResolvedKeySet`.
 #[test]
@@ -385,11 +407,13 @@ fn no_legacy_key_api_anywhere_in_freemkv() {
     let mut files = Vec::new();
     rs_files(&root.join("src"), &mut files);
     rs_files(&root.join("tests"), &mut files);
+    let test_only = test_only_modules(root);
     let mut hits = Vec::new();
     for f in &files {
         let rel = f.strip_prefix(root).unwrap();
         let src = std::fs::read_to_string(f).expect("read source");
-        for (line, word) in banned_uses(&src, rel.starts_with("tests")) {
+        let is_test = rel.starts_with("tests") || test_only.iter().any(|t| rel == t);
+        for (line, word) in banned_uses(&src, is_test) {
             hits.push(format!("{}:{line}: {word}", rel.display()));
         }
     }

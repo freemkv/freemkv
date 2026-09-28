@@ -434,6 +434,9 @@ struct ParsedFlags {
     keydb_path: Option<String>,
     key_url: Option<String>,
     key_auth: Option<String>,
+    /// `--vid-from disc://…`: the drive holding the disc whose Volume ID an image's keys
+    /// need (E7034, KU §4.2 Q4). Only its scan runs; nothing is ripped from it.
+    vid_from: Option<String>,
     title_nums: Vec<usize>,
     /// `-t all`: rip every title. Without it (and without any `-t N`), the
     /// default is the MAIN TITLE only — obfuscated discs with 50+ similar-
@@ -668,6 +671,22 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                     }
                 }
             }
+            // KU §4.2 Q4: "insert the disc and re-run with `--vid-from disc://N`".
+            "--vid-from" => {
+                let flag = &args[i];
+                match args.get(i + 1) {
+                    Some(v) if !crate::cli_entry::is_flag_token(v) => {
+                        i += 1;
+                        f.vid_from = Some(v.clone());
+                    }
+                    _ => {
+                        return Err(strings::fmt(
+                            "error.flag_needs_value",
+                            &[("flag", flag), ("example", "--vid-from disc://")],
+                        ));
+                    }
+                }
+            }
             // An unrecognized dash-prefixed token is a typo (`--titel`,
             // `--qiet`), not something to silently ignore. Bare `-` and
             // non-dash positionals (URLs) are left for the caller to interpret.
@@ -709,6 +728,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         keydb_path,
         key_url,
         key_auth,
+        vid_from,
         mut title_nums,
         all_titles,
         streams,
@@ -764,6 +784,16 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         out.raw(Normal, &msg);
         return 1;
     }
+    if let Err(msg) = validate_vid_from(vid_from.as_deref(), source, &parsed_source) {
+        out.raw(Normal, &msg);
+        return 1;
+    }
+    // The drive's scan, with no key call: the VID an image's keys need (KU §4.2).
+    let mut drive_disc = match vid_from.as_deref().map(|d| scan_vid_drive(d, &keys, &out)) {
+        Some(Some(disc)) => Some(disc),
+        Some(None) => return 1,
+        None => None,
+    };
 
     // Disc → ISO or Disc → null: use Disc::copy() (not a stream). Its own exit
     // code (0 / DISC_COPY_DAMAGED_EXIT / 1) passes straight through.
@@ -780,7 +810,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     // decrypts an existing image; `dir://` joins this arm when it becomes a
     // source. Not the recovery path — see `image_to_iso`.
     if matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. }) && parsed_source.is_disc_source() {
-        return if image_to_iso(source, dest, &keys, &out) {
+        return if image_to_iso(source, dest, &keys, drive_disc.take(), &out) {
             0
         } else {
             1
@@ -791,7 +821,15 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     // Placed before the generic mux path. Byte-stream sources, `--raw`, and
     // `--multipass` are already rejected above, so the source here is a disc.
     if matches!(parsed_dest, libfreemkv::StreamUrl::Dir { .. }) {
-        return if dir_to_extract(source, dest, &keys, &parsed_source, force, &out) {
+        return if dir_to_extract(
+            source,
+            dest,
+            &keys,
+            &parsed_source,
+            force,
+            drive_disc.take(),
+            &out,
+        ) {
             0
         } else {
             1
@@ -799,8 +837,23 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     }
 
     // Everything else: figure out titles, pipe each one
-    // For disc with explicit -t, skip the upfront ISO scan (pipe_disc scans itself)
     let is_disc = matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. });
+    // A disc is scanned once up front, with no key call: its titles, and the one resolve.
+    let mut disc_scan = None;
+    if is_disc {
+        match scan_rip_drive(source, &keys) {
+            Ok(pair) => disc_scan = Some(pair),
+            Err(e) if all_titles => {
+                out.raw(Normal, &scan_failed_msg(&e));
+                out.raw(Normal, &disc_scan_all_titles_failed());
+                return 1;
+            }
+            Err(e) => {
+                out.raw(Normal, &render_drive_open_error(&e));
+                return 1;
+            }
+        }
+    }
 
     // `--multipass`/`--raw` on a non-iso:// dest is already rejected by
     // `preflight_validate`. A disc source skips the upfront `scan_iso` but
@@ -812,22 +865,13 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     // Resolve the per-title indices to rip (None means a dir-creation error
     // was printed; abort). `-t all` on a DISC scans once to learn the title
     // count and carries each title's IDENTITY for `pipe_disc`'s re-scan to check.
-    let (title_nums, disc_identities) = if is_disc && all_titles {
-        match resolve_disc_all_titles(&title_nums, disc_title_identities(source, &keys, &out)) {
+    let (title_nums, disc_identities) = if let (Some((d, _, _)), true) = (&disc_scan, all_titles) {
+        let ids: Vec<TitleIdentity> = d.titles.iter().map(TitleIdentity::of).collect();
+        match resolve_disc_all_titles(&title_nums, (!ids.is_empty()).then_some(ids)) {
             Some(pair) => pair,
-            // The upfront scan FAILED, and `-t all` cannot proceed without it.
-            // The old code left `title_nums` empty, so `pipe_disc` ripped
-            // title 1 and exited 0, unaware `-t all` was requested. Fail LOUDLY.
+            // `-t all` without a title list must fail loudly, never rip title 1 and exit 0.
             None => {
-                out.raw(
-                    Normal,
-                    &strings::get_or(
-                        "error.disc_scan_all_titles_failed",
-                        "Error: could not scan the disc to list its titles, so `-t all` \
-                         cannot know which titles to rip. Nothing was ripped — check the \
-                         disc and drive and try again.",
-                    ),
-                );
+                out.raw(Normal, &disc_scan_all_titles_failed());
                 return 1;
             }
         }
@@ -874,22 +918,34 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     // Pipe each title
     let mut ok = true;
 
-    // For an ISO source, resolve the AACS unit keys ONCE (keyless scan → local
-    // keydb → decrypt_with) and hand them to each title's stream — libfreemkv
-    // does no lookup. A disc source resolves per-title inside `pipe_disc`.
-    let iso_unit_keys = match iso_disc {
-        Some((disc, reader)) => resolve_iso_unit_keys(disc, reader, &keys, &out),
-        None => Vec::new(),
-    };
-
-    // Fresh-key-on-failure factory for the ISO mux: when an online key service
-    // is configured, a unit no upfront key decrypts is re-tried against it.
-    // `None` (no `--key-url`) keeps the prior behaviour.
-    let iso_key_fetch = if is_disc {
-        None
+    // KU §2.1 invariant 1: every key this rip reads with, from ONE resolve over its titles,
+    // before its first output byte. A stream source (no AACS) has none.
+    let rip_titles: Vec<usize> = jobs.iter().map(|(t, _)| t.unwrap_or(0)).collect();
+    let set = if let Some((disc, mut reader, _)) = disc_scan {
+        let known: Vec<usize> = rip_titles
+            .iter()
+            .copied()
+            .filter(|&t| t < disc.titles.len())
+            .collect();
+        let scope = libfreemkv::keys::KeyScope::Titles(known);
+        let set = disc_rip_keys(&disc, reader.as_mut(), scope, &keys, &out);
+        drop(reader);
+        match set {
+            Some(set) => Some(set),
+            None => return 1,
+        }
+    } else if iso_disc.is_some() {
+        let n = titles.as_ref().map_or(0, Vec::len);
+        let known = rip_titles.iter().copied().filter(|&t| t < n).collect();
+        let scope = libfreemkv::keys::KeyScope::Titles(known);
+        match image_rip_keys(source, scope, drive_disc.take(), &keys, &out) {
+            Some(opened) => Some(opened.keys),
+            None => return 1,
+        }
     } else {
-        build_iso_key_fetch(source, &keys)
+        None
     };
+    let set = set.unwrap_or_else(libfreemkv::keys::ResolvedKeySet::none);
 
     // A multi-title rip with no specific title named must skip an uncrackable
     // incidental title (menu stub) rather than abort. `-t all` isn't the same
@@ -942,6 +998,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
                 title_idx.unwrap_or(0),
                 job_identity(&disc_identities, *title_idx),
                 &keys,
+                &set,
                 raw,
                 multipass,
                 &streams,
@@ -974,13 +1031,12 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
                 },
                 _ => libfreemkv::StreamSelection::default(),
             };
-            // `..Default`: `InputOptions::keys` stays `None` here until KU-F1 hands in the set.
+            // Every title reads through the rip's one set: no lookup after it (KU §2.1).
             let opts = libfreemkv::InputOptions {
-                unit_keys: iso_unit_keys.clone(),
                 title_index: *title_idx,
                 raw,
-                key_fetch: iso_key_fetch.clone(),
                 selection,
+                keys: Some(set.clone()),
                 ..Default::default()
             };
             pipe(source, dest_url, &opts, &out)
@@ -1363,41 +1419,6 @@ fn validate_file_dest(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn disc_title_identities(
-    source: &str,
-    keys: &KeyConfig,
-    out: &Output,
-) -> Option<Vec<TitleIdentity>> {
-    let parsed = libfreemkv::parse_url(source);
-    let target = match &parsed {
-        libfreemkv::StreamUrl::Disc { device: Some(p) } => {
-            libfreemkv::DeviceTarget::Path(p.clone())
-        }
-        _ => libfreemkv::DeviceTarget::Autodetect,
-    };
-    let (session, _trace) = match freemkv_engine::open_scan_resolve(
-        target,
-        drive_credentials(keys.keydb_path()),
-        key_source_factory(keys, out),
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            // `-t all` needs the disc's title list; a scan failure here must be
-            // reported, not silently turned into "no titles" (which used to
-            // masquerade as an empty selection). Surface the cause, then decline.
-            out.raw(Normal, &scan_failed_msg(&e));
-            return None;
-        }
-    };
-    let ids: Vec<TitleIdentity> = session
-        .disc()
-        .map(|d| d.titles.iter().map(TitleIdentity::of).collect())?;
-    // Drop the session before the per-title loop reopens the drive — the same
-    // shape the desktop app already uses.
-    drop(session);
-    (!ids.is_empty()).then_some(ids)
-}
-
 pub(crate) fn disc_title_nums(all_titles: bool, requested: &[usize], found: usize) -> Vec<usize> {
     if !all_titles || !requested.is_empty() {
         return requested.to_vec();
@@ -1569,22 +1590,6 @@ fn keyless_scan_opts() -> libfreemkv::ScanOptions {
     libfreemkv::ScanOptions::default()
 }
 
-pub(crate) fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOptions {
-    libfreemkv::ScanOptions {
-        credentials: drive_credentials(keydb_path),
-        ..Default::default()
-    }
-}
-
-// disc→ISO scan options: a raw copy never decrypts, so it scans on past an unreadable
-// AACS key file (libfreemkv records E7031 and refuses keys).
-fn disc_copy_scan_opts(keys: &KeyConfig, raw: bool) -> libfreemkv::ScanOptions {
-    libfreemkv::ScanOptions {
-        raw_copy: raw,
-        ..drive_scan_opts(keys.keydb_path())
-    }
-}
-
 fn dest_is_directory(dest: &str, parsed_dest: &libfreemkv::StreamUrl) -> bool {
     dest.ends_with('/') || std::path::Path::new(parsed_dest.path_str()).is_dir()
 }
@@ -1597,18 +1602,25 @@ pub(crate) fn drive_credentials(
     (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs })
 }
 
+/// `freemkv info -v`'s key status (KU §2.5: "`freemkv info` … `Titles([main])` for status"):
+/// one resolve against the local keydb, its walk shown; `None` when it refused.
 pub(crate) fn resolve_info_keys(
     drive: &mut libfreemkv::Drive,
-    disc: &mut libfreemkv::Disc,
+    disc: &libfreemkv::Disc,
     keydb_path: &Option<String>,
     out: &Output,
-) {
+) -> Option<libfreemkv::keys::KeySetStatus> {
     let keys = KeyConfig {
         keydb_path: keydb_path.clone(),
         key_url: None,
         key_auth: None,
     };
-    resolve_disc_keys(disc, drive, &keys, out);
+    let main = freemkv_engine::resolve_selection(disc, &freemkv_engine::Selection::MainMovie);
+    let scope = libfreemkv::keys::KeyScope::Titles(main);
+    let factory = key_source_factory(&keys, out);
+    let (set, trace) = crate::rip_keys::resolve(disc, drive, scope, &factory, None, None);
+    emit_resolution_trace(out, &trace);
+    set.ok().map(|s| s.status())
 }
 
 fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>)> {
@@ -1626,71 +1638,6 @@ fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::Secto
     }
 }
 
-fn resolve_iso_unit_keys(
-    mut disc: libfreemkv::Disc,
-    mut reader: Box<dyn libfreemkv::SectorSource>,
-    keys: &KeyConfig,
-    out: &Output,
-) -> Vec<(u32, [u8; 16])> {
-    resolve_disc_keys(&mut disc, reader.as_mut(), keys, out);
-    match disc.decrypt_keys() {
-        libfreemkv::DecryptKeys::Aacs { unit_keys, .. } => unit_keys,
-        _ => Vec::new(),
-    }
-}
-
-fn build_iso_key_fetch(source: &str, keys: &KeyConfig) -> Option<libfreemkv::sector::KeyFetch> {
-    let url = keys.key_url.clone()?;
-    // Reuse the SSRF guard the upfront source list uses; a rejected URL means no
-    // fetch (rather than POSTing key material to an internal/metadata host).
-    if freemkv_keysources::validate_keyserver_url(&url).is_err() {
-        return None;
-    }
-    let auth = keys.key_auth.clone().unwrap_or_default();
-    // Iso AND Dir: a folder is an image-level source with the same AACS
-    // inputs. Matching only `Iso` silently disabled online key fetch for
-    // `dir://` even when the same disc's key was retrievable as an ISO.
-    let (path, from_dir) = match libfreemkv::parse_url(source) {
-        libfreemkv::StreamUrl::Iso { path } => (path, false),
-        libfreemkv::StreamUrl::Dir { path } => (path, true),
-        _ => return None,
-    };
-    // Capture the disc's inf + MKB ONCE; a non-AACS source yields an error → None.
-    let p = std::path::Path::new(&path);
-    let (inf, mkb, version) = if from_dir {
-        libfreemkv::Disc::read_aacs_inputs_from_dir(p).ok()?
-    } else {
-        libfreemkv::Disc::read_aacs_inputs(p).ok()?
-    };
-    if inf.is_empty() {
-        return None;
-    }
-    // Disc inputs the lib's `key_fetch` reuses per call (it swaps in the failing
-    // `samples`). An ISO has no live-drive VID (all-zero) — VID-optional. The
-    // version drives the Unit_Key_RO.inf stride for a VUK-from-server reply.
-    let inputs = libfreemkv::DiscInputs {
-        disc_hash: String::new(),
-        volume_id: [0u8; 16],
-        version,
-        mkb,
-        unit_key_ro: inf,
-        samples: Vec::new(),
-        volume_label: None,
-    };
-    // Zero duplicated fetch logic: the lib's `key_fetch` owns the full flow.
-    // The CLI only supplies the disc inputs and a way to rebuild its key
-    // source (the `--key-url` OnlineSource).
-    let make_sources: std::sync::Arc<
-        dyn Fn() -> Vec<Box<dyn libfreemkv::keysource::KeySource>> + Send + Sync,
-    > = std::sync::Arc::new(move || {
-        vec![Box::new(freemkv_keysources::OnlineSource::new(
-            url.clone(),
-            auth.clone(),
-        )) as Box<dyn libfreemkv::keysource::KeySource>]
-    });
-    Some(libfreemkv::keysource::key_fetch(inputs, make_sources))
-}
-
 pub(crate) fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::PathBuf {
     keydb_path
         .clone()
@@ -1700,6 +1647,7 @@ pub(crate) fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::Pat
         .unwrap_or_else(|| std::path::PathBuf::from("keydb.cfg"))
 }
 
+#[cfg(test)]
 fn build_key_sources_quiet(keys: &KeyConfig) -> Vec<Box<dyn freemkv_keysources::KeySource>> {
     freemkv_engine::key_sources(&key_params(keys))
 }
@@ -1754,71 +1702,178 @@ fn emit_resolution_trace(out: &Output, trace: &libfreemkv::aacs::trace::Resoluti
     }
 }
 
-fn resolve_disc_keys(
-    disc: &mut libfreemkv::Disc,
-    reader: &mut dyn libfreemkv::SectorSource,
-    keys: &KeyConfig,
-    out: &Output,
-) {
-    let factory = key_source_factory(keys, out);
-    let resolved = libfreemkv::resolve_keys_for(reader, disc, factory);
-    emit_resolution_trace(out, &resolved.trace);
+use crate::rip_keys::render_trace as render_resolution_trace;
+
+/// `-t all` could not list the disc's titles, so nothing was ripped.
+fn disc_scan_all_titles_failed() -> String {
+    strings::get_or(
+        "error.disc_scan_all_titles_failed",
+        "Error: could not scan the disc to list its titles, so `-t all` \
+         cannot know which titles to rip. Nothing was ripped — check the \
+         disc and drive and try again.",
+    )
 }
 
-fn render_resolution_trace(trace: &libfreemkv::aacs::trace::ResolutionTrace) -> Vec<String> {
-    use libfreemkv::aacs::trace::{KeyNode, KeyOutcome as KO, UnlockOutcome};
+/// A drive that would not open or scan: "no drive" for autodetect, else the coded error.
+fn render_drive_open_error(e: &libfreemkv::Error) -> String {
+    match e {
+        libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
+            strings::get("error.no_drive")
+        }
+        _ => render_error(e),
+    }
+}
 
-    let mkb = |m: Option<u32>| match m {
-        Some(n) => format!(" (MKBv{n})"),
-        None => String::new(),
+/// The `DeviceTarget` a `disc://` URL names: a device path, or autodetect.
+fn device_target(source: &str) -> libfreemkv::DeviceTarget {
+    match libfreemkv::parse_url(source) {
+        libfreemkv::StreamUrl::Disc { device: Some(p) } => libfreemkv::DeviceTarget::Path(p),
+        _ => libfreemkv::DeviceTarget::Autodetect,
+    }
+}
+
+type DriveScan = (libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>, String);
+
+/// Open and scan the drive at `source` with NO key call (KU §3.2 `open_scan`): the disc,
+/// its raw reader for the rip's one resolve, and the device path.
+fn scan_rip_drive(source: &str, keys: &KeyConfig) -> Result<DriveScan, libfreemkv::Error> {
+    let credentials = drive_credentials(keys.keydb_path());
+    let mut session = freemkv_engine::open_scan(device_target(source), credentials, false)?;
+    let device = session.device_path().to_string();
+    let disc = session.take_disc().expect("scan populated the disc");
+    session.stage_drive_as_reader();
+    let reader = session.take_reader().expect("the drive was just staged");
+    Ok((disc, reader, device))
+}
+
+/// The drive `--vid-from` names, scanned with no key call; `None` once the error is shown.
+fn scan_vid_drive(device: &str, keys: &KeyConfig, out: &Output) -> Option<libfreemkv::Disc> {
+    let credentials = drive_credentials(keys.keydb_path());
+    match crate::rip_keys::drive_scan(device, credentials) {
+        Ok(disc) => Some(disc),
+        Err(e) => {
+            out.raw(Normal, &render_drive_open_error(&e));
+            None
+        }
+    }
+}
+
+/// `--vid-from` must name a drive, for an `iso://` image (a `dir://` folder is always
+/// scanned, KU §3.2 D6; a disc source brings its own VID).
+fn validate_vid_from(
+    vid_from: Option<&str>,
+    source: &str,
+    parsed_source: &libfreemkv::StreamUrl,
+) -> Result<(), String> {
+    let Some(v) = vid_from else {
+        return Ok(());
     };
-    let mut lines = Vec::new();
-
-    for step in &trace.unlock {
-        // `who` is the unlocker's own name() — printed verbatim (no enum to map).
-        let outcome = match step.outcome {
-            UnlockOutcome::Unlocked => "UNLOCKED".to_string(),
-            UnlockOutcome::FirmwareNotUnlockable => "firmware not unlockable".to_string(),
-            UnlockOutcome::NoUsableHostCert { mkb: m } => format!("no usable host cert{}", mkb(m)),
-            UnlockOutcome::CertRevoked { mkb: m } => format!("host cert revoked{}", mkb(m)),
-            UnlockOutcome::HandshakeRejected => "handshake rejected".to_string(),
-            UnlockOutcome::VidUnavailable => "Volume ID unavailable".to_string(),
-        };
-        lines.push(format!("unlock: {} > {outcome}", step.who));
+    if !matches!(libfreemkv::parse_url(v), libfreemkv::StreamUrl::Disc { .. }) {
+        return Err(strings::fmt_or(
+            "error.vid_from_not_a_drive",
+            "Error: --vid-from needs the drive holding the disc: disc:// (or disc://DEVICE), got '{value}'.",
+            &[("value", v)],
+        ));
     }
-
-    for step in &trace.keys {
-        // `who` is the source's own label() — printed verbatim (no enum to map).
-        let nodes: Vec<&str> = step
-            .path
-            .iter()
-            .map(|n| match n {
-                KeyNode::MatchedDisc => "matched disc",
-                KeyNode::NoEntry => "no entry",
-                KeyNode::NoDerivableKey => "no derivable key",
-                KeyNode::FoundUnitKeys => "found unit keys",
-                KeyNode::FoundVuk => "found VUK",
-                KeyNode::FoundMediaKey => "found media key",
-                KeyNode::NeedVid => "need VID",
-                KeyNode::VidFromUnlock => "VID from drive",
-                KeyNode::VidFromKeydb => "VID from keydb",
-                KeyNode::NoVid => "no VID",
-                KeyNode::DerivedVuk => "derived VUK",
-                KeyNode::DerivedUnitKeys => "derived unit keys",
-            })
-            .collect();
-        let outcome = match step.outcome {
-            KO::Resolved => "RESOLVED",
-            KO::MissingVid => "MISSING VID",
-            KO::NoKey => "NO KEY",
-        };
-        let mut parts = vec![step.who.clone()];
-        parts.extend(nodes.into_iter().map(str::to_string));
-        parts.push(outcome.to_string());
-        lines.push(format!("key: {}", parts.join(" > ")));
+    if !matches!(parsed_source, libfreemkv::StreamUrl::Iso { .. }) {
+        return Err(strings::fmt_or(
+            "error.vid_from_iso_only",
+            "Error: --vid-from applies only to an iso:// image source, got '{source}'.",
+            &[("source", source)],
+        ));
     }
+    Ok(())
+}
 
-    lines
+/// E7034's next step on the command line (KU §4.2: "insert the disc and re-run with
+/// `--vid-from disc://N`").
+fn vid_from_hint() -> String {
+    strings::get_or(
+        "rip.vid_from_hint",
+        "To finish, insert the disc and run the same command again with --vid-from disc:// \
+         (or --vid-from disc://DEVICE to name the drive). Only the disc's Volume ID is read; \
+         it is not ripped again.",
+    )
+}
+
+/// Print a key refusal (E7034 with its hint), or the set's HD DVD note; the set on success.
+fn report_keys(
+    set: libfreemkv::Result<libfreemkv::keys::ResolvedKeySet>,
+    out: &Output,
+) -> Option<libfreemkv::keys::ResolvedKeySet> {
+    match set {
+        Ok(set) => {
+            if let Some(note) = crate::rip_keys::best_effort_note(&set.status()) {
+                out.raw(Normal, &note);
+            }
+            Some(set)
+        }
+        Err(e) => {
+            out.raw(Normal, &render_error(&e));
+            if crate::rip_keys::needs_disc(&e) {
+                out.raw(Normal, &vid_from_hint());
+            }
+            None
+        }
+    }
+}
+
+/// The rip's one resolve over a drive, before any output (KU §2.3); Ctrl-C stops it.
+fn disc_rip_keys(
+    disc: &libfreemkv::Disc,
+    reader: &mut dyn libfreemkv::SectorSource,
+    scope: libfreemkv::keys::KeyScope,
+    keys: &KeyConfig,
+    out: &Output,
+) -> Option<libfreemkv::keys::ResolvedKeySet> {
+    let factory = key_source_factory(keys, out);
+    let sigint = SigintHalt::install();
+    let r = crate::rip_keys::resolve(disc, reader, scope, &factory, None, Some(sigint.halt()));
+    drop(sigint);
+    emit_resolution_trace(out, &r.1);
+    report_keys(r.0, out)
+}
+
+/// Open an image rip's source and resolve its keys once (KU §3.2), with `--vid-from`'s
+/// drive scan when given; `halt` stops the resolve. `None` once the refusal is shown.
+fn open_rip_image(
+    source: &str,
+    scope: libfreemkv::keys::KeyScope,
+    drive_disc: Option<libfreemkv::Disc>,
+    keys: &KeyConfig,
+    halt: &libfreemkv::Halt,
+    out: &Output,
+) -> Option<freemkv_engine::OpenedImage> {
+    let src = freemkv_engine::ImageSource::from_url(source)?;
+    let o = crate::rip_keys::ImageOpen {
+        scope,
+        seed: None,
+        drive_disc,
+        halt: Some(halt.clone()),
+    };
+    let (opened, trace) = crate::rip_keys::open_image(&src, key_source_factory(keys, out), o);
+    emit_resolution_trace(out, &trace);
+    let opened = match opened {
+        Ok(o) => o,
+        Err(e) => {
+            report_keys(Err(e), out);
+            return None;
+        }
+    };
+    report_keys(Ok(opened.keys.clone()), out)?;
+    Some(opened)
+}
+
+/// [`open_rip_image`] with its own Ctrl-C watch.
+fn image_rip_keys(
+    source: &str,
+    scope: libfreemkv::keys::KeyScope,
+    drive_disc: Option<libfreemkv::Disc>,
+    keys: &KeyConfig,
+    out: &Output,
+) -> Option<freemkv_engine::OpenedImage> {
+    let sigint = SigintHalt::install();
+    open_rip_image(source, scope, drive_disc, keys, sigint.halt(), out)
 }
 
 #[allow(clippy::too_many_arguments)] // cohesive single-title disc rip
@@ -1828,51 +1883,37 @@ fn pipe_disc(
     title_idx: usize,
     expected: Option<&TitleIdentity>,
     keys: &KeyConfig,
+    set: &libfreemkv::keys::ResolvedKeySet,
     raw: bool,
     _multipass: bool,
     streams: &freemkv_engine::StreamChoice,
     multi_title: bool,
     out: &Output,
 ) -> Result<(), PipeFail> {
-    let parsed = libfreemkv::parse_url(source);
-    let target = match &parsed {
-        libfreemkv::StreamUrl::Disc { device: Some(p) } => {
-            libfreemkv::DeviceTarget::Path(p.clone())
-        }
-        _ => libfreemkv::DeviceTarget::Autodetect,
-    };
-
     out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", source)]));
-    // Drive bring-up (open + lock-tray + scan + resolve keys) is the shared
-    // optical core in `freemkv_engine::open_scan_resolve`, also used by the
-    // desktop GUI. Tray unlock is guaranteed by `Drive::drop`; CLI keeps only presentation.
-    let (mut session, trace) = freemkv_engine::open_scan_resolve(
-        target,
-        drive_credentials(keys.keydb_path()),
-        key_source_factory(keys, out),
-    )
-    .map_err(|e| {
-        PipeFail::fatal(match &e {
-            libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
-                strings::get("error.no_drive")
-            }
-            _ => format!("{}", e),
-        })
-    })?;
-    emit_resolution_trace(out, &trace);
+    // KU §3.3: each title reopens the drive with `open_scan` (no key call) and reads
+    // through the rip's one set, after `is_for`. Tray unlock is guaranteed by `Drive::drop`.
+    let credentials = drive_credentials(keys.keydb_path());
+    let mut session = freemkv_engine::open_scan(device_target(source), credentials, false)
+        .map_err(|e| {
+            PipeFail::fatal(match &e {
+                libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
+                    strings::get("error.no_drive")
+                }
+                _ => format!("{}", e),
+            })
+        })?;
     // ── Pre-flight validation (borrows the scanned disc; no drive I/O) ──
-    // The session is kept intact so `mux_stream(MuxInput::Session)` can take
-    // its staged reader; range-check and decrypt gates borrow `disc` immutably.
     let batch = libfreemkv::disc::detect_max_batch_sectors(session.device_path());
     // Resolved -a/-s PID selection for this title (default = keep all).
     let mut selection = libfreemkv::StreamSelection::default();
     {
         let disc = session.disc().expect("scan populated the disc");
-        // The same range + identity rules from `run()`'s scanned-source path,
-        // centralized in `resolve_scanned_title`: range prevents a panic on
-        // `disc.titles[title_idx]` below; identity catches a diverging re-scan.
+        // The same range + identity rules from `run()`'s scanned-source path; range
+        // prevents a panic on `disc.titles[title_idx]`, identity catches a diverging re-scan.
         let title =
             resolve_scanned_title(&disc.titles, title_idx, expected).map_err(PipeFail::fatal)?;
+        crate::rip_keys::check_reopened(set, disc).map_err(PipeFail::from_typed)?;
 
         // Translate the -a/-s language policy into PIDs against this scanned
         // title. A bad tag is a hard error (typo). Default All/All is a no-op.
@@ -1886,29 +1927,17 @@ fn pipe_disc(
                 .map_err(PipeFail::fatal)?;
         }
 
-        // Pre-flight decrypt gate (disc-wide): catches a scrambled-but-uncracked
-        // CSS disc or an AACS disc with no resolved key before the mux, so the
-        // dedicated NoDiscKey/CssKeyMissing message fires. `--raw` discs pass.
-        disc.ensure_decryptable(raw).map_err(PipeFail::from_typed)?;
-
-        // Per-title decrypt gate for AACS/non-DVD: same keys `mux_stream`
-        // resolves later, but a `None` key fails loudly here rather than
-        // muxing garbage. DVD is gated inside `DiscStream::new` instead.
-        if needs_pre_mux_title_key(disc.format) {
-            let keys = disc.decrypt_keys();
-            disc.ensure_title_decryptable(raw, &keys, false)
-                .map_err(PipeFail::from_typed)?;
-        }
+        // KU §3.5: the one decrypt gate, from the set (AACS) or the disc (CSS).
+        let scope = libfreemkv::keys::KeyScope::Titles(vec![title_idx]);
+        crate::rip_keys::gate(disc, raw, Some(set), &scope).map_err(PipeFail::from_typed)?;
     }
 
     // The live drive is opened and the source is ready — complete the source
-    // "opening…" line started above. The disc→PES construction (DiscStream::new,
-    // the per-title CSS crack, the header pump) now lives inside `mux_stream`.
+    // "opening…" line started above.
     out.raw(Normal, &strings::get("rip.ok"));
 
-    // Stage the drive as the session's boxed reader, then run the shared
-    // driver: builds `DiscStream`, pumps headers (metadata short-circuit runs
-    // before the header gate now), opens the sink, and pumps frames to EOF/halt.
+    // Stage the drive as the session's boxed reader, then run the shared driver with the
+    // rip's set: it builds the stream, pumps headers, opens the sink and pumps frames.
     session.stage_drive_as_reader();
     let metadata_sink = is_metadata_sink(dest);
     let events = Arc::new(CliMuxEvents::new(*out, dest.to_string(), metadata_sink));
@@ -1923,11 +1952,12 @@ fn pipe_disc(
         selection,
     };
     let sigint = SigintHalt::install();
-    let result = libfreemkv::mux_stream(
-        MuxInput::Session {
+    let result = libfreemkv::mux_with_keys(
+        libfreemkv::MuxSource::Session {
             session: &mut session,
             title_index: title_idx,
         },
+        Some(set),
         dest,
         &opts,
         sigint.halt(),
@@ -2099,22 +2129,17 @@ fn source_path_of(source: &str) -> Option<std::path::PathBuf> {
 /// grew a narrower copy of it that a hardlink walks straight through.
 use crate::file_identity::same_file;
 
-/// Decrypt a whole image into `dest` through libfreemkv's shared whole-disc reader, the
-/// one the engine's disc → ISO sweep uses, so the GUI, CLI and image paths never diverge.
-/// Every key is settled before `dest` is created, so a refusal, or a stop (`interrupt`)
-/// while keying, leaves no file behind.
+/// Decrypt a whole image into `dest` through the rip's set: its whole-disc reader is the one
+/// the engine's disc → ISO sweep uses, so the GUI, CLI and image paths never diverge. Every
+/// key was settled before this (KU §2.1), so a refusal leaves no file behind.
 fn write_decrypted_image(
     disc: &libfreemkv::Disc,
     reader: Box<dyn libfreemkv::SectorSource>,
     dest: &std::path::Path,
-    fetch: Option<&libfreemkv::sector::KeyFetch>,
-    interrupt: &'static AtomicBool,
+    set: &libfreemkv::keys::ResolvedKeySet,
+    halt: &libfreemkv::Halt,
 ) -> libfreemkv::error::Result<u64> {
-    // Watched from the start, so a Ctrl-C during keying (probes, key-service calls)
-    // stops before `write_image` creates `dest`.
-    let sigint = SigintHalt::watching(interrupt);
-    let halt = sigint.halt();
-    let mut src = libfreemkv::whole_disc::whole_disc_reader(disc, reader, true, fetch, Some(halt))?;
+    let mut src = set.whole_disc_reader(disc, reader, Some(halt))?;
     libfreemkv::write_image(&mut src, dest, disc.capacity_sectors, halt, |_| {})
 }
 
@@ -2149,7 +2174,13 @@ fn refuse_unstaged_titles(
     }
 }
 
-fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
+fn image_to_iso(
+    source: &str,
+    dest: &str,
+    keys: &KeyConfig,
+    drive_disc: Option<libfreemkv::Disc>,
+    out: &Output,
+) -> bool {
     let iso_path = match libfreemkv::parse_url(dest) {
         libfreemkv::StreamUrl::Iso { path } => path,
         _ => return false,
@@ -2157,25 +2188,11 @@ fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> boo
     if source_path_of(source).is_some_and(|src| refuse_staged_image(&src, out)) {
         return false;
     }
-
-    let (mut disc, reader) = match scan_iso(source) {
-        Some(pair) => pair,
-        None => {
-            out.raw(
-                Normal,
-                &strings::fmt("error.iso_unreadable", &[("path", source)]),
-            );
-            return false;
-        }
-    };
-
-    let mut reader = reader;
-    // Resolve keys against the source before copying: an `iso://` destination is
-    // a DECRYPTED image, so an encrypted source that yields no key must fail
-    // here rather than write ciphertext under a name that promises plaintext.
-    resolve_disc_keys(&mut disc, reader.as_mut(), keys, out);
-    if let Err(e) = disc.ensure_decryptable(false) {
-        out.raw(Normal, &render_error(&e));
+    if scan_iso(source).is_none() {
+        out.raw(
+            Normal,
+            &strings::fmt("error.iso_unreadable", &[("path", source)]),
+        );
         return false;
     }
 
@@ -2190,16 +2207,23 @@ fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> boo
         return false;
     }
 
-    let total_sectors = disc.capacity_sectors;
+    // An `iso://` destination is a DECRYPTED image: every key of the whole disc is resolved
+    // once, before `dest` exists (KU §2.5 `WholeDisc`). Ctrl-C is watched from the start.
+    let sigint = SigintHalt::install();
+    let scope = libfreemkv::keys::KeyScope::WholeDisc;
+    let Some(opened) = open_rip_image(source, scope, drive_disc, keys, sigint.halt(), out) else {
+        return false;
+    };
+    let total_sectors = opened.disc.capacity_sectors;
     let start = std::time::Instant::now();
-    let fetch = build_iso_key_fetch(source, keys);
     let result = write_decrypted_image(
-        &disc,
-        reader,
+        &opened.disc,
+        opened.reader,
         std::path::Path::new(&iso_path),
-        fetch.as_ref(),
-        &INTERRUPTED,
+        &opened.keys,
+        sigint.halt(),
     );
+    drop(sigint);
 
     match result {
         Ok(0) => {
@@ -2256,55 +2280,40 @@ fn disc_to_iso(
     multipass: bool,
     out: &Output,
 ) -> i32 {
-    let parsed_source = libfreemkv::parse_url(source);
     let parsed_dest = libfreemkv::parse_url(dest);
-    let device = match &parsed_source {
-        libfreemkv::StreamUrl::Disc { device: Some(p) } => Some(p.clone()),
-        _ => None,
-    };
-
-    let mut drive = match device {
-        Some(ref d) => match libfreemkv::Drive::open(d) {
-            Ok(d) => d,
-            Err(e) => {
-                out.raw(Normal, &render_error(&e));
-                return 1;
-            }
-        },
-        None => match libfreemkv::find_drive() {
-            Some(d) => d,
-            None => {
-                out.raw(Normal, &strings::get("error.no_drive"));
-                return 1;
-            }
-        },
-    };
-    out.raw(
-        Normal,
-        &strings::fmt("rip.drive", &[("device", drive.device_path())]),
-    );
-    debug_drive_step("wait_ready", drive.wait_ready());
-    debug_drive_step("init", drive.init());
-    // probe_disc is advisory: it routinely fails (no disc, already probed) and
-    // the scan below re-derives what it needs, so its result stays discarded.
-    let _ = drive.probe_disc();
-
-    let mut disc = match libfreemkv::Disc::scan(&mut drive, &disc_copy_scan_opts(keys, raw)) {
-        Ok(d) => d,
+    // A raw copy scans on past an unreadable AACS key file (libfreemkv records E7031).
+    let credentials = drive_credentials(keys.keydb_path());
+    let mut session = match freemkv_engine::open_scan(device_target(source), credentials, raw) {
+        Ok(s) => s,
         Err(e) => {
-            out.raw(Normal, &scan_failed_msg(&e));
+            out.raw(Normal, &render_drive_open_error(&e));
             return 1;
         }
     };
-    // Resolve + apply the AACS key so the keys persist in the mapfile during
-    // disc→ISO copy (the mux step reads them back to decrypt). Ciphertext is
-    // sampled internally so the resolved key is validated against real data.
-    resolve_disc_keys(&mut disc, &mut drive, keys, out);
-
-    // Pre-flight decrypt gate: a decrypting copy of an encrypted disc with no
-    // usable key would write ciphertext and exit 0. Refuse here, before
-    // locking the tray, so `Disc::copy`'s gate is surfaced with a localized message.
-    if let Err(e) = disc.ensure_decryptable(raw) {
+    out.raw(
+        Normal,
+        &strings::fmt("rip.drive", &[("device", session.device_path())]),
+    );
+    let disc = session.take_disc().expect("scan populated the disc");
+    let mut drive = match session.into_drive() {
+        Ok(d) => d,
+        Err(e) => {
+            out.raw(Normal, &render_error(&e));
+            return 1;
+        }
+    };
+    // KU §2.5: a raw copy makes no key call at all (FK7); a decrypting copy resolves the
+    // whole disc once, up front, then gates on it (E7026 for Pending forensic keys, §5.4).
+    let scope = crate::rip_keys::copy_scope(raw);
+    let set = if raw {
+        libfreemkv::keys::ResolvedKeySet::none()
+    } else {
+        match disc_rip_keys(&disc, &mut drive, scope.clone(), keys, out) {
+            Some(set) => set,
+            None => return 1,
+        }
+    };
+    if let Err(e) = crate::rip_keys::gate(&disc, raw, Some(&set), &scope) {
         out.raw(Normal, &render_error(&e));
         return 1;
     }
@@ -2341,7 +2350,6 @@ fn disc_to_iso(
     }
     out.blank(Normal);
 
-    drive.lock_tray();
     let start = std::time::Instant::now();
     let last_update = std::cell::Cell::new(start);
     // Speed + ETA come from the ENGINE's one derivation (no local math). The CLI
@@ -2378,7 +2386,7 @@ fn disc_to_iso(
         speed_est: &speed_est,
     };
 
-    let copy_opts = disc_copy_options(None, raw, multipass, &progress);
+    let copy_opts = disc_copy_options((!raw).then_some(&set), raw, multipass, &progress);
     let exit_code = match freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts) {
         Ok(r) if copy_verdict(&r) == CopyVerdict::Interrupted => {
             // Ctrl-C halted the copy. Don't print "Complete" over a partial
@@ -2490,86 +2498,57 @@ fn dir_to_extract(
     keys: &KeyConfig,
     parsed_source: &libfreemkv::StreamUrl,
     force: bool,
+    drive_disc: Option<libfreemkv::Disc>,
     out: &Output,
 ) -> bool {
     let dest_path = match libfreemkv::parse_url(dest) {
         libfreemkv::StreamUrl::Dir { path } => path,
         _ => return false,
     };
-
-    // Open the right reader + scan, resolving keys, then extract. The two
-    // source kinds differ only in how the `SectorSource` + scanned `Disc` are
-    // obtained; the extraction is identical once keys are resolved.
+    // A decrypted folder is the whole disc (KU §2.5 `WholeDisc`): one resolve up front,
+    // then the extract reads every file through that set.
+    let scope = libfreemkv::keys::KeyScope::WholeDisc;
     match parsed_source {
-        libfreemkv::StreamUrl::Disc { device } => {
-            let mut drive = match device {
-                Some(p) => match libfreemkv::Drive::open(p) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        out.raw(Normal, &render_error(&e));
-                        return false;
-                    }
-                },
-                None => match libfreemkv::find_drive() {
-                    Some(d) => d,
-                    None => {
-                        out.raw(Normal, &strings::get("error.no_drive"));
-                        return false;
-                    }
-                },
-            };
-            out.raw(
-                Normal,
-                &strings::fmt("rip.drive", &[("device", drive.device_path())]),
-            );
-            debug_drive_step("wait_ready", drive.wait_ready());
-            debug_drive_step("init", drive.init());
-            let _ = drive.probe_disc();
-
-            let mut disc =
-                match libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keys.keydb_path())) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        out.raw(Normal, &scan_failed_msg(&e));
-                        return false;
-                    }
-                };
-            resolve_disc_keys(&mut disc, &mut drive, keys, out);
-            if let Err(e) = disc.ensure_decryptable(false) {
-                out.raw(Normal, &render_error(&e));
-                return false;
-            }
-            drive.lock_tray();
-            let ok = run_extract(&disc, &mut drive, &dest_path, force, out);
-            drive.unlock_tray();
-            ok
-        }
-        // Iso AND Dir: scan_dir synthesizes a UDF volume over a folder,
-        // returning the same pair. Dir used to fall to the `_` arm marked
-        // "unreachable", which stopped being true once Dir joined is_disc_source().
-        libfreemkv::StreamUrl::Iso { path } | libfreemkv::StreamUrl::Dir { path } => {
-            let scan = if matches!(parsed_source, libfreemkv::StreamUrl::Dir { .. }) {
-                libfreemkv::scan_dir
-            } else {
-                if refuse_staged_image(std::path::Path::new(path), out) {
-                    return false;
-                }
-                libfreemkv::scan_iso
-            };
-            let (mut disc, mut reader) = match scan(std::path::Path::new(path), keyless_scan_opts())
-            {
-                Ok(pair) => pair,
+        libfreemkv::StreamUrl::Disc { .. } => {
+            let (disc, mut reader, device) = match scan_rip_drive(source, keys) {
+                Ok(scan) => scan,
                 Err(e) => {
-                    out.raw(Normal, &scan_failed_msg(&e));
+                    out.raw(Normal, &render_drive_open_error(&e));
                     return false;
                 }
             };
-            resolve_disc_keys(&mut disc, reader.as_mut(), keys, out);
-            if let Err(e) = disc.ensure_decryptable(false) {
+            out.raw(Normal, &strings::fmt("rip.drive", &[("device", &device)]));
+            let Some(set) = disc_rip_keys(&disc, reader.as_mut(), scope.clone(), keys, out) else {
+                return false;
+            };
+            if let Err(e) = crate::rip_keys::gate(&disc, false, Some(&set), &scope) {
                 out.raw(Normal, &render_error(&e));
                 return false;
             }
-            run_extract(&disc, &mut reader, &dest_path, force, out)
+            run_extract(&disc, reader.as_mut(), &dest_path, force, &set, out)
+        }
+        // Iso AND Dir: an image-level source opens through the one image door.
+        libfreemkv::StreamUrl::Iso { path } | libfreemkv::StreamUrl::Dir { path } => {
+            let is_iso = matches!(parsed_source, libfreemkv::StreamUrl::Iso { .. });
+            if is_iso && refuse_staged_image(std::path::Path::new(path), out) {
+                return false;
+            }
+            let Some(opened) = image_rip_keys(source, scope.clone(), drive_disc, keys, out) else {
+                return false;
+            };
+            if let Err(e) = crate::rip_keys::gate(&opened.disc, false, Some(&opened.keys), &scope) {
+                out.raw(Normal, &render_error(&e));
+                return false;
+            }
+            let mut reader = opened.reader;
+            run_extract(
+                &opened.disc,
+                reader.as_mut(),
+                &dest_path,
+                force,
+                &opened.keys,
+                out,
+            )
         }
         _ => {
             // Unreachable: preflight rejects non-disc sources for dir://.
@@ -2601,6 +2580,7 @@ fn run_extract(
     reader: &mut dyn libfreemkv::SectorSource,
     dest_path: &std::path::Path,
     force: bool,
+    set: &libfreemkv::keys::ResolvedKeySet,
     out: &Output,
 ) -> bool {
     out.raw(
@@ -2617,8 +2597,9 @@ fn run_extract(
     // `.partial`. `SigintHalt` joins the watcher on drop, even on unwind.
     let sigint = SigintHalt::install();
 
+    let sink = HaltSink(sigint.halt());
     let outcome =
-        freemkv_engine::extract_tree(disc, reader, dest_path, force, &HaltSink(sigint.halt()));
+        freemkv_engine::extract_tree_with(disc, reader, dest_path, force, Some(set), &sink);
     drop(sigint);
 
     match outcome {
@@ -2851,12 +2832,6 @@ fn print_progress(done: u64, total: u64, start: &std::time::Instant) {
     let _ = std::io::stderr().flush();
 }
 
-fn debug_drive_step(step: &str, result: libfreemkv::Result<()>) {
-    if let Err(e) = result {
-        eprintln!("freemkv: drive {step} (advisory) failed: {e}");
-    }
-}
-
 fn print_completion_summary(out: &Output, done: u64, start: std::time::Instant) {
     if !out.is_quiet() {
         eprint!("\r\x1b[K");
@@ -3023,10 +2998,6 @@ fn resolve_scanned_title<'a>(
     Ok(title)
 }
 
-fn needs_pre_mux_title_key(format: libfreemkv::DiscFormat) -> bool {
-    !matches!(format, libfreemkv::DiscFormat::Dvd)
-}
-
 fn normalize_title_nums(title_nums: &mut Vec<usize>, all_titles: bool) {
     if title_nums.is_empty() && !all_titles {
         title_nums.push(1);
@@ -3171,9 +3142,10 @@ mod staged_image_tests {
             iso.contains("refuse_staged_image(&src, out)"),
             "iso:// -> iso://"
         );
-        let dir = body("\nfn dir_to_extract(", "libfreemkv::scan_iso\n");
+        let dir = body("\nfn dir_to_extract(", "image_rip_keys(");
         assert!(
-            dir.contains("refuse_staged_image(std::path::Path::new(path), out)"),
+            dir.contains("refuse_staged_image(std::path::Path::new(path), out)")
+                && !dir.contains("scan_iso"),
             "dir://"
         );
         let mux = body("    let iso_disc = if is_disc", "    // Pipe each title");
@@ -3188,23 +3160,12 @@ mod staged_image_tests {
 mod tests {
     use super::{
         KeyConfig, PipeFail, build_jobs, build_key_sources_quiet, copy_should_continue,
-        dest_is_directory, disc_copy_recovered_data, disc_copy_scan_opts, disc_title_nums,
-        fmt_disc_damage, fmt_err, fmt_err_str, is_keyserver_url, is_metadata_sink,
-        is_scheme_only_sink, is_url_token, parse_error_code, parse_flags, parse_stream_spec,
-        preflight_validate, render_error, resolved_keydb_path, sanitize_name, scan_failed_msg,
-        title_in_range, validate_dir_input, validate_file_dest, validate_iso_input,
+        dest_is_directory, disc_copy_recovered_data, disc_title_nums, fmt_disc_damage, fmt_err,
+        fmt_err_str, is_keyserver_url, is_metadata_sink, is_scheme_only_sink, is_url_token,
+        parse_error_code, parse_flags, parse_stream_spec, preflight_validate, render_error,
+        resolved_keydb_path, sanitize_name, scan_failed_msg, title_in_range, validate_dir_input,
+        validate_file_dest, validate_iso_input,
     };
-
-    // A raw disc→ISO copy scans on past an unreadable AACS key file; a decrypting one stops.
-    #[test]
-    fn disc_copy_scan_opts_sets_raw_copy_only_for_a_raw_copy() {
-        let keys = KeyConfig {
-            keydb_path: Some("/nonexistent/freemkv-test/keydb.cfg".into()),
-            ..Default::default()
-        };
-        assert!(disc_copy_scan_opts(&keys, true).raw_copy);
-        assert!(!disc_copy_scan_opts(&keys, false).raw_copy);
-    }
 
     #[test]
     fn a_dir_source_must_exist_and_be_a_directory() {
@@ -5844,112 +5805,6 @@ mod verdict_tests {
 }
 
 #[cfg(test)]
-mod disc_gate_tests {
-    use super::needs_pre_mux_title_key;
-    use libfreemkv::DiscFormat;
-
-    #[test]
-    fn every_format_but_dvd_is_key_checked_before_the_mux() {
-        for f in [
-            DiscFormat::BluRay,
-            DiscFormat::Uhd,
-            DiscFormat::Fmts,
-            DiscFormat::HdDvd,
-        ] {
-            assert!(
-                needs_pre_mux_title_key(f),
-                "{f:?} must be key-checked before the mux or it muxes garbage at exit 0"
-            );
-        }
-        assert!(
-            !needs_pre_mux_title_key(DiscFormat::Dvd),
-            "a DVD is cracked inside DiscStream::new — gating here is a second drive read"
-        );
-    }
-}
-
-#[cfg(test)]
-mod iso_key_tests {
-    use super::{KeyConfig, resolve_iso_unit_keys};
-    use crate::output::Output;
-
-    /// A reader that returns zeroes. `resolve_iso_unit_keys` only samples
-    /// ciphertext through it, and with no key source configured no sample is
-    /// consulted at all — the disc's already-resolved keys are what comes back.
-    struct ZeroSource;
-    impl libfreemkv::SectorSource for ZeroSource {
-        fn read_sectors(
-            &mut self,
-            _lba: u32,
-            count: u16,
-            buf: &mut [u8],
-            _recovery: bool,
-        ) -> libfreemkv::Result<usize> {
-            let n = count as usize * 2048;
-            buf[..n].fill(0);
-            Ok(n)
-        }
-    }
-
-    pub(super) fn disc(aacs: Option<libfreemkv::AacsState>, encrypted: bool) -> libfreemkv::Disc {
-        libfreemkv::Disc {
-            volume_id: "TEST".into(),
-            meta_title: None,
-            format: libfreemkv::DiscFormat::BluRay,
-            capacity_sectors: 1,
-            capacity_bytes: 2048,
-            layers: 1,
-            titles: vec![],
-            region: libfreemkv::disc::DiscRegion::Free,
-            aacs,
-            css: None,
-            encrypted,
-            aacs_error: None,
-            css_error: None,
-            content_format: libfreemkv::ContentFormat::BdTs,
-        }
-    }
-
-    pub(super) fn aacs(unit_keys: Vec<(u32, [u8; 16])>) -> libfreemkv::AacsState {
-        libfreemkv::test_util::aacs_state()
-            .unit_keys(unit_keys)
-            .build()
-    }
-
-    #[test]
-    fn aacs_unit_keys_are_forwarded_from_the_scan() {
-        let out = Output::new(false, true);
-        // No keydb and no key URL: nothing is consulted, so what comes out is
-        // exactly what the scan already had.
-        let keys = KeyConfig {
-            keydb_path: None,
-            key_url: None,
-            key_auth: None,
-        };
-
-        let want = vec![(0u32, [0xABu8; 16]), (7u32, [0x5Cu8; 16])];
-        let got = resolve_iso_unit_keys(
-            disc(Some(aacs(want.clone())), true),
-            Box::new(ZeroSource),
-            &keys,
-            &out,
-        );
-        assert_eq!(got, want, "the scan's unit keys did not reach the mux");
-        assert!(
-            !got.iter().all(|(_, k)| *k == [0u8; 16]),
-            "an all-zero key is a placeholder, not a resolved key"
-        );
-
-        // An unencrypted disc contributes NO keys — not a placeholder entry.
-        let clear = resolve_iso_unit_keys(disc(None, false), Box::new(ZeroSource), &keys, &out);
-        assert!(
-            clear.is_empty(),
-            "an unencrypted ISO must yield no keys, got {clear:?}"
-        );
-    }
-}
-
-#[cfg(test)]
 mod build_jobs_edge_tests {
     use super::{build_jobs, disc_title_nums};
     use crate::output::Output;
@@ -6100,7 +5955,7 @@ mod dest_is_source_tests {
     fn the_image_decrypt_path_actually_calls_the_guard() {
         let src = include_str!("pipe.rs").replace("\r\n", "\n");
         let start = src
-            .find("\nfn image_to_iso(source: &str")
+            .find("\nfn image_to_iso(")
             .expect("image_to_iso definition present");
         let end = start
             + src[start..]
@@ -6119,8 +5974,8 @@ mod dest_is_source_tests {
             .find("\nfn write_decrypted_image(")
             .expect("write_decrypted_image definition present")..];
         assert!(
-            copy.contains("whole_disc::whole_disc_reader"),
-            "the image copy must read through the engine's shared whole-disc reader"
+            copy.contains("set.whole_disc_reader("),
+            "the image copy must read through the rip's set's shared whole-disc reader"
         );
     }
 
@@ -7079,9 +6934,8 @@ mod image_copy_tests {
         }
     }
 
-    /// An AACS 1.0 BD declaring `declared` CPS units, holding `pool`; the kept
-    /// title plays file 0.
-    fn disc(fx: &Fixture, declared: u16, pool: &[[u8; 16]]) -> libfreemkv::Disc {
+    /// An AACS 1.0 BD declaring `declared` CPS units; the kept title plays file 0.
+    fn disc(fx: &Fixture, declared: u16) -> libfreemkv::Disc {
         let mut uk_ro = vec![0u8; 96 + 48 * declared as usize];
         uk_ro[..4].copy_from_slice(&48u32.to_be_bytes());
         uk_ro[48..50].copy_from_slice(&declared.to_be_bytes());
@@ -7101,17 +6955,7 @@ mod image_copy_tests {
             layers: 1,
             titles: vec![title],
             region: libfreemkv::disc::DiscRegion::Free,
-            aacs: Some(
-                libfreemkv::test_util::aacs_state()
-                    .unit_keys(
-                        pool.iter()
-                            .enumerate()
-                            .map(|(i, k)| (i as u32 + 1, *k))
-                            .collect(),
-                    )
-                    .uk_ro(uk_ro)
-                    .build(),
-            ),
+            aacs: Some(libfreemkv::test_util::aacs_state().uk_ro(uk_ro).build()),
             css: None,
             encrypted: true,
             aacs_error: None,
@@ -7150,48 +6994,77 @@ mod image_copy_tests {
         }
     }
 
-    fn copy(
+    fn mem(fx: &Fixture, probe_fail: Option<(u32, u32)>) -> Mem {
+        Mem {
+            image: fx.source.clone(),
+            probe_fail,
+        }
+    }
+
+    /// The rip's up-front set over the whole image (KU §2.5), from a keydb holding `pool`
+    /// and an online service holding `online`.
+    fn keys(
         fx: &Fixture,
         d: &libfreemkv::Disc,
         probe_fail: Option<(u32, u32)>,
-        fetch: Option<&libfreemkv::sector::KeyFetch>,
+        pool: &[[u8; 16]],
+        online: &[[u8; 16]],
+    ) -> libfreemkv::error::Result<libfreemkv::keys::ResolvedKeySet> {
+        use crate::ku_fixtures::{Answer, Calls, factory};
+        let f = factory(
+            &[(Answer::Keydb, pool), (Answer::Online, online)],
+            &Calls::default(),
+        );
+        let opts = libfreemkv::keys::ResolveKeysOptions::default();
+        let scope = libfreemkv::keys::KeyScope::WholeDisc;
+        libfreemkv::keys::ResolvedKeySet::resolve(d, &mut mem(fx, probe_fail), scope, &f, opts)
+            .map(|r| r.keys)
+    }
+
+    fn copy(
+        fx: &Fixture,
+        d: &libfreemkv::Disc,
+        set: &libfreemkv::keys::ResolvedKeySet,
+        halt: &libfreemkv::Halt,
     ) -> (std::path::PathBuf, libfreemkv::error::Result<u64>) {
         let dest = fx.dir.join("out.iso");
-        let reader = Box::new(Mem {
-            image: fx.source.clone(),
-            probe_fail,
-        });
-        static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        let r = write_decrypted_image(d, reader, &dest, fetch, &NEVER);
+        let r = write_decrypted_image(d, Box::new(mem(fx, None)), &dest, set, halt);
         (dest, r)
     }
 
-    /// A refusal comes before the destination is created: no partial "decrypted" ISO.
+    /// KU §2.1 invariant 6, "Refuse first": a file no source keys refuses before the
+    /// destination exists (E7032), with no partial "decrypted" ISO.
     #[test]
     fn a_refused_image_copy_creates_no_output() {
         let fx = fixture("refuse", [K0, STRANGER]);
-        let (dest, r) = copy(&fx, &disc(&fx, 2, &[K0, K1]), None, None);
+        let r = keys(&fx, &disc(&fx, 2), None, &[K0, K1], &[]);
         assert!(
             matches!(r, Err(Error::WholeDiscKeyMissing)),
             "{:?}",
             r.err()
         );
-        assert!(!dest.exists(), "refusal must precede creating the ISO");
+        assert!(!fx.dir.join("out.iso").exists());
     }
 
-    /// Wired to the DECLARED CPS count: an unprobeable file is keyed with the one
-    /// held key on a one-unit disc, and stops the copy with E7032 on a two-unit one.
+    /// Wired to the DECLARED CPS count (KS-14): an unprobeable file of a one-unit disc is
+    /// proven on arrival with its one key; on a two-unit disc a file no held key opens
+    /// stops the copy loudly (E7032, KU §2.4), never garbage.
     #[test]
-    fn the_image_copy_keys_an_unprobeable_file_by_the_declared_cps_count() {
+    fn the_image_copy_proves_an_unprobeable_file_on_arrival() {
+        use libfreemkv::spec::keys::KS_14_UNIT_KEY_BLOCK;
+        assert!(KS_14_UNIT_KEY_BLOCK.text.contains("Num_of_CPS_Unit"));
         let fx = fixture("declared", [K0, K0]);
         let (o, n) = fx.files[1];
-        let (dest, r) = copy(&fx, &disc(&fx, 1, &[K0]), Some((o, o + n)), None);
-        r.expect("a declared single-CPS disc keys the file with its one key");
-        assert!(
-            cpi_masked_eq(&fx, &std::fs::read(&dest).unwrap()),
-            "decrypted image (CPI-masked)"
-        );
-        let (_, r) = copy(&fx, &disc(&fx, 2, &[K0]), Some((o, o + n)), None);
+        let d = disc(&fx, 1);
+        let set = keys(&fx, &d, Some((o, o + n)), &[K0], &[]).expect("one declared key");
+        let (dest, r) = copy(&fx, &d, &set, &libfreemkv::Halt::new());
+        r.expect("the one held key opens the file on arrival");
+        assert!(cpi_masked_eq(&fx, &std::fs::read(&dest).unwrap()));
+
+        let fx = fixture("stranger", [K0, STRANGER]);
+        let d = disc(&fx, 2);
+        let set = keys(&fx, &d, Some((o, o + n)), &[K0], &[]).expect("lazy, not missing");
+        let (_, r) = copy(&fx, &d, &set, &libfreemkv::Halt::new());
         assert!(
             matches!(r, Err(Error::WholeDiscKeyMissing)),
             "{:?}",
@@ -7199,62 +7072,29 @@ mod image_copy_tests {
         );
     }
 
-    /// Ctrl-C that already landed ends the copy before the destination exists.
+    /// A Ctrl-C that already landed ends the copy before the destination exists.
     #[test]
-    fn a_stop_before_keying_creates_no_output() {
-        static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    fn a_stop_before_writing_creates_no_output() {
         let fx = fixture("halt", [K0, K1]);
-        let dest = fx.dir.join("out.iso");
-        let reader = Box::new(Mem {
-            image: fx.source.clone(),
-            probe_fail: None,
-        });
-        let r = write_decrypted_image(&disc(&fx, 2, &[K0, K1]), reader, &dest, None, &STOP);
+        let d = disc(&fx, 2);
+        let set = keys(&fx, &d, None, &[K0, K1], &[]).unwrap();
+        let halt = libfreemkv::Halt::new();
+        halt.cancel();
+        let (dest, r) = copy(&fx, &d, &set, &halt);
         assert!(matches!(r, Err(Error::Halted)), "{:?}", r.err());
-        assert!(
-            !dest.exists(),
-            "a stop before keying must precede creating the ISO"
-        );
+        assert!(!dest.exists(), "a stop must precede creating the ISO");
     }
 
-    /// Ctrl-C DURING keying (here, while the key service is asked) is honoured before
-    /// the destination exists, not one written batch later.
-    #[test]
-    fn a_ctrl_c_during_the_key_lookup_creates_no_output() {
-        static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        let fx = fixture("sigint", [K0, K1]);
-        let dest = fx.dir.join("out.iso");
-        let reader = Box::new(Mem {
-            image: fx.source.clone(),
-            probe_fail: None,
-        });
-        let fetch = libfreemkv::sector::KeyFetch::unit_only(std::sync::Arc::new(|_| {
-            STOP.store(true, std::sync::atomic::Ordering::SeqCst);
-            // Let the SIGINT watcher (200 ms poll) see it, as a real lookup would.
-            std::thread::sleep(std::time::Duration::from_millis(600));
-            Ok(vec![K1])
-        }));
-        let d = disc(&fx, 3, &[K0, K2]);
-        let r = write_decrypted_image(&d, reader, &dest, Some(&fetch), &STOP);
-        assert!(matches!(r, Err(Error::Halted)), "{:?}", r.err());
-        assert!(
-            !dest.exists(),
-            "a Ctrl-C while keying must precede creating the ISO"
-        );
-    }
-
-    /// Same key sources as the engine: a key no held one provides is fetched
-    /// before the copy, not refused.
+    /// Same key sources as the engine, asked up front: a key the keydb lacks comes from
+    /// the online service before the copy starts, never mid-copy.
     #[test]
     fn the_image_copy_asks_the_key_source_for_a_missing_key() {
         let fx = fixture("fetch", [K0, K1]);
-        let fetch = libfreemkv::sector::KeyFetch::unit_only(std::sync::Arc::new(|_| Ok(vec![K1])));
-        let (dest, r) = copy(&fx, &disc(&fx, 3, &[K0, K2]), None, Some(&fetch));
+        let d = disc(&fx, 3);
+        let set = keys(&fx, &d, None, &[K0, K2], &[K1]).expect("the online key");
+        let (dest, r) = copy(&fx, &d, &set, &libfreemkv::Halt::new());
         r.unwrap_or_else(|e| panic!("the fetched key must decrypt the file, got {e}"));
-        assert!(
-            cpi_masked_eq(&fx, &std::fs::read(&dest).unwrap()),
-            "decrypted image (CPI-masked)"
-        );
+        assert!(cpi_masked_eq(&fx, &std::fs::read(&dest).unwrap()));
     }
 }
 
@@ -7356,6 +7196,22 @@ mod ku_cli_tests {
         assert_eq!(calls.all()[0].vid, Some(VID));
         assert!(mkv.exists(), "{text}");
         assert_no_secret_on_disk(dir.path(), &[K1, VID]);
+    }
+
+    /// FK7 (KU §2.5: "Raw copy (`--raw`, …) | `None`: no key call"): the disc→ISO copy
+    /// scans with `open_scan(.., raw)` and resolves only on its decrypting arm (a live
+    /// drive is needed to run it, so this reads the wiring; `rip_keys` proves the rest).
+    #[test]
+    fn raw_disc_copy_makes_no_key_request() {
+        let src = include_str!("pipe.rs").replace("\r\n", "\n");
+        let a = src.find("\nfn disc_to_iso(").expect("disc_to_iso");
+        let body = &src[a..a + src[a..].find("\nfn dir_to_extract(").expect("next fn")];
+        assert!(body.contains("open_scan(device_target(source), credentials, raw)"));
+        let keyed = body.find("disc_rip_keys(").expect("the decrypting resolve");
+        assert!(
+            body[..keyed].contains("let set = if raw {"),
+            "resolve only when decrypting"
+        );
     }
 
     /// `--vid-from` names a drive for an `iso://` image only (a folder is always scanned,
