@@ -518,16 +518,18 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
     }
 }
 
-/// T25's no-answer and idle bounds (stop design v5 §2.7): connect 10 s, headers 10 s,
-/// body idle 10 s; no total.
+/// T25's no-answer and idle bounds (stop design v5 §2.7): DNS 10 s (as the keydb fetch's
+/// `DNS_TIMEOUT`), connect 10 s, headers 10 s, body idle 10 s; no total.
 #[derive(Clone, Copy)]
 struct UpdateTimeouts {
+    resolve: std::time::Duration,
     connect: std::time::Duration,
     headers: std::time::Duration,
     idle: std::time::Duration,
 }
 
 const UPDATE_TIMEOUTS: UpdateTimeouts = UpdateTimeouts {
+    resolve: std::time::Duration::from_secs(10),
     connect: std::time::Duration::from_secs(10),
     headers: std::time::Duration::from_secs(10),
     idle: std::time::Duration::from_secs(10),
@@ -543,15 +545,18 @@ pub fn check_for_update(current: &str) -> String {
     check_for_update_at(URL, current, UPDATE_TIMEOUTS)
 }
 
-fn check_for_update_at(url: &str, current: &str, t: UpdateTimeouts) -> String {
+fn update_config(t: UpdateTimeouts) -> ureq::config::Config {
     // Stop design v5 §2.7 (T25): "connect 10 s, headers 10 s, and a body idle of 10 s
     // through freemkv's `IdleReCapConnector`"; the `timeout_global(10 s)` total is gone.
-    let config = ureq::config::Config::builder()
+    ureq::config::Config::builder()
         .timeout_connect(Some(t.connect))
         .timeout_recv_response(Some(t.headers))
         .timeout_recv_body(None)
-        .build();
-    let resp = crate::keydb_fetch::idle_agent(config, t.idle)
+        .build()
+}
+
+fn check_for_update_at(url: &str, current: &str, t: UpdateTimeouts) -> String {
+    let resp = crate::keydb_fetch::idle_agent(update_config(t), t.idle)
         .get(url)
         .header("User-Agent", "freemkv-gui")
         .header("Accept", "application/vnd.github+json")
@@ -1006,10 +1011,20 @@ mod update_check_tests {
 
     fn scaled(idle: Duration) -> UpdateTimeouts {
         UpdateTimeouts {
+            resolve: Duration::from_secs(5),
             connect: Duration::from_secs(5),
             headers: Duration::from_secs(5),
             idle,
         }
+    }
+
+    // T25 is "no answer" bounded at every step before the body; a lookup that never
+    // answers is one, bounded like the keydb fetch's DNS 10 s (T20). Per spec.
+    #[test]
+    fn update_check_bounds_the_dns_lookup() {
+        let t = super::update_config(super::UPDATE_TIMEOUTS).timeouts();
+        assert_eq!(t.resolve, Some(Duration::from_secs(10)));
+        assert_eq!(t.recv_body, None, "no total");
     }
 
     // FT9a (stop design v5 §2.7, T25): "(a) body trickle past 10 s total (scaled) → a
