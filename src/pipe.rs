@@ -275,7 +275,7 @@ fn scan_failed_msg(e: &dyn std::fmt::Display) -> String {
 
 fn fmt_err_str(s: &str) -> String {
     if let Some((code_part, data)) = parse_error_code(s) {
-        let key = format!("error.{code_part}");
+        let key = strings::front_end_error_key(strings::FrontEnd::Cli, code_part);
         // `strings::get` returns the dotted path verbatim on a miss, so a
         // present locale entry is one whose lookup does NOT equal its own key.
         if strings::get(&key) != key {

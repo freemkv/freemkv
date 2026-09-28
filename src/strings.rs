@@ -59,6 +59,37 @@ pub fn is_unsafe_display_char(c: char) -> bool {
             | '\u{FEFF}')
 }
 
+/// Which shell renders an error: each may word the fix its own way (the CLI names its
+/// command, the GUI its Settings action); the shared `error.<code>` text stays neutral,
+/// because the freemkv-library server shows it too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrontEnd {
+    Cli,
+    // The CLI binary builds this module without the GUI (off macOS).
+    #[allow(dead_code)]
+    Gui,
+}
+
+/// The catalog key to render `code` (`"E7013"`) with on `front`: its own `error_cli.` /
+/// `error_gui.` wording when the catalog has one, else the shared `error.` text.
+pub fn front_end_error_key(front: FrontEnd, code: &str) -> String {
+    let name = match front {
+        FrontEnd::Cli => "cli",
+        FrontEnd::Gui => "gui",
+    };
+    front_end_error_key_in(name, code, get)
+}
+
+fn front_end_error_key_in(front: &str, code: &str, lookup: impl Fn(&str) -> String) -> String {
+    let own = format!("error_{front}.{code}");
+    // A catalog miss returns the dotted path itself.
+    if lookup(&own) != own {
+        own
+    } else {
+        format!("error.{code}")
+    }
+}
+
 #[cfg(test)]
 mod front_end_error_tests {
     use super::*;
@@ -71,9 +102,18 @@ mod front_end_error_tests {
             "error_cli.E7013" => "refresh it with: freemkv update-keys".to_string(),
             k => k.to_string(),
         };
-        assert_eq!(front_end_error_key_in("cli", "E7013", catalog), "error_cli.E7013");
-        assert_eq!(front_end_error_key_in("gui", "E7013", catalog), "error.E7013");
-        assert_eq!(front_end_error_key_in("cli", "E7022", catalog), "error.E7022");
+        assert_eq!(
+            front_end_error_key_in("cli", "E7013", catalog),
+            "error_cli.E7013"
+        );
+        assert_eq!(
+            front_end_error_key_in("gui", "E7013", catalog),
+            "error.E7013"
+        );
+        assert_eq!(
+            front_end_error_key_in("cli", "E7022", catalog),
+            "error.E7022"
+        );
     }
 
     /// The keydb-fixing codes name a step on every front end: the CLI its command
