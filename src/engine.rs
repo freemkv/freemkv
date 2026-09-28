@@ -337,10 +337,68 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
     // A FOLDER is an image-level source too — `scan_dir` synthesizes a UDF
     // volume over an extracted disc tree, returning the same (Disc, reader)
     // pair `scan_iso` does (needed for "Open Folder" / drag-and-drop).
-    let opened = fe::open_image(&fe::ImageSource::from_path(path), &key_params(keys))
-        .map_err(|e| format!("E{} scan failed", e.code()))?;
-    let summary = key_summary(&opened.disc, opened.won.as_deref());
-    Ok(scanned_from_disc(&opened.disc, summary))
+    let (disc, summary) = match open_image_keyed(path, keys, None) {
+        Ok(opened) => {
+            let summary = image_key_summary(&opened.disc, &opened.keys, opened.won.as_deref());
+            (opened.disc, summary)
+        }
+        // KU-E1: a keyless image refuses the keyed open; it still lists its titles.
+        Err(e) if is_key_refusal(&e) => {
+            let (disc, _) = fe::scan_image(&fe::ImageSource::from_path(path))
+                .map_err(|e| format!("E{} scan failed", e.code()))?;
+            (disc, format!("locked — no key yet (E{})", e.code()))
+        }
+        Err(e) => return Err(format!("E{} scan failed", e.code())),
+    };
+    Ok(scanned_from_disc(&disc, summary))
+}
+
+// KU-E1: the key set each image was last opened with, in memory only (J6), so the preflight
+// and the run after an Open seed from it instead of asking the key sources again.
+static IMAGE_KEYS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<std::path::PathBuf, libfreemkv::keys::ResolvedKeySet>>,
+> = std::sync::LazyLock::new(Default::default);
+
+// Open the image at `path` keyed for `scope` (`None` = its main title): seeded from its last
+// open's set, which asks no key source when it covers `scope`, else resolved here, once.
+fn open_image_keyed(
+    path: &str,
+    keys: &KeyConfig,
+    scope: Option<libfreemkv::keys::KeyScope>,
+) -> Result<fe::OpenedImage, libfreemkv::Error> {
+    let src = fe::ImageSource::from_path(path);
+    let factory = fe::key_source_factory(&key_params(keys));
+    let cache = || IMAGE_KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    let input = match cache().get(src.path()).cloned() {
+        Some(set) => fe::KeyInput::Seeded(factory, set),
+        None => fe::KeyInput::Resolve(factory),
+    };
+    let opts = fe::OpenImageOptions {
+        keys: input,
+        disc: None,
+        scope,
+        vid: None,
+        halt: None,
+    };
+    let opened = fe::open_image_with(&src, opts)?;
+    cache().insert(src.path().to_path_buf(), opened.keys.clone());
+    Ok(opened)
+}
+
+// An image open's up-front key refusal (KU §3.2): no key (E7022/E7032), FMTS forensic keys
+// (E7026), a key source failed (E7028–30), or only the disc's Volume ID can finish (E7034).
+fn is_key_refusal(e: &libfreemkv::Error) -> bool {
+    use libfreemkv::error as c;
+    [
+        c::E_NO_DISC_KEY,
+        c::E_WHOLE_DISC_KEY_MISSING,
+        c::E_FMTS_KEY_MISSING,
+        c::E_KEY_SERVICE_UNAVAILABLE,
+        c::E_KEY_SERVICE_UNAUTHORIZED,
+        c::E_KEY_SERVICE_RATE_LIMITED,
+        c::E_AACS_VID_NEEDS_DISC,
+    ]
+    .contains(&e.code())
 }
 
 /// The `freemkv info -v` detail block for a scanned disc/ISO — the same facts
@@ -647,12 +705,18 @@ pub fn preflight_with_keys(
     titles: &[usize],
     keys: &KeyConfig,
 ) -> Result<Vec<String>, String> {
-    // Folder OR image — the third place this dispatch was needed. A preflight
-    // that cannot open a folder reports a spurious failure for a source the
-    // rip itself handles.
-    let disc = fe::open_image(&fe::ImageSource::from_path(path), &key_params(keys))
-        .map_err(|e| format!("E{}", e.code()))?
-        .disc;
+    // Folder or image, keyed for the selection (seeded from the Open's set, so usually no
+    // key call); an out-of-range pick opens for the main title and preflight names it.
+    let scope = (!titles.is_empty()).then(|| libfreemkv::keys::KeyScope::Titles(titles.to_vec()));
+    let opened = match open_image_keyed(path, keys, scope) {
+        Err(libfreemkv::Error::DiscTitleRange { .. }) => open_image_keyed(path, keys, None),
+        r => r,
+    };
+    let opened = match opened {
+        Ok(opened) => opened,
+        Err(e) if is_key_refusal(&e) => return Ok(vec!["encrypted-no-key".to_string()]),
+        Err(e) => return Err(format!("E{}", e.code())),
+    };
     let sel = if titles.is_empty() {
         fe::Selection::MainMovie
     } else {
@@ -661,11 +725,12 @@ pub fn preflight_with_keys(
     // Folder OR image — the scan above already dispatches on it, and a
     // preflight run against `iso://<folder>` answers about a source that does
     // not exist in that form.
-    let job =
-        fe::Job::new(format!("{}://{path}", image_or_dir_scheme(path)), dest).with_selection(sel);
-    // No decrypt gate of our own: the engine's `preflight` delegates that to
-    // `resolve_keys`, so a second check here could only drift from it.
-    match fe::preflight(&disc, &job) {
+    let job = fe::Job::new(format!("{}://{path}", image_or_dir_scheme(path)), dest)
+        .with_selection(sel)
+        .with_keys(opened.keys.clone());
+    // No decrypt gate of our own: the engine's `preflight` judges the rip's key set,
+    // so a second check here could only drift from it.
+    match fe::preflight(&opened.disc, &job) {
         fe::Preflight::Ready => Ok(vec![]),
         fe::Preflight::Blocked(rs) => Ok(rs.iter().map(|r| r.key.to_string()).collect()),
     }
@@ -817,6 +882,26 @@ pub(crate) fn key_summary(disc: &libfreemkv::Disc, won: Option<&str>) -> String 
         (true, Some(w)) => format!("unlocked via {w}"),
         (true, None) => "unlocked".into(),
         (false, _) => "locked — no key yet".into(),
+    }
+}
+
+// `key_summary` for an image opened with the rip's key set (KU-E1): the set, not the disc's
+// banked keys (an image open banks none), says whether it is unlocked.
+pub(crate) fn image_key_summary(
+    disc: &libfreemkv::Disc,
+    keys: &libfreemkv::keys::ResolvedKeySet,
+    won: Option<&str>,
+) -> String {
+    if !disc.encrypted {
+        return "unencrypted".into();
+    }
+    if disc.css.is_some() {
+        return "CSS (DVD)".into();
+    }
+    match (fe::keys::key_status(disc, keys), won) {
+        (libfreemkv::keys::DecryptStatus::Ready, Some(w)) => format!("unlocked via {w}"),
+        (libfreemkv::keys::DecryptStatus::Ready, None) => "unlocked".into(),
+        _ => "locked — no key yet".into(),
     }
 }
 
@@ -1327,7 +1412,7 @@ pub fn folder_writable(dest: &std::path::Path, force: bool) -> Result<(), String
 // subdir (never the raw dest_dir) stops it dumping into ~/Movies.
 fn run_extract_folder(
     req: &RipRequest,
-    disc: &libfreemkv::Disc,
+    (disc, keys): (&libfreemkv::Disc, Option<&libfreemkv::keys::ResolvedKeySet>),
     reader: &mut dyn libfreemkv::SectorSource,
     label: &str,
     sink: &UiSink,
@@ -1345,7 +1430,11 @@ fn run_extract_folder(
             "extracting decrypted file tree → {}",
             dest.display()
         ));
-    match fe::extract_tree(disc, reader, &dest, req.force, sink) {
+    let extracted = match keys {
+        Some(set) => extract_tree_keyed(disc, reader, &dest, req.force, set, &state.cancel),
+        None => fe::extract_tree(disc, reader, &dest, req.force, sink),
+    };
+    match extracted {
         Ok(res) => {
             for f in &res.files {
                 if f.bytes_unreadable > 0 {
@@ -1364,6 +1453,49 @@ fn run_extract_folder(
         }
         Err(e) => Err(format!("Extraction failed: E{}", e.code())),
     }
+}
+
+// `fe::extract_tree` with the rip's key set: KU-E1's engine does not pass one yet, and an
+// image's disc carries no banked key. `cancel` stops it at the next file/batch boundary.
+fn extract_tree_keyed(
+    disc: &libfreemkv::Disc,
+    reader: &mut dyn libfreemkv::SectorSource,
+    dest: &std::path::Path,
+    force: bool,
+    keys: &libfreemkv::keys::ResolvedKeySet,
+    cancel: &AtomicBool,
+) -> Result<libfreemkv::ExtractResult, libfreemkv::Error> {
+    // Ends the watcher on every exit, a panic included, so the scope can join it.
+    struct Done<'a>(&'a AtomicBool);
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    let halt = libfreemkv::Halt::new();
+    let done = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            while !done.load(Ordering::Relaxed) {
+                if cancel.load(Ordering::Relaxed) {
+                    halt.cancel();
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+        if cancel.load(Ordering::Relaxed) {
+            halt.cancel();
+        }
+        let _done = Done(&done);
+        let opts = libfreemkv::ExtractOptions {
+            force,
+            progress: None,
+            halt: Some(halt.clone()),
+            keys: Some(keys),
+        };
+        disc.extract_tree(reader, dest, &opts)
+    })
 }
 
 fn is_stream_source(path: &str) -> bool {
@@ -1901,13 +2033,19 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     // BEFORE muxing; the mid-mux key fetch comes from the same chain.
     let src_path = std::path::Path::new(&req.source);
     whole_image_gate(&req.format, src_path)?;
-    let mut opened = fe::open_image(
-        &fe::ImageSource::from_path(&req.source),
-        &key_params(&req.keys),
-    )
-    .map_err(|e| format!("E{} scan failed", e.code()))?;
-
     let kind = out_kind(&req.format);
+    // KU-E1: the keys this run decrypts, resolved once up front (seeded from the Open's
+    // set): every stream file for a decrypted image or folder, none for a raw copy.
+    let scope = match kind {
+        OutKind::IsoImage if req.raw => Some(libfreemkv::keys::KeyScope::None),
+        OutKind::IsoImage | OutKind::DecryptedFolder => Some(libfreemkv::keys::KeyScope::WholeDisc),
+        _ => {
+            (!req.titles.is_empty()).then(|| libfreemkv::keys::KeyScope::Titles(req.titles.clone()))
+        }
+    };
+    let mut opened = open_image_keyed(&req.source, &req.keys, scope)
+        .map_err(|e| format!("E{} scan failed", e.code()))?;
+
     let label = if opened.disc.volume_id.is_empty() {
         "disc".to_string()
     } else {
@@ -1921,7 +2059,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
             return run_extract_folder(
                 req,
-                &opened.disc,
+                (&opened.disc, Some(&opened.keys)),
                 opened.reader.as_mut(),
                 &label,
                 sink,
@@ -1960,6 +2098,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             );
             job.raw = req.raw;
             job.mode = fe::RipMode::Single;
+            job.keys = Some(opened.keys.clone());
             let result =
                 fe::recover_to_iso(&opened.disc, opened.reader.as_mut(), &dest, &job, sink)
                     .map_err(|e| format!("image decrypt failed: {e}"))?;
@@ -2327,7 +2466,7 @@ fn run_disc_scanning(
             .take_reader()
             .ok_or("could not stage the drive for extraction")?;
         let disc = session.disc().ok_or("scan produced no disc")?;
-        let result = run_extract_folder(req, disc, reader.as_mut(), &label, sink, state);
+        let result = run_extract_folder(req, (disc, None), reader.as_mut(), &label, sink, state);
         drop(reader);
         drop(session);
         if req.auto_eject {
@@ -3577,7 +3716,10 @@ mod routing_tests {
         );
 
         // 0. An image source for an ISO/folder output is checked before the scan.
-        let blocking = slice("\nfn run_blocking(", "    let mut opened = fe::open_image(");
+        let blocking = slice(
+            "\nfn run_blocking(",
+            "    let mut opened = open_image_keyed(",
+        );
         assert!(blocking.contains("whole_image_gate(&req.format, src_path)?;"));
         let titles = slice(
             "\nfn run_blocking(",
@@ -5364,5 +5506,70 @@ mod pure_helper_tests {
         assert_eq!(purpose_label(LabelPurpose::Score), Some("Score"));
         assert_eq!(purpose_label(LabelPurpose::Ime), Some("IME"));
         assert_eq!(purpose_label(LabelPurpose::Normal), None);
+    }
+}
+
+// KU-E1: an image opens once with its keys; the preflight and run after the Open seed from
+// that set, in memory, instead of resolving again.
+#[cfg(test)]
+mod ku_e1_image_key_tests {
+    use super::{KeyConfig, preflight_with_keys, scan_with_keys};
+    use crate::ku_fixture::{K1, bd_image};
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    // The Open resolves the image's key from the keydb and keeps the set; the preflight
+    // then passes on that set alone (the keydb is gone by then), where it used to report
+    // encrypted-no-key because nothing was banked on the disc.
+    #[test]
+    fn the_preflight_after_an_open_is_keyed_by_its_set() {
+        let fx = bd_image();
+        let dir = tempfile::tempdir().unwrap();
+        let iso = fx.write(dir.path(), "ku.iso");
+        let iso = iso.to_str().unwrap();
+        let hash = fx.disc.aacs.as_ref().unwrap().disc_hash.clone();
+        let hash = libfreemkv::hex::strip_hex_prefix(&hash).to_string();
+        let keydb = dir.path().join("keydb.cfg");
+        std::fs::write(&keydb, format!("0x{hash} = KU | U | 1-0x{}\n", hex(&K1))).unwrap();
+        let keys = KeyConfig {
+            keydb_path: keydb.to_string_lossy().into_owned(),
+            local_only: true,
+            ..KeyConfig::default()
+        };
+        let scanned = scan_with_keys(iso, &keys).expect("the open scans");
+        assert!(
+            scanned.key_summary.starts_with("unlocked"),
+            "{}",
+            scanned.key_summary
+        );
+        std::fs::remove_file(&keydb).unwrap();
+        let blocked = preflight_with_keys(iso, "/tmp", &[], &keys).expect("preflight ran");
+        assert!(blocked.is_empty(), "keyed by the Open's set: {blocked:?}");
+    }
+
+    // A keyless image refuses the keyed open but still lists its titles, locked, and the
+    // preflight names the missing key.
+    #[test]
+    fn a_keyless_image_still_scans_and_preflight_names_the_key() {
+        let fx = bd_image();
+        let dir = tempfile::tempdir().unwrap();
+        let iso = fx.write(dir.path(), "keyless.iso");
+        let iso = iso.to_str().unwrap();
+        let keys = KeyConfig {
+            keydb_path: dir.path().join("none.cfg").to_string_lossy().into_owned(),
+            local_only: true,
+            ..KeyConfig::default()
+        };
+        let scanned = scan_with_keys(iso, &keys).expect("a keyless image still scans");
+        assert_eq!(scanned.title_count, 1);
+        assert!(
+            scanned.key_summary.starts_with("locked"),
+            "{}",
+            scanned.key_summary
+        );
+        let blocked = preflight_with_keys(iso, "/tmp", &[], &keys).expect("preflight ran");
+        assert_eq!(blocked, vec!["encrypted-no-key".to_string()]);
     }
 }

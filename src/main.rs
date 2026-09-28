@@ -43,6 +43,9 @@ mod title_identity;
 // the lib (`freemkv::win_app`) instead, reused by the windowed image.
 #[cfg(all(feature = "gui", target_os = "macos"))]
 mod engine;
+// The KU fixture `engine`'s tests use.
+#[cfg(all(test, feature = "gui", target_os = "macos"))]
+mod ku_fixture;
 #[cfg(all(feature = "gui", target_os = "macos"))]
 mod mac;
 #[cfg(all(feature = "gui", target_os = "macos"))]
