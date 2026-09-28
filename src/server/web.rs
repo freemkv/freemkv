@@ -5968,7 +5968,11 @@ fn key_status(c: &Config) -> serde_json::Value {
         "keydb_bytes": meta.as_ref().map(|m| m.len()),
         "keydb_modified": modified,
         "keydb_url_set": !c.keydb_url.trim().is_empty(),
-        "keyserver_set": crate::server::keysource::uses_online(c),
+        "keyserver_set": !c.keyserver_url.trim().is_empty(),
+        "keyserver_host": crate::server::web::mask_webhook_url(c.keyserver_url.trim())
+            .trim_end_matches(crate::server::settings_schema::SECRET_SENTINEL)
+            .trim_end_matches('/')
+            .to_string(),
         "key_source": c.key_source,
         "tmdb_set": !c.tmdb_api_key.is_empty(),
     })

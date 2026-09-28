@@ -292,7 +292,7 @@ pub static FIELDS: &[Field] = &[
     field("library_iso_subfolders", "Include ISO sub-folders", G::Library, Kind::Bool, B(false),
         "Also list ISOs one folder down (dvd/, hddvd/, bd/). Off = top-level ISOs only."),
     field("key_source", "Key source", G::Keys, Kind::Choice(KEY_SOURCE), S("local"),
-        "Keys come from the local KEYDB first, then the keyserver when one is set."),
+        "Where keys come from: only the source picked here. Local KEYDB reads the KEYDB.cfg file; Online keyserver asks the online key service and nothing else."),
     field("keydb_path", "KEYDB.cfg location", G::Keys, Kind::KeydbPath, Def::Unset,
         "Blank = keydb.cfg in the config folder.").placeholder("/config/keydb.cfg").show_if("key_source", "local"),
     field("keydb_resolved", "KEYDB in use", G::Keys, Kind::Info, Def::None,

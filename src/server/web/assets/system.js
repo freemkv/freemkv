@@ -44,11 +44,20 @@ export default {
       put($('#about', view), '<dt>freemkv</dt><dd class="mono">' + esc(d.version_label) + '</dd>'
         + '<dt>Rip library</dt><dd class="mono">' + esc(d.libfreemkv) + '</dd>'
         + '<dt>Debug logging</dt><dd>' + (d.debug_enabled ? 'on' : 'off') + '</dd>');
+      // Keys come only from the source picked in Settings; the other one is idle.
       const k = d.keys || {};
-      put($('#keys', view), '<dt>KEYDB</dt><dd>' + (k.keydb_present ? '<span class="dot dot-ok"></span> ' + bytes(k.keydb_bytes) + ', updated ' + esc(ago(k.keydb_modified)) : '<span class="dot dot-bad"></span> <span style="color:var(--bad)">not found</span>') + '<br><span class="mono small muted">' + esc(k.keydb_path) + '</span></dd>'
-        + '<dt>KEYDB updates</dt><dd>' + (k.keydb_url_set ? 'from the configured URL, daily' : '<span class="muted">no update URL set</span>') + '</dd>'
-        + '<dt>Keyserver</dt><dd>' + (k.keyserver_set ? 'set, asked after the KEYDB' : '<span class="muted">not set</span>') + '</dd>'
+      const online = k.key_source === 'online';
+      const notUsed = '<span class="muted">not used (keys come from the ' + (online ? 'online key service' : 'KEYDB') + ')</span>';
+      const keydb = (k.keydb_present ? '<span class="dot dot-ok"></span> ' + bytes(k.keydb_bytes) + ', updated ' + esc(ago(k.keydb_modified)) : '<span class="dot dot-bad"></span> <span style="color:var(--bad)">not found</span>')
+        + '<br><span class="mono small muted">' + esc(k.keydb_path) + '</span>';
+      const service = k.keyserver_set ? '<span class="dot dot-ok"></span> ' + esc(k.keyserver_host || 'set') : '<span class="dot dot-bad"></span> <span style="color:var(--bad)">no URL set</span>';
+      put($('#keys', view), '<dt>Keys from</dt><dd><b>' + (online ? 'Online key service' : 'KEYDB') + '</b>' + (online ? '' : ' <span class="mono small muted">(' + esc(k.keydb_path) + ')</span>') + '</dd>'
+        + '<dt>KEYDB</dt><dd>' + (online ? notUsed : keydb) + '</dd>'
+        + '<dt>KEYDB updates</dt><dd>' + (online ? notUsed : k.keydb_url_set ? 'from the configured URL, daily' : '<span class="muted">no update URL set</span>') + '</dd>'
+        + '<dt>Key service</dt><dd>' + (online ? service : notUsed) + '</dd>'
         + '<dt>TMDB</dt><dd>' + (k.tmdb_set ? 'API key set' : '<span class="muted">no API key: titles come from the disc label</span>') + '</dd>');
+      $('#kst', view).hidden = !online;
+      $('#kdb', view).hidden = online;
       $('#kst', view).disabled = !k.keyserver_set;
       $('#kdb', view).disabled = !k.keydb_url_set;
       put($('#mounts', view), (d.mounts || []).map(mountRow).join('') || '<tr><td colspan="4" class="muted">Checking the folders…</td></tr>');
