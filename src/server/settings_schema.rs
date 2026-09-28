@@ -300,7 +300,7 @@ pub static FIELDS: &[Field] = &[
     field("output_format", "What to make", G::Ripping, Kind::Choice(OUTPUT_FORMAT), S("mkv"),
         "What each rip produces. The server rips the main movie; for extras or other titles, use the freemkv app or command line."),
     field("network_target", "Network address", G::Ripping, Kind::Target, S(""),
-        "The other machine's address and port, for example nas.local:9000.")
+        "The other machine's address and port, for example nas.example.com:9000.")
         .placeholder("nas.example.com:9000").show_if("output_format", "network"),
     field("main_feature", "Main movie only", G::Hidden, Kind::Bool, B(true),
         "Rip only the movie itself, not the extras.").hide_if("output_format", "iso"),
