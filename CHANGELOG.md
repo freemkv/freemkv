@@ -5,6 +5,7 @@
 ### Changed
 
 - A disc whose AACS key file (`Unit_Key_RO.inf`) cannot be read now stops `freemkv info` and decrypting rips with error E7031; a `--raw` disc→ISO copy still runs.
+- A decrypted disc→ISO or image→ISO copy of a multi-key AACS disc whose unplayed stream file no held key opens now stops before the copy with E7032, which says to rip the titles to MKV or make a raw copy. Each such file is probed at its first unit and up to 32 units across it. If no probe is readable (damage), the copy stops at the file's first encrypted unit with the same E7032. The GUI, CLI and image paths all behave the same way.
 - **Separate app and CLI builds on every OS.** Both install the `freemkv` command; install one or the other. The **app** opens its window when run with no arguments and runs the CLI for any command. The **CLI** has no UI libraries (static on Linux) and prints usage when run with no arguments. `freemkv gui` still opens the window in the app. See [INSTALL.md](INSTALL.md).
 - CLI binaries are renamed `freemkv-cli-<arch>-<os>` (e.g. `freemkv-cli-x86_64-linux`, `freemkv-cli-x86_64-windows.exe`). The old names are still published for this release only; update download scripts.
 - Windows app: new per-user installer `freemkv-x86_64-windows-setup.exe` (Start menu entry, adds itself to `PATH`). The portable `.zip` now holds `freemkv.exe` (the window) and `freemkv.com` (so `freemkv` typed in a terminal prints to it).

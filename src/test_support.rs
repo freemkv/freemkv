@@ -113,6 +113,7 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::AacsNoHostCert { path: p() },
         Error::AacsKeyFileUnreadable,
         Error::AacsNoUsableHostCert,
+        Error::WholeDiscKeyMissing,
         Error::AacsBusKeyUnavailable,
         Error::FmtsKeyMissing,
         Error::KeydbConnect { host: p() },
