@@ -4438,6 +4438,7 @@ mod tests {
             details: vec![],
             keys: None,
             needs_disc: false,
+            refusal: None,
         }
     }
 

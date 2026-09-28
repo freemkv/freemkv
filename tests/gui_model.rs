@@ -67,6 +67,7 @@ fn video_only_disc() -> Scanned {
         details: vec![],
         keys: None,
         needs_disc: false,
+        refusal: None,
     }
 }
 
@@ -87,6 +88,7 @@ fn disc(titles: &[(f64, usize)]) -> Scanned {
         details: vec![],
         keys: None,
         needs_disc: false,
+        refusal: None,
     }
 }
 
@@ -126,6 +128,7 @@ fn mp2_extension_disc() -> Scanned {
         details: vec![],
         keys: None,
         needs_disc: false,
+        refusal: None,
     }
 }
 
@@ -1722,6 +1725,7 @@ fn tagged_disc(streams: &[(&str, &str, bool)]) -> Scanned {
         details: vec![],
         keys: None,
         needs_disc: false,
+        refusal: None,
     }
 }
 

@@ -79,6 +79,37 @@ pub struct Scanned {
     pub keys: Option<libfreemkv::keys::ResolvedKeySet>,
     /// Open refused E7034: only the disc's Volume ID can finish the key (KU §4.2).
     pub needs_disc: bool,
+    /// Open's answered refusal (not E7034): Start shows it again rather than asking again.
+    pub refusal: Option<KeyRefusal>,
+}
+
+/// A key refusal Open got from the sources, kept so Start does not ask them twice (KU §2.1
+/// invariant 4): re-asked only after a key-settings change or keydb update, for titles
+/// Open did not resolve, or when Open's failure was transport-class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRefusal {
+    pub code: u16,
+    /// What the log said at Open, said again at Start.
+    pub text: String,
+    /// The titles Open resolved (its scope).
+    pub titles: Vec<usize>,
+    /// E7028, the key service unreachable (J13 transport class): asking again may succeed.
+    pub transport: bool,
+}
+
+/// The key settings and the keydb file's state at one moment: a refusal given under one
+/// snapshot is not re-asked under the same one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeySnapshot(KeyConfig, Option<(std::time::SystemTime, u64)>);
+
+impl KeySnapshot {
+    pub fn of(keys: &KeyConfig) -> Self {
+        let keydb = key_params(keys)
+            .keydb_path
+            .and_then(|p| std::fs::metadata(p).ok());
+        let stamp = keydb.and_then(|m| Some((m.modified().ok()?, m.len())));
+        KeySnapshot(keys.clone(), stamp)
+    }
 }
 
 fn fmt_dur(secs: f64) -> String {
@@ -315,6 +346,7 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
         details,
         keys: None,
         needs_disc: false,
+        refusal: None,
     })
 }
 
@@ -335,14 +367,19 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
     let (disc, _reader) = fe::scan_image(&src).map_err(|e| format!("E{} scan failed", e.code()))?;
     let main = fe::resolve_selection(&disc, &fe::Selection::MainMovie);
     let o = crate::rip_keys::ImageOpen {
-        scope: libfreemkv::keys::KeyScope::Titles(main),
+        scope: libfreemkv::keys::KeyScope::Titles(main.clone()),
         seed: None,
         drive_disc: None,
         halt: None,
     };
     let (opened, trace) =
         crate::rip_keys::open_image(&src, crate::rip_keys::sources(&key_params(keys)), o);
-    Ok(scanned_with_keys(&disc, opened.map(|o| o.keys), &trace))
+    Ok(scanned_with_keys(
+        &disc,
+        opened.map(|o| o.keys),
+        &trace,
+        main,
+    ))
 }
 
 /// A scan's display rows, plus its key set or refusal and the walk behind it.
@@ -350,6 +387,7 @@ fn scanned_with_keys(
     disc: &libfreemkv::Disc,
     keys: libfreemkv::Result<libfreemkv::keys::ResolvedKeySet>,
     trace: &crate::rip_keys::Trace,
+    titles: Vec<usize>,
 ) -> Scanned {
     let set = keys.as_ref().ok();
     let mut sc = scanned_from_disc(disc, key_summary(disc, set));
@@ -360,9 +398,16 @@ fn scanned_with_keys(
     match keys {
         Ok(set) => sc.keys = Some(set),
         Err(e) => {
+            let code = e.code();
+            let text = format!("E{code} {}", explain(code));
+            sc.details.push(text.clone());
             sc.needs_disc = crate::rip_keys::needs_disc(&e);
-            sc.details
-                .push(format!("E{} {}", e.code(), explain(e.code())));
+            sc.refusal = (!sc.needs_disc).then_some(KeyRefusal {
+                code,
+                text,
+                titles,
+                transport: code == libfreemkv::error::E_KEY_SERVICE_UNAVAILABLE,
+            });
         }
     }
     sc
@@ -507,6 +552,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
         details,
         keys: None,
         needs_disc: false,
+        refusal: None,
     }
 }
 
@@ -628,7 +674,7 @@ fn key_factory(keys: &KeyConfig) -> libfreemkv::KeySourceFactory {
 pub fn scan_disc_with_keys(source: &str, keys: &KeyConfig) -> Result<Scanned, String> {
     let (disc, mut reader) = drive_scan(source, keys, false)?;
     let main = fe::resolve_selection(&disc, &fe::Selection::MainMovie);
-    let scope = libfreemkv::keys::KeyScope::Titles(main);
+    let scope = libfreemkv::keys::KeyScope::Titles(main.clone());
     let (set, trace) = crate::rip_keys::resolve(
         &disc,
         reader.as_mut(),
@@ -637,7 +683,7 @@ pub fn scan_disc_with_keys(source: &str, keys: &KeyConfig) -> Result<Scanned, St
         None,
         None,
     );
-    Ok(scanned_with_keys(&disc, set, &trace))
+    Ok(scanned_with_keys(&disc, set, &trace, main))
 }
 
 /// Open and scan the drive behind `source` with NO key call (`fe::open_scan`): the disc
@@ -1172,7 +1218,7 @@ pub fn summarize_extract(res: &libfreemkv::ExtractResult, dest: &std::path::Path
 pub type KeySet = libfreemkv::keys::ResolvedKeySet;
 
 /// Key configuration taken from the user's settings.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct KeyConfig {
     pub keydb_path: String,
     pub keyserver_url: String,
@@ -4408,6 +4454,7 @@ mod routing_tests {
             details: vec![],
             keys: None,
             needs_disc: false,
+            refusal: None,
         }
     }
 

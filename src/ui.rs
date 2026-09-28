@@ -1769,6 +1769,8 @@ pub struct App {
     seed: Option<crate::engine::KeySet>,
     /// Open or the last run refused E7034: the next Start is the insert-the-disc Retry.
     vid_retry: bool,
+    /// Open's answered key refusal, under the key settings it was given for (B2).
+    open_refusal: Option<(crate::engine::KeyRefusal, crate::engine::KeySnapshot)>,
     /// The launch probe's in-flight scan, if one is running.
     ///
     /// Its OWN slot, deliberately not `run`. `run` means "a rip is in
@@ -1869,6 +1871,7 @@ impl App {
             disc_label: String::new(),
             seed: None,
             vid_retry: false,
+            open_refusal: None,
             probe: None,
             opening: None,
             pending: None,
@@ -2211,6 +2214,7 @@ impl App {
         // The key set lives in memory for this source only (KU §2.1 invariant 5).
         self.seed = None;
         self.vid_retry = false;
+        self.open_refusal = None;
         self.page = Page::Empty;
     }
 
@@ -2386,6 +2390,9 @@ impl App {
                 // (KU §4.2), so Start scans a drive instead of asking again without the VID.
                 self.seed = sc.keys.clone();
                 self.vid_retry = sc.needs_disc;
+                let keys =
+                    crate::engine::KeySnapshot::of(&KeyConfig::from_settings(&self.settings));
+                self.open_refusal = sc.refusal.clone().map(|r| (r, keys));
                 if sc.needs_disc {
                     self.say(LogKind::Notice, &crate::engine::insert_disc_retry());
                 }
@@ -2444,6 +2451,15 @@ impl App {
         vec![Effect::Redraw]
     }
 
+    // Open's answered refusal, when asking again could only repeat it (KU §2.1 invariant 4):
+    // the same key settings and keydb, titles within Open's scope, not transport-class.
+    fn refused_again(&self, titles: &[usize]) -> Option<String> {
+        let (refusal, keys) = self.open_refusal.as_ref()?;
+        let now = crate::engine::KeySnapshot::of(&KeyConfig::from_settings(&self.settings));
+        let within = titles.iter().all(|t| refusal.titles.contains(t));
+        (!refusal.transport && *keys == now && within).then(|| refusal.text.clone())
+    }
+
     fn start_run(&mut self) -> Vec<Effect> {
         if self.source.is_empty() {
             self.say(
@@ -2468,6 +2484,10 @@ impl App {
                 LogKind::Notice,
                 &crate::strings::get("gui.log.select_title_first"),
             );
+            return vec![Effect::Redraw];
+        }
+        if let Some(text) = self.refused_again(&titles) {
+            self.say(LogKind::Notice, &text);
             return vec![Effect::Redraw];
         }
         let (audio_pids, sub_pids, explicit_streams) = self.tree.ticked_streams();
@@ -3829,6 +3849,7 @@ mod tests {
             details: Vec::new(),
             keys: None,
             needs_disc: false,
+            refusal: None,
         }
     }
 
@@ -3864,6 +3885,8 @@ mod tests {
             let mut app = App::new();
             app.output_dir = out.display().to_string();
             let mut sc = probe_scan();
+            // A real Open logs the refusal among its details (`scanned_with_keys`).
+            sc.details = vec!["E7022 no key for this disc".into()];
             sc.refusal = Some(crate::engine::KeyRefusal {
                 code: 7022,
                 text: "E7022 no key for this disc".into(),
@@ -4135,6 +4158,7 @@ mod tests {
                 details: vec![],
                 keys: None,
                 needs_disc: false,
+                refusal: None,
             },
             "Main film only",
             0.0,
