@@ -549,6 +549,7 @@ fn update_config(t: UpdateTimeouts) -> ureq::config::Config {
     // Stop design v5 §2.7 (T25): "connect 10 s, headers 10 s, and a body idle of 10 s
     // through freemkv's `IdleReCapConnector`"; the `timeout_global(10 s)` total is gone.
     ureq::config::Config::builder()
+        .timeout_resolve(Some(t.resolve))
         .timeout_connect(Some(t.connect))
         .timeout_recv_response(Some(t.headers))
         .timeout_recv_body(None)
