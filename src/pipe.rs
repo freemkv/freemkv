@@ -1946,6 +1946,8 @@ fn disc_copy_options<'a>(
 ) -> freemkv_engine::CopyOptions<'a> {
     // KU §2.1 invariant 5: "No key byte and no raw VID is written to any file" (FK6). The
     // rip's up-front set rides in memory; the engine writes only `disc` + `vidfp` lines.
+    // Needless once KU-X1 drops the legacy key fields; needed until it lands.
+    #[allow(clippy::needless_update)]
     freemkv_engine::CopyOptions {
         decrypt: !raw,
         multipass,
@@ -5564,17 +5566,30 @@ mod verdict_tests {
     /// no raw VID is written to any file". A disc→ISO copy hands the mapfile neither.
     #[test]
     fn disc_copy_options_persist_no_keys() {
+        use crate::ku_fixtures::*;
         let nop = |_: &libfreemkv::progress::PassProgress| true;
-        let set = libfreemkv::keys::ResolvedKeySet::none();
+        let fx = bd_image(&[Some(K1)], 1);
+        let disc = drive_disc(&fx);
+        let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
+        let opts = libfreemkv::keys::ResolveKeysOptions::default();
+        let scope = libfreemkv::keys::KeyScope::WholeDisc;
+        let set =
+            libfreemkv::keys::ResolvedKeySet::resolve(&disc, &mut fx.source(), scope, &f, opts)
+                .unwrap()
+                .keys;
         for raw in [false, true] {
-            let o = disc_copy_options(Some(&set), raw, false, &nop);
-            assert!(o.keys.is_some(), "the rip's set rides in memory");
-            assert!(o.unit_keys.is_empty(), "no key reaches the mapfile");
-            assert_eq!(o.vid, None, "no raw VID reaches the mapfile");
+            let dir = TempDir::new("fk6");
+            let iso = dir.path().join("disc.iso");
+            let o = disc_copy_options((!raw).then_some(&set), raw, false, &nop);
+            let r = freemkv_engine::copy(&disc, &mut fx.source(), &iso, &o).unwrap();
+            assert!(r.bytes_good > 0, "the copy ran");
+            let map = std::fs::read_to_string(freemkv_engine::mapfile_path_for(&iso)).unwrap();
             assert!(
-                o.key_fetch.is_none(),
-                "no mid-rip lookup (KU §2.1 invariant 4)"
+                !map.contains("freemkv-uk") && !map.contains("freemkv-vid:"),
+                "{map}"
             );
+            // Neither the key nor the VID, raw or as hex, in the mapfile (or anywhere).
+            assert_no_secret_on_disk(dir.path(), &[K1, VID]);
         }
     }
 
