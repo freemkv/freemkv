@@ -1597,11 +1597,39 @@ fn resolve_iso_unit_keys(
     }
 }
 
-// Mid-mux key fetch for an image source over the same local-first chain the
-// upfront resolve uses (see `key_params`).
+// Mid-mux key fetch for an image source over the same local-first chain the upfront
+// resolve uses (see `key_params`). KU-E1 dropped the engine's `build_key_fetch`; this
+// is its body, kept here until the pipe moves to the up-front key set (KU-F1).
 fn build_iso_key_fetch(source: &str, keys: &KeyConfig) -> Option<libfreemkv::sector::KeyFetch> {
     let src = freemkv_engine::ImageSource::from_url(source)?;
-    freemkv_engine::build_key_fetch(&src, &key_params(keys))
+    let params = key_params(keys);
+    if freemkv_engine::key_sources(&params).is_empty() {
+        return None;
+    }
+    let (inf, mkb, version) = match &src {
+        freemkv_engine::ImageSource::Iso(p) => libfreemkv::Disc::read_aacs_inputs(p).ok()?,
+        freemkv_engine::ImageSource::Dir(p) => {
+            libfreemkv::Disc::read_aacs_inputs_from_dir(p).ok()?
+        }
+    };
+    if inf.is_empty() {
+        return None;
+    }
+    // An image has no drive handshake, so no Volume ID; the hash is what a keydb keys on.
+    let hash = libfreemkv::aacs::inf::disc_hash(&inf);
+    let inputs = libfreemkv::DiscInputs {
+        disc_hash: libfreemkv::aacs::inf::disc_hash_hex(&hash),
+        volume_id: [0u8; 16],
+        version,
+        mkb,
+        unit_key_ro: inf,
+        samples: Vec::new(),
+        volume_label: None,
+    };
+    Some(libfreemkv::keysource::key_fetch(
+        inputs,
+        std::sync::Arc::new(move || freemkv_engine::key_sources(&params)),
+    ))
 }
 
 pub(crate) fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::PathBuf {
@@ -1917,6 +1945,7 @@ fn disc_copy_options<'a>(
     raw: bool,
     multipass: bool,
     progress: &'a dyn libfreemkv::progress::Progress,
+    halt: Option<&libfreemkv::Halt>,
 ) -> freemkv_engine::CopyOptions<'a> {
     // Mirrors `recover_to_iso`'s wiring (the GUI's path): persist the resolved
     // keys (or the VID, if unresolved) into the mapfile so a later resume can
@@ -1930,7 +1959,8 @@ fn disc_copy_options<'a>(
     freemkv_engine::CopyOptions {
         decrypt: !raw,
         multipass,
-        halt: None,
+        // The Ctrl-C halt, so a Stop also wakes the copy's between-pass waits.
+        halt: halt.map(|h| h.as_arc().clone()),
         progress: Some(progress),
         vid,
         unit_keys,
@@ -2299,7 +2329,8 @@ fn disc_to_iso(
         speed_est: &speed_est,
     };
 
-    let copy_opts = disc_copy_options(&disc, raw, multipass, &progress);
+    let sigint = SigintHalt::install();
+    let copy_opts = disc_copy_options(&disc, raw, multipass, &progress, Some(sigint.halt()));
     let exit_code = match freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts) {
         Ok(r) if copy_verdict(&r) == CopyVerdict::Interrupted => {
             // Ctrl-C halted the copy. Don't print "Complete" over a partial
@@ -5629,7 +5660,7 @@ mod verdict_tests {
         let nop = |_: &libfreemkv::progress::PassProgress| true;
 
         let d = super::iso_key_tests::disc(None, false);
-        let default_flags = disc_copy_options(&d, false, false, &nop);
+        let default_flags = disc_copy_options(&d, false, false, &nop, None);
         assert!(
             default_flags.decrypt,
             "a plain disc->iso rip must DECRYPT; ciphertext is only ever --raw"
@@ -5641,7 +5672,18 @@ mod verdict_tests {
         );
         assert!(default_flags.halt.is_none());
 
-        let raw = disc_copy_options(&d, true, true, &nop);
+        // A Ctrl-C halt reaches the copy: the same flag, so a Stop wakes its waits.
+        let halt = libfreemkv::Halt::new();
+        let halted = disc_copy_options(&d, false, false, &nop, Some(&halt));
+        halt.cancel();
+        assert!(
+            halted
+                .halt
+                .as_ref()
+                .is_some_and(|h| h.load(std::sync::atomic::Ordering::SeqCst))
+        );
+
+        let raw = disc_copy_options(&d, true, true, &nop, None);
         assert!(!raw.decrypt, "--raw is ciphertext passthrough");
         assert!(
             raw.multipass,
@@ -5656,7 +5698,7 @@ mod verdict_tests {
         use super::iso_key_tests::{aacs, disc};
         let nop = |_: &libfreemkv::progress::PassProgress| true;
         let keyed = disc(Some(aacs(vec![(1, [7u8; 16])])), true);
-        let o = disc_copy_options(&keyed, true, false, &nop);
+        let o = disc_copy_options(&keyed, true, false, &nop, None);
         assert_eq!(
             o.unit_keys,
             vec![(1, [7u8; 16])],
@@ -5664,7 +5706,7 @@ mod verdict_tests {
         );
         assert_eq!(o.vid, Some([0u8; 16]));
         let clear = disc(None, false);
-        let o = disc_copy_options(&clear, true, false, &nop);
+        let o = disc_copy_options(&clear, true, false, &nop, None);
         assert!(o.unit_keys.is_empty() && o.vid.is_none());
     }
 
