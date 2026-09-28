@@ -1455,8 +1455,8 @@ fn run_extract_folder(
     }
 }
 
-// `fe::extract_tree` with the rip's key set: KU-E1's engine does not pass one yet, and an
-// image's disc carries no banked key. `cancel` stops it at the next file/batch boundary.
+// `fe::extract_tree` with the rip's key set (an image's disc carries no banked key).
+// TODO(KU-E1 engine): switch to `fe::extract_tree` once it takes `ExtractOptions.keys`.
 fn extract_tree_keyed(
     disc: &libfreemkv::Disc,
     reader: &mut dyn libfreemkv::SectorSource,

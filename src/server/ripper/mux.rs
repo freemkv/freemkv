@@ -1211,14 +1211,10 @@ pub(crate) struct LiveMuxSource {
     pub(crate) title: libfreemkv::DiscTitle,
     /// Container format (TS vs PS demux selection).
     pub(crate) format: libfreemkv::ContentFormat,
-    /// Decryption keys autorip already resolved as its own app-layer policy
-    /// (`disc.decrypt_keys()`). The driver consumes them as-is.
-    pub(crate) keys: libfreemkv::decrypt::DecryptKeys,
-    /// Retained pre-rip FMTS forensic key map (`fmts_key_map`). `mux_stream`
-    /// applies it via `DiscStream::with_key_map` so single-pass FMTS reads only
-    /// our-phase units and decrypts the forensic segment correctly. `None` for
-    /// every non-FMTS disc, leaving the read walk unchanged.
-    pub(crate) key_map: Option<std::sync::Arc<libfreemkv::decrypt::AacsKeyMap>>,
+    /// The rip's up-front key set (KU §2.1): its keys, its FMTS forensic map and the
+    /// on-arrival proof. `None` (or a non-AACS set) decrypts no AACS; a DVD cracks its CSS
+    /// title key in the stream.
+    pub(crate) keys: Option<libfreemkv::keys::ResolvedKeySet>,
     /// Skip-past-read-errors (zero-fill + continue) — wired onto
     /// `DiscStream::skip_errors` (was `on_read_error == "skip"`).
     pub(crate) skip_errors: bool,
@@ -1310,18 +1306,15 @@ pub(crate) fn mux_live(
         inputs.device,
         &format!("Opening output: {}", inputs.dest_url),
     );
-    let input = libfreemkv::MuxInput::Live {
+    let source = libfreemkv::MuxSource::Live {
         reader: src.reader,
         title: src.title,
         format: src.format,
-        keys: src.keys,
-        // The forensic FMTS map — applied via `DiscStream::with_key_map` inside
-        // `mux_stream`, exactly the pre-migration `s.with_key_map(map)`.
-        key_map: src.key_map,
     };
 
-    let result = libfreemkv::mux_stream(
-        input,
+    let result = libfreemkv::mux_with_keys(
+        source,
+        src.keys.as_ref(),
         &inputs.dest_url,
         &opts,
         &halt_token,

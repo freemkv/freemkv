@@ -375,6 +375,10 @@ pub(super) struct DriveSession {
     /// scan_disc's final key-service verdict for a still-keyless disc, so rip_disc
     /// classifies from the real `/decode` answer instead of re-probing.
     pub(super) key_verdict: Option<crate::server::keysource::ServiceReachability>,
+    /// The rip's key set, resolved once right after the scan (KU §2.1); memory only.
+    pub(super) keys: Option<libfreemkv::keys::ResolvedKeySet>,
+    /// Why the scan's resolve refused (no key, a key-source failure, …), when it did.
+    pub(super) key_error: Option<libfreemkv::Error>,
 }
 
 /// Global drive sessions — one per device.
@@ -505,18 +509,22 @@ pub(super) fn session_is_scanned(device: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// The keys and Volume ID the scan of `device`'s disc resolved, if a session holds one
-/// (memory only): what an inserted disc lends its staged image's resume.
-pub(super) fn session_held_keys(device: &str) -> Option<crate::server::keysource::HeldKeys> {
-    SESSIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(device)?
+/// The key set and Volume ID the scan of `device`'s disc resolved (memory only): what an
+/// inserted disc lends its staged image's resume.
+pub(super) fn session_rip_keys(
+    device: &str,
+) -> (Option<libfreemkv::keys::ResolvedKeySet>, Option<[u8; 16]>) {
+    let sessions = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(sess) = sessions.get(device) else {
+        return (None, None);
+    };
+    let vid = sess
         .disc
-        .as_ref()?
-        .aacs
         .as_ref()
-        .and_then(crate::server::keysource::HeldKeys::from_aacs)
+        .and_then(|d| d.aacs.as_ref())
+        .map(|a| a.volume_id)
+        .filter(|v| *v != [0u8; 16]);
+    (sess.keys.clone(), vid)
 }
 
 pub(super) fn drop_session(device: &str) {

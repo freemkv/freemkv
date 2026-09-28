@@ -385,20 +385,16 @@ fn resume_titles(disc: &libfreemkv::Disc, is_fanout: bool, plan: &[staging::Outp
     titles
 }
 
-// A resume's keys, memory only: the inserted disc's scan (keys and VID), else what the
-// process that ripped this image held from its drive, else the key chain, asked once.
-// The flag: a drive in hand lent its scan.
+// A resume's keys, memory only: the inserted disc's up-front set, else the set the process
+// that ripped this image resolved at its scan, else the key chain, asked once (with the
+// inserted disc's VID, if any). The flag: a drive in hand lent its scan.
 fn resume_staged_keys(device: &str, iso: &Path) -> (crate::server::keysource::StagedKeys, bool) {
     use crate::server::keysource::StagedKeys;
-    let drive = super::session::session_held_keys(device);
-    let from_drive = drive.is_some();
-    let ripped = crate::server::keysource::held_drive_keys(iso);
-    let keys = match (drive, ripped) {
-        (Some(d), _) if d.has_keys() => StagedKeys::Held(d),
-        (_, Some(r)) if r.has_keys() => StagedKeys::Held(r),
-        (d, r) => StagedKeys::Resolve {
-            vid: d.and_then(|h| h.vid()).or(r.and_then(|h| h.vid())),
-        },
+    let (drive_keys, drive_vid) = super::session::session_rip_keys(device);
+    let from_drive = drive_keys.is_some() || drive_vid.is_some();
+    let keys = match drive_keys.or_else(|| crate::server::keysource::rip_keys_for(iso)) {
+        Some(set) => StagedKeys::Rip(set),
+        None => StagedKeys::Resolve { vid: drive_vid },
     };
     (keys, from_drive)
 }
@@ -1988,7 +1984,7 @@ pub(crate) fn remux_from_ripped_marker(
     outcome.failure_needs_disc =
         !success && staging::snapshot_staging_disc(staging_dir).is_some_and(|snap| snap.needs_disc);
     if success {
-        crate::server::keysource::forget_drive_keys(&iso_path);
+        crate::server::keysource::forget_rip_keys(&iso_path);
         // Hand-off consumed. Drop the marker so this dir doesn't get
         // re-queued on the next muxer tick. If the delete fails, surface
         // marker is still worth a warning so the operator can clear it.
