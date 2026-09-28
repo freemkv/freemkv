@@ -211,6 +211,39 @@ mod tests {
         );
     }
 
+    // J23: "the generic pre-mux fit report leaves out declared-only extension tracks".
+    #[test]
+    fn j23_a_declared_only_mp2_extension_is_never_in_the_excluded_note() {
+        crate::strings::set_locale("en");
+        let main = vec![
+            video(libfreemkv::Codec::Mpeg2),
+            audio(0xC0, libfreemkv::Codec::Mp2),
+        ];
+        let mut with_ext = main.clone();
+        with_ext.push(libfreemkv::Stream::Audio(libfreemkv::AudioStream {
+            pid: 0xD0,
+            codec: libfreemkv::Codec::Mp2,
+            channels: libfreemkv::AudioChannels::Stereo,
+            language: "eng".into(),
+            sample_rate: libfreemkv::SampleRate::S48,
+            secondary: false,
+            purpose: libfreemkv::LabelPurpose::Normal,
+            label: libfreemkv::disc::MP2_EXTENSION_LABEL.into(),
+        }));
+        for dest in ["mkv:///o/x.mkv", "mp4:///o/x.mp4", "mpg:///o/x.mpg"] {
+            let lines = excluded_lines(dest, &title(with_ext.clone()));
+            assert!(
+                !lines.iter().any(|l| l.contains(" 3:")),
+                "{dest}: the declared-only extension is listed: {lines:?}"
+            );
+            assert_eq!(
+                lines,
+                excluded_lines(dest, &title(main.clone())),
+                "{dest}: the extension changed the note"
+            );
+        }
+    }
+
     #[test]
     fn keep_is_mpg_only_when_every_exclusion_is_the_extension() {
         use libfreemkv::SkipReason as R;
