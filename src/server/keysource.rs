@@ -1060,7 +1060,6 @@ mod tests {
             libfreemkv::test_util::aacs_state()
                 .version(libfreemkv::aacs::mkb::AACS_MAJOR_UHD)
                 .disc_hash("0xabc")
-                .key_source(libfreemkv::disc::KeyOrigin::KeyDb)
                 .build(),
         );
         disc
