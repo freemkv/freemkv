@@ -47,14 +47,43 @@ export function issueText(i) {
   return t;
 }
 
+const DEEP_TEXT = {
+  clean: 'Plays through cleanly',
+  decoder_limitation: "Plays through cleanly (one track uses a feature the checker can't decode)",
+  decode_errors: 'Playing it through found errors',
+  demux_errors: 'Reading it through found errors',
+  bitstream_corruption: 'The video data is damaged',
+  memory_runaway: "The video can't be played through",
+  nonzero_exit: 'The check stopped with an error',
+  timeout: 'The check took too long; it will try again',
+  oom: 'The check was stopped; it will try again',
+  killed: 'The check was stopped; it will try again',
+  media_unavailable: 'The file went away during the check; it will try again',
+};
+
+/** One line for a row's deep audit, or '' when there is none. */
+export function deepText(r) {
+  const d = r.deep;
+  if (!d) return '';
+  if (d.state === 'pending') return 'Deep audit: waiting its turn';
+  if (d.state === 'scanning') return 'Deep audit: playing it through now';
+  const v = d.verdict || {};
+  let t = DEEP_TEXT[v.reason] || String(v.reason || '').replace(/_/g, ' ');
+  if (d.state === 'corrupt' && v.errors) t += ' (' + v.errors + (v.errors === 1 ? ' error' : ' errors') + ')';
+  return 'Deep audit: ' + t;
+}
+
 /** [dotClass, glyph, tooltip, sortRank] for a row's audit. */
 export function auditState(r) {
   if (!r.mkv) return ['dot-idle', '', 'No MKV', 9];
   const a = r.audit;
   if (!a) return ['dot-warn', '●', 'Not checked yet', 3];
-  if (!a.ok) return ['dot-bad', '●', a.issues.map(issueText).join('; '), 5];
-  if (a.issues.length) return ['dot-warn', '●', a.issues.map(issueText).join('; '), 2];
-  return ['dot-ok', '✓', 'Checks out', 0];
+  const deep = deepText(r);
+  const tip = (t) => deep ? t + ' · ' + deep : t;
+  if (!a.ok) return ['dot-bad', '●', tip(a.issues.map(issueText).join('; ')), 5];
+  if (r.deep && r.deep.state === 'corrupt') return ['dot-bad', '●', deep, 4];
+  if (a.issues.length) return ['dot-warn', '●', tip(a.issues.map(issueText).join('; ')), 2];
+  return ['dot-ok', '✓', tip('Checks out'), 0];
 }
 
 export function auditHtml(r) {
@@ -87,6 +116,14 @@ export function openDetails(r, ctx = {}) {
     + '</div>';
   if (a && a.issues.length) {
     body += '<h3>Findings</h3>' + a.issues.map(i => '<div class="issue"><span class="dot ' + (i.kind === 'no_cues' ? 'dot-warn' : 'dot-bad') + '"></span>' + esc(issueText(i)) + '</div>').join('');
+  }
+  if (r.deep) {
+    const v = r.deep.verdict;
+    const bad = r.deep.state === 'corrupt';
+    body += '<h3>Deep audit</h3><div class="issue"><span class="dot ' + (bad ? 'dot-bad' : r.deep.state === 'clean' ? 'dot-ok' : 'dot-warn') + '"></span>'
+      + esc(deepText(r).replace(/^Deep audit: /, '')) + (v && v.scanned ? ' <span class="muted small">' + esc(when(v.scanned)) + '</span>' : '') + '</div>';
+    const lines = v ? (v.bad && v.bad.length ? v.bad : v.clean ? [] : v.sample) : [];
+    if (lines.length) body += '<details><summary class="small">What the decoder said</summary><pre class="mono small" style="white-space:pre-wrap;max-height:16rem;overflow:auto">' + esc(lines.join('\n')) + '</pre></details>';
   }
   if (a) {
     body += '<h3>Tracks</h3><table class="det"><thead><tr><th>#</th><th>Type</th><th>Codec</th><th>Language</th></tr></thead><tbody>' + trackRows(a) + '</tbody></table>';

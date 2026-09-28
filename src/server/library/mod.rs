@@ -3,11 +3,12 @@
 //!
 //! [`index`] builds the cross-list, [`probe`] reads the muxed-with stamp and
 //! runs the fast audit, [`queue`] persists the jobs, [`worker`] runs them one
-//! at a time, [`arbiter`] gives rips the mux slot first, and [`api`] serves
-//! `/api/library*`.
+//! at a time, [`arbiter`] gives rips the mux slot first, [`deep`] decodes each MKV
+//! in full when the setting is on, and [`api`] serves `/api/library*`.
 
 pub mod api;
 pub mod arbiter;
+pub mod deep;
 pub mod index;
 pub mod links;
 pub mod probe;
@@ -160,6 +161,9 @@ pub struct Snapshot {
 pub struct Library {
     pub queue: Queue,
     pub probes: ProbeCache,
+    pub deep: deep::Store,
+    // The deep_audit setting as the deep loop last read it.
+    deep_on: AtomicBool,
     config_dir: PathBuf,
     log_dir: PathBuf,
     live: Mutex<Live>,
@@ -210,6 +214,12 @@ pub fn start(cfg: &Arc<RwLock<Config>>) -> std::thread::JoinHandle<()> {
             .name("library-index".into())
             .spawn(move || worker::index_loop(&lib, &cfg));
     }
+    {
+        let (lib, cfg) = (lib.clone(), cfg.clone());
+        let _ = std::thread::Builder::new()
+            .name("library-deep".into())
+            .spawn(move || worker::deep_loop(&lib, &cfg, &arbiter::ARBITER));
+    }
     let cfg = cfg.clone();
     std::thread::Builder::new()
         .name("library-remux".into())
@@ -241,6 +251,8 @@ pub struct RowView {
     pub needs_remux: bool,
     /// `None` until the auditor has reached this file.
     pub audit: Option<AuditReport>,
+    /// The full-decode audit; `None` while the setting is off and no verdict exists.
+    pub deep: Option<deep::DeepView>,
     pub job: Option<Job>,
     pub result: Option<JobResult>,
 }
@@ -266,6 +278,8 @@ impl Library {
         Self {
             queue: Queue::open(config_dir),
             probes: ProbeCache::default(),
+            deep: deep::Store::open(config_dir),
+            deep_on: AtomicBool::new(false),
             config_dir: config_dir.to_path_buf(),
             log_dir: log_dir.to_path_buf(),
             live: Mutex::new(Live::default()),
@@ -296,6 +310,17 @@ impl Library {
 
     pub(crate) fn touch_index(&self) {
         self.index_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Whether the deep audit is on, as its loop last read the setting.
+    pub fn deep_enabled(&self) -> bool {
+        self.deep_on.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_deep_enabled(&self, on: bool) {
+        if self.deep_on.swap(on, Ordering::SeqCst) != on {
+            self.touch_index();
+        }
     }
 
     /// Whether the indexer is scanning or reading headers right now.
@@ -428,8 +453,12 @@ impl Library {
     /// Forget the audits of `paths` (every file when `None`) and wake the
     /// indexer to redo them. Returns how many cached audits were dropped.
     pub fn reaudit(&self, paths: Option<&[PathBuf]>) -> usize {
+        // One file's Re-audit redoes the full decode too; "every file" only the fast pass.
         let n = match paths {
-            Some(ps) => ps.iter().filter(|p| self.probes.forget_audit(p)).count(),
+            Some(ps) => {
+                self.deep.forget(ps);
+                ps.iter().filter(|p| self.probes.forget_audit(p)).count()
+            }
             None => self.probes.forget_all_audits(),
         };
         self.touch_index();
@@ -490,6 +519,7 @@ impl Library {
         let q = self.queue.snapshot();
         let running = probe::running_version();
         let (mut probing, mut auditing) = (0, 0);
+        let deep_on = self.deep_enabled();
         let rows = snap
             .rows
             .iter()
@@ -511,6 +541,12 @@ impl Library {
                     .zip(sig)
                     .and_then(|(m, s)| self.probes.audit(m, s));
                 auditing += usize::from(r.mkv.is_some() && audit.is_none());
+                let deep = r
+                    .mkv
+                    .as_deref()
+                    .zip(sig)
+                    .filter(|_| audit.is_some())
+                    .and_then(|(m, s)| self.deep.view(m, s, deep_on));
                 let needs_remux =
                     r.remuxable() && (r.mkv.is_none() || (probed && muxed_with.out_of_date()));
                 let (job, result) = match &r.target {
@@ -537,6 +573,7 @@ impl Library {
                     probed,
                     needs_remux,
                     audit,
+                    deep,
                     job,
                     result,
                 }

@@ -226,6 +226,9 @@ pub struct Config {
     /// Library: also list ISOs one folder down (`dvd/`, `bd/`, ...). Off = top level only.
     #[serde(default)]
     pub library_iso_subfolders: bool,
+    /// Library: decode every MKV in full with ffmpeg, in the background. Off by default.
+    #[serde(default)]
+    pub deep_audit: bool,
 }
 
 // Manual `Debug` that redacts secret-bearing fields (tmdb_api_key,
@@ -281,6 +284,7 @@ impl std::fmt::Debug for Config {
             .field("library_dir", &self.library_dir)
             .field("library_iso_dir", &self.library_iso_dir)
             .field("library_iso_subfolders", &self.library_iso_subfolders)
+            .field("deep_audit", &self.deep_audit)
             .finish()
     }
 }

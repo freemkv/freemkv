@@ -339,6 +339,8 @@ pub static FIELDS: &[Field] = &[
         "The folder with your disc copies (ISOs). Blank = the Disc copies folder.").placeholder("The ISO folder"),
     field("library_iso_subfolders", "Look in sub-folders too", G::Library, Kind::Bool, B(false),
         "Also find disc copies one folder down, for example dvd/ or bd/."),
+    field("deep_audit", "Deep audit", G::Library, Kind::Bool, B(false),
+        "Play every movie file through in full, in the background, to find damage the quick check can't see. Slow: one file at a time, paused while ripping or remuxing."),
     field("key_source", "Keys come from", G::Keys, Kind::Choice(KEY_SOURCE), S("local"),
         "Blu-ray discs need keys to unlock them."),
     field("keydb_path", "Keys file location", G::Keys, Kind::KeydbPath, Def::Unset,

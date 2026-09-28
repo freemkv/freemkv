@@ -648,6 +648,52 @@ pub fn index_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>) {
     }
 }
 
+/// The deep-audit loop: while the setting is on and nothing else wants the disks (a remux
+/// or a rip), decode the next fast-audited MKV in full, oldest first.
+pub fn deep_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
+    let enabled = || cfg.read().unwrap_or_else(|e| e.into_inner()).deep_audit;
+    let busy = || lib.queue.snapshot().running().is_some() || arbiter.rip_active();
+    while !shutting_down() {
+        lib.set_deep_enabled(enabled());
+        let ffmpeg = super::deep::ffmpeg();
+        let d = super::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner()));
+        let target = match &ffmpeg {
+            Some(_) if enabled() && !busy() && !lib.indexing() => super::deep::next_target(
+                &lib.deep,
+                &deep_candidates(lib),
+                crate::server::util::epoch_secs(),
+            ),
+            _ => None,
+        };
+        let (Some(ffmpeg), Some((path, sig))) = (ffmpeg, target) else {
+            nap(Duration::from_secs(DEEP_IDLE_SECS));
+            continue;
+        };
+        tracing::info!(file = %path.display(), "deep audit: decoding");
+        lib.touch_index();
+        let stop = || shutting_down() || !enabled() || busy();
+        let err_file = lib.log_dir.join("deep-audit.stderr");
+        let _ = std::fs::create_dir_all(&lib.log_dir);
+        super::deep::audit_one(&lib.deep, &ffmpeg, &path, sig, &d.library, &err_file, &stop);
+        lib.touch_index();
+    }
+}
+
+const DEEP_IDLE_SECS: u64 = 30;
+
+// The MKVs the fast audit has read, at the size and mtime it read them.
+fn deep_candidates(lib: &Library) -> Vec<(std::path::PathBuf, super::probe::FileSig)> {
+    let snap = lib.snapshot();
+    snap.rows
+        .iter()
+        .filter_map(|r| r.mkv.as_ref())
+        .filter_map(|m| {
+            let sig = *snap.sigs.get(m)?;
+            lib.probes.audit(m, sig).map(|_| (m.clone(), sig))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::probe::{MuxedWith, testmkv::mkv};
