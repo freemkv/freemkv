@@ -960,6 +960,15 @@ def legs(policy):
 
 LEG_JOB = {'linux': 'cli-matrix (linux)', 'windows': 'cli-matrix (windows)',
            'linux-perf': 'cli-perf (linux)', 'windows-perf': 'cli-perf (windows)'}
+def job_named(jobs, name):
+    """The job called `name`, also when GitHub appends other matrix values ("cli-matrix (linux, …)")."""
+    for job in jobs:
+        n = job.get('name') or ''
+        if n == name or (name.endswith(')') and n.startswith(name[:-1] + ', ')):
+            return job
+    return None
+
+
 LEG_TARGET = {'linux': 'x86_64-unknown-linux-musl', 'windows': 'x86_64-pc-windows-msvc',
               'linux-perf': 'x86_64-unknown-linux-musl', 'windows-perf': 'x86_64-pc-windows-msvc'}
 
@@ -989,15 +998,14 @@ def check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, per
             and (run.get('head_repository') or {}).get('full_name') == f'{OWNER}/freemkv'
             and run.get('head_sha') == revisions['freemkv']):
         raise ValueError('run is not a trusted freemkv qa.yml run at the evidence sha')
-    by_name = {j.get('name'): j for j in jobs}
     for name in required_jobs(policy):
-        if (by_name.get(name) or {}).get('conclusion') != 'success':
+        if (job_named(jobs, name) or {}).get('conclusion') != 'success':
             raise ValueError(f'job {name!r} is not success')
     runner_re = re.compile(policy['runner_name_re'])
     label = f'run-{run_id}'
     for leg in legs(policy):
         rec = (ev.get('legs') or {}).get(leg)
-        job = by_name[LEG_JOB[leg]]
+        job = job_named(jobs, LEG_JOB[leg])
         if not isinstance(rec, dict):
             raise ValueError(f'leg {leg} not recorded')
         m = runner_re.fullmatch(job.get('runner_name') or '')
@@ -1269,7 +1277,13 @@ def write_evidence_tag(f, run_id, evidence_bytes, lock_bytes, post=gh_post):
     name = f'media-evidence/{f}/{run_id}'
     tag = post(f'{base}/tags', {'tag': name, 'message': f'full-disc evidence for {f} from run {run_id}',
                                 'object': commit, 'type': 'commit'})['sha']
-    post(f'{base}/refs', {'ref': f'refs/tags/{name}', 'sha': tag})
+    try:
+        post(f'{base}/refs', {'ref': f'refs/tags/{name}', 'sha': tag})
+    except subprocess.CalledProcessError as exc:
+        # "Re-run all jobs" of a run that already recorded: its evidence tag stands.
+        if 'Reference already exists' not in (exc.stdout or '') + (exc.stderr or ''):
+            raise
+        print(f'::notice::refs/tags/{name} already exists (an earlier attempt of this run recorded it)')
     return name, commit
 
 
@@ -1280,22 +1294,39 @@ def record(plan_dir, legs_dir, policy, env, request=gh_api, aws=aws_json, post=g
     lock = (plan_dir / 'Cargo.lock').read_bytes()
     run = request(f'repos/{OWNER}/freemkv/actions/runs/{run_id}')
     jobs = request(f'repos/{OWNER}/freemkv/actions/runs/{run_id}/jobs?filter=latest&per_page=100')['jobs']
-    by_name = {j['name']: j for j in jobs}
     runner_re = re.compile(policy['runner_name_re'])
+    # What each launch job wrote when it started an instance (any attempt of this run).
+    launched = {}
+    for path in legs_dir.glob('launch-*.json'):
+        att = json.loads(path.read_text())
+        launched[att.get('instance_id')] = att
     legs_out = {}
     for leg in legs(policy):
         rec = json.loads((legs_dir / f'leg-{leg}.json').read_text())
-        job = by_name.get(LEG_JOB[leg]) or {}
+        job = job_named(jobs, LEG_JOB[leg]) or {}
         m = runner_re.fullmatch(job.get('runner_name') or '')
         if not m or rec.get('runner_name') != job.get('runner_name') or rec.get('instance_id') != m.group(3):
             raise ValueError(f'leg {leg}: runner {job.get("runner_name")!r} does not match its record')
-        tags = {}
-        for res in aws('ec2', 'describe-instances', '--instance-ids', rec['instance_id'])['Reservations']:
+        os_name = leg.split('-')[0]
+        want_labels = f'freemkv-media,{os_name},run-{run_id}'
+        att = launched.get(rec['instance_id'])
+        if not att or att.get('launched_by') != run_id or att.get('os') != os_name \
+                or att.get('runner_labels') != want_labels:
+            raise ValueError(f'leg {leg}: instance {rec["instance_id"]} has no launch record from run {run_id}')
+        # EC2 keeps a terminated instance visible for about an hour; confirm while it can.
+        try:
+            reservations = aws('ec2', 'describe-instances', '--instance-ids', rec['instance_id'])['Reservations']
+        except Exception as exc:  # noqa: BLE001 — NotFound after termination: the launch record stands
+            print(f'::notice::{leg}: {rec["instance_id"]} no longer visible in EC2 ({exc}); using its launch record')
+            reservations = []
+        for res in reservations:
             for inst in res['Instances']:
                 tags = {t['Key']: t['Value'] for t in inst.get('Tags', [])}
-        if tags.get('launched-by') != str(run_id) or f'run-{run_id}' not in tags.get('runner-labels', '').split(','):
-            raise ValueError(f'leg {leg}: instance {rec["instance_id"]} was not launched by run {run_id}')
+                if tags.get('launched-by') != str(run_id) or tags.get('runner-labels') != want_labels:
+                    raise ValueError(f'leg {leg}: instance {rec["instance_id"]} was not launched by run {run_id}')
         rec['launched_by'] = run_id
+        rec['launch_template'] = att.get('launch_template')
+        rec['launch_template_version'] = att.get('launch_template_version')
         legs_out[leg] = rec
     ev['legs'] = legs_out
     evidence_bytes = json.dumps(ev, indent=1, sort_keys=True).encode()
@@ -1407,7 +1438,8 @@ def main(argv=None):
             return 0
         if args.mode == 'verdict':
             green, lines = verdict(os.environ)
-            text = '\n'.join(lines) + '\n'
+            # A reason may carry dispatch text; never let a line start a workflow command.
+            text = '\n'.join(line.replace('::', ': :') for line in lines) + '\n'
             print(text)
             if os.environ.get('GITHUB_STEP_SUMMARY'):
                 with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:

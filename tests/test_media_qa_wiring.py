@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 import media_gate as mg  # noqa: E402
@@ -62,19 +63,40 @@ class StructureTests(unittest.TestCase):
     def test_launch_has_deadline_watch_cancel_and_teardown(self):
         launch = self.jobs['launch']
         names = [s.get('name', '') for s in launch['steps']]
-        for want in ('Watch the leg', 'Cancel the run (launch failed)', 'Tear down', 'Still the newest candidate'):
+        for want in ('Watch the leg', 'Cancel the run (no runner is coming)', 'Tear down', 'Still the newest candidate'):
             self.assertIn(want, names)
         watch = next(s for s in launch['steps'] if s.get('name') == 'Watch the leg')['run']
         self.assertIn('deadline', watch)
         self.assertIn('actions/runs/$RUN_ID/cancel', watch)
+        self.assertIn('picked=true', watch, 'the deadline must stop applying once the leg is picked up')
+        self.assertIn('[ "$picked" = false ]', watch)
+        self.assertIn('sleep 30; continue', watch, 'a failed poll is retried, not fatal')
+        cancel = next(s for s in launch['steps'] if s.get('name') == 'Cancel the run (no runner is coming)')
+        self.assertEqual(cancel['if'], "failure() && steps.watch.outcome != 'failure'")
+        self.assertGreater(names.index('Cancel the run (no runner is coming)'), names.index('Watch the leg'))
         teardown = next(s for s in launch['steps'] if s.get('name') == 'Tear down')
         self.assertTrue(teardown['if'].startswith('always()'))
         self.assertIn('terminate-instances', teardown['run'])
+        self.assertIn('Name=tag:launched-by,Values=$RUN_ID', teardown['run'])
+        self.assertIn('Name=tag:runner-labels,Values=freemkv-media,$OS,run-$RUN_ID', teardown['run'])
         launch_run = next(s for s in launch['steps'] if s.get('name') == 'Launch the ephemeral runner')['run']
         self.assertIn('run-" + $id', launch_run)
         self.assertIn('launched-by', launch_run)
         self.assertIn('--user-data "file://$userdata"', launch_run)
         self.assertIn('Version=$version', launch_run)
+
+    def test_launch_attests_and_leg_uploads_survive_reruns(self):
+        launch_run = next(s for s in self.jobs['launch']['steps'] if s.get('name') == 'Launch the ephemeral runner')['run']
+        self.assertIn('launch-$OS-$ATTEMPT.json', launch_run)
+        for job in ('launch', 'cli-matrix'):
+            for step in self.jobs[job]['steps']:
+                if 'upload-artifact' in step.get('uses', ''):
+                    with self.subTest(job=job, name=step['with']['name']):
+                        self.assertTrue(step['with'].get('overwrite'))
+        record = self.jobs['record-media-evidence']
+        self.assertIn('launch', record['needs'])
+        self.assertIn("needs.launch.result == 'success'", record['if'])
+        self.assertIn('launch-*', [st.get('with', {}).get('pattern') for st in record['steps']])
 
     def test_concurrency_is_per_candidate(self):
         self.assertIn('${{ github.sha }}', self.qa['concurrency']['group'])
@@ -260,11 +282,24 @@ class LegAndRecordTests(unittest.TestCase):
         for leg, rec in legs_rec.items():
             rec = dict(rec)
             rec.pop('launched_by')
+            rec['runner_name'] = f'ephemeral-{leg}-i-0{"1" if leg == "linux" else "2"}23456789abcdef0'
+            rec['instance_id'] = rec['runner_name'].rsplit('-', 2)[-2] + '-' + rec['runner_name'].rsplit('-', 1)[-1]
             (legs / f'leg-{leg}.json').write_text(json.dumps(rec))
+            next(j for j in e.jobs if j['name'] == mg.LEG_JOB[leg])['runner_name'] = rec['runner_name']
+            e.ev['legs'][leg].update(runner_name=rec['runner_name'], instance_id=rec['instance_id'])
+            att = {'instance_id': rec['instance_id'], 'launched_by': RUN_ID, 'run_attempt': 1, 'os': leg,
+                   'runner_labels': f'freemkv-media,{leg},run-{RUN_ID}', 'launch_template': f'freemkv-runner-{leg}',
+                   'launch_template_version': '3'}
+            (legs / f'launch-{leg}-1.json').write_text(json.dumps(att))
         e.jobs = [j for j in e.jobs if j['name'] != 'record-media-evidence']
-        tags = {'launched-by': str(RUN_ID), 'runner-labels': f'freemkv-media,linux,run-{RUN_ID}'}
-        aws = lambda *a: {'Reservations': [{'Instances': [{'Tags': [{'Key': k, 'Value': v}
-                                                                    for k, v in tags.items()]}]}]}
+        tags = {'launched-by': str(RUN_ID)}
+
+        def aws(*a):
+            if tags.get('gone'):
+                raise subprocess.CalledProcessError(254, a, 'InvalidInstanceID.NotFound')
+            os_name = 'linux' if a[-1].startswith('i-01') else 'windows'
+            t = dict(tags, **{'runner-labels': tags.get('labels', f'freemkv-media,{os_name},run-{RUN_ID}')})
+            return {'Reservations': [{'Instances': [{'Tags': [{'Key': k, 'Value': v} for k, v in t.items()]}]}]}
         posts = []
 
         def post(endpoint, body):
@@ -291,6 +326,60 @@ class LegAndRecordTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
         self.assertEqual(posts, [])
+
+    def test_record_uses_the_launch_record_once_ec2_forgets_the_instance(self):
+        e, plan, legs, env, aws, post, posts, tags = self.setup_record()
+        tags['gone'] = True
+        name, _ = mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
+        self.assertTrue(name.startswith('media-evidence/'))
+
+    def test_record_refuses_a_leg_without_a_matching_launch_record(self):
+        for change in ('delete', 'os', 'run'):
+            with self.subTest(change=change):
+                e, plan, legs, env, aws, post, posts, tags = self.setup_record()
+                path = legs / 'launch-windows-1.json'
+                att = json.loads(path.read_text())
+                if change == 'delete':
+                    path.unlink()
+                elif change == 'os':
+                    att.update(os='linux', runner_labels=f'freemkv-media,linux,run-{RUN_ID}')
+                    path.write_text(json.dumps(att))
+                else:
+                    att['launched_by'] = RUN_ID + 1
+                    path.write_text(json.dumps(att))
+                with self.assertRaises(ValueError):
+                    mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
+                self.assertEqual(posts, [])
+
+    def test_record_refuses_ec2_labels_for_another_os(self):
+        e, plan, legs, env, aws, post, posts, tags = self.setup_record()
+        tags['labels'] = f'freemkv-media,linux,run-{RUN_ID}'
+        with self.assertRaises(ValueError):
+            mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
+
+    def test_existing_tag_from_an_earlier_attempt_is_success(self):
+        calls = []
+
+        def post(endpoint, body):
+            calls.append(endpoint)
+            if endpoint.endswith('/refs'):
+                raise subprocess.CalledProcessError(1, 'gh', output='{"message":"Reference already exists"}')
+            return {'sha': 'x'}
+        name, _ = mg.write_evidence_tag('f' * 64, RUN_ID, b'{}', b'', post=post)
+        self.assertTrue(name.endswith(f'/{RUN_ID}'))
+
+        def post_fail(endpoint, body):
+            if endpoint.endswith('/refs'):
+                raise subprocess.CalledProcessError(1, 'gh', output='{"message":"Resource not accessible"}')
+            return {'sha': 'x'}
+        with self.assertRaises(subprocess.CalledProcessError):
+            mg.write_evidence_tag('f' * 64, RUN_ID, b'{}', b'', post=post_fail)
+
+    def test_job_named_accepts_matrix_suffixes(self):
+        jobs = [{'name': 'cli-matrix (linux, x86_64-unknown-linux-musl)'}, {'name': 'cli-matrix (windows)'}]
+        self.assertEqual(mg.job_named(jobs, 'cli-matrix (linux)')['name'], jobs[0]['name'])
+        self.assertEqual(mg.job_named(jobs, 'cli-matrix (windows)')['name'], 'cli-matrix (windows)')
+        self.assertIsNone(mg.job_named([{'name': 'cli-matrix (linuxx)'}], 'cli-matrix (linux)'))
 
     def test_record_refuses_a_leg_built_with_another_toolchain(self):
         e, plan, legs, env, aws, post, posts, _ = self.setup_record()
@@ -332,6 +421,18 @@ class VerdictTests(unittest.TestCase):
         for env, green in cases:
             with self.subTest(env=env):
                 self.assertEqual(mg.verdict(env)[0], green)
+
+    def test_reason_cannot_issue_workflow_commands(self):
+        import io
+        import contextlib
+        import os
+        out = io.StringIO()
+        env = {'PLAN_RESULT': 'success', 'STATUS': 'waived', 'REASON': '::add-mask::x ::stop-commands::t'}
+        with unittest.mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out):
+            self.assertEqual(mg.main(['verdict']), 1)
+        body = out.getvalue().split('::error', 1)[0]
+        self.assertNotIn('::add-mask::', body)
+        self.assertNotIn('::stop-commands::', body)
 
     def test_reuse_says_why(self):
         green, lines = mg.verdict({'PLAN_RESULT': 'success', 'STATUS': 'reuse', 'EVIDENCE_URL': 'https://x/1',

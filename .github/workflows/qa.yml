@@ -365,11 +365,14 @@ jobs:
           persist-credentials: false
           sparse-checkout: .github/runner-templates
       - name: Still the newest candidate
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.ref_name }}" = qa ]; then
+          if [ "$REF_NAME" = qa ]; then
             head=$(gh api "repos/$REPO/git/ref/heads/qa" -q .object.sha)
-            if [ "$head" != "${{ github.sha }}" ]; then
+            if [ "$head" != "$SHA" ]; then
               echo "::error title=Superseded::qa moved to ${head:0:12}; this run proves nothing and launches nothing"
               gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/cancel" || true
               exit 1
@@ -429,6 +432,13 @@ jobs:
                           --query 'Instances[0].InstanceId' --output text 2>launch.err); then
                   echo "instance=$id" >> "$GITHUB_OUTPUT"
                   echo "launched $id ($OS, type=$t subnet=$s market=$market, template $lt v$version)"
+                  # What record-media-evidence checks the leg against, even after EC2 forgets the instance.
+                  jq -n --arg id "$id" --arg run "$RUN_ID" --arg attempt "$ATTEMPT" --arg os "$OS" \
+                        --arg lt "$lt" --arg v "$version" --arg type "$t" \
+                        '{instance_id: $id, launched_by: ($run | tonumber), run_attempt: ($attempt | tonumber),
+                          os: $os, runner_labels: ("freemkv-media," + $os + ",run-" + $run),
+                          launch_template: $lt, launch_template_version: $v, requested_type: $type}' \
+                        > "launch-$OS-$ATTEMPT.json"
                   return 0
                 fi
                 echo "  failed ($t/$s/$market): $(cat launch.err)"
@@ -448,35 +458,50 @@ jobs:
           [ "$rc" = 0 ] && exit 0
           echo "::error title=Runner launch failed::could not launch the $OS media runner — cancelling the run so its leg does not sit queued" >&2
           exit 1
-      - name: Cancel the run (launch failed)
-        if: failure() && steps.launch.outcome == 'failure'
-        run: gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/cancel" || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.launch.outputs.instance != ''
+        with:
+          name: "launch-${{ matrix.os }}-${{ github.run_attempt }}"
+          path: "launch-${{ matrix.os }}-${{ github.run_attempt }}.json"
+          overwrite: true
       # Ends with the leg's conclusion. A leg not picked up by the deadline (the
       # instance never registered) terminates the instance and cancels the run.
       - name: Watch the leg
+        id: watch
         env:
           INSTANCE: ${{ steps.launch.outputs.instance }}
         run: |
           set -uo pipefail
-          leg="cli-matrix ($OS)"
+          leg="cli-matrix ($OS"
           limit=900; [ "$OS" = windows ] && limit=1800
           deadline=$(( $(date +%s) + limit ))
+          picked=false
           while :; do
-            state=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs?per_page=100" \
-                      -q ".jobs[] | select(.name == \"$leg\") | \"\(.status) \(.conclusion)\"" 2>/dev/null | head -1)
-            read -r status conclusion <<<"${state:-unknown none}"
+            # A failed poll is retried; only a leg never picked up by the deadline is fatal.
+            if ! state=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs?per_page=100" \
+                           -q ".jobs[] | select(.name | startswith(\"$leg\")) | \"\(.status) \(.conclusion)\"" \
+                           2>/dev/null | head -1) || [ -z "$state" ]; then
+              sleep 30; continue
+            fi
+            read -r status conclusion <<<"$state"
+            [ "$status" = in_progress ] && picked=true
             if [ "$status" = completed ]; then
-              echo "$leg: $conclusion"
+              echo "$leg): $conclusion"
               [ "$conclusion" = success ]; exit $?
             fi
-            if [ "$status" != in_progress ] && [ "$(date +%s)" -gt "$deadline" ]; then
-              echo "::error title=Runner never picked up the leg::$leg is still '$status' $((limit / 60)) min after launch — terminating $INSTANCE and cancelling the run"
+            if [ "$picked" = false ] && [ "$(date +%s)" -gt "$deadline" ]; then
+              echo "::error title=Runner never picked up the leg::$leg) is still '$status' $((limit / 60)) min after launch — terminating $INSTANCE and cancelling the run"
               aws ec2 terminate-instances --instance-ids "$INSTANCE" >/dev/null 2>&1 || true
               gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/cancel" || true
               exit 1
             fi
             sleep 30
           done
+      # Anything failing before the watch (credentials, token, launch) would leave
+      # the leg queued for a runner that never comes: cancel the run instead.
+      - name: Cancel the run (no runner is coming)
+        if: failure() && steps.watch.outcome != 'failure'
+        run: gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/cancel" || true
       # Fresh credentials: the watch can outlive the first session.
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         if: always() && steps.reg.outputs.param != ''
@@ -490,9 +515,15 @@ jobs:
           INSTANCE: ${{ steps.launch.outputs.instance }}
         run: |
           aws ssm delete-parameter --name "$PARAM" 2>/dev/null || true
-          if [ -n "$INSTANCE" ]; then
-            aws ec2 terminate-instances --instance-ids "$INSTANCE" --query 'TerminatingInstances[0].CurrentState.Name' --output text || true
-          fi
+          # Every live instance this run launched for this leg, including one whose id was
+          # never written because the run was cancelled mid-launch.
+          ids=$(aws ec2 describe-instances --filters "Name=tag:launched-by,Values=$RUN_ID" \
+                  "Name=tag:runner-labels,Values=freemkv-media,$OS,run-$RUN_ID" \
+                  "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+                  --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || true)
+          for id in $INSTANCE $ids; do
+            aws ec2 terminate-instances --instance-ids "$id" --query 'TerminatingInstances[0].CurrentState.Name' --output text || true
+          done
 
   cli-matrix:
     # Not `needs: launch`: a failed leg fails its launch job too, so "Re-run failed
@@ -682,6 +713,7 @@ jobs:
         with:
           name: "fetch-report-${{ matrix.os }}"
           path: "fetch-${{ matrix.os }}.json"
+          overwrite: true
           if-no-files-found: ignore
       - name: Run the full CLI acceptance suite
         id: suite
@@ -741,16 +773,19 @@ jobs:
         with:
           name: "leg-${{ matrix.os }}"
           path: "leg-${{ matrix.os }}.json"
+          overwrite: true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: "cli-matrix-${{ matrix.os }}"
           path: "cli-${{ matrix.os }}.txt"
+          overwrite: true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: "cli-suite-log-${{ matrix.os }}"
           path: "suite-${{ matrix.os }}.log"
+          overwrite: true
 
   compare-cli-matrix:
     needs: [plan-media, cli-matrix]
@@ -828,9 +863,9 @@ jobs:
   # Writes the evidence: an annotated tag media-evidence/<F>/<run_id> on an
   # orphan commit holding evidence.json and the built Cargo.lock.
   record-media-evidence:
-    needs: [plan-media, cli-matrix, compare-cli-matrix]
+    needs: [plan-media, launch, cli-matrix, compare-cli-matrix]
     if: >-
-      always() && needs.plan-media.outputs.run == 'true'
+      always() && needs.plan-media.outputs.run == 'true' && needs.launch.result == 'success'
       && needs.cli-matrix.result == 'success' && needs.compare-cli-matrix.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -850,6 +885,8 @@ jobs:
         with: { name: media-plan, path: media-plan }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { pattern: 'leg-*', path: legs, merge-multiple: true }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { pattern: 'launch-*', path: legs, merge-multiple: true }
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
