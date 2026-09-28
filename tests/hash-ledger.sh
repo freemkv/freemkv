@@ -81,6 +81,32 @@ STAMP="${FMKV_STAMP:-unknown}"
 
 py() { python3 - "$LEDGER" "$STATE" "$@"; }
 
+# STATE is private per invocation (cli-integration.sh sets FMKV_LEDGER_STATE
+# under its own mktemp WORK dir), so only LEDGER -- committed, shared by every
+# run -- needs serializing. mkdir is atomic on every filesystem bash runs on
+# here (POSIX, and NTFS via git-bash), unlike `flock`, which isn't guaranteed
+# present on all three CI OSes. Runs in a subshell so the EXIT trap releases
+# the lock on any exit path (success, python3 failure, or a signal), not just
+# the happy path.
+with_ledger_lock() {
+  (
+    lockdir="${LEDGER}.lockdir"
+    trap 'rmdir "$lockdir" 2>/dev/null' EXIT
+    tries=0
+    until mkdir "$lockdir" 2>/dev/null; do
+      tries=$((tries + 1))
+      if [ "$tries" -ge 30 ]; then
+        echo "hash-ledger: stale lock $lockdir after 30s, stealing it" >&2
+        rmdir "$lockdir" 2>/dev/null || true
+        tries=0 # restart the wait for whoever holds it now, not an instant re-steal
+        continue
+      fi
+      sleep 1
+    done
+    "$@"
+  )
+}
+
 case "${1:-}" in
 check)
   key="${2:?key}"; file="${3:?file}"
@@ -106,7 +132,7 @@ json.dump(s,open(state,"w"),indent=2)
 EOF
     exit 1
   fi
-  py cmp "$key" "$h" "$VERSION" "$COMMIT" "$STAMP" <<'EOF'
+  with_ledger_lock py cmp "$key" "$h" "$VERSION" "$COMMIT" "$STAMP" <<'EOF'
 import json,sys,os
 ledger,state,_,key,h,version,commit,stamp=sys.argv[1:9]
 L=json.load(open(ledger)) if os.path.exists(ledger) else {"entries":{}}
@@ -146,7 +172,7 @@ accept)
   reason=""
   while [ $# -gt 0 ]; do case "$1" in --reason) reason="${2:-}"; shift 2;; *) shift;; esac; done
   [ -n "$reason" ] || { echo "hash-ledger: accept needs --reason \"why this changed\"" >&2; exit 2; }
-  py acc "$key" "$reason" "$VERSION" "$COMMIT" "$STAMP" <<'EOF'
+  with_ledger_lock py acc "$key" "$reason" "$VERSION" "$COMMIT" "$STAMP" <<'EOF'
 import json,sys,os
 ledger,state,_,key,reason,version,commit,stamp=sys.argv[1:9]
 S=json.load(open(state)) if os.path.exists(state) else {"changed":[]}
