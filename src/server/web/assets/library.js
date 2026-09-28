@@ -9,9 +9,9 @@ import { muxedHtml, auditState, openDetails, outdated, videoLabel, issueText } f
 
 const FILTERS = [
   ['all', 'All'],
-  ['issues', 'Issues'],
+  ['issues', 'Problems'],
   ['outdated', 'Out of date'],
-  ['pending', 'Not audited'],
+  ['pending', 'Not checked'],
 ];
 
 /** The status dot, with what it means in its tooltip. */
@@ -63,7 +63,7 @@ export default {
           <div class="menu"><button class="icon-btn" id="more" aria-label="More actions">${ICON.more}</button>
             <div class="menu-list" id="more-list" hidden>
               <button data-a="rescan">Rescan the folders now</button>
-              <button data-a="reaudit">Re-audit every file</button>
+              <button data-a="reaudit">Check every file again</button>
             </div></div>
         </div>
       </div>
@@ -74,8 +74,8 @@ export default {
           <button class="icon-btn legend-btn" id="legend-btn" aria-label="What the status dots mean" aria-expanded="false">i</button>
           <div class="legend" id="legend">
             <span><span class="sdot dot-ok tick">✓</span> checks out</span>
-            <span><span class="sdot dot-warn"></span> pending or a note</span>
-            <span><span class="sdot dot-bad"></span> issue</span>
+            <span><span class="sdot dot-warn"></span> not checked yet, or a note</span>
+            <span><span class="sdot dot-bad"></span> problem</span>
           </div>
           <div class="sort" id="sort"></div>
           <span class="upd" id="upd"></span>
@@ -83,7 +83,7 @@ export default {
         </div>
         <div id="list"></div>
       </div>
-      <p class="foot-note">The audit is the fast structural pass: EBML header, tracks, declared duration, and the seek index agreeing with it. It never reads the video itself. Click a title for its full track list, findings and files.</p>`;
+      <p class="foot-note">The check reads each file's structure (tracks, length and index), not the picture itself. Click a title for its tracks and details.</p>`;
     const chips = chipFilter($('#stats', view), { store: 'libFilter', onChange: () => paint() });
     let q = '';
     let last = null;
@@ -121,7 +121,7 @@ export default {
         }
       } else if (b.dataset.a === 'reaudit') {
         const r = await act(null, () => api('POST', '/api/library/reaudit', { all: true }), 'Re-audit');
-        if (r) { toast('Re-auditing ' + plural(r.requeued, 'file'), 'info'); refreshNow(); }
+        if (r) { toast('Checking ' + plural(r.requeued, 'file') + ' again', 'info'); refreshNow(); }
       }
     });
     $('#legend-btn', view).addEventListener('click', (e) => {
@@ -148,7 +148,7 @@ export default {
       chips.update(FILTERS.map(([f, label]) => ({
         id: f, label, count: count[f],
         tone: f === 'issues' ? 'bad' : f === 'outdated' ? 'warn' : '',
-        tip: f === 'outdated' ? 'MKVs not muxed by this freemkv. Remux is where they get fixed.' : '',
+        tip: f === 'outdated' ? 'Files made by an older version or another program. The Remux page rebuilds them.' : '',
       })));
       const filter = chips.selected();
       const empty = d.scanning ? 'Scanning the library…'

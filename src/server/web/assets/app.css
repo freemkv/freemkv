@@ -242,6 +242,9 @@ table.list tr.grey td.title b { font-weight: 500; }
 .settings-nav { position: sticky; top: 5rem; display: flex; flex-direction: column; gap: 0.15rem; }
 .settings-nav a { color: var(--slate); font-size: 0.9rem; font-weight: 550; padding: 0.35rem 0.75rem; border-radius: 8px; }
 .settings-nav a:hover { background: var(--card); color: var(--teal-dark); }
+.settings-nav a.on { background: var(--card); color: var(--teal-dark); box-shadow: inset 2px 0 0 var(--teal); }
+/* A section jumped to lands whole, heading included, below the sticky header. */
+#form > section.card { scroll-margin-top: calc(var(--nav-h, 61px) + 16px); }
 .field { padding: 0.95rem 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(10rem, 16rem) 1fr; gap: 0.4rem 1.5rem; }
 .card .field:first-of-type { border-top: 0; padding-top: 0.2rem; }
 .field > label, .field > .lbl { font-weight: 600; font-size: 0.9rem; padding-top: 0.4rem; }
@@ -259,6 +262,7 @@ input.txt.bad { border-color: var(--bad); }
 .seg label:first-child span { border-left: 0; }
 .seg input:checked + span { background: var(--teal); color: #fff; }
 .seg input:focus-visible + span { outline: 2px solid var(--teal); outline-offset: -2px; }
+.opt-help { margin-top: 0.4rem; font-size: 0.84rem; color: var(--slate); }
 .switch { display: inline-flex; align-items: center; gap: 0.6rem; cursor: pointer; font-size: 0.88rem; padding-top: 0.35rem; }
 .switch input { appearance: none; width: 2.4rem; height: 1.35rem; border-radius: 99px; background: var(--line-strong); position: relative; cursor: pointer; transition: background 0.15s; flex: none; margin: 0; }
 .switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: calc(1.35rem - 4px); height: calc(1.35rem - 4px); border-radius: 50%; background: #fff; transition: transform 0.15s; box-shadow: 0 1px 2px rgba(0,0,0,.25); }

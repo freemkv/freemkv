@@ -5223,13 +5223,11 @@ mod web_tests {
             let (code, body) = roundtrip(&cfg, "POST", "/api/settings", Some(&patch), &[]);
             assert_eq!(code, 200, "a valid multi-field patch must succeed: {body}");
             let c = cfg.read().unwrap();
-            assert!(c.auto_eject && c.main_feature && c.capture_without_keys && c.keep_iso);
+            assert!(c.auto_eject && c.capture_without_keys && c.keep_iso);
+            // File-only settings are not set by a save (the form never offers them).
+            assert_eq!(c.main_feature, Config::default().main_feature);
+            assert_eq!(c.min_length_secs, Config::default().min_length_secs);
             assert_eq!(c.max_retries, 10, "max_retries clamps to 10");
-            assert_eq!(
-                c.min_length_secs,
-                30 * 24 * 3600,
-                "min_length_secs clamps to MAX_DURATION_SECS (30 days)"
-            );
             assert_eq!(c.decrypt_threads, 256, "decrypt_threads clamps to 256");
             assert_eq!(
                 c.log_retention_days, 3650,

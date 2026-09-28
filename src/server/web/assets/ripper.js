@@ -54,7 +54,7 @@ function stateLabel(s) {
   if (s.status === 'detecting') return 'Detecting';
   if (s.status === 'error') return 'Error';
   if (s.status === 'done') return 'Done';
-  if (s.status === 'moving') return 'Handed off';
+  if (s.status === 'moving') return 'Finishing up';
   if (!discIn(s)) return 'No disc';
   if (!(s.tmdb_title || s.disc_name)) return 'Disc inserted';
   return 'Ready';
@@ -71,7 +71,7 @@ function dotClass(s) {
 function discHtml(s) {
   const title = s.tmdb_title || s.disc_name;
   if (!discIn(s)) return '<div class="drive-idle">' + ICON.disc + 'No disc</div>';
-  if (!title) return '<div class="drive-idle">' + ICON.disc + 'Disc detected' + (s.status === 'idle' ? ' · scan it to see what it is' : '') + '</div>';
+  if (!title) return '<div class="drive-idle">' + ICON.disc + 'Disc inserted' + (s.status === 'idle' ? ' · press Scan to see what it is' : '') + '</div>';
   const poster = s.tmdb_poster ? '<img class="poster" src="' + esc(s.tmdb_poster) + '" alt="">' : '<div class="poster">' + ICON.disc + '</div>';
   const fmt = s.disc_format && s.disc_format !== 'unknown' ? '<span class="badge fmt-' + esc(s.disc_format) + '">' + esc(s.disc_format.toUpperCase()) + '</span>' : '';
   const ks = s.key_status || '';
@@ -89,7 +89,7 @@ function stepsHtml(s) {
   const st = s.status;
   const steps = st === 'scanning' ? ['now', '', ''] : st === 'ripping' ? ['done', 'now', ''] : (st === 'moving' || st === 'done') ? ['done', 'done', 'done'] : null;
   if (!steps) return '';
-  const names = ['Scan', 'Rip', 'Hand off'];
+  const names = ['Read', 'Rip', 'Finish'];
   return '<div class="steps">' + names.map((n, i) => '<span class="s ' + steps[i] + '">' + (steps[i] === 'done' ? '✓' : steps[i] === 'now' ? '●' : '○') + ' ' + n + '</span>').join('<span class="sep">›</span>') + '</div>';
 }
 
@@ -136,12 +136,12 @@ function ripFigures(s) {
   const figs = ['<b>' + pct + '%</b>'];
   if (s.pass_eta) figs.push('ETA ' + esc(s.pass_eta));
   if (s.speed_mbs != null) figs.push(fmtSpeed(s.speed_mbs));
-  const left = rem > 0 ? '<div class="small" style="width:100%;color:var(--slate)">' + (nSec ? plural(nSec, 'section') + ' · ' : '') + Math.round(rem / 2048).toLocaleString() + ' sectors (' + fmtBytes(rem) + ') remaining</div>' : '';
+  const left = rem > 0 ? '<div class="small" style="width:100%;color:var(--slate)">' + (nSec ? plural(nSec, 'damaged area') + ' · ' : '') + fmtBytes(rem) + ' still to read</div>' : '';
   const pills = [];
-  if (s.bytes_good > 0) pills.push('<span class="badge badge-ok">Good ' + fmtBytes(s.bytes_good) + '</span>');
+  if (s.bytes_good > 0) pills.push('<span class="badge badge-ok">Read ' + fmtBytes(s.bytes_good) + '</span>');
   if (rem > 0) {
     const risk = s.main_at_risk_ms > 0 ? '~' + fmtMs(s.main_at_risk_ms) : '0:00';
-    pills.push('<span class="badge badge-warn" title="Not yet read cleanly. The time is how much of the main movie it touches">Maybe ' + fmtBytes(rem) + ' · ' + risk + '</span>');
+    pills.push('<span class="badge badge-warn" title="Not read cleanly yet; the time is how much of the movie it affects">Not read yet ' + fmtBytes(rem) + ' · ' + risk + ' of the movie</span>');
   }
   return { figs: figs.join('<span class="muted"> · </span>') + left, pills: pills.join(' ') };
 }
@@ -152,7 +152,7 @@ function bannersHtml(s) {
     h += '<div class="banner bad">⚠ <span>' + escLinks(s.last_error) + '</span></div>';
   }
   if (s.status === 'ripping' && s.current_batch > 0 && s.preferred_batch > 0 && s.current_batch < s.preferred_batch) {
-    h += '<div class="banner info">↺ Recovering · batch ' + s.current_batch + ' / ' + s.preferred_batch + (s.last_sector > 0 ? ' · LBA ' + s.last_sector.toLocaleString() : '') + '</div>';
+    h += '<div class="banner info">↺ Reading a damaged area slowly (' + s.current_batch + ' / ' + s.preferred_batch + ' sectors at a time)</div>';
   }
   return h;
 }
@@ -278,7 +278,7 @@ function muxHtml(state, sys) {
     h += barRow(mx.disc_name, [mx.progress_pct + '%', mx.speed_mbs > 0 ? fmtSpeed(mx.speed_mbs) : '', mx.eta ? mx.eta + ' remaining' : ''].filter(Boolean).join(' · '), mx.progress_pct);
   }
   h += queueRows(state._mux_queue != null ? state._mux_queue : sys.mux_queue);
-  if (!h) h = '<div class="muted small">Nothing muxing.</div>';
+  if (!h) h = '<div class="muted small">Nothing waiting.</div>';
   return h + errorRows(sys.mux_errors, 'mux');
 }
 function moveHtml(state, sys) {
@@ -286,7 +286,7 @@ function moveHtml(state, sys) {
   let h = moves.filter(m => m && m.name).map(m => barRow(m.name + (m.artifact ? ' (' + m.artifact + ')' : ''),
     [m.progress_pct + '%', m.speed_mbs > 0 ? fmtSpeed(m.speed_mbs) : '', m.eta ? m.eta + ' remaining' : ''].filter(Boolean).join(' · '), m.progress_pct)).join('');
   h += queueRows(state._move_queue != null ? state._move_queue : sys.move_queue);
-  if (!h) h = '<div class="muted small">Nothing moving.</div>';
+  if (!h) h = '<div class="muted small">Nothing waiting.</div>';
   return h + errorRows(sys.move_errors, 'move');
 }
 function reviewHtml(items) {
@@ -351,9 +351,9 @@ function changeTitle(dev, s) {
   titlePicker({
     heading: 'Title for the disc in ' + dev,
     initial: s.tmdb_title || s.disc_name,
-    sub: 'Correct the match before ripping. A TMDB pick or a typed name (a trailing "(YYYY)" is the year) is used for this rip only.',
+    sub: 'Fix the name before ripping. Pick a TMDB match or type a name; "(YYYY)" at the end is the year. It applies to this rip only.',
     onPick: async (c, btn) => {
-      const r = await act(btn, () => api('POST', '/api/title/' + dev, c), 'Change title');
+      const r = await act(btn, () => api('POST', '/api/title/' + dev, { ...c, year: c.year || 0 }), 'Change title');
       if (r === undefined) return false;
       toast('The disc in ' + dev + ' will be filed as ' + c.title + (c.year ? ' (' + c.year + ')' : ''), 'ok');
       return true;
@@ -363,15 +363,15 @@ function changeTitle(dev, s) {
 
 function reviewDialog(it, reload) {
   titlePicker({
-    heading: 'Held for review: ' + (it.title || it.dir) + (it.year ? ' (' + it.year + ')' : ''),
+    heading: 'Which title is this? ' + (it.title || it.dir) + (it.year ? ' (' + it.year + ')' : ''),
     initial: it.title || '',
     sub: esc(it.reason || '') + (it.file ? '<br><span class="mono">' + esc(it.file) + '</span>' : ''),
-    extraFoot: '<button class="btn btn-ghost btn-sm" id="rv-cancel">Discard this rip</button><button class="btn btn-secondary btn-sm" id="rv-proceed">File as-is</button>',
-    onPick: async (c, btn) => resolve(btn, { action: 'retitle', title: c.title, year: c.year || it.year || 0 }),
+    extraFoot: '<button class="btn btn-ghost btn-sm" id="rv-cancel">Delete this rip</button><button class="btn btn-secondary btn-sm" id="rv-proceed">Keep this name</button>',
+    onPick: async (c, btn) => resolve(btn, { action: 'retitle', title: c.title, year: c.year || 0 }),
     onExtra: (m) => {
       m.el.querySelector('#rv-proceed').onclick = async (e) => { if (await resolve(e.currentTarget, { action: 'proceed' })) m.close(); };
       const cb = m.el.querySelector('#rv-cancel');
-      cb.onclick = (e) => twoStep(e.currentTarget, async (b) => { if (await resolve(b, { action: 'cancel' })) m.close(); }, 'Confirm discard');
+      cb.onclick = (e) => twoStep(e.currentTarget, async (b) => { if (await resolve(b, { action: 'cancel' })) m.close(); }, 'Confirm delete');
       void cb;
     },
   });
@@ -466,11 +466,11 @@ export default {
       <div class="drives" id="drives"></div>
       <h2 style="margin:2.25rem 0 1rem;font-size:1.15rem;letter-spacing:-.01em">After the rip</h2>
       <div class="grid grid-2">
-        <section class="card"><div class="card-head"><h2>Mux queue</h2></div><div id="mux"></div></section>
-        <section class="card"><div class="card-head"><h2>Move queue</h2></div><div id="move"></div></section>
+        <section class="card"><div class="card-head"><h2>Making video files</h2></div><div id="mux"></div></section>
+        <section class="card"><div class="card-head"><h2>Moving to your library</h2></div><div id="move"></div></section>
       </div>
-      <section class="card" id="review-card" style="margin-top:1.25rem" hidden><div class="card-head"><h2>Held for review <span class="count" id="review-n"></span></h2></div>
-        <p class="small muted" style="margin:-.4rem 0 .6rem">These rips finished but their title was not certain enough to file on their own.</p><div id="review"></div></section></div>`;
+      <section class="card" id="review-card" style="margin-top:1.25rem" hidden><div class="card-head"><h2>Waiting for a title <span class="count" id="review-n"></span></h2></div>
+        <p class="small muted" style="margin:-.4rem 0 .6rem">These rips are done, but the movie's name wasn't certain. Pick the right one to file them.</p><div id="review"></div></section></div>`;
     const root = $('#rp', view);
     const cards = new Map();
     let state = {};
@@ -484,10 +484,10 @@ export default {
       const devs = Object.keys(state).filter(k => !k.startsWith('_')).sort();
       put($('#lede', view), devs.length
         ? plural(devs.length, 'drive') + ' · ' + devs.filter(d => ACTIVE.includes(state[d].status)).length + ' busy'
-        : 'No drives detected. A drive shows up here a minute after it is connected.');
+        : 'No drives found. A drive appears here about a minute after it is plugged in.');
       for (const [dev, el] of cards) if (!devs.includes(dev)) { el.remove(); cards.delete(dev); }
       const emptyEl = drivesEl.querySelector(':scope > .empty');
-      if (!devs.length && !emptyEl) drivesEl.insertAdjacentHTML('beforeend', '<div class="card empty" style="grid-column:1/-1">' + ICON.disc + 'No drives detected</div>');
+      if (!devs.length && !emptyEl) drivesEl.insertAdjacentHTML('beforeend', '<div class="card empty" style="grid-column:1/-1">' + ICON.disc + 'No drives found</div>');
       if (devs.length && emptyEl) emptyEl.remove();
       devs.forEach((dev, i) => {
         let el = cards.get(dev);
@@ -535,7 +535,7 @@ export default {
       if (c) {
         const kind = c.dataset.clear;
         if (await act(c, () => api('POST', '/api/' + kind + '-errors/clear?path=' + encodeURIComponent(c.dataset.path)), 'Clear') !== undefined) {
-          toast('Cleared. It comes back if it is still stuck.', 'info');
+          toast('Cleared. It comes back if the problem is still there.', 'info');
         }
         loadSys();
         return;

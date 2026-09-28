@@ -86,7 +86,7 @@ export default {
               <button data-a="clear">Clear finished…</button>
               <button data-a="rescan">Rescan the folders now</button>
               <hr>
-              <label title="Also log the engine's debug lines for each remux (shown in its log)"><input type="checkbox" id="debug"> Debug log</label>
+              <label title="Write extra detail into each remux's log, for bug reports"><input type="checkbox" id="debug"> Detailed logs</label>
             </div></div>
         </div>
       </div>
@@ -106,7 +106,7 @@ export default {
         </div>
         <div id="tbl"></div>
       </div>
-      <p class="foot-note">A remux re-muxes the main title from its ISO with this freemkv and only replaces the MKV once the new one verifies (or creates it when missing). Titles that match several ISOs are greyed and never touched. One title at a time; a rip always takes priority.</p>`;
+      <p class="foot-note">Remux rebuilds a movie file from its disc copy (ISO) with this version of freemkv, and only replaces the old file once the new one checks out. One at a time; rips always go first. Titles that match several disc copies are greyed out and left alone.</p>`;
     let last = null, q = '';
     const chips = chipFilter($('#stats', view), { store: 'remuxFilter', onChange: () => paint() });
     $('#tbl', view).classList.add('wrap-m');
@@ -300,7 +300,7 @@ export default {
         put($('#now-s', view), esc(liveText(live)) + (queued ? ' · ' + queued + ' more queued' : ''));
       } else {
         put($('#now-t', view), 'Waiting to start');
-        put($('#now-s', view), plural(queued, 'title') + ' queued' + ' · a rip has priority');
+        put($('#now-s', view), plural(queued, 'title') + ' queued · starts when no rip needs the drive');
       }
       $('#now-barbox', view).hidden = !live;
       if (live) fill($('#now-bar', view), live.pct);

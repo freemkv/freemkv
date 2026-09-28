@@ -32,12 +32,12 @@ export function muxedHtml(r, plain = false) {
 }
 
 const ISSUE_TEXT = {
-  not_mkv: 'Not a Matroska file',
-  unreadable: 'The header could not be read',
+  not_mkv: 'Not an MKV file',
+  unreadable: "The file's header can't be read",
   no_video: 'No video track',
-  no_duration: 'No declared duration',
-  no_cues: 'No seek index (Cues): the runtime is taken from the header',
-  runtime_mismatch: 'The content ends before its declared length (truncated?)',
+  no_duration: "The file doesn't say how long it is",
+  no_cues: 'No index for skipping through the video',
+  runtime_mismatch: 'The video stops before the length the file claims (cut short?)',
 };
 
 export function issueText(i) {
@@ -51,10 +51,10 @@ export function issueText(i) {
 export function auditState(r) {
   if (!r.mkv) return ['dot-idle', '', 'No MKV', 9];
   const a = r.audit;
-  if (!a) return ['dot-warn', '●', 'Waiting for the audit', 3];
+  if (!a) return ['dot-warn', '●', 'Not checked yet', 3];
   if (!a.ok) return ['dot-bad', '●', a.issues.map(issueText).join('; '), 5];
   if (a.issues.length) return ['dot-warn', '●', a.issues.map(issueText).join('; '), 2];
-  return ['dot-ok', '✓', 'Structure checks out: header, tracks, duration and index agree', 0];
+  return ['dot-ok', '✓', 'Checks out', 0];
 }
 
 export function auditHtml(r) {
@@ -76,14 +76,14 @@ export function openDetails(r, ctx = {}) {
   const a = r.audit;
   const [cls] = auditState(r);
   const verdict = !r.mkv ? '<span class="badge badge-muted">no MKV</span>'
-    : !a ? '<span class="badge badge-warn">audit pending</span>'
+    : !a ? '<span class="badge badge-warn">not checked yet</span>'
     : cls === 'dot-bad' ? '<span class="badge badge-bad">issue</span>'
     : cls === 'dot-warn' ? '<span class="badge badge-warn">checks out, with a note</span>'
-    : '<span class="badge badge-ok">✓ structure checks out</span>';
+    : '<span class="badge badge-ok">✓ checks out</span>';
   let body = '<div class="chips" style="margin-bottom:1rem">' + verdict
     + (a && a.duration_secs ? ' <span class="badge badge-muted">' + runtime(a.duration_secs) + '</span>' : '')
     + (r.size_bytes ? ' <span class="badge badge-muted">' + bytes(r.size_bytes) + '</span>' : '')
-    + (r.muxed_with && (r.muxed_with.state === 'older' || r.muxed_with.state === 'other') ? ' <span class="badge badge-warn">muxed with an older writer</span>' : '')
+    + (r.muxed_with && (r.muxed_with.state === 'older' || r.muxed_with.state === 'other') ? ' <span class="badge badge-warn">made by an older version or another program</span>' : '')
     + '</div>';
   if (a && a.issues.length) {
     body += '<h3>Findings</h3>' + a.issues.map(i => '<div class="issue"><span class="dot ' + (i.kind === 'no_cues' ? 'dot-warn' : 'dot-bad') + '"></span>' + esc(issueText(i)) + '</div>').join('');
@@ -93,7 +93,7 @@ export function openDetails(r, ctx = {}) {
   }
   body += '<h3>Files</h3><dl class="kv">'
     + (r.mkv ? '<dt>MKV</dt><dd class="mono">' + esc(r.mkv) + '</dd>' : '')
-    + (r.mkv ? '<dt>Muxed with</dt><dd>' + esc(r.writing_app || 'no stamp') + '</dd>' : '')
+    + (r.mkv ? '<dt>Made with</dt><dd>' + esc(r.writing_app || 'not recorded') + '</dd>' : '')
     + (r.modified ? '<dt>Modified</dt><dd>' + esc(when(r.modified)) + '</dd>' : '')
     + '<dt>Source ISO</dt><dd class="mono">' + (r.iso ? esc(r.iso) + (r.linked ? ' <span class="badge badge-teal" title="Recorded when this app ripped it">linked</span>' : '') : '<span class="muted">' + esc(noteText(r)) + '</span>') + '</dd>'
     + (r.target && !r.mkv ? '<dt>Remux creates</dt><dd class="mono">' + esc(r.target) + '</dd>' : '')
