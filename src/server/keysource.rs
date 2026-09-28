@@ -220,7 +220,7 @@ pub fn open_staged_image(
     cfg: &Config,
     iso: &Path,
     vid: Option<[u8; 16]>,
-    banked: Option<&libfreemkv::AacsState>,
+    banked: Option<libfreemkv::AacsState>,
 ) -> Result<freemkv_engine::OpenedImage, libfreemkv::Error> {
     let src = freemkv_engine::ImageSource::Iso(iso.to_path_buf());
     let params = key_params(cfg);
@@ -234,23 +234,10 @@ pub fn open_staged_image(
     if let Some(drive) = banked {
         match disc.aacs.as_mut() {
             Some(a) => {
-                a.unit_keys = drive.unit_keys.clone();
+                a.unit_keys = drive.unit_keys;
                 a.volume_id = drive.volume_id;
             }
-            None => {
-                disc.aacs = Some(libfreemkv::AacsState {
-                    version: drive.version,
-                    bus_encryption: drive.bus_encryption,
-                    mkb_version: drive.mkb_version,
-                    disc_hash: drive.disc_hash.clone(),
-                    key_source: drive.key_source,
-                    vuk: drive.vuk,
-                    unit_keys: drive.unit_keys.clone(),
-                    volume_id: drive.volume_id,
-                    uk_ro: drive.uk_ro.clone(),
-                    mkb: drive.mkb.clone(),
-                })
-            }
+            None => disc.aacs = Some(drive),
         }
         let key_fetch = disc.inputs().map(|inputs| {
             libfreemkv::keysource::key_fetch(inputs, freemkv_engine::key_source_factory(&params))
@@ -1128,18 +1115,13 @@ mod tests {
     // state — outcome tests use only no-key/erroring sources.
     fn keyless_encrypted_disc_with_aacs() -> libfreemkv::Disc {
         let mut disc = keyless_encrypted_disc();
-        disc.aacs = Some(libfreemkv::disc::AacsState {
-            version: libfreemkv::aacs::mkb::AACS_MAJOR_UHD,
-            bus_encryption: false,
-            mkb_version: None,
-            disc_hash: "0xabc".into(),
-            key_source: libfreemkv::disc::KeyOrigin::KeyDb,
-            vuk: None,
-            unit_keys: Vec::new(),
-            volume_id: [0u8; 16],
-            uk_ro: Vec::new(),
-            mkb: Vec::new(),
-        });
+        disc.aacs = Some(
+            libfreemkv::test_util::aacs_state()
+                .version(libfreemkv::aacs::mkb::AACS_MAJOR_UHD)
+                .disc_hash("0xabc")
+                .key_source(libfreemkv::disc::KeyOrigin::KeyDb)
+                .build(),
+        );
         disc
     }
 

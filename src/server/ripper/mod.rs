@@ -4740,7 +4740,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 &cfg_read,
                 std::path::Path::new(&iso_path_str),
                 None,
-                disc.aacs.as_ref(),
+                disc.aacs.take(),
             ) {
                 Ok(image) => {
                     crate::server::log::device_log(

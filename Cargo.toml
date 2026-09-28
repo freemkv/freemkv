@@ -92,9 +92,6 @@ mimalloc = "0.1"
 tiny_http = { version = "0.12", optional = true }
 once_cell = { version = "1", optional = true }
 
-[dev-dependencies]
-tempfile = "3"
-
 # ── Windows desktop shell ───────────────────────────────────────────────────
 # `winsafe` is idiomatic safe Win32 with ZERO dependencies — it owns the message
 # loop, window classes and control lifetimes, and asks the OS to draw every
@@ -162,6 +159,7 @@ block2 = { version = "=0.6", optional = true }
 # `test_util` fixtures (`aacs_state`, …) for this crate's tests (keys-upfront
 # KU-P1). CI resolves it through the sibling path patch.
 libfreemkv = { version = "1.7", features = ["test-util"] }
+tempfile = "3"
 
 # Resolve the freemkv crates from their GIT TAGS. They are OFF crates.io
 # (libfreemkv git-deps the firmware crate, and keysources deps libfreemkv), so
