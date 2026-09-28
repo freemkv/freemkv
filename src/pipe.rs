@@ -2077,6 +2077,11 @@ fn url_path_of(url: &libfreemkv::StreamUrl) -> Option<std::path::PathBuf> {
         // No filesystem path to compare: a live drive, a socket, stdio, the
         // bit bucket, and a URL we could not parse at all (rejected earlier).
         U::Disc { .. } | U::Network { .. } | U::Stdio | U::Null | U::Unknown { .. } => None,
+        // A file scheme libfreemkv adds before this match names it (`mpg://`): its path.
+        #[allow(unreachable_patterns)]
+        other => {
+            Some(std::path::PathBuf::from(other.path_str())).filter(|p| !p.as_os_str().is_empty())
+        }
     }
 }
 
@@ -6213,6 +6218,19 @@ mod dest_is_source_tests {
             assert!(
                 url_path_of(&libfreemkv::parse_url(url)).is_none(),
                 "{url} has no path to compare"
+            );
+        }
+    }
+
+    /// A file scheme libfreemkv declares ahead of this match (`mpg://`, mpg-output-design v5
+    /// L2) still names its path, so the same-file guard sees it on both sides.
+    #[test]
+    fn a_newly_declared_file_scheme_yields_its_path() {
+        let url = libfreemkv::parse_url("mpg:///m/Movie.mpg");
+        if url.scheme() == "mpg" {
+            assert_eq!(
+                url_path_of(&url),
+                Some(std::path::PathBuf::from("/m/Movie.mpg"))
             );
         }
     }
