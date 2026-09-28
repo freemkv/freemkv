@@ -1274,6 +1274,17 @@ pub fn bar_caption(pct: f64, elapsed_secs: u64, eta_secs: Option<u64>) -> String
     }
 }
 
+/// The saving captions once Stop is pressed (stop design v5 §3.2 (A), ST-I2's strings):
+/// "Finishing …" when every title is already written, so the run ends Done; else
+/// "Stopping …". `None` while no Stop is pending.
+pub fn stop_caption(stopping: bool, titles_done: usize, run_titles: usize) -> Option<String> {
+    match (stopping, titles_done >= run_titles.max(1)) {
+        (false, _) => None,
+        (true, true) => Some(crate::strings::get_or("stop.finishing", "Finishing …")),
+        (true, false) => Some(crate::strings::get_or("stop.stopping", "Stopping …")),
+    }
+}
+
 /// The container word for a chosen output format ("MKV" / "MP4" / "ISO" /
 /// "chapter" / …), for the progress caption "Saving to {container} file".
 ///
@@ -2834,6 +2845,10 @@ impl App {
             .as_ref()
             .map(|st| st.titles_done.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
+        let stopping = self
+            .run
+            .as_ref()
+            .is_some_and(|st| st.cancel.load(Ordering::Relaxed));
         View {
             page: self.page,
             title_rows: self.rows(),
@@ -2850,13 +2865,21 @@ impl App {
                 None,
             ),
             show_overall_bar: self.run_titles > 1,
-            saving_current: crate::strings::fmt(
-                "gui.progress.saving_current",
-                &[("container", container_label(&self.effective_format()))],
+            saving_current: stop_caption(stopping, titles_done, self.run_titles).unwrap_or_else(
+                || {
+                    crate::strings::fmt(
+                        "gui.progress.saving_current",
+                        &[("container", container_label(&self.effective_format()))],
+                    )
+                },
             ),
-            saving_overall: crate::strings::fmt(
-                "gui.progress.saving_overall",
-                &[("container", container_label(&self.effective_format()))],
+            saving_overall: stop_caption(stopping, titles_done, self.run_titles).unwrap_or_else(
+                || {
+                    crate::strings::fmt(
+                        "gui.progress.saving_overall",
+                        &[("container", container_label(&self.effective_format()))],
+                    )
+                },
             ),
             output_dir: self.output_dir.clone(),
             format: self.effective_format(),

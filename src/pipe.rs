@@ -2113,8 +2113,14 @@ fn hold_iso_lock(
 /// What an interrupted disc→ISO copy prints. §2.5: the image and its lock are "Kept after
 /// Stop … where it guards the resumable artifact", so a rerun resumes.
 fn interrupted_text(iso: &std::path::Path) -> String {
-    let _ = iso;
-    strings::get("rip.interrupted")
+    let stopped = strings::get("rip.interrupted");
+    match iso.exists() {
+        true => format!(
+            "{stopped}\n{}",
+            strings::get_or("stop.progress_kept", "Progress kept")
+        ),
+        false => stopped,
+    }
 }
 
 /// The process exit code: 0 on a complete copy, `DISC_COPY_DAMAGED_EXIT` on a copy that is

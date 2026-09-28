@@ -2200,6 +2200,14 @@ fn release_iso_lock(
 ) {
     let cancelled = state.cancel.load(Ordering::SeqCst);
     let done = (res.is_ok() && !cancelled) || !iso.exists();
+    if cancelled && !done {
+        let kept = crate::strings::get_or("stop.progress_kept", "Progress kept");
+        state
+            .lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(kept);
+    }
     crate::artifact_lock::release(lock, done);
 }
 
