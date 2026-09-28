@@ -452,6 +452,13 @@ fn the_structural_guard_skips_comments_and_test_strings() {
         assert!(banned_uses(s, false).is_empty(), "matched: {s}");
     }
     assert!(banned_uses(&format!("const B: &str = \"{fetch}\";"), true).is_empty());
+    // M5: production-only bans; a test's own helpers may still take a `unit_keys:` param.
+    let fields = ["unit", "_keys: vec![]"].concat();
+    let prod = format!("fn f() {{ let o = O {{ {fields} }}; }}");
+    assert_eq!(banned_uses(&prod, false).len(), 1, "{prod}");
+    assert!(banned_uses(&prod, true).is_empty(), "a test may: {prod}");
+    let reason = ["resolve_keys", "_with_reason("].concat();
+    assert_eq!(banned_uses(&format!("fn f() {{ d.{reason}r); }}"), false).len(), 1);
     let unit = ["decrypt", "_unit"].concat();
     let helper =
         format!("use libfreemkv::test_util::{{BdFile, {unit}}};\nfn t() {{ {unit}(&mut u, &k); }}");
