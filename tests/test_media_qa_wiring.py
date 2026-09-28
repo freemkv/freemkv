@@ -82,14 +82,14 @@ class StructureTests(unittest.TestCase):
         self.assertIn('{Name: "tag:runner-labels", Values: [$l]}', teardown['run'])
         self.assertNotRegex(teardown['run'], r'Name=tag:runner-labels,Values=[^"]', 'shorthand splits the value on commas')
         launch_run = next(s for s in launch['steps'] if s.get('name') == 'Launch the ephemeral runner')['run']
-        self.assertIn('run-" + $id', launch_run)
+        self.assertIn('{Key: "runner-labels", Value: $l}', launch_run)
         self.assertIn('launched-by', launch_run)
         self.assertIn('--user-data "file://$userdata"', launch_run)
         self.assertIn('Version=$version', launch_run)
 
     def test_launch_attests_and_leg_uploads_survive_reruns(self):
         launch_run = next(s for s in self.jobs['launch']['steps'] if s.get('name') == 'Launch the ephemeral runner')['run']
-        self.assertIn('launch-$OS-$ATTEMPT.json', launch_run)
+        self.assertIn('launch-$LEG-$ATTEMPT.json', launch_run)
         for job in ('launch', 'cli-matrix'):
             for step in self.jobs[job]['steps']:
                 if 'upload-artifact' in step.get('uses', ''):
@@ -157,9 +157,147 @@ class StructureTests(unittest.TestCase):
         self.assertIn("trap 'shutdown -h now' EXIT", linux)
         self.assertIn('tags/instance/runner-labels', windows)
         self.assertIn('--labels $labels', windows)
-        self.assertIn('ephemeral-windows-$iid', windows)
+        self.assertIn('ephemeral-windows$kind-$iid', windows)
+        self.assertIn('ephemeral-linux$KIND-$IID', linux)
         self.assertIn('finally', windows)
         self.assertRegex('ephemeral-windows-i-0123456789abcdef0', POLICY['runner_name_re'])
+
+
+class LaunchWiringTests(unittest.TestCase):
+    """No manual AWS step: perf legs, the Spot cap and the token parameter all live in the launch job."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.jobs = load()['jobs']
+        except ImportError:
+            raise unittest.SkipTest('PyYAML is not installed')
+        cls.launch = cls.jobs['launch']
+        cls.text = '\n'.join(s.get('run', '') for s in cls.launch['steps'])
+
+    def step(self, name):
+        return next(s for s in self.launch['steps'] if s.get('name') == name)
+
+    def test_legs_come_from_the_plan(self):
+        self.assertIn('needs.plan-media.outputs.legs', self.launch['strategy']['matrix']['leg'])
+        self.assertEqual(self.jobs['plan-media']['outputs']['legs'], '${{ steps.plan.outputs.legs }}')
+
+    def test_everything_run_instances_gets_comes_from_the_spec(self):
+        self.assertIn('media_gate.py launch-spec --leg "$LEG"', self.step('Launch spec')['run'])
+        run = self.step('Launch the ephemeral runner')['run']
+        for want in ('--instance-market-options "$options"', '--block-device-mappings "$bdm"',
+                     "jq -c '.markets[]'", '--instance-type "$t"'):
+            self.assertIn(want, run)
+        self.assertNotIn("MarketType=spot", run, 'the market (and its price cap) comes from the policy')
+        self.assertNotRegex(run, r'c[67]i\.4xlarge', 'instance types come from the policy')
+        self.assertNotRegex(self.text, r'freemkv-runner-[a-z]+-perf', 'no separate perf launch templates')
+
+    def test_no_per_run_token_parameter_and_no_delete(self):
+        self.assertNotIn('delete-parameter', '\n'.join(json.dumps(s) for s in self.launch['steps']))
+        mint = self.step('Mint a registration token and stash it in SSM (SecureString)')
+        self.assertIn('--overwrite', mint['run'])
+        self.assertIn('steps.spec.outputs.param', mint['env']['PARAM'])
+        self.assertNotIn('RUN_ID', mint['run'])
+
+    def test_teardown_matches_the_legs_labels(self):
+        teardown = self.step('Tear down')
+        self.assertEqual(teardown['env']['LABELS'], '${{ steps.spec.outputs.labels }}')
+        self.assertEqual(self.step('Watch the leg')['env']['JOB'], '${{ steps.spec.outputs.job }}')
+
+
+class LaunchSpecTests(unittest.TestCase):
+    TEMPLATES = {'freemkv-runner-linux': {'version': 7, 'image_id': 'ami-l', 'instance_type': 'c7i.4xlarge'},
+                 'freemkv-runner-windows': {'version': 5, 'image_id': 'ami-w', 'instance_type': 'm7i.4xlarge'}}
+
+    def perf_policy(self):
+        import copy
+        policy = copy.deepcopy(POLICY)
+        policy['perf']['enabled'] = True
+        return policy
+
+    def fake_aws(self, calls):
+        def aws(*args):
+            calls.append(args)
+            return {'LaunchTemplateVersions': [{'LaunchTemplateData': {'BlockDeviceMappings': [
+                {'DeviceName': '/dev/sda1', 'Ebs': {'VolumeSize': 600, 'VolumeType': 'gp3', 'Iops': 6000,
+                                                   'Throughput': 500, 'DeleteOnTermination': True}}]}}]}
+        return aws
+
+    def test_only_the_functional_templates_are_pinned(self):
+        self.assertEqual(mg.launch_templates(POLICY), ['freemkv-runner-linux', 'freemkv-runner-windows'])
+        self.assertEqual(mg.launch_templates(self.perf_policy()), mg.launch_templates(POLICY))
+
+    def test_linux_spot_carries_the_policy_cap_then_on_demand(self):
+        spec = mg.launch_spec(POLICY, 'linux', RUN_ID, 'qa', self.TEMPLATES, aws=None)
+        self.assertEqual((spec['template'], spec['version']), ('freemkv-runner-linux', '7'))
+        self.assertEqual([m['name'] for m in spec['markets']], ['spot', 'on-demand'])
+        spot = spec['markets'][0]['options']
+        self.assertEqual(spot['MarketType'], 'spot')
+        self.assertEqual(spot['SpotOptions']['MaxPrice'], POLICY['launch']['linux']['spot_max_price'])
+        self.assertEqual(spec['types'], POLICY['launch']['linux']['types'])
+        self.assertIsNone(spec['block_device_mappings'])
+        self.assertEqual(spec['labels'], f'freemkv-media,linux,run-{RUN_ID}')
+        self.assertEqual(spec['job'], 'cli-matrix (linux)')
+
+    def test_windows_uses_its_template_market_and_type(self):
+        spec = mg.launch_spec(POLICY, 'windows', RUN_ID, 'qa', self.TEMPLATES)
+        self.assertEqual(spec['markets'], [{'name': 'template', 'options': None}])
+        self.assertEqual(spec['types'], [])
+        self.assertTrue(spec['user_data'].endswith('user-data-windows.ps1'))
+
+    def test_perf_legs_override_the_functional_template(self):
+        policy = self.perf_policy()
+        self.assertEqual(mg.legs(policy), ['linux', 'windows', 'linux-perf', 'windows-perf'])
+        for leg, template, version in (('linux-perf', 'freemkv-runner-linux', '7'),
+                                       ('windows-perf', 'freemkv-runner-windows', '5')):
+            with self.subTest(leg=leg):
+                calls = []
+                spec = mg.launch_spec(policy, leg, RUN_ID, 'qa', self.TEMPLATES, aws=self.fake_aws(calls))
+                self.assertEqual((spec['template'], spec['version']), (template, version))
+                self.assertEqual(spec['types'], [policy['perf']['instance_type']], 'one type, no fallback')
+                self.assertEqual(spec['labels'], f'freemkv-media-perf,{leg.split("-")[0]},run-{RUN_ID}')
+                self.assertEqual(spec['job'], f'cli-perf ({leg.split("-")[0]})')
+                root = spec['block_device_mappings'][0]
+                self.assertEqual(root['Ebs']['VolumeSize'], policy['perf']['root_volume_gib'])
+                self.assertEqual((root['DeviceName'], root['Ebs']['Throughput']), ('/dev/sda1', 500),
+                                 'every other template setting of the volume is kept')
+                self.assertEqual(calls, [('ec2', 'describe-launch-template-versions', '--launch-template-name',
+                                          template, '--versions', version)])
+
+    def test_perf_legs_only_when_enabled(self):
+        with self.assertRaises(ValueError):
+            mg.launch_spec(POLICY, 'linux-perf', RUN_ID, 'qa', self.TEMPLATES)
+
+    def test_one_overwritten_parameter_per_branch_and_leg(self):
+        a = mg.launch_spec(POLICY, 'linux', RUN_ID, 'qa', self.TEMPLATES)['param']
+        b = mg.launch_spec(POLICY, 'linux', RUN_ID + 1, 'qa', self.TEMPLATES)['param']
+        self.assertEqual(a, b, 'the name must not grow with every run: nothing ever deletes it')
+        self.assertEqual(a, '/freemkv-ci/runner-reg/qa-linux')
+        self.assertNotEqual(a, mg.launch_spec(POLICY, 'windows', RUN_ID, 'qa', self.TEMPLATES)['param'])
+        self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID, 'dev', self.TEMPLATES)['param'])
+        self.assertTrue(a.startswith('/freemkv-ci/runner-reg/'), 'inside the scope the roles already grant')
+        with self.assertRaises(ValueError):
+            mg.launch_spec(POLICY, 'linux', RUN_ID, 'feature/x', self.TEMPLATES)
+
+    def test_unpinned_templates_launch_the_default_version(self):
+        spec = mg.launch_spec(POLICY, 'linux', RUN_ID, 'qa', {'freemkv-runner-linux': {'error': 'AccessDenied'}})
+        self.assertEqual(spec['version'], '$Default')
+
+    def test_cli_prints_one_json_line(self):
+        import io
+        import contextlib
+        import os
+        out = io.StringIO()
+        env = {'GITHUB_RUN_ID': str(RUN_ID), 'GITHUB_REF_NAME': 'qa', 'TEMPLATES': json.dumps(self.TEMPLATES)}
+        with unittest.mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out):
+            self.assertEqual(mg.main(['launch-spec', '--leg', 'linux']), 0)
+        self.assertEqual(len(out.getvalue().strip().splitlines()), 1)
+        self.assertEqual(json.loads(out.getvalue())['version'], '7')
+
+    def test_record_expects_the_perf_label_on_perf_legs(self):
+        self.assertEqual(mg.leg_labels('linux-perf', 5), 'freemkv-media-perf,linux,run-5')
+        self.assertEqual(mg.leg_labels('windows', 5), 'freemkv-media,windows,run-5')
+        self.assertRegex('ephemeral-linux-perf-i-0123456789abcdef0', POLICY['runner_name_re'])
 
 
 class LeakGuardTests(unittest.TestCase):

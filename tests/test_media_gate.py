@@ -184,7 +184,7 @@ FEATURES = {'x86_64-unknown-linux-musl': [['serde_json', '1.0.151', 'default,std
 EXTERNALS = {
     'fixtures': {k: {'version_id': f'v-{k}', 'etag': f'"{k}"'} for k in POLICY['fixtures']},
     'launch_templates': {k: {'version': 3, 'image_id': 'ami-1', 'instance_type': 'c7i.4xlarge',
-                             'user_data_sha256': 'u'} for k in POLICY['launch_templates']},
+                             'user_data_sha256': 'u'} for k in mg.launch_templates(POLICY)},
 }
 
 
@@ -467,7 +467,7 @@ class FingerprintTests(unittest.TestCase):
                             (('fixtures', 'bd.iso', 'version_id'), 'v2'),
                             (('launch_templates', 'freemkv-runner-linux', 'version'), 4),
                             (('launch_templates', 'freemkv-runner-windows', 'image_id'), 'ami-2'),
-                            (('launch_templates', 'freemkv-runner-linux-perf', 'instance_type'), 'c6i.4xlarge')):
+                            (('launch_templates', 'freemkv-runner-windows', 'instance_type'), 'c6i.4xlarge')):
             ext = copy.deepcopy(EXTERNALS)
             ext[path[0]][path[1]][path[2]] = value
             with self.subTest(external=path):
@@ -870,6 +870,9 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(out['fingerprint'], e.f, 'plan and evidence must fingerprint the same candidate alike')
         self.assertEqual((out['status'], out['run']), ('reuse', 'false'))
         self.assertIn(str(RUN_ID), out['evidence_url'])
+
+    def test_plan_names_the_legs_to_launch(self):
+        self.assertEqual(json.loads(self.plan()['legs']), ['linux', 'windows'])
 
     def test_env_driven_decisions(self):
         self.assertEqual(self.plan()['status'], 'run')

@@ -1210,6 +1210,7 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, post=No
     outputs = {'status': status, 'run': str(go).lower(), 'fingerprint': f, 'reason': reason,
                'revisions': json.dumps(revisions, sort_keys=True), 'toolchain': inputs['toolchain'],
                'evidence_url': proven['url'] if proven else '', 'harness': policy['harness']['sha'],
+               'legs': json.dumps(legs(policy)),
                'launch_templates': json.dumps({k: v for k, v in externals.get('launch_templates', {}).items()
                                                if isinstance(v, dict)}, sort_keys=True),
                'warnings': warnings}
@@ -1243,8 +1244,54 @@ def pin(ref_name, sha, requested, request=gh_api):
 
 
 def launch_templates(policy):
-    names = [n for n in policy['launch_templates'] if not n.endswith('-perf')]
-    return names + ([n for n in policy['launch_templates'] if n.endswith('-perf')] if policy['perf']['enabled'] else [])
+    """The functional templates. Perf legs launch from these too, with run-instances overrides."""
+    return sorted({cfg['template'] for cfg in policy['launch'].values()})
+
+
+def leg_labels(leg, run_id):
+    """The runner labels a leg's instance registers with (freemkv-media[-perf],<os>,run-<id>)."""
+    os_name, perf = leg.split('-')[0], leg.endswith('-perf')
+    return f'freemkv-media{"-perf" if perf else ""},{os_name},run-{run_id}'
+
+
+def launch_spec(policy, leg, run_id, ref_name, templates, aws=None):
+    """Everything the launch step passes to run-instances for one leg, from the policy alone:
+    - the functional template at its planned version (no separate perf templates exist);
+    - perf differences as overrides: the perf instance type, no type fallback, the root volume;
+    - the market: Spot with the policy's price cap (never the template's), then On-Demand;
+    - one registration-token parameter per branch and leg, overwritten by every launch, so nothing
+      is left to delete (the runner role has no ssm:DeleteParameter and needs none)."""
+    if leg not in legs(policy):
+        raise ValueError(f'leg {leg!r} is not launched under this policy ({legs(policy)})')
+    if ref_name not in ('qa', 'dev'):
+        raise ValueError(f'the media legs launch on qa and dev only, not {ref_name!r}')
+    os_name, perf = leg.split('-')[0], leg.endswith('-perf')
+    cfg = policy['launch'][os_name]
+    template = cfg['template']
+    pin = templates.get(template) if isinstance(templates.get(template), dict) else {}
+    version = str(pin.get('version', '$Default'))
+    types = [policy['perf']['instance_type']] if perf else list(cfg.get('types', []))
+    markets = [{'name': 'template', 'options': None}]
+    if cfg.get('spot_max_price'):
+        markets = [{'name': 'spot', 'options': {'MarketType': 'spot', 'SpotOptions': {
+            'MaxPrice': str(cfg['spot_max_price']), 'SpotInstanceType': 'one-time',
+            'InstanceInterruptionBehavior': 'terminate'}}}]
+        if cfg.get('on_demand_fallback'):
+            markets.append({'name': 'on-demand', 'options': {}})
+    mappings = None
+    if perf and policy['perf'].get('root_volume_gib'):
+        data = (aws or aws_json)('ec2', 'describe-launch-template-versions', '--launch-template-name', template,
+                                 '--versions', version)['LaunchTemplateVersions'][0]['LaunchTemplateData']
+        mappings = [dict(m, Ebs=dict(m['Ebs'])) if 'Ebs' in m else dict(m)
+                    for m in data.get('BlockDeviceMappings') or []]
+        root = next((m for m in mappings if 'Ebs' in m), None)
+        if root is None:
+            raise ValueError(f'{template} v{version} has no EBS root volume to resize for {leg}')
+        root['Ebs']['VolumeSize'] = int(policy['perf']['root_volume_gib'])
+    return {'leg': leg, 'os': os_name, 'template': template, 'version': version, 'types': types,
+            'markets': markets, 'block_device_mappings': mappings, 'labels': leg_labels(leg, run_id),
+            'job': LEG_JOB[leg], 'param': f'/freemkv-ci/runner-reg/{ref_name}-{leg}',
+            'user_data': f'.github/runner-templates/user-data-{os_name}.{"ps1" if os_name == "windows" else "sh"}'}
 
 
 def aws_json(*args, run=subprocess.run):
@@ -1360,7 +1407,7 @@ def record(plan_dir, legs_dir, policy, env, request=gh_api, aws=aws_json, post=g
         if not m or rec.get('runner_name') != job.get('runner_name') or rec.get('instance_id') != m.group(3):
             raise ValueError(f'leg {leg}: runner {job.get("runner_name")!r} does not match its record')
         os_name = leg.split('-')[0]
-        want_labels = f'freemkv-media,{os_name},run-{run_id}'
+        want_labels = leg_labels(leg, run_id)
         att = launched.get(rec['instance_id'])
         if not att or att.get('launched_by') != run_id or att.get('os') != os_name \
                 or att.get('runner_labels') != want_labels:
@@ -1430,7 +1477,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('mode', choices=('guards', 'checkout', 'plan', 'restore', 'seal',
                                          'release-lock-assert', 'fingerprint', 'pin', 'externals',
-                                         'leg', 'record', 'verdict'))
+                                         'leg', 'record', 'verdict', 'launch-spec'))
     parser.add_argument('--workspace', type=Path, default=Path.cwd())
     parser.add_argument('--plan-directory', type=Path, default=Path('media-plan'))
     parser.add_argument('--revisions')
@@ -1485,6 +1532,11 @@ def main(argv=None):
             rec = leg_identity(args.leg, args.target, args.c_toolchain, os.environ)
             args.out.write_text(json.dumps(rec, indent=1, sort_keys=True) + '\n')
             print(json.dumps(rec, indent=1, sort_keys=True))
+            return 0
+        if args.mode == 'launch-spec':
+            spec = launch_spec(policy, args.leg, int(os.environ['GITHUB_RUN_ID']), os.environ['GITHUB_REF_NAME'],
+                               json.loads(os.environ.get('TEMPLATES') or '{}'))
+            print(json.dumps(spec, sort_keys=True))
             return 0
         if args.mode == 'record':
             name, commit = record(args.plan_directory, args.legs, policy, os.environ)

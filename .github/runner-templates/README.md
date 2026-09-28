@@ -87,3 +87,32 @@ only the instance its own run launched can take the job — a stray runner (the
 1.6.5 incident) or another run's instance cannot. A user-data change therefore
 takes effect on the next qa run without touching AWS; applying it to the
 templates as well only matters for `ci-runner-launch.yml`.
+
+## qa launches: nothing to set up in AWS
+
+Everything qa.yml's `launch (<leg>)` job passes to `run-instances` comes from
+`tests/media-gate-policy.json` through `media_gate.py launch-spec`, so no
+template or IAM change is ever needed for it:
+
+- **Perf legs** (`linux-perf`, `windows-perf`, once `perf.enabled`) launch from
+  the same two functional templates. Their differences are run-instances
+  overrides: `--instance-type` `perf.instance_type` (no type fallback),
+  `--block-device-mappings` with the root volume resized to
+  `perf.root_volume_gib` (every other volume setting copied from the pinned
+  template version), and the `freemkv-media-perf` label, with which the
+  user-data registers as `ephemeral-<os>-perf-<instance-id>`.
+- **The Spot price cap** is `launch.<os>.spot_max_price`, passed as
+  `--instance-market-options` on every Spot attempt, so it no longer depends
+  on (and overrides) whatever the template says.
+- **The registration token** goes to one SecureString per branch and leg,
+  `/freemkv-ci/runner-reg/<ref>-<leg>`, `--overwrite` on every launch. The
+  launcher never deletes it (its role has no `ssm:DeleteParameter`): a token
+  the instance never read expires 60 minutes after it was minted and the next
+  launch of that leg overwrites it, so the set of parameters is fixed and
+  nothing piles up. The instance still deletes it right after reading, which
+  its own role already allows. Two launches of the same leg on the same
+  branch within one boot could hand the second instance an already-deleted
+  parameter; on qa the superseded check lets only the tip candidate launch,
+  and if it ever happens the leg misses its pickup deadline and the run
+  cancels itself (a red, re-runnable run, never a stray runner).
+  `ci-runner-launch.yml` keeps its own per-run names.

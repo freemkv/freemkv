@@ -61,6 +61,7 @@ jobs:
       revisions: ${{ steps.plan.outputs.revisions }}
       harness: ${{ steps.plan.outputs.harness }}
       launch_templates: ${{ steps.plan.outputs.launch_templates }}
+      legs: ${{ steps.plan.outputs.legs }}
       evidence_url: ${{ steps.plan.outputs.evidence_url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -338,7 +339,9 @@ jobs:
   # One job per EC2 leg: launch a runner only this run can use (the run-<id>
   # label), then watch the leg and end with its conclusion, so "Re-run failed
   # jobs" re-runs both and gets a fresh instance. Teardown always runs, so a
-  # cancelled run never strands an instance.
+  # cancelled run never strands an instance. Everything run-instances gets comes
+  # from `media_gate.py launch-spec` (the policy): the functional template at its
+  # planned version, the perf legs' differences as overrides, and the Spot cap.
   launch:
     needs: [plan-media, release-tests, windows-build, cli-integration]
     if: needs.plan-media.outputs.run == 'true'
@@ -351,10 +354,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [linux, windows]
+        leg: ${{ fromJSON(needs.plan-media.outputs.legs || '["linux", "windows"]') }}
     env:
       GH_TOKEN: ${{ github.token }}
-      OS: ${{ matrix.os }}
+      LEG: ${{ matrix.leg }}
       RUN_ID: ${{ github.run_id }}
       ATTEMPT: ${{ github.run_attempt }}
       REPO: ${{ github.repository }}
@@ -363,7 +366,11 @@ jobs:
         with:
           path: freemkv
           persist-credentials: false
-          sparse-checkout: .github/runner-templates
+          sparse-checkout: |
+            .github/runner-templates
+            tests
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '3.12' }
       - name: Still the newest candidate
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -382,63 +389,86 @@ jobs:
         with:
           role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
           aws-region: us-west-2
+      - name: Launch spec
+        id: spec
+        env:
+          TEMPLATES: ${{ needs.plan-media.outputs.launch_templates }}
+        run: |
+          set -euo pipefail
+          spec=$(python3 freemkv/tests/media_gate.py launch-spec --leg "$LEG")
+          echo "$spec" | jq .
+          {
+            echo "spec=$spec"
+            echo "param=$(jq -r .param <<<"$spec")"
+            echo "labels=$(jq -r .labels <<<"$spec")"
+            echo "job=$(jq -r .job <<<"$spec")"
+          } >> "$GITHUB_OUTPUT"
+      # One parameter per branch and leg (/freemkv-ci/runner-reg/<ref>-<leg>),
+      # overwritten by every launch: nothing is left behind to delete. A token
+      # the instance never read dies on its own 60 minutes after it was minted,
+      # and the next launch of the leg overwrites it. The instance deletes it
+      # right after reading (its own role allows that), which shortens its life.
       - name: Mint a registration token and stash it in SSM (SecureString)
         id: reg
         env:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          PARAM: ${{ steps.spec.outputs.param }}
         run: |
           set -euo pipefail
           tok=$(gh api -X POST "repos/$REPO/actions/runners/registration-token" -q .token)
           echo "::add-mask::$tok"
-          param="/freemkv-ci/runner-reg/$RUN_ID-$ATTEMPT-$OS"
-          aws ssm put-parameter --name "$param" --type SecureString --value "$tok" --overwrite >/dev/null
-          echo "param=$param" >> "$GITHUB_OUTPUT"
+          aws ssm put-parameter --name "$PARAM" --type SecureString --value "$tok" --overwrite >/dev/null
+          echo "param=$PARAM" >> "$GITHUB_OUTPUT"
       # The planned launch-template version, and the user-data from this commit
       # (so the runner registers with this run's labels).
       - name: Launch the ephemeral runner
         id: launch
         env:
           PARAM: ${{ steps.reg.outputs.param }}
-          TEMPLATES: ${{ needs.plan-media.outputs.launch_templates }}
+          SPEC: ${{ steps.spec.outputs.spec }}
         run: |
           set -euo pipefail
-          lt="freemkv-runner-$OS"
-          templates=${TEMPLATES:-}; [ -n "$templates" ] || templates='{}'
-          version=$(jq -r --arg lt "$lt" '.[$lt].version // "$Default"' <<<"$templates")
-          ext=sh; [ "$OS" = windows ] && ext=ps1
-          userdata="freemkv/.github/runner-templates/user-data-$OS.$ext"
-          tags=$(jq -cn --arg p "$PARAM" --arg r "$REPO" --arg id "$RUN_ID" --arg os "$OS" '[{ResourceType: "instance",
+          lt=$(jq -r .template <<<"$SPEC")
+          version=$(jq -r .version <<<"$SPEC")
+          labels=$(jq -r .labels <<<"$SPEC")
+          userdata="freemkv/$(jq -r .user_data <<<"$SPEC")"
+          bdm=$(jq -c .block_device_mappings <<<"$SPEC")
+          tags=$(jq -cn --arg p "$PARAM" --arg r "$REPO" --arg id "$RUN_ID" --arg l "$labels" '[{ResourceType: "instance",
             Tags: [{Key: "freemkv-ci", Value: "runner"}, {Key: "runner-token-param", Value: $p},
                    {Key: "runner-repo", Value: $r}, {Key: "launched-by", Value: $id},
-                   {Key: "runner-labels", Value: ("freemkv-media," + $os + ",run-" + $id)}]}]')
+                   {Key: "runner-labels", Value: $l}]}]')
           vpc=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
           subnets=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" --query 'Subnets[].SubnetId' --output text)
           [ -n "$subnets" ] || { echo "no subnets in default VPC $vpc" >&2; exit 1; }
-          # Linux keeps its capacity fallback (the actual type is recorded by the leg);
-          # Windows launches the template's own type.
-          if [ "$OS" = linux ]; then types="c7i.4xlarge c6i.4xlarge m7i.4xlarge"; else types=template; fi
+          # The functional Linux leg falls back across types (the actual type is recorded
+          # by the leg); a perf leg has exactly one type; an empty list is the template's.
+          types=$(jq -r '.types | if length == 0 then "template" else join(" ") end' <<<"$SPEC")
           try_launch() {
-            local market="$1"; shift
+            local market="$1" options="$2"
             local t s id
             for t in $types; do
               for s in $subnets; do
                 echo "attempt: type=$t subnet=$s market=$market"
-                typearg=(); [ "$t" = template ] || typearg=(--instance-type "$t")
+                extra=()
+                [ "$t" = template ] || extra+=(--instance-type "$t")
+                [ "$options" = null ] || extra+=(--instance-market-options "$options")
+                [ "$bdm" = null ] || extra+=(--block-device-mappings "$bdm")
                 if id=$(aws ec2 run-instances \
                           --launch-template "LaunchTemplateName=$lt,Version=$version" \
-                          "${typearg[@]}" --subnet-id "$s" "$@" \
+                          --subnet-id "$s" "${extra[@]}" \
                           --user-data "file://$userdata" \
                           --tag-specifications "$tags" \
                           --query 'Instances[0].InstanceId' --output text 2>launch.err); then
                   echo "instance=$id" >> "$GITHUB_OUTPUT"
-                  echo "launched $id ($OS, type=$t subnet=$s market=$market, template $lt v$version)"
+                  echo "launched $id ($LEG, type=$t subnet=$s market=$market, template $lt v$version)"
                   # What record-media-evidence checks the leg against, even after EC2 forgets the instance.
-                  jq -n --arg id "$id" --arg run "$RUN_ID" --arg attempt "$ATTEMPT" --arg os "$OS" \
-                        --arg lt "$lt" --arg v "$version" --arg type "$t" \
+                  jq -n --arg id "$id" --arg run "$RUN_ID" --arg attempt "$ATTEMPT" --arg leg "$LEG" \
+                        --arg os "$(jq -r .os <<<"$SPEC")" --arg labels "$labels" \
+                        --arg lt "$lt" --arg v "$version" --arg type "$t" --arg market "$market" \
                         '{instance_id: $id, launched_by: ($run | tonumber), run_attempt: ($attempt | tonumber),
-                          os: $os, runner_labels: ("freemkv-media," + $os + ",run-" + $run),
+                          leg: $leg, os: $os, runner_labels: $labels, market: $market,
                           launch_template: $lt, launch_template_version: $v, requested_type: $type}' \
-                        > "launch-$OS-$ATTEMPT.json"
+                        > "launch-$LEG-$ATTEMPT.json"
                   return 0
                 fi
                 echo "  failed ($t/$s/$market): $(cat launch.err)"
@@ -449,20 +479,24 @@ jobs:
             done
             return 1
           }
-          rc=0
-          if [ "$OS" = linux ]; then try_launch spot --instance-market-options 'MarketType=spot' || rc=$?; else try_launch template || rc=$?; fi
-          if [ "$rc" = 1 ] && [ "$OS" = linux ]; then
-            echo "all Spot attempts hit capacity — falling back to On-Demand"
-            rc=0; try_launch on-demand --instance-market-options '{}' || rc=$?
-          fi
+          # Markets in order (Spot at the policy's cap, then On-Demand; or the
+          # template's own): only capacity exhaustion moves on to the next one.
+          rc=1
+          while read -r market; do
+            name=$(jq -r .name <<<"$market")
+            options=$(jq -c .options <<<"$market")
+            rc=0; try_launch "$name" "$options" || rc=$?
+            [ "$rc" = 1 ] || break
+            echo "every $name attempt hit capacity"
+          done < <(jq -c '.markets[]' <<<"$SPEC")
           [ "$rc" = 0 ] && exit 0
-          echo "::error title=Runner launch failed::could not launch the $OS media runner — cancelling the run so its leg does not sit queued" >&2
+          echo "::error title=Runner launch failed::could not launch the $LEG media runner — cancelling the run so its leg does not sit queued" >&2
           exit 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.launch.outputs.instance != ''
         with:
-          name: "launch-${{ matrix.os }}-${{ github.run_attempt }}"
-          path: "launch-${{ matrix.os }}-${{ github.run_attempt }}.json"
+          name: "launch-${{ matrix.leg }}-${{ github.run_attempt }}"
+          path: "launch-${{ matrix.leg }}-${{ github.run_attempt }}.json"
           overwrite: true
       # Ends with the leg's conclusion. A leg not picked up by the deadline (the
       # instance never registered) terminates the instance and cancels the run.
@@ -470,10 +504,11 @@ jobs:
         id: watch
         env:
           INSTANCE: ${{ steps.launch.outputs.instance }}
+          JOB: ${{ steps.spec.outputs.job }}
         run: |
           set -uo pipefail
-          leg="cli-matrix ($OS)"
-          limit=900; [ "$OS" = windows ] && limit=1800
+          leg="$JOB"
+          limit=900; case "$LEG" in windows*) limit=1800 ;; esac
           deadline=$(( $(date +%s) + limit ))
           picked=false
           while :; do
@@ -505,21 +540,21 @@ jobs:
         run: gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/cancel" || true
       # Fresh credentials: the watch can outlive the first session.
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
-        if: always() && steps.reg.outputs.param != ''
+        if: always() && steps.spec.outputs.labels != ''
         with:
           role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
           aws-region: us-west-2
+      # The registration-token parameter is not deleted here (see the mint step).
       - name: Tear down
-        if: always() && steps.reg.outputs.param != ''
+        if: always() && steps.spec.outputs.labels != ''
         env:
-          PARAM: ${{ steps.reg.outputs.param }}
+          LABELS: ${{ steps.spec.outputs.labels }}
           INSTANCE: ${{ steps.launch.outputs.instance }}
         run: |
-          aws ssm delete-parameter --name "$PARAM" 2>/dev/null || true
           # Every live instance this run launched for this leg, including one whose id was
           # never written because the run was cancelled mid-launch.
           # JSON filters: the CLI's shorthand would split the comma-separated label value.
-          filters=$(jq -cn --arg r "$RUN_ID" --arg l "freemkv-media,$OS,run-$RUN_ID" '[
+          filters=$(jq -cn --arg r "$RUN_ID" --arg l "$LABELS" '[
             {Name: "tag:launched-by", Values: [$r]}, {Name: "tag:runner-labels", Values: [$l]},
             {Name: "instance-state-name", Values: ["pending", "running", "stopping", "stopped"]}]')
           ids=$(aws ec2 describe-instances --filters "$filters" \

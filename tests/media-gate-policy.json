@@ -31,14 +31,18 @@
   "closure_skip": ["freemkv-unlock", "freemkv-i18n"],
   "runner_name_re": "^ephemeral-(linux|windows)(-perf)?-(i-[0-9a-f]{8,17})$",
   "harness": {"repository": "freemkv/freemkv-ci", "sha": "7ff716072c7063aaf4f1a7dd7200f532dab77794"},
-  "launch_templates": ["freemkv-runner-linux", "freemkv-runner-windows",
-                       "freemkv-runner-linux-perf", "freemkv-runner-windows-perf"],
+  "launch": {
+    "linux": {"template": "freemkv-runner-linux", "types": ["c7i.4xlarge", "c6i.4xlarge", "m7i.4xlarge"],
+              "spot_max_price": "0.72", "on_demand_fallback": true},
+    "windows": {"template": "freemkv-runner-windows", "types": []}
+  },
   "fixtures": ["dvd.iso", "bd.iso", "uhd.iso", "hddvd.iso", "keydb.cfg"],
   "canary": {"probes": []},
   "perf": {
     "enabled": false,
     "protocol": 1,
     "instance_type": "c6id.4xlarge",
+    "root_volume_gib": 100,
     "titles": {},
     "repeats": 3,
     "thresholds": {"fail": 2.0, "warn_cpu": 1.3, "warn_mkv": 1.5, "rss_fail_mib": 256, "rss_warn_mib": 64,
