@@ -2110,6 +2110,13 @@ fn hold_iso_lock(
     None
 }
 
+/// What an interrupted disc→ISO copy prints. §2.5: the image and its lock are "Kept after
+/// Stop … where it guards the resumable artifact", so a rerun resumes.
+fn interrupted_text(iso: &std::path::Path) -> String {
+    let _ = iso;
+    strings::get("rip.interrupted")
+}
+
 /// The process exit code: 0 on a complete copy, `DISC_COPY_DAMAGED_EXIT` on a copy that is
 /// kept and usable but short some sectors, 1 on any other failure (no drive, scan error,
 /// `Disc::copy` error). The caller propagates this straight to `main`'s exit code.
@@ -2254,7 +2261,7 @@ fn disc_to_iso(
             if !out.is_quiet() {
                 eprint!("\r\x1b[K");
             }
-            out.raw(Normal, &strings::get("rip.interrupted"));
+            out.raw(Normal, &interrupted_text(&iso_path));
             1
         }
         Ok(r) if copy_verdict(&r) == CopyVerdict::NoData => {
@@ -7147,6 +7154,25 @@ mod ku_cli_tests {
         let lock = body.find("hold_iso_lock(&iso_path").expect("the lock");
         assert!(lock < body.find("freemkv_engine::copy(").expect("the copy"));
         assert!(body.contains("crate::artifact_lock::release(lock, done)"));
+    }
+
+    // §2.5: "Kept after Stop … where it guards the resumable artifact"; ST-I2's "progress
+    // kept" (§5.7) says so after the interrupt, and only while the image is on disk. Per spec.
+    #[test]
+    fn an_interrupted_copy_says_progress_kept_while_the_image_is_on_disk() {
+        let dir = TempDir::new("cli-kept");
+        let iso = dir.path().join("Movie.iso");
+        let (stopped, kept) = (
+            crate::strings::get("rip.interrupted"),
+            crate::strings::get("stop.progress_kept"),
+        );
+        assert_eq!(
+            super::interrupted_text(&iso),
+            stopped,
+            "no image: nothing kept"
+        );
+        std::fs::write(&iso, b"partial").unwrap();
+        assert_eq!(super::interrupted_text(&iso), format!("{stopped}\n{kept}"));
     }
 
     static LOCK_CTRL_C: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

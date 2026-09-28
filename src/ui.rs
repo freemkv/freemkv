@@ -4564,6 +4564,34 @@ mod tests {
         assert!(app.ejecting.is_none());
     }
 
+    // Stop design v5 §3.2 (A): "the GUI updates on the next frame"; ST-I2's strings
+    // "stopping; … finishing" (§5.7). A Stop after every title is written ends Done.
+    // Per spec; do not change without a spec citation proving otherwise.
+    #[test]
+    fn a_stop_says_stopping_and_finishing_once_every_title_is_written() {
+        let mut app = App::new();
+        let st: Arc<RunState> = Arc::default();
+        app.run = Some(st.clone());
+        app.run_titles = 2;
+        let (stopping, finishing) = (
+            crate::strings::get("stop.stopping"),
+            crate::strings::get("stop.finishing"),
+        );
+        assert_ne!(app.view().saving_current, stopping, "no Stop yet");
+        app.dispatch(Cmd::Cancel);
+        let v = app.view();
+        assert_eq!(
+            (v.saving_current, v.saving_overall),
+            (stopping.clone(), stopping)
+        );
+        st.titles_done.store(2, Ordering::SeqCst);
+        let v = app.view();
+        assert_eq!(
+            (v.saving_current, v.saving_overall),
+            (finishing.clone(), finishing)
+        );
+    }
+
     #[test]
     fn the_eject_button_shows_for_an_idle_disc_source_only() {
         let mut app = App::new();

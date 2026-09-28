@@ -5935,6 +5935,28 @@ mod ku_gui_tests {
         );
     }
 
+    // §2.5: "Kept after Stop … where it guards the resumable artifact"; ST-I2's "progress
+    // kept" (§5.7) says so. A Stop that left no image keeps nothing. Per spec.
+    #[test]
+    fn a_stop_that_keeps_the_image_says_progress_kept() {
+        let dir = TempDir::new("gui-kept");
+        let iso = dir.path().join("Movie.iso");
+        let kept = crate::strings::get("stop.progress_kept");
+        let never = libfreemkv::Halt::new();
+        for (on_disk, says) in [(true, true), (false, false)] {
+            let st = Arc::new(RunState::default());
+            st.cancel.store(true, Ordering::SeqCst);
+            if on_disk {
+                std::fs::write(&iso, b"partial").unwrap();
+            }
+            let lock = crate::artifact_lock::hold_iso(&iso, &never).unwrap();
+            release_iso_lock(lock, &Ok("Cancelled".into()), &iso, &st);
+            let lines = st.lines.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            assert_eq!(lines.contains(&kept), says, "{on_disk}: {lines:?}");
+            let _ = std::fs::remove_file(&iso);
+        }
+    }
+
     // §2.5: the lock is "created at op start and held for the whole op". The drive's ISO
     // and staging copy need a live drive, so this reads the wiring; the image arm runs it.
     #[test]
