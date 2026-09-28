@@ -154,14 +154,27 @@ def base_files():
 
 def git(path, *args):
     return subprocess.check_output(['git', '-C', str(path), '-c', 'user.email=t@example.com', '-c', 'user.name=t',
-                                    '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/nonexistent', *args],
+                                    '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/nonexistent',
+                                    '-c', 'maintenance.auto=false', '-c', 'gc.auto=0', *args],
                                    text=True, stderr=subprocess.DEVNULL).strip()
+
+
+def rmtree_quiet(path):
+    # CI flake (freemkv-library run 36409482771): an entry under .git/objects vanished mid-rmtree,
+    # likely a detached git auto-maintenance; git() now disables it, and a vanished entry is not an error.
+    def gone_ok(func, p, exc):
+        if not isinstance(exc if isinstance(exc, BaseException) else exc[1], FileNotFoundError):
+            raise exc if isinstance(exc, BaseException) else exc[1]
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=gone_ok)
+    else:
+        shutil.rmtree(path, onerror=gone_ok)
 
 
 class Workspace:
     def __init__(self, test, files=None):
         self.root = Path(tempfile.mkdtemp())
-        test.addCleanup(shutil.rmtree, self.root)
+        test.addCleanup(rmtree_quiet, self.root)
         self.files = files or base_files()
         for repo, tree in self.files.items():
             (self.root / repo).mkdir()
@@ -973,7 +986,7 @@ class WaiverTests(unittest.TestCase):
 class SealTests(unittest.TestCase):
     def plan_dir(self, run_id=RUN_ID, sha=SIB_SHA['freemkv']):
         d = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, d)
+        self.addCleanup(rmtree_quiet, d)
         lock = lock_text().encode()
         (d / 'Cargo.lock').write_bytes(lock)
         (d / 'evidence.json').write_text(json.dumps({'run_id': run_id, 'revisions': {'freemkv': sha},
@@ -1012,7 +1025,7 @@ class LockTests(unittest.TestCase):
 
     def test_cli_exit_codes(self):
         d = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, d)
+        self.addCleanup(rmtree_quiet, d)
         (d / 'a.lock').write_text(lock_text())
         (d / 'b.lock').write_text(lock_text(edit=bump('ureq', '3.4.3')))
         (d / 'c.lock').write_text(lock_text(edit=bump('freemkv', '1.7.8')))
@@ -1052,7 +1065,7 @@ class LockTests(unittest.TestCase):
     def test_restore_rejects_a_tampered_lock(self):
         ws, run, _ = self.workspace_with_resolve()
         d = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, d)
+        self.addCleanup(rmtree_quiet, d)
         revisions = {r: mg.git(ws.root / r, 'rev-parse', 'HEAD') for r in mg.FIRST_PARTY}
         lock = lock_text().encode()
         (d / 'Cargo.lock').write_bytes(lock)
@@ -1133,7 +1146,7 @@ class PlanTests(unittest.TestCase):
 
     def test_outputs_cannot_be_injected(self):
         d = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, d)
+        self.addCleanup(rmtree_quiet, d)
         out = d / 'out'
         env = dict(os.environ, GITHUB_OUTPUT=str(out))
         with unittest.mock.patch.dict(os.environ, env, clear=True):

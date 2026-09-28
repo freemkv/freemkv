@@ -1034,6 +1034,7 @@ pub fn summarize_outcome(
             title_index,
             code,
             kind,
+            ..
         } => Err(with_partial(format!(
             "{}title {} failed: {}",
             so_far(),
@@ -2927,6 +2928,7 @@ mod outcome_summary_tests {
             title_index: 2,
             code: None,
             kind: ErrorKind::StorageFull,
+            data: String::new(),
         };
         let r = summarize_outcome(&out, 2, 0, 3, "/out");
         let msg = r.expect_err("a rip stopped by a full disk must not report success");
@@ -2950,6 +2952,7 @@ mod outcome_summary_tests {
                 title_index: 0,
                 code: None,
                 kind,
+                data: String::new(),
             };
             let msg = summarize_outcome(&out, 0, 0, 1, "/out").unwrap_err();
             assert!(
@@ -2967,6 +2970,7 @@ mod outcome_summary_tests {
             title_index: 0,
             code: Some(9048),
             kind: ErrorKind::Other,
+            data: String::new(),
         };
         let msg = summarize_outcome(&out, 0, 0, 1, "/out").unwrap_err();
         assert!(msg.contains("MP4"), "{msg}");
