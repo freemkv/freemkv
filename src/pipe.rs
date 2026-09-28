@@ -3461,7 +3461,7 @@ mod tests {
         impl libfreemkv::SectorSource for FlaggedClearUnit {
             fn read_sectors(
                 &mut self,
-                _lba: u32,
+                lba: u32,
                 count: u16,
                 buf: &mut [u8],
                 _recovery: bool,
@@ -3471,7 +3471,9 @@ mod tests {
                     *b = (i as u8).wrapping_mul(31).wrapping_add(7);
                 }
                 buf[0] = 0xC0; // CPI bits set on the unit's first byte
-                buf[4] = 0x47; // TS sync in the clear seed: on the unit grid
+                if lba >= 300 {
+                    buf[4] = 0x47; // content unit: TS sync in the clear seed (on grid)
+                }
                 Ok(n)
             }
         }
