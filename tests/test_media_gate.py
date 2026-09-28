@@ -716,7 +716,8 @@ class DecideTests(unittest.TestCase):
         self.assertIsNone(e.found(lambda r, p: True), 'perf leg on a functional runner')
 
     def test_forged_tags_are_rejected(self):
-        """A tag anyone but a real, successful qa.yml run on qa wrote is never evidence."""
+        """A tag anyone but a real, successful qa.yml run wrote, whose commit is the qa tip or an
+        ancestor of it, is never evidence."""
         human = {'name': 'Matthew Jackson', 'email': '1085847+MattJackson@users.noreply.github.com'}
         cases = {
             'pushed by a person': lambda e: e.tag.update(tagger=dict(human, date=stamp(RUN_START, hours=1))),
@@ -881,6 +882,39 @@ class DecideTests(unittest.TestCase):
         e = Evidence(self)
         e.run.pop('created_at')
         self.assertIsNone(e.found())
+
+    def age_run(self, age):
+        """Evidence whose run was created `age` (a timedelta) ago."""
+        import datetime
+        e = Evidence(self)
+        t = datetime.datetime.now(datetime.timezone.utc) - age
+        e.run['created_at'] = t.strftime('%Y-%m-%dT%H:%M:%SZ')
+        e.run['updated_at'] = (t + datetime.timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        e.tag['tagger']['date'] = (t + datetime.timedelta(minutes=20)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        logs = []
+        return e.found(log=logs.append), logs
+
+    def test_the_last_hour_before_expiry_is_accepted_with_a_warning(self):
+        import datetime
+        got, logs = self.age_run(datetime.timedelta(days=89, hours=23))
+        self.assertIsNotNone(got, logs)
+        self.assertTrue(any('89 days old and expires at 90 days (in 1)' in w for w in got['warnings']),
+                        got['warnings'])
+        got, logs = self.age_run(datetime.timedelta(days=90, minutes=5))
+        self.assertIsNone(got)
+        self.assertTrue(any('evidence expired: it is 90 days old' in line for line in logs), logs)
+
+    def test_the_warning_window_opens_at_76_days(self):
+        """max_age_days 90, EXPIRY_NOTICE_DAYS 14: whole days of age >= 76 warn, below do not."""
+        import datetime
+        self.assertEqual((POLICY['max_age_days'], mg.EXPIRY_NOTICE_DAYS), (90, 14))
+        got, _ = self.age_run(datetime.timedelta(days=75, hours=23))
+        self.assertIsNotNone(got)
+        self.assertEqual(got['warnings'], [], '75 days 23 h: no warning yet')
+        got, _ = self.age_run(datetime.timedelta(days=76, minutes=5))
+        self.assertIsNotNone(got)
+        self.assertEqual(len(got['warnings']), 1)
+        self.assertIn('76 days old and expires at 90 days (in 14)', got['warnings'][0])
 
     def test_expiry_matches_the_plan_artifact_retention(self):
         import yaml

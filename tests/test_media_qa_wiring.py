@@ -405,12 +405,27 @@ class LaunchSpecTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.spec(ref=ref)
 
-    def test_unpinned_templates_launch_the_default_version(self):
-        calls = []
-        spec = mg.launch_spec(POLICY, 'linux', RUN_ID, self.QA, {'freemkv-runner-linux': {'error': 'AccessDenied'}},
-                              aws=self.fake_aws(calls))
-        self.assertEqual(spec['version'], '$Default')
-        self.assertEqual(calls[0][-1], '$Default')
+    def test_an_unpinned_template_is_refused(self):
+        """Fail closed: '$Default' would be read at launch time, not the version F fingerprinted."""
+        cases = {'unreadable': {'error': 'AccessDenied'}, 'absent': None, 'no version': {'image_id': 'ami-1'},
+                 'string version': {'version': '$Default'}, 'zero': {'version': 0}, 'bool': {'version': True}}
+        for name, pin in cases.items():
+            with self.subTest(name=name):
+                calls = []
+                templates = {} if pin is None else {'freemkv-runner-linux': pin}
+                with self.assertRaisesRegex(ValueError, 'no pinned version'):
+                    mg.launch_spec(POLICY, 'linux', RUN_ID, self.QA, templates, aws=self.fake_aws(calls))
+                self.assertEqual(calls, [], 'nothing is read, nothing is launched')
+
+    def test_on_demand_refuses_non_instance_launch_tags(self):
+        """Volume and network-interface tags in the template are not dropped silently."""
+        for rtype in ('volume', 'network-interface', 'spot-instances-request'):
+            with self.subTest(resource=rtype):
+                data = json.loads(json.dumps(LINUX_TEMPLATE))
+                data['TagSpecifications'].append({'ResourceType': rtype, 'Tags': [{'Key': 'Name', 'Value': 'x'}]})
+                with self.assertRaisesRegex(ValueError, rtype):
+                    self.spec(data=data)
+        self.assertIsNotNone(self.spec()[0]['on_demand'], 'instance-only tags (the live template) are fine')
 
     def test_cli_prints_one_json_line(self):
         import io

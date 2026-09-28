@@ -1401,6 +1401,12 @@ def on_demand_launch(data, template, version, mappings):
     out = {k: data[k] for k in ('ImageId', 'InstanceType', 'IamInstanceProfile', 'SecurityGroupIds',
                                 'MetadataOptions', 'InstanceInitiatedShutdownBehavior') if k in data}
     out['BlockDeviceMappings'] = mappings if mappings is not None else data['BlockDeviceMappings']
+    others = sorted({str(spec.get('ResourceType')) for spec in data.get('TagSpecifications') or []
+                     if spec.get('ResourceType') != 'instance'})
+    if others:
+        raise ValueError(f'{template} v{version} tags {others} at launch, which an On-Demand launch without the '
+                         'template does not reproduce (only instance tags are carried); drop them from the template '
+                         'or teach on_demand_launch to pass them')
     tags = [t for spec in data.get('TagSpecifications') or [] if spec.get('ResourceType') == 'instance'
             for t in spec.get('Tags') or [] if t.get('Key') not in OWN_TAGS]
     return {'input': out, 'tags': tags}
@@ -1424,8 +1430,14 @@ def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1):
     os_name, perf = leg.split('-')[0], leg.endswith('-perf')
     cfg = policy['launch'][os_name]
     template = cfg['template']
-    pin = templates.get(template) if isinstance(templates.get(template), dict) else {}
-    version = str(pin.get('version', '$Default'))
+    # The version plan-media pinned (and fingerprinted into F). Without it there is nothing to
+    # launch: '$Default' would be read at launch time and could be a version F never saw.
+    pin = templates.get(template)
+    if not isinstance(pin, dict) or not isinstance(pin.get('version'), int) or isinstance(pin.get('version'), bool) \
+            or pin['version'] < 1:
+        raise ValueError(f'{template} has no pinned version in the plan ({pin!r}); refusing to launch '
+                         'an unpinned template (the plan could not read the launch templates)')
+    version = str(pin['version'])
     types = [policy['perf']['instance_type']] if perf else list(cfg.get('types', []))
     markets = [{'name': 'template', 'options': None, 'template': True}]
     if cfg.get('spot_max_price'):
