@@ -29,6 +29,7 @@ pub fn record(config_dir: &Path, mkv: &Path, iso: &Path) -> std::io::Result<()> 
 
 /// The mover's hook: a disc delivered as exactly one MKV and one ISO is a link.
 pub fn record_delivery<'a>(config_dir: &str, delivered: impl IntoIterator<Item = &'a str>) {
+    super::wake();
     let (mut mkvs, mut isos) = (Vec::new(), Vec::new());
     for d in delivered {
         let p = Path::new(d);

@@ -90,6 +90,23 @@ impl MuxedWith {
     }
 }
 
+/// A writing-app stamp cut down to "program version" for a table cell:
+/// `"mkvmerge v96.0 ('It's My Life') 64-bit"` becomes `"mkvmerge 96.0"`,
+/// `"freemkv 1.7.7 (gc8e67f1)"` becomes `"freemkv 1.7.7"`.
+pub fn short_label(app: &str) -> String {
+    let mut words = app.split_whitespace();
+    let Some(name) = words.next() else {
+        return String::new();
+    };
+    let version = words
+        .map(|w| w.trim_start_matches(['v', 'V']))
+        .find(|w| w.starts_with(|c: char| c.is_ascii_digit()) && w.contains('.'));
+    match version {
+        Some(v) => format!("{name} {v}"),
+        None => name.to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Stamp {
     sig: FileSig,
@@ -143,6 +160,49 @@ pub struct AuditReport {
     pub video_tracks: usize,
     pub audio_tracks: usize,
     pub subtitle_tracks: usize,
+    /// Video codecs, in track order (`"HEVC"`, `"AVC"`, ...).
+    pub video: Vec<String>,
+    /// Audio tracks as codec and language, in track order.
+    pub audio: Vec<TrackFacts>,
+    /// Subtitle languages, in track order.
+    pub subtitles: Vec<String>,
+}
+
+/// One audio track as the Library shows it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TrackFacts {
+    pub codec: String,
+    pub language: String,
+}
+
+/// A Matroska CodecID as a reader would name it.
+pub fn codec_name(id: &str) -> String {
+    let known = [
+        ("V_MPEGH/ISO/HEVC", "HEVC"),
+        ("V_MPEG4/ISO/AVC", "AVC"),
+        ("V_MPEG2", "MPEG-2"),
+        ("V_MPEG1", "MPEG-1"),
+        ("V_MS/VFW/FOURCC", "VC-1"),
+        ("V_AV1", "AV1"),
+        ("A_TRUEHD", "TrueHD"),
+        ("A_MLP", "TrueHD"),
+        ("A_DTS", "DTS"),
+        ("A_EAC3", "E-AC-3"),
+        ("A_AC3", "AC-3"),
+        ("A_PCM", "PCM"),
+        ("A_FLAC", "FLAC"),
+        ("A_AAC", "AAC"),
+        ("A_OPUS", "Opus"),
+        ("A_MPEG/L3", "MP3"),
+        ("A_MPEG/L2", "MP2"),
+        ("S_HDMV/PGS", "PGS"),
+        ("S_VOBSUB", "VobSub"),
+        ("S_TEXT/UTF8", "SRT"),
+    ];
+    known
+        .iter()
+        .find(|(prefix, _)| id.starts_with(prefix))
+        .map_or_else(|| id.to_string(), |(_, name)| (*name).to_string())
 }
 
 // Same slack the engine's verify allows between a runtime and a declared length.
@@ -161,6 +221,9 @@ pub fn audit_fast(path: &Path) -> AuditReport {
         video_tracks: 0,
         audio_tracks: 0,
         subtitle_tracks: 0,
+        video: Vec::new(),
+        audio: Vec::new(),
+        subtitles: Vec::new(),
     };
     let magic_ok = std::fs::File::open(path).and_then(|mut f| {
         let mut m = [0u8; 4];
@@ -187,6 +250,17 @@ pub fn audit_fast(path: &Path) -> AuditReport {
     report.video_tracks = count(|k| matches!(k, K::Video));
     report.audio_tracks = count(|k| matches!(k, K::Audio));
     report.subtitle_tracks = count(|k| matches!(k, K::Subtitle));
+    for t in &probe.tracks {
+        match t.kind {
+            K::Video => report.video.push(codec_name(&t.codec_id)),
+            K::Audio => report.audio.push(TrackFacts {
+                codec: codec_name(&t.codec_id),
+                language: t.language.clone(),
+            }),
+            K::Subtitle => report.subtitles.push(t.language.clone()),
+            K::Other(_) => {}
+        }
+    }
     report.duration_secs = probe.duration_secs;
     report.runtime_secs = probe.last_cue_secs;
     if report.video_tracks == 0 {
@@ -241,6 +315,47 @@ impl ProbeCache {
         Some(app)
     }
 
+    /// The cached stamp for `path` if it was read at `sig`. No filesystem I/O:
+    /// `None` means "not read yet", `Some(None)` "read, and it has no stamp".
+    pub fn cached_stamp(&self, path: &Path, sig: FileSig) -> Option<Option<String>> {
+        self.lock_stamps()
+            .get(path)
+            .filter(|s| s.sig == sig)
+            .map(|s| s.writing_app.clone())
+    }
+
+    /// Read the stamp of `path`, known to be at `sig`, unless it is cached.
+    /// The header read happens outside the lock. True if it read the file.
+    pub fn refresh_stamp(&self, path: &Path, sig: FileSig) -> bool {
+        if self.cached_stamp(path, sig).is_some() {
+            return false;
+        }
+        let app = std::fs::File::open(path)
+            .map(std::io::BufReader::new)
+            .and_then(libfreemkv::probe_mkv)
+            .ok()
+            .and_then(|p| p.writing_app.or(p.muxing_app));
+        self.lock_stamps().insert(
+            path.to_path_buf(),
+            Stamp {
+                sig,
+                writing_app: app,
+            },
+        );
+        true
+    }
+
+    /// Drop the cached audit of `path`, so the auditor reads it again.
+    pub fn forget_audit(&self, path: &Path) -> bool {
+        self.lock_audits().remove(path).is_some()
+    }
+
+    /// Record a known stamp for `path` at `sig` (a remux just wrote it).
+    pub fn record_at(&self, path: &Path, sig: FileSig, writing_app: Option<String>) {
+        self.lock_stamps()
+            .insert(path.to_path_buf(), Stamp { sig, writing_app });
+    }
+
     /// Record what a finished remux wrote, against the file as it is now.
     pub fn record(&self, path: &Path, writing_app: Option<String>) {
         let Some(sig) = FileSig::stat(path) else {
@@ -264,6 +379,11 @@ impl ProbeCache {
         let Some(sig) = FileSig::stat(path) else {
             return false;
         };
+        self.refresh_audit_at(path, sig)
+    }
+
+    /// [`Self::refresh_audit`] for a file already known to be at `sig`.
+    pub fn refresh_audit_at(&self, path: &Path, sig: FileSig) -> bool {
         if self.audit(path, sig).is_some() {
             return false;
         }
@@ -347,6 +467,47 @@ mod tests {
     }
 
     #[test]
+    fn stamps_shorten_to_program_and_version() {
+        assert_eq!(
+            short_label("mkvmerge v96.0 ('It's My Life') 64-bit"),
+            "mkvmerge 96.0"
+        );
+        assert_eq!(short_label("freemkv 1.7.7 (gc8e67f1)"), "freemkv 1.7.7");
+        assert_eq!(
+            short_label("MakeMKV v1.17.5 linux(x64-release)"),
+            "MakeMKV 1.17.5"
+        );
+        assert_eq!(short_label("freemkv"), "freemkv");
+        assert_eq!(short_label(""), "");
+    }
+
+    #[test]
+    fn the_library_versions_classify_as_the_user_expects() {
+        // The running 1.7.7 build against what the test library was written with.
+        let m = |a: &str| MuxedWith::from_app(Some(a), (1, 7, 7));
+        assert!(!m("freemkv 1.7.7 (gc8e67f1)").out_of_date());
+        assert!(m("freemkv 1.6.11 (g1234567)").out_of_date());
+        assert!(m("mkvmerge v96.0 ('It's My Life') 64-bit").out_of_date());
+    }
+
+    #[test]
+    fn cached_lookups_never_touch_the_disk() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("a.mkv");
+        std::fs::write(&p, mkv("freemkv 1.6.11 (g1)", Some(60.0), Some(55), true)).unwrap();
+        let sig = FileSig::stat(&p).unwrap();
+        let cache = ProbeCache::default();
+        assert_eq!(cache.cached_stamp(&p, sig), None, "not read yet");
+        assert!(cache.refresh_stamp(&p, sig));
+        assert!(!cache.refresh_stamp(&p, sig), "cached");
+        std::fs::remove_file(&p).unwrap();
+        assert_eq!(
+            cache.cached_stamp(&p, sig),
+            Some(Some("freemkv 1.6.11 (g1)".into()))
+        );
+    }
+
+    #[test]
     fn the_running_version_is_the_crate_version() {
         let v = running_version();
         assert_eq!(
@@ -389,6 +550,7 @@ mod tests {
         let good = audit(mkv("freemkv 1.8.0", Some(7200.0), Some(7195), true));
         assert!(good.ok, "{good:?}");
         assert_eq!(good.video_tracks, 1);
+        assert_eq!(good.video, ["AVC"]);
         assert_eq!(good.runtime_secs, Some(7195.0));
 
         let short = audit(mkv("freemkv 1.8.0", Some(7200.0), Some(2400), true));

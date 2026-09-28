@@ -101,7 +101,7 @@ pub fn list_mkvs(root: &Path) -> Listing<MkvFile> {
     out
 }
 
-fn mkv_title(root: &Path, path: &Path) -> String {
+pub(crate) fn mkv_title(root: &Path, path: &Path) -> String {
     let rel = path.strip_prefix(root).unwrap_or(path);
     let mut parts = rel.components();
     let first = parts.next();

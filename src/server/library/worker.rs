@@ -4,7 +4,7 @@
 
 use super::arbiter::Arbiter;
 use super::queue::{Job, JobNote, JobResult};
-use super::{Library, Running};
+use super::{Library, LineKind, Running, transcript};
 use crate::server::config::Config;
 use freemkv_engine::{Event, Level, Progress, Sink};
 use std::io::Write as _;
@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-fn shutting_down() -> bool {
+pub(crate) fn shutting_down() -> bool {
     crate::server::SHUTDOWN.load(Ordering::Relaxed)
 }
 
@@ -66,6 +66,7 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
             job_id: job.id,
             title: job.title.clone(),
             target: job.target.clone(),
+            iso: job.iso.clone(),
             phase: "start".into(),
             started_at: crate::server::util::epoch_secs(),
             ..Default::default()
@@ -73,18 +74,28 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
     });
     let sink = JobSink {
         lib,
+        job_id: job.id,
         arbiter,
         epoch,
         log,
         debug,
+        iso_url: format!("iso://{}", job.iso.display()),
         last_activity: AtomicU64::new(crate::server::util::epoch_secs()),
-        logged_decile: AtomicU64::new(0),
+        term: Mutex::new(Term::default()),
     };
-    sink.line(format!("Remux {} from {}", job.title, job.iso.display()));
-    sink.line(format!("Target {}", job.target.display()));
-    if debug {
-        sink.line(format!("freemkv {}", crate::server::VERSION_LABEL));
-    }
+    sink.emit(
+        LineKind::Cmd,
+        format!(
+            "$ freemkv iso://{} mkv://{}",
+            job.iso.display(),
+            job.target.display()
+        ),
+    );
+    sink.emit(
+        LineKind::Out,
+        format!("freemkv {}", crate::server::VERSION_LABEL),
+    );
+    sink.emit(LineKind::Out, String::new());
     let started = Instant::now();
     let done = AtomicBool::new(false);
     let ending = std::thread::scope(|scope| {
@@ -95,6 +106,7 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
         done.store(true, Ordering::SeqCst);
         ending
     });
+    sink.close_open_line(matches!(ending, Ending::Done { .. }));
     finish(lib, &job, ending, started.elapsed(), &sink);
     lib.set_running(|r| *r = None);
 }
@@ -126,9 +138,9 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
     }
 }
 
-/// Write a job's ending to the probe cache, the queue and the console. On success
-/// the new stamp is recorded before the queue changes, so the row is current the
-/// moment the UI hears the job finished.
+/// Write a job's ending to the probe cache, the index, the queue and the
+/// console. On success the new stamp is recorded before the queue changes, so
+/// the row is current the moment the UI hears the job finished.
 pub(crate) fn finish(
     lib: &Library,
     job: &Job,
@@ -139,8 +151,8 @@ pub(crate) fn finish(
     let now = crate::server::util::epoch_secs();
     match ending {
         Ending::Done { writing_app } => {
-            lib.probes.record(&job.target, writing_app.clone());
-            let size = std::fs::metadata(&job.target).map(|m| m.len()).unwrap_or(0);
+            lib.note_landed(&job.target, writing_app.clone());
+            let size = lib.snapshot().sigs.get(&job.target).map_or(0, |s| s.size);
             lib.queue.finish(
                 job.id,
                 JobResult::Done {
@@ -150,13 +162,14 @@ pub(crate) fn finish(
                     writing_app: writing_app.clone(),
                 },
             );
-            sink.line(format!(
-                "Done: {:.1} GB in {}, muxed with {}",
-                size as f64 / 1e9,
-                hms(took.as_secs()),
-                writing_app.as_deref().unwrap_or("an unknown writer")
-            ));
-            lib.probes.refresh_audit(&job.target);
+            sink.line(
+                LineKind::Ok,
+                format!(
+                    "Remuxed in {}: {}",
+                    hms(took.as_secs()),
+                    writing_app.as_deref().unwrap_or("no writing-app stamp")
+                ),
+            );
         }
         Ending::Stopped(note @ JobNote::Stalled) => {
             lib.queue.note_running(job.id, note);
@@ -168,14 +181,20 @@ pub(crate) fn finish(
                     finished_at: now,
                 },
             );
-            sink.line("Stopped: no progress; the old MKV is unchanged".into());
+            sink.line(
+                LineKind::Err,
+                "Stopped: no progress. The old MKV is unchanged.".into(),
+            );
         }
         Ending::Stopped(note) => {
             lib.queue.requeue(job.id, note);
             sink.line(
+                LineKind::Warn,
                 match note {
-                    JobNote::Preempted => "Stopped for a rip; back at the head of the queue",
-                    _ => "Interrupted; back at the head of the queue",
+                    JobNote::Preempted => {
+                        "Stopped: a rip needs the mux slot. Back at the head of the queue."
+                    }
+                    _ => "Interrupted. Back at the head of the queue.",
                 }
                 .into(),
             );
@@ -190,7 +209,10 @@ pub(crate) fn finish(
                     finished_at: now,
                 },
             );
-            sink.line(format!("Failed: {message}; the old MKV is unchanged"));
+            sink.line(LineKind::Err, format!("Error: {message}"));
+            if job.replace {
+                sink.line(LineKind::Out, "The old MKV is unchanged.".into());
+            }
         }
     }
 }
@@ -218,7 +240,7 @@ fn hms(secs: u64) -> String {
 
 /// Somewhere a job's human-readable lines go.
 pub(crate) trait LineSink {
-    fn line(&self, text: String);
+    fn line(&self, kind: LineKind, text: String);
 }
 
 struct JobLog(Mutex<Option<std::fs::File>>);
@@ -236,21 +258,40 @@ impl JobLog {
         Self(Mutex::new(file))
     }
 
-    fn write(&self, text: &str) {
+    fn write(&self, kind: LineKind, text: &str) {
         if let Some(f) = self.0.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            let _ = writeln!(f, "{} {text}", crate::server::util::format_iso_datetime());
+            let _ = writeln!(f, "{}", super::log_line(kind, text));
         }
     }
 }
 
+// What the transcript has printed so far, to lay lines out the way the CLI does.
+#[derive(Default)]
+struct Term {
+    // The title's header lines, known once the engine hands over the title.
+    title: Option<TitleText>,
+    opened: bool,
+    mux_started: Option<Instant>,
+    // The in-place progress line; printed for good when the title finishes.
+    progress: String,
+}
+
+struct TitleText {
+    duration: String,
+    size_gb: String,
+    streams: Vec<String>,
+}
+
 struct JobSink<'a> {
     lib: &'a Library,
+    job_id: u64,
     arbiter: &'a Arbiter,
     epoch: u64,
     log: JobLog,
     debug: bool,
+    iso_url: String,
     last_activity: AtomicU64,
-    logged_decile: AtomicU64,
+    term: Mutex<Term>,
 }
 
 impl JobSink<'_> {
@@ -270,12 +311,72 @@ impl JobSink<'_> {
             }
         });
     }
+
+    fn term(&self) -> std::sync::MutexGuard<'_, Term> {
+        self.term.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn emit(&self, kind: LineKind, text: String) {
+        self.log.write(kind, &text);
+        self.lib.console(self.job_id, kind, text);
+    }
+
+    // The image is open: the CLI's "Title N (...)", "Opening iso://...OK" and stream block.
+    fn print_opened(&self, idx: usize) {
+        let title = {
+            let mut t = self.term();
+            if t.opened {
+                return;
+            }
+            t.opened = true;
+            t.title.take()
+        };
+        if let Some(t) = &title {
+            self.emit(
+                LineKind::Out,
+                crate::strings::fmt(
+                    "rip.title_info",
+                    &[
+                        ("num", &(idx + 1).to_string()),
+                        ("duration", &t.duration),
+                        ("size", &t.size_gb),
+                    ],
+                ),
+            );
+        }
+        self.emit(LineKind::Out, format!("{}{}", opening(&self.iso_url), ok()));
+        for line in title.iter().flat_map(|t| t.streams.iter()) {
+            self.emit(LineKind::Out, line.clone());
+        }
+    }
+
+    // End the job's transcript the way a terminal leaves it: an unfinished
+    // "Opening ..." line, and the last progress line, stay on screen.
+    fn close_open_line(&self, _ok: bool) {
+        let (opened, progress) = {
+            let mut t = self.term();
+            (t.opened, std::mem::take(&mut t.progress))
+        };
+        if !opened {
+            self.emit(LineKind::Out, opening(&self.iso_url));
+        }
+        if !progress.is_empty() {
+            self.emit(LineKind::Out, progress);
+        }
+    }
+}
+
+fn opening(url: &str) -> String {
+    crate::strings::fmt("rip.opening", &[("device", url)])
+}
+
+fn ok() -> String {
+    crate::strings::get("rip.ok")
 }
 
 impl LineSink for JobSink<'_> {
-    fn line(&self, text: String) {
-        self.log.write(&text);
-        self.lib.console(text);
+    fn line(&self, kind: LineKind, text: String) {
+        self.emit(kind, text);
     }
 }
 
@@ -284,76 +385,92 @@ impl Sink for JobSink<'_> {
         self.alive();
         match level {
             Level::Trace | Level::Debug if !self.debug => {}
-            Level::Trace | Level::Debug => self.line(format!("debug: {msg}")),
-            Level::Warn => self.line(format!("warning: {msg}")),
-            Level::Error => self.line(format!("error: {msg}")),
-            Level::Info => self.line(msg.to_string()),
+            Level::Trace | Level::Debug => self.emit(LineKind::Debug, msg.to_string()),
+            Level::Warn => self.emit(LineKind::Warn, msg.to_string()),
+            Level::Error => self.emit(LineKind::Err, msg.to_string()),
+            Level::Info => self.emit(LineKind::Out, msg.to_string()),
         }
+    }
+
+    fn title_opened(&self, title: &libfreemkv::DiscTitle) {
+        self.alive();
+        self.term().title = Some(TitleText {
+            duration: title.duration_display(),
+            size_gb: format!("{:.1}", title.size_gb()),
+            streams: transcript::stream_lines(title),
+        });
     }
 
     fn progress(&self, p: &Progress) {
         self.alive();
+        let line = transcript::progress_line(p.bytes_done, p.bytes_total, p.speed_bps, p.eta_secs);
         let pct = (p.bytes_total > 0)
             .then(|| (p.bytes_done as f64 * 100.0 / p.bytes_total as f64).min(100.0));
+        self.term().progress = line.clone();
+        if self.debug {
+            self.log.write(LineKind::Debug, &line);
+        }
         self.lib.set_running(|r| {
             if let Some(r) = r {
                 r.pct = pct;
+                r.bytes_done = p.bytes_done;
+                r.bytes_total = p.bytes_total;
                 r.speed_bps = p.speed_bps;
                 r.eta_secs = p.eta_secs;
                 r.stalled_secs = 0;
+                r.line = line;
             }
         });
-        let Some(pct) = pct else { return };
-        let decile = (pct / 10.0) as u64;
-        if decile > self.logged_decile.swap(decile, Ordering::Relaxed) {
-            let eta = p.eta_secs.map_or_else(|| "-".to_string(), hms);
-            self.line(format!(
-                "{:>3.0}%  {:.1} MB/s  ETA {eta}",
-                pct,
-                p.speed_bps as f64 / 1e6
-            ));
-        } else if self.debug {
-            self.log
-                .write(&format!("progress {pct:.2}% {} B/s", p.speed_bps));
-        }
     }
 
     fn event(&self, e: &Event<'_>) {
         self.alive();
         match e {
-            Event::Phase { name } => {
-                self.phase(name);
-                let text = match *name {
-                    "open" => "Opening the image",
-                    "mux" => "Muxing",
-                    "verify" => "Verifying the new MKV",
-                    "replace" => "Moving the new MKV into place",
-                    other => other,
-                };
-                self.line(text.to_string());
+            Event::Phase { name } => self.phase(name),
+            Event::TitleStart { idx, dest } => {
+                self.print_opened(*idx);
+                self.term().mux_started = Some(Instant::now());
+                self.emit(LineKind::Out, format!("{}{}", opening(dest), ok()));
             }
-            Event::TitleStart { idx, .. } => self.line(format!("Title {}", idx + 1)),
-            Event::TitleDone { result, .. } => match result {
-                Ok(o) => self.line(format!(
-                    "Muxed {:.1} GB, {} streams{}",
-                    o.bytes_written as f64 / 1e9,
-                    o.streams,
-                    if o.completed { "" } else { " (stopped)" }
-                )),
-                Err(err) => self.line(format!("Mux failed: {}", error_text(err))),
-            },
+            Event::TitleDone { result, .. } => {
+                let (progress, started) = {
+                    let mut t = self.term();
+                    (std::mem::take(&mut t.progress), t.mux_started)
+                };
+                if !progress.is_empty() {
+                    self.emit(LineKind::Out, progress);
+                }
+                self.lib.set_running(|r| {
+                    if let Some(r) = r {
+                        r.line.clear();
+                    }
+                });
+                match result {
+                    Ok(o) => {
+                        self.emit(LineKind::Out, String::new());
+                        let secs = started.map_or(0.0, |s| s.elapsed().as_secs_f64());
+                        let kind = if o.completed {
+                            LineKind::Ok
+                        } else {
+                            LineKind::Warn
+                        };
+                        self.emit(kind, transcript::complete_line(o.bytes_written, secs));
+                    }
+                    Err(err) => self.emit(LineKind::Err, format!("Error: {}", error_text(err))),
+                }
+            }
             Event::Verify {
                 ok,
                 runtime_secs,
                 expected_secs,
-                ..
-            } => self.line(format!(
-                "Verify {}: runtime {} of {}",
-                if *ok { "passed" } else { "failed" },
-                runtime_secs.map_or_else(|| "unknown".into(), |s| hms(s as u64)),
-                hms(*expected_secs as u64)
-            )),
-            Event::Replaced { .. } => self.line("Replaced the old MKV".into()),
+                path,
+            } => self.emit(
+                if *ok { LineKind::Out } else { LineKind::Err },
+                transcript::verify_line(path, *ok, *runtime_secs, *expected_secs),
+            ),
+            Event::Replaced { path } => {
+                self.emit(LineKind::Out, format!("Replaced {}", path.display()))
+            }
             _ => {}
         }
     }
@@ -405,34 +522,38 @@ fn watchdog(lib: &Library, job_id: u64, sink: &JobSink<'_>, done: &AtomicBool) {
             StallAction::None => warned &= stall >= STALL_WARN_SECS,
             StallAction::Warn => {
                 warned = true;
-                sink.line(format!("No progress for {}", hms(stall)));
+                sink.line(LineKind::Warn, format!("No progress for {}", hms(stall)));
             }
             StallAction::CancelRemux => {
                 cancelled = true;
                 lib.stall_cancel.store(true, Ordering::SeqCst);
                 lib.queue.note_running(job_id, JobNote::Stalled);
-                sink.line(format!(
-                    "No progress for {}; cancelling this remux",
-                    hms(stall)
-                ));
+                sink.line(
+                    LineKind::Err,
+                    format!("No progress for {}; cancelling this remux", hms(stall)),
+                );
             }
         }
     }
 }
 
-/// Audit every library MKV whose cached audit no longer matches it, then rest.
-pub fn audit_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>) {
+/// How often the indexer rescans when nothing wakes it.
+pub(crate) const RESCAN_SECS: u64 = 60;
+
+/// Keep the in-memory index current: scan, read headers, audit, then sleep
+/// until woken or the rescan interval passes.
+pub fn index_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>) {
     while !shutting_down() {
         let d = super::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner()));
-        for m in super::index::list_mkvs(&d.library).files {
-            if shutting_down() {
-                return;
-            }
-            if lib.probes.refresh_audit(&m.path) {
-                lib.touch_live();
+        if !lib.index_now(&d) {
+            continue;
+        }
+        let until = Instant::now() + Duration::from_secs(RESCAN_SECS);
+        while !shutting_down() && Instant::now() < until {
+            if lib.wait_for_wake(Duration::from_secs(1)) {
+                break;
             }
         }
-        nap(Duration::from_secs(60));
     }
 }
 
@@ -446,7 +567,7 @@ mod tests {
 
     struct Lines(Mutex<Vec<String>>);
     impl LineSink for Lines {
-        fn line(&self, text: String) {
+        fn line(&self, _kind: LineKind, text: String) {
             self.0.lock().unwrap().push(text);
         }
     }
@@ -484,6 +605,20 @@ mod tests {
         (t, lib, dirs)
     }
 
+    fn test_sink<'a>(lib: &'a Library, arbiter: &'a Arbiter) -> JobSink<'a> {
+        JobSink {
+            lib,
+            job_id: 7,
+            arbiter,
+            epoch: arbiter.epoch(),
+            log: JobLog(Mutex::new(None)),
+            debug: false,
+            iso_url: "iso:///i/A.iso".into(),
+            last_activity: AtomicU64::new(0),
+            term: Mutex::new(Term::default()),
+        }
+    }
+
     fn row<'a>(l: &'a super::super::Listing, title: &str) -> &'a super::super::RowView {
         l.rows.iter().find(|r| r.title == title).unwrap()
     }
@@ -505,6 +640,7 @@ mod tests {
     #[test]
     fn muxed_with_is_current_the_moment_a_remux_finishes_mid_batch() {
         let (_t, lib, dirs) = library_with(&["A", "B", "C"]);
+        lib.index_now(&dirs);
         let before = lib.listing(&dirs);
         for t in ["A", "B", "C"] {
             assert!(matches!(
@@ -548,12 +684,13 @@ mod tests {
             row(&after, "B").muxed_with,
             MuxedWith::Older { .. }
         ));
-        assert!(lines.0.lock().unwrap()[0].starts_with("Done:"));
+        assert!(lines.0.lock().unwrap()[0].starts_with("Remuxed in"));
     }
 
     #[test]
-    fn a_file_changed_behind_the_queue_is_re_read_on_the_next_listing() {
+    fn a_file_changed_behind_the_queue_is_re_read_on_the_next_index_pass() {
         let (_t, lib, dirs) = library_with(&["A"]);
+        lib.index_now(&dirs);
         assert!(matches!(
             row(&lib.listing(&dirs), "A").muxed_with,
             MuxedWith::Older { .. }
@@ -561,6 +698,7 @@ mod tests {
         let target = dirs.library.join("A/A.mkv");
         let longer = format!("{} with a longer stamp", current_stamp());
         std::fs::write(&target, mkv(&longer, Some(60.0), Some(58), true)).unwrap();
+        lib.index_now(&dirs);
         assert_eq!(
             row(&lib.listing(&dirs), "A").writing_app.as_deref(),
             Some(longer.as_str())
@@ -570,6 +708,7 @@ mod tests {
     #[test]
     fn a_failure_keeps_its_code_and_a_preempted_job_goes_back_first() {
         let (_t, lib, dirs) = library_with(&["A", "B"]);
+        lib.index_now(&dirs);
         lib.enqueue(&dirs, |_| true);
         let lines = Lines(Mutex::new(Vec::new()));
         let a = lib.queue.claim_next().unwrap();
@@ -626,15 +765,7 @@ mod tests {
     fn a_rip_that_starts_mid_remux_is_not_blocked_and_stops_the_remux() {
         let (_t, lib, _dirs) = library_with(&[]);
         let arbiter = Arbiter::new();
-        let sink = JobSink {
-            lib: &lib,
-            arbiter: &arbiter,
-            epoch: arbiter.epoch(),
-            log: JobLog(Mutex::new(None)),
-            debug: false,
-            last_activity: AtomicU64::new(0),
-            logged_decile: AtomicU64::new(0),
-        };
+        let sink = test_sink(&lib, &arbiter);
         std::thread::scope(|s| {
             let remux = s.spawn(|| {
                 let t = Instant::now();

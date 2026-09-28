@@ -278,6 +278,25 @@ impl Queue {
         })
     }
 
+    /// Drop the queued (not running) job for `target`. Returns how many went.
+    pub fn remove_queued(&self, target: &Path) -> usize {
+        self.mutate(|f| {
+            let before = f.jobs.len();
+            f.jobs
+                .retain(|j| !(j.target == target && j.state == JobState::Queued));
+            before - f.jobs.len()
+        })
+    }
+
+    /// Drop every queued job; the running one carries on.
+    pub fn clear_queued(&self) -> usize {
+        self.mutate(|f| {
+            let before = f.jobs.len();
+            f.jobs.retain(|j| j.state != JobState::Queued);
+            before - f.jobs.len()
+        })
+    }
+
     pub fn set_paused(&self, paused: bool) {
         self.mutate(|f| f.paused = paused);
     }

@@ -5590,10 +5590,55 @@ mod web_tests {
                 c.library_dir = lib.to_string_lossy().into_owned();
                 c.library_iso_dir = isos.to_string_lossy().into_owned();
             }
+            // Two MKVs with ISOs: one muxed by an older freemkv, one by mkvmerge.
+            use crate::server::library::probe::testmkv::mkv;
+            for (t, app) in [
+                ("Old (2001)", "freemkv 1.6.11 (g1)"),
+                ("Merged (2002)", "mkvmerge v96.0 ('x') 64-bit"),
+            ] {
+                std::fs::create_dir_all(lib.join(t)).unwrap();
+                std::fs::write(
+                    lib.join(t).join(format!("{t}.mkv")),
+                    mkv(app, Some(60.0), Some(58), true),
+                )
+                .unwrap();
+                std::fs::write(isos.join(format!("{t}.iso")), b"iso").unwrap();
+            }
+            // Before the first scan the answer is immediate and says so.
             let (code, body) = roundtrip(&cfg, "GET", "/api/library", None, &[]);
             assert_eq!(code, 200, "{body}");
             let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["scanning"], true);
+            let (code, body) = roundtrip(&cfg, "POST", "/api/library/queue/out-of-date", None, &[]);
+            assert_eq!(code, 409, "no silent zero before the scan: {body}");
+
+            let c = cfg.read().unwrap().clone();
+            let library = crate::server::library::instance(&c);
+            assert!(library.index_now(&crate::server::library::dirs(&c)));
+            // Indexed: the answer comes from memory, even with the folders gone.
+            let moved = dir.path().join("moved-away");
+            std::fs::rename(&lib, &moved).unwrap();
+            let t = std::time::Instant::now();
+            let (code, body) = roundtrip(&cfg, "GET", "/api/library", None, &[]);
+            assert!(t.elapsed() < std::time::Duration::from_secs(2));
+            std::fs::rename(&moved, &lib).unwrap();
+            assert_eq!(code, 200, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
             assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+            assert_eq!(v["rows"].as_array().unwrap().len(), 3, "{body}");
+            let row = |t: &str| {
+                v["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["title"] == t)
+                    .unwrap()
+                    .clone()
+            };
+            assert_eq!(row("Merged (2002)")["muxed_label"], "mkvmerge 96.0");
+            assert_eq!(row("Old (2001)")["muxed_label"], "freemkv 1.6.11");
+            assert_eq!(row("Old (2001)")["needs_remux"], true);
+            let v = serde_json::json!({"rows": [row("New (2020)")]});
             assert_eq!(v["rows"][0]["kind"], "iso_only");
             let target = v["rows"][0]["target"].as_str().unwrap().to_string();
 
@@ -5607,6 +5652,15 @@ mod web_tests {
             );
             assert!(add(&target).1.contains("\"queued\":1"));
             assert!(add(&target).1.contains("\"queued\":0"), "already queued");
+            let (_, body) = roundtrip(&cfg, "POST", "/api/library/queue/out-of-date", None, &[]);
+            let q: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                (q["queued"].as_u64(), q["eligible"].as_u64()),
+                (Some(2), Some(3)),
+                "{body}"
+            );
+            let (_, body) = roundtrip(&cfg, "POST", "/api/library/queue/clear-queued", None, &[]);
+            assert!(body.contains("\"removed\":3"), "{body}");
             let (_, body) = roundtrip(&cfg, "POST", "/api/library/queue/pause", None, &[]);
             assert!(body.contains("\"paused\":true"), "{body}");
             let (code, _) = roundtrip(&cfg, "GET", "/api/library/console", None, &[]);
