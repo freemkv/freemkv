@@ -550,11 +550,15 @@ class Evidence:
         self.ev = {'schema': mg.SCHEMA, 'fingerprint': self.f, 'inputs': self.inputs, 'revisions': revisions,
                    'lock_sha256': mg.sha256(self.lock), 'run_id': RUN_ID,
                    'legs': {leg: leg_record(leg) for leg in mg.legs(policy)}}
-        self.run = {'id': RUN_ID, 'path': '.github/workflows/qa.yml', 'event': 'workflow_dispatch',
-                    'head_branch': 'dev', 'head_sha': revisions['freemkv'],
+        self.run = {'id': RUN_ID, 'path': '.github/workflows/qa.yml', 'event': 'push',
+                    'head_branch': 'qa', 'head_sha': revisions['freemkv'],
                     'repository': {'full_name': 'freemkv/freemkv'},
                     'head_repository': {'full_name': 'freemkv/freemkv'},
-                    'created_at': '2026-09-20T00:00:00Z'}
+                    'status': 'completed', 'conclusion': 'success',
+                    'created_at': '2026-09-20T00:00:00Z', 'updated_at': '2026-09-20T02:00:00Z'}
+        # The tag object as record-media-evidence writes it through GITHUB_TOKEN.
+        self.tag = {'tag': f'media-evidence/{self.f}/{RUN_ID}', 'object': {'sha': 'c1', 'type': 'commit'},
+                    'tagger': dict(mg.ACTIONS_BOT, date='2026-09-20T01:50:00Z')}
         self.jobs = [{'name': n, 'conclusion': 'success', 'runner_name': None, 'labels': []}
                      for n in mg.required_jobs(policy)]
         for leg in mg.legs(policy):
@@ -576,7 +580,7 @@ class Evidence:
         routes = {
             f'git/matching-refs/tags/media-evidence/{self.f}/': self.tags if self.tags is not None else [
                 {'ref': f'refs/tags/media-evidence/{self.f}/{RUN_ID}', 'object': {'sha': 't1', 'type': 'tag'}}],
-            'git/tags/t1': {'object': {'sha': 'c1', 'type': 'commit'}},
+            'git/tags/t1': self.tag,
             'git/commits/c1': {'parents': [], 'tree': {'sha': 'tr1'}},
             'git/trees/tr1': {'tree': [{'path': 'evidence.json', 'type': 'blob', 'sha': 'b1', 'size': 10},
                                        {'path': 'Cargo.lock', 'type': 'blob', 'sha': 'b2', 'size': 10}]},
@@ -618,6 +622,10 @@ class DecideTests(unittest.TestCase):
             'run not found': lambda e: setattr(e, 'run', {}),
             'pull_request event': lambda e: e.run.update(event='pull_request'),
             'feature branch': lambda e: e.run.update(head_branch='feature-x'),
+            'dev branch': lambda e: e.run.update(head_branch='dev'),
+            'run still in progress': lambda e: e.run.update(status='in_progress', conclusion=None),
+            'run failed': lambda e: e.run.update(conclusion='failure'),
+            'run cancelled': lambda e: e.run.update(conclusion='cancelled'),
             'wrong workflow': lambda e: e.run.update(path='.github/workflows/ci.yml'),
             'fork': lambda e: e.run.update(head_repository={'full_name': 'evil/freemkv'}),
             'head sha': lambda e: e.run.update(head_sha='f' * 40),
@@ -657,6 +665,41 @@ class DecideTests(unittest.TestCase):
         e.ev['legs']['linux-perf']['runner_name'] = 'ephemeral-linux-i-0123456789abcdef0'
         e.job('cli-perf (linux)')['runner_name'] = 'ephemeral-linux-i-0123456789abcdef0'
         self.assertIsNone(e.found(lambda r, p: True), 'perf leg on a functional runner')
+
+    def test_forged_tags_are_rejected(self):
+        """A tag anyone but a real, successful qa.yml run on qa wrote is never evidence."""
+        human = {'name': 'Matthew Jackson', 'email': '1085847+MattJackson@users.noreply.github.com'}
+        cases = {
+            'pushed by a person': lambda e: e.tag.update(tagger=dict(human, date='2026-09-20T01:50:00Z')),
+            'bot name, other email': lambda e: e.tag['tagger'].update(email='github-actions@example.com'),
+            'no tagger': lambda e: e.tag.pop('tagger'),
+            'tag object under another name': lambda e: e.tag.update(tag=f'media-evidence/{e.f}/{RUN_ID + 1}'),
+            'dated before the run': lambda e: e.tag['tagger'].update(date='2026-09-19T23:59:59Z'),
+            'dated after the run': lambda e: e.tag['tagger'].update(date='2026-09-21T00:00:00Z'),
+            'undated': lambda e: e.tag['tagger'].pop('date'),
+            'run id that does not exist': lambda e: e.tags.__setitem__(0, {
+                'ref': f'refs/tags/media-evidence/{e.f}/{RUN_ID + 7}', 'object': {'sha': 't1', 'type': 'tag'}}),
+            'run of another workflow': lambda e: e.run.update(path='.github/workflows/release.yml'),
+            'run at another sha': lambda e: e.run.update(head_sha='e' * 40),
+            'run on dev': lambda e: e.run.update(head_branch='dev', event='workflow_dispatch'),
+            'run that failed': lambda e: e.run.update(conclusion='failure'),
+        }
+        for name, apply in cases.items():
+            with self.subTest(name=name):
+                e = Evidence(self)
+                e.tags = [{'ref': f'refs/tags/media-evidence/{e.f}/{RUN_ID}', 'object': {'sha': 't1', 'type': 'tag'}}]
+                apply(e)
+                self.assertIsNone(e.found(), name)
+        # The same fixture untouched is accepted, so each case above fails on its own change.
+        self.assertIsNotNone(Evidence(self).found())
+
+    def test_forged_tag_with_otherwise_perfect_evidence_is_rejected(self):
+        """Copying a real run's evidence byte for byte does not help a tag the bot did not write."""
+        e = Evidence(self)
+        e.tag['tagger'] = {'name': 'github-actions', 'email': mg.ACTIONS_BOT['email'], 'date': '2026-09-20T01:50:00Z'}
+        logs = []
+        self.assertIsNone(mg.find_evidence(e.f, e.policy, e.request, log=logs.append))
+        self.assertTrue(any('not created by github-actions[bot]' in line for line in logs), logs)
 
     def test_newest_valid_tag_wins_and_a_bad_one_never_blocks(self):
         e = Evidence(self)

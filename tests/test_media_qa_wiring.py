@@ -364,16 +364,35 @@ class LegAndRecordTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
 
+    def existing_tag(self, tagger, f='f' * 64, run_id=RUN_ID):
+        """A fake API holding refs/tags/media-evidence/<f>/<run_id> written by `tagger`."""
+        name = f'media-evidence/{"f" * 64}/{RUN_ID}'
+        blob = lambda b: {'content': base64.b64encode(b).decode()}
+        routes = {
+            f'repos/freemkv/freemkv/git/ref/tags/{name}': {'ref': f'refs/tags/{name}', 'object': {'sha': 't9', 'type': 'tag'}},
+            'repos/freemkv/freemkv/git/tags/t9': {'tag': name, 'object': {'sha': 'c9', 'type': 'commit'},
+                                                  'tagger': dict(tagger, date='2026-09-20T01:00:00Z')},
+            'repos/freemkv/freemkv/git/commits/c9': {'parents': [], 'tree': {'sha': 'tr9'}},
+            'repos/freemkv/freemkv/git/trees/tr9': {'tree': [
+                {'path': 'evidence.json', 'type': 'blob', 'sha': 'b9', 'size': 1},
+                {'path': 'Cargo.lock', 'type': 'blob', 'sha': 'b8', 'size': 1}]},
+            'repos/freemkv/freemkv/git/blobs/b9': blob(json.dumps({'fingerprint': f, 'run_id': run_id}).encode()),
+            'repos/freemkv/freemkv/git/blobs/b8': blob(b''),
+        }
+        return routes.__getitem__
+
     def test_existing_tag_from_an_earlier_attempt_is_success(self):
         calls = []
 
         def post(endpoint, body):
-            calls.append(endpoint)
+            calls.append((endpoint, body))
             if endpoint.endswith('/refs'):
                 raise subprocess.CalledProcessError(1, 'gh', output='{"message":"Reference already exists"}')
             return {'sha': 'x'}
-        name, _ = mg.write_evidence_tag('f' * 64, RUN_ID, b'{}', b'', post=post)
+        name, commit = mg.write_evidence_tag('f' * 64, RUN_ID, b'{}', b'', post=post,
+                                             request=self.existing_tag(mg.ACTIONS_BOT))
         self.assertTrue(name.endswith(f'/{RUN_ID}'))
+        self.assertEqual(commit, 'c9', 'the standing tag\'s commit is the evidence')
 
         def post_fail(endpoint, body):
             if endpoint.endswith('/refs'):
@@ -381,6 +400,44 @@ class LegAndRecordTests(unittest.TestCase):
             return {'sha': 'x'}
         with self.assertRaises(subprocess.CalledProcessError):
             mg.write_evidence_tag('f' * 64, RUN_ID, b'{}', b'', post=post_fail)
+
+    def test_a_forged_tag_squatting_the_name_is_refused(self):
+        def post(endpoint, body):
+            if endpoint.endswith('/refs'):
+                raise subprocess.CalledProcessError(1, 'gh', output='{"message":"Reference already exists"}')
+            return {'sha': 'x'}
+        person = {'name': 'Someone', 'email': 'someone@users.noreply.github.com'}
+        for label, request in (('person', self.existing_tag(person)),
+                               ('another F', self.existing_tag(mg.ACTIONS_BOT, f='e' * 64)),
+                               ('another run', self.existing_tag(mg.ACTIONS_BOT, run_id=RUN_ID + 1))):
+            with self.subTest(label):
+                with self.assertRaises(ValueError):
+                    mg.write_evidence_tag('f' * 64, RUN_ID, b'{}', b'', post=post, request=request)
+
+    def test_the_writer_names_the_actions_bot_as_tagger(self):
+        posts = []
+
+        def post(endpoint, body):
+            posts.append((endpoint, body))
+            return {'sha': f's{len(posts)}'}
+        import datetime
+        now = datetime.datetime(2026, 9, 20, 1, 0, tzinfo=datetime.timezone.utc)
+        mg.write_evidence_tag('f' * 64, RUN_ID, b'{}', b'', post=post, now=now)
+        tag = next(b for e, b in posts if e.endswith('/tags'))
+        self.assertEqual(tag['tagger'], dict(mg.ACTIONS_BOT, date='2026-09-20T01:00:00Z'))
+
+    def test_record_refuses_a_run_off_the_qa_branch(self):
+        e, plan, legs, env, aws, post, posts, _ = self.setup_record()
+        e.run.update(head_branch='dev', event='workflow_dispatch')
+        with self.assertRaises(ValueError):
+            mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
+        self.assertEqual(posts, [])
+
+    def test_record_runs_inside_its_own_unfinished_run(self):
+        e, plan, legs, env, aws, post, posts, _ = self.setup_record()
+        e.run.update(status='in_progress', conclusion=None)
+        name, _ = mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
+        self.assertTrue(name.startswith('media-evidence/'))
 
     def test_job_named_accepts_matrix_suffixes(self):
         jobs = [{'name': 'cli-matrix (linux, x86_64-unknown-linux-musl)'}, {'name': 'cli-matrix (windows)'}]

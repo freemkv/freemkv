@@ -926,8 +926,50 @@ def evidence_candidates(f, request):
     return sorted(out, key=lambda x: -x[1])
 
 
+# The identity GITHUB_TOKEN writes as (record-media-evidence names it explicitly).
+ACTIONS_BOT = {'name': 'github-actions[bot]', 'email': '41898282+github-actions[bot]@users.noreply.github.com'}
+
+
+def _when(stamp):
+    return datetime.datetime.fromisoformat(str(stamp).replace('Z', '+00:00'))
+
+
+def check_tag_provenance(tag, name, run):
+    """Raise ValueError unless the tag object was written by the Actions bot under `name` while the
+    run was live (created_at .. updated_at: an earlier attempt's tag stands after "Re-run all jobs").
+    No ruleset is relied on: this is the consumer's own check, and trusted_run() binds the run."""
+    tagger = tag.get('tagger') or {}
+    if tagger.get('name') != ACTIONS_BOT['name'] or tagger.get('email') != ACTIONS_BOT['email']:
+        raise ValueError(f'evidence tag was not created by {ACTIONS_BOT["name"]} '
+                         f'(tagger {tagger.get("name")!r} <{tagger.get("email")}>)')
+    if tag.get('tag') != name:
+        raise ValueError(f'tag object is named {tag.get("tag")!r}, not {name!r}')
+    try:
+        when, lo, hi = _when(tagger['date']), _when(run['created_at']), _when(run['updated_at'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f'evidence tag date cannot be placed in run {run.get("id")} ({exc})') from exc
+    if not lo <= when <= hi:
+        raise ValueError(f'evidence tag dated {tagger["date"]} is outside run {run.get("id")} '
+                         f'({lo.isoformat()} .. {hi.isoformat()})')
+
+
+def trusted_run(run, run_id, sha, finished=True):
+    """Raise ValueError unless `run` is a freemkv qa.yml run on the qa branch at `sha`; `finished`
+    also requires it to have completed successfully (an evidence consumer; record runs inside it)."""
+    if not (isinstance(run, dict) and run.get('id') == run_id
+            and run.get('path', '').split('@')[0] == '.github/workflows/qa.yml'
+            and run.get('event') in ('push', 'workflow_dispatch')
+            and run.get('head_branch') == 'qa'
+            and (run.get('repository') or {}).get('full_name') == f'{OWNER}/freemkv'
+            and (run.get('head_repository') or {}).get('full_name') == f'{OWNER}/freemkv'
+            and run.get('head_sha') == sha):
+        raise ValueError('run is not a freemkv qa.yml run on the qa branch at the evidence sha')
+    if finished and (run.get('status') != 'completed' or run.get('conclusion') != 'success'):
+        raise ValueError(f'run {run_id} is {run.get("status")}/{run.get("conclusion")}, not a successful run')
+
+
 def read_evidence(ref, request):
-    """(evidence.json bytes, Cargo.lock bytes) from the orphan commit an evidence tag points at."""
+    """(evidence.json bytes, Cargo.lock bytes, tag object) from the orphan commit an evidence tag points at."""
     tag = request(f'repos/{OWNER}/freemkv/git/tags/{ref["object"]["sha"]}')
     if tag.get('object', {}).get('type') != 'commit':
         raise ValueError('evidence tag does not point at a commit')
@@ -944,7 +986,7 @@ def read_evidence(ref, request):
             raise ValueError(f'{name} is oversized')
         blob = request(f'repos/{OWNER}/freemkv/git/blobs/{blobs[name]["sha"]}')
         out.append(base64.b64decode(blob['content']))
-    return out
+    return out + [tag]
 
 
 def required_jobs(policy):
@@ -973,8 +1015,9 @@ LEG_TARGET = {'linux': 'x86_64-unknown-linux-musl', 'windows': 'x86_64-pc-window
               'linux-perf': 'x86_64-unknown-linux-musl', 'windows-perf': 'x86_64-pc-windows-msvc'}
 
 
-def check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, perf_check=None):
-    """Raise ValueError unless this evidence proves F (I-2). Returns warnings."""
+def check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, perf_check=None, finished=True):
+    """Raise ValueError unless this evidence proves F (I-2). Returns warnings. `finished=False` is
+    record's self-check from inside the still-running run."""
     if len(evidence_bytes) > MAX_EVIDENCE:
         raise ValueError('evidence.json is oversized')
     ev = json.loads(evidence_bytes)
@@ -990,14 +1033,7 @@ def check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, per
     revisions = ev.get('revisions')
     if not valid_revisions(revisions) or ev.get('run_id') != run_id:
         raise ValueError('revisions or run id malformed')
-    if not (isinstance(run, dict) and run.get('id') == run_id
-            and run.get('path', '').split('@')[0] == '.github/workflows/qa.yml'
-            and run.get('event') in ('push', 'workflow_dispatch')
-            and run.get('head_branch') in ('qa', 'dev')
-            and (run.get('repository') or {}).get('full_name') == f'{OWNER}/freemkv'
-            and (run.get('head_repository') or {}).get('full_name') == f'{OWNER}/freemkv'
-            and run.get('head_sha') == revisions['freemkv']):
-        raise ValueError('run is not a trusted freemkv qa.yml run at the evidence sha')
+    trusted_run(run, run_id, revisions['freemkv'], finished=finished)
     for name in required_jobs(policy):
         if (job_named(jobs, name) or {}).get('conclusion') != 'success':
             raise ValueError(f'job {name!r} is not success')
@@ -1055,9 +1091,11 @@ def find_evidence(f, policy, request=gh_api, perf_check=None, log=print):
         return None
     for ref, run_id in candidates:
         try:
-            evidence_bytes, lock_bytes = read_evidence(ref, request)
+            evidence_bytes, lock_bytes, tag = read_evidence(ref, request)
             run = request(f'repos/{OWNER}/freemkv/actions/runs/{run_id}')
             jobs = request(f'repos/{OWNER}/freemkv/actions/runs/{run_id}/jobs?filter=latest&per_page=100')['jobs']
+            # Who wrote the tag, and for which real run: a tag anyone else pushed is not evidence.
+            check_tag_provenance(tag, f'media-evidence/{f}/{run_id}', run)
             ev, warnings = check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, perf_check)
             return {'run_id': run_id, 'evidence': ev, 'warnings': warnings,
                     'url': f'https://github.com/{OWNER}/freemkv/actions/runs/{run_id}'}
@@ -1264,8 +1302,10 @@ def gh_post(endpoint, body):
     return json.loads(res.stdout)
 
 
-def write_evidence_tag(f, run_id, evidence_bytes, lock_bytes, post=gh_post):
-    """The orphan commit holding evidence.json and Cargo.lock, and its annotated tag (decision 6)."""
+def write_evidence_tag(f, run_id, evidence_bytes, lock_bytes, post=gh_post, request=gh_api, now=None):
+    """The orphan commit holding evidence.json and Cargo.lock, and its annotated tag (decision 6).
+    The tagger is the Actions bot (what check_tag_provenance requires). A tag already at the name
+    counts only if it is this run's own evidence for F from an earlier attempt."""
     base = f'repos/{OWNER}/freemkv/git'
     blobs = [post(f'{base}/blobs', {'content': base64.b64encode(data).decode(), 'encoding': 'base64'})['sha']
              for data in (evidence_bytes, lock_bytes)]
@@ -1275,15 +1315,27 @@ def write_evidence_tag(f, run_id, evidence_bytes, lock_bytes, post=gh_post):
     commit = post(f'{base}/commits', {'message': f'media evidence {f} (run {run_id})', 'tree': tree,
                                       'parents': []})['sha']
     name = f'media-evidence/{f}/{run_id}'
+    stamp = (now or datetime.datetime.now(datetime.timezone.utc)).strftime('%Y-%m-%dT%H:%M:%SZ')
     tag = post(f'{base}/tags', {'tag': name, 'message': f'full-disc evidence for {f} from run {run_id}',
-                                'object': commit, 'type': 'commit'})['sha']
+                                'object': commit, 'type': 'commit', 'tagger': dict(ACTIONS_BOT, date=stamp)})['sha']
     try:
         post(f'{base}/refs', {'ref': f'refs/tags/{name}', 'sha': tag})
     except subprocess.CalledProcessError as exc:
-        # "Re-run all jobs" of a run that already recorded: its evidence tag stands.
         if 'Reference already exists' not in (exc.stdout or '') + (exc.stderr or ''):
             raise
+        # "Re-run all jobs" of a run that already recorded: its evidence tag stands, but only if it
+        # really is ours. A tag someone else pushed at this name is refused, not adopted.
+        existing = request(f'{base}/ref/tags/{name}')
+        old_ev, _, old_tag = read_evidence(existing, request)
+        tagger = old_tag.get('tagger') or {}
+        old = json.loads(old_ev)
+        if (existing.get('object', {}).get('type') != 'tag' or old_tag.get('tag') != name
+                or tagger.get('name') != ACTIONS_BOT['name'] or tagger.get('email') != ACTIONS_BOT['email']
+                or old.get('fingerprint') != f or old.get('run_id') != run_id):
+            raise ValueError(f'refs/tags/{name} already exists and is not this run\'s evidence '
+                             f'(tagger {tagger.get("name")!r}); refusing to adopt it')
         print(f'::notice::refs/tags/{name} already exists (an earlier attempt of this run recorded it)')
+        commit = old_tag['object']['sha']
     return name, commit
 
 
@@ -1334,8 +1386,8 @@ def record(plan_dir, legs_dir, policy, env, request=gh_api, aws=aws_json, post=g
     ev['legs'] = legs_out
     evidence_bytes = json.dumps(ev, indent=1, sort_keys=True).encode()
     done = jobs + [{'name': 'record-media-evidence', 'conclusion': 'success'}]
-    check_evidence(ev['fingerprint'], run_id, evidence_bytes, lock, run, done, policy)
-    return write_evidence_tag(ev['fingerprint'], run_id, evidence_bytes, lock, post)
+    check_evidence(ev['fingerprint'], run_id, evidence_bytes, lock, run, done, policy, finished=False)
+    return write_evidence_tag(ev['fingerprint'], run_id, evidence_bytes, lock, post, request)
 
 
 def verdict(env):
