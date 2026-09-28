@@ -544,11 +544,14 @@ pub fn check_for_update(current: &str) -> String {
 }
 
 fn check_for_update_at(url: &str, current: &str, t: UpdateTimeouts) -> String {
+    // Stop design v5 §2.7 (T25): "connect 10 s, headers 10 s, and a body idle of 10 s
+    // through freemkv's `IdleReCapConnector`"; the `timeout_global(10 s)` total is gone.
     let config = ureq::config::Config::builder()
-        .timeout_global(Some(t.idle))
+        .timeout_connect(Some(t.connect))
+        .timeout_recv_response(Some(t.headers))
+        .timeout_recv_body(None)
         .build();
-    let _ = (t.connect, t.headers);
-    let resp = ureq::Agent::new_with_config(config)
+    let resp = crate::keydb_fetch::idle_agent(config, t.idle)
         .get(url)
         .header("User-Agent", "freemkv-gui")
         .header("Accept", "application/vnd.github+json")

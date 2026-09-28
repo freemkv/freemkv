@@ -174,6 +174,18 @@ impl Resolver for PinnedResolver {
     }
 }
 
+/// An agent whose body reads re-arm `idle` (T25 shares T20's connector, stop design §2.7).
+// The update check is GUI-only; the CLI binary builds this module without it.
+#[allow(dead_code)]
+pub(crate) fn idle_agent(config: Config, idle: Duration) -> ureq::Agent {
+    use ureq::unversioned::transport::Connector as _;
+    ureq::Agent::with_parts(
+        config,
+        DefaultConnector::new().chain(IdleReCapConnector { idle }),
+        ureq::unversioned::resolver::DefaultResolver::default(),
+    )
+}
+
 // Chained after DefaultConnector to re-arm a ROLLING per-read idle bound on every body read,
 // restoring the stall detection ureq 3.4.1 removed (#1194).
 #[derive(Debug)]
