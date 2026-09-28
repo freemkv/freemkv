@@ -1,0 +1,52 @@
+{
+  "schema": 4,
+  "revision": 1,
+  "libraries": ["libfreemkv", "freemkv-engine", "freemkv-keysources"],
+  "library_required": ["src/**", "build.rs", "Cargo.toml"],
+  "library_inert": [".github/**", "tests/**", "benches/**", "examples/**", "docs/**", "*.md", "*.rst",
+                    "LICENSE*", "LICENSES/**", "NOTICE", "REUSE.toml", ".gitignore", "codecov.yml",
+                    "deny.toml", "rustfmt.toml", "clippy.toml", "Makefile", "Cargo.lock"],
+  "required_extra": {"freemkv-engine": ["USING_THE_ENGINE.md"]},
+  "freemkv_required": ["src/pipe.rs", "src/keydb_fetch.rs", "src/file_identity.rs", "src/title_identity.rs",
+                       "build.rs", "res/freemkv.manifest"],
+  "freemkv_modules": ["pipe", "keydb_fetch", "file_identity", "title_identity"],
+  "freemkv_crate_roots": ["src/main.rs", "src/lib.rs"],
+  "control_plane": [".github/workflows/qa.yml", ".github/scripts/exact-toolchain.sh", ".github/runner-templates/**",
+                    "tests/media_gate.py", "tests/media_perf.py", "tests/media_fetch.py", "tests/media_checks.py",
+                    "tests/media-gate-policy.json", "tests/media-fetch-requirements.txt"],
+  "gui_features": ["gui"],
+  "rerun_exempt": {
+    "libfreemkv": {".git/*": "GIT_SUFFIX stamp only; version metadata is excluded from comparison"},
+    "freemkv": {"res/freemkv.ico": "icon: the Windows app icon resource, not code"}
+  },
+  "allowed_crate_callees": {
+    "cli_entry": "argument parsing (VALUE_FLAGS, is_flag_token); covered by cli-integration and hash-matrix",
+    "disc_info": "info output; covered by cli-integration and hash-matrix",
+    "lossy": "lossy-export report text; covered by cli-integration and hash-matrix",
+    "messaging": "level/code messaging; covered by messaging_contract and cli-integration",
+    "output": "terminal output; covered by cli-integration and hash-matrix",
+    "strings": "i18n string facade; covered by cli-integration and hash-matrix"
+  },
+  "closure_roots": ["ureq", "mimalloc", "libc"],
+  "closure_skip": ["freemkv-unlock", "freemkv-i18n"],
+  "runner_name_re": "^ephemeral-(linux|windows)(-perf)?-(i-[0-9a-f]{8,17})$",
+  "harness": {"repository": "freemkv/freemkv-ci", "sha": "7ff716072c7063aaf4f1a7dd7200f532dab77794"},
+  "launch_templates": ["freemkv-runner-linux", "freemkv-runner-windows",
+                       "freemkv-runner-linux-perf", "freemkv-runner-windows-perf"],
+  "fixtures": ["dvd.iso", "bd.iso", "uhd.iso", "hddvd.iso", "keydb.cfg"],
+  "canary": {"probes": []},
+  "perf": {
+    "enabled": false,
+    "protocol": 1,
+    "instance_type": "c6id.4xlarge",
+    "titles": {},
+    "repeats": 3,
+    "thresholds": {"fail": 2.0, "warn_cpu": 1.3, "warn_mkv": 1.5, "rss_fail_mib": 256, "rss_warn_mib": 64,
+                   "fast": 0.5, "calibration": [0.8, 1.25], "noise": 1.25},
+    "drift_window": 5,
+    "baseline_scan_cap": 50,
+    "accept": [],
+    "pinned_baseline": null
+  },
+  "max_age_days": 90
+}

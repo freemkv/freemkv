@@ -73,13 +73,17 @@ jobs:
   media-harness-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # tests/media_gate.py reads TOML with tomllib (Python 3.11+).
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '3.12' }
+      - run: pip install --quiet pyyaml
       - run: python3 -m unittest discover -s tests -p 'test_media*.py' -v
 
   changelog:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require a CHANGELOG entry for the crate version on main
         shell: bash
         run: |
@@ -103,7 +107,7 @@ jobs:
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
@@ -132,7 +136,7 @@ jobs:
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
@@ -162,7 +166,7 @@ jobs:
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
@@ -192,7 +196,7 @@ jobs:
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
@@ -220,7 +224,7 @@ jobs:
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
@@ -249,7 +253,7 @@ jobs:
     if: github.ref_name == 'qa' || github.ref_name == 'main'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
@@ -275,7 +279,7 @@ jobs:
   cli-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
@@ -320,7 +324,7 @@ jobs:
   cli-has-no-ui-deps:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
@@ -358,7 +362,7 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
@@ -383,7 +387,7 @@ jobs:
   core-is-portable:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
@@ -413,7 +417,7 @@ jobs:
   version-consistency:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Cargo.toml and Info.plist must agree
         shell: bash
         run: |
@@ -449,7 +453,7 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
@@ -471,7 +475,7 @@ jobs:
       - uses: taiki-e/install-action@6db3a280da9eee4283c045c7431ab5116f1a0089 # cargo-llvm-cov
       - run: cargo llvm-cov --workspace --features gui --ignore-run-fail --lcov --output-path lcov.info
         working-directory: freemkv
-      - uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: freemkv/lcov.info

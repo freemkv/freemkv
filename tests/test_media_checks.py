@@ -98,6 +98,34 @@ class TimelineTests(unittest.TestCase):
         with self.assertRaises(checks.ValidationError):
             checks.timeline(data, "cadence")
 
+    def test_vc1_vfw_block_timestamps_surface_as_dts(self):
+        # Matroska V_MS/VFW/FOURCC (VC-1, HD-DVD): ffprobe reports the block
+        # timestamp as DTS and leaves pts N/A on anchors (measured on a real rip).
+        data = fixture()
+        data["format"]["format_name"] = "matroska,webm"
+        data["streams"][0].update(codec_name="vc1", codec_tag_string="WVC1")
+        for n, packet in enumerate(data["packets"][:50]):
+            packet["dts_time"] = packet["pts_time"]
+            if n % 3 != 1:
+                del packet["pts_time"]
+        checks.timeline(data, "cadence")
+        for field, value in [("format_name", "mpegts"), ("codec_tag_string", "[0][0][0][0]")]:
+            other = copy.deepcopy(data)
+            (other["format"] if field == "format_name" else other["streams"][0])[field] = value
+            with self.subTest(field=field), \
+                    self.assertRaisesRegex(checks.ValidationError, "missing packet timestamp"):
+                checks.timeline(other, "cadence")
+        del data["packets"][3]["dts_time"]
+        with self.assertRaisesRegex(checks.ValidationError, "missing packet timestamp"):
+            checks.timeline(data, "cadence")
+
+    def test_dts_does_not_stand_in_for_pts_outside_vc1(self):
+        data = fixture()
+        data["streams"][0]["codec_name"] = "h264"
+        data["packets"][3]["dts_time"] = data["packets"][3].pop("pts_time")
+        with self.assertRaisesRegex(checks.ValidationError, "missing packet timestamp"):
+            checks.timeline(data, "cadence")
+
     def test_uniformly_compressed_audio_fails(self):
         data = fixture()
         for packet in data["packets"][50:]:

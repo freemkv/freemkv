@@ -1,6 +1,11 @@
 name: qa
+run-name: qa ${{ inputs.dispatch_id || github.sha }}
 
-# Bounded media validation runs in hash-matrix; full-disc EC2 integration is opt-in.
+# The release candidate gate. plan-media pins the candidate (the six rip-crate
+# shas and one resolved lock, L_qa) for every job, and decides whether the
+# full-disc EC2 matrix must run: it runs when the rip-affecting inputs have no
+# green evidence (tests/media_gate.py, policy tests/media-gate-policy.json),
+# and is reused otherwise. media-verdict is the one media answer.
 
 on:
   push:
@@ -8,23 +13,106 @@ on:
   workflow_dispatch:
     inputs:
       run_media:
-        description: >-
-          Run full-disc DVD/BD/UHD/HD-DVD integration on ephemeral EC2 runners
-          (~121 GiB per platform, approximately two hours). The bounded media
-          known-answer and three-platform parity gate runs on every QA push.
+        description: Run the full-disc EC2 matrix even when green evidence exists.
         type: boolean
         default: false
+      skip_media:
+        description: Skip the full-disc matrix. qa is red if it was required (unproven).
+        type: boolean
+        default: false
+      skip_reason:
+        description: Why the full-disc matrix is skipped (required with skip_media).
+        type: string
+        default: ''
+      revisions:
+        description: JSON of the six rip-crate shas to pin (promote passes it).
+        type: string
+        default: ''
+      dispatch_id:
+        description: Correlation id shown in the run name (promote passes it).
+        type: string
+        default: ''
 
-# A run_media dispatch gets its own group: cancelling it after launch-runners
-# would strand its EC2 runners until their 4h self-destruct.
+# One group per candidate sha: a newer candidate is never cancelled by an older
+# run, and a cancelled run tears down its own EC2 instances (launch teardown).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && inputs.run_media && format('-media-{0}', github.run_id) || '' }}
+  group: qa-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
+  # Pins the candidate (C: six shas, one resolved lock), runs the
+  # classification guards, fingerprints the rip-affecting inputs and decides:
+  # reuse green evidence, or run the full-disc matrix.
+  plan-media:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    outputs:
+      run: ${{ steps.plan.outputs.run }}
+      status: ${{ steps.plan.outputs.status }}
+      reason: ${{ steps.plan.outputs.reason }}
+      fingerprint: ${{ steps.plan.outputs.fingerprint }}
+      revisions: ${{ steps.plan.outputs.revisions }}
+      harness: ${{ steps.plan.outputs.harness }}
+      launch_templates: ${{ steps.plan.outputs.launch_templates }}
+      evidence_url: ${{ steps.plan.outputs.evidence_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '3.12' }
+      - name: Exact toolchain (freemkv rust-version)
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
+      - name: Pin the candidate
+        id: pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.revisions }}
+        run: python3 freemkv/tests/media_gate.py pin --workspace .
+      # External inputs are fingerprinted too. A read failure is recorded, which
+      # can only force a run (fail-safe), never reuse.
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        continue-on-error: true
+        with:
+          role-to-assume: ${{ secrets.FMKV_FIXTURES_ROLE }}
+          aws-region: us-west-2
+      - name: Pin the fixtures
+        env:
+          B: ${{ secrets.FMKV_FIXTURES_BUCKET }}
+        run: python3 freemkv/tests/media_gate.py externals --part fixtures --bucket "$B" --out externals.json
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        continue-on-error: true
+        with:
+          role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
+          aws-region: us-west-2
+      - name: Pin the launch templates
+        run: python3 freemkv/tests/media_gate.py externals --part launch_templates --out externals.json
+      - name: Plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISIONS: ${{ steps.pin.outputs.revisions }}
+          SUPERSEDED: ${{ steps.pin.outputs.superseded }}
+          RUN_MEDIA: ${{ inputs.run_media }}
+          SKIP_MEDIA: ${{ inputs.skip_media }}
+          SKIP_REASON: ${{ inputs.skip_reason }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: python3 freemkv/tests/media_gate.py plan --workspace . --externals externals.json --plan-directory media-plan
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: media-plan
+          path: media-plan
+          retention-days: 90
+          if-no-files-found: error
+
   rc-tag:
     # Only a qa push is a candidate; a dispatch (e.g. a media run on dev) must
     # not mint an rc tag.
@@ -33,7 +121,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Stamp the next rc
@@ -49,6 +137,7 @@ jobs:
           echo "### Candidate \`$tag\`" >> "$GITHUB_STEP_SUMMARY"
 
   release-tests:
+    needs: [plan-media]
     strategy:
       fail-fast: false
       matrix:
@@ -57,22 +146,32 @@ jobs:
         features: ['', '--features gui']
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
-        with:
-          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
-          self: freemkv
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '3.12' }
+      - name: Exact toolchain (freemkv rust-version)
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: media-plan, path: media-plan }
+      # The six rip-crate shas and the one lock (L_qa) plan-media pinned; every
+      # build below is --locked against it.
+      - name: Build from the planned candidate
+        shell: bash
+        env:
+          REVISIONS: ${{ needs.plan-media.outputs.revisions }}
+        run: |
+          set -euo pipefail
+          py=$(command -v python3 || command -v python)
+          "$py" freemkv/tests/media_gate.py checkout --workspace . --revisions "$REVISIONS"
+          "$py" freemkv/tests/media_gate.py restore --workspace . --plan-directory media-plan
       - name: Install GTK4 + libadwaita development headers (Linux app)
         if: runner.os == 'Linux' && matrix.features != ''
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential
-      - name: Exact toolchain (freemkv rust-version)
-        shell: bash
-        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -82,23 +181,34 @@ jobs:
         shell: bash
         run: |
           bash freemkv/.github/scripts/exact-toolchain.sh assert-env "$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')" freemkv
-      - run: cargo test --release --tests ${{ matrix.features }}
+      - run: cargo test --locked --release --tests ${{ matrix.features }}
         working-directory: freemkv
 
   windows-build:
+    needs: [plan-media]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
-        with:
-          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
-          self: freemkv
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '3.12' }
       - name: Exact toolchain (freemkv rust-version)
         shell: bash
         run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: media-plan, path: media-plan }
+      # The six rip-crate shas and the one lock (L_qa) plan-media pinned; every
+      # build below is --locked against it.
+      - name: Build from the planned candidate
+        shell: bash
+        env:
+          REVISIONS: ${{ needs.plan-media.outputs.revisions }}
+        run: |
+          set -euo pipefail
+          py=$(command -v python3 || command -v python)
+          "$py" freemkv/tests/media_gate.py checkout --workspace . --revisions "$REVISIONS"
+          "$py" freemkv/tests/media_gate.py restore --workspace . --plan-directory media-plan
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -107,13 +217,13 @@ jobs:
         shell: bash
         run: |
           bash freemkv/.github/scripts/exact-toolchain.sh assert-env "$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')" freemkv
-      - run: cargo build --release --tests
+      - run: cargo build --locked --release --tests
         working-directory: freemkv
-      - run: cargo build --release --tests --features gui
+      - run: cargo build --locked --release --tests --features gui
         working-directory: freemkv
       # The release installer, compiled and round-tripped here so a broken
       # freemkv.iss fails qa instead of the tag build (steps mirror release.yml).
-      - run: cargo build --release --features gui
+      - run: cargo build --locked --release --features gui
         working-directory: freemkv
       - name: Build the installer
         shell: pwsh
@@ -176,24 +286,36 @@ jobs:
           $after = (& $userPath) -split ';'
           if (Compare-Object $before $after -SyncWindow 0) { throw "uninstall changed other user PATH entries: '$($before -join ';')' -> '$($after -join ';')'" }
 
+
   cli-integration:
+    needs: [plan-media]
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: freemkv
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
-        with:
-          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
-          self: freemkv
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '3.12' }
       - name: Exact toolchain (freemkv rust-version)
         shell: bash
         run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: media-plan, path: media-plan }
+      # The six rip-crate shas and the one lock (L_qa) plan-media pinned; every
+      # build below is --locked against it.
+      - name: Build from the planned candidate
+        shell: bash
+        env:
+          REVISIONS: ${{ needs.plan-media.outputs.revisions }}
+        run: |
+          set -euo pipefail
+          py=$(command -v python3 || command -v python)
+          "$py" freemkv/tests/media_gate.py checkout --workspace . --revisions "$REVISIONS"
+          "$py" freemkv/tests/media_gate.py restore --workspace . --plan-directory media-plan
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: freemkv
@@ -206,24 +328,56 @@ jobs:
             brew install ffmpeg
           fi
       # The CLI build: cli-parity expects a bare `freemkv` to print usage.
-      - run: cargo build --release --bin freemkv
+      - run: cargo build --locked --release --bin freemkv
         working-directory: freemkv
       - run: tests/cli-parity.sh check
         working-directory: freemkv
       - run: tests/cli-integration.sh
         working-directory: freemkv
 
-  launch-runners:
-    needs: [release-tests, windows-build, cli-integration]
-    if: github.event_name == 'workflow_dispatch' && inputs.run_media
+  # One job per EC2 leg: launch a runner only this run can use (the run-<id>
+  # label), then watch the leg and end with its conclusion, so "Re-run failed
+  # jobs" re-runs both and gets a fresh instance. Teardown always runs, so a
+  # cancelled run never strands an instance.
+  launch:
+    needs: [plan-media, release-tests, windows-build, cli-integration]
+    if: needs.plan-media.outputs.run == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 300
     permissions:
       id-token: write
       contents: read
+      actions: write
     strategy:
+      fail-fast: false
       matrix:
         os: [linux, windows]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OS: ${{ matrix.os }}
+      RUN_ID: ${{ github.run_id }}
+      ATTEMPT: ${{ github.run_attempt }}
+      REPO: ${{ github.repository }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+          persist-credentials: false
+          sparse-checkout: .github/runner-templates
+      - name: Still the newest candidate
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_NAME" = qa ]; then
+            head=$(gh api "repos/$REPO/git/ref/heads/qa" -q .object.sha)
+            if [ "$head" != "$SHA" ]; then
+              echo "::error title=Superseded::qa moved to ${head:0:12}; this run proves nothing and launches nothing"
+              gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/cancel" || true
+              exit 1
+            fi
+          fi
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
@@ -234,95 +388,151 @@ jobs:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
         run: |
           set -euo pipefail
-          tok=$(gh api -X POST "repos/${{ github.repository }}/actions/runners/registration-token" -q .token)
+          tok=$(gh api -X POST "repos/$REPO/actions/runners/registration-token" -q .token)
           echo "::add-mask::$tok"
-          param="/freemkv-ci/runner-reg/${{ github.run_id }}-${{ matrix.os }}"
+          param="/freemkv-ci/runner-reg/$RUN_ID-$ATTEMPT-$OS"
           aws ssm put-parameter --name "$param" --type SecureString --value "$tok" --overwrite >/dev/null
           echo "param=$param" >> "$GITHUB_OUTPUT"
+      # The planned launch-template version, and the user-data from this commit
+      # (so the runner registers with this run's labels).
       - name: Launch the ephemeral runner
+        id: launch
+        env:
+          PARAM: ${{ steps.reg.outputs.param }}
+          TEMPLATES: ${{ needs.plan-media.outputs.launch_templates }}
         run: |
           set -euo pipefail
-
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            vpc=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
-            subnet=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" --query 'Subnets[0].SubnetId' --output text)
-            aws ec2 run-instances \
-              --launch-template LaunchTemplateName=freemkv-runner-${{ matrix.os }} \
-              --subnet-id "$subnet" \
-              --tag-specifications "ResourceType=instance,Tags=[
-                  {Key=freemkv-ci,Value=runner},
-                  {Key=runner-token-param,Value=${{ steps.reg.outputs.param }}},
-                  {Key=runner-repo,Value=${{ github.repository }}},
-                  {Key=launched-by,Value=${{ github.run_id }}}]" \
-              --query 'Instances[0].InstanceId' --output text
-            exit 0
-          fi
-
-
+          lt="freemkv-runner-$OS"
+          templates=${TEMPLATES:-}; [ -n "$templates" ] || templates='{}'
+          version=$(jq -r --arg lt "$lt" '.[$lt].version // "$Default"' <<<"$templates")
+          ext=sh; [ "$OS" = windows ] && ext=ps1
+          userdata="freemkv/.github/runner-templates/user-data-$OS.$ext"
+          tags=$(jq -cn --arg p "$PARAM" --arg r "$REPO" --arg id "$RUN_ID" --arg os "$OS" '[{ResourceType: "instance",
+            Tags: [{Key: "freemkv-ci", Value: "runner"}, {Key: "runner-token-param", Value: $p},
+                   {Key: "runner-repo", Value: $r}, {Key: "launched-by", Value: $id},
+                   {Key: "runner-labels", Value: ("freemkv-media," + $os + ",run-" + $id)}]}]')
           vpc=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
-          subnets=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" \
-                      --query 'Subnets[].SubnetId' --output text)
+          subnets=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" --query 'Subnets[].SubnetId' --output text)
           [ -n "$subnets" ] || { echo "no subnets in default VPC $vpc" >&2; exit 1; }
-
-          types="c7i.4xlarge c6i.4xlarge m7i.4xlarge"
-
-          tags="ResourceType=instance,Tags=[
-              {Key=freemkv-ci,Value=runner},
-              {Key=runner-token-param,Value=${{ steps.reg.outputs.param }}},
-              {Key=runner-repo,Value=${{ github.repository }}},
-              {Key=launched-by,Value=${{ github.run_id }}}]"
-
+          # Linux keeps its capacity fallback (the actual type is recorded by the leg);
+          # Windows launches the template's own type.
+          if [ "$OS" = linux ]; then types="c7i.4xlarge c6i.4xlarge m7i.4xlarge"; else types=template; fi
           try_launch() {
             local market="$1"; shift
             local t s id
             for t in $types; do
               for s in $subnets; do
                 echo "attempt: type=$t subnet=$s market=$market"
+                typearg=(); [ "$t" = template ] || typearg=(--instance-type "$t")
                 if id=$(aws ec2 run-instances \
-                          --launch-template LaunchTemplateName=freemkv-runner-linux \
-                          --instance-type "$t" \
-                          --subnet-id "$s" \
-                          "$@" \
+                          --launch-template "LaunchTemplateName=$lt,Version=$version" \
+                          "${typearg[@]}" --subnet-id "$s" "$@" \
+                          --user-data "file://$userdata" \
                           --tag-specifications "$tags" \
                           --query 'Instances[0].InstanceId' --output text 2>launch.err); then
-                  echo "$id"
-                  echo "launched $id (linux, type=$t subnet=$s market=$market)"
+                  echo "instance=$id" >> "$GITHUB_OUTPUT"
+                  echo "launched $id ($OS, type=$t subnet=$s market=$market, template $lt v$version)"
+                  # What record-media-evidence checks the leg against, even after EC2 forgets the instance.
+                  jq -n --arg id "$id" --arg run "$RUN_ID" --arg attempt "$ATTEMPT" --arg os "$OS" \
+                        --arg lt "$lt" --arg v "$version" --arg type "$t" \
+                        '{instance_id: $id, launched_by: ($run | tonumber), run_attempt: ($attempt | tonumber),
+                          os: $os, runner_labels: ("freemkv-media," + $os + ",run-" + $run),
+                          launch_template: $lt, launch_template_version: $v, requested_type: $type}' \
+                        > "launch-$OS-$ATTEMPT.json"
                   return 0
                 fi
                 echo "  failed ($t/$s/$market): $(cat launch.err)"
                 if ! grep -qiE 'InsufficientInstanceCapacity|Unsupported|InsufficientHostCapacity|capacity|SpotMaxPriceTooLow' launch.err; then
-                  echo "non-capacity error — not retrying further" >&2
                   return 2
                 fi
               done
             done
             return 1
           }
-
           rc=0
-          try_launch spot --instance-market-options 'MarketType=spot' || rc=$?
-          [ "$rc" = 0 ] && exit 0
-          if [ "$rc" = 2 ]; then
-            echo "::error title=Runner launch failed::a non-capacity error launching the linux media runner — see the failure above" >&2
-            exit 1
+          if [ "$OS" = linux ]; then try_launch spot --instance-market-options 'MarketType=spot' || rc=$?; else try_launch template || rc=$?; fi
+          if [ "$rc" = 1 ] && [ "$OS" = linux ]; then
+            echo "all Spot attempts hit capacity — falling back to On-Demand"
+            rc=0; try_launch on-demand --instance-market-options '{}' || rc=$?
           fi
-
-          echo "all Spot attempts hit capacity — falling back to On-Demand"
-          rc=0
-          try_launch on-demand --instance-market-options '{}' || rc=$?
           [ "$rc" = 0 ] && exit 0
-          echo "::error title=No capacity::every instance type × subnet failed as both Spot and On-Demand in us-west-2 — check service quotas / capacity in the region" >&2
+          echo "::error title=Runner launch failed::could not launch the $OS media runner — cancelling the run so its leg does not sit queued" >&2
           exit 1
-      # No instance will consume the registration token: delete it rather than leave it in SSM.
-      - name: Delete the unused registration token
-        if: (failure() || cancelled()) && steps.reg.outputs.param != ''
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.launch.outputs.instance != ''
+        with:
+          name: "launch-${{ matrix.os }}-${{ github.run_attempt }}"
+          path: "launch-${{ matrix.os }}-${{ github.run_attempt }}.json"
+          overwrite: true
+      # Ends with the leg's conclusion. A leg not picked up by the deadline (the
+      # instance never registered) terminates the instance and cancels the run.
+      - name: Watch the leg
+        id: watch
+        env:
+          INSTANCE: ${{ steps.launch.outputs.instance }}
+        run: |
+          set -uo pipefail
+          leg="cli-matrix ($OS)"
+          limit=900; [ "$OS" = windows ] && limit=1800
+          deadline=$(( $(date +%s) + limit ))
+          picked=false
+          while :; do
+            # A failed poll is retried; only a leg never picked up by the deadline is fatal.
+            # The leg's name, or the same name with further matrix values ("cli-matrix (linux, …)").
+            if ! state=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs?per_page=100" \
+                           -q ".jobs[] | select(.name == \"$leg\" or (.name | startswith(\"${leg%)}, \"))) | \"\(.status) \(.conclusion)\"" \
+                           2>/dev/null | head -1) || [ -z "$state" ]; then
+              state="unknown none"
+            fi
+            read -r status conclusion <<<"$state"
+            [ "$status" = in_progress ] && picked=true
+            if [ "$status" = completed ]; then
+              echo "$leg: $conclusion"
+              [ "$conclusion" = success ]; exit $?
+            fi
+            if [ "$picked" = false ] && [ "$(date +%s)" -gt "$deadline" ]; then
+              echo "::error title=Runner never picked up the leg::$leg is still '$status' $((limit / 60)) min after launch — terminating $INSTANCE and cancelling the run"
+              aws ec2 terminate-instances --instance-ids "$INSTANCE" >/dev/null 2>&1 || true
+              gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/cancel" || true
+              exit 1
+            fi
+            sleep 30
+          done
+      # Anything failing before the watch (credentials, token, launch) would leave
+      # the leg queued for a runner that never comes: cancel the run instead.
+      - name: Cancel the run (no runner is coming)
+        if: failure() && steps.watch.outcome != 'failure'
+        run: gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/cancel" || true
+      # Fresh credentials: the watch can outlive the first session.
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        if: always() && steps.reg.outputs.param != ''
+        with:
+          role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
+          aws-region: us-west-2
+      - name: Tear down
+        if: always() && steps.reg.outputs.param != ''
         env:
           PARAM: ${{ steps.reg.outputs.param }}
-        run: aws ssm delete-parameter --name "$PARAM" || true
+          INSTANCE: ${{ steps.launch.outputs.instance }}
+        run: |
+          aws ssm delete-parameter --name "$PARAM" 2>/dev/null || true
+          # Every live instance this run launched for this leg, including one whose id was
+          # never written because the run was cancelled mid-launch.
+          # JSON filters: the CLI's shorthand would split the comma-separated label value.
+          filters=$(jq -cn --arg r "$RUN_ID" --arg l "freemkv-media,$OS,run-$RUN_ID" '[
+            {Name: "tag:launched-by", Values: [$r]}, {Name: "tag:runner-labels", Values: [$l]},
+            {Name: "instance-state-name", Values: ["pending", "running", "stopping", "stopped"]}]')
+          ids=$(aws ec2 describe-instances --filters "$filters" \
+                  --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || true)
+          for id in $INSTANCE $ids; do
+            aws ec2 terminate-instances --instance-ids "$id" --query 'TerminatingInstances[0].CurrentState.Name' --output text || true
+          done
 
   cli-matrix:
-    needs: [launch-runners]
-    if: github.event_name == 'workflow_dispatch' && inputs.run_media
+    # Not `needs: launch`: a failed leg fails its launch job too, so "Re-run failed
+    # jobs" re-runs the pair and gets a fresh instance for this run's label.
+    needs: [plan-media, release-tests, windows-build, cli-integration]
+    if: needs.plan-media.outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -335,35 +545,27 @@ jobs:
             target: x86_64-unknown-linux-musl
           - os: windows
             target: x86_64-pc-windows-msvc
-    runs-on: [self-hosted, freemkv-media, "${{ matrix.os }}"]
+    # run-<id>: only the instance this run launched can take the job.
+    runs-on: [self-hosted, freemkv-media, "${{ matrix.os }}", "run-${{ github.run_id }}"]
     timeout-minutes: 240
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { path: freemkv }
-      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
-        with:
-          checkout: libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
-          self: freemkv
-          ref: "${{ github.ref_name == 'dev' && 'dev' || 'qa' }}"
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: freemkv/freemkv-ci
-          ref: 7ff716072c7063aaf4f1a7dd7200f532dab77794
+          ref: ${{ needs.plan-media.outputs.harness }}
           token: ${{ secrets.ORG_DISPATCH_TOKEN }}
           persist-credentials: false
           path: ci
-      - name: Record the libfreemkv sha
-        shell: bash
-        run: echo "LF_SHA=$(git -C libfreemkv rev-parse --short HEAD)" >> "$GITHUB_ENV"
       - name: Install ffmpeg
         shell: bash
         run: |
           set -euo pipefail
           if [ "${{ matrix.os }}" = "linux" ]; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg python3 python3-venv
           else
             choco install ffmpeg python3 -y --no-progress
             export PATH="$PATH:/c/ProgramData/chocolatey/bin"
@@ -433,13 +635,24 @@ jobs:
           export PATH="$cargo_bin:$PATH"
           echo "$cargo_bin" >> "$GITHUB_PATH"
           bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml "${{ matrix.target }}"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: media-plan, path: media-plan }
+      - name: Build from the planned candidate
+        shell: bash
+        env:
+          REVISIONS: ${{ needs.plan-media.outputs.revisions }}
+        run: |
+          set -euo pipefail
+          "$FMKV_PYTHON" freemkv/tests/media_gate.py checkout --workspace . --revisions "$REVISIONS"
+          "$FMKV_PYTHON" freemkv/tests/media_gate.py restore --workspace . --plan-directory media-plan
+          echo "LF_SHA=$(git -C libfreemkv rev-parse --short HEAD)" >> "$GITHUB_ENV"
       # Catches the gui feature's crates leaking into the CLI build.
       - name: The CLI build has no UI dependencies
         shell: bash
         working-directory: freemkv
         run: |
           set -euo pipefail
-          tree=$(cargo tree -e normal,build --target "${{ matrix.target }}" --prefix none)
+          tree=$(cargo tree --locked -e normal,build --target "${{ matrix.target }}" --prefix none)
           ui=$(grep -E '^(gtk4|gdk4|libadwaita|glib-sys|gobject-sys|gio-sys|winsafe|windows|objc2-app-kit) ' \
                  <<<"$tree" | sed 's/ (\*)$//' | sort -u || true)
           if [ -n "$ui" ]; then
@@ -448,46 +661,63 @@ jobs:
             exit 1
           fi
       - name: Clean build environment and C toolchain
+        id: cenv
         shell: bash
         run: bash freemkv/.github/scripts/exact-toolchain.sh assert-env "${{ matrix.target }}" freemkv
       - name: Build the CLI
         shell: bash
         working-directory: freemkv
-        run: cargo build --release --target "${{ matrix.target }}" --bin freemkv
-      - name: Fetch the four disc fixtures
+        run: cargo build --locked --release --target "${{ matrix.target }}" --bin freemkv
+      - name: The Linux CLI is static
+        if: matrix.os == 'linux'
         shell: bash
+        run: |
+          BIN="freemkv/target/${{ matrix.target }}/release/freemkv"
+          if readelf -d "$BIN" | grep -q NEEDED; then
+            readelf -d "$BIN"; echo "::error::the Linux CLI is not static"; exit 1
+          fi
+      # All five keys at once, every ranged GET pinned to the ETag (or VersionId)
+      # recorded first, and each object's ETag recomputed from the bytes as they
+      # arrive (tests/media_fetch.py). The report records the fetch time per key.
+      - name: Fetch the disc fixtures and key database
+        shell: bash
+        env:
+          B: ${{ secrets.FMKV_FIXTURES_BUCKET }}
         run: |
           set -euo pipefail
           export AWS_DEFAULT_REGION=us-west-2 AWS_REGION=us-west-2
-          B="${{ secrets.FMKV_FIXTURES_BUCKET }}"
           if [ "${{ matrix.os }}" = "windows" ]; then
             ISO_DIR=$(cygpath -m "$(pwd)")/isos
+            venv="$(cygpath -u "$RUNNER_TEMP")/fetch-venv"
+            venv_py="$venv/Scripts/python.exe"
           else
             ISO_DIR="$(pwd)/isos"
+            venv="$RUNNER_TEMP/fetch-venv"
+            venv_py="$venv/bin/python"
           fi
-          mkdir -p isos
           echo "ISO_DIR=$ISO_DIR" >> "$GITHUB_ENV"
-          if ! err=$(aws s3 cp "s3://$B/keydb.cfg" keydb.cfg --region us-west-2 --only-show-errors 2>&1); then
-            echo "::error title=Key database download failed::could not fetch keydb.cfg from the fixtures bucket — the BD family cannot decrypt without it: ${err:-<no client output>}"
-            exit 1
-          fi
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            echo "KEYDB_PATH=$(cygpath -m "$(pwd)")/keydb.cfg" >> "$GITHUB_ENV"
-          else
-            echo "KEYDB_PATH=$(pwd)/keydb.cfg" >> "$GITHUB_ENV"
-          fi
-
-          for f in dvd bd uhd hddvd; do
-            sz=$(aws s3api head-object --bucket "$B" --key "$f.iso" --region us-west-2 \
-                   --query ContentLength --output text)
-            echo "::group::fetch $f.iso ($((sz/1024/1024/1024)) GiB)"
-            if ! err=$(aws s3 cp "s3://$B/$f.iso" "isos/$f.iso" --region us-west-2 --only-show-errors 2>&1); then
-              echo "::error title=Fixture download failed ($f)::could not fetch $f.iso from the Oregon bucket — check the runner's instance profile can read it: ${err:-<no client output>}"
-              exit 1
-            fi
-            echo "::endgroup::"
-          done
+          echo "KEYDB_PATH=$ISO_DIR/keydb.cfg" >> "$GITHUB_ENV"
+          "$FMKV_PYTHON" -m venv "$venv"
+          "$venv_py" -m pip install --quiet --disable-pip-version-check --require-hashes --only-binary=:all: \
+            -r freemkv/tests/media-fetch-requirements.txt
+          # The fixture pins plan-media fingerprinted; resolve afresh only if it could not read them.
+          "$venv_py" - <<'PY'
+          import json
+          ext = json.load(open('media-plan/evidence.json'))['inputs']['externals']
+          if 'error' not in ext.get('fixtures', {'error': 1}):
+              json.dump(ext['fixtures'], open('fixtures.json', 'w'))
+          PY
+          [ -f fixtures.json ] || "$venv_py" freemkv/tests/media_fetch.py resolve --bucket "$B" --out fixtures.json
+          "$venv_py" freemkv/tests/media_fetch.py fetch --bucket "$B" --manifest fixtures.json \
+            --dest isos --report "fetch-${{ matrix.os }}.json"
           df -h . | tail -1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: "fetch-report-${{ matrix.os }}"
+          path: "fetch-${{ matrix.os }}.json"
+          overwrite: true
+          if-no-files-found: ignore
       - name: Run the full CLI acceptance suite
         id: suite
         shell: bash
@@ -534,20 +764,35 @@ jobs:
           echo "── hashes recorded on ${{ matrix.os }} ──"
           cat "cli-${{ matrix.os }}.txt"
           exit $rc
+      # What record-media-evidence cross-checks against the jobs API and EC2.
+      - name: Leg identity
+        shell: bash
+        env:
+          C_TOOLCHAIN: ${{ steps.cenv.outputs.c_toolchain }}
+        run: |
+          "$FMKV_PYTHON" freemkv/tests/media_gate.py leg --leg "${{ matrix.os }}" --target "${{ matrix.target }}" \
+            --c-toolchain "$C_TOOLCHAIN" --out "leg-${{ matrix.os }}.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: "leg-${{ matrix.os }}"
+          path: "leg-${{ matrix.os }}.json"
+          overwrite: true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: "cli-matrix-${{ matrix.os }}"
           path: "cli-${{ matrix.os }}.txt"
+          overwrite: true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: "cli-suite-log-${{ matrix.os }}"
           path: "suite-${{ matrix.os }}.log"
+          overwrite: true
 
   compare-cli-matrix:
-    needs: [cli-matrix]
-    if: always() && (github.event_name == 'workflow_dispatch' && inputs.run_media)
+    needs: [plan-media, cli-matrix]
+    if: always() && needs.plan-media.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -617,3 +862,63 @@ jobs:
           print(f"\n{len(arts)} artifacts compared across {len(plats)} platforms")
           sys.exit(1 if fail else 0)
           PY
+
+  # Writes the evidence: an annotated tag media-evidence/<F>/<run_id> on an
+  # orphan commit holding evidence.json and the built Cargo.lock.
+  record-media-evidence:
+    needs: [plan-media, launch, cli-matrix, compare-cli-matrix]
+    if: >-
+      always() && needs.plan-media.outputs.run == 'true' && needs.launch.result == 'success'
+      && needs.cli-matrix.result == 'success' && needs.compare-cli-matrix.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+    outputs:
+      tag: ${{ steps.record.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '3.12' }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: media-plan, path: media-plan }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { pattern: 'leg-*', path: legs, merge-multiple: true }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { pattern: 'launch-*', path: legs, merge-multiple: true }
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ secrets.FMKV_RUNNER_ROLE }}
+          aws-region: us-west-2
+      - name: Record the evidence
+        id: record
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 freemkv/tests/media_gate.py record --plan-directory media-plan --legs legs
+
+  # The one media answer (I-1): green only if evidence was reused or written by this run.
+  media-verdict:
+    needs: [plan-media, launch, cli-matrix, compare-cli-matrix, record-media-evidence]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+          persist-credentials: false
+          sparse-checkout: tests
+      - name: Media verdict
+        env:
+          PLAN_RESULT: ${{ needs.plan-media.result }}
+          STATUS: ${{ needs.plan-media.outputs.status }}
+          REASON: ${{ needs.plan-media.outputs.reason }}
+          EVIDENCE_URL: ${{ needs.plan-media.outputs.evidence_url }}
+          MATRIX: ${{ needs.cli-matrix.result }}
+          COMPARE: ${{ needs.compare-cli-matrix.result }}
+          RECORD: ${{ needs.record-media-evidence.result }}
+          TAG: ${{ needs.record-media-evidence.outputs.tag }}
+        run: python3 freemkv/tests/media_gate.py verdict

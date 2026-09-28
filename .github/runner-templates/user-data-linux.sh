@@ -46,7 +46,11 @@ IID=$(md instance-id)
 # there is no ordering trap). IMDS tags still require InstanceMetadataTags=enabled.
 PARAM=$(md tags/instance/runner-token-param)
 REPO=$(md tags/instance/runner-repo)
+# The launching run's labels (freemkv-media,<os>,run-<run_id>): only that run's
+# jobs can land on this box, so no other run can steal it or be stolen by it.
+LABELS=$(md tags/instance/runner-labels)
 [ -n "$PARAM" ] && [ -n "$REPO" ] || { echo "FATAL: tags not visible via IMDS — is InstanceMetadataTags enabled?"; exit 1; }
+[[ "$LABELS" =~ ^freemkv-media(-perf)?,linux,run-[0-9]+$ ]] || { echo "FATAL: bad runner-labels tag '$LABELS'"; exit 1; }
 REGION=$(md placement/region)
 REG=$(aws ssm get-parameter --region "$REGION" --name "$PARAM" --with-decryption --query Parameter.Value --output text)
 # Delete immediately so the token never outlives this boot, whatever happens next.
@@ -61,7 +65,7 @@ chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_HOME/actions-runner"
 
 su - "$RUNNER_USER" -c "cd $RUNNER_HOME/actions-runner && ./config.sh \
   --url https://github.com/$REPO --token $REG \
-  --name ephemeral-linux-$IID --labels freemkv-media,linux --unattended --ephemeral"
+  --name ephemeral-linux-$IID --labels $LABELS --unattended --ephemeral"
 
 # `run.sh` returns as soon as the single job finishes, because of --ephemeral.
 su - "$RUNNER_USER" -c "cd $RUNNER_HOME/actions-runner && ./run.sh" || true
