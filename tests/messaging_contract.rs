@@ -354,6 +354,10 @@ fn en_json_has_no_string_for_a_code_libfreemkv_does_not_declare() {
     );
 }
 
+// Codes libfreemkv adds before this fixture can name them (the fixture compiles against
+// libfreemkv dev). Enumerate the variant and drop its name here once libfreemkv has it.
+const PENDING_VARIANTS: &[&str] = &["E_AACS_KEY_FILE_UNREADABLE"];
+
 // Every code libfreemkv can put inside an `Error` must appear in `all_error_variants()`, and
 // vice versa. A forgotten variant is INVISIBLE to every other assertion here.
 #[test]
@@ -374,6 +378,7 @@ fn fixture_enumerates_every_error_code_a_variant_can_carry() {
 
     let missing: Vec<String> = declared
         .iter()
+        .filter(|(_, name)| !PENDING_VARIANTS.contains(&name.as_str()))
         .filter(|(code, name)| carried.contains(*name) && !enumerated.contains(code))
         .map(|(code, name)| format!("E{code} ({name})"))
         .collect();
@@ -384,6 +389,18 @@ fn fixture_enumerates_every_error_code_a_variant_can_carry() {
          src/test_support.rs and write their strings in freemkv-i18n (all 29 locales).",
         missing.len(),
         missing
+    );
+
+    let stale_pending: Vec<&String> = declared
+        .iter()
+        .filter(|(code, name)| {
+            PENDING_VARIANTS.contains(&name.as_str()) && enumerated.contains(code)
+        })
+        .map(|(_, name)| name)
+        .collect();
+    assert!(
+        stale_pending.is_empty(),
+        "all_error_variants() already enumerates {stale_pending:?}: drop them from PENDING_VARIANTS"
     );
 
     let retired: Vec<u32> = enumerated
