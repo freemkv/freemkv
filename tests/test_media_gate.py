@@ -715,12 +715,28 @@ class DecideTests(unittest.TestCase):
         self.assertTrue(any('days old' in w for w in got['warnings']))
 
     def test_canary(self):
-        policy = with_policy(canary={'probes': [{'name': 'uhd', 'expected_sha256': mg.sha256(b'key')}]})
-        self.assertTrue(mg.canary(policy, lambda p: b'key'))
-        self.assertFalse(mg.canary(policy, lambda p: b'other'))
-        self.assertFalse(mg.canary(policy, lambda p: (_ for _ in ()).throw(OSError('down'))))
+        policy = with_policy(canary={'probes': [{'fixture': 'uhd.iso'}]})
+        ok = {'ok': True, 'probes': [{'fixture': 'uhd.iso', 'ok': True, 'reason': 'known key returned'}]}
+        self.assertEqual(mg.canary(policy, ok, 'qa'), (True, '', None))
+        failed = {'ok': False, 'probes': [{'fixture': 'uhd.iso', 'ok': False, 'reason': 'HTTP 503'}]}
+        self.assertEqual(mg.canary(policy, failed, 'qa')[:2], (False, 'uhd.iso: HTTP 503'))
+        for name, result in {'no result': None, 'not a dict': ['ok'], 'probe skipped': {'ok': True, 'probes': []},
+                             'probe not ok': {'ok': True, 'probes': [{'fixture': 'uhd.iso', 'ok': 'yes'}]},
+                             'crashed': {'ok': False, 'probes': [], 'error': 'KeyError'}}.items():
+            with self.subTest(name=name):
+                self.assertFalse(mg.canary(policy, result, 'qa')[0])
+        ok_dev, _, note = mg.canary(policy, None, 'dev')
+        self.assertTrue(ok_dev, 'the canary runs where the gate runs (qa), not on dev')
+        self.assertIn('qa only', note)
+        self.assertEqual(mg.canary(with_policy(canary={'probes': []}), None, 'qa'), (True, '', None))
         self.assertEqual(mg.decide(False, canary_ok=False)[:2], ('canary-failed', False))
         self.assertEqual(mg.decide(True, run_media=True, canary_ok=False)[:2], ('canary-failed', False))
+        self.assertIn('HTTP 503', mg.decide(False, canary_ok=False, canary_why='uhd.iso: HTTP 503')[2])
+
+    def test_the_canary_is_configured(self):
+        """Decision 15 is enforced by the checked-in policy, not waiting on an operator."""
+        self.assertIn({'fixture': 'uhd.iso'}, POLICY['canary']['probes'])
+        self.assertIn('tests/media_canary.py', POLICY['control_plane'], 'the canary is part of F')
 
     def test_decide_order(self):
         self.assertEqual(mg.decide(False)[:2], ('run', True))
@@ -870,6 +886,27 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(out['fingerprint'], e.f, 'plan and evidence must fingerprint the same candidate alike')
         self.assertEqual((out['status'], out['run']), ('reuse', 'false'))
         self.assertIn(str(RUN_ID), out['evidence_url'])
+
+    def test_plan_on_qa_runs_the_canary_verdict(self):
+        base = {'REVISIONS': json.dumps(SIB_SHA), 'GITHUB_RUN_ID': str(RUN_ID), 'GITHUB_REF_NAME': 'qa'}
+
+        def plan(result):
+            return mg.plan(self.ws.root, POLICY, base, EXTERNALS, request=lambda e, **kw: [], run=self.run,
+                           canary_result=result, tree=lambda root, k, run: FEATURES)[0]
+        ok = plan({'ok': True, 'probes': [{'fixture': 'uhd.iso', 'ok': True, 'reason': 'known key returned'}]})
+        self.assertEqual((ok['status'], ok['run']), ('run', 'true'))
+        self.assertFalse([w for w in ok['warnings'] if 'canary' in w], 'no canary warning once it is active')
+        self.assertEqual(ok['notices'], [])
+        bad = plan({'ok': False, 'probes': [{'fixture': 'uhd.iso', 'ok': False, 'reason': 'no key'}]})
+        self.assertEqual((bad['status'], bad['run']), ('canary-failed', 'false'), 'red immediately, no EC2')
+        self.assertIn('no key', bad['reason'])
+        self.assertEqual(plan(None)['status'], 'canary-failed', 'a canary that never reported fails closed')
+
+    def test_plan_off_qa_notes_the_canary_did_not_run(self):
+        out = self.plan(GITHUB_REF_NAME='dev')
+        self.assertEqual(out['status'], 'run')
+        self.assertFalse([w for w in out['warnings'] if 'canary' in w])
+        self.assertTrue(any('qa only' in n for n in out['notices']))
 
     def test_plan_names_the_legs_to_launch(self):
         self.assertEqual(json.loads(self.plan()['legs']), ['linux', 'windows'])

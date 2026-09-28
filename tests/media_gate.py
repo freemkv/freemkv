@@ -9,6 +9,7 @@ Commands (all fail closed):
   seal       confirm a plan belongs to this run and candidate (any attempt)
   release-lock-assert   third-party lock entries must equal between two locks
   fingerprint           print F for a workspace (diagnostic)
+  launch-spec           the run-instances arguments for one EC2 leg, from the policy
 
 The design is freemkv-private scratch qa-media-gate-design-v4.md; the policy is
 tests/media-gate-policy.json, which is itself a required input.
@@ -1104,12 +1105,13 @@ def find_evidence(f, policy, request=gh_api, perf_check=None, log=print):
     return None
 
 
-def decide(proven, run_media=False, skip=False, skip_reason='', canary_ok=True, superseded=False):
+def decide(proven, run_media=False, skip=False, skip_reason='', canary_ok=True, superseded=False, canary_why=''):
     """(status, run, reason). Red statuses: waived, superseded, canary-failed."""
     if superseded:
         return 'superseded', False, 'a newer candidate is on this branch; this run proves nothing'
     if not canary_ok:
-        return 'canary-failed', False, 'key service broken: the canary did not return the expected keys'
+        return 'canary-failed', False, ('key service broken: the canary did not return the expected keys'
+                                        + (f' ({canary_why})' if canary_why else ''))
     if run_media:
         return 'run', True, 'run_media requested'
     if proven:
@@ -1121,17 +1123,23 @@ def decide(proven, run_media=False, skip=False, skip_reason='', canary_ok=True, 
     return 'run', True, 'rip-affecting inputs lack green evidence'
 
 
-def canary(policy, post):
-    """D2: every configured key-service probe returns the expected answer. True when none configured."""
-    ok = True
-    for probe in policy['canary'].get('probes', []):
-        try:
-            got = sha256(post(probe))
-        except Exception:  # noqa: BLE001
-            got = None
-        if got != probe['expected_sha256']:
-            ok = False
-    return ok
+def canary(policy, result, ref_name):
+    """D2 / decision 15: (ok, why, notice) from tests/media_canary.py's result for this run.
+    It runs where the gate runs (qa); elsewhere it is not asked. On qa, a missing, malformed or
+    failed result, or one that skipped a configured probe, fails closed."""
+    probes = [p['fixture'] for p in policy['canary'].get('probes', [])]
+    if not probes:
+        return True, '', None
+    if ref_name != 'qa':
+        return True, '', f'the key-service canary runs on qa only (this run is on {ref_name})'
+    if not isinstance(result, dict):
+        return False, 'the canary did not run or wrote no result', None
+    got = {p.get('fixture'): p for p in result.get('probes') or [] if isinstance(p, dict)}
+    bad = [f'{f}: {(got.get(f) or {}).get("reason") or "not probed"}' for f in probes
+           if (got.get(f) or {}).get('ok') is not True]
+    if bad or result.get('ok') is not True:
+        return False, '; '.join(bad) or result.get('error') or 'the canary failed', None
+    return True, '', None
 
 
 # ── Plan artifact: seal and restore ────────────────────────────────────────
@@ -1173,7 +1181,7 @@ def lock_assert(base_text, candidate_text, k_only=False, policy=None):
 
 # ── Plan (§3.2 job 1) ──────────────────────────────────────────────────────
 
-def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, post=None, perf_check=None,
+def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, canary_result=None, perf_check=None,
          tree=resolved_features):
     """Pin, resolve, guard, fingerprint, look up, decide. Returns (outputs, evidence dict, lock text)."""
     revisions = json.loads(env['REVISIONS'])
@@ -1194,15 +1202,18 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, post=No
     inputs = required_inputs(ws, policy, lock_text, tree(ws / 'freemkv', k_names, run=run) if tree else {},
                              externals)
     f = fingerprint(inputs)
-    canary_ok = canary(policy, post) if post else not policy['canary'].get('probes')
+    notices = []
     if not policy['canary'].get('probes'):
         warnings.append('the key-service canary has no probes configured (policy canary.probes); '
                         'decision 15 is not enforced until one is added')
+    canary_ok, canary_why, note = canary(policy, canary_result, env.get('GITHUB_REF_NAME', ''))
+    if note:
+        notices.append(note)
     proven = find_evidence(f, policy, request, perf_check) if canary_ok else None
     status, go, reason = decide(proven is not None, env.get('RUN_MEDIA') == 'true',
                                 env.get('SKIP_MEDIA') == 'true' or '[skip-media]' in env.get('HEAD_MESSAGE', ''),
                                 env.get('SKIP_REASON') or ('[skip-media]' if '[skip-media]' in env.get('HEAD_MESSAGE', '') else ''),
-                                canary_ok, env.get('SUPERSEDED') == 'true')
+                                canary_ok, env.get('SUPERSEDED') == 'true', canary_why)
     if proven:
         warnings += proven['warnings']
     evidence = {'schema': SCHEMA, 'fingerprint': f, 'inputs': inputs, 'revisions': revisions,
@@ -1213,7 +1224,7 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, post=No
                'legs': json.dumps(legs(policy)),
                'launch_templates': json.dumps({k: v for k, v in externals.get('launch_templates', {}).items()
                                                if isinstance(v, dict)}, sort_keys=True),
-               'warnings': warnings}
+               'warnings': warnings, 'notices': notices}
     return outputs, evidence, lock_text
 
 
@@ -1462,7 +1473,7 @@ def _write_outputs(outputs):
     path = os.environ.get('GITHUB_OUTPUT')
     chunks = []
     for key, value in outputs.items():
-        if key == 'warnings':
+        if key in ('warnings', 'notices'):
             continue
         value = ' '.join(str(value).splitlines())
         delim = 'EOF_' + os.urandom(8).hex()
@@ -1493,6 +1504,7 @@ def main(argv=None):
     parser.add_argument('--target')
     parser.add_argument('--c-toolchain', default='')
     parser.add_argument('--legs', type=Path)
+    parser.add_argument('--canary', type=Path, help="tests/media_canary.py's result (plan)")
     args = parser.parse_args(argv)
     policy = load_policy(args.policy)
     ws = args.workspace
@@ -1567,12 +1579,20 @@ def main(argv=None):
             k = [e[0] for e in closure(parse_lock(lock), policy)]
             print(fingerprint(required_inputs(ws, policy, lock, resolved_features(ws / 'freemkv', k), externals)))
             return 0
-        outputs, evidence, lock = plan(ws, policy, os.environ, externals)
+        canary_result = None
+        if args.canary and args.canary.exists():
+            try:
+                canary_result = json.loads(args.canary.read_text())
+            except ValueError:
+                canary_result = None
+        outputs, evidence, lock = plan(ws, policy, os.environ, externals, canary_result=canary_result)
         args.plan_directory.mkdir(parents=True, exist_ok=True)
         (args.plan_directory / 'evidence.json').write_text(json.dumps(evidence, indent=1, sort_keys=True) + '\n')
         (args.plan_directory / 'Cargo.lock').write_text(lock)
         for w in outputs['warnings']:
             print(f'::warning::{w}')
+        for n in outputs['notices']:
+            print(f'::notice::{n}')
         _write_outputs(outputs)
         return 0
     except GuardError as exc:

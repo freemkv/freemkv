@@ -163,6 +163,35 @@ class StructureTests(unittest.TestCase):
         self.assertRegex('ephemeral-windows-i-0123456789abcdef0', POLICY['runner_name_re'])
 
 
+class CanaryWiringTests(unittest.TestCase):
+    """Decision 15 in CI: plan-media runs the canary on qa and the plan reads its result."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.plan = load()['jobs']['plan-media']
+        except ImportError:
+            raise unittest.SkipTest('PyYAML is not installed')
+        cls.names = [s.get('name', s.get('uses', '')) for s in cls.plan['steps']]
+
+    def test_canary_step(self):
+        step = next(s for s in self.plan['steps'] if s.get('name') == 'Key-service canary')
+        self.assertEqual(step['if'], "github.ref_name == 'qa'", 'where the gate runs, never on dev')
+        self.assertTrue(step['continue-on-error'], 'a crash leaves no result, which the plan fails closed on')
+        self.assertEqual(step['env']['FMKV_KEY_URL'], '${{ secrets.FMKV_KEY_URL }}')
+        self.assertEqual(step['env']['FMKV_KEY_AUTH'], '${{ secrets.FMKV_KEY_AUTH }}')
+        self.assertIn('media_canary.py --bucket "$B" --externals externals.json --out canary.json', step['run'])
+        self.assertIn('--require-hashes', step['run'])
+
+    def test_canary_reads_with_the_fixtures_role_before_the_plan(self):
+        roles = [i for i, s in enumerate(self.plan['steps']) if 'configure-aws-credentials' in s.get('uses', '')]
+        canary = self.names.index('Key-service canary')
+        self.assertTrue(roles[0] < canary < roles[1], 'after the fixtures role, before the runner role')
+        plan = next(s for s in self.plan['steps'] if s.get('name') == 'Plan')
+        self.assertIn('--canary canary.json', plan['run'])
+        self.assertGreater(self.names.index('Plan'), canary)
+
+
 class LaunchWiringTests(unittest.TestCase):
     """No manual AWS step: perf legs, the Spot cap and the token parameter all live in the launch job."""
 

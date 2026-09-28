@@ -13,6 +13,7 @@
   "freemkv_crate_roots": ["src/main.rs", "src/lib.rs"],
   "control_plane": [".github/workflows/qa.yml", ".github/scripts/exact-toolchain.sh", ".github/runner-templates/**",
                     "tests/media_gate.py", "tests/media_perf.py", "tests/media_fetch.py", "tests/media_checks.py",
+                    "tests/media_canary.py",
                     "tests/media-gate-policy.json", "tests/media-fetch-requirements.txt"],
   "gui_features": ["gui"],
   "rerun_exempt": {
@@ -37,7 +38,7 @@
     "windows": {"template": "freemkv-runner-windows", "types": []}
   },
   "fixtures": ["dvd.iso", "bd.iso", "uhd.iso", "hddvd.iso", "keydb.cfg"],
-  "canary": {"probes": []},
+  "canary": {"probes": [{"fixture": "uhd.iso"}]},
   "perf": {
     "enabled": false,
     "protocol": 1,

@@ -89,6 +89,25 @@ jobs:
         env:
           B: ${{ secrets.FMKV_FIXTURES_BUCKET }}
         run: python3 freemkv/tests/media_gate.py externals --part fixtures --bucket "$B" --out externals.json
+      # Decision 15: the key service must still return the UHD fixture's key, proven by
+      # decrypting the fixture's own ciphertext (tests/media_canary.py). It reads only the
+      # AACS files and a few sample units of the pinned object (ranged GETs, the fixtures
+      # role above). qa only, never dev; a failure or a missing result makes the plan
+      # red ("canary-failed") before any EC2.
+      - name: Key-service canary
+        if: github.ref_name == 'qa'
+        continue-on-error: true
+        env:
+          B: ${{ secrets.FMKV_FIXTURES_BUCKET }}
+          FMKV_KEY_URL: ${{ secrets.FMKV_KEY_URL }}
+          FMKV_KEY_AUTH: ${{ secrets.FMKV_KEY_AUTH }}
+        run: |
+          set -euo pipefail
+          venv="$RUNNER_TEMP/canary-venv"
+          python3 -m venv "$venv"
+          "$venv/bin/python" -m pip install --quiet --disable-pip-version-check --require-hashes --only-binary=:all: \
+            -r freemkv/tests/media-fetch-requirements.txt
+          "$venv/bin/python" freemkv/tests/media_canary.py --bucket "$B" --externals externals.json --out canary.json
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         continue-on-error: true
         with:
@@ -106,7 +125,7 @@ jobs:
           SKIP_MEDIA: ${{ inputs.skip_media }}
           SKIP_REASON: ${{ inputs.skip_reason }}
           HEAD_MESSAGE: ${{ github.event.head_commit.message }}
-        run: python3 freemkv/tests/media_gate.py plan --workspace . --externals externals.json --plan-directory media-plan
+        run: python3 freemkv/tests/media_gate.py plan --workspace . --externals externals.json --canary canary.json --plan-directory media-plan
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: media-plan
