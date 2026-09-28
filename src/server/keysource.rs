@@ -210,67 +210,215 @@ pub fn build_sources(cfg: &Config) -> Vec<Box<dyn KeySource>> {
     sources
 }
 
-/// Open a staged disc image through the engine, ready to mux titles from.
+/// The AACS keys a live drive already resolved for one disc (KU §2.1): its base unit keys,
+/// its FMTS forensic index keys and its Volume ID. Memory only, for the staged image's
+/// mux, which proves them on the image instead of asking a key source again (J6: never
+/// written). `Debug` shows counts only.
+#[derive(Clone)]
+pub struct HeldKeys {
+    base: Vec<[u8; 16]>,
+    forensic: Vec<[u8; 16]>,
+    vid: Option<[u8; 16]>,
+}
+
+impl std::fmt::Debug for HeldKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeldKeys")
+            .field("base", &self.base.len())
+            .field("forensic", &self.forensic.len())
+            .field("vid", &self.vid.map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+// libfreemkv's crate-private `FMTS_POOL_TAG_BASE`: the FMTS gate banks each forensic index
+// key onto `unit_keys` with a CPS number at or above it, in slot (index) order.
+const FMTS_POOL_TAG_BASE: u32 = 1 << 24;
+
+impl HeldKeys {
+    /// The keys and Volume ID on a drive-resolved `aacs` (the FMTS gate's forensic keys
+    /// included); `None` when it holds neither.
+    pub fn from_aacs(aacs: &libfreemkv::AacsState) -> Option<Self> {
+        if aacs.unit_keys.is_empty() && aacs.volume_id == [0u8; 16] {
+            return None;
+        }
+        let mut forensic: Vec<(u32, [u8; 16])> = aacs
+            .unit_keys
+            .iter()
+            .filter(|(cps, _)| *cps >= FMTS_POOL_TAG_BASE)
+            .copied()
+            .collect();
+        forensic.sort_by_key(|(cps, _)| *cps);
+        Some(Self {
+            base: aacs
+                .unit_keys
+                .iter()
+                .filter(|(cps, _)| *cps < FMTS_POOL_TAG_BASE)
+                .map(|(_, k)| *k)
+                .collect(),
+            forensic: forensic.into_iter().map(|(_, k)| k).collect(),
+            vid: Some(aacs.volume_id).filter(|v| *v != [0u8; 16]),
+        })
+    }
+
+    /// The drive's Volume ID, when its handshake read one.
+    pub fn vid(&self) -> Option<[u8; 16]> {
+        self.vid
+    }
+
+    /// Whether the drive resolved any key (else only its Volume ID is held).
+    pub fn has_keys(&self) -> bool {
+        !self.base.is_empty()
+    }
+}
+
+// The drive's held keys as a key source: asked once per resolve (not per sample), so a
+// resolve over them makes no request to any real source.
+struct HeldSource(HeldKeys);
+
+impl KeySource for HeldSource {
+    fn get_unit_keys(
+        &self,
+        _: &dyn libfreemkv::keysource::ResolveCtx,
+    ) -> Result<Vec<libfreemkv::aacs::types::UnitKey>, libfreemkv::Error> {
+        Ok((0u32..)
+            .zip(&self.0.base)
+            .map(|(i, k)| libfreemkv::aacs::types::UnitKey::new(i, *k))
+            .collect())
+    }
+
+    fn get_fmts_indexes(
+        &self,
+        _: &dyn libfreemkv::keysource::ResolveCtx,
+    ) -> Result<Vec<libfreemkv::aacs::types::UnitKey>, libfreemkv::Error> {
+        Ok((0u32..)
+            .zip(&self.0.forensic)
+            .map(|(i, k)| libfreemkv::aacs::types::UnitKey::forensic(i, *k, (i + 1) as u8))
+            .collect())
+    }
+
+    fn label(&self) -> &'static str {
+        "drive"
+    }
+
+    fn answer_depends_on_samples(&self) -> bool {
+        false
+    }
+}
+
+// The drive's keys first, then `fallback`, which a resolve asks only for a piece no held
+// key opens (a sample-dependent online service) — never for what the drive resolved.
+fn held_factory(
+    held: HeldKeys,
+    fallback: libfreemkv::KeySourceFactory,
+) -> libfreemkv::KeySourceFactory {
+    std::sync::Arc::new(move || {
+        let mut sources: Vec<Box<dyn KeySource>> = vec![Box::new(HeldSource(held.clone()))];
+        sources.extend(fallback());
+        sources
+    })
+}
+
+// A fresh rip's drive keys, from its `.ripped` hand-off to the mux worker's open of the
+// same ISO (the worker has no drive). Process memory only: a restart forgets them.
+static HELD: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<PathBuf, HeldKeys>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn held_map() -> std::sync::MutexGuard<'static, std::collections::HashMap<PathBuf, HeldKeys>> {
+    HELD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Keep the drive's keys for the staged `iso` until its mux is done (memory only).
+pub fn hold_drive_keys(iso: &Path, keys: HeldKeys) {
+    held_map().insert(iso.to_path_buf(), keys);
+}
+
+/// The drive's keys held for `iso`, if this process ripped it.
+pub fn held_drive_keys(iso: &Path) -> Option<HeldKeys> {
+    held_map().get(iso).cloned()
+}
+
+/// Drop the keys held for `iso` (its mux delivered).
+pub fn forget_drive_keys(iso: &Path) {
+    held_map().remove(iso);
+}
+
+/// Where a staged image's keys come from (KU §3.2).
+pub enum StagedKeys {
+    /// Keys a drive already resolved (a fresh rip, or the disc inserted for a resume):
+    /// proven on the image with no key-service call. A drive that resolved none lends
+    /// only its Volume ID to the key chain.
+    Held(HeldKeys),
+    /// No drive keys in hand (a resume after a restart): the key chain, asked once, up
+    /// front. `vid` only from a drive in hand; the mapfile holds none (J6).
+    Resolve { vid: Option<[u8; 16]> },
+}
+
+/// Open a staged disc image through the engine, ready to mux `titles` from.
 ///
-/// `banked` is AACS state a live drive already resolved during the rip: its
-/// keys are used as-is and nothing is looked up again. Otherwise the keys
-/// resolve from [`key_params`]; `vid` is the Volume ID the rip recorded, which
-/// an image alone cannot supply (VID-derived keys need it).
+/// `disc` is the image's own scan (it is not scanned again). The keys for every one of
+/// `titles` resolve here, once, before any output; no later mux of the image asks a key
+/// source again. `Err` refuses before any output: E7022/E7032 (no key), E7026 (FMTS
+/// forensic keys), E7028–30 (a key source failed), E7034 (only the disc's Volume ID can
+/// finish the keys: insert the disc).
 pub fn open_staged_image(
     cfg: &Config,
     iso: &Path,
-    vid: Option<[u8; 16]>,
-    banked: Option<libfreemkv::AacsState>,
+    disc: libfreemkv::Disc,
+    titles: &[usize],
+    keys: StagedKeys,
+    halt: Option<libfreemkv::Halt>,
 ) -> Result<freemkv_engine::OpenedImage, libfreemkv::Error> {
-    let src = freemkv_engine::ImageSource::Iso(iso.to_path_buf());
     let params = key_params(cfg);
-    let banked = banked.filter(|a| !a.unit_keys.is_empty());
-    if banked.is_none() && vid.is_none() {
-        let opened = freemkv_engine::open_image(&src, &params)?;
-        log_resolution(&opened);
-        return Ok(opened);
-    }
-    let (mut disc, mut reader) = freemkv_engine::scan_image(&src)?;
-    if let Some(drive) = banked {
-        match disc.aacs.as_mut() {
-            Some(a) => {
-                a.unit_keys = drive.unit_keys;
-                a.volume_id = drive.volume_id;
-            }
-            None => disc.aacs = Some(drive),
+    let (input, vid) = match keys {
+        StagedKeys::Held(held) if !held.has_keys() => (
+            freemkv_engine::KeyInput::Resolve(freemkv_engine::key_source_factory(&params)),
+            held.vid(),
+        ),
+        StagedKeys::Held(held) => {
+            let vid = held.vid();
+            // Only the online service can add a key the drive's chain did not find.
+            let online = freemkv_engine::KeyParams {
+                keydb_path: None,
+                ..params
+            };
+            let fallback = freemkv_engine::key_source_factory(&online);
+            (
+                freemkv_engine::KeyInput::Resolve(held_factory(held, fallback)),
+                vid,
+            )
         }
-        let key_fetch = disc.inputs().map(|inputs| {
-            libfreemkv::keysource::key_fetch(inputs, freemkv_engine::key_source_factory(&params))
-        });
-        return Ok(freemkv_engine::OpenedImage {
-            source: src,
-            disc,
-            reader,
-            key_fetch,
-            trace: ResolutionTrace::new(),
-            won: None,
-        });
-    }
-    if let (Some(vid), Some(a)) = (vid, disc.aacs.as_mut())
-        && a.volume_id == [0u8; 16]
-    {
-        a.volume_id = vid;
-    }
+        StagedKeys::Resolve { vid } => (
+            freemkv_engine::KeyInput::Resolve(freemkv_engine::key_source_factory(&params)),
+            vid,
+        ),
+    };
+    open_staged(iso, disc, titles, input, vid, halt)
+}
+
+// `open_staged_image` over an already-built key input (the tests inject their sources).
+fn open_staged(
+    iso: &Path,
+    disc: libfreemkv::Disc,
+    titles: &[usize],
+    keys: freemkv_engine::KeyInput,
+    vid: Option<[u8; 16]>,
+    halt: Option<libfreemkv::Halt>,
+) -> Result<freemkv_engine::OpenedImage, libfreemkv::Error> {
     // Drain an earlier decode verdict so the caller's take sees only this resolve's.
     let _ = take_online_decode_reachability();
-    let resolved = libfreemkv::resolve_keys_for(
-        reader.as_mut(),
-        &mut disc,
-        freemkv_engine::key_source_factory(&params),
-    );
-    let opened = freemkv_engine::OpenedImage {
-        source: src,
-        disc,
-        reader,
-        key_fetch: resolved.key_fetch,
-        won: freemkv_engine::won_source(&resolved.trace),
-        trace: resolved.trace,
+    let src = freemkv_engine::ImageSource::Iso(iso.to_path_buf());
+    let opts = freemkv_engine::OpenImageOptions {
+        keys,
+        disc: Some(disc),
+        scope: Some(libfreemkv::keys::KeyScope::Titles(titles.to_vec())),
+        vid,
+        halt,
     };
+    let mut opened = freemkv_engine::open_image_with(&src, opts)?;
+    // The set covers every title this open muxes; with no sources kept, a mux outside
+    // them refuses instead of asking a key source mid-rip.
+    opened.sources = None;
     log_resolution(&opened);
     Ok(opened)
 }
@@ -1320,13 +1468,25 @@ mod tests {
         assert_eq!(bare.key_auth, None);
     }
 
-    // A missing image is a scan error on both open routes (engine open, VID resolve).
+    // A missing image fails the open on both key routes (drive keys, the key chain).
     #[test]
     fn open_staged_image_reports_a_missing_image() {
         let cfg = Config::default();
         let missing = Path::new("/nonexistent-autorip-iso-fixture-xyz.iso");
-        assert!(open_staged_image(&cfg, missing, None, None).is_err());
-        assert!(open_staged_image(&cfg, missing, Some([7u8; 16]), None).is_err());
+        let disc = || keyless_encrypted_disc_with_aacs();
+        let held = HeldKeys::from_aacs(
+            &libfreemkv::test_util::aacs_state()
+                .unit_keys(vec![(1, [5u8; 16])])
+                .build(),
+        )
+        .unwrap();
+        assert!(
+            open_staged_image(&cfg, missing, disc(), &[0], StagedKeys::Held(held), None).is_err()
+        );
+        let resolve = StagedKeys::Resolve {
+            vid: Some([7u8; 16]),
+        };
+        assert!(open_staged_image(&cfg, missing, disc(), &[0], resolve, None).is_err());
     }
 
     // The PROBE is disc-less (empty POST), so its classification stays coarse:
@@ -1906,5 +2066,110 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(keydb_path(&cfg), PathBuf::from("/mnt/archive/keydb.cfg"));
+    }
+}
+
+#[cfg(test)]
+mod ku_e1_tests {
+    use super::*;
+    use crate::ku_fixture::{K1, VID, bd_image, counting, write_sidecar};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn drive_keys(unit_keys: Vec<(u32, [u8; 16])>, vid: [u8; 16]) -> HeldKeys {
+        let aacs = libfreemkv::test_util::aacs_state()
+            .unit_keys(unit_keys)
+            .volume_id(vid)
+            .build();
+        HeldKeys::from_aacs(&aacs).expect("keys or a VID")
+    }
+
+    // KU-E1: a fresh multipass rip muxes its staged ISO with the keys its drive already
+    // resolved. The open proves them on the image and neither it nor the mux asks a key
+    // source: the online fallback, there only for a piece no drive key opens, is never called.
+    #[test]
+    fn a_fresh_multipass_mux_asks_no_key_source() {
+        let fx = bd_image();
+        let dir = tempfile::tempdir().unwrap();
+        let iso = fx.write(dir.path(), "disc.iso");
+        write_sidecar(&fx, &iso, false);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let held = drive_keys(vec![(1, K1)], VID);
+        let keys = freemkv_engine::KeyInput::Resolve(held_factory(held, counting(&calls)));
+        let image = open_staged(&iso, fx.scan(), &[0], keys, Some(VID), None).unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "the drive's key opens the title"
+        );
+        assert!(
+            image
+                .keys
+                .covers(&libfreemkv::keys::KeyScope::Titles(vec![0]))
+        );
+        assert!(image.sources.is_none(), "no source is kept past the open");
+
+        let dest = format!("mkv://{}", dir.path().join("out.mkv").display());
+        let plan = freemkv_engine::MuxPlan::new(vec![0]);
+        let out = freemkv_engine::mux_image_titles(
+            &image,
+            &plan,
+            &|_| dest.clone(),
+            &freemkv_engine::NoopSink,
+        );
+        assert!(
+            matches!(out, freemkv_engine::RipOutcome::Ok { titles_written: 1 }),
+            "{out:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "nor does the mux");
+    }
+
+    // Without the drive's key, the same open asks the fallback: the held source is what
+    // saves the lookup, not an open that never resolves.
+    #[test]
+    fn a_piece_no_drive_key_opens_asks_the_fallback() {
+        let fx = bd_image();
+        let dir = tempfile::tempdir().unwrap();
+        let iso = fx.write(dir.path(), "disc.iso");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let held = drive_keys(vec![(1, [0x33; 16])], VID);
+        let keys = freemkv_engine::KeyInput::Resolve(held_factory(held, counting(&calls)));
+        let r = open_staged(&iso, fx.scan(), &[0], keys, Some(VID), None);
+        assert!(r.is_err(), "no key opens the title");
+        assert!(calls.load(Ordering::SeqCst) >= 1, "the fallback was asked");
+    }
+
+    // The FMTS gate banks forensic index keys onto `unit_keys` with a CPS tag at or above
+    // libfreemkv's pool tag base, in index order: they split out as forensic, in order.
+    #[test]
+    fn held_keys_split_base_and_forensic_by_the_fmts_tag() {
+        let tag = FMTS_POOL_TAG_BASE;
+        let held = drive_keys(
+            vec![(tag + 2, [2; 16]), (1, [9; 16]), (tag + 1, [1; 16])],
+            [0; 16],
+        );
+        assert_eq!(held.base, vec![[9; 16]]);
+        assert_eq!(held.forensic, vec![[1; 16], [2; 16]]);
+        assert_eq!(held.vid(), None, "an all-zero VID is no VID");
+        let vid_only = drive_keys(Vec::new(), VID);
+        assert!(!vid_only.has_keys());
+        assert_eq!(vid_only.vid(), Some(VID));
+        let none = libfreemkv::test_util::aacs_state().build();
+        assert!(HeldKeys::from_aacs(&none).is_none());
+        assert!(
+            !format!("{held:?}").contains("9, 9"),
+            "Debug shows counts only"
+        );
+    }
+
+    // The ripping process lends its drive's keys to the mux worker by ISO path, in memory.
+    #[test]
+    fn drive_keys_are_held_per_iso_until_forgotten() {
+        let iso = Path::new("/staging/ku-e1-held/disc.iso");
+        assert!(held_drive_keys(iso).is_none());
+        hold_drive_keys(iso, drive_keys(vec![(1, K1)], VID));
+        assert!(held_drive_keys(iso).is_some_and(|h| h.has_keys()));
+        forget_drive_keys(iso);
+        assert!(held_drive_keys(iso).is_none());
     }
 }

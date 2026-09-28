@@ -505,6 +505,20 @@ pub(super) fn session_is_scanned(device: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The keys and Volume ID the scan of `device`'s disc resolved, if a session holds one
+/// (memory only): what an inserted disc lends its staged image's resume.
+pub(super) fn session_held_keys(device: &str) -> Option<crate::server::keysource::HeldKeys> {
+    SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(device)?
+        .disc
+        .as_ref()?
+        .aacs
+        .as_ref()
+        .and_then(crate::server::keysource::HeldKeys::from_aacs)
+}
+
 pub(super) fn drop_session(device: &str) {
     // Recover-and-proceed on poison (matching store_session / take_session):
     // silently no-op'ing here would leak a stale DriveSession in the map, so a

@@ -869,6 +869,49 @@ mod tests {
         assert!(safe_to_create(&d, &t.path().join("elsewhere/A.mkv")).is_err());
     }
 
+    // KU-E1: a remux whose keys need the disc's Volume ID (never on disk, J6) fails E7034
+    // before any output. The row says to insert the disc, the job is not re-queued, and
+    // the old MKV is byte-for-byte unchanged.
+    #[test]
+    fn a_remux_needing_the_disc_says_insert_it_and_is_not_retried() {
+        let (t, lib, dirs) = library_with(&["A"]);
+        let fx = crate::ku_fixture::bd_image();
+        let iso = dirs.isos.as_ref().unwrap().join("A.iso");
+        std::fs::write(&iso, &fx.img.image).unwrap();
+        crate::ku_fixture::write_sidecar(&fx, &iso, true);
+        let mkv_path = dirs.library.join("A/A.mkv");
+        let old_mkv = std::fs::read(&mkv_path).unwrap();
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        let job = lib.queue.claim_next().expect("the stale MKV is queued");
+        assert_eq!(job.iso, iso);
+        let cfg = Config {
+            keydb_path: Some(t.path().join("no-keydb.cfg").to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        let arbiter = Arbiter::new();
+        let ending = remux(&job, &cfg, &test_sink(&lib, &arbiter));
+        let lines = Lines(Mutex::new(Vec::new()));
+        finish(&lib, &job, ending, Duration::ZERO, &lines);
+
+        let q = lib.queue.snapshot();
+        let r = q.results.values().next().cloned().unwrap();
+        let JobResult::Failed { code, message, .. } = r else {
+            panic!("{r:?}");
+        };
+        assert_eq!(code, Some(libfreemkv::error::E_AACS_VID_NEEDS_DISC));
+        assert!(message.contains("Insert the disc to finish"), "{message}");
+        assert_eq!(q.count(JobState::Failed), 1);
+        assert!(lib.queue.claim_next().is_none(), "never retried by itself");
+        assert_eq!(
+            std::fs::read(&mkv_path).unwrap(),
+            old_mkv,
+            "the old MKV is kept"
+        );
+        let said = lines.0.lock().unwrap().join("\n");
+        assert!(said.contains("The old MKV is unchanged"), "{said}");
+    }
+
     #[test]
     fn a_retry_appends_to_the_title_log() {
         let t = tempfile::tempdir().unwrap();

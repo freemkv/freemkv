@@ -161,6 +161,10 @@ pub struct DiscState {
     /// Count of abort-on-loss outcomes (informational; the dir stays resumable).
     #[serde(default)]
     pub aborted_loss_attempt: u64,
+    /// E7034 hold on a `Ripped` dir: its keys need the disc's Volume ID (never saved,
+    /// J6), so the mux worker stops re-dispatching it until the disc is inserted.
+    #[serde(default)]
+    pub needs_disc: bool,
 
     // --- identity / routing (was the `.disc-label` file + done body) -------
     /// Raw volume label — the same value the `.disc-label` file held; used by
@@ -230,6 +234,7 @@ impl DiscState {
             accept_loss: false,
             failure_reason: None,
             aborted_loss_attempt: 0,
+            needs_disc: false,
             disc_label: String::new(),
             disc_name: String::new(),
             disc_format: String::new(),
@@ -441,6 +446,14 @@ pub fn mutate_state_if_present(staging_disc_dir: &Path, f: impl FnOnce(&mut Disc
     if let Some(mut st) = read_state(staging_disc_dir) {
         f(&mut st);
         write_state(staging_disc_dir, &st);
+    }
+}
+
+/// Set or lift the E7034 hold ([`DiscState::needs_disc`]) on a dir with a `state.json`.
+/// A write only when it changes, so lifting an unset hold touches nothing.
+pub fn set_needs_disc(staging_disc_dir: &Path, needs_disc: bool) {
+    if read_state(staging_disc_dir).is_some_and(|st| st.needs_disc != needs_disc) {
+        mutate_state_if_present(staging_disc_dir, |st| st.needs_disc = needs_disc);
     }
 }
 
@@ -1172,6 +1185,9 @@ pub struct StagingSnapshot {
     /// dir is OWNED by the mux worker; the drive-resume paths must not select
     /// it for a fresh sweep or a double-mux.
     pub has_muxing: bool,
+    /// A `Ripped` dir held for its disc (E7034, [`DiscState::needs_disc`]): the mux
+    /// worker does not own it, and inserting the disc finishes it.
+    pub needs_disc: bool,
     pub has_iso: bool,
     pub has_mapfile: bool,
     pub has_mkv: bool,
@@ -1284,6 +1300,7 @@ struct Lifecycle {
     has_ripped: bool,
     has_sweeping: bool,
     has_muxing: bool,
+    needs_disc: bool,
 }
 
 impl Lifecycle {
@@ -1319,6 +1336,7 @@ impl Lifecycle {
             has_ripped: st.state == Ripped,
             has_sweeping: st.state == Sweeping,
             has_muxing: st.muxing,
+            needs_disc: st.state == Ripped && st.needs_disc,
         }
     }
 
@@ -1351,6 +1369,7 @@ impl Lifecycle {
             has_ripped: obs.has_ripped,
             has_sweeping: obs.has_sweeping,
             has_muxing: obs.has_muxing,
+            needs_disc: false,
         }
     }
 
@@ -1706,6 +1725,7 @@ pub fn snapshot_staging_disc(dir: &Path) -> Option<StagingSnapshot> {
         has_ripped: life.has_ripped,
         has_sweeping: life.has_sweeping,
         has_muxing: life.has_muxing,
+        needs_disc: life.needs_disc,
         has_iso: obs.has_iso,
         has_mapfile: obs.has_mapfile,
         has_mkv: obs.has_mkv,

@@ -141,6 +141,31 @@ pub(crate) fn is_halt_error(e: &std::io::Error) -> bool {
     freemkv_engine::error_code(e) == Some(libfreemkv::error::E_HALTED)
 }
 
+// A staged image's up-front key refusal (KU §3.2): no key (E7022/E7032), FMTS forensic keys
+// (E7026), a key source failed (E7028–30), or only the disc's VID can finish (E7034).
+pub(crate) fn is_key_refusal(e: &libfreemkv::Error) -> bool {
+    KEY_REFUSAL_CODES.contains(&e.code())
+}
+
+const KEY_REFUSAL_CODES: [u16; 7] = {
+    use libfreemkv::error as c;
+    [
+        c::E_NO_DISC_KEY,
+        c::E_WHOLE_DISC_KEY_MISSING,
+        c::E_FMTS_KEY_MISSING,
+        c::E_KEY_SERVICE_UNAVAILABLE,
+        c::E_KEY_SERVICE_UNAUTHORIZED,
+        c::E_KEY_SERVICE_RATE_LIMITED,
+        c::E_AACS_VID_NEEDS_DISC,
+    ]
+};
+
+// The code of a key refusal (see `is_key_refusal`) carried through an `io::Error`, e.g. a
+// mux's `TitleDone(Err)`; `None` for anything else.
+pub(crate) fn io_key_refusal(e: &std::io::Error) -> Option<u16> {
+    freemkv_engine::error_code(e).filter(|code| KEY_REFUSAL_CODES.contains(code))
+}
+
 // True when a mux-construction `io::Error` is a missing-FMTS-forensic-key error (E7026): base
 // AACS keys resolved but online forensic keys did not.
 pub(crate) fn is_fmts_key_missing_error(e: &std::io::Error) -> bool {
@@ -1520,6 +1545,19 @@ fn dispatch_rip_request(
     device_path: &str,
     mode: crate::server::web::ResumeMode,
 ) {
+    // E7034: this disc is what its staged image waits for; finish that mux, never re-rip.
+    if mode != crate::server::web::ResumeMode::Wipe
+        && disc_staging_hold(cfg, device, false) == Some(StagingHold::NeedsDisc)
+        && let Some(class) = find_resumable_for_disc(cfg, device)
+    {
+        crate::server::log::device_log(
+            device,
+            "Disc inserted for its staged image (E7034) — finishing the mux from the image",
+        );
+        resume::resume_remux(cfg, device, class);
+        drop_session(device);
+        return;
+    }
     match mode {
         crate::server::web::ResumeMode::Require => {
             if resume_refused_by_staging(cfg, device) {
@@ -1641,6 +1679,8 @@ enum StagingHold {
     LossAborted,
     /// `.sweeping` by another drive's live rip of the same disc.
     LiveSweep,
+    /// A staged image held for this disc (E7034): inserting it finishes the mux.
+    NeedsDisc,
 }
 
 /// What the caller of [`staging_hold_stands_down`] is about to do to the staging dir.
@@ -1659,7 +1699,9 @@ enum GuardFor {
 fn staging_hold_stands_down(cfg: &Arc<RwLock<Config>>, device: &str, purpose: GuardFor) -> bool {
     let hold = match disc_staging_hold(cfg, device, purpose == GuardFor::Wipe) {
         None => return false,
-        Some(StagingHold::LossAborted) if purpose == GuardFor::Resume => return false,
+        Some(StagingHold::LossAborted | StagingHold::NeedsDisc) if purpose == GuardFor::Resume => {
+            return false;
+        }
         Some(hold) => hold,
     };
     let why = match hold {
@@ -1713,6 +1755,9 @@ fn staging_hold_stands_down(cfg: &Arc<RwLock<Config>>, device: &str, purpose: Gu
         }
         StagingHold::LiveSweep => {
             "Another drive is sweeping this disc's staging dir right now — NOT re-ripping."
+        }
+        StagingHold::NeedsDisc => {
+            "This disc's staged image is waiting for it (E7034) but could not be resumed — NOT re-ripping. Use Resume to finish it."
         }
         StagingHold::Unreadable => {
             "Cannot read this disc's staging dir cleanly (staging share degraded?) — NOT re-ripping, so a finished rip can't be destroyed. Retry once staging is readable."
@@ -1803,7 +1848,9 @@ fn disc_staging_hold(
 // Pure: the hold a cleanly-read snapshot imposes. `.done` counts on its own for old-format
 // dirs that crashed between the `.done` and `.completed` writes.
 fn snapshot_hold(snap: &staging::StagingSnapshot) -> Option<StagingHold> {
-    if snap.has_ripped || snap.has_muxing {
+    if snap.needs_disc && !snap.has_muxing {
+        Some(StagingHold::NeedsDisc)
+    } else if snap.has_ripped || snap.has_muxing {
         Some(StagingHold::OwnedByWorker)
     } else if snap.has_review {
         Some(StagingHold::HeldForReview)
@@ -1954,7 +2001,7 @@ fn staging_disc_owned_by_worker(staging_root: &std::path::Path, sanitized: &str)
         // mount after a restart can hide the marker from a raw stat, letting
         // Default auto-rip fall through to rip_disc and O_TRUNC the ISO.
         if let Some(snap) = staging::snapshot_staging_disc(&path)
-            && (snap.has_ripped || snap.has_muxing)
+            && ((snap.has_ripped && !snap.needs_disc) || snap.has_muxing)
         {
             return true;
         }
@@ -1968,7 +2015,11 @@ fn resumable_dir_blocked(snap: &staging::StagingSnapshot) -> bool {
     // `completed` also blocks: with `keep_iso = true` the ISO survives past
     // completion, so a manual Require on a just-finished dir could otherwise
     // pass this gate and delete_partial_output would destroy the delivered MKV.
-    snap.has_ripped || snap.has_muxing || snap.has_review || snap.has_failed || snap.completed
+    (snap.has_ripped && !snap.needs_disc)
+        || snap.has_muxing
+        || snap.has_review
+        || snap.has_failed
+        || snap.completed
 }
 
 // End-of-recovery loss figure in milliseconds, or NaN when untrustworthy (`promotion_intact ==
@@ -2220,7 +2271,7 @@ fn resumable_for_disc(cfg: &Config, display_name: &str, disc_label: &str) -> Opt
             // A dir the mux worker owns (.ripped/.muxing) must NOT be offered
             // as resumable — resuming would race a fresh sweep against the
             // worker's reads. Mirrors disc_owned_by_worker's Wipe guard.
-            if snap.has_ripped || snap.has_muxing {
+            if (snap.has_ripped && !snap.needs_disc) || snap.has_muxing {
                 return None;
             }
         }
@@ -3345,6 +3396,8 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     .map(|a| a.unit_keys.clone())
                     .unwrap_or_default(),
                 key_fetch: key_fetch.clone(),
+                // A raw capture (`decrypt: false`) decrypts nothing: no key set.
+                keys: None,
             };
 
             match freemkv_engine::sweep(&disc, &mut session.drive, iso_path, &sweep_opts) {
@@ -3887,6 +3940,8 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 progress: Some(&patch_progress),
                 halt: Some(pass_halt.clone()),
                 key_fetch: key_fetch.clone(),
+                // A raw capture (`decrypt: false`) decrypts nothing: no key set.
+                keys: None,
             };
             // Un-wedge the drive in SOFTWARE before each retry pass: grinding a
             // bad cluster leaves it in a HARDWARE_ERROR wedge needing a power-cycle.
@@ -4439,6 +4494,15 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // override) so resume_remux doesn't second-guess a deliberate pick.
             title_confident,
         };
+        // The worker muxes with no drive: lend it this drive's keys and VID, in memory
+        // only (J6), so its open asks no key source for them.
+        if let Some(held) = disc
+            .aacs
+            .as_ref()
+            .and_then(crate::server::keysource::HeldKeys::from_aacs)
+        {
+            crate::server::keysource::hold_drive_keys(std::path::Path::new(&iso_path_str), held);
+        }
         let staging_path = std::path::Path::new(&staging);
         if let Err(e) = crate::server::muxer::write_marker(staging_path, &marker) {
             // Couldn't hand off — fall back to the inline mux below
@@ -4736,12 +4800,30 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         MuxSource::StagedImage => {
             // Multipass: mux the staged ISO through the engine, keyed with what the
             // drive already resolved (FMTS forensic keys included) — no second lookup.
-            let image = match crate::server::keysource::open_staged_image(
-                &cfg_read,
-                std::path::Path::new(&iso_path_str),
-                None,
-                disc.aacs.take(),
-            ) {
+            let iso_path = std::path::Path::new(&iso_path_str);
+            let staged_keys = match disc
+                .aacs
+                .as_ref()
+                .and_then(crate::server::keysource::HeldKeys::from_aacs)
+            {
+                Some(held) => crate::server::keysource::StagedKeys::Held(held),
+                None => crate::server::keysource::StagedKeys::Resolve { vid: None },
+            };
+            let opened = freemkv_engine::scan_image(&freemkv_engine::ImageSource::Iso(
+                iso_path.to_path_buf(),
+            ))
+            .and_then(|(image_disc, _)| {
+                let idx = image_title_index(&image_disc, &title);
+                crate::server::keysource::open_staged_image(
+                    &cfg_read,
+                    iso_path,
+                    image_disc,
+                    &[idx],
+                    staged_keys,
+                    Some(halt_token.clone()),
+                )
+            });
+            let image = match opened {
                 Ok(image) => {
                     crate::server::log::device_log(
                         device,
@@ -4751,6 +4833,28 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                         ),
                     );
                     image
+                }
+                Err(libfreemkv::Error::Halted) => {
+                    crate::server::log::device_log(
+                        device,
+                        "Rip stopped by user while keying the ISO — staging preserved for resume.",
+                    );
+                    unregister_halt(device);
+                    return;
+                }
+                Err(e) if is_key_refusal(&e) => {
+                    // Keys, not the image: keep the ISO for a resume, never `.failed`.
+                    let msg = format_lib_error("Open ISO", &e);
+                    crate::server::log::device_log(
+                        device,
+                        &format!("{msg}\nStaging preserved ({staging}) for a resume."),
+                    );
+                    update_state_with(device, |s| {
+                        s.status = "error".to_string();
+                        s.last_error = msg.clone();
+                    });
+                    unregister_halt(device);
+                    return;
                 }
                 Err(e) => {
                     let msg = format_lib_error("Open ISO", &e);
@@ -4797,6 +4901,18 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                             device,
                             "Rip stopped by user during mux setup — staging preserved for resume.",
                         );
+                        unregister_halt(device);
+                        return;
+                    }
+                    // A key refusal is not the image's fault: keep the ISO for a resume.
+                    if io_key_refusal(&e).is_some() {
+                        let msg =
+                            format!("Mux refused for keys — staging preserved for a resume ({e}).");
+                        crate::server::log::device_log(device, &msg);
+                        update_state_with(device, |s| {
+                            s.status = "error".to_string();
+                            s.last_error = msg.clone();
+                        });
                         unregister_halt(device);
                         return;
                     }
@@ -5991,6 +6107,15 @@ fn aacs_failure_message(err: Option<&libfreemkv::Error>) -> String {
              fails, the disc may be damaged.",
         ),
 
+        // KU §3.2 up-front refusals: no key source holds a key that opens the content.
+        ec::E_NO_DISC_KEY | ec::E_WHOLE_DISC_KEY_MISSING => error_line(
+            code,
+            "No key source has a key that opens this disc's content. Add or update a \
+             key source in Settings.",
+        ),
+
+        ec::E_AACS_VID_NEEDS_DISC => error_line(code, VID_NEEDS_DISC_MESSAGE),
+
         // Host certs were offered, but every one failed a local check before any
         // drive round-trip — a keydb problem, not a rejection (distinct from
         // E_AACS_NO_HOST_CERT: certs WERE present here).
@@ -6016,6 +6141,21 @@ fn aacs_failure_message(err: Option<&libfreemkv::Error>) -> String {
              via /api/debug for details.",
         ),
     }
+}
+
+/// E7034 in words: the keys need the disc's Volume ID, which is read from the disc and
+/// never saved (J6), so only the disc can finish the mux.
+pub(crate) const VID_NEEDS_DISC_MESSAGE: &str = "Insert the disc to finish. This disc's keys \
+     can only be finished with its Volume ID, which is read from the disc and never saved. \
+     The ripped image is kept; inserting the disc muxes it without re-reading it.";
+
+/// E7034 as the device tile and the mux worker's card show it (one string, so the card
+/// de-dupes across ticks).
+pub(crate) fn vid_needs_disc_text() -> String {
+    format!(
+        "E{} {VID_NEEDS_DISC_MESSAGE}",
+        libfreemkv::error::E_AACS_VID_NEEDS_DISC
+    )
 }
 
 // Render a user-facing error line in the locked rc.6 format:
@@ -6270,7 +6410,12 @@ fn format_lib_error(phase: &str, e: &libfreemkv::Error) -> String {
         | Error::AacsNoUsableHostCert
         | Error::CssKeyMissing
         | Error::CssAuthFailed
-        | Error::NoDiscKey { .. } => {
+        | Error::NoDiscKey { .. }
+        | Error::WholeDiscKeyMissing
+        | Error::AacsVidNeedsDisc
+        | Error::KeyServiceUnavailable
+        | Error::KeyServiceUnauthorized
+        | Error::KeyServiceRateLimited => {
             return format!(
                 "{phase} failed: {}",
                 strip_error_prefix(&aacs_failure_message(Some(e)))

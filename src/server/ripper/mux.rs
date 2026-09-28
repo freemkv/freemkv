@@ -643,12 +643,17 @@ impl EngineMuxSink {
     }
 
     // The title's result. None means the engine stopped before starting it: a halt.
-    fn take_result(&self) -> std::io::Result<libfreemkv::MuxOutcome> {
+    // The title's result, else the loop's `outcome`: a refusal before any title (a key
+    // refusal before `TitleStart`) must not read as a Stop.
+    fn take_result(
+        &self,
+        outcome: &freemkv_engine::RipOutcome,
+    ) -> std::io::Result<libfreemkv::MuxOutcome> {
         self.result
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .take()
-            .unwrap_or_else(|| Err(libfreemkv::Error::Halted.into()))
+            .unwrap_or_else(|| Err(outcome_error(outcome)))
     }
 }
 
@@ -996,9 +1001,9 @@ fn map_iso_mux_outcome(
             })
         }
         Err(e) => {
-            // Propagate the two classifications the call site handles specially
-            // (staging-preserving resume, FMTS retryable deferral).
-            if super::is_halt_error(&e) || super::is_fmts_key_missing_error(&e) {
+            // Propagate what the call site classifies itself: a Stop (staging kept) and a
+            // key refusal (E7034 "insert the disc", else a key deferral), never damage.
+            if super::is_halt_error(&e) || super::io_key_refusal(&e).is_some() {
                 return Err(e);
             }
             if !opened {
@@ -1086,6 +1091,23 @@ fn map_iso_mux_outcome(
     }
 }
 
+// The error a title-less `RipOutcome` stands for: its code, a disc-level no-key (E7022),
+// or a Stop.
+fn outcome_error(outcome: &freemkv_engine::RipOutcome) -> std::io::Error {
+    match outcome {
+        freemkv_engine::RipOutcome::Failed {
+            code: Some(code), ..
+        } => std::io::Error::other(format!("E{code}")),
+        freemkv_engine::RipOutcome::Failed { kind, .. } => {
+            std::io::Error::new(*kind, "image mux failed before any title")
+        }
+        freemkv_engine::RipOutcome::NoKey => {
+            std::io::Error::other(format!("E{}", libfreemkv::error::E_NO_DISC_KEY))
+        }
+        _ => libfreemkv::Error::Halted.into(),
+    }
+}
+
 // Run the ISO/multipass (and resume) mux through the engine's `mux_image_titles`; live
 // single-pass sibling is `mux_live`. `Err` only for the two call-site classifications
 // (halt, FMTS deferral); everything else maps into `MuxOutcome`.
@@ -1160,9 +1182,9 @@ pub(crate) fn mux_iso(
         &format!("Opening output: {}", inputs.dest_url),
     );
     let dest = inputs.dest_url.clone();
-    let _ = freemkv_engine::mux_image_titles(src.image, &plan, &|_| dest.clone(), &sink);
+    let outcome = freemkv_engine::mux_image_titles(src.image, &plan, &|_| dest.clone(), &sink);
 
-    let result = sink.take_result();
+    let result = sink.take_result(&outcome);
     let opened = sink.opened.load(Ordering::Relaxed);
     let partial_bytes = wd_bytes.load(Ordering::Relaxed);
     let final_errors = atomics_in.input_errors.load(Ordering::Relaxed);
@@ -2039,7 +2061,7 @@ mod tests {
         use freemkv_engine::{Event, Sink};
         let (sink, ..) = engine_sink("engine_sink_result");
         let halted = sink
-            .take_result()
+            .take_result(&freemkv_engine::RipOutcome::Halted)
             .expect_err("no TitleDone means stopped before start");
         assert!(super::super::is_halt_error(&halted));
 
@@ -2057,7 +2079,8 @@ mod tests {
             dest: "mkv:///x.mkv",
             result: Ok(&done),
         });
-        assert_eq!(sink.take_result().expect("ok").bytes_written, 1234);
+        let ok = freemkv_engine::RipOutcome::Ok { titles_written: 1 };
+        assert_eq!(sink.take_result(&ok).expect("ok").bytes_written, 1234);
 
         let fmts: std::io::Error = libfreemkv::Error::FmtsKeyMissing.into();
         sink.event(&Event::TitleDone {
@@ -2065,8 +2088,51 @@ mod tests {
             dest: "mkv:///x.mkv",
             result: Err(&fmts),
         });
-        let err = sink.take_result().expect_err("err");
+        let err = sink.take_result(&ok).expect_err("err");
         assert!(super::super::is_fmts_key_missing_error(&err), "{err}");
+    }
+
+    // KU-E1: a key refusal is never a Stop. Before any title the loop's outcome carries it;
+    // as a `TitleDone(Err)` with no output it reaches the call site as the key error
+    // (E7034 "insert the disc", else a key deferral), not a quarantining setup failure.
+    #[test]
+    fn a_key_refusal_is_a_key_error_not_a_stop_or_damage() {
+        use freemkv_engine::{Event, RipOutcome, Sink};
+        let (sink, ..) = engine_sink("engine_sink_key_refusal");
+        let refused = |code: u16| RipOutcome::Failed {
+            title_index: 0,
+            code: Some(code),
+            kind: std::io::ErrorKind::Other,
+        };
+        for code in [7022u16, 7026, 7032, 7034] {
+            let e = sink.take_result(&refused(code)).expect_err("refused");
+            assert!(!super::super::is_halt_error(&e), "E{code} is not a Stop");
+            assert_eq!(super::super::io_key_refusal(&e), Some(code));
+        }
+        let no_key = sink.take_result(&RipOutcome::NoKey).expect_err("no key");
+        assert_eq!(super::super::io_key_refusal(&no_key), Some(7022));
+
+        for err in [
+            libfreemkv::Error::AacsVidNeedsDisc,
+            libfreemkv::Error::NoDiscKey {
+                disc_hash: "ab".into(),
+            },
+            libfreemkv::Error::FmtsKeyMissing,
+        ] {
+            let code = err.code();
+            let io: std::io::Error = err.into();
+            sink.event(&Event::TitleDone {
+                idx: 0,
+                dest: "mkv:///x.mkv",
+                result: Err(&io),
+            });
+            let result = sink.take_result(&RipOutcome::Halted);
+            let Err(mapped) = map_iso_mux_outcome(result, false, "ku", 0.0, Instant::now(), 0, 0)
+            else {
+                panic!("E{code}: the call site classifies a key refusal");
+            };
+            assert_eq!(super::super::io_key_refusal(&mapped), Some(code));
+        }
     }
 
     // `/api/stop` cancels the device's Halt; the engine polls it through the sink.
@@ -2125,7 +2191,9 @@ mod tests {
                 content_format: libfreemkv::ContentFormat::BdTs,
             },
             reader: Box::new(NoRead),
-            key_fetch: None,
+            keys: libfreemkv::keys::ResolvedKeySet::none(),
+            sources: None,
+            prescanned: false,
             trace: libfreemkv::aacs::trace::ResolutionTrace::new(),
             won: None,
         }

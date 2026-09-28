@@ -29,6 +29,8 @@ pub mod file_identity;
 /// Declared here as well as in `main.rs` because `settings.rs` — the GUI's
 /// Update-keydb path — lives in this tree and could not otherwise reach it.
 pub mod keydb_fetch;
+#[cfg(test)]
+pub(crate) mod ku_fixture;
 /// What a finished mux still has to tell the user — the ONE renderer both
 /// shells use for a completed-but-lossy export. Declared here as well as in
 /// `main.rs`, same reason as `title_identity`.
