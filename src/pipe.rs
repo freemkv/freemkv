@@ -6772,6 +6772,42 @@ mod formatter_tests {
         );
     }
 
+    // D4 parity: a mux that fails before its output opens prints no pre-mux note, in the CLI
+    // as in the GUI (engine.rs `a_mux_that_fails_before_open_logs_no_note`).
+    #[test]
+    fn a_mux_that_fails_before_open_prints_no_note() {
+        crate::strings::set_locale("en");
+        let dir = std::env::temp_dir().join(format!("fmkv-d4-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.mpg");
+        crate::lossy::mpg_source_fixture(&src);
+        let dest = format!("mp4://{}/missing/x.mp4", dir.display());
+        let events = std::sync::Arc::new(CliMuxEvents::new(loud(), dest.clone(), false));
+        let url = format!("mpg://{}", src.display());
+        let opts = libfreemkv::MuxOptions {
+            skip_errors: false,
+            batch_sectors: 64,
+            raw: false,
+            selection: libfreemkv::StreamSelection::default(),
+            send_deadline: Some(std::time::Duration::from_secs(60)),
+        };
+        let (res, printed) = capture(|| {
+            libfreemkv::mux_stream(
+                libfreemkv::MuxInput::Url {
+                    url: &url,
+                    opts: libfreemkv::InputOptions::default(),
+                },
+                &dest,
+                &opts,
+                &libfreemkv::Halt::new(),
+                events,
+            )
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(res.is_err(), "no such output directory");
+        assert!(!printed.contains("left out"), "got:\n{printed}");
+    }
+
     #[test]
     fn print_excluded_names_the_tracks_the_container_cannot_carry() {
         crate::strings::set_locale("en");

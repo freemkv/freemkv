@@ -144,6 +144,79 @@ fn lost_mb(bytes: u64) -> String {
     format!("{}.{:02}", hundredths / 100, hundredths % 100)
 }
 
+/// A small clear `mpg://` file for tests that need a real source whose pre-mux note is not
+/// empty: MPEG-2 video and one DVD subpicture track (neither of which MP4 carries).
+#[cfg(test)]
+pub(crate) fn mpg_source_fixture(path: &std::path::Path) {
+    use libfreemkv::{
+        Codec, ColorSpace, DiscTitle, FrameRate, HdrFormat, LabelQualifier, PesFrame, Resolution,
+        Stream, SubtitleStream, VideoStream,
+    };
+    let title = DiscTitle {
+        streams: vec![
+            Stream::Video(VideoStream {
+                pid: 0xE0,
+                codec: Codec::Mpeg2,
+                resolution: Resolution::R576i,
+                frame_rate: FrameRate::F25,
+                hdr: HdrFormat::Sdr,
+                color_space: ColorSpace::Bt470bg,
+                display_aspect: None,
+                secondary: false,
+                label: String::new(),
+                measured_cicp: None,
+            }),
+            Stream::Subtitle(SubtitleStream {
+                pid: 0x20,
+                codec: Codec::DvdSub,
+                language: "eng".into(),
+                forced: false,
+                qualifier: LabelQualifier::None,
+                codec_data: None,
+            }),
+        ],
+        codec_privates: vec![None, None],
+        ..DiscTitle::empty()
+    };
+    // 13818-2 sequence header (720x576, 25 Hz) + sequence_extension; an I or P picture.
+    const SEQ: [u8; 22] = [
+        0, 0, 1, 0xB3, 0x2D, 0x02, 0x40, 0x23, 0xFF, 0xFF, 0xE3, 0x80, 0, 0, 1, 0xB5, 0x14, 0x8A,
+        0x00, 0x01, 0x00, 0x00,
+    ];
+    let pic = |coding: u8| {
+        let mut v = vec![0, 0, 1, 0x00, 0x00, coding << 3, 0xFF, 0xF8];
+        v.extend_from_slice(&[0, 0, 1, 0xB5, 0x8F, 0xFF, 0xF3, 0x80, 0x80]);
+        v.extend_from_slice(&[0, 0, 1, 0x01, 0x12, 0x34, 0x56]);
+        v
+    };
+    let frame = |track: usize, pts: i64, keyframe: bool, data: Vec<u8>| PesFrame {
+        track,
+        pts,
+        keyframe,
+        data,
+        duration_ns: None,
+        discard_padding_ns: 0,
+        source: None,
+        coding: None,
+    };
+    let url = format!("mpg://{}", path.display());
+    let mut sink = libfreemkv::output(&url, &title, None).expect("mpg:// output");
+    for k in 0..50i64 {
+        let pts = 1_000_000_000 + k * 40_000_000;
+        let key = k % 10 == 0;
+        let mut data = if key { SEQ.to_vec() } else { Vec::new() };
+        data.extend(pic(if key { 1 } else { 2 }));
+        data.resize(2_000, 0x55);
+        sink.write(&frame(0, pts, key, data)).expect("video");
+        if k % 10 == 5 {
+            let mut spu = vec![0x01, 0xF4];
+            spu.resize(500, 0x11);
+            sink.write(&frame(1, pts, true, spu)).expect("subpicture");
+        }
+    }
+    sink.finish().expect("finish");
+}
+
 #[cfg(test)]
 mod tests {
     use super::{excluded_lines, is_lossy, keep_for, lossy_lines, lost_mb};
