@@ -94,7 +94,7 @@ function paintChip(running, queued) {
   }
   chip.hidden = false;
   const pct = running.pct;
-  $('.t', chip).textContent = 'Remuxing ' + running.title;
+  $('.t', chip).textContent = running.title;
   fill($('.mini i', chip), pct);
   $('.pct', chip).textContent = pct == null ? '' : pct.toFixed(0) + '%';
   chip.title = 'Open the console' + (queued ? ' · ' + queued + ' queued after this' : '');

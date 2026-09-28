@@ -47,9 +47,9 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("web/assets/ui.js"),
     ),
     (
-        "table.js",
+        "medialist.js",
         "text/javascript; charset=utf-8",
-        include_bytes!("web/assets/table.js"),
+        include_bytes!("web/assets/medialist.js"),
     ),
     (
         "libdata.js",

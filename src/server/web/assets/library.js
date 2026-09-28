@@ -3,8 +3,8 @@
 
 import { esc, $, put, api, act, toast, runtime, bytes, date, ago, plural, ICON, menu } from './ui.js';
 import { watch, refreshNow } from './libdata.js';
-import { keyedTable } from './table.js';
-import { muxedHtml, auditHtml, auditState, openDetails } from './details.js';
+import { mediaList } from './medialist.js';
+import { muxedHtml, auditState, openDetails, outdated, videoLabel, issueText } from './details.js';
 
 const FILTERS = [
   ['all', 'All'],
@@ -13,39 +13,41 @@ const FILTERS = [
   ['pending', 'Not audited'],
 ];
 
-function langs(list, cap = 6) {
-  const seen = [...new Set(list.filter(Boolean))];
-  return seen.slice(0, cap).join(' ') + (seen.length > cap ? ' +' + (seen.length - cap) : '');
+/** The status dot, with what it means in its tooltip. */
+export function dotHtml(r) {
+  const [cls, glyph, tip] = auditState(r);
+  if (!r.mkv) return '<span class="sdot dot-idle" title="No MKV yet"></span>';
+  return '<span class="sdot ' + cls + (glyph === '✓' ? ' tick' : '') + '" title="' + esc(tip) + '" aria-label="' + esc(tip) + '">' + (glyph === '✓' ? '✓' : '') + '</span>';
 }
 
-const cols = [
-  { id: 'title', label: 'Title', cls: 'title', sort: r => r.title.toLowerCase(),
-    html: r => '<b>' + esc(r.title) + '</b>' },
-  { id: 'status', label: 'Status', sort: r => auditState(r)[3], html: auditHtml },
-  { id: 'runtime', label: 'Runtime', cls: 'nowrap', sort: r => (r.audit && r.audit.duration_secs) || 0,
-    html: r => r.audit ? '<span class="muted small">' + runtime(r.audit.duration_secs) + '</span>' : '<span class="muted small">…</span>' },
-  { id: 'video', label: 'Video', hideSm: true, sort: r => (r.audit && r.audit.video.join(' ')) || '',
-    html: r => r.audit ? '<span class="chips">' + r.audit.video.map(v => '<span class="tag">' + esc(v) + '</span>').join('') + '</span>' : '' },
-  { id: 'audio', label: 'Audio', hideSm: true, sort: r => (r.audit && r.audit.audio.length) || 0,
-    html: r => {
-      if (!r.audit) return '';
-      const a = r.audit.audio;
-      if (!a.length) return '<span class="muted small">none</span>';
-      const codecs = [...new Set(a.map(t => t.codec))];
-      return '<span class="chips">' + codecs.map(c => '<span class="tag">' + esc(c) + '</span>').join('') + '</span>'
-        + '<div class="note" title="' + esc(a.map(t => t.codec + ' ' + t.language).join(' | ')) + '">' + plural(a.length, 'track') + ' · ' + esc(langs(a.map(t => t.language))) + '</div>';
-    } },
-  { id: 'subs', label: 'Subtitles', hideSm: true, sort: r => (r.audit && r.audit.subtitles.length) || 0,
-    html: r => r.audit ? (r.audit.subtitles.length ? '<span class="small">' + r.audit.subtitles.length + '</span> <span class="note">' + esc(langs(r.audit.subtitles)) + '</span>' : '<span class="muted small">none</span>') : '' },
-  { id: 'muxed', label: 'Muxed with', cls: 'nowrap', sort: r => r.muxed_label || '', html: muxedHtml },
-  { id: 'size', label: 'Size', cls: 'num', hideSm: true, sort: r => r.size_bytes || 0, html: r => '<span class="small">' + bytes(r.size_bytes) + '</span>' },
-  { id: 'modified', label: 'Ripped', cls: 'nowrap', sort: r => r.modified || 0, html: r => '<span class="muted small">' + date(r.modified) + '</span>' },
-];
+/** Runtime and size, muted, after the title. */
+export function metaHtml(r) {
+  const bits = [];
+  if (r.audit && r.audit.duration_secs) bits.push(runtime(r.audit.duration_secs));
+  if (r.size_bytes) bits.push(bytes(r.size_bytes));
+  return bits.map(b => '<span>' + esc(b) + '</span>').join('');
+}
+
+/** The track pills: video, audio codecs and count, subtitles, languages. */
+export function trackPills(r) {
+  const a = r.audit;
+  if (!r.mkv) return '';
+  if (!a) return '<span class="pill ghost">' + (r.probed ? 'auditing…' : 'probing…') + '</span>';
+  const out = [];
+  videoLabel(a.video).forEach(v => out.push('<span class="pill strong">' + esc(v) + '</span>'));
+  [...new Set(a.audio.map(t => t.codec))].forEach(c => out.push('<span class="pill">' + esc(c) + '</span>'));
+  if (a.audio.length) out.push('<span class="pill ghost" title="' + esc(a.audio.map(t => t.codec + ' ' + t.language).join(', ')) + '">' + plural(a.audio.length, 'audio', 'audio') + '</span>');
+  if (a.subtitles.length) out.push('<span class="pill ghost" title="' + esc(a.subtitles.join(', ')) + '">' + a.subtitles.length + ' subs</span>');
+  const langs = [...new Set(a.audio.map(t => t.language).filter(Boolean))];
+  if (langs.length) out.push('<span class="pill text" title="Audio languages: ' + esc(langs.join(', ')) + '">' + esc(langs.slice(0, 3).join(' ') + (langs.length > 3 ? ' +' + (langs.length - 3) : '')) + '</span>');
+  a.issues.forEach(i => out.push('<span class="pill ' + (i.kind === 'no_cues' ? 'warn' : 'bad') + '" title="' + esc(issueText(i)) + '">' + esc(i.kind === 'runtime_mismatch' ? 'truncated?' : i.kind.replace(/_/g, ' ')) + '</span>'));
+  return out.join('');
+}
 
 function matches(r, f, q) {
   if (q && !r.title.toLowerCase().includes(q)) return false;
   if (f === 'issues') return auditState(r)[0] === 'dot-bad';
-  if (f === 'outdated') return r.probed && r.muxed_with && (r.muxed_with.state === 'older' || r.muxed_with.state === 'other');
+  if (f === 'outdated') return outdated(r);
   if (f === 'pending') return !r.audit;
   return true;
 }
@@ -70,22 +72,47 @@ export default {
       <div class="table-card">
         <div class="toolbar">
           <label class="search">${ICON.search}<span class="sr-only">Search titles</span><input id="q" type="search" placeholder="Search titles" autocomplete="off"></label>
-          <div class="legend">
-            <span><span style="color:var(--ok)">✓</span> structure checks out</span>
-            <span><span style="color:#d97706">●</span> pending, or a note</span>
-            <span><span style="color:var(--bad)">●</span> issue</span>
+          <button class="icon-btn legend-btn" id="legend-btn" aria-label="What the status dots mean" aria-expanded="false">i</button>
+          <div class="legend" id="legend">
+            <span><span class="sdot dot-ok tick">✓</span> checks out</span>
+            <span><span class="sdot dot-warn"></span> pending or a note</span>
+            <span><span class="sdot dot-bad"></span> issue</span>
           </div>
+          <div class="sort" id="sort"></div>
         </div>
-        <div id="tbl"></div>
+        <div id="list"></div>
       </div>
-      <p class="foot-note">The audit is the fast structural pass: EBML header, tracks, declared duration, and the seek index agreeing with it. It never reads the video itself. Click a title for its tracks, findings and files.</p>`;
+      <p class="foot-note">The audit is the fast structural pass: EBML header, tracks, declared duration, and the seek index agreeing with it. It never reads the video itself. Click a title for its full track list, findings and files.</p>`;
     let filter = sessionStorage.getItem('libFilter') || 'all';
     let q = '';
     let last = null;
-    const table = keyedTable($('#tbl', view), cols, {
+    const list = mediaList($('#list', view), {
       key: r => r.mkv,
-      store: 'libSort',
+      store: 'libSort2',
+      sortHost: $('#sort', view),
+      defaultSort: { id: 'title', dir: 1 },
+      sorts: {
+        title: ['Title', r => r.title.toLowerCase()],
+        runtime: ['Runtime', r => (r.audit && r.audit.duration_secs) || 0],
+        size: ['Size', r => r.size_bytes || 0],
+        muxed: ['Muxed with', r => (outdated(r) ? '0' : '1') + (r.muxed_label || '')],
+        status: ['Status', r => -auditState(r)[3]],
+        ripped: ['Ripped', r => r.modified || 0],
+      },
       onRow: (r) => openDetails(r),
+      render: (r) => ({
+        dot: dotHtml(r),
+        title: esc(r.title),
+        meta: metaHtml(r),
+        pills: '<span class="m-only">' + muxedHtml(r) + '</span>' + trackPills(r) + (r.modified ? '<span class="pill text" title="Ripped">' + esc(date(r.modified)) + '</span>' : ''),
+        side: muxedHtml(r),
+        act: '<button class="icon-btn row-more" aria-label="Details for ' + esc(r.title) + '">' + ICON.more + '</button>',
+      }),
+    });
+    ctx.cleanup.push(() => list.destroy());
+    $('#list', view).addEventListener('click', (e) => {
+      const b = e.target.closest('.row-more');
+      if (b) { e.stopPropagation(); openDetails(b.closest('.mrow')._row); }
     });
     menu($('#more', view), $('#more-list', view));
     $('#more-list', view).addEventListener('click', async (e) => {
@@ -101,6 +128,10 @@ export default {
       } else if (b.dataset.a === 'json') {
         window.open('/api/library', '_blank');
       }
+    });
+    $('#legend-btn', view).addEventListener('click', (e) => {
+      const open = $('#legend', view).classList.toggle('open');
+      e.currentTarget.setAttribute('aria-expanded', String(open));
     });
     $('#q', view).addEventListener('input', (e) => { q = e.target.value.trim().toLowerCase(); paint(); });
     $('#stats', view).addEventListener('click', (e) => {
@@ -128,12 +159,13 @@ export default {
       }
       put($('#stats', view), FILTERS.map(([f, label]) => {
         const tone = f === 'issues' && count[f] ? ' bad' : f === 'outdated' && count[f] ? ' warn' : '';
-        return '<button class="stat' + tone + (filter === f ? ' on' : '') + '" data-f="' + f + '" aria-pressed="' + (filter === f) + '"><b>' + count[f] + '</b> ' + label + '</button>';
+        const tip = f === 'outdated' ? ' title="MKVs not muxed by this freemkv. The same count as the Remux page."' : '';
+        return '<button class="stat' + tone + (filter === f ? ' on' : '') + '" data-f="' + f + '" aria-pressed="' + (filter === f) + '"' + tip + '><b>' + count[f] + '</b> ' + label + '</button>';
       }).join(''));
       const empty = d.scanning ? 'Scanning the library…'
         : !files.length ? 'No MKVs found in ' + esc(d.library_dir) + '. Set the Library folder in <a href="/settings" data-link>Settings</a>.'
         : 'No titles match.';
-      table.update(files.filter(r => matches(r, filter, q)), empty);
+      list.update(files.filter(r => matches(r, filter, q)), empty);
     }
     ctx.cleanup.push(watch((d, err, liveOnly) => {
       if (err && !d) { put($('#lede', view), '<span style="color:var(--bad)">Could not load the library: ' + esc(err.message) + '</span>'); return; }

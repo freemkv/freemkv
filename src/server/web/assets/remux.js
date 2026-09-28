@@ -4,34 +4,47 @@
 
 import { esc, $, put, fill, api, act, toast, twoStep, bytes, runtime, when, hms, speed, plural, ICON, menu } from './ui.js';
 import { watch, refreshNow } from './libdata.js';
-import { keyedTable } from './table.js';
-import { muxedHtml, auditHtml, auditState, openDetails, noteText, queueOne } from './details.js';
+import { mediaList } from './medialist.js';
+import { muxedHtml, openDetails, noteText, queueOne, outdated } from './details.js';
+import { dotHtml, metaHtml } from './library.js';
 import { openConsole, openTitleLog } from './console.js';
 
 const can = r => r.kind === 'remux' || r.kind === 'iso_only';
 const active = r => r.job && (r.job.state === 'queued' || r.job.state === 'running');
 const NOTE = { restarted: 'after a restart', preempted: 'a rip took the slot', interrupted: 'interrupted', stalled: 'stalled' };
 
-function statusHtml(r) {
+// The row's state as pills: live progress, queued, done or failed.
+function statePills(r) {
   const j = r.job, res = r.result;
-  const log = (j || res) ? ' <a href="#" class="small" data-log>' + (j && j.state === 'running' ? 'console' : 'log') + '</a>' : '';
+  const log = (j || res) ? '<button class="pill link" type="button" data-log>' + (j && j.state === 'running' ? 'console' : 'log') + '</button>' : '';
   if (j && j.state === 'running') {
     // Static markup: the bar and its text are filled in place by paintLive.
-    return '<div class="cellbar" data-live="' + j.id + '"><div class="bar"><i></i></div>'
-      + '<span class="txt">starting…' + log + '</span></div>';
+    return '<span class="pill live" data-keep="1"><span class="cellbar" data-live="' + j.id + '"><span class="bar"><i></i></span><span class="txt">starting…</span></span></span>' + log;
   }
   if (j && j.state === 'queued') {
-    return '<span class="badge badge-warn">queued</span>' + (j.note ? ' <span class="note">' + esc(NOTE[j.note] || j.note) + '</span>' : '')
-      + ' <button class="x" data-unqueue title="Take it out of the queue" aria-label="Take ' + esc(r.title) + ' out of the queue">×</button>';
+    return '<span class="pill warn" data-keep="1">Queued' + (j.note ? ' · ' + esc(NOTE[j.note] || j.note) : '') + '</span>';
   }
   if (res && res.outcome === 'done') {
-    return '<span style="color:var(--ok)">✓</span> <span class="small">' + bytes(res.size_bytes) + ' in ' + runtime(res.secs) + '</span>' + log;
+    return '<span class="pill ok" data-keep="1" title="Remuxed in ' + esc(runtime(res.secs) || res.secs + 's') + ', ' + esc(when(res.finished_at)) + '">✓ Done · ' + bytes(res.size_bytes) + '</span>' + log;
   }
   if (res && res.outcome === 'failed') {
-    const msg = (res.code != null && !res.message.includes('E' + res.code) ? 'E' + res.code + ' ' : '') + res.message;
-    return '<span style="color:var(--bad)" title="' + esc(msg) + '">✗ ' + esc(msg.length > 70 ? msg.slice(0, 70) + '…' : msg) + '</span>' + log;
+    const f = (j && j.failure) || res;
+    const msg = (f.code != null && !f.message.includes('E' + f.code) ? 'E' + f.code + ' ' : '') + f.message;
+    const short = msg.replace(/^E(\d+)\s+(Error:\s*)?/, 'E$1 ');
+    return '<span class="pill bad" data-keep="1" title="' + esc(msg) + '">✗ Failed · ' + esc(short.length > 48 ? short.slice(0, 48) + '…' : short) + '</span>' + log;
   }
   return '';
+}
+
+function actHtml(r) {
+  if (r.job && r.job.state === 'queued') {
+    return '<button class="btn btn-ghost btn-sm" data-unqueue title="Take it out of the queue" aria-label="Take ' + esc(r.title) + ' out of the queue">× Unqueue</button>';
+  }
+  if (!can(r) || active(r)) return '';
+  const failed = r.result && r.result.outcome === 'failed';
+  const label = failed ? 'Retry' : r.kind === 'iso_only' ? 'Create' : 'Remux';
+  const tone = failed || r.needs_remux ? 'btn-primary' : 'btn-ghost';
+  return '<button class="btn btn-sm ' + tone + '" data-remux>' + label + '</button>';
 }
 
 function liveText(p) {
@@ -44,7 +57,7 @@ function liveText(p) {
 function isoHtml(r) {
   if (!r.iso) return '<span class="note' + (r.kind === 'ambiguous' ? ' warn' : '') + '">' + esc(noteText(r)) + '</span>';
   const name = String(r.iso).split('/').pop();
-  return '<span class="small" title="' + esc(r.iso) + '">' + esc(name) + '</span>' + (r.linked ? ' <span class="badge badge-teal" title="Recorded when this app ripped it">linked</span>' : '');
+  return '<span class="one" title="' + esc(r.iso) + (r.linked ? ' (recorded when this app ripped it)' : '') + '">' + (r.linked ? '<span class="badge badge-teal">linked</span>' : '') + '<span class="ell iso">' + esc(name) + '</span></span>';
 }
 
 export default {
@@ -74,6 +87,7 @@ export default {
         <div class="toolbar">
           <label class="search">${ICON.search}<span class="sr-only">Search titles</span><input id="q" type="search" placeholder="Search titles" autocomplete="off"></label>
           <label class="small muted" style="display:inline-flex;gap:.4rem;align-items:center"><input type="checkbox" id="hide" style="accent-color:var(--teal)"> Hide titles with no ISO</label>
+          <div class="sort" id="sort"></div>
         </div>
         <div id="tbl"></div>
       </div>
@@ -81,27 +95,33 @@ export default {
     let last = null, q = '';
     let hide = localStorage.getItem('remuxHide') === '1';
     $('#hide', view).checked = hide;
-    const cols = [
-      { id: 'title', label: 'Title', cls: 'title', sort: r => r.title.toLowerCase(), html: r => '<b>' + esc(r.title) + '</b>' },
-      { id: 'iso', label: 'ISO', hideSm: true, sort: r => r.iso ? String(r.iso).split('/').pop() : '~', html: isoHtml },
-      { id: 'muxed', label: 'Muxed with', cls: 'nowrap', sort: r => (r.needs_remux ? '0' : '1') + (r.muxed_label || ''), html: r => muxedHtml(r, !can(r)) },
-      { id: 'audit', label: 'Audit', sort: r => auditState(r)[3], html: auditHtml },
-      { id: 'status', label: 'Remux', sort: r => r.job ? r.job.state : (r.result ? r.result.outcome : '~'), html: statusHtml },
-      { id: 'finished', label: 'Finished', cls: 'nowrap', hideSm: true, sort: r => (r.result && r.result.finished_at) || 0,
-        html: r => r.result && !active(r) ? '<span class="muted small">' + esc(when(r.result.finished_at)) + '</span>' : '' },
-      { id: 'act', label: '', cls: 'act', html: r => can(r)
-        ? '<button class="btn btn-sm ' + (r.needs_remux ? 'btn-primary' : 'btn-ghost') + '" data-remux' + (active(r) ? ' disabled' : '') + '>' + (r.kind === 'iso_only' ? 'Create' : 'Remux') + '</button>' : '' },
-    ];
-    const table = keyedTable($('#tbl', view), cols, {
+    const list = mediaList($('#tbl', view), {
       key: r => r.key + '|' + (r.target || r.mkv || r.iso || ''),
-      store: 'remuxSort',
+      store: 'remuxSort2',
+      sortHost: $('#sort', view),
+      defaultSort: { id: 'title', dir: 1 },
       group: r => can(r) ? 0 : 1,
-      rowClass: r => can(r) ? '' : 'grey',
+      sorts: {
+        title: ['Title', r => r.title.toLowerCase()],
+        state: ['State', r => r.job ? ({ running: 0, queued: 1 }[r.job.state] ?? 3) : r.result ? (r.result.outcome === 'failed' ? 2 : 4) : 5],
+        muxed: ['Muxed with', r => (r.needs_remux ? '0' : '1') + (r.muxed_label || '')],
+        finished: ['Finished', r => (r.result && r.result.finished_at) || 0],
+        size: ['Size', r => r.size_bytes || 0],
+      },
       onRow: (r) => openDetails(r),
+      render: (r) => ({
+        cls: can(r) ? '' : 'grey',
+        dot: dotHtml(r),
+        title: esc(r.title),
+        meta: metaHtml(r),
+        pills: '<span class="mux-pill" data-keep="1">' + muxedHtml(r) + '</span>' + statePills(r),
+        side: isoHtml(r),
+        act: actHtml(r),
+      }),
     });
-    const tbody = $('#tbl tbody', view);
-    tbody.addEventListener('click', (e) => {
-      const tr = e.target.closest('tr');
+    ctx.cleanup.push(() => list.destroy());
+    $('#tbl', view).addEventListener('click', (e) => {
+      const tr = e.target.closest('.mrow');
       const r = tr && tr._row;
       if (!r) return;
       const rb = e.target.closest('button[data-remux]');
@@ -116,7 +136,7 @@ export default {
         }, 'Remove');
         return;
       }
-      const lg = e.target.closest('a[data-log]');
+      const lg = e.target.closest('[data-log]');
       if (lg) {
         e.preventDefault();
         e.stopPropagation();
@@ -179,25 +199,32 @@ export default {
       if (!d) return;
       const rows = d.rows;
       const have = rows.filter(can);
-      const nOod = rows.filter(r => r.needs_remux && !active(r)).length;
       const qd = d.queue || {};
       put($('#lede', view), d.scanning ? 'Scanning the library and ISO folders…'
         : 'freemkv <b>' + esc(d.version_label) + '</b>'
           + (d.iso_dir ? ' · ISOs from <b>' + esc(d.iso_dir) + '</b>' + (d.iso_subfolders ? ' (and sub-folders)' : '') : ' · <span style="color:var(--warn)">no ISO folder set: <a href="/settings#Library" data-link>set one</a></span>')
           + (d.probing ? ' · reading ' + d.probing + ' headers' : ''));
+      // One definition of out of date everywhere (see details.outdated); the
+      // button says exactly what it will queue.
+      const stale = rows.filter(outdated);
+      const staleNoIso = stale.filter(r => !can(r)).length;
+      const missing = rows.filter(r => r.kind === 'iso_only' && !r.mkv).length;
+      const todo = rows.filter(r => r.needs_remux && !active(r)).length;
+      const waiting = rows.filter(r => r.needs_remux && active(r)).length;
       const stats = [
-        [have.length, 'with an ISO', ''],
-        [rows.filter(r => r.mkv).length, 'MKVs', ''],
-        [rows.filter(r => r.needs_remux).length, 'out of date or missing', nOod ? 'warn' : ''],
-        [qd.queued || 0, 'queued', ''],
-        [qd.done || 0, 'done', 'ok'],
-        [qd.failed || 0, 'failed', qd.failed ? 'bad' : ''],
+        [stale.length, 'out of date', stale.length ? 'warn' : '', staleNoIso ? staleNoIso + ' of them have no single ISO, so they cannot be remuxed' : 'All of them have an ISO'],
+        [missing, 'with no MKV yet', '', 'An ISO with no MKV: a remux creates it'],
+        [(qd.queued || 0) + (qd.running ? 1 : 0), 'queued', '', 'Queued or running'],
+        [qd.done || 0, 'done', 'ok', ''],
+        [qd.failed || 0, 'failed', qd.failed ? 'bad' : '', ''],
+        [have.length, 'with an ISO', '', ''],
       ];
-      put($('#stats', view), stats.map(([n, l, tone]) => '<span class="stat ' + tone + '"><b>' + n + '</b> ' + l + '</span>').join(''));
+      put($('#stats', view), stats.map(([n, l, tone, tip]) => '<span class="stat ' + tone + '"' + (tip ? ' title="' + esc(tip) + '"' : '') + '><b>' + n + '</b> ' + l + '</span>').join(''));
       const ood = $('#ood', view), all = $('#all', view);
       if (!ood.classList.contains('busy')) {
-        ood.disabled = !nOod || d.scanning;
-        put(ood, 'Remux ' + nOod + ' out of date');
+        ood.disabled = !todo || d.scanning;
+        put(ood, todo ? (waiting ? 'Queue ' + todo + ' more' : 'Remux ' + todo + ' out of date') : (waiting ? 'All out of date queued' : 'Nothing out of date'));
+        ood.title = todo + ' out of date or with no MKV, not yet queued' + (waiting ? '; ' + waiting + ' already queued or running' : '');
       }
       if (!all.classList.contains('busy') && !all.classList.contains('confirm')) {
         all.disabled = !have.length || d.scanning;
@@ -208,8 +235,8 @@ export default {
       if (!pb.classList.contains('busy')) pb.textContent = qd.paused ? 'Resume queue' : 'Pause queue';
       $('#paused', view).hidden = !qd.paused;
       $('#debug', view).checked = !!qd.debug_log;
-      const list = rows.filter(r => (!hide || can(r)) && (!q || r.title.toLowerCase().includes(q)));
-      table.update(list, d.scanning ? 'Scanning…' : rows.length ? 'No titles match.' : 'Nothing in the library or ISO folders yet.');
+      const shown = rows.filter(r => (!hide || can(r)) && (!q || r.title.toLowerCase().includes(q)));
+      list.update(shown, d.scanning ? 'Scanning…' : rows.length ? 'No titles match.' : 'Nothing in the library or ISO folders yet.');
       paintLive(d.live);
     }
 
