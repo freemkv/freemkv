@@ -2171,7 +2171,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
                     }
                     Ok(summarize_image_decrypt(&result, &dest))
                 });
-            release_iso_lock(lock, &res, &dest, state);
+            release_iso_lock(lock, &res, false, &dest, state);
             return res;
         }
         _ => {}
@@ -2202,9 +2202,11 @@ fn hold_iso_lock(
 fn release_iso_lock(
     lock: libfreemkv::io::ArtifactLock,
     res: &Result<String, String>,
+    halted: bool,
     iso: &std::path::Path,
     state: &Arc<RunState>,
 ) {
+    let _ = halted;
     let cancelled = state.cancel.load(Ordering::SeqCst);
     let done = (res.is_ok() && !cancelled) || !iso.exists();
     if cancelled && !done {
@@ -2742,7 +2744,7 @@ fn run_disc_scanning(
                 )
             })
         })();
-        release_iso_lock(lock, &res, std::path::Path::new(&iso_path), state);
+        release_iso_lock(lock, &res, false, std::path::Path::new(&iso_path), state);
         return res;
     }
 
@@ -5956,19 +5958,29 @@ mod ku_gui_tests {
     fn a_stop_that_keeps_the_image_says_progress_kept() {
         let dir = TempDir::new("gui-kept");
         let iso = dir.path().join("Movie.iso");
+        let sidecar = dir.path().join("Movie.iso.lock");
         let kept = crate::strings::get("stop.progress_kept");
         let never = libfreemkv::Halt::new();
-        for (on_disk, says) in [(true, true), (false, false)] {
+        // (image on disk, the copy halted) → (sidecar kept, "progress kept" said). A Stop
+        // pressed after the copy finished halted nothing: the op succeeded (§2.5).
+        for (on_disk, halted, says) in [
+            (true, true, true),
+            (false, true, false),
+            (true, false, false),
+        ] {
             let st = Arc::new(RunState::default());
             st.cancel.store(true, Ordering::SeqCst);
             if on_disk {
                 std::fs::write(&iso, b"partial").unwrap();
             }
             let lock = crate::artifact_lock::hold_iso(&iso, &never).unwrap();
-            release_iso_lock(lock, &Ok("Cancelled".into()), &iso, &st);
+            release_iso_lock(lock, &Ok("done".into()), halted, &iso, &st);
             let lines = st.lines.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            assert_eq!(lines.contains(&kept), says, "{on_disk}: {lines:?}");
+            let case = format!("{on_disk}/{halted}: {lines:?}");
+            assert_eq!(lines.contains(&kept), says, "{case}");
+            assert_eq!(sidecar.exists(), says, "{case}");
             let _ = std::fs::remove_file(&iso);
+            let _ = std::fs::remove_file(&sidecar);
         }
     }
 
@@ -6004,7 +6016,7 @@ mod ku_gui_tests {
         let body = &src[a..a + src[a..].find("\nfn mux_staged_titles(").expect("next fn")];
         let lock = body.find("hold_iso_lock(").expect("the lock");
         assert!(lock < body.find("fe::multipass_rip_staged(").expect("the copy"));
-        assert!(body.contains("release_iso_lock(lock, &res,"));
+        assert!(body.contains("release_iso_lock(lock, &res, halted,"));
     }
 
     /// FK2 (KU §2.5: "GUI open | `Titles([main])` for status. The result seeds the rip's
