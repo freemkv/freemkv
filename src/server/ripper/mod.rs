@@ -3399,7 +3399,6 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 halt: Some(pass1_halt.clone()),
                 // A raw capture decrypts nothing; the set only stamps the identity.
                 keys: rip_keys.as_ref().ok().cloned(),
-                ..Default::default()
             };
 
             match freemkv_engine::sweep(&disc, &mut session.drive, iso_path, &sweep_opts) {
@@ -3943,7 +3942,6 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 halt: Some(pass_halt.clone()),
                 // A raw capture decrypts nothing; the set checks the mapfile's identity.
                 keys: rip_keys.as_ref().ok().cloned(),
-                ..Default::default()
             };
             // Un-wedge the drive in SOFTWARE before each retry pass: grinding a
             // bad cluster leaves it in a HARDWARE_ERROR wedge needing a power-cycle.
