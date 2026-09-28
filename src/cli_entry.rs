@@ -984,6 +984,62 @@ mod tests {
 
     use super::{SUBCOMMANDS, collect_urls, stream_info_lines, update_keys_dest};
 
+    // M1b (mpg-output-design v5 §3): "`info` (`stream_info_lines`) and `json://` list it
+    // with the same label." The DVD MPEG-2 extension track shows its sentinel label raw.
+    fn mp2_extension_pair() -> Vec<libfreemkv::Stream> {
+        use libfreemkv::{AudioChannels, AudioStream, Codec, LabelPurpose, SampleRate, Stream};
+        let mk = |pid: u16, label: &str| {
+            Stream::Audio(AudioStream {
+                pid,
+                codec: Codec::Mp2,
+                channels: AudioChannels::Stereo,
+                language: "eng".into(),
+                sample_rate: SampleRate::S48,
+                secondary: false,
+                purpose: LabelPurpose::Normal,
+                label: label.into(),
+            })
+        };
+        vec![
+            mk(0xC0, ""),
+            mk(0xD0, libfreemkv::disc::MP2_EXTENSION_LABEL),
+        ]
+    }
+
+    #[test]
+    fn info_lists_an_mp2_extension_track_with_its_label() {
+        crate::strings::set_locale("en");
+        let lines = stream_info_lines(&mp2_extension_pair());
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(!lines[0].contains(libfreemkv::disc::MP2_EXTENSION_LABEL));
+        assert!(
+            lines[1].ends_with(&format!(" — {}", libfreemkv::disc::MP2_EXTENSION_LABEL)),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn json_lists_an_mp2_extension_track_with_the_same_label() {
+        let dir = std::env::temp_dir().join(format!("fmkv-m1b-json-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.json");
+        let title = libfreemkv::DiscTitle {
+            streams: mp2_extension_pair(),
+            ..libfreemkv::DiscTitle::empty()
+        };
+        let url = format!("json://{}", path.display());
+        let mut sink = libfreemkv::output(&url, &title, None).unwrap();
+        sink.finish().unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let audio = doc["audio"].as_array().expect("json:// lists audio");
+        assert_eq!(audio.len(), 2, "{doc}");
+        assert_eq!(audio[1]["pid"], 0xD0);
+        // `TitleProfile`'s `AudioTrack.name` is the stream label.
+        assert_eq!(audio[1]["name"], libfreemkv::disc::MP2_EXTENSION_LABEL);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // Covers the tag-assembly arms of stream_info_lines (purpose/secondary/ label) that the
     // escape-stripping test below never reaches.
     #[test]

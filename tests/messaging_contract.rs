@@ -216,6 +216,17 @@ fn timed_out_and_vid_needs_disc_have_real_messages() {
     );
 }
 
+// MPG-F1: E9074 carries a real message that names the way out, as E9048 does. §5:
+// "MPG needs a video track it can carry (MPEG-1/2, H.264, HEVC or VC-1); this title
+// has none. Use mkv:// instead." (mpg-output-design v5)
+#[test]
+fn mpg_no_video_track_has_a_real_message() {
+    let m = en_msg(9074);
+    assert_ne!(m, "error.E9074", "en.json missing error.E9074");
+    assert!(m.contains("MPG"), "E9074 must name MPG: {m}");
+    assert!(m.contains("mkv://"), "E9074 must point at mkv://: {m}");
+}
+
 #[test]
 fn decrypt_failed_message_is_actionable() {
     let m = en_msg(7013);
@@ -374,9 +385,9 @@ fn en_json_has_no_string_for_a_code_libfreemkv_does_not_declare() {
 }
 
 // Codes libfreemkv adds before this fixture can name them (the fixture compiles against
-// libfreemkv dev), each enumerated and dropped here once libfreemkv dev declares it.
-// Holds LB9's E6021/E6022 (CC-F1a emptied it: stop-design-v5 §6 R7.4).
-const PENDING_VARIANTS: &[&str] = &["E_BUS_STREAM_UNMAPPED", "E_IMAGE_SCOPED"];
+// libfreemkv dev). MPG-F1 empties it: MPG-L0 declares E9074 and the fixture now
+// enumerates `Error::MpgNoVideoTrack` (mpg-output-design v5 §8).
+const PENDING_VARIANTS: &[&str] = &[];
 
 // Every code libfreemkv can put inside an `Error` must appear in `all_error_variants()`, and
 // vice versa. A forgotten variant is INVISIBLE to every other assertion here.

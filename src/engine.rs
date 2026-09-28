@@ -34,6 +34,11 @@ pub struct Row {
     /// libfreemkv put on the stream (including its PGS forced probe) — never
     /// re-derived here. Always `false` for audio and non-stream rows.
     pub forced: bool,
+    /// The PID of the row whose tick this row shows, for a row that is no choice
+    /// of its own: the DVD MPEG-2 multichannel extension (PID 0xD0|n) follows its
+    /// base 0xC0|n, "disabled and mirrors the base" (mpg-output-design v5 §3).
+    /// `None` for every other row.
+    pub mirrors: Option<u16>,
 }
 
 /// What the shell needs after a scan. Pure data — no engine types.
@@ -195,17 +200,26 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                 libfreemkv::Stream::Audio(a) => (a.language.clone(), false),
                 libfreemkv::Stream::Subtitle(s) => (s.language.clone(), s.forced),
             };
+            // libfreemkv's `StreamSelection::apply` keeps the extension iff its base is kept,
+            // so its row is never a choice: it mirrors base PID 0xC0|n.
+            let mirrors = match st {
+                libfreemkv::Stream::Audio(a) if a.is_mp2_extension() => {
+                    Some(0x00C0 | (a.pid & 0x07))
+                }
+                _ => None,
+            };
             Row {
                 type_s: ty.into(),
                 desc,
                 depth: 2,
-                checkable: ty != "Video",
+                checkable: ty != "Video" && mirrors.is_none(),
                 title: ti,
                 info,
                 pid,
                 duration_secs: 0.0,
                 lang,
                 forced,
+                mirrors,
             }
         })
         .collect()
@@ -254,6 +268,7 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
         duration_secs: 0.0,
         lang: String::new(),
         forced: false,
+        mirrors: None,
     }];
     rows.push(Row {
         type_s: "Title".into(),
@@ -275,6 +290,7 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
         duration_secs: t.duration_secs,
         lang: String::new(),
         forced: false,
+        mirrors: None,
     });
     rows.extend(stream_rows(t, 0));
 
@@ -401,6 +417,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
         duration_secs: 0.0,
         lang: String::new(),
         forced: false,
+        mirrors: None,
     });
 
     for (ti, t) in disc.titles.iter().enumerate() {
@@ -439,6 +456,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
             duration_secs: t.duration_secs,
             lang: String::new(),
             forced: false,
+            mirrors: None,
         });
         rows.extend(stream_rows(t, ti));
     }
@@ -1881,6 +1899,8 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     }
     // Folder OR image (`Ui::open` lists a folder's titles too). Keys resolve
     // BEFORE muxing; the mid-mux key fetch comes from the same chain.
+    let src_path = std::path::Path::new(&req.source);
+    whole_image_gate(&req.format, src_path)?;
     let mut opened = fe::open_image(
         &fe::ImageSource::from_path(&req.source),
         &key_params(&req.keys),
@@ -1971,6 +1991,10 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
         fe::Selection::Titles(req.titles.clone())
     };
     let indices = fe::resolve_selection(&opened.disc, &sel);
+    // A staged image holds only the titles it was staged for (checked by extents, so the
+    // staging mux's re-mapped selection passes); anything else would mux zero-fill.
+    fe::ensure_titles_staged(src_path, &opened.disc, &indices)
+        .map_err(|e| gui_error(&e, src_path))?;
     state
         .lines
         .lock()
@@ -2167,6 +2191,37 @@ fn recovery_produced_no_data(good_bytes: u64) -> bool {
     good_bytes == 0
 }
 
+// An image staged for an MKV rip holds only its titles: never a whole-disc (ISO or
+// folder) source. Same engine check as the CLI's `iso://`/`dir://` destinations.
+fn whole_image_gate(format: &str, src: &std::path::Path) -> Result<(), String> {
+    if !matches!(
+        out_kind(format),
+        OutKind::DecryptedFolder | OutKind::IsoImage
+    ) {
+        return Ok(());
+    }
+    fe::ensure_whole_image(src).map_err(|e| gui_error(&e, src))
+}
+
+// An engine refusal about the image at `src`, localized with its path as `{detail}`.
+fn gui_error(e: &libfreemkv::Error, src: &std::path::Path) -> String {
+    let msg = crate::strings::error_message_with(u32::from(e.code()), &src.display().to_string());
+    format!("E{} {msg}", e.code())
+}
+
+// Why "keep the image" was not honoured: the staging held only the chosen titles.
+fn staging_not_kept_note(keep_iso: bool, scoped: bool) -> String {
+    if !(keep_iso && scoped) {
+        return String::new();
+    }
+    let note = crate::strings::get_or(
+        "rip.staging_not_kept",
+        "The staged image was not kept: the location of a stream file on this disc could not \
+         be read, so only the chosen titles were read and it is not a whole-disc image.",
+    );
+    format!("\n{note}")
+}
+
 // Whether the staging ISO is removed after the title mux. Three conditions, not one: keep_iso
 // alone would delete the image on a cancel or failed mux, destroying the one artefact that lets
 // the user retry.
@@ -2308,12 +2363,27 @@ fn run_disc_scanning(
             abort_on_lost_secs: req.abort_lost_secs,
             is_iso_output: want_iso,
         };
-        let result = fe::multipass_rip(
+        // An MKV deliverable stages only nav/UDF + the chosen titles (never bus-encrypted,
+        // AACS BD Pre-recorded 0.953 §3.7) unless a kept, whole image can be made.
+        let scope = if want_iso {
+            None
+        } else {
+            let sel = if req.titles.is_empty() {
+                fe::Selection::MainMovie
+            } else {
+                fe::Selection::Titles(req.titles.clone())
+            };
+            let indices = fe::resolve_selection(disc, &sel);
+            fe::mkv_staging_scope(disc, reader.as_mut(), &indices, req.keep_iso)
+                .map_err(|e| format!("recovery failed: {e}"))?
+        };
+        let result = fe::multipass_rip_staged(
             disc,
             reader.as_mut(),
             std::path::Path::new(&iso_path),
             &job,
             &opts,
+            scope.as_deref(),
             sink,
         )
         .map_err(|e| format!("recovery failed: {e}"))?;
@@ -2378,7 +2448,9 @@ fn run_disc_scanning(
         // for actually landed. `state.cancel` is the flag the Stop button
         // sets, read directly rather than inferred from the mux's summary.
         let cancelled = state.cancel.load(std::sync::atomic::Ordering::SeqCst);
-        if should_delete_staging_iso(req.keep_iso, mux.is_ok(), cancelled) {
+        // A scoped staging image is not a disc image, so it is never kept (JUDGEMENT).
+        let keep = req.keep_iso && scope.is_none();
+        if should_delete_staging_iso(keep, mux.is_ok(), cancelled) {
             let _ = std::fs::remove_file(&iso_path);
         }
         if let Err(e) = &mux {
@@ -2392,7 +2464,13 @@ fn run_disc_scanning(
         // The recursive mux above reports its own success text (titles
         // written); it has no way to know THIS stage's recovery left residual
         // damage under tolerance, so the note is appended out here instead.
-        return mux.map(|s| format!("{s}{}", damage_note(&result)));
+        return mux.map(|s| {
+            format!(
+                "{s}{}{}",
+                damage_note(&result),
+                staging_not_kept_note(req.keep_iso, scope.is_some())
+            )
+        });
     }
 
     // Which titles to rip — same Selection/resolve_selection the ISO path
@@ -3436,9 +3514,9 @@ mod routing_tests {
         demux_needs_subdirs, disc_device, disc_raw_copy, fe, image_or_dir_scheme, is_disc_source,
         is_stream_source, iso_recovery_result, mux_opts, out_kind, recovery_plan,
         recovery_produced_no_data, recovery_raw, remap_against, remap_title_pids,
-        run_disc_scanning, should_delete_staging_iso, source_scheme, stream_selection_for,
-        title_session_mux_opts, title_streams, verify_selection_identity, verify_title_identity,
-        won_from_trace,
+        run_disc_scanning, should_delete_staging_iso, source_scheme, staging_not_kept_note,
+        stream_selection_for, title_session_mux_opts, title_streams, verify_selection_identity,
+        verify_title_identity, whole_image_gate, won_from_trace,
     };
     use std::sync::Arc;
 
@@ -3490,12 +3568,48 @@ mod routing_tests {
         //    the shipped defaults fail before reading a sector.
         let recover = slice(
             "        let mut job = fe::Job::new(format!(\"disc://",
-            "        let result = fe::multipass_rip(",
+            "        let result = fe::multipass_rip_staged(",
         );
         assert!(
             recover.contains("recovery_raw(req.multipass, want_iso, req.raw)"),
             "the recovery job must take its raw flag from recovery_raw; \
              passing req.raw straight through is what multipass_rip refuses"
+        );
+
+        // 0. An image source for an ISO/folder output is checked before the scan.
+        let blocking = slice("\nfn run_blocking(", "    let mut opened = fe::open_image(");
+        assert!(blocking.contains("whole_image_gate(&req.format, src_path)?;"));
+        let titles = slice(
+            "\nfn run_blocking(",
+            "        .push(format!(\"selection resolved to titles",
+        );
+        assert!(
+            titles.contains("fe::ensure_titles_staged(src_path, &opened.disc, &indices)"),
+            "an image mux checks a staged image holds its titles"
+        );
+
+        // 1a. An MKV deliverable stages only its scope, and a scoped image is never
+        //     kept (AACS BD Pre-recorded 0.953 §3.7: nothing else is safe to read).
+        assert!(
+            recover
+                .contains("fe::mkv_staging_scope(disc, reader.as_mut(), &indices, req.keep_iso)"),
+            "the MKV staging must be scoped through mkv_staging_scope"
+        );
+        let staged = slice(
+            "        let result = fe::multipass_rip_staged(",
+            "        .map_err(|e| format!(\"recovery failed: {e}\"))?;\n        drop(reader);",
+        );
+        assert!(
+            staged.contains("scope.as_deref()"),
+            "the scope reaches the passes"
+        );
+        let keep = slice(
+            "        let keep = req.keep_iso && scope.is_none();",
+            "            let _ = std::fs::remove_file(&iso_path);",
+        );
+        assert!(
+            keep.contains("should_delete_staging_iso(keep,"),
+            "a scoped image is not kept"
         );
 
         // 1b. The selection is re-resolved by identity before the staging mux.
@@ -3906,6 +4020,7 @@ mod routing_tests {
             duration_secs: if ty == "Title" { 5400.0 } else { 0.0 },
             lang: String::new(),
             forced: false,
+            mirrors: None,
         };
         let mut rows = vec![Row {
             depth: 0,
@@ -4378,6 +4493,37 @@ mod routing_tests {
         );
         // And the same request with raw ticked is allowed.
         assert_eq!(recovery_raw(true, true, true), Ok(true));
+    }
+
+    // A GUI ISO or folder output from an image staged for an MKV rip is refused before
+    // the scan, exactly like the CLI's; an MKV output from it is not.
+    #[test]
+    fn a_staged_image_is_refused_as_a_whole_disc_source() {
+        let dir = std::env::temp_dir().join(format!("fmkv-gui-staged-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let iso = dir.join("STAGED.iso");
+        std::fs::write(&iso, vec![0u8; 2048]).unwrap();
+        std::fs::write(
+            fe::mapfile_path_for(&iso),
+            "# freemkv-scope: 0x0+0x800\n0x0 ? 1\n0x0 0x800 ?\n",
+        )
+        .unwrap();
+        for format in ["ISO image", "decrypted folder"] {
+            let err = whole_image_gate(format, &iso).unwrap_err();
+            assert!(err.starts_with("E6022 "), "{format}: {err}");
+            assert!(err.contains(&iso.display().to_string()), "{err}");
+        }
+        whole_image_gate("MKV", &iso).expect("an MKV of its titles is what it is for");
+        whole_image_gate("ISO image", &dir.join("plain.iso")).expect("no mapfile");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // JUDGEMENT: a scoped staging image is never kept; the note says why, only then.
+    #[test]
+    fn the_not_kept_note_appears_only_for_a_kept_request_on_a_scoped_staging() {
+        assert!(staging_not_kept_note(true, true).contains("was not kept"));
+        assert_eq!(staging_not_kept_note(true, false), "");
+        assert_eq!(staging_not_kept_note(false, true), "");
     }
 
     fn req() -> RipRequest {
@@ -5120,6 +5266,47 @@ mod display_sanitisation_tests {
         let disc = hostile_disc();
         let bad = offenders(&stream_rows(&disc.titles[0], 0));
         assert!(bad.is_empty(), "unsanitised stream row text: {bad:?}");
+    }
+
+    /// M1b: "Its checkbox is **disabled and mirrors the base**" (mpg-output-design v5 §3).
+    /// The DVD MPEG-2 extension row is no choice of its own and names base PID 0xC0|n; a
+    /// foreign 0xD3 without the sentinel label stays an ordinary choice.
+    #[test]
+    fn an_mp2_extension_stream_row_mirrors_its_base_pid() {
+        let mk = |pid: u16, label: &str| {
+            Stream::Audio(AudioStream {
+                pid,
+                codec: Codec::Mp2,
+                channels: AudioChannels::Stereo,
+                language: "eng".into(),
+                sample_rate: SampleRate::S48,
+                secondary: false,
+                purpose: LabelPurpose::Normal,
+                label: label.into(),
+            })
+        };
+        let ext_label = libfreemkv::disc::MP2_EXTENSION_LABEL;
+        let mut t = hostile_disc().titles.remove(0);
+        t.streams = vec![mk(0xC2, ""), mk(0xD2, ext_label), mk(0xD3, "")];
+        let rows = stream_rows(&t, 0);
+        assert!(
+            rows[0].checkable && rows[0].mirrors.is_none(),
+            "{:?}",
+            rows[0]
+        );
+        assert!(!rows[1].checkable, "the extension row is not a choice");
+        assert_eq!(rows[1].mirrors, Some(0xC2));
+        assert_eq!(rows[1].pid, Some(0xD2));
+        assert!(
+            rows[1].desc.contains(ext_label),
+            "shown with its label: {}",
+            rows[1].desc
+        );
+        assert!(
+            rows[2].checkable && rows[2].mirrors.is_none(),
+            "{:?}",
+            rows[2]
+        );
     }
 
     /// A crafted field must not be able to add a LINE to a tooltip — the one

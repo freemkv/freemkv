@@ -154,6 +154,20 @@ fn state_for(check: Option<Check>) -> u32 {
     }
 }
 
+/// The same three glyphs drawn disabled, at `ST_* + DISABLED_OFFSET`: a mirror row
+/// (`Row::check_enabled == false`, the MPEG-2 extension) shows its base's tick greyed,
+/// as the macOS and GTK shells disable the box.
+const DISABLED_OFFSET: u32 = 3;
+
+fn state_for_row(r: &Row) -> u32 {
+    let s = state_for(r.check);
+    if r.check_enabled || s == ST_NONE {
+        s
+    } else {
+        s + DISABLED_OFFSET
+    }
+}
+
 /// Development-only environment lookup. In a release build this always fails,
 /// so the shipped app has no environment switches at all — the same rule the
 /// macOS shell follows.
@@ -226,6 +240,7 @@ mod extra {
     pub const DFCS_BUTTONCHECK: u32 = 0x0000_0000;
     pub const DFCS_CHECKED: u32 = 0x0000_0400;
     pub const DFCS_BUTTON3STATE: u32 = 0x0000_0008;
+    pub const DFCS_INACTIVE: u32 = 0x0000_0100;
 }
 
 // DPI: every physical length in this shell comes from `window_dpi`/`system_dpi`
@@ -404,7 +419,7 @@ fn build_check_images<T: 'static>(tree: &gui::TreeView<T>, dpi: u32) -> w::AnyRe
         return Ok(());
     }
 
-    let mut il = w::HIMAGELIST::Create(w::SIZE::with(side, side), co::ILC::COLOR32, 4, 0)?;
+    let mut il = w::HIMAGELIST::Create(w::SIZE::with(side, side), co::ILC::COLOR32, 7, 0)?;
 
     let desktop = w::HWND::GetDesktopWindow();
     let screen_dc = desktop.GetDC()?;
@@ -418,7 +433,7 @@ fn build_check_images<T: 'static>(tree: &gui::TreeView<T>, dpi: u32) -> w::AnyRe
     };
 
     // Index 0 is "no state image" as far as the tree is concerned, so a
-    // placeholder occupies it and the real glyphs land on 1, 2 and 3.
+    // placeholder occupies it and the real glyphs land on 1-3, disabled on 4-6.
     let states = [
         (co::VS::BUTTON_CHECKBOX_UNCHECKEDNORMAL, 0u32),
         (co::VS::BUTTON_CHECKBOX_UNCHECKEDNORMAL, 0u32),
@@ -426,6 +441,19 @@ fn build_check_images<T: 'static>(tree: &gui::TreeView<T>, dpi: u32) -> w::AnyRe
         (
             co::VS::BUTTON_CHECKBOX_MIXEDNORMAL,
             extra::DFCS_BUTTON3STATE | extra::DFCS_CHECKED,
+        ),
+        // 4, 5, 6: the same glyphs disabled (`state_for_row`, DISABLED_OFFSET).
+        (
+            co::VS::BUTTON_CHECKBOX_UNCHECKEDDISABLED,
+            extra::DFCS_INACTIVE,
+        ),
+        (
+            co::VS::BUTTON_CHECKBOX_CHECKEDDISABLED,
+            extra::DFCS_CHECKED | extra::DFCS_INACTIVE,
+        ),
+        (
+            co::VS::BUTTON_CHECKBOX_MIXEDDISABLED,
+            extra::DFCS_BUTTON3STATE | extra::DFCS_CHECKED | extra::DFCS_INACTIVE,
         ),
     ];
 
@@ -1217,7 +1245,7 @@ impl Shell {
                     .map(|it| unsafe { it.htreeitem().raw_copy() }),
             };
             if let Some(h) = &added {
-                self.set_row_state(h, state_for(r.check));
+                self.set_row_state(h, state_for_row(r));
             }
             handles.push(added);
         }
@@ -1249,13 +1277,13 @@ impl Shell {
     fn sync_tree_states(&self, rows: &[Row]) {
         let mut by_index = std::collections::HashMap::with_capacity(rows.len());
         for r in rows {
-            by_index.entry(r.index).or_insert(r.check);
+            by_index.entry(r.index).or_insert(state_for_row(r));
         }
         for root in self.tree.items().iter_root() {
             let apply = |it: &w::gui::TreeViewItem<'_, usize>| {
                 let idx = *it.data().borrow();
-                if let Some(&check) = by_index.get(&idx) {
-                    self.set_row_state(it.htreeitem(), state_for(check));
+                if let Some(&state) = by_index.get(&idx) {
+                    self.set_row_state(it.htreeitem(), state);
                 }
             };
             apply(&root);
@@ -3661,7 +3689,7 @@ impl Shell {
         // whole `state_for` mapping: a row with no checkbox must show none, and
         // a Mixed row must show the third glyph, not fall back to checked/unchecked.
         for r in &v.title_rows {
-            let want = state_for(r.check);
+            let want = state_for_row(r);
             let got = self.widget_state(r.index);
             check(
                 "widget-row-state-matches-the-core",
@@ -4378,6 +4406,7 @@ mod tests {
                 duration_secs: 0.0,
                 lang: String::new(),
                 forced: false,
+                mirrors: None,
             }
         }
         let mut rows = vec![row("Bluray disc", "TEST_DISC", 0, false, usize::MAX)];
@@ -4521,6 +4550,31 @@ mod tests {
         ] {
             assert!((1..=3).contains(&s), "state image index {s} has no bitmap");
         }
+    }
+
+    #[test]
+    fn a_mirror_row_shows_its_tick_disabled() {
+        // M1b (mpg-output-design v5 §3): the MPEG-2 extension row's box is
+        // "disabled and mirrors the base" — its own glyph, 4..=6, never an
+        // enabled one the user would reasonably try to click.
+        let row = |check: Option<Check>, check_enabled: bool| Row {
+            index: 0,
+            depth: 2,
+            type_s: "Audio".into(),
+            desc: String::new(),
+            check,
+            check_enabled,
+        };
+        let mut seen = Vec::new();
+        for c in [Check::Off, Check::On, Check::Mixed] {
+            assert_eq!(state_for_row(&row(Some(c), true)), state_for(Some(c)));
+            let s = state_for_row(&row(Some(c), false));
+            assert!((4..=6).contains(&s), "disabled index {s} has no bitmap");
+            seen.push(s);
+        }
+        seen.dedup();
+        assert_eq!(seen.len(), 3, "two disabled states share a glyph");
+        assert_eq!(state_for_row(&row(None, false)), ST_NONE);
     }
 
     // ── the incremental log pane ──────────────────────────────────────────

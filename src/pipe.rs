@@ -848,6 +848,13 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         out.blank(Normal);
     }
 
+    // A leftover image staged for an MKV rip only holds the titles it was staged for.
+    if let (Some((disc, _)), Some(src)) = (&iso_disc, source_path_of(source))
+        && refuse_unstaged_titles(&src, disc, &jobs, &out)
+    {
+        return 1;
+    }
+
     // Pipe each title
     let mut ok = true;
 
@@ -2032,11 +2039,45 @@ fn write_decrypted_image(
     libfreemkv::write_image(&mut src, dest, disc.capacity_sectors, halt, |_| {})
 }
 
+/// An image staged for an MKV rip holds only its titles, so it is never a whole-disc
+/// source (`iso://` copy, `dir://` extract): print E6022 and say so. Same engine check
+/// as the GUI's.
+fn refuse_staged_image(image: &std::path::Path, out: &Output) -> bool {
+    match freemkv_engine::ensure_whole_image(image) {
+        Ok(()) => false,
+        Err(e) => {
+            out.raw(Normal, &render_error(&e));
+            true
+        }
+    }
+}
+
+/// A staged image's never-read sectors are zeros: refuse (E6022) any job whose title
+/// extents its scope does not hold. `None` jobs mux title 0. Same engine check as the GUI's.
+fn refuse_unstaged_titles(
+    image: &std::path::Path,
+    disc: &libfreemkv::Disc,
+    jobs: &[(Option<usize>, String)],
+    out: &Output,
+) -> bool {
+    let titles: Vec<usize> = jobs.iter().map(|(t, _)| t.unwrap_or(0)).collect();
+    match freemkv_engine::ensure_titles_staged(image, disc, &titles) {
+        Ok(()) => false,
+        Err(e) => {
+            out.raw(Normal, &render_error(&e));
+            true
+        }
+    }
+}
+
 fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
     let iso_path = match libfreemkv::parse_url(dest) {
         libfreemkv::StreamUrl::Iso { path } => path,
         _ => return false,
     };
+    if source_path_of(source).is_some_and(|src| refuse_staged_image(&src, out)) {
+        return false;
+    }
 
     let (mut disc, reader) = match scan_iso(source) {
         Some(pair) => pair,
@@ -2431,6 +2472,9 @@ fn dir_to_extract(
             let src = if matches!(parsed_source, libfreemkv::StreamUrl::Dir { .. }) {
                 freemkv_engine::ImageSource::Dir(path.into())
             } else {
+                if refuse_staged_image(std::path::Path::new(path), out) {
+                    return false;
+                }
                 freemkv_engine::ImageSource::Iso(path.into())
             };
             let (mut disc, mut reader) = match freemkv_engine::scan_image(&src) {
@@ -2978,6 +3022,130 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
         libfreemkv::LabelPurpose::Score => Some("stream.purpose.score"),
         libfreemkv::LabelPurpose::Ime => Some("stream.purpose.ime"),
         libfreemkv::LabelPurpose::Normal => None,
+    }
+}
+
+#[cfg(test)]
+mod staged_image_tests {
+    use super::{Output, refuse_staged_image, refuse_unstaged_titles};
+
+    // A per-test scratch dir under the system temp dir, removed on drop.
+    struct TmpDir(std::path::PathBuf);
+    impl TmpDir {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let d = std::env::temp_dir().join(format!("fmkv-staged-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&d).unwrap();
+            Self(d)
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // An image staged for an MKV rip is refused as a whole-disc source; others are not.
+    #[test]
+    fn a_staged_image_is_refused_as_a_whole_disc_source() {
+        let tmp = TmpDir::new();
+        let iso = tmp.0.join("STAGED.iso");
+        std::fs::write(&iso, vec![0u8; 2048]).unwrap();
+        let mf = freemkv_engine::mapfile_path_for(&iso);
+        std::fs::write(&mf, "# freemkv-scope: 0x0+0x800\n0x0 ? 1\n0x0 0x800 ?\n").unwrap();
+        let out = Output::new(false, true);
+        assert!(refuse_staged_image(&iso, &out), "E6022");
+        std::fs::write(&mf, "0x0 ? 1\n0x0 0x800 +\n").unwrap();
+        assert!(!refuse_staged_image(&iso, &out), "a whole image");
+        assert!(
+            !refuse_staged_image(&tmp.0.join("none.iso"), &out),
+            "no mapfile"
+        );
+    }
+
+    fn title(start_lba: u32, sector_count: u32) -> libfreemkv::DiscTitle {
+        let mut t = libfreemkv::DiscTitle::empty();
+        t.extents = vec![libfreemkv::Extent {
+            start_lba,
+            sector_count,
+        }];
+        t
+    }
+
+    // A staged image muxes only titles its scope holds; `-t` jobs and the default (None =
+    // title 0) are checked by extents.
+    #[test]
+    fn a_staged_image_muxes_only_titles_its_scope_holds() {
+        let tmp = TmpDir::new();
+        let iso = tmp.0.join("STAGED.iso");
+        std::fs::write(&iso, vec![0u8; 8 * 2048]).unwrap();
+        let mf = freemkv_engine::mapfile_path_for(&iso);
+        std::fs::write(&mf, "# freemkv-scope: 0x0+0x2000\n0x0 ? 1\n0x0 0x4000 ?\n").unwrap();
+        let disc = libfreemkv::Disc {
+            volume_id: "STAGED".into(),
+            meta_title: None,
+            format: libfreemkv::DiscFormat::Uhd,
+            capacity_sectors: 8,
+            capacity_bytes: 8 * 2048,
+            layers: 1,
+            titles: vec![title(0, 4), title(4, 4)],
+            region: libfreemkv::disc::DiscRegion::Free,
+            aacs: None,
+            css: None,
+            encrypted: false,
+            aacs_error: None,
+            css_error: None,
+            content_format: libfreemkv::ContentFormat::BdTs,
+        };
+        let out = Output::new(false, true);
+        let job = |t: Option<usize>| vec![(t, String::new())];
+        assert!(
+            !refuse_unstaged_titles(&iso, &disc, &job(Some(0)), &out),
+            "in scope"
+        );
+        assert!(
+            !refuse_unstaged_titles(&iso, &disc, &job(None), &out),
+            "default = title 0"
+        );
+        assert!(
+            refuse_unstaged_titles(&iso, &disc, &job(Some(1)), &out),
+            "E6022"
+        );
+        std::fs::remove_file(&mf).unwrap();
+        assert!(
+            !refuse_unstaged_titles(&iso, &disc, &job(Some(1)), &out),
+            "not staged"
+        );
+    }
+
+    // Both CLI whole-disc sinks from an image check it before scanning or writing.
+    #[test]
+    fn iso_and_dir_outputs_from_an_image_check_it_first() {
+        let src = include_str!("pipe.rs").replace("\r\n", "\n");
+        let body = |from: &str, to: &str| {
+            let a = src.find(from).expect(from);
+            src[a..a + src[a..].find(to).expect(to)].to_string()
+        };
+        let iso = body("\nfn image_to_iso(", "scan_iso(source)");
+        assert!(
+            iso.contains("refuse_staged_image(&src, out)"),
+            "iso:// -> iso://"
+        );
+        let dir = body(
+            "\nfn dir_to_extract(",
+            "freemkv_engine::ImageSource::Iso(path.into())\n",
+        );
+        assert!(
+            dir.contains("refuse_staged_image(std::path::Path::new(path), out)"),
+            "dir://"
+        );
+        let mux = body("    let iso_disc = if is_disc", "    // Pipe each title");
+        assert!(
+            mux.contains("refuse_unstaged_titles(&src, disc, &jobs, &out)"),
+            "iso:// -> MKV"
+        );
     }
 }
 
@@ -6688,6 +6856,9 @@ mod image_copy_tests {
     const K2: [u8; 16] = [0x33; 16];
     const STRANGER: [u8; 16] = [0x77; 16];
 
+    /// The plaintext of every encrypted fixture unit: a TS sync byte at offset 4 of each
+    /// 192-byte packet, and CPI 11₂ on packet 0, flagged before `encrypt_unit`. Decryption
+    /// may clear that CPI (KU §5.4), so outputs are compared CPI-masked: [`cpi_masked_eq`].
     fn clear_unit() -> Vec<u8> {
         let mut u = vec![0u8; 6144];
         for off in (4..6144).step_by(192) {
@@ -6695,6 +6866,53 @@ mod image_copy_tests {
         }
         u[0] |= 0xC0;
         u
+    }
+
+    /// `got == fx.expected` except the CPI bits of each stream-file source packet.
+    /// Per spec; do not change without a spec citation proving otherwise.
+    fn cpi_masked_eq(fx: &Fixture, got: &[u8]) -> bool {
+        // KS-6 AACS BD §3.10.2 Table 3-34: "TP_extra_header { Copy_permission_indicator 2
+        // uimsbf Arrival_time_stamp 30 uimsbf }": mask only the 2 CPI bits (byte0 & 0x3F).
+        let mask = |img: &[u8]| {
+            let mut img = img.to_vec();
+            for &(start, n) in &fx.files {
+                let (at, end) = (start as usize * SECTOR, (start + n) as usize * SECTOR);
+                for off in (at..end.min(img.len())).step_by(192) {
+                    img[off] &= 0x3F;
+                }
+            }
+            img
+        };
+        got.len() == fx.expected.len() && mask(got) == mask(&fx.expected)
+    }
+
+    /// The mask hides only the CPI bits of stream-file packets: a cleared CPI still
+    /// matches, but an ATS bit, a payload byte or a flag outside the files does not.
+    /// Per spec; do not change without a spec citation proving otherwise.
+    #[test]
+    fn the_cpi_mask_ignores_only_the_cpi_bits_of_stream_packets() {
+        let fx = fixture("cpimask", [K0, K1]);
+        let pkt = fx.files[1].0 as usize * SECTOR + 5 * 192;
+        // KS-5 AACS BD §3.10.2: "… or shall be set to 00₂ if the data is not encrypted".
+        let mut cleared = fx.expected.clone();
+        cleared[fx.files[0].0 as usize * SECTOR] &= 0x3F;
+        cleared[pkt] |= 0xC0;
+        assert!(
+            cpi_masked_eq(&fx, &cleared),
+            "CPI-only differences are masked"
+        );
+        for (at, bit) in [(pkt, 0x20), (pkt + 1, 0x01), (pkt + 4, 0x01), (0, 0xC0)] {
+            let mut other = fx.expected.clone();
+            other[at] ^= bit;
+            assert!(
+                !cpi_masked_eq(&fx, &other),
+                "byte {at} bit {bit:#x} must count"
+            );
+        }
+        assert!(
+            !cpi_masked_eq(&fx, &fx.expected[..SECTOR]),
+            "length must count"
+        );
     }
 
     /// A UDF image with two 30-sector stream files; `keys[i]` encrypts file `i`.
@@ -6867,8 +7085,8 @@ mod image_copy_tests {
         let (dest, r) = copy(&fx, &disc(&fx, 1, &[K0]), Some((o, o + n)), None);
         r.expect("a declared single-CPS disc keys the file with its one key");
         assert!(
-            std::fs::read(&dest).unwrap() == fx.expected,
-            "decrypted image"
+            cpi_masked_eq(&fx, &std::fs::read(&dest).unwrap()),
+            "decrypted image (CPI-masked)"
         );
         let (_, r) = copy(&fx, &disc(&fx, 2, &[K0]), Some((o, o + n)), None);
         assert!(
@@ -6931,8 +7149,8 @@ mod image_copy_tests {
         let (dest, r) = copy(&fx, &disc(&fx, 3, &[K0, K2]), None, Some(&fetch));
         r.unwrap_or_else(|e| panic!("the fetched key must decrypt the file, got {e}"));
         assert!(
-            std::fs::read(&dest).unwrap() == fx.expected,
-            "decrypted image"
+            cpi_masked_eq(&fx, &std::fs::read(&dest).unwrap()),
+            "decrypted image (CPI-masked)"
         );
     }
 }
