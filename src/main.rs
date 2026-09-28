@@ -61,6 +61,13 @@ mod settings;
 #[cfg(all(feature = "gui", target_os = "macos"))]
 mod ui;
 
+#[cfg(feature = "server")]
+fn invoked_as_autorip(args: &[String]) -> bool {
+    args.first()
+        .and_then(|a0| std::path::Path::new(a0).file_stem())
+        .is_some_and(|stem| stem == "autorip")
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -69,6 +76,12 @@ fn main() {
     #[cfg(feature = "server")]
     if args.get(1).map(String::as_str) == Some("server") {
         freemkv::server::run(args[2..].to_vec());
+        return;
+    }
+    // Invoked as `autorip` (the image's 1.7.7 name): the daemon, arguments unchanged.
+    #[cfg(feature = "server")]
+    if invoked_as_autorip(&args) {
+        freemkv::server::run(args[1..].to_vec());
         return;
     }
 
@@ -393,4 +406,16 @@ fn dev_harness() -> bool {
     }
 
     false
+}
+
+#[cfg(all(test, feature = "server"))]
+mod autorip_alias_tests {
+    #[test]
+    fn only_the_autorip_name_runs_the_daemon() {
+        let is = |a0: &str| super::invoked_as_autorip(&[a0.to_string()]);
+        assert!(is("/usr/local/bin/autorip"));
+        assert!(is("autorip"));
+        assert!(!is("/usr/local/bin/freemkv"));
+        assert!(!super::invoked_as_autorip(&[]));
+    }
 }

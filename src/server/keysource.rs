@@ -144,8 +144,12 @@ pub fn save_keydb(
 
 /// A boot-time warning for a stored online `keyserver_url` the rip will refuse
 /// on scheme alone (e.g. an `http://` URL saved before https became mandatory).
-/// Pure — no DNS — so it is safe on the startup path.
+/// Only in online mode: a local-mode rip never consults the URL. Pure — no DNS —
+/// so it is safe on the startup path.
 pub fn keyserver_url_startup_warning(cfg: &Config) -> Option<String> {
+    if cfg.key_source != "online" {
+        return None;
+    }
     let url = cfg.keyserver_url.trim();
     if url.is_empty() || url.starts_with("https://") {
         return None;
@@ -198,12 +202,18 @@ pub fn key_params(cfg: &Config) -> freemkv_engine::KeyParams {
 pub fn build_sources(cfg: &Config) -> Vec<Box<dyn KeySource>> {
     let params = key_params(cfg);
     let sources = freemkv_engine::key_sources(&params);
-    if sources.len() < 2 && !keydb_path(cfg).exists() {
+    if params.online_only {
+        if sources.is_empty() {
+            tracing::warn!(
+                phase = "key_resolve",
+                "online key source selected but no usable https:// keyserver URL is set — every disc will report NO KEY until one is"
+            );
+        }
+    } else if !keydb_path(cfg).exists() {
         tracing::warn!(
             phase = "key_resolve",
             keydb_path = %keydb_path(cfg).display(),
-            online = sources.len(),
-            "no keydb.cfg at the resolved path — keys come only from the online key service, if one is set"
+            "local key source selected but NO keydb.cfg at the resolved path — every disc will report NO KEY until a keydb exists here; set 'KEYDB.cfg Location' or place the file at this path"
         );
     }
     sources
@@ -387,10 +397,10 @@ fn log_key_walk(trace: &ResolutionTrace, disc_hash: &str) {
     }
 }
 
-/// Whether the key chain includes the remote key service (a URL is set) —
-/// used by the UI to announce a potentially slow keyserver round-trip.
+/// Whether the rip asks the remote key service: only when `key_source` is
+/// "online". A saved URL in local mode is never consulted.
 pub fn uses_online(cfg: &Config) -> bool {
-    !cfg.keyserver_url.trim().is_empty()
+    cfg.key_source == "online"
 }
 
 /// What the online key service actually said about a disc — the verdict the
@@ -1089,7 +1099,7 @@ mod tests {
             let sources = build_sources(&cfg);
             assert_eq!(sources.len(), n, "{key_source}");
             assert!(sources.iter().all(|s| s.label() == "keydb"));
-            assert!(!uses_online(&cfg));
+            assert_eq!(uses_online(&cfg), key_source == "online", "{key_source}");
         }
     }
 
@@ -1107,16 +1117,33 @@ mod tests {
         }
     }
 
-    // An SSRF-blocked URL never becomes a source; the keydb still applies.
+    // An SSRF-blocked URL never becomes a source, leaving online mode with none.
     #[test]
     fn build_sources_drops_online_source_on_ssrf_blocked_url() {
         let cfg = Config {
-            key_source: "local".into(),
+            key_source: "online".into(),
             keyserver_url: "https://169.254.169.254/keys".into(),
             ..Config::default()
         };
+        assert!(build_sources(&cfg).is_empty());
+    }
+
+    // key_source=local with a saved URL is local only: no online source, no
+    // online probe or outage retry, and no "Communicating" status.
+    #[test]
+    fn local_key_source_with_saved_url_never_goes_online() {
+        let cfg = Config {
+            key_source: "local".into(),
+            keyserver_url: "https://8.8.8.8/decode".into(),
+            keyserver_secret: "tok".into(),
+            ..Config::default()
+        };
+        assert!(!uses_online(&cfg));
+        let p = key_params(&cfg);
+        assert!(p.key_url.is_none() && p.key_auth.is_none() && !p.online_only);
         let labels: Vec<_> = build_sources(&cfg).iter().map(|s| s.label()).collect();
         assert_eq!(labels, ["keydb"]);
+        assert!(keyserver_url_startup_warning(&cfg).is_none());
     }
 
     // The settings fields autorip wrote map onto the engine's parameters as-is.
@@ -1412,8 +1439,8 @@ mod tests {
         }
     }
 
-    // A stored pre-upgrade http:// keyserver URL is named at boot, whatever
-    // `key_source` says (the chain consults any set URL); https and blank are silent.
+    // A stored pre-upgrade http:// keyserver URL is named at boot in online mode;
+    // https, blank, and any URL under `key_source = "local"` are silent.
     #[test]
     fn keyserver_url_startup_warning_flags_only_non_https() {
         let cfg = |src: &str, url: &str| Config {
@@ -1427,19 +1454,18 @@ mod tests {
         assert!(!w.contains("  "), "no stray whitespace runs: {w:?}");
         assert!(keyserver_url_startup_warning(&cfg("online", "https://k.example.org/d")).is_none());
         assert!(keyserver_url_startup_warning(&cfg("online", "")).is_none());
-        assert!(keyserver_url_startup_warning(&cfg("local", "http://k.example.org/d")).is_some());
+        assert!(keyserver_url_startup_warning(&cfg("local", "http://k.example.org/d")).is_none());
     }
 
     // Cleartext http:// is a standing config fault: the online source is dropped.
     #[test]
     fn build_sources_drops_online_source_on_http_url() {
         let cfg = Config {
-            key_source: "local".into(),
+            key_source: "online".into(),
             keyserver_url: "http://8.8.8.8/decode".into(),
             ..Config::default()
         };
-        let labels: Vec<_> = build_sources(&cfg).iter().map(|s| s.label()).collect();
-        assert_eq!(labels, ["keydb"]);
+        assert!(build_sources(&cfg).is_empty());
     }
 
     // `render_resolution_trace` is the app-layer's ENTIRE English mapping of

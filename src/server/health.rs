@@ -90,6 +90,24 @@ fn statvfs(p: &Path) -> Option<(u64, u64)> {
     }
 }
 
+// Asks the filesystem (access W_OK, EROFS included) instead of writing a probe file into
+// the user's folders.
+fn writable(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: `c` is a valid NUL-terminated path.
+        unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::metadata(p).is_ok_and(|m| !m.permissions().readonly())
+    }
+}
+
 /// Check one folder now, on the calling thread (it may block on a dead mount).
 pub fn check(role: &'static str, path: &Path, want_write: bool) -> Mount {
     let started = Instant::now();
@@ -116,9 +134,7 @@ pub fn check(role: &'static str, path: &Path, want_write: bool) -> Mount {
         }
     }
     if want_write {
-        let probe = path.join(".freemkv-health-probe");
-        let w = std::fs::write(&probe, b"").is_ok();
-        let _ = std::fs::remove_file(&probe);
+        let w = writable(path);
         m.writable = Some(w);
         if !w {
             m.problem = Some("not writable".into());
@@ -230,6 +246,11 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let m = check("Output", t.path(), true);
         assert!(m.ok && m.writable == Some(true), "{m:?}");
+        assert_eq!(
+            std::fs::read_dir(t.path()).unwrap().count(),
+            0,
+            "the check wrote a file"
+        );
         let gone = check("Output", &t.path().join("nope"), true);
         assert!(!gone.ok);
         assert_eq!(gone.problem.as_deref(), Some("missing"));

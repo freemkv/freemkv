@@ -784,10 +784,10 @@ fn auto_insert_rip_mode(on_insert: &str) -> Option<crate::server::web::ResumeMod
     }
 }
 
-// Fresh unattended rip: unless the staging guards hold the disc, discard its stale partial /
-// terminal staging, then sweep.
+// Fresh unattended rip (1.7.7): discard this disc's staging, whatever it holds, then sweep.
+// Only staging the mux worker owns, another drive sweeps, or that can't be read stands down.
 fn auto_rip_fresh(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
-    if staging_hold_stands_down(cfg, device, GuardFor::Wipe) {
+    if staging_hold_stands_down(cfg, device, GuardFor::Insert) {
         return;
     }
     wipe_staging_for_disc(cfg, device);
@@ -1421,10 +1421,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         .clone()
         .unwrap_or_else(|| disc.volume_id.clone());
     let key_scope = rip_key_scope(&disc, &cfg_read, media_type, &scan_name);
-    if crate::server::keysource::uses_online(&cfg_read)
-        && !matches!(disc.format, libfreemkv::DiscFormat::Dvd)
-        && key_scope != libfreemkv::keys::KeyScope::None
-    {
+    if announces_online_resolve(&cfg_read, &disc, &key_scope) {
         crate::server::log::device_log(device, "Communicating with online keyserver...");
         update_state_with(device, |s| {
             s.key_status = "Communicating with online keyserver…".to_string();
@@ -1659,18 +1656,11 @@ fn dispatch_rip_request(
             }
         }
         crate::server::web::ResumeMode::Prefer => {
-            // A loss-aborted disc may take another (non-destructive) resume pass;
-            // every fresh fallback below re-guards without that allowance.
-            let resumable = resumable_for_device(cfg, device);
-            let purpose = if resumable.is_some() {
-                GuardFor::Resume
-            } else {
-                GuardFor::InPlace
-            };
-            if staging_hold_stands_down(cfg, device, purpose) {
+            // 1.7.7: continue a started disc, else rip fresh.
+            if staging_hold_stands_down(cfg, device, GuardFor::Insert) {
                 return;
             }
-            match auto_resume_action(resumable) {
+            match auto_resume_action(resumable_for_device(cfg, device)) {
                 AutoResumeAction::Sweep => {
                     crate::server::log::device_log(
                         device,
@@ -1749,20 +1739,22 @@ enum StagingHold {
 enum GuardFor {
     /// Sweep in place (Default).
     InPlace,
-    /// Resume sweep / remux: a loss-aborted disc may take another pass.
-    Resume,
-    /// `remove_dir_all` then sweep: an empty-looking listing is not trusted.
-    Wipe,
+    /// On-insert Rip / Resume: only staging owned by the mux worker, swept by another
+    /// drive, or unreadable holds; an empty-looking listing is not trusted.
+    Insert,
 }
 
-// Guards shared by every non-destructive rip mode (Default, Fresh, Prefer). Returns true,
+// Staging guards for Default and the on-insert modes (Fresh, Prefer). Returns true,
 // after surfacing why, when this disc's staging must not be re-swept.
 fn staging_hold_stands_down(cfg: &Arc<RwLock<Config>>, device: &str, purpose: GuardFor) -> bool {
-    let hold = match disc_staging_hold(cfg, device, purpose == GuardFor::Wipe) {
+    let hold = match disc_staging_hold(cfg, device, purpose == GuardFor::Insert) {
         None => return false,
-        Some(StagingHold::LossAborted | StagingHold::NeedsDisc) if purpose == GuardFor::Resume => {
-            return false;
-        }
+        Some(
+            StagingHold::Completed
+            | StagingHold::LossAborted
+            | StagingHold::HeldForReview
+            | StagingHold::NeedsDisc,
+        ) if purpose == GuardFor::Insert => return false,
         Some(hold) => hold,
     };
     let why = match hold {
@@ -2780,9 +2772,11 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         return;
     }
 
-    let duration = crate::server::util::format_duration_hm(disc.titles[0].duration_secs);
-    let codecs = format_codecs(&disc.titles[0]);
-    let title = disc.titles[0].clone();
+    // The main movie, picked by the engine exactly as the CLI and GUI pick it.
+    let main = freemkv_engine::resolve_selection(&disc, &freemkv_engine::Selection::MainMovie);
+    let title = disc.titles[main.first().copied().unwrap_or(0)].clone();
+    let duration = crate::server::util::format_duration_hm(title.duration_secs);
+    let codecs = format_codecs(&title);
 
     // Down-vs-no-key (rip path): the final key-service verdict. A TRANSIENT one
     // bounded-retries then parks the disc below; a terminal one names what the
@@ -5903,6 +5897,18 @@ fn keyless_failure_message(disc: &libfreemkv::Disc) -> String {
     keyless_failure_message_for(disc.css_error.as_ref(), disc.aacs_error.as_ref())
 }
 
+// Whether the scan's key resolve asks the online key service, so the tile says
+// "Communicating with online keyserver": online mode only, never for a DVD's CSS.
+fn announces_online_resolve(
+    cfg: &Config,
+    disc: &libfreemkv::Disc,
+    scope: &libfreemkv::keys::KeyScope,
+) -> bool {
+    crate::server::keysource::uses_online(cfg)
+        && !matches!(disc.format, libfreemkv::DiscFormat::Dvd)
+        && *scope != libfreemkv::keys::KeyScope::None
+}
+
 // (log line, state reason) for the resume path's keyless mux deferral, from the resume
 // decode's verdict (`decode_reach`); probes only when that decode made no HTTP answer.
 // A terminal verdict won't clear by waiting, so it must not promise an automatic mux.
@@ -8331,6 +8337,41 @@ mod tests {
         assert!(probed.contains("never contacted"), "{probed}");
     }
 
+    // key_source=local with a saved URL: no "Communicating with online keyserver"
+    // status, no outage retry, and the keyless deferral never probes the URL.
+    #[test]
+    fn local_key_source_with_saved_url_makes_no_online_probe() {
+        use libfreemkv::keys::KeyScope;
+        let cfg = |src: &str| crate::server::config::Config {
+            key_source: src.into(),
+            keyserver_url: "http://8.8.8.8/decode".into(),
+            ..Default::default()
+        };
+        let disc = encrypted_keyless_disc();
+        assert!(!super::announces_online_resolve(
+            &cfg("local"),
+            &disc,
+            &KeyScope::WholeDisc
+        ));
+        assert!(super::announces_online_resolve(
+            &cfg("online"),
+            &disc,
+            &KeyScope::WholeDisc
+        ));
+        assert!(!super::should_retry_online_keys(
+            crate::server::keysource::uses_online(&cfg("local")),
+            false,
+            true,
+            true
+        ));
+        // Online, the probe of the refused http:// URL says "never contacted";
+        // local must not probe at all, so that text is absent.
+        let (_, online) = super::deferred_keyless_texts(&cfg("online"), &disc, None);
+        assert!(online.contains("never contacted"), "{online}");
+        let (_, local) = super::deferred_keyless_texts(&cfg("local"), &disc, None);
+        assert!(!local.contains("never contacted"), "{local}");
+    }
+
     // 401/403 is a credential rejection — it must get the credential text,
     // not the "does not recognise ... check the key-service address" wording.
     #[test]
@@ -10756,10 +10797,10 @@ mod tests {
         ]
     }
 
-    // Regression (1.7.6): on_insert=rip mapped to the operator Wipe and on_insert=resume fell
-    // back to it, so an unattended insert deleted finished / held / loss-aborted staging.
+    // 1.7.7: on_insert=rip rips fresh every time and on_insert=resume rips fresh unless the
+    // disc was started, so finished / held staging is replaced; only the mux worker's is spared.
     #[test]
-    fn unattended_insert_dispatch_never_destroys_protected_staging() {
+    fn unattended_insert_replaces_finished_staging_but_spares_the_mux_worker() {
         for on_insert in ["rip", "resume"] {
             let mode = super::auto_insert_rip_mode(on_insert).expect("an auto-rip mode");
             for (label, arm) in protected_staging_arms() {
@@ -10769,15 +10810,17 @@ mod tests {
                 }
                 let device = format!("sg_insert_guard_{on_insert}_{label}_test");
                 let (_tmp, dir, st) = dispatch_over_staged_disc(&device, "Guarded Disc", mode, arm);
-                assert_eq!(
-                    std::fs::read(dir.join("Sentinel.iso")).ok().as_deref(),
-                    Some(&b"precious"[..]),
-                    "on_insert={on_insert} destroyed a {label} staging dir"
-                );
-                assert_eq!(
-                    st.status, "idle",
-                    "on_insert={on_insert} over a {label} dir must stand down, not rip: {st:?}"
-                );
+                let kept = std::fs::read(dir.join("Sentinel.iso")).ok();
+                if matches!(label, "ripped" | "muxing") {
+                    assert_eq!(
+                        kept.as_deref(),
+                        Some(&b"precious"[..]),
+                        "on_insert={on_insert} destroyed a {label} staging dir"
+                    );
+                    assert_eq!(st.status, "idle", "{on_insert} over {label}: {st:?}");
+                } else {
+                    assert!(kept.is_none(), "on_insert={on_insert} kept a {label} dir");
+                }
             }
         }
     }

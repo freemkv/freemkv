@@ -6040,7 +6040,7 @@ fn drive_summary() -> Vec<serde_json::Value> {
 // POST /api/system/keyserver-test: ask the keyserver whether it answers.
 fn handle_keyserver_test(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    if !crate::server::keysource::uses_online(&c) {
+    if c.keyserver_url.trim().is_empty() {
         return json_response(
             request,
             400,

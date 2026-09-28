@@ -66,6 +66,7 @@ RUN apk add --no-cache nfs-utils busybox-static \
  && for app in sh mount umount mountpoint ls cat env wget mkdir chown ln rm id ps grep less head tail; do \
         ln -sf /bin/busybox /out/bin/$app; \
     done \
+ && mkdir -p /out/usr/local/bin && ln -s freemkv /out/usr/local/bin/autorip \
  && cp -r /etc/services              /out/etc/services 2>/dev/null || true \
  && cp -r /etc/nsswitch.conf         /out/etc/nsswitch.conf 2>/dev/null || true
 
