@@ -197,6 +197,25 @@ fn aacs_no_keys_message_points_at_update_keys() {
     );
 }
 
+// FT5 (CC-F1a): the shared cascade's two codes carry real messages, not the
+// bare-code fallback (stop-design-v5 §6 R7.4; keys-upfront-design §6).
+#[test]
+fn timed_out_and_vid_needs_disc_have_real_messages() {
+    let m9073 = en_msg(9073);
+    assert_ne!(m9073, "error.E9073", "en.json missing error.E9073");
+    assert!(
+        m9073.to_lowercase().contains("timed out") || m9073.to_lowercase().contains("timeout"),
+        "E9073 must say it timed out: {m9073}"
+    );
+
+    let m7034 = en_msg(7034);
+    assert_ne!(m7034, "error.E7034", "en.json missing error.E7034");
+    assert!(
+        m7034.to_lowercase().contains("volume id") || m7034.to_lowercase().contains("disc"),
+        "E7034 must point at the disc/Volume ID: {m7034}"
+    );
+}
+
 #[test]
 fn decrypt_failed_message_is_actionable() {
     let m = en_msg(7013);
@@ -355,9 +374,9 @@ fn en_json_has_no_string_for_a_code_libfreemkv_does_not_declare() {
 }
 
 // Codes libfreemkv adds before this fixture can name them (the fixture compiles against
-// libfreemkv dev). CC-F0: "`PENDING_VARIANTS` += `"E_TIMED_OUT"`, `"E_AACS_VID_NEEDS_DISC"`"
-// (stop-design-v5 §6 R7.1). Emptied at CC-F1a.
-const PENDING_VARIANTS: &[&str] = &["E_TIMED_OUT", "E_AACS_VID_NEEDS_DISC"];
+// libfreemkv dev). CC-F1a: "`PENDING_VARIANTS` is emptied" (stop-design-v5
+// §6 R7.4) now that CC-L0 declares both and the fixture enumerates them.
+const PENDING_VARIANTS: &[&str] = &[];
 
 // Every code libfreemkv can put inside an `Error` must appear in `all_error_variants()`, and
 // vice versa. A forgotten variant is INVISIBLE to every other assertion here.

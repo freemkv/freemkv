@@ -203,6 +203,9 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::SyncTimeout,
         Error::SyncWorkerLost,
         Error::DriveInquiryShort,
+        // CC-F1a (stop-design-v5 §6 R7.4): the shared cascade's two codes.
+        Error::AacsVidNeedsDisc,
+        Error::TimedOut { op: "verify" },
     ]
 }
 
