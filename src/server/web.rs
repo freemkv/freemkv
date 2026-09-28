@@ -1541,7 +1541,16 @@ mod web_tests {
             "menus share one document listener"
         );
         assert!(asset("settings.js").contains("new-password"));
-        assert!(asset("system.js").contains("r.reachable"));
+        assert!(asset("settings.js").contains("r.reachable"));
+        // Library is the MKVs and never remuxes; the header carries no job.
+        let library = asset("library.js");
+        assert!(!library.contains("href=\"/remux\""));
+        assert!(library.contains("remux: false"));
+        assert!(!super::INDEX_HTML.contains("jobchip"));
+        assert!(
+            !asset("system.js").contains("id=\"keys\""),
+            "keys live in Settings"
+        );
     }
 
     // Every module the shell imports is embedded and served.

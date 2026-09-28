@@ -106,10 +106,10 @@ export function openDetails(r, ctx = {}) {
         : '<span style="color:var(--bad)">✗ ' + esc(res.message) + '</span>, ' + esc(when(res.finished_at)))
       + '</p>';
   }
-  const can = r.kind === 'remux' || r.kind === 'iso_only';
+  const can = ctx.remux !== false && (r.kind === 'remux' || r.kind === 'iso_only');
   const busy = r.job && (r.job.state === 'queued' || r.job.state === 'running');
   const foot = (r.mkv ? '<button class="btn btn-ghost btn-sm" data-a="reaudit">Re-audit</button>' : '')
-    + (r.job || r.result ? '<button class="btn btn-ghost btn-sm" data-a="log">Remux log</button>' : '')
+    + (ctx.remux !== false && (r.job || r.result) ? '<button class="btn btn-ghost btn-sm" data-a="log">Remux log</button>' : '')
     + (can ? '<button class="btn btn-primary btn-sm" data-a="remux"' + (busy ? ' disabled' : '') + '>' + (busy ? 'Queued' : 'Remux') + '</button>' : '');
   const m = modal({ title: esc(r.title), body, foot, wide: true });
   const q = (s) => m.el.querySelector(s);

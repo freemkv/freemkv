@@ -59,7 +59,6 @@ export default {
       <div class="page-head">
         <div><h1>Library</h1><p class="lede" id="lede">Loading…</p></div>
         <div class="actions">
-          <a class="btn btn-secondary" href="/remux" data-link>Remux…</a>
           <div class="menu"><button class="icon-btn" id="more" aria-label="More actions">${ICON.more}</button>
             <div class="menu-list" id="more-list" hidden>
               <button data-a="rescan">Rescan the folders now</button>
@@ -99,7 +98,7 @@ export default {
         status: ['Status', r => -auditState(r)[3]],
         ripped: ['Ripped', r => r.modified || 0],
       },
-      onRow: (r) => openDetails(r),
+      onRow: (r) => openDetails(r, { remux: false }),
       render: (r) => ({
         dot: dotHtml(r),
         title: esc(r.title),
@@ -112,7 +111,7 @@ export default {
     ctx.cleanup.push(() => list.destroy());
     $('#list', view).addEventListener('click', (e) => {
       const b = e.target.closest('.row-more');
-      if (b) { e.stopPropagation(); openDetails(b.closest('.mrow')._row); }
+      if (b) { e.stopPropagation(); openDetails(b.closest('.mrow')._row, { remux: false }); }
     });
     menu($('#more', view), $('#more-list', view));
     $('#more-list', view).addEventListener('click', async (e) => {

@@ -305,6 +305,8 @@ pub static FIELDS: &[Field] = &[
         "The full endpoint the decode request is posted to, path included.").show_if("key_source", "online"),
     field("keyserver_secret", "Keyserver secret", G::Keys, Kind::Secret, S(""),
         "Bearer token, if the keyserver needs one.").show_if("key_source", "online"),
+    field("test_keyserver", "", G::Keys, Kind::Action { endpoint: "/api/system/keyserver-test", button: "Test the keyserver" }, Def::None,
+        "Ask the key service whether it answers, using the URL saved above.").show_if("key_source", "online"),
     field("capture_without_keys", "Capture discs without keys", G::Keys, Kind::Bool, B(false),
         "With no usable keys, image the disc and mux it once keys arrive. Off skips the disc."),
     field("tmdb_api_key", "TMDB API key", G::Metadata, Kind::Secret, S(""),

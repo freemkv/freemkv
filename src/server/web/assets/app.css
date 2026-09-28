@@ -52,13 +52,10 @@ a:hover { color: var(--teal-darker); }
 .icon-btn:hover { color: var(--ink); border-color: var(--muted); }
 .icon-btn svg { width: 1.05rem; height: 1.05rem; }
 
-/* The running-job chip in the header: opens the Console. */
-.jobchip { display: inline-flex; align-items: center; gap: 0.55rem; max-width: 22rem; padding: 0.3rem 0.8rem 0.3rem 0.6rem; border-radius: 999px; border: 1px solid var(--teal-line); background: var(--teal-tint); color: var(--teal-darker); font: 600 0.8rem var(--font); cursor: pointer; }
-.jobchip:hover { border-color: var(--teal); }
-.jobchip .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.jobchip .mini { width: 3.5rem; height: 5px; border-radius: 99px; background: color-mix(in srgb, var(--teal) 22%, transparent); overflow: hidden; flex: none; }
-.jobchip .mini i { display: block; height: 100%; width: 0; background: var(--teal); transition: width 0.8s linear; }
-.jobchip .pct { font-variant-numeric: tabular-nums; flex: none; }
+/* Activity badge on a nav tab: busy drives on Ripper, a running remux on Remux. */
+.nav-links a { position: relative; }
+.nav-badge.dot { min-width: 0.55rem; width: 0.55rem; height: 0.55rem; padding: 0; vertical-align: 0.2em; }
+.nav-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 1.1rem; height: 1.1rem; padding: 0 0.3rem; margin-left: 0.35rem; border-radius: 999px; background: var(--teal); color: #fff; font: 700 0.68rem var(--font); vertical-align: 0.1em; animation: pulse 1.8s ease-in-out infinite; }
 .pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--teal); flex: none; animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
@@ -353,8 +350,10 @@ table.det td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); }
 .mmain { min-width: 0; display: flex; flex-direction: column; gap: 0.3rem; }
 .mline { display: flex; align-items: baseline; gap: 0.6rem; min-width: 0; }
 .mtitle { font-weight: 650; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
-.mmeta { display: flex; gap: 0.6rem; color: var(--muted); font-size: 0.82rem; white-space: nowrap; flex: none; font-variant-numeric: tabular-nums; }
-.mmeta span + span::before { content: "·"; margin-right: 0.6rem; opacity: 0.7; }
+.mmeta { display: flex; align-items: center; gap: 0.6rem; color: var(--muted); font-size: 0.82rem; white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; font-variant-numeric: tabular-nums; }
+.mmeta > span { overflow: hidden; text-overflow: ellipsis; }
+.mmeta > .badge { flex: none; }
+.mmeta span:not(.badge) + span:not(.badge)::before { content: "·"; margin-right: 0.6rem; opacity: 0.7; }
 .mpills { display: flex; gap: 0.35rem; align-items: center; flex-wrap: nowrap; overflow: hidden; min-width: 0; }
 .mpills > * { flex: none; }
 .mside { min-width: 0; text-align: right; font-size: 0.86rem; display: flex; justify-content: flex-end; }
@@ -380,6 +379,13 @@ table.det td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); }
 .sortdir { width: 2rem; height: 2rem; font: 700 0.9rem var(--font); }
 .row-more { width: 2rem; height: 2rem; }
 
+/* The running remux, above the list: its own progress and the Console. */
+.now { display: flex; align-items: center; gap: 0.9rem; padding: 0.7rem 1rem; margin-bottom: 1rem; border: 1px solid var(--teal-line); background: var(--teal-tint); border-radius: var(--radius); }
+.now-main { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+.now-main b { color: var(--teal-darker); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.now-main span { font-variant-numeric: tabular-nums; }
+.now .bar { flex: 0 1 14rem; background: color-mix(in srgb, var(--teal) 18%, transparent); }
+
 /* Narrow desktops: the right-hand column gives way first. */
 @media (max-width: 1100px) { .mrow { grid-template-columns: auto minmax(0, 1fr) minmax(0, 11rem) auto; } }
 
@@ -392,6 +398,10 @@ table.det td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); }
   .mtitle { flex-basis: 100%; }
   .mact .btn-sm, .mact .icon-btn { min-height: 44px; min-width: 44px; }
   .pill.live .bar { width: 5rem; }
+  .wrap-m .mpills { flex-wrap: wrap; row-gap: 0.3rem; }
+  .pill { max-width: 100%; overflow: hidden; }
+  .now { flex-wrap: wrap; }
+  .now .bar { flex-basis: 100%; order: 3; }
   .sort { margin-left: 0; }
   .toolbar .search { max-width: none; }
 }
@@ -406,8 +416,6 @@ table.det td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); }
 @media (max-width: 640px) {
   .nav-inner { gap: 0.6rem 1rem; }
   .nav-links { order: 3; width: 100%; overflow-x: auto; gap: 1.1rem; }
-  .jobchip .t, .jobchip .mini { display: none; }
-  .jobchip .lbl::after { content: " ·"; }
   .stats { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 0.2rem; scrollbar-width: none; }
   .stat { flex: none; }
   .legend { display: none; }

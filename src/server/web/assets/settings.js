@@ -132,13 +132,15 @@ async function mount(view, ctx) {
         paintDirty();
       } else if (e.target.closest('[data-endpoint]')) {
         const b = e.target.closest('[data-endpoint]');
-        const st = form.querySelector('[data-status]');
+        const st = b.parentElement.querySelector('[data-status]');
         if (dirty()) toast('Save first: the update uses the saved settings', 'info');
         const r = await act(b, () => api('POST', b.dataset.endpoint), b.textContent);
         if (r) {
-          const t = r.entries != null ? 'Updated: ' + r.entries.toLocaleString() + ' entries' : 'Done';
-          if (st) st.textContent = t;
-          toast(t, 'ok');
+          const bad = r.reachable === false;
+          const t = r.entries != null ? 'Updated: ' + r.entries.toLocaleString() + ' entries'
+            : r.reachable != null ? (r.reachable ? 'The keyserver answered' : 'No proper answer: ' + r.result) : 'Done';
+          if (st) { st.textContent = t; st.style.color = bad ? 'var(--bad)' : ''; }
+          toast(t, bad ? 'bad' : 'ok');
         } else if (st) st.textContent = '';
       }
     });

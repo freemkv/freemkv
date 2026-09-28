@@ -6,7 +6,7 @@ import { esc, $, put, fill, api, act, toast, twoStep, bytes, runtime, when, hms,
 import { watch, refreshNow } from './libdata.js';
 import { mediaList } from './medialist.js';
 import { muxedHtml, openDetails, noteText, queueOne, outdated } from './details.js';
-import { dotHtml, metaHtml } from './library.js';
+import { dotHtml } from './library.js';
 import { openConsole, openTitleLog } from './console.js';
 
 const can = r => r.kind === 'remux' || r.kind === 'iso_only';
@@ -54,10 +54,21 @@ function liveText(p) {
     + (p.phase !== 'mux' ? ' · ' + p.phase : '');
 }
 
-function isoHtml(r) {
-  if (!r.iso) return '<span class="note' + (r.kind === 'ambiguous' ? ' warn' : '') + '">' + esc(noteText(r)) + '</span>';
-  const name = String(r.iso).split('/').pop();
-  return '<span class="one" title="' + esc(r.iso) + (r.linked ? ' (recorded when this app ripped it)' : '') + '">' + (r.linked ? '<span class="badge badge-teal">linked</span>' : '') + '<span class="ell iso">' + esc(name) + '</span></span>';
+// The ISO list: every row that has an ISO, or several that match one title.
+const isIsoRow = r => !!r.iso || r.kind === 'ambiguous';
+
+function isoName(r) {
+  return r.iso ? String(r.iso).split('/').pop() : noteText(r);
+}
+
+// The MKV this ISO feeds: its file name, or where a remux would create it.
+function mkvHtml(r) {
+  if (r.mkv) {
+    const name = String(r.mkv).split('/').pop();
+    return '<span class="one" title="' + esc(r.mkv) + '"><span class="ell iso">' + esc(name) + '</span></span>';
+  }
+  if (r.kind === 'iso_only') return '<span class="one" title="A remux creates ' + esc(r.target || '') + '"><span class="ell iso">no MKV yet</span></span>';
+  return '<span class="note warn">' + esc(noteText(r)) + '</span>';
 }
 
 export default {
@@ -82,19 +93,18 @@ export default {
         </div>
       </div>
       <div class="stats" id="stats"></div>
+      <div class="now" id="now" hidden><span class="pulse"></span><div class="now-main"><b id="now-t"></b><span class="muted small" id="now-s"></span></div><div class="bar"><i id="now-bar"></i></div><button class="btn btn-ghost btn-sm" id="now-console">${ICON.term} Console</button></div>
       <div class="banner warn" id="paused" hidden style="margin:0 0 1rem">The queue is paused: the running title finishes, then nothing new starts until you resume.</div>
       <div class="table-card">
         <div class="toolbar">
           <label class="search">${ICON.search}<span class="sr-only">Search titles</span><input id="q" type="search" placeholder="Search titles" autocomplete="off"></label>
-          <label class="small muted" style="display:inline-flex;gap:.4rem;align-items:center"><input type="checkbox" id="hide" style="accent-color:var(--teal)"> Hide titles with no ISO</label>
           <div class="sort" id="sort"></div>
         </div>
         <div id="tbl"></div>
       </div>
-      <p class="foot-note">A remux re-muxes the main title from its ISO with this freemkv and only replaces the MKV once the new one verifies (or creates it when missing). Greyed titles have no single ISO and are never touched. One title at a time; a rip always takes priority. <a href="/api/library" target="_blank">JSON</a></p>`;
+      <p class="foot-note">A remux re-muxes the main title from its ISO with this freemkv and only replaces the MKV once the new one verifies (or creates it when missing). Titles that match several ISOs are greyed and never touched. One title at a time; a rip always takes priority. <a href="/api/library" target="_blank">JSON</a></p>`;
     let last = null, q = '';
-    let hide = localStorage.getItem('remuxHide') === '1';
-    $('#hide', view).checked = hide;
+    $('#tbl', view).classList.add('wrap-m');
     const list = mediaList($('#tbl', view), {
       key: r => r.key + '|' + (r.target || r.mkv || r.iso || ''),
       store: 'remuxSort2',
@@ -106,16 +116,16 @@ export default {
         state: ['State', r => r.job ? ({ running: 0, queued: 1 }[r.job.state] ?? 3) : r.result ? (r.result.outcome === 'failed' ? 2 : 4) : 5],
         muxed: ['Muxed with', r => (r.needs_remux ? '0' : '1') + (r.muxed_label || '')],
         finished: ['Finished', r => (r.result && r.result.finished_at) || 0],
-        size: ['Size', r => r.size_bytes || 0],
+        iso: ['ISO name', r => isoName(r).toLowerCase()],
       },
       onRow: (r) => openDetails(r),
       render: (r) => ({
         cls: can(r) ? '' : 'grey',
         dot: dotHtml(r),
         title: esc(r.title),
-        meta: metaHtml(r),
-        pills: '<span class="mux-pill" data-keep="1">' + muxedHtml(r) + '</span>' + statePills(r),
-        side: isoHtml(r),
+        meta: '<span class="iso-name" title="' + esc(r.iso || '') + '">' + esc(isoName(r)) + '</span>' + (r.linked ? '<span class="badge badge-teal" title="Recorded when this app ripped it">linked</span>' : ''),
+        pills: (r.mkv ? '<span class="mux-pill" data-keep="1">' + muxedHtml(r) + '</span>' : '') + statePills(r),
+        side: mkvHtml(r),
         act: actHtml(r),
       }),
     });
@@ -148,12 +158,12 @@ export default {
     $('#ood', view).addEventListener('click', (e) => bulk(e.currentTarget, '/api/library/queue/out-of-date', 'out of date'));
     $('#all', view).addEventListener('click', (e) => twoStep(e.currentTarget, (b) => bulk(b, '/api/library/queue/all', 'with an ISO')));
     $('#console', view).addEventListener('click', () => openConsole());
+    $('#now-console', view).addEventListener('click', () => openConsole());
     $('#pause', view).addEventListener('click', async (e) => {
       const paused = last && last.queue && last.queue.paused;
       const r = await act(e.currentTarget, () => api('POST', paused ? '/api/library/queue/resume' : '/api/library/queue/pause'), paused ? 'Resume' : 'Pause');
       if (r) { toast(r.paused ? 'Queue paused: the running title finishes, then it waits' : 'Queue resumed', 'info'); refreshNow(); }
     });
-    $('#hide', view).addEventListener('change', (e) => { hide = e.target.checked; localStorage.setItem('remuxHide', hide ? '1' : '0'); paint(); });
     $('#q', view).addEventListener('input', (e) => { q = e.target.value.trim().toLowerCase(); paint(); });
     menu($('#more', view), $('#more-list', view));
     $('#debug', view).addEventListener('change', async (e) => {
@@ -204,27 +214,31 @@ export default {
         : 'freemkv <b>' + esc(d.version_label) + '</b>'
           + (d.iso_dir ? ' · ISOs from <b>' + esc(d.iso_dir) + '</b>' + (d.iso_subfolders ? ' (and sub-folders)' : '') : ' · <span style="color:var(--warn)">no ISO folder set: <a href="/settings#Library" data-link>set one</a></span>')
           + (d.probing ? ' · reading ' + d.probing + ' headers' : ''));
-      // One definition of out of date everywhere (see details.outdated); the
-      // button says exactly what it will queue.
-      const stale = rows.filter(outdated);
-      const staleNoIso = stale.filter(r => !can(r)).length;
-      const missing = rows.filter(r => r.kind === 'iso_only' && !r.mkv).length;
-      const todo = rows.filter(r => r.needs_remux && !active(r)).length;
-      const waiting = rows.filter(r => r.needs_remux && active(r)).length;
+      // Chips count ISOs and the queue. "Need a remux" is exactly what the
+      // bulk button can queue: out of date (one definition, shared with the
+      // Library) or no MKV yet.
+      const isoRows = rows.filter(isIsoRow);
+      const need = have.filter(r => r.needs_remux);
+      const todo = need.filter(r => !active(r)).length;
+      const waiting = need.length - todo;
+      const stale = have.filter(outdated).length;
+      const missing = have.filter(r => !r.mkv).length;
+      const ambiguous = rows.filter(r => r.kind === 'ambiguous').length;
       const stats = [
-        [stale.length, 'out of date', stale.length ? 'warn' : '', staleNoIso ? staleNoIso + ' of them have no single ISO, so they cannot be remuxed' : 'All of them have an ISO'],
-        [missing, 'with no MKV yet', '', 'An ISO with no MKV: a remux creates it'],
+        [have.length, 'ISOs', '', ambiguous ? ambiguous + ' more titles match several ISOs and are left alone' : 'ISOs matched to one title'],
+        [need.length, 'need a remux', need.length ? 'warn' : '', stale + ' out of date, ' + missing + ' with no MKV yet'],
+        [missing, 'no MKV yet', '', 'A remux creates the MKV'],
         [(qd.queued || 0) + (qd.running ? 1 : 0), 'queued', '', 'Queued or running'],
         [qd.done || 0, 'done', 'ok', ''],
         [qd.failed || 0, 'failed', qd.failed ? 'bad' : '', ''],
-        [have.length, 'with an ISO', '', ''],
       ];
+      if (ambiguous) stats.push([ambiguous, 'ambiguous', 'warn', 'Several ISOs match one title: rename one']);
       put($('#stats', view), stats.map(([n, l, tone, tip]) => '<span class="stat ' + tone + '"' + (tip ? ' title="' + esc(tip) + '"' : '') + '><b>' + n + '</b> ' + l + '</span>').join(''));
       const ood = $('#ood', view), all = $('#all', view);
       if (!ood.classList.contains('busy')) {
         ood.disabled = !todo || d.scanning;
         put(ood, todo ? (waiting ? 'Queue ' + todo + ' more' : 'Remux ' + todo + ' out of date') : (waiting ? 'All out of date queued' : 'Nothing out of date'));
-        ood.title = todo + ' out of date or with no MKV, not yet queued' + (waiting ? '; ' + waiting + ' already queued or running' : '');
+        ood.title = todo + ' of the ' + need.length + ' that need a remux, not yet queued' + (waiting ? '; ' + waiting + ' already queued or running' : '');
       }
       if (!all.classList.contains('busy') && !all.classList.contains('confirm')) {
         all.disabled = !have.length || d.scanning;
@@ -235,13 +249,20 @@ export default {
       if (!pb.classList.contains('busy')) pb.textContent = qd.paused ? 'Resume queue' : 'Pause queue';
       $('#paused', view).hidden = !qd.paused;
       $('#debug', view).checked = !!qd.debug_log;
-      const shown = rows.filter(r => (!hide || can(r)) && (!q || r.title.toLowerCase().includes(q)));
-      list.update(shown, d.scanning ? 'Scanning…' : rows.length ? 'No titles match.' : 'Nothing in the library or ISO folders yet.');
+      const shown = isoRows.filter(r => !q || r.title.toLowerCase().includes(q) || isoName(r).toLowerCase().includes(q));
+      list.update(shown, d.scanning ? 'Scanning…' : isoRows.length ? 'No ISOs match.'
+        : d.iso_dir ? 'No ISOs in ' + esc(d.iso_dir) + '.' : 'Set the source ISO folder in <a href="/settings#Library" data-link>Settings</a>.');
       paintLive(d.live);
     }
 
-    // Progress straight off the SSE frame, into the existing bar: no re-render.
+    // Progress straight off the SSE frame, into the existing bars: no re-render.
     function paintLive(live) {
+      $('#now', view).hidden = !live;
+      if (live) {
+        put($('#now-t', view), 'Remuxing ' + esc(live.title));
+        put($('#now-s', view), esc(liveText(live)));
+        fill($('#now-bar', view), live.pct);
+      }
       const cell = view.querySelector('.cellbar[data-live]');
       if (!cell) return;
       const p = live && String(live.job_id) === cell.dataset.live ? live : null;

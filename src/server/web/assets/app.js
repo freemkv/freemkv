@@ -2,8 +2,7 @@
 // page modules, the theme toggle, and the header chip that follows the
 // running remux and opens the Console.
 
-import { $, $$, fill, api, ICON } from './ui.js';
-import { openConsole } from './console.js';
+import { $, $$, api, ICON } from './ui.js';
 import { live, connect, subscribe, publishState } from './bus.js';
 
 const ROUTES = {
@@ -84,24 +83,31 @@ $('#theme').addEventListener('click', () => {
 });
 paintThemeButton();
 
-// ── Header chip: the running remux; click for the Console ─────────────────
+// ── Activity: a small badge on the tab that owns the work ──────────────────
+// Ripper shows how many drives are busy; Remux a dot while a remux runs. Each
+// page shows its own jobs' progress; nothing picks one job for the header.
 
-function paintChip(running, queued) {
-  const chip = $('#jobchip');
-  if (!running) {
-    chip.hidden = true;
-    return;
-  }
-  chip.hidden = false;
-  const pct = running.pct;
-  $('.t', chip).textContent = running.title;
-  fill($('.mini i', chip), pct);
-  $('.pct', chip).textContent = pct == null ? '' : pct.toFixed(0) + '%';
-  chip.title = 'Open the console' + (queued ? ' · ' + queued + ' queued after this' : '');
+function badge(href, text, label) {
+  const a = $('.nav-links a[href="' + href + '"]');
+  if (!a) return;
+  let b = a.querySelector('.nav-badge');
+  if (!text) { if (b) b.remove(); a.removeAttribute('title'); return; }
+  if (!b) { b = document.createElement('span'); b.className = 'nav-badge'; a.appendChild(b); }
+  // "●" is drawn as a plain dot; a number as a count.
+  b.classList.toggle('dot', text === '●');
+  const shown = text === '●' ? '' : text;
+  if (b.textContent !== shown) b.textContent = shown;
+  b.setAttribute('aria-label', label);
+  a.title = label;
 }
-$('#jobchip').addEventListener('click', () => openConsole());
-subscribe('library', (f) => paintChip(f.running, f.queued));
-api('GET', '/api/library/console').then(c => paintChip(c.running, c.queue && c.queue.queued)).catch(() => {});
+const RIPPING = ['ripping', 'scanning', 'detecting'];
+subscribe('state', (s) => {
+  const busy = Object.keys(s).filter(k => !k.startsWith('_') && RIPPING.includes(s[k].status)).length;
+  badge('/ripper', busy ? String(busy) : '', busy + (busy === 1 ? ' drive' : ' drives') + ' busy');
+});
+const paintRemux = (running) => badge('/remux', running ? '●' : '', running ? 'Remuxing ' + running.title : '');
+subscribe('library', (f) => paintRemux(f.running));
+api('GET', '/api/library/console').then(c => paintRemux(c.running)).catch(() => {});
 
 // ── Browser notifications for finished and failed rips ─────────────────────
 
