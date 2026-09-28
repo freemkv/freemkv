@@ -211,7 +211,14 @@ impl Queue {
     }
 
     /// Take the oldest queued job and mark it running. `None` while paused.
+    /// An idle queue is left alone: no generation bump, no write.
     pub fn claim_next(&self) -> Option<Job> {
+        {
+            let f = self.lock();
+            if f.paused || f.running().is_some() || f.count(JobState::Queued) == 0 {
+                return None;
+            }
+        }
         self.mutate(|f| {
             if f.paused || f.running().is_some() {
                 return None;
@@ -438,6 +445,32 @@ mod tests {
             1,
             "results outlive the cleared job"
         );
+    }
+
+    #[test]
+    fn an_idle_queue_is_not_rewritten_by_polling() {
+        let t = tempfile::tempdir().unwrap();
+        let q = Queue::open(t.path());
+        let file = t.path().join(QUEUE_FILE);
+        let (g, m) = (
+            q.generation(),
+            std::fs::metadata(&file).unwrap().modified().unwrap(),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        for _ in 0..5 {
+            assert!(q.claim_next().is_none());
+        }
+        assert_eq!(q.generation(), g, "no change, no generation bump");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().modified().unwrap(),
+            m,
+            "no write"
+        );
+        q.set_paused(true);
+        q.add(vec![job(t.path(), "a")]);
+        let g = q.generation();
+        assert!(q.claim_next().is_none());
+        assert_eq!(q.generation(), g, "a paused queue is not rewritten either");
     }
 
     #[test]

@@ -11,8 +11,12 @@ const RING_CAP: usize = 500;
 // this it would grow unbounded for the container lifetime.
 const SYSTEM_LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 
-static LOGS: once_cell::sync::Lazy<Mutex<HashMap<String, VecDeque<String>>>> =
+// Each ring line carries a sequence number that only ever grows (across every
+// device), so a viewer can ask for "lines after N" even once the ring wraps.
+type Ring = VecDeque<(u64, String)>;
+static LOGS: once_cell::sync::Lazy<Mutex<HashMap<String, Ring>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+static NEXT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn log_dir() -> String {
     // Same resolution as config: AUTORIP_DIR, else writable /config (Docker),
@@ -73,7 +77,8 @@ pub fn device_log(device: &str, msg: &str) {
         let mut logs = LOGS.lock().unwrap_or_else(|e| e.into_inner());
         let log = logs.entry(device.to_string()).or_default();
         let was_empty = log.is_empty();
-        log.push_back(line.clone());
+        let seq = NEXT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        log.push_back((seq, line.clone()));
         if log.len() > RING_CAP {
             log.pop_front();
         }
@@ -118,12 +123,22 @@ pub fn get_device_log(device: &str, lines: usize) -> Vec<String> {
     let logs = LOGS.lock().unwrap_or_else(|e| e.into_inner());
     logs.get(device)
         .map(|log| {
-            // Single allocation of just the tail slice, computed while
-            // holding the lock — no intermediate double-reverse Vecs.
             let start = log.len().saturating_sub(lines);
-            log.iter().skip(start).cloned().collect()
+            log.iter().skip(start).map(|(_, l)| l.clone()).collect()
         })
         .unwrap_or_default()
+}
+
+/// A device's ring lines with a sequence number above `since`, oldest-first,
+/// and the newest sequence number handed out so far (the next `since`).
+pub fn get_device_log_since(device: &str, since: u64) -> (u64, Vec<(u64, String)>) {
+    let logs = LOGS.lock().unwrap_or_else(|e| e.into_inner());
+    let lines = logs
+        .get(device)
+        .map(|log| log.iter().filter(|(s, _)| *s > since).cloned().collect())
+        .unwrap_or_default();
+    let newest = NEXT_SEQ.load(std::sync::atomic::Ordering::Relaxed) - 1;
+    (newest, lines)
 }
 
 /// Move the device's current live log to `logs/rips/{device}_{iso_ts}.log`
@@ -559,6 +574,27 @@ mod tests {
         assert_eq!(lines.len(), 3);
         // Tail of the buffer — last 3 lines are 2, 3, 4.
         assert!(lines[2].contains("line 4"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_viewer_keeps_following_after_the_ring_wraps() {
+        let _guard = crate::server::log::env_guard();
+        let d = tmpdir("since_wrap");
+        unsafe {
+            std::env::set_var("AUTORIP_DIR", &d);
+        }
+        let dev = format!("test_since_{}", std::process::id());
+        for i in 0..(RING_CAP + 20) {
+            device_log(&dev, &format!("line {i}"));
+        }
+        let (seq, all) = get_device_log_since(&dev, 0);
+        assert_eq!(all.len(), RING_CAP);
+        device_log(&dev, "after the wrap");
+        let (next, new) = get_device_log_since(&dev, seq);
+        assert_eq!(new.len(), 1, "a full ring must not hide the next line");
+        assert!(new[0].1.contains("after the wrap"));
+        assert!(next > seq);
         let _ = std::fs::remove_dir_all(&d);
     }
 

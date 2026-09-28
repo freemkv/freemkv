@@ -29,6 +29,8 @@ pub enum Group {
     Notifications,
     Performance,
     Advanced,
+    /// Loaded and kept, never shown: autorip settings nothing reads any more.
+    Hidden,
 }
 
 impl Group {
@@ -57,6 +59,7 @@ impl Group {
             Group::Notifications => "Notifications",
             Group::Performance => "Performance",
             Group::Advanced => "Advanced",
+            Group::Hidden => "",
         }
     }
 }
@@ -312,9 +315,9 @@ pub static FIELDS: &[Field] = &[
         "Threads for AACS decryption. 0 = every core (up to 64)."),
     field("log_retention_days", "Keep logs for (days)", G::Performance, Kind::Number { max: MAX_RETENTION_DAYS }, N(30),
         "Per-drive logs older than this are pruned daily."),
-    field("max_rip_duration_secs", "Rip time limit (seconds)", G::Advanced, Kind::Number { max: MAX_DURATION_SECS }, N(28_800),
+    field("max_rip_duration_secs", "Rip time limit (seconds)", G::Hidden, Kind::Number { max: MAX_DURATION_SECS }, N(28_800),
         "Longest a rip may run across every pass."),
-    field("min_pass_budget_secs", "Minimum pass budget (seconds)", G::Advanced, Kind::Number { max: MAX_DURATION_SECS }, N(5_400),
+    field("min_pass_budget_secs", "Minimum pass budget (seconds)", G::Hidden, Kind::Number { max: MAX_DURATION_SECS }, N(5_400),
         "Per-pass time budget when the disc runtime is unknown."),
     field("transport_recovery_delay_secs", "Drive reconnect delay (seconds)", G::Advanced, Kind::Number { max: MAX_DURATION_SECS }, N(5),
         "Wait after a USB drive re-enumerates before reopening it."),
@@ -530,11 +533,29 @@ pub struct Patch {
 /// checks (DNS), so call it before taking the config write lock.
 pub fn parse_patch(body: &Value, current: &Config) -> Result<Patch, String> {
     let mut patch = Patch::default();
+    let effective = |key: &str| {
+        body.get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                serde_json::to_value(current)
+                    .ok()?
+                    .get(key)?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+    };
     for f in FIELDS {
         let Some(raw) = body.get(f.key).filter(|x| !x.is_null()) else {
             continue;
         };
-        if let Some(v) = f.parse(raw, Mode::Save, current)? {
+        // A stream target that is not in use (an old one kept from autorip) is
+        // stored as it is, not checked, so it cannot block every other save.
+        let inactive = matches!(f.kind, Kind::Target)
+            && f.show_if
+                .is_some_and(|w| effective(w.key).as_deref() != Some(w.value));
+        let mode = if inactive { Mode::Load } else { Mode::Save };
+        if let Some(v) = f.parse(raw, mode, current)? {
             patch.values.push((f.key, v));
         }
     }
@@ -653,6 +674,7 @@ fn options_json(opts: &[(&str, &str)]) -> Value {
 pub fn schema_json() -> Value {
     let fields: Vec<Value> = FIELDS
         .iter()
+        .filter(|f| f.group != Group::Hidden)
         .map(|f| {
             let mut o = json!({
                 "key": f.key,
@@ -758,6 +780,49 @@ mod tests {
         assert_eq!(c.keydb_path, None);
         assert_eq!(c.port, 8080);
         assert_eq!(c.autorip_dir, "/config");
+    }
+
+    #[test]
+    fn an_unused_network_target_does_not_block_a_save() {
+        let c = Config {
+            output_format: "mkv".into(),
+            network_target: "10.0.0.5:9000".into(),
+            ..Config::default()
+        };
+        let body = json!({"network_target": "10.0.0.5:9000", "auto_eject": false});
+        assert!(
+            parse_patch(&body, &c).is_ok(),
+            "mkv output: the target is not checked"
+        );
+        let body = json!({"network_target": "10.0.0.5:9000", "output_format": "network"});
+        assert!(
+            parse_patch(&body, &c)
+                .unwrap_err()
+                .contains("network_target")
+        );
+    }
+
+    #[test]
+    fn dead_settings_load_but_are_not_on_the_form() {
+        let s = schema_json();
+        let keys: Vec<&str> = s["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["key"].as_str().unwrap())
+            .collect();
+        assert!(!keys.contains(&"max_rip_duration_secs"));
+        assert!(!keys.contains(&"min_pass_budget_secs"));
+        assert!(
+            !s["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|g| g["id"] == "Hidden")
+        );
+        let mut c = Config::default();
+        load_into(&mut c, &json!({"max_rip_duration_secs": 100}));
+        assert_eq!(c.max_rip_duration_secs, 100);
     }
 
     #[test]

@@ -144,6 +144,15 @@ pub fn handle(
                 return None;
             }
             let pick = |r: &super::RowView| r.target.as_ref().is_some_and(|t| wanted.contains(t));
+            let creates = lib
+                .listing(&d)
+                .rows
+                .iter()
+                .any(|r| pick(r) && r.mkv.is_none());
+            if let Some(why) = lib.queue_block(&d, creates) {
+                err(request, 409, &why);
+                return None;
+            }
             let n = lib.enqueue(&d, pick);
             queued(request, n, wanted.len());
         }
@@ -154,6 +163,10 @@ pub fn handle(
                     409,
                     "the library is still being scanned; try again in a moment",
                 );
+                return None;
+            }
+            if let Some(why) = lib.queue_block(&d, true) {
+                err(request, 409, &why);
                 return None;
             }
             let all = path.ends_with("/all");

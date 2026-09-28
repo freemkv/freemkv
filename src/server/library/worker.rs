@@ -113,6 +113,11 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
 
 fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
     if !job.replace
+        && let Err(why) = safe_to_create(&super::dirs(cfg), &job.target)
+    {
+        return Ending::Failed(std::io::Error::other(why));
+    }
+    if !job.replace
         && let Some(parent) = job.target.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
@@ -135,6 +140,29 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
         Err(_) if shutting_down() => Ending::Stopped(JobNote::Interrupted),
         Err(_) if sink.lib.stall_cancel.load(Ordering::SeqCst) => Ending::Stopped(JobNote::Stalled),
         Err(e) => Ending::Failed(e),
+    }
+}
+
+/// The last look before a remux creates a new MKV: the target must sit under
+/// the library folder, and that folder must be listable and not empty (an
+/// unmounted share is an empty mountpoint on the local disk).
+pub(crate) fn safe_to_create(d: &super::Dirs, target: &std::path::Path) -> Result<(), String> {
+    if !target.starts_with(&d.library) {
+        return Err(format!(
+            "{} is not under the library folder",
+            target.display()
+        ));
+    }
+    match std::fs::read_dir(&d.library).map(|mut r| r.next().is_some()) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "the library folder {} is empty (is the share mounted?); nothing was written",
+            d.library.display()
+        )),
+        Err(e) => Err(format!(
+            "the library folder {} cannot be read ({e}); nothing was written",
+            d.library.display()
+        )),
     }
 }
 
@@ -255,10 +283,31 @@ struct JobLog(Mutex<Option<std::fs::File>>);
 
 impl JobLog {
     fn create(path: &std::path::Path) -> Self {
+        // Append: a retry keeps the earlier attempts' transcripts above it.
+        let earlier = std::fs::metadata(path).is_ok_and(|m| m.len() > 0);
         let file = path
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::File::create(path))
+            .and_then(|()| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+            })
+            .map(|mut f| {
+                if earlier {
+                    let _ = writeln!(f, "{}", super::log_line(LineKind::Out, ""));
+                    let _ = writeln!(
+                        f,
+                        "{}",
+                        super::log_line(
+                            LineKind::Debug,
+                            &format!("──── another attempt, {} ────", crate::server::util::format_iso_datetime())
+                        )
+                    );
+                }
+                f
+            })
             .inspect_err(|e| {
                 tracing::warn!(path = %path.display(), error = %e, "library job log not writable")
             })
@@ -553,6 +602,11 @@ pub(crate) const RESCAN_SECS: u64 = 60;
 /// Keep the in-memory index current: scan, read headers, audit, then sleep
 /// until woken or the rescan interval passes.
 pub fn index_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>) {
+    let d = super::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner()));
+    let swept = lib.sweep_partials(&d);
+    if swept > 0 {
+        tracing::info!(count = swept, "removed orphaned remux partials at startup");
+    }
     while !shutting_down() {
         let d = super::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner()));
         if !lib.index_now(&d) {
@@ -792,6 +846,38 @@ mod tests {
             remux.join().unwrap();
         });
         assert!(sink.preempted(), "a rip that already ended still counts");
+    }
+
+    #[test]
+    fn a_new_mkv_is_never_created_in_an_empty_or_foreign_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let d = super::super::Dirs {
+            library: t.path().join("lib"),
+            isos: None,
+            iso_subfolders: false,
+        };
+        let target = d.library.join("A/A.mkv");
+        assert!(
+            safe_to_create(&d, &target)
+                .unwrap_err()
+                .contains("cannot be read")
+        );
+        std::fs::create_dir_all(&d.library).unwrap();
+        assert!(safe_to_create(&d, &target).unwrap_err().contains("empty"));
+        std::fs::create_dir_all(d.library.join("B")).unwrap();
+        assert!(safe_to_create(&d, &target).is_ok());
+        assert!(safe_to_create(&d, &t.path().join("elsewhere/A.mkv")).is_err());
+    }
+
+    #[test]
+    fn a_retry_appends_to_the_title_log() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("A.log");
+        JobLog::create(&p).write(LineKind::Out, "first");
+        JobLog::create(&p).write(LineKind::Out, "second");
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("first") && text.contains("second"), "{text}");
+        assert!(text.contains("another attempt"));
     }
 
     #[test]

@@ -30,6 +30,9 @@ pub struct Mount {
 }
 
 static LAST: Mutex<Vec<Mount>> = Mutex::new(Vec::new());
+// Folders whose last check has not come back. A hung mount keeps one thread
+// blocked; it never gets a second one.
+static IN_FLIGHT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// The last completed check.
 pub fn mounts() -> Vec<Mount> {
@@ -130,18 +133,44 @@ pub fn check(role: &'static str, path: &Path, want_write: bool) -> Mount {
     m
 }
 
-// `check` on a throwaway thread, abandoned after CHECK_TIMEOUT.
+// `check` on a throwaway thread, abandoned after CHECK_TIMEOUT. While a
+// folder's earlier check is still stuck, it reads as not responding at once.
 fn check_bounded(role: &'static str, path: PathBuf, want_write: bool) -> Mount {
     let (tx, rx) = std::sync::mpsc::channel();
     let p = path.clone();
+    {
+        let mut busy = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        if busy.contains(&path) {
+            drop(busy);
+            return not_responding(role, &path);
+        }
+        busy.push(path.clone());
+    }
     let spawned = std::thread::Builder::new()
         .name("health-check".into())
         .spawn(move || {
-            let _ = tx.send(check(role, &p, want_write));
+            let m = check(role, &p, want_write);
+            IN_FLIGHT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|x| *x != p);
+            let _ = tx.send(m);
         });
-    let timed_out = || Mount {
+    if spawned.is_err() {
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|x| *x != path);
+        return not_responding(role, &path);
+    }
+    rx.recv_timeout(CHECK_TIMEOUT)
+        .unwrap_or_else(|_| not_responding(role, &path))
+}
+
+fn not_responding(role: &'static str, path: &Path) -> Mount {
+    Mount {
         role,
-        path: path.clone(),
+        path: path.to_path_buf(),
         ok: false,
         problem: Some(format!(
             "not responding after {}s (a stale network mount?)",
@@ -152,12 +181,16 @@ fn check_bounded(role: &'static str, path: PathBuf, want_write: bool) -> Mount {
         total_bytes: None,
         latency_ms: None,
         checked_at: crate::server::util::epoch_secs(),
-    };
-    if spawned.is_err() {
-        return timed_out();
     }
-    rx.recv_timeout(CHECK_TIMEOUT)
-        .unwrap_or_else(|_| timed_out())
+}
+
+/// Whether the last check of `path` found it usable. `None` if never checked.
+pub fn folder_ok(path: &Path) -> Option<bool> {
+    LAST.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|m| m.path == path)
+        .map(|m| m.ok)
 }
 
 /// Check every folder once and publish the result.
@@ -200,6 +233,29 @@ mod tests {
         let gone = check("Output", &t.path().join("nope"), true);
         assert!(!gone.ok);
         assert_eq!(gone.problem.as_deref(), Some("missing"));
+    }
+
+    #[test]
+    fn a_stuck_check_is_never_doubled() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("stuck");
+        IN_FLIGHT.lock().unwrap().push(p.clone());
+        let m = check_bounded("Library", p.clone(), false);
+        assert!(!m.ok);
+        assert!(m.problem.unwrap().contains("not responding"));
+        assert_eq!(
+            IN_FLIGHT
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|x| **x == p)
+                .count(),
+            1
+        );
+        IN_FLIGHT.lock().unwrap().retain(|x| *x != p);
+        let fine = check_bounded("Library", t.path().to_path_buf(), false);
+        assert!(fine.ok);
+        assert!(!IN_FLIGHT.lock().unwrap().contains(&t.path().to_path_buf()));
     }
 
     #[test]

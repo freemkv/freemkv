@@ -375,8 +375,8 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     } else if is_post && url == "/api/system/keyserver-test" {
         handle_keyserver_test(request, cfg);
     } else if is_get && url.starts_with("/api/logs/") {
-        let device = url.trim_start_matches("/api/logs/");
-        let device = percent_decode(device);
+        let rest = url.trim_start_matches("/api/logs/");
+        let device = percent_decode(rest.split('?').next().unwrap_or(""));
         if !is_valid_device_name(&device) {
             return json_response(request, 400, r#"{"error":"invalid device name"}"#);
         }
@@ -1432,7 +1432,35 @@ fn carries_body(request: &tiny_http::Request) -> bool {
 const MAX_SSE_CLIENTS: usize = 8;
 
 static INFLIGHT_HANDLERS: AtomicUsize = AtomicUsize::new(0);
-static SSE_CLIENTS: AtomicUsize = AtomicUsize::new(0);
+// Open /events streams, oldest first, each with a stop flag. A client that
+// vanished can leave its stream blocked, so a new one over the cap evicts the
+// oldest, and every stream ends after SSE_MAX_LIFETIME (the browser reconnects).
+static SSE_STREAMS: std::sync::Mutex<std::collections::VecDeque<(u64, Arc<AtomicBool>)>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+static SSE_NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+const SSE_MAX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(600);
+
+// Admit a stream, evicting the oldest past the cap. Returns its id and stop flag.
+fn sse_admit() -> (u64, Arc<AtomicBool>) {
+    let id = SSE_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut open = SSE_STREAMS.lock().unwrap_or_else(|e| e.into_inner());
+    while open.len() >= MAX_SSE_CLIENTS {
+        if let Some((old, flag)) = open.pop_front() {
+            flag.store(true, Ordering::SeqCst);
+            tracing::info!(stream = old, "SSE cap reached: closing the oldest stream");
+        }
+    }
+    open.push_back((id, stop.clone()));
+    (id, stop)
+}
+
+fn sse_leave(id: u64) {
+    SSE_STREAMS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(i, _)| *i != id);
+}
 
 // RAII admission token for a counted connection slot: decrements its counter
 // on drop so the slot frees on any exit path (return, panic-unwind).
@@ -1461,6 +1489,24 @@ impl Drop for ConnGuard {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod web_tests {
+    // A new client past the cap closes the oldest stream instead of being refused.
+    #[test]
+    fn the_oldest_event_stream_gives_way() {
+        let admitted: Vec<_> = (0..super::MAX_SSE_CLIENTS + 2)
+            .map(|_| super::sse_admit())
+            .collect();
+        let stopped = admitted
+            .iter()
+            .filter(|(_, f)| f.load(super::Ordering::SeqCst))
+            .count();
+        assert!(stopped >= 2, "the two oldest are told to stop");
+        assert!(!admitted.last().unwrap().1.load(super::Ordering::SeqCst));
+        assert!(super::SSE_STREAMS.lock().unwrap().len() <= super::MAX_SSE_CLIENTS);
+        for (id, _) in admitted {
+            super::sse_leave(id);
+        }
+    }
+
     // An embedded UI asset as text.
     fn asset(name: &str) -> &'static str {
         let (_, _, body) = super::ASSETS
@@ -4234,6 +4280,19 @@ mod web_tests {
             );
             let (_, body) = roundtrip(&cfg, "POST", "/api/library/queue/clear-queued", None, &[]);
             assert!(body.contains("\"removed\":3"), "{body}");
+            // With the library folder emptied (an unmounted share looks like
+            // this), creating a new MKV is refused, one title or many.
+            let away = dir.path().join("away");
+            std::fs::rename(&lib, &away).unwrap();
+            std::fs::create_dir(&lib).unwrap();
+            assert!((0..20).any(|_| library.index_now(&d)));
+            let (code, body) = add(&target);
+            assert_eq!(code, 409, "{body}");
+            assert!(body.contains("is empty"), "{body}");
+            let (code, _) = roundtrip(&cfg, "POST", "/api/library/queue/all", None, &[]);
+            assert_eq!(code, 409);
+            std::fs::remove_dir(&lib).unwrap();
+            std::fs::rename(&away, &lib).unwrap();
             let (_, body) = roundtrip(&cfg, "POST", "/api/library/queue/pause", None, &[]);
             assert!(body.contains("\"paused\":true"), "{body}");
             let (code, _) = roundtrip(&cfg, "GET", "/api/library/console", None, &[]);
@@ -4451,6 +4510,51 @@ mod web_tests {
                 saved.contains("\"abort_on_lost_secs\""),
                 "the persisted settings.json must carry the field"
             );
+        }
+
+        // `?since=` answers JSON with a sequence to continue from.
+        #[test]
+        fn device_log_since_answers_json() {
+            let cfg = Arc::new(RwLock::new(Config::default()));
+            crate::server::log::device_log("sincetest", "hello");
+            let (code, body) = roundtrip(&cfg, "GET", "/api/logs/sincetest?since=0", None, &[]);
+            assert_eq!(code, 200, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(v["seq"].as_u64().unwrap() >= 1);
+            assert!(v["lines"][0][1].as_str().unwrap().contains("hello"));
+            let seq = v["seq"].as_u64().unwrap();
+            let (_, body) = roundtrip(
+                &cfg,
+                "GET",
+                &format!("/api/logs/sincetest?since={seq}"),
+                None,
+                &[],
+            );
+            assert!(body.contains("\"lines\":[]"), "{body}");
+            let (code, _) = roundtrip(&cfg, "GET", "/api/logs/sincetest", None, &[]);
+            assert_eq!(code, 200, "the plain tail still works");
+            let (code, body) = roundtrip(&cfg, "POST", "/api/system/keyserver-test", None, &[]);
+            assert_eq!(code, 400, "{body}");
+        }
+
+        // A save whose file write fails must leave the running config as it was.
+        #[test]
+        fn settings_post_rolls_back_when_the_write_fails() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let blocker = tmp.path().join("not-a-dir");
+            std::fs::write(&blocker, b"x").unwrap();
+            let cfg = cfg_in_tempdir(&blocker.join("config"));
+            let before = cfg.read().unwrap().auto_eject;
+            let (code, body) = roundtrip(
+                &cfg,
+                "POST",
+                "/api/settings",
+                Some(&format!(r#"{{"auto_eject": {}}}"#, !before)),
+                &[],
+            );
+            assert_eq!(code, 500, "{body}");
+            assert!(body.contains("nothing was changed"), "{body}");
+            assert_eq!(cfg.read().unwrap().auto_eject, before, "rolled back");
         }
 
         // A present-but-invalid on_read_error must not block the legacy
@@ -5874,11 +5978,12 @@ fn handle_keyserver_test(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
         );
     }
     let r = crate::server::keysource::probe_online_reachability(&c);
-    let ok = matches!(r, crate::server::keysource::ServiceReachability::Answered);
+    let reachable = matches!(r, crate::server::keysource::ServiceReachability::Answered);
+    // The test ran either way: `reachable` is its answer, not a request error.
     json_response(
         request,
         200,
-        &serde_json::json!({"ok": ok, "result": format!("{r:?}")}).to_string(),
+        &serde_json::json!({"reachable": reachable, "result": format!("{r:?}")}).to_string(),
     );
 }
 
@@ -5947,6 +6052,21 @@ fn handle_device_log(request: tiny_http::Request, _cfg: &Arc<RwLock<Config>>, de
     if !is_valid_device_name(device) {
         text_response(request, "invalid device");
         return;
+    }
+    // `?since=N`: only the lines after sequence N, as JSON, so a viewer keeps
+    // following the ring after it wraps. Without it, the plain-text tail.
+    let since = request
+        .url()
+        .split_once('?')
+        .and_then(|(_, q)| q.split('&').find_map(|kv| kv.strip_prefix("since=")))
+        .and_then(|v| v.parse::<u64>().ok());
+    if let Some(since) = since {
+        let (seq, lines) = crate::server::log::get_device_log_since(device, since);
+        return json_response(
+            request,
+            200,
+            &serde_json::json!({ "seq": seq, "lines": lines }).to_string(),
+        );
     }
     let lines = crate::server::log::get_device_log(device, 2000);
     text_response(request, &lines.join("\n"));
@@ -6029,10 +6149,11 @@ fn handle_debug_log(request: tiny_http::Request, url: &str) {
         }
     };
 
+    // Filter first, then keep the last `n`: a device's lines must not be
+    // crowded out of the window by other devices' lines.
     let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(n);
     let mut out: Vec<String> = Vec::new();
-    for line in &lines[start..] {
+    for line in &lines {
         if let Some(ref l) = level {
             let allowed = levels_at_or_above(l);
             // tracing-subscriber JSON format puts the level in `"level":"INFO"`.
@@ -6056,6 +6177,7 @@ fn handle_debug_log(request: tiny_http::Request, url: &str) {
         }
         out.push((*line).to_string());
     }
+    out.drain(..out.len().saturating_sub(n));
     text_response(request, &out.join("\n"));
 }
 
@@ -6270,6 +6392,12 @@ fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
         ));
     }
 
+    // A save that fails puts the running config back, unless a newer save
+    // changed it since; otherwise the page would say "nothing changed" while
+    // the daemon ran on the unsaved values.
+    let applied = serde_json::to_value(&snapshot).ok();
+    let roll_back = || roll_back_settings(cfg, applied.as_ref(), &current);
+
     // Queue on the coalescing writer and await it with a deadline: a hung
     // write (NFS) parks only that writer, and later saves supersede it.
     let rx = match config::save_coalesced(snapshot, save_gen) {
@@ -6280,6 +6408,7 @@ fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
                 error = %e,
                 "failed to spawn settings-save thread; on-disk settings.json unchanged"
             );
+            roll_back();
             return json_response(
                 request,
                 500,
@@ -6295,10 +6424,15 @@ fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
                 error = %e,
                 "settings save failed; on-disk settings.json unchanged"
             );
+            roll_back();
             json_response(
                 request,
                 500,
-                r#"{"ok":false,"error":"settings save failed"}"#,
+                &serde_json::json!({
+                    "ok": false,
+                    "error": format!("settings.json could not be written ({e}); nothing was changed")
+                })
+                .to_string(),
             )
         }
         Err(_) => {
@@ -6317,24 +6451,33 @@ fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
     }
 }
 
+// Put `previous` back as the running config, unless a newer save moved it on
+// from `applied` (the values the failed save installed). Runs after the save
+// has failed, never while one is in flight.
+fn roll_back_settings(
+    cfg: &Arc<RwLock<Config>>,
+    applied: Option<&serde_json::Value>,
+    previous: &Config,
+) {
+    let mut c = cfg.write().unwrap_or_else(|e| e.into_inner());
+    if serde_json::to_value(&*c).ok().as_ref() == applied {
+        *c = previous.clone();
+        config::apply_decrypt_threads(previous.decrypt_threads);
+    }
+}
+
 fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     // /events holds its thread for the whole client session (1s poll
-    // loop). Cap concurrent streams so N clients can't pin N threads and
-    // DoS the box; over the cap return 503 and let the thread end.
-    let _sse_guard = match ConnGuard::try_acquire(&SSE_CLIENTS, MAX_SSE_CLIENTS) {
-        Some(g) => g,
-        None => {
-            tracing::warn!(
-                max = MAX_SSE_CLIENTS,
-                "SSE connection rejected: concurrent /events cap reached"
-            );
-            return json_response(
-                request,
-                503,
-                r#"{"ok":false,"error":"too many SSE clients"}"#,
-            );
+    // loop). At most MAX_SSE_CLIENTS stay open: the oldest gives way.
+    let (id, stop) = sse_admit();
+    struct Leave(u64);
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            sse_leave(self.0);
         }
-    };
+    }
+    let _leave = Leave(id);
+    let opened = std::time::Instant::now();
     // Same-origin only, matching every other route — no ACAO. The service
     // is unauthenticated, so a wildcard would let any page the operator
     // visits cross-origin subscribe and read the full RipState.
@@ -6369,6 +6512,9 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     let mut library = crate::server::library::api::SseCursor::default();
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
+        if stop.load(Ordering::SeqCst) || opened.elapsed() > SSE_MAX_LIFETIME {
+            break;
+        }
         let mut frame = format!("data: {}\n\n", get_state_json(&staging_dir()));
         if let Some(lib) = crate::server::library::api::sse_frame(&mut library) {
             frame.push_str(&lib);

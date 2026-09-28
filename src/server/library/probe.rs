@@ -209,9 +209,21 @@ pub fn codec_name(id: &str) -> String {
 const RUNTIME_SLACK_SECS: f64 = 10.0;
 const RUNTIME_SLACK_FRACTION: f64 = 0.02;
 
+/// Whether a read failure says something about the file (it is short, garbled
+/// or not Matroska) rather than about the storage (EIO, ESTALE, a timeout, a
+/// file that vanished). Only a verdict about the file may be cached.
+pub fn is_verdict(e: &std::io::Error) -> bool {
+    freemkv_engine::error_code(e).is_some()
+        || matches!(
+            e.kind(),
+            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::InvalidData
+        )
+}
+
 /// The fast pass: EBML magic, header, at least one video track, a Duration, and
-/// the last Cues entry within max(10 s, 2 %) of that Duration.
-pub fn audit_fast(path: &Path) -> AuditReport {
+/// the last Cues entry within max(10 s, 2 %) of that Duration. `None` when the
+/// storage failed rather than the file: try again on the next pass.
+pub fn audit_fast(path: &Path) -> Option<AuditReport> {
     let mut report = AuditReport {
         depth: AuditDepth::Fast,
         ok: false,
@@ -230,20 +242,29 @@ pub fn audit_fast(path: &Path) -> AuditReport {
         f.read_exact(&mut m)?;
         Ok(m == [0x1A, 0x45, 0xDF, 0xA3])
     });
-    if !matches!(magic_ok, Ok(true)) {
-        report.issues.push(AuditIssue::NotMkv);
-        return report;
+    match magic_ok {
+        Ok(true) => {}
+        Ok(false) => {
+            report.issues.push(AuditIssue::NotMkv);
+            return Some(report);
+        }
+        Err(e) if is_verdict(&e) => {
+            report.issues.push(AuditIssue::NotMkv);
+            return Some(report);
+        }
+        Err(_) => return None,
     }
     let probe = std::fs::File::open(path)
         .map(std::io::BufReader::new)
         .and_then(libfreemkv::probe_mkv_with_cues);
     let probe = match probe {
         Ok(p) => p,
-        Err(e) => {
+        Err(e) if is_verdict(&e) => {
             let code = freemkv_engine::error_code(&e);
             report.issues.push(AuditIssue::Unreadable { code });
-            return report;
+            return Some(report);
         }
+        Err(_) => return None,
     };
     use libfreemkv::MkvTrackKind as K;
     let count = |k: fn(&K) -> bool| probe.tracks.iter().filter(|t| k(&t.kind)).count();
@@ -280,7 +301,20 @@ pub fn audit_fast(path: &Path) -> AuditReport {
         }
     }
     report.ok = report.issues.iter().all(|i| !i.fatal());
-    report
+    Some(report)
+}
+
+// The writing-app stamp of `path`. `Ok(None)` is a verdict (no stamp, or not
+// a readable MKV); `Err` is a storage failure worth retrying.
+fn read_stamp(path: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::File::open(path)
+        .map(std::io::BufReader::new)
+        .and_then(libfreemkv::probe_mkv)
+    {
+        Ok(p) => Ok(p.writing_app.or(p.muxing_app)),
+        Err(e) if is_verdict(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// The cache behind both facts. Filesystem work never happens under its locks.
@@ -300,11 +334,7 @@ impl ProbeCache {
         {
             return Some(s.writing_app.clone());
         }
-        let app = std::fs::File::open(path)
-            .map(std::io::BufReader::new)
-            .and_then(libfreemkv::probe_mkv)
-            .ok()
-            .and_then(|p| p.writing_app.or(p.muxing_app));
+        let app = read_stamp(path).ok()?;
         self.lock_stamps().insert(
             path.to_path_buf(),
             Stamp {
@@ -330,11 +360,11 @@ impl ProbeCache {
         if self.cached_stamp(path, sig).is_some() {
             return false;
         }
-        let app = std::fs::File::open(path)
-            .map(std::io::BufReader::new)
-            .and_then(libfreemkv::probe_mkv)
-            .ok()
-            .and_then(|p| p.writing_app.or(p.muxing_app));
+        let app = match read_stamp(path) {
+            Ok(app) => app,
+            // The storage failed, not the file: cache nothing, retry next pass.
+            Err(_) => return false,
+        };
         self.lock_stamps().insert(
             path.to_path_buf(),
             Stamp {
@@ -395,7 +425,9 @@ impl ProbeCache {
         if self.audit(path, sig).is_some() {
             return false;
         }
-        let report = audit_fast(path);
+        let Some(report) = audit_fast(path) else {
+            return false;
+        };
         self.lock_audits().insert(path.to_path_buf(), (sig, report));
         true
     }
@@ -472,6 +504,27 @@ mod tests {
         );
         assert_eq!(m(None), MuxedWith::Unknown);
         assert!(!m(Some("  ")).out_of_date());
+    }
+
+    #[test]
+    fn a_storage_error_is_not_cached_as_a_verdict() {
+        let t = tempfile::tempdir().unwrap();
+        // A directory opens but cannot be read: an I/O failure, not a file verdict.
+        let p = t.path().join("odd.mkv");
+        std::fs::create_dir(&p).unwrap();
+        assert!(audit_fast(&p).is_none());
+        let sig = FileSig::stat(&p).unwrap();
+        let cache = ProbeCache::default();
+        assert!(!cache.refresh_audit_at(&p, sig), "nothing cached");
+        assert!(cache.audit(&p, sig).is_none());
+        assert!(!cache.refresh_stamp(&p, sig));
+        assert_eq!(cache.cached_stamp(&p, sig), None, "retried next pass");
+        // A missing file is not a verdict either.
+        assert!(audit_fast(&t.path().join("gone.mkv")).is_none());
+        // A short file is: it really is not an MKV.
+        let short = t.path().join("short.mkv");
+        std::fs::write(&short, b"ab").unwrap();
+        assert_eq!(audit_fast(&short).unwrap().issues, [AuditIssue::NotMkv]);
     }
 
     #[test]
@@ -553,7 +606,7 @@ mod tests {
         let p = t.path().join("a.mkv");
         let audit = |bytes: Vec<u8>| {
             std::fs::write(&p, bytes).unwrap();
-            audit_fast(&p)
+            audit_fast(&p).unwrap()
         };
         let good = audit(mkv("freemkv 1.8.0", Some(7200.0), Some(7195), true));
         assert!(good.ok, "{good:?}");

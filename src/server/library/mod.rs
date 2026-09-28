@@ -149,6 +149,9 @@ pub struct Snapshot {
     /// Size and mtime of each MKV as the scan saw it.
     pub sigs: HashMap<PathBuf, FileSig>,
     pub incomplete: bool,
+    /// The library folder listed with no entries at all (an unmounted share
+    /// looks exactly like this).
+    pub library_empty: bool,
     pub scanned_at: Option<u64>,
     pub scan_ms: u64,
 }
@@ -358,7 +361,9 @@ impl Library {
         });
         let links = links::load(&self.config_dir);
         let rows = index::classify(&d.library, &mkvs.files, &isos.files, &links);
+        let library_empty = std::fs::read_dir(&d.library).is_ok_and(|mut r| r.next().is_none());
         self.set_snapshot(Snapshot {
+            library_empty,
             dirs: Some(d.clone()),
             mkvs: mkvs.files,
             isos: isos.files,
@@ -437,23 +442,29 @@ impl Library {
             return;
         };
         self.probes.record_at(target, sig, writing_app);
-        let mut next = (*self.snapshot()).clone();
-        next.sigs.insert(target.to_path_buf(), sig);
-        for row in next.rows.iter_mut() {
-            if row.target.as_deref() == Some(target) && row.kind == RowKind::IsoOnly {
-                row.kind = RowKind::Remux;
-                row.mkv = Some(target.to_path_buf());
-            }
-        }
-        if !next.mkvs.iter().any(|m| m.path == target)
-            && let Some(dirs) = &next.dirs
+        // Edited under the write lock, so a scan finishing now cannot lose it.
         {
-            next.mkvs.push(index::MkvFile {
-                path: target.to_path_buf(),
-                title: index::mkv_title(&dirs.library, target),
-            });
+            let mut guard = self.index.write().unwrap_or_else(|e| e.into_inner());
+            let mut next = (**guard).clone();
+            next.sigs.insert(target.to_path_buf(), sig);
+            for row in next.rows.iter_mut() {
+                if row.target.as_deref() == Some(target) && row.kind == RowKind::IsoOnly {
+                    row.kind = RowKind::Remux;
+                    row.mkv = Some(target.to_path_buf());
+                }
+            }
+            if !next.mkvs.iter().any(|m| m.path == target)
+                && let Some(dirs) = &next.dirs
+            {
+                let title = index::mkv_title(&dirs.library, target);
+                next.mkvs.push(index::MkvFile {
+                    path: target.to_path_buf(),
+                    title,
+                });
+            }
+            *guard = Arc::new(next);
         }
-        self.set_snapshot(next);
+        self.touch_index();
         self.probes.refresh_audit_at(target, sig);
         self.touch_index();
     }
@@ -537,6 +548,67 @@ impl Library {
             probing,
             auditing,
         }
+    }
+
+    /// Why queueing must wait, if it must. `creates` says whether the jobs
+    /// would write new MKVs (rather than replace ones that exist): an empty
+    /// library beside a full ISO folder looks like an unmounted share, and a
+    /// new MKV would then land on the local disk under the mountpoint.
+    pub fn queue_block(&self, d: &Dirs, creates: bool) -> Option<String> {
+        if crate::server::health::folder_ok(&d.library) == Some(false) {
+            return Some(format!(
+                "The library folder {} is not answering (see System). Nothing was queued.",
+                d.library.display()
+            ));
+        }
+        let snap = self.snapshot();
+        if snap.incomplete {
+            return Some(
+                "A library or ISO folder could not be fully read on the last scan. Nothing was queued; it will be once a full scan succeeds."
+                    .into(),
+            );
+        }
+        if creates && snap.library_empty && !snap.isos.is_empty() {
+            return Some(format!(
+                "The library folder {} is empty while the ISO folder is not. If the library share is not mounted, new MKVs would be written to the local disk. Nothing was queued; if the library really is empty, create any folder in it first.",
+                d.library.display()
+            ));
+        }
+        None
+    }
+
+    /// Delete `.mkv.partial` files under the library's title folders that no
+    /// running job owns: leftovers from a crash or a failed or cleared job.
+    /// Returns how many went.
+    pub fn sweep_partials(&self, d: &Dirs) -> usize {
+        let owned = self
+            .queue
+            .snapshot()
+            .running()
+            .map(|j| queue::partial_path(&j.target));
+        let Ok(titles) = std::fs::read_dir(&d.library) else {
+            return 0;
+        };
+        let mut n = 0;
+        for dir in titles.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+            let Ok(files) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for f in files.flatten().map(|e| e.path()) {
+                let partial = f
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.to_ascii_lowercase().ends_with(".mkv.partial"));
+                if partial
+                    && owned.as_deref() != Some(f.as_path())
+                    && std::fs::remove_file(&f).is_ok()
+                {
+                    tracing::info!(path = %f.display(), "removed an orphaned remux partial");
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 
     /// Queue the remuxable rows `pick` selects, from memory. Returns how many
@@ -723,6 +795,62 @@ mod tests {
                 isos: Some("/src".into()),
                 iso_subfolders: true
             }
+        );
+    }
+
+    fn dirs_in(t: &Path) -> Dirs {
+        Dirs {
+            library: t.join("lib"),
+            isos: Some(t.join("isos")),
+            iso_subfolders: false,
+        }
+    }
+
+    #[test]
+    fn an_empty_library_beside_isos_blocks_new_mkvs() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        std::fs::create_dir_all(&d.library).unwrap();
+        std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+        std::fs::write(d.isos.as_ref().unwrap().join("A (2000).iso"), b"x").unwrap();
+        let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+        lib.index_now(&d);
+        assert!(lib.queue_block(&d, true).unwrap().contains("empty"));
+        assert_eq!(
+            lib.queue_block(&d, false),
+            None,
+            "replacing is not creating"
+        );
+        std::fs::create_dir(d.library.join("Something")).unwrap();
+        lib.index_now(&d);
+        assert_eq!(lib.queue_block(&d, true), None);
+    }
+
+    #[test]
+    fn orphaned_partials_are_swept_but_the_running_one_is_kept() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        let a = d.library.join("A");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::write(a.join("A.mkv.partial"), b"half").unwrap();
+        std::fs::write(a.join("A.mkv"), b"whole").unwrap();
+        let b = d.library.join("B");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(b.join("B.mkv.partial"), b"running").unwrap();
+        let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+        lib.queue.add(vec![queue::NewJob {
+            title: "B".into(),
+            iso: "/i/B.iso".into(),
+            target: b.join("B.mkv"),
+            replace: false,
+        }]);
+        lib.queue.claim_next().unwrap();
+        assert_eq!(lib.sweep_partials(&d), 1);
+        assert!(!a.join("A.mkv.partial").exists());
+        assert!(a.join("A.mkv").exists());
+        assert!(
+            b.join("B.mkv.partial").exists(),
+            "the running job's partial stays"
         );
     }
 
