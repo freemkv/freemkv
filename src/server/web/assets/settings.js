@@ -1,0 +1,159 @@
+// Settings: drawn entirely from GET /api/settings/schema, the same table the
+// server loads, validates and redacts with. Nothing here names a setting,
+// except the webhook list's own editor.
+
+import { esc, $, $$, api, act, toast } from './ui.js';
+
+function ctlHtml(f, v) {
+  const id = 'f-' + f.key;
+  const ph = f.placeholder ? ' placeholder="' + esc(f.placeholder) + '"' : '';
+  switch (f.type) {
+    case 'bool':
+      return '<label class="switch"><input type="checkbox" id="' + id + '" data-key="' + f.key + '"' + (v ? ' checked' : '') + '><span>' + (v ? 'On' : 'Off') + '</span></label>';
+    case 'choice':
+      return '<div class="seg" role="radiogroup" aria-labelledby="l-' + f.key + '">' + f.options.map(o =>
+        '<label><input type="radio" name="' + f.key + '" data-key="' + f.key + '" value="' + esc(o.value) + '"' + (v === o.value ? ' checked' : '') + '><span>' + esc(o.label) + '</span></label>').join('') + '</div>';
+    case 'number':
+      return '<input class="txt num" type="number" min="0" max="' + (f.max || '') + '" id="' + id + '" data-key="' + f.key + '" value="' + esc(v == null ? '' : v) + '">';
+    case 'secret':
+      return '<input class="txt" type="password" autocomplete="off" id="' + id + '" data-key="' + f.key + '" value="' + esc(v || '') + '"' + (v ? '' : ' placeholder="Not set"') + '>';
+    case 'info':
+      return '<div class="info-line" id="' + id + '">' + esc(v || '') + '</div>';
+    case 'action':
+      return '<button type="button" class="btn btn-secondary btn-sm" data-endpoint="' + esc(f.endpoint) + '">' + esc(f.button) + '</button> <span class="small muted" data-status="' + f.key + '"></span>';
+    case 'webhooks':
+      return '<div id="hooks">' + (v || []).map(hookRow).join('') + '</div><button type="button" class="btn btn-ghost btn-sm" id="addhook">+ Add a webhook</button>';
+    default:
+      return '<input class="txt" type="text" spellcheck="false" id="' + id + '" data-key="' + f.key + '" value="' + esc(v == null ? '' : v) + '"' + ph + '>';
+  }
+}
+
+function hookRow(h) {
+  h = typeof h === 'string' ? { url: h, post_rip: true, post_mux: true, post_move: true } : (h || { url: '', post_rip: true, post_mux: true, post_move: true });
+  const cb = (k, label) => '<label><input type="checkbox" data-flag="' + k + '"' + (h[k] !== false ? ' checked' : '') + '> ' + label + '</label>';
+  return '<div class="hook"><input class="txt" type="text" data-hook placeholder="https://discord.com/api/webhooks/…" value="' + esc(h.url || '') + '" aria-label="Webhook URL">'
+    + '<span class="flags">' + cb('post_rip', 'Rip') + cb('post_mux', 'Mux') + cb('post_move', 'Move') + '</span>'
+    + '<button type="button" class="x" data-rmhook aria-label="Remove this webhook">×</button></div>';
+}
+
+function fieldHtml(f, v, sub) {
+  const labelled = f.type !== 'action' && f.type !== 'webhooks';
+  const lbl = f.label ? (labelled && f.type !== 'choice' ? '<label id="l-' + f.key + '" for="f-' + f.key + '">' + esc(f.label) + '</label>' : '<span class="lbl" id="l-' + f.key + '">' + esc(f.label) + '</span>') : '<span class="lbl"></span>';
+  return '<div class="field' + (sub ? ' sub' : '') + '" data-field="' + f.key + '"'
+    + (f.show_if ? ' data-show="' + f.show_if.key + '=' + esc(f.show_if.value) + '"' : '')
+    + (f.hide_if ? ' data-hide="' + f.hide_if.key + '=' + esc(f.hide_if.value) + '"' : '') + '>'
+    + lbl + '<div class="ctl">' + ctlHtml(f, v) + '</div>' + (f.help ? '<div class="help">' + esc(f.help) + '</div>' : '') + '</div>';
+}
+
+async function mount(view) {
+    view.innerHTML = '<div class="page-head"><div><h1>Settings</h1><p class="lede">Saved to <span class="mono">settings.json</span> in the config folder. Changes apply to the next rip.</p></div></div><div id="body" class="muted">Loading…</div>';
+    let schema, values;
+    try {
+      [schema, values] = await Promise.all([api('GET', '/api/settings/schema'), api('GET', '/api/settings')]);
+    } catch (e) {
+      $('#body', view).innerHTML = '<div class="banner bad" style="margin:0">Could not load the settings: ' + esc(e.message) + '</div>';
+      return;
+    }
+    const groups = schema.groups.filter(g => schema.fields.some(f => f.group === g.id));
+    const html = groups.map(g => {
+      const fields = schema.fields.filter(f => f.group === g.id);
+      const inner = fields.map(f => fieldHtml(f, values[f.key], !!f.show_if || !!f.hide_if)).join('');
+      if (g.id === 'Advanced') {
+        return '<section class="card" id="' + g.id + '"><details class="adv"><summary>' + esc(g.title) + ' <span class="muted small" style="font-weight:400">time limits most setups never change</span></summary><div style="margin-top:.8rem">' + inner + '</div></details></section>';
+      }
+      return '<section class="card" id="' + g.id + '"><h2>' + esc(g.title) + '</h2>' + inner + '</section>';
+    }).join('');
+    $('#body', view).outerHTML = '<div class="settings-layout"><nav class="settings-nav" aria-label="Settings sections">'
+      + groups.map(g => '<a href="#' + g.id + '">' + esc(g.title) + '</a>').join('') + '</nav>'
+      + '<form id="form" class="stack" novalidate>' + html
+      + '<div class="savebar"><button type="submit" class="btn btn-primary" id="save">Save changes</button><button type="button" class="btn btn-ghost" id="revert">Discard</button><span class="msg" id="msg">No changes</span></div></form></div>';
+    const form = $('#form', view);
+    const initial = JSON.stringify(collect());
+
+    function current(key) {
+      const on = form.querySelector('input[data-key="' + key + '"]:checked');
+      return on ? on.value : values[key];
+    }
+    function applyConditions() {
+      $$('[data-show],[data-hide]', form).forEach(el => {
+        let visible = true;
+        if (el.dataset.show) { const [k, v] = el.dataset.show.split('='); if (current(k) !== v) visible = false; }
+        if (el.dataset.hide) { const [k, v] = el.dataset.hide.split('='); if (current(k) === v) visible = false; }
+        el.hidden = !visible;
+      });
+    }
+    function collect() {
+      const out = {};
+      $$('[data-key]', form).forEach(el => {
+        const k = el.dataset.key;
+        if (el.type === 'radio') { if (el.checked) out[k] = el.value; }
+        else if (el.type === 'checkbox') out[k] = el.checked;
+        else if (el.type === 'number') out[k] = el.value === '' ? 0 : Math.max(0, parseInt(el.value, 10) || 0);
+        else out[k] = el.value;
+      });
+      const hooks = $('#hooks', form);
+      if (hooks) {
+        out.webhook_urls = $$('.hook', hooks).map(row => {
+          const flag = (k) => row.querySelector('[data-flag="' + k + '"]').checked;
+          return { url: row.querySelector('[data-hook]').value.trim(), post_rip: flag('post_rip'), post_mux: flag('post_mux'), post_move: flag('post_move') };
+        }).filter(h => h.url);
+      }
+      return out;
+    }
+    const dirty = () => JSON.stringify(collect()) !== initial;
+    function paintDirty() {
+      const d = dirty();
+      const msg = $('#msg', form);
+      if (!msg.classList.contains('bad')) msg.textContent = d ? 'Unsaved changes' : 'No changes';
+      $('#save', form).disabled = !d;
+      $('#revert', form).disabled = !d;
+    }
+    form.addEventListener('input', (e) => {
+      if (e.target.matches('.switch input')) e.target.nextElementSibling.textContent = e.target.checked ? 'On' : 'Off';
+      $('#msg', form).classList.remove('bad');
+      applyConditions();
+      paintDirty();
+    });
+    form.addEventListener('click', async (e) => {
+      if (e.target.closest('#addhook')) {
+        $('#hooks', form).insertAdjacentHTML('beforeend', hookRow(null));
+        $('#hooks .hook:last-child [data-hook]', form).focus();
+        paintDirty();
+      } else if (e.target.closest('[data-rmhook]')) {
+        e.target.closest('.hook').remove();
+        paintDirty();
+      } else if (e.target.closest('[data-endpoint]')) {
+        const b = e.target.closest('[data-endpoint]');
+        const st = form.querySelector('[data-status]');
+        if (dirty()) toast('Save first: the update uses the saved settings', 'info');
+        const r = await act(b, () => api('POST', b.dataset.endpoint), b.textContent);
+        if (r) {
+          const t = r.entries != null ? 'Updated: ' + r.entries.toLocaleString() + ' entries' : 'Done';
+          if (st) st.textContent = t;
+          toast(t, 'ok');
+        } else if (st) st.textContent = '';
+      }
+    });
+    $('#revert', form).addEventListener('click', () => mount(view));
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = $('#save', form);
+      const msg = $('#msg', form);
+      const body = collect();
+      const r = await act(btn, () => api('POST', '/api/settings', body), 'Save');
+      if (r) {
+        const y = window.scrollY;
+        await mount(view);
+        window.scrollTo(0, y);
+        toast('Settings saved', 'ok');
+      } else {
+        msg.classList.add('bad');
+        msg.textContent = 'Not saved. Nothing was changed.';
+      }
+    });
+    applyConditions();
+    paintDirty();
+    if (location.hash) { const t = document.getElementById(location.hash.slice(1)); if (t) t.scrollIntoView(); }
+}
+
+export default { title: 'Settings', mount };

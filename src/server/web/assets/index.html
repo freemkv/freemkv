@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>freemkv library</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/app.css?v={VERSION}">
+<script>
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('theme'); } catch (e) {}
+    if (t !== 'dark' && t !== 'light') t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+</head>
+<body>
+<a class="sr-only" href="#view">Skip to content</a>
+<header class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="/library" data-link>
+      <img src="/assets/freemkv-icon.svg" alt="" width="32" height="32">
+      <span>freemkv <span class="sub">library</span></span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="/library" data-link>Library</a>
+      <a href="/remux" data-link>Remux</a>
+      <a href="/ripper" data-link>Ripper</a>
+      <a href="/settings" data-link>Settings</a>
+      <a href="/system" data-link>System</a>
+    </nav>
+    <div class="nav-tools">
+      <button class="jobchip" id="jobchip" type="button" hidden title="Open the console">
+        <span class="pulse"></span><span class="t"></span><span class="mini"><i></i></span><span class="pct"></span>
+      </button>
+      <button class="icon-btn" id="theme" type="button" aria-label="Switch between light and dark"></button>
+    </div>
+  </div>
+</header>
+<main id="view" tabindex="-1"></main>
+<footer class="foot">
+  <a href="https://freemkv.org" target="_blank" rel="noopener">freemkv</a> library <span class="mono">{VERSION}</span>
+</footer>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+<script type="module" src="/assets/app.js?v={VERSION}"></script>
+</body>
+</html>

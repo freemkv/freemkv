@@ -22,1516 +22,97 @@ pub fn debug_enabled() -> bool {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Embedded single-page HTML dashboard — full parity with Python autorip web UI.
-// The freemkv brand favicon, shared verbatim with the marketing site
-// (freemkv.org's public/favicon.svg). Served at /favicon.svg so the dashboard
-// tab shows the same icon as the website.
-const FAVICON_SVG: &str = r##"<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
-<g transform="translate(128, 128)">
-<circle cx="0" cy="0" r="120" fill="#0D9488" />
-<circle cx="0" cy="0" r="95" fill="#0F766E" />
-<circle cx="0" cy="0" r="70" fill="#0D9488" />
-<circle cx="0" cy="0" r="28" fill="#F0FDFA" />
-<circle cx="0" cy="0" r="15" fill="#0D9488" />
-<path d="M0,-120 A120,120 0 0,1 103.9,60 L77.9,45 A90,90 0 0,0 0,-90 Z" fill="#14B8A6" opacity="0.6"/>
-<path d="M-15,-10 L-2,-10 L-2,10 L-15,10 Z" fill="#F0FDFA" opacity="0.9" transform="translate(55, 0)"/>
-<path d="M0,-9 L16,0 L0,9 Z" fill="#F0FDFA" opacity="0.9" transform="translate(58, 0)"/>
-</g>
-</svg>
-"##;
+// The web UI: real files under web/assets/, embedded at build time (no build
+// step). Plain ES modules; `app.js` routes between the page modules.
+const INDEX_HTML: &str = include_str!("web/assets/index.html");
+const ASSETS: &[(&str, &str, &[u8])] = &[
+    (
+        "app.css",
+        "text/css; charset=utf-8",
+        include_bytes!("web/assets/app.css"),
+    ),
+    (
+        "app.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/app.js"),
+    ),
+    (
+        "bus.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/bus.js"),
+    ),
+    (
+        "ui.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/ui.js"),
+    ),
+    (
+        "table.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/table.js"),
+    ),
+    (
+        "libdata.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/libdata.js"),
+    ),
+    (
+        "details.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/details.js"),
+    ),
+    (
+        "console.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/console.js"),
+    ),
+    (
+        "library.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/library.js"),
+    ),
+    (
+        "remux.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/remux.js"),
+    ),
+    (
+        "ripper.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/ripper.js"),
+    ),
+    (
+        "settings.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/settings.js"),
+    ),
+    (
+        "system.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/system.js"),
+    ),
+    (
+        "freemkv-icon.svg",
+        "image/svg+xml",
+        include_bytes!("web/assets/freemkv-icon.svg"),
+    ),
+    (
+        "favicon.svg",
+        "image/svg+xml",
+        include_bytes!("web/assets/favicon.svg"),
+    ),
+];
 
-const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<title>AutoRip</title>
-<style>
-:root {
-  --bg:#f6f8fa; --border:#d0d7de; --text:#1f2328; --text2:#4d5560; --text3:#656d76;
-  --accent:#0969da; --green:#1a7f37; --yellow:#9a6700; --red:#cf222e; --blue:#0969da;
-  --card:#fff; --log-bg:#fff; --log-text:#24292f; --log-border:#d0d7de; --chip:#eaeef2; --poster-bg:#e1e4e8;
-  /* Light-mode pill backgrounds (--green / --yellow / --red) are all
-     saturated/dark — pair them with white pill text. Dark mode flips
-     to lighter pill backgrounds, which want black text instead. */
-  --pill-fg:#fff;
-}
-body.dark {
-  --bg:#0d1117; --border:#3d444d; --text:#f0f6fc; --text2:#d1d9e0; --text3:#9198a1;
-  --accent:#79c0ff; --green:#56d364; --yellow:#e3b341; --red:#ff7b72; --blue:#79c0ff;
-  --card:#151b23; --log-bg:#151b23; --log-text:#d1d9e0; --log-border:#3d444d; --chip:#262c36; --poster-bg:#262c36;
-  --pill-fg:#000;
-}
-* { margin:0; padding:0; box-sizing:border-box; }
-/* Always reserve the vertical scrollbar gutter. Without this, switching
-   between key sources (Local is taller than Online) makes the page scrollbar
-   appear/disappear, which changes the viewport width and shifts the centered
-   .c container sideways. overflow-y:scroll keeps the gutter present always. */
-html { overflow-y:scroll; scrollbar-gutter:stable; }
-body { font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; display:flex; flex-direction:column; }
-.c { max-width:900px; margin:0 auto; padding:20px; width:100%; flex:1; display:flex; flex-direction:column; }
-@keyframes p { 0%,100%{opacity:1} 50%{opacity:.3} }
-@keyframes ph { 0%,100%{opacity:1} 50%{opacity:.45} }
-.card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:16px; }
-.card h2 { font-size:.7rem; color:var(--text3); margin-bottom:10px; text-transform:uppercase; font-weight:600; letter-spacing:1px; }
-.log { background:var(--log-bg); border:1px solid var(--log-border); border-radius:8px; padding:12px; font-family:'SF Mono','Fira Code',monospace; font-size:.75rem; max-height:280px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; line-height:1.6; color:var(--log-text); }
-.log::-webkit-scrollbar { width:5px; } .log::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
-.btn { background:var(--chip); border:1px solid var(--border); color:var(--text); padding:5px 12px; border-radius:6px; cursor:pointer; font-size:.78rem; text-decoration:none; }
-.btn:hover { background:var(--border); }
-.ok { color:var(--green); } .warn { color:var(--red); }
-.headerbar { display:flex; align-items:center; gap:8px 12px; padding:12px 16px; flex-wrap:wrap; border-bottom:1px solid var(--border); background:var(--card); position:sticky; top:0; z-index:10; }
-.nav { text-decoration:none; font-size:.85rem; color:var(--text3); padding:4px 0; border-bottom:2px solid transparent; cursor:pointer; background:none; border-top:none; border-left:none; border-right:none; }
-.nav:hover { color:var(--text); } .nav.active { color:var(--text); border-bottom-color:var(--accent); font-weight:500; }
-.brand { font-size:1.1rem; color:var(--text3); font-weight:400; letter-spacing:3px; text-transform:uppercase; }
-/* Now Playing card */
-.np { display:flex; align-items:flex-start; gap:20px; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:16px; min-height:180px; }
-.poster { width:120px; height:180px; border-radius:8px; background:var(--poster-bg); flex-shrink:0; align-self:flex-start; object-fit:cover; box-shadow:0 2px 8px rgba(0,0,0,.1); }
-.ph { width:120px; min-height:170px; border-radius:8px; background:var(--poster-bg); flex-shrink:0; display:flex; align-items:center; justify-content:center; }
-.ph svg { width:40px; height:40px; opacity:.4; }
-.nfo { flex:1; display:flex; flex-direction:column; justify-content:center; }
-.mt { font-size:1.5rem; font-weight:600; color:var(--text); line-height:1.2; }
-.my { font-size:.9rem; color:var(--text2); margin-top:4px; }
-.mo { font-size:.8rem; color:var(--text2); margin-top:8px; line-height:1.5; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
-.b { display:inline-block; padding:2px 8px; border-radius:4px; font-size:.7rem; font-weight:600; text-transform:uppercase; margin-left:8px; }
-.b.uhd { background:#0969da18; color:var(--blue); border:1px solid #0969da33; }
-.b.bluray { background:#1a7f3718; color:var(--green); border:1px solid #1a7f3733; }
-.b.dvd { background:#9a670018; color:var(--yellow); border:1px solid #9a670033; }
-.btn-stop, .btn-eject { font-size:.78rem; }
-.idle-msg { display:flex; flex-direction:column; align-items:center; justify-content:center; width:100%; min-height:160px; color:var(--text3); }
-.idle-msg svg { width:48px; height:48px; opacity:.4; margin-bottom:12px; }
-.idle-msg p { font-size:.85rem; }
-/* Device tabs */
-.dtab { display:inline-block; padding:6px 16px; font-size:.8rem; cursor:pointer; border:1px solid var(--border); border-bottom:none; border-radius:8px 8px 0 0; background:var(--chip); color:var(--text3); margin-right:4px; }
-.dtab.active { background:var(--card); color:var(--text); font-weight:500; border-bottom:1px solid var(--card); margin-bottom:-1px; position:relative; z-index:1; }
-.dtabs { border-bottom:1px solid var(--border); margin-bottom:16px; padding:0 4px; }
-.actions { display:flex; gap:8px; align-items:center; margin-bottom:12px; }
-/* History table */
-table { width:100%; border-collapse:collapse; font-size:.8rem; margin-top:16px; display:block; overflow-x:auto; }
-th { text-align:left; color:var(--text3); font-weight:600; font-size:.7rem; text-transform:uppercase; letter-spacing:.5px; padding:8px 10px; border-bottom:2px solid var(--border); }
-td { padding:8px 10px; border-bottom:1px solid var(--border); }
-tr:hover { background:var(--chip); }
-/* System page */
-.files { font-size:.8rem; line-height:1.8; }
-.files span { color:var(--text2); }
-/* Settings */
-.setting { margin-bottom:18px; }
-.setting label { display:block; font-size:13px; color:var(--text2); font-weight:500; margin-bottom:5px; }
-.setting input[type=text], .setting input[type=number] { padding:8px 10px; border:1px solid var(--border); border-radius:6px; background:var(--log-bg); color:var(--text); font-size:13px; font-family:inherit; box-sizing:border-box; }
-.setting input[type=text] { width:100%; }
-.setting input[type=number] { width:120px; }
-.setting input:focus { outline:none; border-color:var(--accent); }
-.setting .hint { font-size:12px; color:var(--text3); margin-top:3px; line-height:1.4; }
-.toggle { display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; font-weight:400; color:var(--text); line-height:1; }
-.toggle input[type=checkbox] { width:13px; height:13px; margin:0; flex-shrink:0; accent-color:var(--accent); }
-#settings-form .card { margin-bottom:12px; }
-#settings-form .card h2 { margin-bottom:14px; }
-.section { display:none; } .section.active { display:flex; flex-direction:column; flex:1; }
-/* ── Mobile / narrow viewports ─────────────────────────────────────────
-   Additive: these rules only take effect below the breakpoints, so the
-   desktop layout above is untouched. Keep the Now-Playing card a COMPACT
-   horizontal row (small poster + info) rather than a full-width stacked
-   poster, tighten the sticky header so the wordmark stops crowding the
-   nav, wrap the action buttons, and enlarge tap targets for touch. */
-@media(max-width:600px){
-  .c{padding:10px 10px 20px}
-  .headerbar{padding:10px 12px;gap:6px 10px}
-  .brand{font-size:.95rem;letter-spacing:2px}
-  .nav{font-size:.9rem;padding:7px 0}
-  .card{padding:13px;margin-bottom:12px}
-  .np{gap:14px;padding:14px;min-height:0}
-  .poster,.ph{width:84px;height:126px;min-height:0;max-height:none}
-  .ph svg{width:28px;height:28px}
-  .mt{font-size:1.2rem}
-  .mo{-webkit-line-clamp:4}
-  .actions{flex-wrap:wrap}
-  .btn{padding:7px 12px}
-  .log{font-size:.72rem;padding:10px}
-  table{font-size:.75rem}
-  th,td{padding:6px 8px}
-  .dtab{padding:6px 12px}
-}
-@media(max-width:400px){
-  .brand{display:none}
-  .mt{font-size:1.12rem}
-  .poster,.ph{width:72px;height:108px}
-}
-</style>
-</head>
-<body>
-<div class="c">
-<div class="headerbar">
-  <span class="brand">AUTORIP</span>
-  <button class="nav active" data-tab="ripper">Ripper</button>
-  <button class="nav" data-tab="library">Library</button>
-  <button class="nav" data-tab="system">System</button>
-  <button class="nav" data-tab="settings">Settings</button>
-  <button class="btn" style="margin-left:auto" onclick="toggleTheme()" id="thm"></button>
-</div>
-
-<!-- Ripper page -->
-<div id="ripper" class="section active">
-  <div id="dtabs"></div>
-  <div id="muxbanner"></div>
-  <div id="np"></div>
-  <div id="actions"></div>
-  <div id="steps" style="margin-bottom:16px"></div>
-  <div id="err"></div>
-  <details style="margin-top:16px"><summary style="font-size:.7rem;color:var(--text3);text-transform:uppercase;font-weight:600;letter-spacing:1px;cursor:pointer;user-select:none">Log</summary>
-  <div id="log" class="log" style="flex:1;max-height:none;margin-top:8px"></div></details>
-  <details id="debugBox" open style="margin-top:12px;display:none"><summary style="font-size:.7rem;color:var(--accent);text-transform:uppercase;font-weight:600;letter-spacing:1px;cursor:pointer;user-select:none">Debug Log (live) — the patch walk + timings</summary>
-  <div id="debuglog" class="log" style="flex:1;max-height:none;margin-top:8px"></div></details>
-</div>
-
-<!-- Library page -->
-<div id="library" class="section">
-  <div class="card" style="margin-top:16px">
-    <div id="libsum" style="font-size:.85rem;color:var(--text2)"></div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
-      <button class="btn" onclick="libPost('/api/library/queue/out-of-date',null,this)">Remux out of date</button>
-      <button class="btn" onclick="if(confirm('Remux every title that has an ISO?'))libPost('/api/library/queue/all',null,this)">Remux all</button>
-      <button class="btn" id="libpause" onclick="libPost(this.dataset.paused==='1'?'/api/library/queue/resume':'/api/library/queue/pause',null,this)">Pause queue</button>
-      <button class="btn" onclick="libPost('/api/library/queue/clear',null,this)">Clear finished</button>
-      <label class="toggle" style="margin-left:auto;font-size:.8rem"><input type="checkbox" id="libdebug" onchange="libPost('/api/library/debug',{enabled:this.checked},null)"> Debug log</label>
-    </div>
-  </div>
-  <div id="librun"></div>
-  <div id="libtable"></div>
-  <details open style="margin-top:12px"><summary style="font-size:.7rem;color:var(--text3);text-transform:uppercase;font-weight:600;letter-spacing:1px;cursor:pointer">Console</summary>
-  <div id="libconsole" class="log" style="margin-top:8px;max-height:320px"></div></details>
-</div>
-
-<!-- System page -->
-<div id="system" class="section">
-  <div id="review"></div>
-  <div class="card" style="margin-top:16px"><h2>Mux Queue</h2><div id="muxes"></div></div>
-  <div class="card"><h2>Move Queue</h2><div id="moves"></div></div>
-  <div class="card"><div class="setting"><label class="toggle"><input type="checkbox" id="debugToggle" onchange="toggleDebug(this.checked)"> Debug logging</label><div class="hint">Verbose logs for bug reports (autorip + rip library). Off by default.</div></div></div>
-  <div><h2 style="font-size:.7rem;color:var(--text3);text-transform:uppercase;font-weight:600;letter-spacing:1px;margin-bottom:8px">System Log</h2><div id="syslog" class="log" style="max-height:400px"></div></div>
-</div>
-
-<!-- Settings page -->
-<div id="settings" class="section">
-  <div style="margin-top:16px">
-  <div id="settings-form"></div>
-  <div style="position:sticky;bottom:0;padding:12px 0;background:var(--bg)">
-  <button class="btn" id="savebtn" onclick="saveSettings()">Save</button>
-  <span id="save-status" style="margin-left:8px;font-size:.8rem;color:var(--green)"></span>
-  </div>
-  </div>
-</div>
-</div>
-
-<div style="text-align:center;padding:16px;font-size:.7rem"><a href="https://github.com/freemkv/autorip" style="color:var(--text3);text-decoration:none" target="_blank">autorip v{VERSION}</a></div>
-
-<script>
-/* ---- Theme ---- */
-const _sun='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>';
-const _moon='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
-function toggleTheme(){document.body.classList.toggle('dark');localStorage.setItem('theme',document.body.classList.contains('dark')?'dark':'light');document.getElementById('thm').innerHTML=document.body.classList.contains('dark')?_sun:_moon}
-(function(){
-  const saved=localStorage.getItem('theme');
-  if(saved==='dark'||(saved==null&&window.matchMedia('(prefers-color-scheme:dark)').matches))document.body.classList.add('dark');
-  document.getElementById('thm').innerHTML=document.body.classList.contains('dark')?_sun:_moon;
-})();
-
-/* ---- Util ---- */
-function esc(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
-/* Turn bare https:// URLs into anchors. Matched on the RAW text and each
-   piece escaped separately, so a URL next to a quote can't swallow its
-   &#39;/&quot; entity. Trailing sentence punctuation stays outside the link. */
-function escLinks(s){if(s==null)return'';s=String(s);let out='',last=0,m;const re=/https:\/\/[^\s<>"']+/g;
-  while((m=re.exec(s))!==null){let u=m[0],tail='';const t=u.match(/[.,;:)\]]+$/);if(t){tail=t[0];u=u.slice(0,-tail.length)}
-    out+=esc(s.slice(last,m.index))+'<a href="'+esc(u)+'" target="_blank" rel="noopener noreferrer" style="color:inherit">'+esc(u)+'</a>'+esc(tail);last=m.index+m[0].length}
-  return out+esc(s.slice(last))}
-function upd(id,html){const el=document.getElementById(id);if(el&&el._last!==html){el.innerHTML=html;el._last=html}}
-/* Every device action button goes through this, and none of them may be
-   fire-and-forget. The drive-card buttons used to call fetch() bare, with no
-   .then and no .catch: the server's answer was DISCARDED. Two of them are
-   rendered exactly in the window where the server now answers 409 — Eject
-   renders on discIn && !active, and "Accept & deliver" renders on
-   lossAborted && !active — and both of those windows can overlap a worker that
-   is still unwinding, which the claim refuses. So the operator clicked Eject
-   and the disc stayed in the drive; or clicked "Accept & deliver", watched the
-   button grey out (it set this.disabled=true first, which READS as success),
-   and no `.accept-loss` marker was ever written. A 409 rendered as a success.
-   Report the failure, and put the button back the way it was. */
-function apiPost(u,btn,label){
-  if(btn)btn.disabled=true;
-  return fetch(u,{method:'POST'}).then(function(r){
-    if(r.ok)return null;
-    return r.text().then(function(t){
-      let msg='';
-      try{const j=JSON.parse(t);if(j&&j.error)msg=j.error}catch(e){}
-      throw new Error(msg||('HTTP '+r.status));
-    });
-  }).catch(function(e){
-    alert((label||'Request')+' failed: '+e.message);
-  }).then(function(){
-    /* Re-enable even on success: the poll re-renders the card from server
-       state a moment later, and a button left disabled after a failure is
-       exactly the "it looked like it worked" bug. */
-    if(btn)btn.disabled=false;
-  });
-}
-
-/* ---- Library ---- */
-let _libGen=-1,_libBusy=false;
-function libActive(){return document.getElementById('library').classList.contains('active')}
-function libGB(b){return b==null?'':(b/1e9).toFixed(1)+' GB'}
-function libHms(s){if(s==null)return'-';s=Math.round(s);return Math.floor(s/3600)+':'+String(Math.floor(s/60)%60).padStart(2,'0')+':'+String(s%60).padStart(2,'0')}
-function libWhen(t){return t?new Date(t*1000).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):''}
-function libPost(u,body,btn){
-  if(btn)btn.disabled=true;
-  const opt={method:'POST'};if(body){opt.body=JSON.stringify(body);opt.headers={'Content-Type':'application/json'}}
-  return fetch(u,opt).then(r=>r.ok?null:r.text().then(t=>{throw new Error(t||('HTTP '+r.status))}))
-    .catch(e=>alert('Request failed: '+e.message)).then(()=>{if(btn)btn.disabled=false;loadLibrary(false)});
-}
-function libRunHtml(r){
-  if(!r)return'';
-  const pct=r.pct==null?null:r.pct;
-  const bar=pct==null?'':'<div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin:8px 0"><div style="height:100%;width:'+pct.toFixed(1)+'%;background:var(--accent)"></div></div>';
-  const stats=pct==null?esc(r.phase):(pct.toFixed(1)+'% \u00b7 '+(r.speed_bps/1e6).toFixed(1)+' MB/s \u00b7 ETA '+libHms(r.eta_secs)+' \u00b7 '+esc(r.phase));
-  const stall=r.stalled_secs>=60?' <span class="warn">no progress for '+libHms(r.stalled_secs)+'</span>':'';
-  return '<div class="card"><b>'+esc(r.title)+'</b>'+bar+'<div style="font-size:.8rem;color:var(--text2)">'+stats+stall+'</div></div>';
-}
-function libConsole(lines,reset){
-  const el=document.getElementById('libconsole');if(!el)return;
-  const atEnd=el.scrollTop+el.clientHeight>=el.scrollHeight-20;
-  if(reset)el.textContent='';
-  el.textContent+=lines.map(l=>l.text+'\n').join('');
-  if(atEnd)el.scrollTop=el.scrollHeight;
-}
-function libEvent(f){
-  if(!libActive())return;
-  libConsole(f.lines||[],false);
-  upd('librun',libRunHtml(f.running));
-  if(f.queue_generation!==_libGen){_libGen=f.queue_generation;loadLibrary(false)}
-}
-function libMuxed(r){
-  const m=r.muxed_with;
-  if(!r.mkv)return r.kind==='iso_only'?'<span class="warn">no MKV</span>':'';
-  if(m.state==='current')return '<span class="ok">'+esc(m.version)+'</span>';
-  if(m.state==='older')return '<span class="warn" title="not muxed with this version">'+esc(m.version)+'</span>';
-  if(m.state==='other')return '<span class="warn">'+esc(m.app)+'</span>';
-  return '-';
-}
-function libAudit(r){
-  if(!r.mkv)return'';
-  const a=r.audit;if(!a)return '<span style="color:var(--text3)">pending</span>';
-  if(a.ok&&!a.issues.length)return '<span class="ok">ok</span>';
-  const t=a.issues.map(i=>i.kind.replace(/_/g,' ')).join(', ');
-  return '<span class="'+(a.ok?'':'warn')+'" title="'+esc(t)+'">'+esc(t)+'</span>';
-}
-function libStatus(r){
-  const j=r.job,res=r.result;let s='';
-  if(j&&j.state==='queued')s='<span style="color:var(--yellow)">queued'+(j.note?' ('+esc(j.note)+')':'')+'</span>';
-  else if(j&&j.state==='running')s='<span style="color:var(--accent)">running</span>';
-  else if(res&&res.outcome==='done')s='<span class="ok">\u2713 '+libGB(res.size_bytes)+' in '+libHms(res.secs)+'</span> <span style="color:var(--text3)">'+libWhen(res.finished_at)+'</span>';
-  else if(res&&res.outcome==='failed')s='<span class="warn" title="'+esc(res.message)+'">\u2717 '+esc((res.code!=null&&res.message.indexOf('E'+res.code)<0?'E'+res.code+' ':'')+res.message).slice(0,90)+'</span>';
-  if(j||res)s+=' <a href="/api/library/log?title='+encodeURIComponent(r.title)+'" target="_blank" style="font-size:.75rem">log</a>';
-  return s;
-}
-function renderLibrary(d){
-  const rows=d.rows||[],q=d.queue||{};
-  const n=rows.filter(r=>r.needs_remux).length,isos=rows.filter(r=>r.iso).length,mkvs=rows.filter(r=>r.mkv).length;
-  upd('libsum','freemkv <b>'+esc(d.version)+'</b> \u00b7 '+mkvs+' MKVs \u00b7 '+isos+' ISOs \u00b7 '+n+' out of date or missing \u00b7 '+q.queued+' queued'+(q.paused?' \u00b7 <b class="warn">queue paused</b>':'')+(d.iso_dir?'':' \u00b7 <span class="warn">no ISO folder set</span>')+(d.incomplete?' \u00b7 <span class="warn">a folder could not be fully read</span>':''));
-  const pb=document.getElementById('libpause');if(pb){pb.dataset.paused=q.paused?'1':'0';pb.textContent=q.paused?'Resume queue':'Pause queue'}
-  const dbg=document.getElementById('libdebug');if(dbg)dbg.checked=!!q.debug_log;
-  upd('librun',libRunHtml(d.live));
-  const order=r=>(r.kind==='remux'||r.kind==='iso_only')?0:1;
-  const sorted=rows.slice().sort((a,b)=>order(a)-order(b));
-  let h='<table style="display:table"><thead><tr><th>Title</th><th>ISO</th><th>Muxed with</th><th>Audit</th><th>Remux</th><th></th></tr></thead><tbody>';
-  sorted.forEach(r=>{
-    const can=r.kind==='remux'||r.kind==='iso_only';
-    const busy=r.job&&(r.job.state==='queued'||r.job.state==='running');
-    const note=r.note?(r.note.kind==='several_isos'?r.note.count+' ISOs match; rename one':r.note.count+' MKVs match'):(r.iso?'':'no ISO');
-    const iso=r.iso?esc(r.iso.split('/').pop())+(r.linked?' <span title="recorded at rip time">\u{1F517}</span>':''):'<span style="color:var(--text3)">'+esc(note)+'</span>';
-    const btn=can?'<button class="btn" '+(busy?'disabled ':'')+'data-target="'+esc(r.target)+'" onclick="libPost(\'/api/library/queue/add\',{target:this.dataset.target},this)">Remux</button>':'';
-    h+='<tr'+(can?'':' style="opacity:.5"')+'><td><b>'+esc(r.title)+'</b></td><td style="font-size:.75rem">'+iso+'</td><td>'+libMuxed(r)+'</td><td style="font-size:.75rem">'+libAudit(r)+'</td><td style="font-size:.75rem">'+libStatus(r)+'</td><td>'+btn+'</td></tr>';
-  });
-  h+='</tbody></table>';
-  upd('libtable',h);
-}
-function loadLibrary(withConsole){
-  if(_libBusy)return;_libBusy=true;
-  fetch('/api/library',{cache:'no-store'}).then(r=>r.json()).then(d=>renderLibrary(d)).catch(()=>{}).then(()=>{_libBusy=false});
-  if(withConsole)fetch('/api/library/console',{cache:'no-store'}).then(r=>r.json()).then(c=>libConsole(c.lines||[],true)).catch(()=>{});
-}
-
-/* ---- Navigation ---- */
-document.querySelectorAll('.nav[data-tab]').forEach(btn=>{
-  btn.addEventListener('click',function(){
-    const tab=this.dataset.tab;
-    document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
-    document.getElementById(tab).classList.add('active');
-    document.querySelectorAll('.nav[data-tab]').forEach(b=>b.classList.remove('active'));
-    this.classList.add('active');
-    if(tab==='system')loadSystem();
-    if(tab==='library')loadLibrary(true);
-    if(tab==='settings')loadSettings();
-  });
-});
-
-/* ---- Browser notifications ---- */
-if(typeof Notification!=='undefined'&&Notification.permission==='default')Notification.requestPermission();
-function notify(title,body,icon){
-  if(typeof Notification!=='undefined'&&Notification.permission==='granted'){
-    try{new Notification(title,{body:body,icon:icon||''})}catch(e){}
-  }
-}
-
-/* ---- Disc SVG icon ---- */
-const D='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>';
-
-/* ---- Codec/Resolution maps ---- */
-/* ---- Step-by-step progress ---- */
-const ACTIVE_STATES=['ripping','scanning','detecting'];
-let _lastStatus={};
-let _activeTab=null;
-
-function renderBar(s,p){
-  /* Two modes, one renderer:
-     - Pass 1 (sequential sweep, s.pass<=1): a genuine left-to-right progress
-       fill. x-axis = work done. Green grows to the read head. Only damage the
-       sweep has ALREADY passed over shows red; the unread region ahead of the
-       head stays blank (NonTried is unknown, not bad — see the overlay clip
-       below).
-     - Pass 2-N (retry/patch, s.pass>1): a POSITIONAL disc map ("the disc,
-       coloured by status"). x-axis = DISC POSITION (0..bytes_total_disc), NOT
-       work done. The whole bar is the disc: GREEN everywhere it's good, RED
-       segments at each still-bad range's real offset. As patches recover
-       sectors, bad_ranges shrink and the red heals to green IN PLACE. A blue
-       PLAYHEAD marks the current read position (last_sector) and pulses so it
-       reads as "actively working here". */
-  const total=s&&s.bytes_total_disc||0;
-  const ranges=s&&s.bad_ranges||[];
-  const positional=!!(s&&s.pass>1);
-  /* Same height in EVERY pass (pass 1 sweep + pass N defrag map) so the bar
-     doesn't resize between phases. 20px reads as a disc map, not a hairline. */
-  const barH=20;
-  /* "You are here" caret ABOVE the bar — consistent in EVERY pass.
-     pass 1 (sweep): at last_sector, the real sequential read head.
-     pass N (patch): at the active section = the highest-LBA bad range still
-     present (autorip patches in reverse, so it steps left as ranges recover).
-     Derived from published state — in patch, last_sector is work-done (not a
-     disc LBA), so the active-section position is used instead. */
-  let caretPct=null;
-  if(total>0&&s&&s.status==='ripping'){
-    if(positional&&ranges.length){
-      /* The handler-chain engine works the LARGEST bad range first
-         (largest-first ordering), so the live position sits on the largest
-         remaining range, not the highest-LBA one. Track that — otherwise the
-         caret parks on a small high-LBA block while recovery is really chewing
-         a big block elsewhere. When the largest range shrinks below another,
-         the arrow jumps to the new largest. */
-      let act=ranges[0];
-      ranges.forEach(r=>{ if(r.count>act.count) act=r; });
-      /* Align to the red block's RENDERED right edge — same offset + min-width
-         0.5% clamp the overlay uses below — so the arrow sits exactly on the
-         end of the red even for tiny ranges (where the true lba+count would
-         fall short of the clamped-wider block). */
-      let offPct=(act.lba*2048)/total*100;
-      if(offPct<0)offPct=0; if(offPct>100)offPct=100;
-      let wPct=Math.max((act.count*2048)/total*100,0.5);
-      if(offPct+wPct>100)wPct=100-offPct;
-      caretPct=offPct+wPct;
-    }else if(!positional&&s.last_sector>0){
-      caretPct=(s.last_sector*2048)/total*100;
-    }
-  }
-  let caret='';
-  if(caretPct!=null){
-    if(caretPct<0)caretPct=0; if(caretPct>100)caretPct=100;
-    caret='<div style="position:relative;height:14px">'
-      +'<div style="position:absolute;left:'+caretPct+'%;bottom:0;transform:translateX(-50%);'
-      +'font-size:.8rem;color:var(--blue);line-height:1;animation:ph 1.2s infinite">'
-      +'▼</div></div>';
-  }
-  let html='<div style="background:var(--chip);border-radius:4px;height:'+barH+'px;overflow:hidden;position:relative">';
-  if(positional){
-    /* Positional map: the entire bar is green (the whole disc, good), then
-       red bad ranges are punched in at their real offsets. If total is
-       unknown (0) we can't place anything positionally — fall back to a
-       neutral green fill so we never divide by zero. */
-    html+='<div style="position:absolute;left:0;top:0;width:100%;height:100%;background:var(--green)"></div>';
-  }else{
-    /* Sequential sweep: green grows with the swept position. Use the
-       FRACTIONAL position (last_sector advances every 250 ms) rather than the
-       integer pass_progress_pct, otherwise the fill jumps a whole 1% at a time
-       (~50 s per step on a UHD) and reads as "nothing, boom chunk". */
-    let fillPct=(total>0&&s&&s.last_sector>0)?(s.last_sector*2048)/total*100:p;
-    if(fillPct<0)fillPct=0; if(fillPct>100)fillPct=100;
-    html+='<div style="background:var(--green);height:100%;width:'+fillPct+'%;transition:width 1s"></div>';
-  }
-  /* Red bad-range overlay. Drawn at each range's real LBA position. min-width
-     0.5% keeps single-sector ranges visible on a 72GB UHD; clamp left+width so
-     a range near the tail never overflows the bar.
-
-     Pass 1 (sweep): the region AHEAD of the read head is UNREAD — NonTried, not
-     bad. We don't know if it's good or bad until it's read, so it stays BLANK
-     (same reason the "maybe" bucket shows no red pill: nothing is a verdict
-     until it's been read). The live bad_ranges during a sweep is dominated by
-     one giant NonTried range covering the whole un-swept tail; painting it red
-     makes a pristine disc look 100% damaged. So CLIP the red to the swept
-     portion [0, last_sector]: only damage the sweep has actually passed over
-     shows red; the unread remainder is neutral track.
-     Pass N (positional): every bad_range IS determined-bad, so draw it in full. */
-  if(total>0&&ranges.length){
-    const sweptPct=positional?100
-      :((s&&s.last_sector>0)?(s.last_sector*2048)/total*100:0);
-    ranges.forEach(r=>{
-      let offPct=(r.lba*2048)/total*100;
-      if(offPct<0)offPct=0; if(offPct>100)offPct=100;
-      let wPct=Math.max((r.count*2048)/total*100,0.5);
-      if(offPct+wPct>100)wPct=100-offPct;
-      if(!positional){
-        /* Blank until read: skip ranges entirely ahead of the head, trim the
-           unread tail off one that straddles it. */
-        if(offPct>=sweptPct)return;
-        if(offPct+wPct>sweptPct)wPct=sweptPct-offPct;
-        if(wPct<=0)return;
-      }
-      html+='<div style="position:absolute;left:'+offPct+'%;top:0;width:'+wPct+'%;height:100%;background:var(--red);opacity:0.9;transition:left 1s,width 1s"></div>';
-    });
-  }
-  html+='</div>';
-  return caret+html;
-}
-function passLabelFor(s){
-   /* Resolve the current pass into a human-readable label for the Ripping
-      step. During multipass we show pass number + phase; otherwise "Ripping". */
-   if(s.pass>0&&s.total_passes>0){
-     /* This is the RIP tab: mux is a 100% separate process and view, so it
-        is NOT a rip pass and is excluded from the count. The backend's
-        total_passes still includes the trailing mux pass (max_retries + 2);
-        subtract it here so the operator sees "pass 2/6" (sweep + 5 retries),
-        never "2/7". */
-     const ripTotal=Math.max(s.total_passes-1,1); // drop the mux pass
-     if(s.pass>=s.total_passes){
-       /* Mux phase \u2014 from the rip tab's view, recovery is finished;
-          muxing lives in its own view. */
-       return 'recovery complete';
-     }
-     const phase=s.pass===1?'copying':'retrying';
-     return 'pass '+s.pass+'/'+ripTotal+' \u00b7 '+phase;
-   }
-   /* If pass=1 and no total_passes set, this is a clean disc — skip to mux. */
-   if(s.pass===1&&s.total_passes===0){
-     return 'pass 1/1 · copying';
-   }
-   return '';
- }
-function renderSteps(steps,progress,eta,speed,s){
-  if(!steps||!steps.length)return'';
-  const icons={done:'\u2713',active:'\u25cf',pending:'\u25cb'};
-  const colors={done:'var(--green)',active:'var(--accent)',pending:'var(--text3)'};
-  return steps.map(st=>{
-    let detail=st.detail||'';
-    if(st.status==='active'&&st.name==='Ripping'){
-      /* v0.13.18: two distinct bars + their own text rows.
-           [pass bar           ] X% \u00b7 ETA H:MM \u00b7 NN MB/s
-           [total bar          ] Total Y% \u00b7 Total ETA H:MM \u00b7 Recovered A.B / C.D GB
-         Both bars read pass_progress_pct / total_progress_pct directly from
-         the server. JS does NO math. */
-      const passPct=(typeof s.pass_progress_pct==='number')?s.pass_progress_pct:(parseInt(progress)||0);
-      const totalPct=(typeof s.total_progress_pct==='number')?s.total_progress_pct:passPct;
-      const passLbl=passLabelFor(s);
-      const header=passLbl?' \u00b7 '+passLbl:'';
-      /* Three fixed-width columns + tabular-nums so the per-pass and
-         total rows align visually: digits stack vertically across rows
-         instead of shifting as the value width changes ("9%" -> "10%",
-         "ETA 1:30:45" -> "ETA 0:05"). Empty slots reserve their column
-         width so the totalLine doesn't drift right when speed is blank. */
-      const TAB='font-variant-numeric:tabular-nums;display:inline-block;';
-      const col=(body,minPx,align)=>
-        '<span style="'+TAB+'min-width:'+minPx+'px;text-align:'+align+'">'+body+'</span>';
-      const passPctStr=col(passPct+'%',45,'right');
-      const passEtaStr=col(s.pass_eta?'ETA '+s.pass_eta:'',95,'left');
-      const spdStr=col(speed||'',85,'left');
-      /* v0.13.19: wider text-row separators (em-spaces around the middle dot)
-         + more vertical breathing room between bars and their text rows so
-         the dashboard doesn't feel cramped. */
-      const SEP=' \u2003\u00b7\u2003 ';
-      /* Don't filter empty slots — they're already wrapped in fixed-width
-         spans and need to keep their column position. Always join all 3. */
-      const passLine=[passPctStr,passEtaStr,spdStr].join(SEP);
-      /* 0.13.24: mirror the per-pass line's terse format. Drop the
-         redundant "Total " prefix on ETA (the leading "Total N%" already
-         makes the bar's identity obvious), and drop "Recovered X / Y GB"
-         entirely — the green Good pill carries the same information
-         without duplicating it. */
-      /* No second "total" bar — mux is a separate view, and a bytes-recovered
-         bar just sits at ~99% through the whole patch (the sweep already
-         recovered nearly everything; the slow grind is the last <1%). The
-         live patch signal is TEXTUAL instead: how many disc sections are
-         still bad and how many sectors remain. */
-      const fmtBytes = (b)=> b>=1073741824 ? (b/1073741824).toFixed(2)+' GB'
-                          : b>=1048576    ? (b/1048576).toFixed(1)+' MB'
-                          : b>=1024       ? (b/1024).toFixed(1)+' KB'
-                          : b+' B';
-      let sectorsLine='';
-      {
-        /* Same line in EVERY pass (consistency): bytes_maybe is the bad/not-yet-
-           good set (NonTrimmed+NonScraped), so this reads as "damage left to
-           recover" in both the sweep and the patch passes. The "N sections ·"
-           prefix only appears once bad ranges exist. */
-        const nSec=(typeof s.num_bad_ranges==='number'&&s.num_bad_ranges>0)
-                    ?s.num_bad_ranges:((s.bad_ranges&&s.bad_ranges.length)||0);
-        const remBytes=(s.bytes_maybe||0)+(s.bytes_lost||0);
-        const remSect=Math.round(remBytes/2048);
-        if(remSect>0){
-          const secPrefix = nSec>0 ? (nSec+' '+(nSec===1?'section':'sections')+' · ') : '';
-          sectorsLine='<div style="font-size:.75rem;color:var(--text2);margin-top:7px;font-variant-numeric:tabular-nums">'
-            +secPrefix+remSect.toLocaleString()+' sectors ('+fmtBytes(remBytes)+') remaining</div>';
-        }
-      }
-      let badLine='';
-      /* TWO pills, ever \u2014 Good and Maybe. Never a third.
-         GOOD  = whole-disc bytes successfully read off the disc (Finished).
-         MAYBE = whole-disc bytes not-yet-good: pending, NonTrimmed, and
-                 currently-unreadable/undecryptable all folded together.
-                 NOTHING is "lost"/"no chance" mid-rip \u2014 a later pass (or a
-                 freshly power-cycled drive) still recovers it, so there is no
-                 terminal bucket here. "Bad" is a VERDICT, decided once after
-                 the final pass (main-feature lost time vs abort_on_lost_secs),
-                 not a live pill.
-         The Maybe pill's BYTES are whole-disc, but its TIME is the MAIN-FEATURE
-         lost time (main_lost_ms) \u2014 that is what the abort gate judges. So
-         "Maybe 990 MB \u00b7 0:00" = 990 MB pending but zero movie time \u21d2 will pass;
-         "Maybe 12 KB \u00b7 ~1 ms" = a few sectors of movie \u21d2 fails a 0 threshold.
-         Time is rendered at ms precision (fmtMs): 6 sectors is 1 ms, never 0. */
-      const bg=s.bytes_good||0, bm=(s.bytes_maybe||0)+(s.bytes_lost||0);
-      if(bg>0 || bm>0){
-        /* FIXED width (not min-width) + border-box so the pills never grow or
-           shrink as the byte/time values change — the row stays rock-steady. */
-        const pill = (label, color, body, wPx)=>
-          '<span style="display:inline-block;box-sizing:border-box;padding:2px 8px;border-radius:10px;background:'+color
-          +';color:var(--pill-fg);font-size:.65rem;font-weight:600;margin-right:6px;'
-          +'width:'+wPx+'px;text-align:center;white-space:nowrap;overflow:hidden;font-variant-numeric:tabular-nums">'
-          +label+' '+body+'</span>';
-        let pills='';
-        if(bg>0){
-          pills+=pill('Good','var(--green,#3aaa55)', fmtBytes(bg), 150);
-        }
-        if(bm>0){
-          /* Time = MAIN-FEATURE movie time at risk (main_at_risk_ms: pending +
-             lost \u2229 feature), NOT the terminal Unreadable-only main_lost_ms which
-             is structurally 0 until the final pass. So 0:00 honestly means "no
-             movie impact" even mid-rip, and a real ms figure means the movie is
-             affected. Melts toward 0 as retries recover pending sectors. */
-          const atRiskMs = (s.main_at_risk_ms!=null && s.main_at_risk_ms>=0) ? s.main_at_risk_ms : 0;
-          const t = atRiskMs>0 ? '~'+fmtMs(atRiskMs) : '0:00';
-          pills+=pill('Maybe','var(--yellow,#f0c000)', fmtBytes(bm)+' \u00b7 '+t, 200);
-        }
-        if(pills) badLine='<div style="font-size:.7rem;margin-top:14px">'+pills+'</div>';
-      }
-      detail='<div style="margin-top:6px">'
-        +renderBar(s,passPct)
-        +'<div style="font-size:.75rem;color:var(--text2);margin-top:7px">'+passLine+'</div>'
-        +sectorsLine
-        +badLine+'</div>';
-      /* Fold pass info into the step name so it's obvious at a glance. */
-      if(passLbl){
-        /* 0.13.25: flex:1 + min-width:0 on the content span pins it to
-           the remaining row width regardless of inner text length. Without
-           this the span sizes to its content, so a longer header
-           ("Pass 2/7: retrying bad ranges") makes the bar inside `detail`
-           wider than a shorter one ("pass 1/7 · copying"), producing
-           visible width wobble as the rip moves through phases. */
-        return '<div style="display:flex;align-items:flex-start;gap:8px;padding:4px 0;font-size:.8rem"><span style="color:'+colors[st.status]+';font-size:.7rem;width:14px;text-align:center;flex-shrink:0;animation:p 1.5s infinite">'+icons[st.status]+'</span><span style="color:var(--text);flex:1;min-width:0">Rip'+header+detail+'</span></div>';
-      }
-    }else if(detail){detail=' \u2014 '+escLinks(detail)}
-    const anim=st.status==='active'?';animation:p 1.5s infinite':'';
-    return '<div style="display:flex;align-items:flex-start;gap:8px;padding:4px 0;font-size:.8rem"><span style="color:'+colors[st.status]+';font-size:.7rem;width:14px;text-align:center'+anim+'">'+icons[st.status]+'</span><span style="color:'+(st.status==='pending'?'var(--text3)':'var(--text)')+'">'+st.name+detail+'</span></div>';
-  }).join('');
-}
-function fmtMs(ms){
-  /* 0.13.24: escalate to minutes / hours / H:MM:SS for large durations.
-     "10817 s" by itself means nothing — render it as "3:00:17". Below
-     1 s we still want millisecond precision for tight read traces. */
-  if(ms==null||!isFinite(ms))return'';
-  if(ms<1)return'<1 ms';
-  if(ms<1000)return ms.toFixed(0)+' ms';
-  const totalSecs=ms/1000;
-  if(totalSecs<60)return totalSecs.toFixed(2)+' s';
-  const h=Math.floor(totalSecs/3600);
-  const m=Math.floor((totalSecs%3600)/60);
-  const s=Math.floor(totalSecs%60);
-  return h>0
-    ? h+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0')
-    : m+':'+String(s).padStart(2,'0');
-}
-/* ---- Build steps from state ---- */
-function buildSteps(s){
-  const steps=[];
-  const st=s.status;
-  if(st==='idle')return[];
-  if(st==='scanning'){
-    steps.push({name:'Scanning',status:'active',detail:''});
-    steps.push({name:'Ripping',status:'pending',detail:''});
-    steps.push({name:'Done',status:'pending',detail:''});
-  }else if(st==='ripping'){
-    steps.push({name:'Scanning',status:'done',detail:''});
-    steps.push({name:'Ripping',status:'active',detail:''});
-    steps.push({name:'Done',status:'pending',detail:''});
-  }else if(st==='moving'||st==='done'){
-    steps.push({name:'Scanning',status:'done',detail:''});
-    steps.push({name:'Ripping',status:'done',detail:''});
-    steps.push({name:'Done',status:'done',detail:''});
-  }else if(st==='error'){
-    steps.push({name:'Error',status:'active',detail:s.last_error||''});
-  }
-  return steps;
-}
-
-/* ---- Ripper page render ---- */
-function handleState(data){
-  /* Persist the latest payload + refresh the Move Queue first — the
-     mover keeps running (and `_move` keeps changing) even when the
-     drive list is empty (idle / state briefly cleared), so the
-     no-devices early return below must not gate Move Queue updates. */
-  window._stateData=data;
-  renderMuxBanner(data);
-  if(document.getElementById('system').classList.contains('active')){renderMuxes();renderMoves();}
-  const devs=Object.keys(data).filter(k=>!k.startsWith('_'));
-  if(!devs.length){
-    upd('dtabs','');
-    upd('np','<div class="np"><div class="idle-msg">'+D+'<p>No drives detected</p></div></div>');
-    upd('actions','');upd('steps','');upd('err','');
-    return;
-  }
-  const multi=devs.length>1;
-
-  devs.forEach(dev=>{
-    const s=data[dev];
-    const prev=_lastStatus[dev];
-    if(prev&&prev!==s.status){
-      if(s.status==='done')notify('AutoRip',(s.tmdb_title||s.disc_name)+' \u2014 Complete',s.tmdb_poster);
-      if(s.status==='error')notify('AutoRip',(s.tmdb_title||s.disc_name)+' \u2014 Error: '+(s.last_error||'unknown'),s.tmdb_poster);
-    }
-    _lastStatus[dev]=s.status;
-  });
-
-  if(!_activeTab||!devs.includes(_activeTab))_activeTab=devs[0];
-
-  /* Device tabs */
-  if(multi){
-    const tabHtml=devs.map(dev=>{
-      const s=data[dev];
-      const active=ACTIVE_STATES.includes(s.status);
-      const errState=s.status==='error';
-      const dotColor=active?'var(--green)':errState?'var(--red)':'var(--text3)';
-      const dotAnim=active?'animation:p 1.5s infinite;':'';
-      const dot='<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:'+dotColor+';'+dotAnim+'margin-right:4px;vertical-align:middle"></span>';
-      return '<span class="dtab'+(dev===_activeTab?' active':'')+'" onclick="_activeTab=\''+dev+'\';renderCurrent()">'+dot+dev+'</span>';
-    }).join('');
-    upd('dtabs','<div class="dtabs">'+tabHtml+'</div>');
-  }else{upd('dtabs','')}
-
-  renderCurrent();
-}
-
-/* Ripper-page banner: muxing/moving of PREVIOUS rips runs in the background
-   on the System tab. When the drive is idle (No disc / done card) new users
-   have no idea that work is still happening off-screen — so surface a hint
-   between the header and the disc card whenever a mux or move is in flight or
-   queued. It clears itself the moment both queues drain. */
-function renderMuxBanner(data){
-  const el=document.getElementById('muxbanner');
-  if(!el)return;
-  data=data||window._stateData||{};
-  const mx=data._mux;
-  const muxActive=!!(mx&&mx.status==='ripping'&&mx.disc_name);
-  const muxQ=!!(data._mux_queue&&data._mux_queue.length);
-  /* `_move` is an ARRAY of per-artifact bars (1.6.7+); tolerate the legacy
-     single-object shape. An active move is any bar carrying a name. The old
-     `mv.name` check silently missed the array form, so the banner never lit
-     up while a move was running — mux showed, move didn't. */
-  const mv=data._move;
-  const moveActive=Array.isArray(mv)?mv.some(m=>m&&m.name):!!(mv&&mv.name);
-  const moveQ=!!(data._move_queue&&data._move_queue.length);
-  const muxing=muxActive||muxQ, moving=moveActive||moveQ;
-  if(!muxing&&!moving){el.innerHTML='';return;}
-  let what;
-  if(muxing&&moving)what='Muxing &amp; moving of previous rips';
-  else if(moving)what='Moving of previous rips';
-  else what='Muxing of previous rips';
-  el.innerHTML='<div onclick="goSystemTab()" '
-    +'style="margin:0 0 16px;padding:10px 14px;background:var(--chip);border:1px solid var(--border);'
-    +'border-radius:8px;font-size:.85rem;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:8px">'
-    +'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);animation:p 1.5s infinite;flex-shrink:0"></span>'
-    +'<span>'+what+' still in progress — see the <b>System</b> tab.</span></div>';
-}
-/* Programmatically activate the System tab (reuses the nav click handler, so
-   loadSystem() fires). Used by the Ripper-page mux/move banner. */
-function goSystemTab(){var b=document.querySelector('.nav[data-tab="system"]');if(b)b.click();}
-function renderCurrent(){
-  const data=window._stateData;
-  if(!data)return;
-  const dev=_activeTab;
-  const s=data[dev];
-  if(!s)return;
-
-  /* Derived state */
-  const active=ACTIVE_STATES.includes(s.status);
-  const title=s.tmdb_title||s.disc_name;
-  const scanned=!!title;
-  const discIn=s.disc_present||scanned||active;
-
-  /* Now Playing card */
-  let card;
-  if(!discIn){
-    card='<div class="np"><div class="idle-msg">'+D+'<p>No disc</p></div></div>';
-  }else if(!scanned){
-    card='<div class="np"><div class="idle-msg">'+D+'<p>Disc detected</p></div></div>';
-  }else{
-    const img=s.tmdb_poster?'<img class="poster" src="'+esc(s.tmdb_poster)+'" alt="">':'<div class="ph">'+D+'</div>';
-    const fmt=s.disc_format;
-    const b=fmt&&fmt!=='unknown'?'<span class="b '+esc(fmt)+'">'+esc(fmt)+'</span>':'';
-    const o=s.tmdb_overview?'<div class="mo">'+esc(s.tmdb_overview)+'</div>':'';
-    const yr=s.tmdb_year>0?s.tmdb_year:'';
-    const dur=s.duration?' \u00b7 '+esc(s.duration):'';
-    const codecs=s.codecs?'<div class="mo" style="color:var(--text3);font-size:.75rem;margin-top:6px">'+esc(s.codecs)+'</div>':'';
-    const ks=s.key_status||'';const rc=ks.indexOf('Missing')===0?'var(--yellow)':'var(--green)';const ready=s.status==='idle'?'<div class="mo" style="color:'+rc+'">'+esc(ks||'Ready to rip')+'</div>':'';
-    /* Before ripping (idle), let the operator correct the matched title:
-       search TMDB and pick — the choice overrides the auto-match for this rip. */
-    const editable=s.status==='idle';
-    /* ✎ change sits in a fixed row ABOVE the title (not appended to it, where it
-       shifted with title length). */
-    const editRow=editable?'<div style="margin-bottom:6px"><button class="btn" style="padding:1px 7px;font-size:.7rem" onclick="titleEdit(\''+dev+'\')">✎ change</button></div>':'';
-    const editBox=editable?'<div id="tedit-'+dev+'" style="display:none;margin-top:8px"></div>':'';
-    card='<div class="np">'+img+'<div class="nfo">'+editRow+'<div class="mt">'+esc(title)+'</div><div class="my">'+yr+dur+' '+b+'</div>'+o+codecs+ready+editBox+'</div></div>';
-  }
-  upd('np',card);
-
-  /* Actions bar */
-  let btns='';
-  if(active){
-    /* Elapsed counter goes BEFORE the Stop button: the action row is
-       right-anchored, so the counter's growth (1m → 1h 02m 34s) extends
-       LEFTWARD into empty space and never shoves the Stop button. tabular-nums
-       keeps digits a fixed pixel width (no per-second jitter); text-align:right
-       + a min-width wide enough for the "1h 02m 34s" form keeps it stable. */
-    btns='<span id="rip-elapsed-'+dev+'" data-started="'+(s.started_epoch_secs||0)+'" style="margin-right:10px;font-size:.78rem;color:var(--text2);align-self:center;font-variant-numeric:tabular-nums;min-width:95px;text-align:right;display:inline-block"></span>';
-    btns+='<button class="btn btn-stop" onclick="if(confirm(\'Stop?\')){apiPost(\'/api/stop/'+dev+'\',this,\'Stop\')}">Stop</button>';
-  }else if(scanned){
-    /* Keys resolved at scan time. If they're missing (and the operator
-       hasn't opted into capture-without-keys), don't offer Rip at all —
-       it would just error. Offer "Scan again" so a freshly-loaded KEYDB
-       or a corrected key source can be re-checked without a page reload. */
-    const notReady=(s.key_status||'').indexOf('Missing')===0;
-    if(notReady){
-      btns='<button class="btn" onclick="apiPost(\'/api/scan/'+dev+'\',this,\'Scan\')">Scan again</button>';
-    }else if(s.resumable){
-      /* A resumable partial exists. Design: the PRIMARY action (Resume —
-         continue where it left off) is the filled accent button and comes
-         first; "Start over" is the DESTRUCTIVE alternative (wipes the partial
-         and re-sweeps from scratch), so it is de-emphasized as a red OUTLINE
-         (not a green fill that competed with the primary) and confirmed. For
-         "remux" Resume just re-muxes the staged ISO. */
-      const rl=s.resumable==='remux'?'Resume (re-mux)':'Resume';
-      btns='<button class="btn" style="background:var(--accent);color:#fff;border-color:var(--accent)" onclick="apiPost(\'/api/rip/'+dev+'?resume=yes\',this,\'Resume\')">'+rl+'</button>';
-      btns+='<button class="btn" style="background:transparent;color:var(--red);border-color:var(--red)" onclick="if(confirm(\'Start over from scratch? This discards the resumable partial for this disc and re-rips the whole disc.\')){apiPost(\'/api/rip/'+dev+'?resume=no\',this,\'Start over\')}">Start over</button>';
-    }else{
-      btns='<button class="btn" style="background:var(--green);color:#fff;border-color:var(--green)" onclick="apiPost(\'/api/rip/'+dev+'?resume=no\',this,\'Rip\')">Rip</button>';
-    }
-  }else if(discIn){
-    btns='<button class="btn" onclick="apiPost(\'/api/scan/'+dev+'\',this,\'Scan\')">Scan</button>';
-  }
-  /* Loss-aborted off-ramp: the rip aborted because main-movie loss exceeded the
-     threshold, but the COMPLETE ISO is staged on disk. Offer exactly TWO clear
-     choices and REPLACE the generic start-over (so the operator isn't offered a
-     destructive fresh rip here):
-       • "Run one more pass" — Resume (resume=yes): another recovery pass over
-         the bad ranges (Pass N from the mapfile, recovering only the bad core).
-       • "Accept & deliver"  — accept the recorded loss and deliver as-is
-         (re-mux with the abort gate bypassed; one-shot, confirmed).
-     Detected by the loss_aborted flag OR a loss-abort last_error; shown ONCE.
-     (Previously two separate blocks each appended an "Accept damage & deliver",
-     so it rendered twice with no Resume; --yellow is a dark brown, so black
-     text on it was unreadable — Resume is accent/white, Accept is amber-outlined.) */
-  const lossAborted=s.loss_aborted||(s.last_error||'').indexOf('lost in main movie')>=0||(s.last_error||'').indexOf('lost at mux')>=0;
-  if(lossAborted&&!active){
-    btns='<button class="btn" style="background:var(--accent);color:#fff;border-color:var(--accent)" onclick="apiPost(\'/api/rip/'+dev+'?resume=yes\',this,\'Run one more pass\')">Run one more pass</button>';
-    btns+='<button class="btn" style="background:transparent;color:var(--yellow);border-color:var(--yellow);font-weight:500" onclick="if(confirm(\'Accept the recorded main-movie damage and deliver this rip as-is? The unreadable section will be missing, but the rest is intact.\')){apiPost(\'/api/accept-loss/\'+dev,this,\'Accept &amp; deliver\')}">Accept &amp; deliver</button>';
-  }
-  if(discIn&&!active)btns+='<button class="btn btn-eject" onclick="apiPost(\'/api/eject/'+dev+'\',this,\'Eject\')">Eject</button>';
-
-  const dot=active?'var(--green)':scanned?'var(--accent)':discIn?'var(--yellow)':'var(--text3)';
-  const pulse=active?'animation:p 1.5s infinite;':'';
-  /* statusLabel intentionally not shown here \u2014 it's already in the
-     Ripping step header below ("Rip \u00b7 pass N/M \u00b7 copying") and the tab
-     strip identifies which device this panel is for. Keep just the
-     colored dot + dev name + action buttons in this row. */
-  upd('actions','<div class="actions"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+dot+';vertical-align:middle;margin-right:6px;'+pulse+'"></span><span style="font-size:.8rem;color:var(--text2)">'+dev+'</span><span style="margin-left:auto;display:flex;gap:6px">'+btns+'</span></div>');
-
-  /* Steps */
-  const steps=buildSteps(s);
-  const progressStr=s.progress_pct>0?s.progress_pct+'%':(s.progress_gb>0?s.progress_gb.toFixed(1)+' GB':'');
-  const speedStr=fmtSpeed(s.speed_mbs);
-  const etaStr=s.eta||'';
-  upd('steps',renderSteps(steps,progressStr,etaStr,speedStr,s));
-
-  /* Error + recovery banner */
-  let errHtml='';
-  if(s.errors>0&&s.last_error){
-    errHtml='<div style="background:var(--red);color:#fff;padding:8px 12px;border-radius:6px;font-size:.8rem;margin-bottom:8px">\u26a0 '+escLinks(s.last_error)+'</div>';
-  }
-  /* The old "N sectors skipped (X MB) — Y at risk" yellow box was removed
-     (2026-06-05): it duplicated the Good/Maybe/No-chance pills (which already
-     show the byte + time breakdown) and the bad-range bar (which shows where
-     the damage is). The red banner above still surfaces a real last_error. */
-  /* Adaptive batch recovery state \u2014 only during an active rip.
-     current_batch < preferred_batch means the library shrunk the read size
-     after a failure and is working through a marginal zone. Show a blue
-     banner so the user can tell "recovering" from "stalled". */
-  if(s.status==='ripping'&&s.current_batch>0&&s.preferred_batch>0&&s.current_batch<s.preferred_batch){
-    const lbaStr=s.last_sector>0?' \u00b7 LBA '+s.last_sector.toLocaleString():'';
-    errHtml+='<div style="background:var(--blue);color:#fff;padding:8px 12px;border-radius:6px;font-size:.8rem;margin-bottom:8px">\u21ba Recovering \u00b7 batch '+s.current_batch+' / '+s.preferred_batch+lbaStr+'</div>';
-  }
-  /* (Pass/phase info lives inside the Ripping step \u2014 no separate banner.) */
-  upd('err',errHtml);
-
-  /* Device log */
-  loadDeviceLog(dev);
-}
-
-/* ---- Local time conversion for log lines ---- */
-function utcToLocal(line){
-  return line.replace(/^\[(\d{2}):(\d{2}):(\d{2})\]/,function(_,h,m,s){
-    const now=new Date();
-    const d=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate(),+h,+m,+s));
-    return '['+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0')+']';
-  });
-}
-
-/* ---- Device log viewer ---- */
-let _logTimer=null;
-/* Render one autorip.jsonl line as a compact human line for the debug box:
-   "HH:MM:SS LEVEL message  k=v k=v" (the patch walk + timings). Falls back
-   to the raw line if it isn't JSON. */
-function fmtDebugLine(line){
-  try{
-    const o=JSON.parse(line);
-    const t=(o.timestamp||'').replace('T',' ').replace('Z','').replace(/\.[0-9]+/,'');
-    const f=o.fields||{};
-    const msg=f.message||'';
-    const extra=Object.keys(f).filter(k=>k!=='message'&&k!=='build').map(k=>k+'='+f[k]).join(' ');
-    return t+' '+(o.level||'')+' '+msg+(extra?'  '+extra:'');
-  }catch(e){return line;}
-}
-function loadDeviceLog(dev){
-  clearTimeout(_logTimer);
-  fetch('/api/logs/'+encodeURIComponent(dev)).then(r=>r.text()).then(text=>{
-    const e=document.getElementById('log');
-    const reversed=text.split('\n').filter(l=>l).map(utcToLocal).reverse().join('\n');
-    if(e&&e._last!==reversed){
-      e.textContent=reversed;
-      e._last=reversed;
-    }
-  }).catch(()=>{});
-  /* Debug Log box: only shown + polled when debug logging is ON. Reuses the
-     existing /api/debug jsonl tailer, filtered to this device, newest-first. */
-  const db=document.getElementById('debugBox');
-  if(window._debugOn){
-    if(db)db.style.display='';
-    fetch('/api/debug?device='+encodeURIComponent(dev)+'&n=500').then(r=>r.text()).then(text=>{
-      const el=document.getElementById('debuglog');
-      const lines=text.split('\n').filter(l=>l).map(fmtDebugLine).reverse().join('\n');
-      if(el&&el._last!==lines){el.textContent=lines;el._last=lines;}
-    }).catch(()=>{});
-  }else if(db){db.style.display='none';}
-  _logTimer=setTimeout(()=>loadDeviceLog(dev),3000);
-}
-
-/* ---- SSE connection ---- */
-let _es=null;
-function connectSSE(){
-  if(_es){_es.close();_es=null}
-  _es=new EventSource('/events');
-  _es.onmessage=function(e){try{handleState(JSON.parse(e.data))}catch(x){}};
-  _es.addEventListener('library',function(e){try{libEvent(JSON.parse(e.data))}catch(x){}});
-  _es.onerror=function(){_es.close();_es=null;setTimeout(connectSSE,2000)};
-}
-
-/* Speed string from MB/s. Drops to KB/s, then B/s for sub-KB rates, so a slow
-   patch reads e.g. "512 B/s" ("it's doing something") instead of "0 KB/s", and
-   "0 B/s" when work is genuinely frozen (grinding one sector's ECC) — never a
-   blank gap. */
-function fmtSpeed(mbs){
-  mbs=+mbs||0;
-  if(mbs>=1) return mbs.toFixed(1)+' MB/s';
-  if(mbs*1024>=1) return (mbs*1024).toFixed(0)+' KB/s';
-  return Math.round(mbs*1048576)+' B/s';
-}
-/* Live rip-elapsed counter (seconds resolution). */
-function fmtElapsedSecs(s){if(!s||s<0)return'';s=+s;const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;return h>0?h+'h '+String(m).padStart(2,'0')+'m '+String(sec).padStart(2,'0')+'s':m+'m '+String(sec).padStart(2,'0')+'s'}
-/* v0.25.7: tick the rip-elapsed counter every 1s. Reads each
-   rip-elapsed-* span's data-started attribute (set by renderCurrent
-   from the latest state push) so the value stays accurate even
-   after the state push briefly rewrites the DOM. */
-setInterval(()=>{
-  const now=Math.floor(Date.now()/1000);
-  document.querySelectorAll('[id^="rip-elapsed-"]').forEach(el=>{
-    const started=+el.dataset.started||0;
-    if(started>0){el.textContent=fmtElapsedSecs(now-started)}
-    else{el.textContent=''}
-  });
-},1000);
-
-/* ---- Candidate caches (avoid inlining titles/dirs — apostrophes break attrs;
-       we key off integer indices instead). ---- */
-let _REV=[];        /* held-rip items, by index */
-let _RC={};         /* review TMDB candidates, by item index */
-let _TC={};         /* ripper-card TMDB candidates, by device */
-
-/* ---- Needs review (System page): rips held for a confident title ---- */
-function reviewResolve(idx,action,extra){
-  const it=_REV[idx]; if(!it)return;
-  const body=Object.assign({dir:it.dir,action:action},extra||{});
-  fetch('/api/review/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
-    .then(r=>r.json().then(j=>({ok:r.ok,j:j})))
-    .then(({ok,j})=>{if(!ok||(j&&j.ok===false)){alert('Resolve failed: '+((j&&j.error)||'server error'));}loadReview();})
-    .catch(()=>{alert('Resolve failed: could not reach the server');loadReview();});
-}
-function reviewSearch(idx){
-  const q=(document.getElementById('rvq-'+idx)||{}).value; if(!q||!q.trim())return;
-  const box=document.getElementById('rvc-'+idx); if(box)box.textContent='searching…';
-  fetch('/api/tmdb/search?q='+encodeURIComponent(q.trim())).then(r=>r.json()).then(cs=>{
-    if(!box)return; _RC[idx]=cs;
-    if(!cs.length){box.textContent='no matches';return}
-    box.innerHTML=cs.map((c,j)=>'<button class="btn" style="margin:2px" onclick="reviewPick('+idx+','+j+')">'+esc(c.title)+(c.year?' ('+c.year+')':'')+'</button>').join('');
-  }).catch(()=>{if(box)box.textContent='search failed'});
-}
-function reviewPick(idx,j){const c=(_RC[idx]||[])[j]; if(c)reviewResolve(idx,'retitle',{title:c.title,year:c.year||0});}
-/* Split typed manual-rename text into {title, year}: a trailing "(YYYY)" is
-   pulled out as the year, else `fallbackYear`. Shared by reviewManual and
-   titleManual so the two entry points can't drift. Returns null on empty. */
-function parseManualName(raw,fallbackYear){
-  raw=(raw||'').trim(); if(!raw)return null;
-  const m=raw.match(/^(.*?)\s*\((\d{4})\)\s*$/);
-  const title=m?m[1].trim():raw;
-  if(!title)return null;
-  return {title:title,year:m?parseInt(m[2],10):(fallbackYear||0)};
-}
-/* Manual entry: file under exactly the typed text (no TMDB pick needed). Lets
-   the operator disambiguate a variant TMDB doesn't list as its own entry —
-   e.g. "Redshift 2 (Extended Cut)" alongside an already-ripped "Redshift 2". */
-function reviewManual(idx){
-  const it=_REV[idx]; if(!it)return;
-  const p=parseManualName((document.getElementById('rvq-'+idx)||{}).value,it.year);
-  if(!p){alert('Type a name first');return}
-  reviewResolve(idx,'retitle',{title:p.title,year:p.year});
-}
-function loadReview(){
-  fetch('/api/review').then(r=>r.json()).then(items=>{
-    const el=document.getElementById('review'); if(!el)return;
-    _REV=items||[];
-    if(!_REV.length){el.innerHTML='';return}
-    let h='<div class="card" style="border-left:3px solid var(--accent);margin-bottom:16px">';
-    h+='<div style="font-weight:600;margin-bottom:8px">⏸ Needs review — '+_REV.length+' rip(s) held for a confident title</div>';
-    _REV.forEach((it,idx)=>{
-      const t=esc(it.title||it.dir)+(it.year?' ('+it.year+')':'');
-      h+='<div style="padding:8px 0;border-top:1px solid var(--border)">';
-      h+='<div><strong>'+t+'</strong> <span style="color:var(--text3);font-size:.8rem">'+esc(it.reason||'')+'</span></div>';
-      h+='<div style="color:var(--text3);font-size:.75rem">'+esc(it.file||'')+'</div>';
-      h+='<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">';
-      h+='<input id="rvq-'+idx+'" placeholder="type an exact name, or a search term…" value="'+esc(it.title||'')+'" style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;width:24rem;max-width:100%">';
-      h+='<button class="btn" onclick="reviewManual('+idx+')">Manual Rename</button>';
-      h+='<button class="btn" onclick="reviewSearch('+idx+')">Search TMDB</button>';
-      h+='<button class="btn" onclick="reviewResolve('+idx+',\'proceed\')">Proceed as-is</button>';
-      h+='<button class="btn" onclick="if(confirm(\'Discard this rip?\'))reviewResolve('+idx+',\'cancel\')">Cancel</button>';
-      h+='</div><div id="rvc-'+idx+'" style="margin-top:6px"></div></div>';
-    });
-    h+='</div>';
-    el.innerHTML=h;
-  }).catch(()=>{});
-}
-loadReview();
-setInterval(loadReview,5000);
-
-/* ---- Ripper-card title editor: correct the match BEFORE ripping ---- */
-function titleEdit(dev){
-  const el=document.getElementById('tedit-'+dev); if(!el)return;
-  if(el.style.display!=='none'){el.style.display='none';return}
-  el.style.display='block';
-  el.innerHTML='<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="tq-'+dev+'" placeholder="type an exact name, or a search term…" style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;width:24rem;max-width:100%"><button class="btn" onclick="titleSearch(\''+dev+'\')">Search TMDB</button><button class="btn" onclick="titleManual(\''+dev+'\')">Manual Rename</button></div><div id="tr-'+dev+'" style="margin-top:6px"></div>';
-  const i=document.getElementById('tq-'+dev); if(i)i.focus();
-}
-function titleSearch(dev){
-  const i=document.getElementById('tq-'+dev); const q=i?i.value.trim():''; if(!q)return;
-  const box=document.getElementById('tr-'+dev); if(box)box.textContent='searching…';
-  fetch('/api/tmdb/search?q='+encodeURIComponent(q)).then(r=>r.json()).then(cs=>{
-    if(!box)return; _TC[dev]=cs;
-    if(!cs.length){box.textContent='no matches';return}
-    box.innerHTML=cs.map((c,j)=>'<button class="btn" style="margin:2px" onclick="titlePick(\''+dev+'\','+j+')">'+esc(c.title)+(c.year?' ('+c.year+')':'')+'</button>').join('');
-  }).catch(()=>{if(box)box.textContent='search failed'});
-}
-function titlePick(dev,j){
-  const c=(_TC[dev]||[])[j]; if(!c)return;
-  fetch('/api/title/'+dev,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)})
-    .then(r=>r.json()).then(()=>{const el=document.getElementById('tedit-'+dev);if(el)el.style.display='none';}).catch(()=>{});
-}
-/* Manual rename: file the active disc under exactly the typed text, no TMDB
-   pick — for a variant TMDB doesn't list separately (e.g. "Redshift 2 (Extended
-   Cut)"). A trailing "(YYYY)" becomes the year; tmdb_id 0 marks it a
-   free-form override (handle_title_override already accepts this). */
-function titleManual(dev){
-  const i=document.getElementById('tq-'+dev);
-  const p=parseManualName(i?i.value:'',0);
-  if(!p){alert('Type a name first');return}
-  fetch('/api/title/'+dev,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({title:p.title,year:p.year,tmdb_id:0})})
-    .then(r=>r.json().then(j=>({ok:r.ok,j:j})))
-    .then(({ok,j})=>{if(!ok||(j&&j.ok===false)){alert('Rename failed: '+((j&&j.error)||'server error'));return}
-      const el=document.getElementById('tedit-'+dev);if(el)el.style.display='none';})
-    .catch(()=>alert('Rename failed: could not reach the server'));
-}
-
-function updateKeydb(stId){
-  /* stId lets the same handler back both the System-page Data Files
-     button (default 'keydb-status') and the Settings-page Local button
-     ('keydb-status-settings'). Tolerates a missing status element. */
-  const st=document.getElementById(stId||'keydb-status');
-  const set=(t,c)=>{if(st){st.textContent=t;st.style.color=c;}};
-  set('Updating…','var(--text3)');
-  fetch('/api/update-keydb',{method:'POST'}).then(r=>r.json()).then(data=>{
-    if(data.ok){set('Updated: '+data.entries+' entries','var(--green)');loadSystem();}
-    else{set(data.error||'Update failed','var(--red)');}
-  }).catch(e=>{set('Network error','var(--red)');});
-}
-/* ---- Mux queue with live progress (mirrors renderMoves shape) ---- */
-function renderMuxes(){
-  const el=document.getElementById('muxes');
-  if(!el)return;
-  const data=window._stateData||{};
-  /* _mux on the wire is a RipState (the worker uses the synthetic
-     `_mux` device key in update_state), not the MuxState struct —
-     so we read disc_name / progress_pct / speed_mbs / eta. The
-     synthetic device's status is "ripping" while the mux is in
-     flight; treat absent or non-active as "no active mux". */
-  const mx=data._mux;
-  const muxActive=mx&&mx.status==='ripping'&&mx.disc_name;
-  let html='';
-  let hasContent=false;
-  if(muxActive){
-    hasContent=true;
-    const pct=mx.progress_pct||0;
-    const spdStr=mx.speed_mbs>=1?mx.speed_mbs.toFixed(1)+' MB/s':mx.speed_mbs>0?(mx.speed_mbs*1024).toFixed(0)+' KB/s':'';
-    const etaStr=mx.eta?mx.eta+' remaining':'';
-    const label=[pct+'%',spdStr,etaStr].filter(x=>x).join(' · ');
-    html+='<div style="padding:6px 0"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);animation:p 1.5s infinite;flex-shrink:0"></span><span style="font-size:.85rem;font-weight:500">'+esc(mx.disc_name)+'</span></div>';
-    html+='<div style="display:flex;align-items:center;gap:8px">';
-    if(pct>0)html+='<div style="flex:1;background:var(--chip);border-radius:3px;height:3px;overflow:hidden"><div style="background:var(--green);height:100%;width:'+pct+'%;transition:width 1s"></div></div>';
-    html+='<span style="font-size:.75rem;color:var(--text2)">'+label+'</span></div></div>';
-  }
-  /* Mux queue rides on the live state payload (_mux_queue), refreshed
-     every SSE tick — so a job that moves on (mux finishes → Move queue)
-     disappears here on the next tick instead of lingering until a hard
-     refresh. `pending_queue` already excludes the dir currently muxing
-     (it carries `.muxing`) and any dir that has entered the Move queue
-     (`.done`/`.review`), so no frontend de-dup band-aid is needed: a job
-     is in exactly one queue. Fall back to the older _muxQueue (from the
-     /api/system fetch) only if the live field is absent. */
-  const muxQ=(data._mux_queue!=null)?data._mux_queue:window._muxQueue;
-  if(muxQ){
-    muxQ.forEach(m=>{
-      hasContent=true;
-      html+='<div style="padding:4px 0;font-size:.8rem"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--yellow);margin-right:8px;vertical-align:middle"></span>'+esc(m)+'</div>';
-    });
-  }
-  if(!hasContent)html='<div style="color:var(--text3);font-size:.8rem">No pending muxes</div>';
-  if(window._muxErrors&&window._muxErrors.length){
-    html+='<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--chip)">';
-    /* Header: re-check (refresh) + clear-all, matching the Move queue. A
-       cleared error the worker still considers blocked reappears on its next
-       tick UNLESS dismissed (loss-aborts stay cleared). */
-    html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">'
-      +'<span style="font-size:.75rem;color:var(--text3);text-transform:uppercase;letter-spacing:.4px">Needs action</span>'
-      +'<span style="flex:1"></span>'
-      +'<a href="#" onclick="event.preventDefault();loadSystem()" style="font-size:.75rem;color:var(--text2);text-decoration:none">↻ Refresh</a>'
-      +'<a href="#" onclick="event.preventDefault();clearAllMuxErr()" style="font-size:.75rem;color:var(--text2);text-decoration:none">Clear all</a>'
-      +'</div>';
-    window._muxErrors.forEach(e=>{
-      var p=e.path||'';
-      html+='<div style="padding:6px 0;font-size:.8rem">'
-        +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">'
-        +'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--red);flex-shrink:0"></span>'
-        +'<span style="font-weight:500;color:var(--red);flex:1;min-width:0;word-break:break-all">'+esc(p)+'</span>'
-        +'<span onclick="clearMuxErr('+JSON.stringify(p)+')" title="Clear this error" '
-          +'style="flex-shrink:0;cursor:pointer;color:var(--text3);font-size:1rem;line-height:1;padding:0 2px">&times;</span>'
-        +'</div>'
-        +'<div style="margin-left:16px;color:var(--text2)">'+esc(e.reason||'')+'</div>'
-        +(e.hint?'<div style="margin-left:16px;color:var(--text3);font-size:.75rem;margin-top:2px">'+esc(e.hint)+'</div>':'')
-        +'</div>';
-    });
-    html+='</div>';
-  }
-  upd('muxes',html);
-}
-
-/* Clear a single stuck mux error (the ✕), then re-pull. */
-function clearMuxErr(path){
-  fetch('/api/mux-errors/clear?path='+encodeURIComponent(path),{method:'POST'})
-    .then(()=>loadSystem()).catch(()=>loadSystem());
-}
-function clearAllMuxErr(){
-  fetch('/api/mux-errors/clear-all',{method:'POST'})
-    .then(()=>loadSystem()).catch(()=>loadSystem());
-}
-/* ---- Move queue with live progress ---- */
-function renderMoves(){
-  const el=document.getElementById('moves');
-  if(!el)return;
-  const data=window._stateData||{};
-  /* `_move` is an ARRAY of per-artifact bars (the movie file and, with
-     keep_iso, its companion ISO \u2014 one bar each). Tolerate the legacy single
-     object shape for safety across a rolling deploy. */
-  const moves=Array.isArray(data._move)?data._move:(data._move&&data._move.name?[data._move]:[]);
-  let html='';
-  let hasContent=false;
-  /* Active move: one progress bar per artifact, labelled "Title (iso)" /
-     "Title (mkv)" so the two legs of a keep_iso move read distinctly. */
-  moves.forEach(mv=>{
-    if(!mv||!mv.name)return;
-    hasContent=true;
-    const pct=mv.progress_pct||0;
-    const spdStr=mv.speed_mbs>=1?mv.speed_mbs.toFixed(1)+' MB/s':mv.speed_mbs>0?(mv.speed_mbs*1024).toFixed(0)+' KB/s':'';
-    const etaStr=mv.eta?mv.eta+' remaining':'';
-    const label=[pct+'%',spdStr,etaStr].filter(x=>x).join(' \u00b7 ');
-    const title=esc(mv.name)+(mv.artifact?' ('+esc(mv.artifact)+')':'');
-    html+='<div style="padding:6px 0"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);animation:p 1.5s infinite;flex-shrink:0"></span><span style="font-size:.85rem;font-weight:500">'+title+'</span></div>';
-    html+='<div style="display:flex;align-items:center;gap:8px">';
-    if(pct>0)html+='<div style="flex:1;background:var(--chip);border-radius:3px;height:3px;overflow:hidden"><div style="background:var(--green);height:100%;width:'+pct+'%;transition:width 1s"></div></div>';
-    html+='<span style="font-size:.75rem;color:var(--text2)">'+label+'</span></div></div>';
-  });
-  /* Pending queue items — from the live state payload (_move_queue),
-     refreshed every SSE tick (falls back to the /api/system _moveQueue only
-     if absent). The server already excludes the actively-moving dir from this
-     list (it's shown as the bars above), so no client-side de-dup is needed. */
-  const moveQ=(data._move_queue!=null)?data._move_queue:window._moveQueue;
-  if(moveQ){
-    moveQ.forEach(m=>{
-      hasContent=true;
-      html+='<div style="padding:4px 0;font-size:.8rem"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--yellow);margin-right:8px;vertical-align:middle"></span>'+esc(m)+'</div>';
-    });
-  }
-  if(!hasContent)html='<div style="color:var(--text3);font-size:.8rem">No pending moves</div>';
-  /* Stuck-move errors that need user action (orphaned staging dirs etc.) */
-  if(window._moveErrors&&window._moveErrors.length){
-    html+='<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--chip)">';
-    /* Header: re-check (refresh) + clear-all. A cleared error the mover still
-       considers blocked reappears on its next tick, so refresh confirms which
-       are actually solved. */
-    html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">'
-      +'<span style="font-size:.75rem;color:var(--text3);text-transform:uppercase;letter-spacing:.4px">Needs action</span>'
-      +'<span style="flex:1"></span>'
-      +'<a href="#" onclick="event.preventDefault();loadSystem()" style="font-size:.75rem;color:var(--text2);text-decoration:none">↻ Refresh</a>'
-      +'<a href="#" onclick="event.preventDefault();clearAllMoveErr()" style="font-size:.75rem;color:var(--text2);text-decoration:none">Clear all</a>'
-      +'</div>';
-    window._moveErrors.forEach(e=>{
-      var p=e.path||'';
-      html+='<div style="padding:6px 0;font-size:.8rem">'
-        +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">'
-        +'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--red);flex-shrink:0"></span>'
-        +'<span style="font-weight:500;color:var(--red);flex:1;min-width:0;word-break:break-all">'+esc(p)+'</span>'
-        +'<span onclick="clearMoveErr('+JSON.stringify(p)+')" title="Clear this error" '
-          +'style="flex-shrink:0;cursor:pointer;color:var(--text3);font-size:1rem;line-height:1;padding:0 2px">&times;</span>'
-        +'</div>'
-        +'<div style="margin-left:16px;color:var(--text2)">'+esc(e.reason||'')+'</div>'
-        +(e.hint?'<div style="margin-left:16px;color:var(--text3);font-size:.75rem;margin-top:2px">'+esc(e.hint)+'</div>':'')
-        +'</div>';
-    });
-    html+='</div>';
-  }
-  upd('moves',html);
-}
-
-/* Clear a single stuck move error (the ✕), then re-pull so a still-blocked
-   one reappears and a solved one stays gone. */
-function clearMoveErr(path){
-  fetch('/api/move-errors/clear?path='+encodeURIComponent(path),{method:'POST'})
-    .then(()=>loadSystem()).catch(()=>loadSystem());
-}
-function clearAllMoveErr(){
-  fetch('/api/move-errors/clear-all',{method:'POST'})
-    .then(()=>loadSystem()).catch(()=>loadSystem());
-}
-
-/* ---- System page ---- */
-function loadSystem(){
-  fetch('/api/system').then(r=>r.json()).then(data=>{
-    /* Move queue - store for renderMoves, then render */
-    window._moveQueue=data.move_queue||[];
-    window._moveErrors=data.move_errors||[];
-    /* Mux queue (v0.25.3) — same shape, separate panel above */
-    window._muxQueue=data.mux_queue||[];
-    window._muxErrors=data.mux_errors||[];
-    renderMuxes();
-    renderMoves();
-    /* Debug-logging toggle reflects current runtime state */
-    const dbg=document.getElementById('debugToggle');
-    if(dbg)dbg.checked=!!data.debug_enabled;
-    /* Global flag so the device-page Debug Log box shows/polls only when on */
-    window._debugOn=!!data.debug_enabled;
-    /* System log */
-    const logEl=document.getElementById('syslog');
-    if(data.syslog){
-      logEl.textContent=data.syslog.split('\n').map(utcToLocal).join('\n');
-      logEl.scrollTop=0;
-    }else{
-      logEl.textContent='No system log available';
-    }
-  }).catch(()=>{});
-}
-
-/* Flip runtime debug logging via POST /api/debug; sync the checkbox to the
-   authoritative state the server returns. */
-function toggleDebug(on){
-  fetch('/api/debug',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})})
-    .then(r=>r.json()).then(d=>{const t=document.getElementById('debugToggle');if(t)t.checked=!!d.enabled;})
-    .catch(()=>{});
-}
-
-/* ---- Settings page ---- */
-function loadSettings(){
-  fetch('/api/settings').then(r=>r.json()).then(renderSettings).catch(()=>{});
-}
-
-function renderSettings(s){
-  /* v0.13.19: derive a virtual `rip_mode` from `max_retries` so the radio
-     selector renders with the right value on load. The backend stays on
-     `max_retries` (and `keep_iso`) — `saveSettings` translates rip_mode back
-     before POST. */
-  if(typeof s.rip_mode!=='string'){
-    s.rip_mode=(s.max_retries>0)?'multi':'single';
-  }
-  const groups=[
-    {title:'Disc Lifecycle',fields:[
-      {key:'on_insert',label:'On Disc Insert',type:'radio',options:[{value:'nothing',label:'Do Nothing'},{value:'scan',label:'Scan'},{value:'rip',label:'Rip'},{value:'resume',label:'Resume'}],hint:'Rip starts fresh each time. Resume continues a resumable rip, or starts fresh if none is available. Both leave finished, review-held and muxing discs alone; Rip also leaves loss-aborted discs for Accept/Resume.'},
-      {key:'auto_eject',label:'Auto Eject',type:'bool',hint:'Eject disc after rip completes'},
-    ]},
-    {title:'Ripping',fields:[
-      // Title filters only apply when the rip ends in a mux step (MKV/M2TS/
-      // Network); ISO is a whole-disc image so they hide for that format.
-      {key:'output_format',label:'Output Format',type:'radio',options:[{value:'mkv',label:'MKV'},{value:'m2ts',label:'M2TS'},{value:'iso',label:'ISO (disc image)'},{value:'network',label:'Network'}],hint:'Format for ripped files. ISO copies the whole disc; the other formats mux selected titles.'},
-      {key:'network_target',label:'Network Target',type:'text',hint:'host:port for network output (e.g. nas.example.com:9000)',indent:true,placeholder:'nas.example.com:9000',showIf:{key:'output_format',value:'network'}},
-      {key:'main_feature',label:'Main Feature Only',type:'bool',hint:'',indent:true,hideIf:{key:'output_format',value:'iso'}},
-      {key:'min_length_secs',label:'Minimum Title Length (seconds)',type:'number',hint:'Shorter titles are skipped (600 = 10 min)',indent:true,hideIf:{key:'output_format',value:'iso'}},
-      {key:'abort_on_lost_secs',label:'Max Acceptable Main Movie Loss',type:'number',hint:'Governs the RIP phase only: seconds of UNREADABLE main-movie data tolerated after all retry passes. If unreadable-sector loss in the MAIN FEATURE still exceeds this once retries are exhausted, the rip aborts (leaving a resumable staging dir). 0 = require a perfect rip — abort on ANY unreadable byte, not just ≥1s. Scoped to the main movie only (a scratched menu/extra outside the title never aborts). Applies to title-selected output (MKV / M2TS / Network stream) — IGNORED for an ISO rip, which is kept whole as-is (for a byte-perfect full-disc image use the freemkv CLI). The mux itself never aborts: any undecryptable/demux-time loss is concealed and tallied, never quarantined. Multi-pass only.',indent:true,showIf:{key:'rip_mode',value:'multi'},hideIf:{key:'output_format',value:'iso'}},
-    ]},
-    {title:'Recovery',fields:[
-      {key:'rip_mode',label:'Rip Mode',type:'radio',options:[{value:'single',label:'Single Pass'},{value:'multi',label:'Multi Pass'}],hint:'Single Pass: stream disc → MKV directly. Fastest, best for healthy discs. Multi Pass: rip an ISO, retry bad sectors with progressively smaller blocks, then mux to MKV. Use for discs with read errors.'},
-      /* Single-pass error policy: only meaningful when there's no retry safety net. */
-      {key:'on_read_error',label:'On Read Error',type:'radio',options:[{value:'stop',label:'Stop'},{value:'skip',label:'Skip (zero-fill)'}],hint:'Drive read error policy for single-pass rips. Stop aborts on the first bad sector. Skip zero-fills it and keeps streaming — useful when the disc is mostly fine and you accept minor loss for speed.',indent:true,showIf:{key:'rip_mode',value:'single'}},
-      /* Multi-pass knobs: retries + accept-loss threshold. on_read_error doesn't apply
-         in multi-pass — sweep always skips by design, retries always retry, and the
-         post-retry abort decision is governed by abort_on_lost_secs (time-based). */
-      {key:'max_retries',label:'Retry Passes',type:'number',hint:'How many retry passes to run on bad sectors. Each pass uses smaller blocks (60→30→15→7→1 sectors) and alternates direction. Default 5 covers most recoverable damage.',indent:true,showIf:{key:'rip_mode',value:'multi'}},
-      {key:'keep_iso',label:'Keep Intermediate ISO',type:'bool',hint:'Keep the intermediate disc ISO after muxing. Off by default to reclaim disk. Filed beside the muxed title unless you set an ISO Folder (under Output).',indent:true,showIf:{key:'rip_mode',value:'multi'}},
-    ]},
-    {title:'Output',fields:[
-      {key:'staging_dir',label:'Staging Directory',type:'text',hint:'Where rips are written before being moved to the final destination. Use a fast local disk for performance; the finished MKV is moved to the output directory on completion.'},
-      {key:'output_dir',label:'Output Directory',type:'text',hint:'Where all ripped files go by default'},
-      {key:'movie_dir',label:'Movies',type:'text',hint:'',indent:true,placeholder:'Same as output directory'},
-      {key:'tv_dir',label:'TV Series',type:'text',hint:'',indent:true,placeholder:'Same as output directory'},
-      {key:'iso_dir',label:'ISO Folder',type:'text',hint:'Where kept ISOs are stored (applies when Keep Intermediate ISO is on, or Output Format is ISO). Relative (e.g. isos) sits under the Output Directory; an absolute path (e.g. /mnt/archive/isos) targets another disk. Blank = beside the muxed title.',indent:true,placeholder:'Beside the muxed title'},
-    ]},
-    {title:'Library',fields:[
-      {key:'library_dir',label:'Library Folder',type:'text',hint:'Where the Title/Title.mkv files are. Blank = the Movies folder above.',placeholder:'Movies folder'},
-      {key:'library_iso_dir',label:'Source ISO Folder',type:'text',hint:'Where the source ISOs are, matched to MKVs by title. Blank = the ISO Folder above.',placeholder:'ISO Folder'},
-      {key:'library_iso_subfolders',label:'Include ISO Subfolders',type:'bool',hint:'Also list ISOs one folder down (dvd/, hddvd/, bd/). Off = top-level ISOs only.'},
-    ]},
-    {title:'API Keys',fields:[
-      {key:'tmdb_api_key',label:'TMDB API Key',type:'text',hint:'v3 API key from themoviedb.org'},
-    ]},
-    {title:'Key Source',fields:[
-      {key:'key_source',label:'AACS Key Source',type:'radio',options:[{value:'local',label:'Local KEYDB'},{value:'online',label:'Online Keyserver'}],hint:'Where per-disc AACS keys come from. Local uses a KEYDB.cfg on disk; Online queries a keyserver.'},
-      {key:'keydb_path',label:'KEYDB.cfg Location',type:'text',hint:'Path to KEYDB.cfg on disk. Blank = default: <AUTORIP_DIR>/keydb.cfg (normally /config/keydb.cfg in Docker).',placeholder:'/config/keydb.cfg',indent:true,showIf:{key:'key_source',value:'local'}},
-      {key:'keydb_resolved',label:'Resolved KEYDB path',type:'info',hint:'The exact file autorip reads keys from right now (after the box above + defaults). If it says NOT FOUND, place keydb.cfg there or set the location above.',indent:true,showIf:{key:'key_source',value:'local'}},
-      {key:'keydb_url',label:'KEYDB Update URL',type:'text',hint:'HTTP URL to download KEYDB.cfg (zip, gz, or plain text).',indent:true,showIf:{key:'key_source',value:'local'}},
-      {type:'action',action:"updateKeydb('keydb-status-settings')",button:'Update KEYDB',status:'keydb-status-settings',hint:'Download the KEYDB.cfg from the URL above into the configured location.',indent:true,showIf:{key:'key_source',value:'local'}},
-      {key:'keyserver_url',label:'Keyserver URL',type:'text',hint:'Full keyserver endpoint URL — the decode request is POSTed here verbatim, so include the path (e.g. https://host/decode).',indent:true,showIf:{key:'key_source',value:'online'}},
-      {key:'keyserver_secret',label:'Keyserver API Secret',type:'text',hint:'Bearer token for the keyserver, if it requires one.',indent:true,showIf:{key:'key_source',value:'online'}},
-      {key:'capture_without_keys',label:'Capture Discs Without Keys',type:'bool',hint:'No usable keys → capture the disc to an ISO and mux later when keys become available. Off = skip the disc.'},
-    ]},
-    {title:'Performance',fields:[
-      {key:'decrypt_threads',label:'Decrypt Threads',type:'number',hint:'How many threads AACS decryption uses. 0 = auto (all available cores, capped at 64). Drop to 4-8 if autorip is sharing the host with other heavy workloads.'},
-      {key:'log_retention_days',label:'Log Retention (days)',type:'number',hint:'Per-device .log files older than this are pruned by the in-process daily cleanup. Default 30.'},
-    ]},
-  ];
-  let html='';
-  groups.forEach(g=>{
-    html+='<div class="card"><h2>'+g.title+'</h2>';
-    g.fields.forEach(f=>{
-      const v=s[f.key]!=null?s[f.key]:'';
-      const indent=f.indent?'margin-left:20px;border-left:2px solid var(--border);padding-left:12px':'';
-      const ph=f.placeholder?' placeholder="'+f.placeholder+'"':'';
-      const hideShow=f.showIf&&s[f.showIf.key]!==f.showIf.value;
-      const hideHide=f.hideIf&&s[f.hideIf.key]===f.hideIf.value;
-      const hide=(hideShow||hideHide)?'display:none;':'';
-      const showAttr=(f.showIf?' data-show-key="'+f.showIf.key+'" data-show-value="'+f.showIf.value+'"':'')+(f.hideIf?' data-hide-key="'+f.hideIf.key+'" data-hide-value="'+f.hideIf.value+'"':'');
-      if(f.type==='action'){
-        html+='<div class="setting" style="'+indent+hide+'"'+showAttr+'><div style="display:flex;align-items:center;gap:10px"><button type="button" class="btn" onclick="'+f.action+'">'+f.button+'</button><span id="'+f.status+'" style="font-size:.8rem"></span></div>'+(f.hint?'<div class="hint">'+f.hint+'</div>':'')+'</div>';
-      }else if(f.type==='radio'){
-        const opts=f.options.map(o=>'<label style="font-size:13px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;margin-right:16px"><input type="radio" name="'+f.key+'" data-key="'+f.key+'" value="'+o.value+'" style="width:14px;height:14px;margin:0;accent-color:var(--accent)" onchange="toggleConditional()" '+(v===o.value?'checked':'')+'>'+o.label+'</label>').join('');
-        html+='<div class="setting" style="'+indent+hide+'"'+showAttr+'><label>'+f.label+'</label><div style="margin-top:4px">'+opts+'</div>'+(f.hint?'<div class="hint">'+f.hint+'</div>':'')+'</div>';
-      }else if(f.type==='bool'){
-        html+='<div class="setting" style="'+indent+hide+'"'+showAttr+'><label class="toggle"><input type="checkbox" data-key="'+f.key+'" '+(v?'checked':'')+'> '+f.label+'</label>'+(f.hint?'<div class="hint">'+f.hint+'</div>':'')+'</div>';
-      }else if(f.type==='info'){
-        html+='<div class="setting" style="'+indent+hide+'"'+showAttr+'><label>'+f.label+'</label><div style="margin-top:4px;font-family:monospace;font-size:.8rem;color:var(--text2);word-break:break-all">'+esc(String(v))+'</div>'+(f.hint?'<div class="hint">'+f.hint+'</div>':'')+'</div>';
-      }else{
-        html+='<div class="setting" style="'+indent+hide+'"'+showAttr+'><label>'+f.label+'</label><input type="'+f.type+'" data-key="'+f.key+'" value="'+esc(String(v))+'"'+ph+'>'+(f.hint?'<div class="hint">'+f.hint+'</div>':'')+'</div>';
-      }
-    });
-    html+='</div>';
-    /* Insert webhooks card after Output */
-    if(g.title==='Output'){
-      /* Each webhook is now {url, post_rip, post_mux, post_move}; tolerate a
-         legacy bare string (older payload) by coercing it to an object that
-         fires on every stage. A pre-1.6.8 object with no post_mux defaults it
-         to true (post_mux!==false below), matching the config loader. */
-      const hooks=(s.webhook_urls||[])
-        .map(h=>typeof h==='string'?{url:h,post_rip:true,post_mux:true,post_move:true}:h)
-        .filter(h=>h&&h.url);
-      html+='<div class="card"><h2>Webhooks</h2>';
-      html+='<div id="webhook-list">';
-      hooks.forEach((h,i)=>{ html+=webhookRow(i,h.url,h.post_rip!==false,h.post_mux!==false,h.post_move!==false); });
-      html+='</div>';
-      html+='<button class="btn" onclick="addWebhook()" style="font-size:.75rem;margin-top:4px">+ Add Webhook</button>';
-      html+='<div style="font-size:12px;color:var(--text3);margin-top:8px;line-height:1.4">POST JSON to each endpoint. Choose per hook which stage fires it — Rip (disc read done, drive free), Mux (.mkv produced), Move (in library) — in any combination. Works with Discord, Jellyfin, n8n, or any HTTP endpoint.</div>';
-      html+='</div>';
-    }
-  });
-  document.getElementById('settings-form').innerHTML=html;
-  toggleConditional();
-}
-function toggleConditional(){
-  // A field may carry BOTH a showIf and a hideIf; it's hidden if showIf
-  // isn't met OR hideIf is met (e.g. abort_on_lost_secs: multi-pass only
-  // AND not ISO output).
-  document.querySelectorAll('[data-show-key],[data-hide-key]').forEach(el=>{
-    let visible=true;
-    if(el.dataset.showKey){
-      const r=document.querySelector('input[data-key="'+el.dataset.showKey+'"]:checked');
-      if(!(r&&r.value===el.dataset.showValue)) visible=false;
-    }
-    if(el.dataset.hideKey){
-      const r=document.querySelector('input[data-key="'+el.dataset.hideKey+'"]:checked');
-      if(r&&r.value===el.dataset.hideValue) visible=false;
-    }
-    el.style.display=visible?'':'none';
-  });
-}
-
-/* One webhook row: URL input + a "Rip", "Mux" and "Move" checkbox (which
-   pipeline stage fires this hook) + a remove button. Rip = disc read done /
-   drive free; Mux = .mkv produced; Move = landed in the library.
-   `postRip`/`postMux`/`postMove` seed the checkboxes; new hooks default all
-   three to true. The checkbox data-attributes are read back per-row in
-   saveSettings(). */
-function webhookRow(i,url,postRip,postMux,postMove){
-  const cb=(attr,on,label)=>'<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--text2);cursor:pointer;white-space:nowrap"><input type="checkbox" '+attr+' '+(on?'checked':'')+' style="width:14px;height:14px;margin:0;accent-color:var(--accent)">'+label+'</label>';
-  return '<div class="webhook-row" style="display:flex;gap:8px;margin-bottom:6px;align-items:center;flex-wrap:wrap">'
-    +'<input type="text" data-webhook="'+i+'" value="'+esc(url||'')+'" placeholder="https://discord.com/api/webhooks/..." style="flex:1;min-width:180px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--log-bg);color:var(--text);font-size:13px;font-family:inherit">'
-    +cb('data-webhook-rip','undefined'==typeof postRip?true:postRip,'Rip')
-    +cb('data-webhook-mux','undefined'==typeof postMux?true:postMux,'Mux')
-    +cb('data-webhook-move','undefined'==typeof postMove?true:postMove,'Move')
-    +'<button class="btn" onclick="this.parentElement.remove()" style="padding:5px 8px;font-size:.75rem">X</button>'
-    +'</div>';
-}
-
-function addWebhook(){
-  const list=document.getElementById('webhook-list');
-  const i=list.children.length;
-  const tmp=document.createElement('div');
-  tmp.innerHTML=webhookRow(i,'',true,true,true);
-  const div=tmp.firstChild;
-  list.appendChild(div);
-  div.querySelector('input[type="text"]').focus();
-}
-
-function saveSettings(){
-  const inputs=document.querySelectorAll('#settings-form [data-key]');
-  const s={};
-  inputs.forEach(el=>{
-    if(el.type==='radio'){if(el.checked)s[el.dataset.key]=el.value}
-    else if(el.type==='checkbox')s[el.dataset.key]=el.checked;
-    else if(el.type==='number')s[el.dataset.key]=parseInt(el.value)||0;
-    else s[el.dataset.key]=el.value;
-  });
-  /* Collect webhooks as {url, post_rip, post_mux, post_move}. Read each flag
-     from the row's own checkboxes so a URL only fires on the stages the
-     operator chose. */
-  const hooks=[];
-  document.querySelectorAll('#webhook-list .webhook-row').forEach(row=>{
-    const urlEl=row.querySelector('input[data-webhook]');
-    const v=(urlEl&&urlEl.value||'').trim();
-    if(!v)return;
-    const rip=row.querySelector('input[data-webhook-rip]');
-    const mux=row.querySelector('input[data-webhook-mux]');
-    const mov=row.querySelector('input[data-webhook-move]');
-    hooks.push({url:v,post_rip:rip?rip.checked:true,post_mux:mux?mux.checked:true,post_move:mov?mov.checked:true});
-  });
-  s.webhook_urls=hooks;
- /* v0.13.19: translate the virtual `rip_mode` selector back to the backend
-      fields. Single → max_retries=0. Keep keep_iso unchanged so the stored
-      preference survives a mode switch (the server no longer clobbers it
-      from rip_mode either). Multi → keep whatever max_retries the user set;
-      default to 5 if they flipped to multi without ever touching the count.
-      The `rip_mode` key itself is never persisted — the backend already
-      infers it from max_retries on the next render. */
-   if(s.rip_mode==='single'){s.max_retries=0}
-   else if(s.rip_mode==='multi'&&(!s.max_retries||s.max_retries<1)){s.max_retries=5}
-   delete s.rip_mode;
-  /* Loud, hard-to-miss feedback on save. The previous version flashed
-     "Saved" in a small green span next to the button for 2 s and did
-     nothing at all on error — easy to miss and silent on failure.
-     Now: the button itself transitions through Saving… → ✓ Saved (green
-     fill) → original label, and the adjacent status span carries any
-     error message in red. */
-  const btn=document.getElementById('savebtn');
-  const status=document.getElementById('save-status');
-  const origLabel=btn.textContent;
-  btn.disabled=true;
-  btn.textContent='Saving…';
-  status.textContent='';
-  status.style.color='var(--green)';
-  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(s)})
-    .then(async r=>{
-      if(!r.ok){
-        let msg='HTTP '+r.status;
-        try{const j=await r.json();if(j&&j.error)msg=j.error;}catch(_){}
-        throw new Error(msg);
-      }
-      btn.textContent='✓ Saved';
-      btn.style.background='var(--green)';
-      btn.style.color='#fff';
-      btn.style.borderColor='var(--green)';
-      status.textContent='Saved';
-      setTimeout(()=>{
-        btn.disabled=false;
-        btn.textContent=origLabel;
-        btn.style.background='';
-        btn.style.color='';
-        btn.style.borderColor='';
-        status.textContent='';
-      },2000);
-    })
-    .catch(e=>{
-      btn.disabled=false;
-      btn.textContent=origLabel;
-      status.style.color='var(--red)';
-      status.textContent='Save failed: '+e.message;
-    });
-}
-
-/* ---- Init ---- */
-fetch('/api/state').then(r=>r.json()).then(data=>{handleState(data);connectSSE()}).catch(()=>setTimeout(connectSSE,1000));
-</script>
-</body>
-</html>"##;
+// The app's own paths: each serves the shell, which routes client-side.
+const PAGES: &[&str] = &[
+    "/",
+    "/index.html",
+    "/library",
+    "/remux",
+    "/ripper",
+    "/settings",
+    "/system",
+];
 
 pub fn run(cfg: &Arc<RwLock<Config>>) {
     let port = cfg.read().unwrap_or_else(|e| e.into_inner()).port;
@@ -1711,10 +292,13 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         );
     }
 
-    if is_get && (url == "/" || url == "/index.html") {
+    let path = url.split('?').next().unwrap_or("");
+    if is_get && PAGES.contains(&path) {
         serve_html(request);
-    } else if is_get && url == "/favicon.svg" {
-        serve_favicon(request);
+    } else if is_get && path == "/favicon.svg" {
+        serve_asset(request, "favicon.svg");
+    } else if is_get && path.starts_with("/assets/") {
+        serve_asset(request, &path["/assets/".len()..]);
     } else if is_get && url == "/api/state" {
         let staging_dir = cfg
             .read()
@@ -1786,6 +370,10 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         }
         crate::server::muxer::clear_mux_error(&target);
         json_response(request, 200, r#"{"ok":true}"#);
+    } else if is_get && url == "/api/logs/download" {
+        handle_logs_download(request, cfg);
+    } else if is_post && url == "/api/system/keyserver-test" {
+        handle_keyserver_test(request, cfg);
     } else if is_get && url.starts_with("/api/logs/") {
         let device = url.trim_start_matches("/api/logs/");
         let device = percent_decode(device);
@@ -2066,10 +654,8 @@ fn handle_tmdb_search(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, ur
 fn serve_html(request: tiny_http::Request) {
     let header =
         Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
-    let html = DASHBOARD_HTML.replace("{VERSION}", crate::server::VERSION_LABEL);
-    // The dashboard IS the app shell (single self-contained HTML+CSS+JS
-    // page); serve it non-cacheable so browsers don't keep running the
-    // OLD UI after a deploy. no-store forces a fresh fetch on every load.
+    let html = INDEX_HTML.replace("{VERSION}", crate::server::VERSION_LABEL);
+    // The shell is never cached, so a deploy is picked up on the next load.
     let response = Response::from_string(html).with_header(header).with_header(
         Header::from_bytes(
             &b"Cache-Control"[..],
@@ -2080,15 +666,24 @@ fn serve_html(request: tiny_http::Request) {
     let _ = request.respond(response);
 }
 
-fn serve_favicon(request: tiny_http::Request) {
-    let header = Header::from_bytes(&b"Content-Type"[..], &b"image/svg+xml"[..]).unwrap();
-    // Unlike the app shell, the icon is immutable brand art — let the browser
-    // cache it so the tab icon doesn't refetch on every poll/load.
-    let response = Response::from_string(FAVICON_SVG)
-        .with_header(header)
-        .with_header(
-            Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=86400"[..]).unwrap(),
-        );
+// One embedded asset by name, or a 404. Revalidated on every load (`no-cache`)
+// so the modules the shell imports always match the running build.
+fn serve_asset(request: tiny_http::Request, name: &str) {
+    let Some((_, ctype, body)) = ASSETS.iter().find(|(n, _, _)| *n == name) else {
+        return json_response(request, 404, r#"{"error":"not found"}"#);
+    };
+    let etag = format!(
+        "\"{}\"",
+        crate::server::VERSION_LABEL.replace(['"', ' '], "")
+    );
+    if header_value(&request, "If-None-Match") == Some(etag.as_str()) {
+        let _ = request.respond(Response::empty(304));
+        return;
+    }
+    let response = Response::from_data(*body)
+        .with_header(Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap())
+        .with_header(Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap())
+        .with_header(Header::from_bytes(&b"ETag"[..], etag.as_bytes()).unwrap());
     let _ = request.respond(response);
 }
 
@@ -2866,6 +1461,39 @@ impl Drop for ConnGuard {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod web_tests {
+    // An embedded UI asset as text.
+    fn asset(name: &str) -> &'static str {
+        let (_, _, body) = super::ASSETS
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .unwrap_or_else(|| panic!("no asset {name}"));
+        std::str::from_utf8(body).expect("text asset")
+    }
+
+    // Every module the shell imports is embedded and served.
+    #[test]
+    fn every_imported_module_is_embedded() {
+        for (name, ctype, body) in super::ASSETS {
+            if !name.ends_with(".js") {
+                continue;
+            }
+            assert!(ctype.starts_with("text/javascript"));
+            let text = std::str::from_utf8(body).unwrap();
+            for part in text
+                .split("from './")
+                .skip(1)
+                .chain(text.split("import('./").skip(1))
+            {
+                let dep = &part[..part.find('\'').unwrap()];
+                assert!(
+                    super::ASSETS.iter().any(|(n, _, _)| *n == dep),
+                    "{name} imports {dep}, which is not embedded"
+                );
+            }
+        }
+        assert!(super::INDEX_HTML.contains("/assets/app.js"));
+    }
+
     use super::*;
 
     // handle_accept_loss refuses (409) while the mux worker owns the
@@ -3861,21 +2489,19 @@ mod web_tests {
         }
         assert_eq!(esc("\"x<>&'"), "&quot;x&lt;&gt;&amp;&#39;");
         // The shipped JS must escape quotes and apostrophes, not just <>&.
-        assert!(DASHBOARD_HTML.contains(r#"replace(/"/g,'&quot;')"#));
-        assert!(DASHBOARD_HTML.contains(r"replace(/'/g,'&#39;')"));
+        assert!(asset("ui.js").contains(r#"replace(/"/g,'&quot;')"#));
+        assert!(asset("ui.js").contains(r"replace(/'/g,'&#39;')"));
     }
 
     // Error text reaches the dashboard via innerHTML — bare URLs need
     // escLinks() (built on esc()) to become anchors while staying safe.
     #[test]
     fn dashboard_error_text_linkifies_urls() {
-        assert!(DASHBOARD_HTML.contains("function escLinks(s){"));
-        // The step detail line ("Error — <message>").
-        assert!(DASHBOARD_HTML.contains(r"'+escLinks(detail)}"));
+        assert!(asset("ui.js").contains("function escLinks(s){"));
         // The red error banner.
-        assert!(DASHBOARD_HTML.contains("escLinks(s.last_error)"));
+        assert!(asset("ripper.js").contains("escLinks(s.last_error)"));
         // Only https is linkified — no javascript:/data: anchors.
-        assert!(DASHBOARD_HTML.contains(r#"/https:\/\/[^\s<>"']+/g"#));
+        assert!(asset("ui.js").contains(r#"/https:\/\/[^\s<>"']+/g"#));
     }
 
     // H7: executes the shipped esc/escLinks JS under node (skipped when node
@@ -3895,10 +2521,11 @@ mod web_tests {
             eprintln!("skipped: node not found on PATH");
             return;
         }
-        let esc_at = DASHBOARD_HTML.find("function esc(s){").unwrap();
-        let esc_end = esc_at + DASHBOARD_HTML[esc_at..].find('\n').unwrap();
-        let links_at = DASHBOARD_HTML.find("function escLinks(s){").unwrap();
-        let links_end = links_at + DASHBOARD_HTML[links_at..].find("\nfunction ").unwrap();
+        let ui = asset("ui.js");
+        let esc_at = ui.find("function esc(s){").unwrap();
+        let esc_end = esc_at + ui[esc_at..].find('\n').unwrap();
+        let links_at = ui.find("function escLinks(s){").unwrap();
+        let links_end = links_at + ui[links_at..].find("\nexport ").unwrap();
         let a = |u: &str| {
             format!(
                 r#"<a href="{u}" target="_blank" rel="noopener noreferrer" style="color:inherit">{u}</a>"#
@@ -3929,8 +2556,8 @@ mod web_tests {
         let inputs: Vec<&str> = cases.iter().map(|c| c.0).collect();
         let script = format!(
             "{}\n{}\nconsole.log(JSON.stringify({}.map(escLinks)));",
-            &DASHBOARD_HTML[esc_at..esc_end],
-            &DASHBOARD_HTML[links_at..links_end],
+            &ui[esc_at..esc_end],
+            &ui[links_at..links_end],
             serde_json::to_string(&inputs).unwrap()
         );
         let out = std::process::Command::new("node")
@@ -7172,7 +5799,14 @@ fn handle_system_info(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         .collect::<Vec<_>>()
         .join("\n");
 
+    let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
     let body = serde_json::json!({
+        "version_label": crate::server::VERSION_LABEL,
+        "libfreemkv": libfreemkv::VERSION_LABEL,
+        "mounts": crate::server::health::mounts(),
+        "keys": key_status(&c),
+        "drives": drive_summary(),
+        "log_dir": c.log_dir(),
         "move_queue": move_queue,
         "move_errors": move_errors,
         "mux_queue": mux_queue,
@@ -7185,6 +5819,125 @@ fn handle_system_info(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     });
 
     json_response(request, 200, &body.to_string());
+}
+
+// Where keys come from and whether each source is usable, for the System page.
+fn key_status(c: &Config) -> serde_json::Value {
+    let path = crate::server::keysource::keydb_path(c);
+    let meta = std::fs::metadata(&path).ok();
+    let modified = meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    serde_json::json!({
+        "keydb_path": path,
+        "keydb_present": meta.is_some(),
+        "keydb_bytes": meta.as_ref().map(|m| m.len()),
+        "keydb_modified": modified,
+        "keydb_url_set": !c.keydb_url.trim().is_empty(),
+        "keyserver_set": crate::server::keysource::uses_online(c),
+        "key_source": c.key_source,
+        "tmdb_set": !c.tmdb_api_key.is_empty(),
+    })
+}
+
+// Every drive the ripper knows, in device order, without the bulky fields.
+fn drive_summary() -> Vec<serde_json::Value> {
+    let state = ripper::STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut devs: Vec<serde_json::Value> = state
+        .iter()
+        .filter(|(k, _)| !k.starts_with('_'))
+        .map(|(k, s)| {
+            serde_json::json!({
+                "device": k,
+                "status": s.status,
+                "disc_present": s.disc_present,
+                "disc": if s.tmdb_title.is_empty() { &s.disc_name } else { &s.tmdb_title },
+                "format": s.disc_format,
+                "key_status": s.key_status,
+            })
+        })
+        .collect();
+    devs.sort_by(|a, b| a["device"].as_str().cmp(&b["device"].as_str()));
+    devs
+}
+
+// POST /api/system/keyserver-test: ask the keyserver whether it answers.
+fn handle_keyserver_test(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
+    let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+    if !crate::server::keysource::uses_online(&c) {
+        return json_response(
+            request,
+            400,
+            r#"{"ok":false,"error":"no keyserver URL is set"}"#,
+        );
+    }
+    let r = crate::server::keysource::probe_online_reachability(&c);
+    let ok = matches!(r, crate::server::keysource::ServiceReachability::Answered);
+    json_response(
+        request,
+        200,
+        &serde_json::json!({"ok": ok, "result": format!("{r:?}")}).to_string(),
+    );
+}
+
+// Cap per file in the log bundle, so a runaway log cannot exhaust memory.
+const BUNDLE_FILE_CAP: u64 = 8 * 1024 * 1024;
+
+// GET /api/logs/download: every log as one zip, each file capped to its tail.
+fn handle_logs_download(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
+    use std::io::Write as _;
+    let log_dir = cfg.read().unwrap_or_else(|e| e.into_inner()).log_dir();
+    let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut dirs = vec![(String::new(), std::path::PathBuf::from(&log_dir))];
+    while let Some((prefix, dir)) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = format!("{prefix}{}", e.file_name().to_string_lossy());
+            match e.file_type() {
+                Ok(t) if t.is_dir() && prefix.is_empty() => {
+                    dirs.push((format!("{name}/"), e.path()))
+                }
+                Ok(t) if t.is_file() => files.push((name, e.path())),
+                _ => {}
+            }
+        }
+    }
+    let json_log = std::path::PathBuf::from(crate::server::observe::json_log_path());
+    if !json_log.starts_with(&log_dir) {
+        files.push(("events.jsonl".into(), json_log));
+    }
+    files.sort();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, path) in files {
+        let Ok(text) = tail_file(&path.to_string_lossy(), BUNDLE_FILE_CAP) else {
+            continue;
+        };
+        if zip.start_file(name, opts).is_ok() {
+            let _ = zip.write_all(text.as_bytes());
+        }
+    }
+    let Ok(cursor) = zip.finish() else {
+        return json_response(
+            request,
+            500,
+            r#"{"ok":false,"error":"could not build the zip"}"#,
+        );
+    };
+    let fname = format!(
+        "attachment; filename=\"freemkv-logs-{}.zip\"",
+        crate::server::util::format_iso_datetime_filename()
+    );
+    let response = Response::from_data(cursor.into_inner())
+        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/zip"[..]).unwrap())
+        .with_header(Header::from_bytes(&b"Content-Disposition"[..], fname.as_bytes()).unwrap())
+        .with_header(Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap());
+    let _ = request.respond(response);
 }
 
 fn handle_device_log(request: tiny_http::Request, _cfg: &Arc<RwLock<Config>>, device: &str) {
@@ -8034,50 +6787,30 @@ mod accept_loss_spawn_failure_tests {
 
 #[cfg(test)]
 mod dashboard_button_tests {
-    // Catches the mutation putting a bare fetch(...) back into any
-    // device-action button's onclick: no .then/.catch discarded the server's
-    // answer, so a 409 (claim held by an unwinding worker) read as success.
+    // A device action must never be a bare fetch: that discards the answer,
+    // so a 409 (a claim held by an unwinding worker) would read as success.
+    // Every action goes through `driveAction`, which reports a refusal.
     #[test]
-    fn no_device_action_button_discards_the_servers_answer() {
-        let src = crate::server::util::source_lf(include_str!("web.rs"));
-        let code: Vec<&str> = src
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .filter(|l| !l.trim_start().starts_with('*'))
-            .collect();
-        let mut checked = 0;
-        for line in code {
-            let is_device_action = [
-                "/api/scan/",
-                "/api/rip/",
-                "/api/eject/",
-                "/api/stop/",
-                "/api/accept-loss/",
-            ]
+    fn no_device_action_discards_the_servers_answer() {
+        let (_, _, body) = super::ASSETS
             .iter()
-            .any(|ep| line.contains(ep));
-            if !line.contains("onclick=") || !is_device_action {
-                continue;
-            }
-            checked += 1;
-            assert!(
-                !line.contains("fetch("),
-                "a device-action button must not call fetch() directly — it \
-                 discards the status code, so a 409 renders as a success. Use \
-                 apiPost(url, this, label). Offending line:\n{line}"
-            );
-            assert!(
-                line.contains("apiPost("),
-                "every device-action button must go through apiPost, which \
-                 surfaces the failure and re-enables the button. Offending \
-                 line:\n{line}"
-            );
-        }
+            .find(|(n, _, _)| *n == "ripper.js")
+            .unwrap();
+        let src = std::str::from_utf8(body).unwrap();
         assert!(
-            checked >= 8,
-            "expected to inspect the whole drive-card button set; only found \
-             {checked} — the matcher has drifted away from the buttons"
+            !src.contains("fetch("),
+            "ripper.js must call the API through api()"
         );
+        for ep in [
+            "/api/scan/",
+            "/api/rip/",
+            "/api/eject/",
+            "/api/stop/",
+            "/api/accept-loss/",
+        ] {
+            assert!(src.contains(ep), "the drive card lost its {ep} action");
+        }
+        assert!(src.contains("act(btn, () => api('POST', url)"));
     }
 }
 

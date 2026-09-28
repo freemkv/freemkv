@@ -199,6 +199,7 @@ pub fn run(argv: Vec<String>) {
     // Library remux worker (plus its auditor). It yields the mux slot to any
     // rip and is joined on shutdown so a cancelled remux cleans its partial.
     let library_handle = crate::server::library::start(&cfg);
+    crate::server::health::start(&cfg);
 
     // Start web server thread
     let _web_handle = std::thread::spawn({
