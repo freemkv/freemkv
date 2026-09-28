@@ -621,6 +621,7 @@ fn forget_space_refusal(staging_dir: &Path) {
 }
 
 pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: ResumeClass) {
+    let _mux_slot = crate::server::library::arbiter::claim_for_rip();
     let ResumeClass::Remux {
         iso_path,
         mapfile_path,

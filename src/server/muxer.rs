@@ -577,8 +577,10 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
         // A fresh dispatch may produce a new/different error — lift any prior
         // operator dismissal so a genuinely new failure can surface again.
         undismiss(&dir.to_string_lossy());
+        let mux_slot = crate::server::library::arbiter::claim_for_rip();
         let outcome =
             crate::server::ripper::resume::remux_from_ripped_marker(cfg_arc, &dir, &marker);
+        drop(mux_slot);
         if outcome.success {
             clear_error(&dir.to_string_lossy());
             tracing::info!(staging = %dir.display(), title = %title, "mux worker: completed");

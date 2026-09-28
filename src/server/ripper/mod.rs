@@ -2371,6 +2371,8 @@ fn fire_rip_complete_webhook(
 /// non-tried) ranges are read. When false, Pass 1 starts fresh (the mapfile
 /// is recreated and the ISO truncated) — the classic full sweep.
 pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resume_sweep: bool) {
+    // Rip has the mux slot first: a running Library remux stops and re-queues.
+    let _mux_slot = crate::server::library::arbiter::claim_for_rip();
     // Replace the spawn site's fresh Halt with one backed by the drive's
     // halt-flag once open, so Stop also pre-empts in-flight Drive::read
     // calls; the swap carries a Stop already landed on the spawn-site token.
