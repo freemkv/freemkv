@@ -702,29 +702,36 @@ pub fn scan_disc_with_keys(
     keys: &KeyConfig,
     tok: &OpenToken,
 ) -> Result<Scanned, String> {
-    let (disc, mut reader) = drive_scan(source, keys, false)?;
+    let (disc, mut reader) = drive_scan(source, keys, tok)?;
     let main = fe::resolve_selection(&disc, &fe::Selection::MainMovie);
     let scope = libfreemkv::keys::KeyScope::Titles(main.clone());
-    let (set, trace) = crate::rip_keys::resolve(
+    let (set, trace) = crate::rip_keys::resolve_observed(
         &disc,
         reader.as_mut(),
         scope,
         &key_factory(keys),
-        None,
-        Some(&tok.halt),
+        &tok.halt,
+        &tok.progress,
     );
     stopped_open(set, tok).map(|set| scanned_with_keys(&disc, set, &trace, main))
 }
 
-/// Open and scan the drive behind `source` with NO key call (`fe::open_scan`): the disc
-/// and its raw reader. The drive is released when the reader drops.
+/// Open and scan the drive behind `source` with NO key call (`fe::open_scan_with`) under
+/// the open's token (stop design v5 §4.3): the disc and its raw reader. The drive is
+/// released when the reader drops.
 fn drive_scan(
     source: &str,
     keys: &KeyConfig,
-    raw_copy: bool,
+    tok: &OpenToken,
 ) -> Result<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>), String> {
-    let session = fe::open_scan(disc_target(source), session_credentials(keys), raw_copy)
-        .map_err(|e| drive_error(&e))?;
+    let session = fe::open_scan_with(
+        disc_target(source),
+        session_credentials(keys),
+        false,
+        &tok.halt,
+        &tok.progress,
+    )
+    .map_err(|e| drive_error(&e))?;
     staged(session)
 }
 

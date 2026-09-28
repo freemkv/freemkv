@@ -104,6 +104,8 @@ pub fn resolve(
 /// [`resolve`] for an open (stop design v5 §4.3, "The open token"): under its `halt`, and
 /// reporting to its `progress`, which each source call holds `busy()` and hands out as
 /// `ResolveCtx::progress()` (T29).
+// The GUI's; the CLI binary builds this module without the GUI off macOS.
+#[allow(dead_code)]
 pub fn resolve_observed(
     disc: &Disc,
     reader: &mut dyn SectorSource,
@@ -112,8 +114,10 @@ pub fn resolve_observed(
     halt: &Halt,
     progress: &libfreemkv::halt::Progress,
 ) -> (libfreemkv::Result<ResolvedKeySet>, Trace) {
-    let _ = progress;
-    resolve(disc, reader, scope, sources, None, Some(halt))
+    if scope == KeyScope::None {
+        return (Ok(ResolvedKeySet::none()), Trace::new());
+    }
+    fe::keys::resolve_for_rip_observed(disc, reader, scope, sources, None, Some(halt), progress)
 }
 
 /// How an image rip opens its source (KU §3.2 `open_image_with`).
