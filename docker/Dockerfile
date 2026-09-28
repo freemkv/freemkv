@@ -1,29 +1,35 @@
-# Local-dev Dockerfile. Multi-stage cargo build + harvest + FROM scratch.
+# The container image of the server build: `freemkv --features server`, the
+# unattended rip daemon + web UI (`freemkv server`). Multi-stage: a static musl
+# cargo build, a harvest of mount.nfs4 + busybox, then a scratch final image.
 #
-# CI uses Dockerfile.ci which skips the cargo build by reusing the
-# musl-static binary the release `build` job already produced. This
-# file is for developers who want to `docker build` against the
-# current working tree without an upstream artifact.
+# Build from the repository root (the build context is the whole crate):
+#
+#   docker build -f docker/Dockerfile -t freemkv-library .
+#
+# docker/Dockerfile.dockerignore keeps target/ and the local .cargo/ path
+# overrides out of the context, so the freemkv crates resolve from the git
+# tags in Cargo.toml exactly as a clean checkout does.
 
-# Must be >= Cargo.toml's `rust-version` (1.98) and at least as new as the
-# toolchain CI resolves (dtolnay/rust-toolchain@stable in ci.yml / release.yml).
-# An older image fails resolution outright with an MSRV error.
-FROM rust:1.98-alpine AS builder
-# musl-dev + gcc + make + cmake for mimalloc-sys C build.
-RUN apk add --no-cache musl-dev gcc make cmake
+# Must be >= Cargo.toml's `rust-version` (1.98.1). An older image fails
+# resolution outright with an MSRV error.
+FROM rust:1.98.1-alpine AS builder
+# musl-dev + gcc + make + cmake for mimalloc-sys C build; git for the build
+# label's commit stamp.
+RUN apk add --no-cache musl-dev gcc make cmake git
 WORKDIR /build
 COPY . .
-# --locked: refuse to modify Cargo.lock during build. If the lock-pinned
-# libfreemkv version isn't yet on crates.io, hard-fail with a visible
-# error instead of silently re-resolving to the previous published
-# version (the v0.18.3 incident).
-RUN cargo build --locked --release
+# The daemon's release profile (thin LTO, one codegen unit), set here rather
+# than in Cargo.toml so the CLI and app release builds are unchanged.
+ENV CARGO_PROFILE_RELEASE_LTO=thin \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+# --locked: refuse to modify Cargo.lock during build, so a lock that no longer
+# matches Cargo.toml fails visibly instead of silently re-resolving.
+RUN cargo build --locked --release --features server --bin freemkv
 
 # Harvest stage — pull mount.nfs4 + its deps + busybox-static + applet
 # symlinks from an alpine image so the FROM scratch final has a working
 # shell for operator triage and a working in-container NFS mount.
-# Maintenance: keep this list in sync with `Dockerfile.ci` — verify
-# via `ldd /sbin/mount.nfs4` after any alpine bump.
+# Maintenance: verify via `ldd /sbin/mount.nfs4` after any alpine bump.
 FROM alpine:3.20 AS harvest
 RUN apk add --no-cache nfs-utils busybox-static \
  && mkdir -p /out/sbin /out/lib /out/usr/lib /out/bin /out/etc \
@@ -49,15 +55,13 @@ RUN apk add --no-cache nfs-utils busybox-static \
 
 FROM scratch
 COPY --from=harvest /out/ /
-# --chmod=0755 on the host-context COPY for udev-trigger.sh
-# (cargo-built binary already has +x from the builder stage but
-# pin perms explicitly to match Dockerfile.ci).
-COPY --from=builder --chmod=0755 /build/target/release/autorip /usr/local/bin/autorip
-COPY --chmod=0755 udev-trigger.sh /usr/local/bin/udev-trigger.sh
+# Pin perms explicitly on both COPYs; the bootstrap's udev rule runs
+# /usr/local/bin/udev-trigger.sh on disc insertion.
+COPY --from=builder --chmod=0755 /build/target/release/freemkv /usr/local/bin/freemkv
+COPY --chmod=0755 docker/udev-trigger.sh /usr/local/bin/udev-trigger.sh
 
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["/usr/local/bin/autorip", "--healthcheck"]
+    CMD ["/usr/local/bin/freemkv", "server", "--healthcheck"]
 
-ENTRYPOINT ["/usr/local/bin/autorip", "--bootstrap"]
