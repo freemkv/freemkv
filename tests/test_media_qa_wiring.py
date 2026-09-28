@@ -183,6 +183,15 @@ class CanaryWiringTests(unittest.TestCase):
         self.assertIn('media_canary.py --bucket "$B" --externals externals.json --out canary.json', step['run'])
         self.assertIn('--require-hashes', step['run'])
 
+    def test_a_canary_failure_fails_plan_media(self):
+        gate = next(s for s in self.plan['steps'] if s.get('name') == 'Key-service canary verdict')
+        self.assertEqual(gate['if'], "steps.plan.outputs.status == 'canary-failed'")
+        self.assertIn('exit 1', gate['run'])
+        self.assertGreater(self.names.index('Key-service canary verdict'), self.names.index('Plan'))
+        upload = next(s for s in self.plan['steps'] if s.get('with', {}).get('name') == 'media-plan')
+        self.assertTrue(upload['with']['overwrite'], '"Re-run failed jobs" re-uploads the plan')
+        self.assertLess(self.plan['steps'].index(upload), self.names.index('Key-service canary verdict'))
+
     def test_canary_reads_with_the_fixtures_role_before_the_plan(self):
         roles = [i for i, s in enumerate(self.plan['steps']) if 'configure-aws-credentials' in s.get('uses', '')]
         canary = self.names.index('Key-service canary')
@@ -646,6 +655,7 @@ class VerdictTests(unittest.TestCase):
             (dict(ok, STATUS='waived'), False),
             (dict(ok, STATUS='superseded'), False),
             (dict(ok, STATUS='canary-failed'), False),
+            ({'PLAN_RESULT': 'failure', 'STATUS': 'canary-failed'}, False),
             ({'PLAN_RESULT': 'failure', 'STATUS': 'reuse'}, False),
             ({'PLAN_RESULT': 'success', 'STATUS': ''}, False),
         ]

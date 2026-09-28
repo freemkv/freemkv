@@ -1495,6 +1495,9 @@ def verdict(env):
     """I-1: (green, lines). The one media answer for this qa run."""
     status, reason = env.get('STATUS', ''), env.get('REASON', '')
     lines = [f'### Full-disc media: {status or "no plan"}', '', reason]
+    if status == 'canary-failed':
+        return False, lines + ['', 'the key-service canary failed, so no EC2 ran and qa is red (decision 15). '
+                                   '"Re-run failed jobs" re-runs the canary.']
     if env.get('PLAN_RESULT') != 'success':
         return False, lines + ['', 'plan-media failed: the candidate could not be pinned or a classification '
                                    'guard fired (see its log). qa is red.']

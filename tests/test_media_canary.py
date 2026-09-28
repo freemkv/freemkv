@@ -294,13 +294,6 @@ class ProbeTests(unittest.TestCase):
     def test_post_decode(self):
         seen = []
 
-        class Resp(io.BytesIO):
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
         def opener(req, timeout):
             seen.append((req, timeout))
             return Resp(b'{"UK": "00"}')
@@ -317,6 +310,101 @@ class ProbeTests(unittest.TestCase):
             mc.post_decode('https://k/d', 'tok', {}, denied)
         with self.assertRaisesRegex(mc.CanaryError, 'size cap'):
             mc.post_decode('https://k/d', 'tok', {}, lambda r, timeout: Resp(b'x' * (mc.MAX_RESPONSE + 1)))
+
+
+class Resp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class SecretTests(unittest.TestCase):
+    """Review FB2: nothing that touches FMKV_KEY_AUTH or FMKV_KEY_URL is echoed."""
+    TOKEN = 'tok-5ecret-\x07-tail'
+
+    def test_a_token_a_header_cannot_carry_is_never_quoted(self):
+        # What http.client says for such a token: it quotes the whole header value.
+        def opener(req, timeout):
+            raise ValueError(f"Invalid header value b'Bearer {self.TOKEN}'")
+        with self.assertRaises(mc.CanaryError) as cm:
+            mc.post_decode('https://k/d', self.TOKEN, {}, opener)
+        self.assertNotIn('5ecret', str(cm.exception))
+        with self.assertRaises(mc.CanaryError) as cm:
+            mc.post_decode('https://k/d', 'tok-5ecret-ok', {}, opener)
+        self.assertNotIn('5ecret', str(cm.exception), 'an unexpected error is reported by type only')
+
+    def test_run_output_never_carries_the_token_or_url(self):
+        url = 'https://k.example/d?key=5ecretq'
+        lines = []
+
+        def leaky(u, auth, body):
+            raise ValueError(f"Invalid header value b'Bearer {auth}' for {u}")
+        result = mc.run(RunTests.POLICY, RunTests.PINS, url, 'tok-5ecret', lambda k, p: Disc().read, leaky,
+                        log=lines.append)
+        text = json.dumps(result) + '\n'.join(lines)
+        self.assertFalse(result['ok'])
+        self.assertNotIn('5ecret', text)
+        self.assertIn('ValueError', text)
+
+    def test_main_error_is_type_only(self):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        (d / 'ext.json').write_text('{"fixtures": {}}')
+        with unittest.mock.patch.object(mc, 'run', side_effect=RuntimeError('Bearer tok-5ecret')), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            mc.main(['--bucket', 'b', '--externals', str(d / 'ext.json'), '--out', str(d / 'c.json')])
+        self.assertNotIn('5ecret', (d / 'c.json').read_text() + out.getvalue())
+
+
+class RetryTests(unittest.TestCase):
+    """Review FB3: a transient failure is retried with backoff; a wrong or missing key is not."""
+
+    def post(self, outcomes):
+        calls, sleeps = [], []
+
+        def opener(req, timeout):
+            calls.append(req)
+            o = outcomes[min(len(calls), len(outcomes)) - 1]
+            if isinstance(o, BaseException):
+                raise o
+            return Resp(o)
+        return calls, sleeps, lambda: mc.post_decode('https://k/d', 't', {}, opener, sleep=sleeps.append)
+
+    def http(self, code):
+        return urllib.error.HTTPError('https://k/d', code, 'x', {}, io.BytesIO(b''))
+
+    def test_transient_then_answer(self):
+        for name, first in (('5xx', self.http(503)), ('429', self.http(429)),
+                            ('network', urllib.error.URLError('reset')), ('timeout', TimeoutError())):
+            with self.subTest(name=name):
+                calls, sleeps, go = self.post([first, b'{"UK": "00"}'])
+                self.assertEqual(go(), {'UK': '00'})
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(sleeps, [mc.BACKOFF[0]])
+
+    def test_gives_up_after_the_attempts(self):
+        calls, sleeps, go = self.post([self.http(502)])
+        with self.assertRaisesRegex(mc.CanaryError, 'HTTP 502'):
+            go()
+        self.assertEqual(len(calls), mc.ATTEMPTS)
+        self.assertEqual(len(sleeps), mc.ATTEMPTS - 1)
+
+    def test_never_retries_an_answer(self):
+        for name, outcome in (('401', self.http(401)), ('404', self.http(404)), ('no key', b'{}'),
+                              ('not json', b'<html>')):
+            with self.subTest(name=name):
+                calls, sleeps, go = self.post([outcome, b'{"UK": "00"}'])
+                try:
+                    got = go()
+                except mc.CanaryError:
+                    got = None
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(sleeps, [])
+                if name == 'no key':
+                    with self.assertRaises(mc.CanaryError):
+                        mc.answer_keys(got, b'')
 
 
 class RunTests(unittest.TestCase):

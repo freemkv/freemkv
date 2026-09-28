@@ -132,6 +132,16 @@ jobs:
           path: media-plan
           retention-days: 90
           if-no-files-found: error
+          overwrite: true
+      # Decision 15, and so "Re-run failed jobs" re-runs the canary: a canary failure
+      # fails this job (media-verdict still reports the plan's status and reason).
+      - name: Key-service canary verdict
+        if: steps.plan.outputs.status == 'canary-failed'
+        env:
+          REASON: ${{ steps.plan.outputs.reason }}
+        run: |
+          echo "::error title=Key-service canary failed::${REASON//::/: :}"
+          exit 1
 
   rc-tag:
     # Only a qa push is a candidate; a dispatch (e.g. a media run on dev) must

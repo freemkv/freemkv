@@ -42,7 +42,15 @@ POLICY = Path(__file__).with_name('media-gate-policy.json')
 
 
 class CanaryError(Exception):
-    """A probe failed; the message is safe to print (no key material, no URL)."""
+    """A probe failed; the message is safe to print (no key material, no URL, no token)."""
+
+
+class Transient(CanaryError):
+    """The service did not answer (network, 5xx, 429): worth another try. A wrong or missing key never is."""
+
+
+ATTEMPTS = 3
+BACKOFF = (5, 15)
 
 
 # ── AES-128 (FIPS-197), enough for the AACS unit decrypt ───────────────────
@@ -433,27 +441,49 @@ def disc_inputs(udf, count=SAMPLES):
     return inf, mkb, samples
 
 
-def post_decode(url, auth, body, opener=None):
-    """POST the /decode request the way OnlineSource does; the parsed JSON answer."""
-    if not url.startswith('https://'):
-        raise CanaryError('FMKV_KEY_URL is not https:// (key material is never sent in cleartext)')
-    headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
-    if auth:
-        headers['Authorization'] = f'Bearer {auth}'
-    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method='POST')
+def _post_once(url, headers, body, opener):
+    req = urllib.request.Request(url, data=body, headers=headers, method='POST')
     try:
         with (opener or urllib.request.urlopen)(req, timeout=TIMEOUT) as resp:
             data = resp.read(MAX_RESPONSE + 1)
     except urllib.error.HTTPError as exc:
+        if exc.code >= 500 or exc.code == 429:
+            raise Transient(f'the key service answered HTTP {exc.code}') from None
         raise CanaryError(f'the key service answered HTTP {exc.code}') from None
     except (urllib.error.URLError, OSError) as exc:
-        raise CanaryError(f'the key service is unreachable ({type(exc).__name__})') from None
+        raise Transient(f'the key service is unreachable ({type(exc).__name__})') from None
     if len(data) > MAX_RESPONSE:
         raise CanaryError('the key service answer is over the size cap')
     try:
         return json.loads(data)
     except ValueError:
         raise CanaryError('the key service answer is not JSON') from None
+
+
+def post_decode(url, auth, body, opener=None, sleep=None):
+    """POST the /decode request the way OnlineSource does; the parsed JSON answer. A transient
+    failure (network, 5xx, 429) is retried ATTEMPTS times with backoff; nothing else is.
+    No error message ever carries the URL or the token: anything unexpected is reported by type."""
+    if not url.startswith('https://'):
+        raise CanaryError('FMKV_KEY_URL is not https:// (key material is never sent in cleartext)')
+    if auth and not all(0x20 < ord(c) < 0x7F for c in auth):
+        raise CanaryError('FMKV_KEY_AUTH holds characters an HTTP header cannot carry (not shown)')
+    headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+    if auth:
+        headers['Authorization'] = f'Bearer {auth}'
+    data = json.dumps(body).encode()
+    sleep = sleep or __import__('time').sleep
+    for attempt in range(ATTEMPTS):
+        try:
+            return _post_once(url, headers, data, opener)
+        except Transient:
+            if attempt == ATTEMPTS - 1:
+                raise
+            sleep(BACKOFF[min(attempt, len(BACKOFF) - 1)])
+        except CanaryError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — may quote the request (the token): type only
+            raise CanaryError(f'the request could not be sent ({type(exc).__name__})') from None
 
 
 def probe(udf, url, auth, post=post_decode):
@@ -486,8 +516,8 @@ def run(policy, pins, url, auth, open_image, post=post_decode, log=print):
             entry.update(probe(Udf(open_image(fixture, pin)), url, auth, post), ok=True, reason='known key returned')
         except CanaryError as exc:
             entry['reason'] = str(exc)
-        except Exception as exc:  # noqa: BLE001 — any other failure fails the probe, with its type only
-            entry['reason'] = f'{type(exc).__name__}: {" ".join(str(exc).splitlines())[:200]}'
+        except Exception as exc:  # noqa: BLE001 — its text may quote the token or the URL: type only
+            entry['reason'] = f'unexpected {type(exc).__name__}'
         result['probes'].append(entry)
         result['ok'] = result['ok'] and entry['ok']
         log(f'canary {fixture}: {"PASS" if entry["ok"] else "FAIL"}: {entry["reason"]}')
@@ -514,7 +544,7 @@ class S3Image:
             code, status = media_fetch.error_code(exc)
             if code == 'PreconditionFailed' or status == 412:
                 raise CanaryError(f'{self.key} changed in S3 since the plan pinned it') from None
-            raise
+            raise CanaryError(f'{self.key}: S3 read failed ({code or status or type(exc).__name__})') from None
         if len(body) != hi - lo + 1:
             raise CanaryError(f'{self.key}: short read at {lo}')
         return body
@@ -552,8 +582,8 @@ def main(argv=None):
         s3 = media_fetch.client(args.region, 4)
         result = run(policy, pins, os.environ.get('FMKV_KEY_URL', ''), os.environ.get('FMKV_KEY_AUTH', ''),
                      lambda key, pin: S3Image(s3, args.bucket, key, pin).read)
-    except Exception as exc:  # noqa: BLE001 — still write a (failed) result for the plan
-        result = {'ok': False, 'probes': [], 'error': f'{type(exc).__name__}: {" ".join(str(exc).splitlines())[:200]}'}
+    except Exception as exc:  # noqa: BLE001 — still write a (failed) result for the plan; type only
+        result = {'ok': False, 'probes': [], 'error': f'unexpected {type(exc).__name__}'}
         print(f'::warning title=Key-service canary::{result["error"]}')
     args.out.write_text(json.dumps(result, indent=1, sort_keys=True) + '\n')
     return 0
