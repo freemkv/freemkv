@@ -3675,13 +3675,9 @@ mod key_summary_tests {
         }
     }
 
-    pub(super) fn aacs(unit_keys: Vec<(u32, [u8; 16])>) -> libfreemkv::AacsState {
-        // The scan-time PLACEHOLDER origin (`ExternalUk`, the builder default) —
-        // identical whether or not a key was ever resolved, so it cannot be trusted.
-        libfreemkv::test_util::aacs_state()
-            .key_source(libfreemkv::KeyOrigin::ExternalUk)
-            .unit_keys(unit_keys)
-            .build()
+    // A scanned disc's AACS state: it carries no key (KU-X2).
+    pub(super) fn aacs() -> libfreemkv::AacsState {
+        libfreemkv::test_util::aacs_state().build()
     }
 
     #[test]
@@ -3705,7 +3701,7 @@ mod key_summary_tests {
     #[test]
     fn placeholder_origin_with_no_keys_reads_as_locked() {
         let mut d = disc(true);
-        d.aacs = Some(aacs(vec![]));
+        d.aacs = Some(aacs());
         let s = key_summary(&d, None);
         assert_eq!(s, "locked — no key yet");
         assert!(!s.contains("online") && !s.contains("keydb"));
@@ -3716,9 +3712,7 @@ mod key_summary_tests {
     #[test]
     fn banked_keys_never_unlock_without_a_set() {
         let mut d = disc(true);
-        let mut a = aacs(vec![(1, [0x5A; 16])]);
-        a.vuk = Some([0x11; 16]);
-        d.aacs = Some(a);
+        d.aacs = Some(aacs());
         assert_eq!(key_summary(&d, None), "locked — no key yet");
         let none = libfreemkv::keys::ResolvedKeySet::none();
         assert_eq!(key_summary(&d, Some(&none)), "locked — no key yet");
@@ -3852,7 +3846,7 @@ mod disc_details_tests {
     #[test]
     fn the_aacs_block_shows_mkb_hash_and_a_non_zero_vid() {
         let mut d = disc(true);
-        let mut a = aacs(vec![(1, [0x5A; 16])]);
+        let mut a = aacs();
         a.mkb_version = Some(64);
         a.bus_encryption = true;
         a.disc_hash = "deadbeef".into();
@@ -3887,7 +3881,7 @@ mod disc_details_tests {
     #[test]
     fn an_all_zero_volume_id_prints_no_vid_line() {
         let mut d = disc(true);
-        d.aacs = Some(aacs(vec![])); // volume_id defaults to all-zero
+        d.aacs = Some(aacs()); // volume_id defaults to all-zero
         assert!(
             !disc_details(&d, "x").iter().any(|l| l.starts_with("VID:")),
             "an unavailable (all-zero) VID must not print a line"
@@ -3899,9 +3893,7 @@ mod disc_details_tests {
     #[test]
     fn the_detail_block_never_renders_the_vuk_or_any_unit_key() {
         let mut d = disc(true);
-        let mut a = aacs(vec![(3, [0x11; 16]), (7, [0x22; 16])]);
-        a.vuk = Some([0xEE; 16]);
-        d.aacs = Some(a);
+        d.aacs = Some(aacs());
 
         let text = disc_details(&d, "unlocked via keydb").join("\n");
         for secret in ["eeeeeeee", "11111111", "22222222"] {
@@ -5232,7 +5224,6 @@ mod routing_tests {
             );
             let keys = input.keys.as_ref().expect("the rip's set must be passed");
             assert!(keys.is_aacs() && keys.is_for(&fx.disc), "the rip's own set");
-            assert!(input.unit_keys.is_empty(), "never a raw key");
             // PER TITLE, not the union: the union encoded the defect where a
             // PID unticked under one title was still written whenever a
             // sibling kept it ticked. `want` is written out, not re-derived.

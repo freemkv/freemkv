@@ -10,7 +10,7 @@ use crate::cli_entry::is_url_token;
 use crate::disc_info::sanitize;
 use crate::output::{Level::Normal, Output};
 use crate::strings;
-use libfreemkv::{MuxEvents, MuxInput, MuxOptions};
+use libfreemkv::{MuxEvents, MuxOptions, MuxSource};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -150,7 +150,7 @@ impl PipeFail {
         }
     }
 
-    /// A failure surfaced by `mux_stream`. Classifies the typed `io::Error` via
+    /// A failure surfaced by `mux_with_keys`. Classifies the typed `io::Error` via
     /// the engine (kills the CLI E-code string-match) and renders its `E<code>`
     /// Display for the user.
     fn from_mux(e: std::io::Error) -> Self {
@@ -991,6 +991,8 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
                 _ => libfreemkv::StreamSelection::default(),
             };
             // Every title reads through the rip's one set: no lookup after it (KU §2.1).
+            // The update is needless only once libfreemkv drops the legacy key fields (KU-X2).
+            #[allow(clippy::needless_update)]
             let opts = libfreemkv::InputOptions {
                 title_index: *title_idx,
                 raw,
@@ -1974,7 +1976,7 @@ fn pipe(
     out: &Output,
 ) -> Result<(), PipeFail> {
     // Source open, header pump/gate, sink open, metadata short-circuit, frame
-    // pump, and NoStreams guard all live inside `mux_stream` now. The CLI
+    // pump, and NoStreams guard all live inside `mux_with_keys` now. The CLI
     // keeps only presentation, via `CliMuxEvents` (stream-info, progress bar).
     out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", source)]));
     out.raw(Normal, &strings::get("rip.ok"));
@@ -1992,11 +1994,12 @@ fn pipe(
         selection: Default::default(),
     };
     let sigint = SigintHalt::install();
-    let result = libfreemkv::mux_stream(
-        MuxInput::Url {
+    let result = libfreemkv::mux_with_keys(
+        MuxSource::Url {
             url: source,
             opts: opts.clone(),
         },
+        None,
         dest,
         &mux_opts,
         sigint.halt(),
@@ -3514,7 +3517,7 @@ mod tests {
     }
 
     // The header-resolution gate that used to live in the CLI now lives in
-    // `libfreemkv::mux::mux_stream`, covered by its own tests there.
+    // `libfreemkv::mux::mux_with_keys`, covered by its own tests there.
 
     // ── fmt_err generalization (english errors for ALL codes) ───────────────
 
@@ -3716,7 +3719,7 @@ mod tests {
     }
 
     // The `mux_was_interrupted` check that used to live here is gone: the CLI
-    // no longer runs the frame loop. `mux_stream` polls `libfreemkv::Halt` and
+    // no longer runs the frame loop. `mux_with_keys` polls `libfreemkv::Halt` and
     // reports interrupts via `MuxOutcome`, mapped to `interrupted_error`.
 
     #[test]
@@ -6555,11 +6558,12 @@ mod formatter_tests {
             send_deadline: Some(std::time::Duration::from_secs(60)),
         };
         let (res, printed) = capture(|| {
-            libfreemkv::mux_stream(
-                libfreemkv::MuxInput::Url {
+            libfreemkv::mux_with_keys(
+                libfreemkv::MuxSource::Url {
                     url: &url,
                     opts: libfreemkv::InputOptions::default(),
                 },
+                None,
                 &dest,
                 &opts,
                 &libfreemkv::Halt::new(),
