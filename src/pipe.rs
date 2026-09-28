@@ -4536,6 +4536,23 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_container_path_is_pointed_at_its_own_scheme() {
+        crate::strings::set_locale("en");
+        for (bare, want) in [
+            ("movie.mpg", "mpg://movie.mpg"),
+            ("VTS_01_1.VOB", "mpg://VTS_01_1.VOB"),
+            ("a.mkv", "mkv://a.mkv"),
+            ("b.mts", "m2ts://b.mts"),
+        ] {
+            let e = preflight(bare, "null://", false, false).unwrap_err();
+            assert!(e.contains(want), "{bare}: {e}");
+            assert!(!e.contains(&format!("iso://{bare}")), "{bare}: {e}");
+        }
+        let e = preflight("in.iso", "null://", false, false).unwrap_err();
+        assert!(e.contains("iso://in.iso"), "{e}");
+    }
+
+    #[test]
     fn preflight_rejects_schemeless_source() {
         // A real readable ISO dest is irrelevant — the schemeless SOURCE must be
         // caught first. Use a sink dest so dest validation can't mask it.
