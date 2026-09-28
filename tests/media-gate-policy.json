@@ -1,6 +1,6 @@
 {
   "schema": 4,
-  "revision": 2,
+  "revision": 3,
   "libraries": ["libfreemkv", "freemkv-engine", "freemkv-keysources"],
   "library_required": ["src/**", "build.rs", "Cargo.toml"],
   "library_inert": [".github/**", "tests/**", "benches/**", "examples/**", "docs/**", "*.md", "*.rst",
