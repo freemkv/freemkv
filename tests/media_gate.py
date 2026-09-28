@@ -326,8 +326,15 @@ class Module:
         for i, t in enumerate(self.toks):
             if not _is(t, 'ident') or not _is(_at(self.toks, i + 1), 'punct', '::'):
                 continue
+            if t[1] in KEYWORDS:
+                continue
             prev = _at(self.toks, i - 1)
-            if _is(prev, 'punct', '::') or _is(prev, 'punct', '.') or _is(prev, 'punct', '$'):
+            if _is(prev, 'punct', '::'):
+                # `::x::` is a crate path only when the `::` leads (after a keyword or punctuation).
+                before = _at(self.toks, i - 2)
+                if (_is(before, 'ident') and before[1] not in KEYWORDS) or _is(before, 'punct', '>'):
+                    continue
+            elif _is(prev, 'punct', '.') or _is(prev, 'punct', '$'):
                 continue
             if _is(_at(self.toks, i + 2), 'punct', '<'):
                 continue
@@ -338,6 +345,9 @@ class Module:
 # ── Guards (§2.3) ──────────────────────────────────────────────────────────
 
 INCLUDES = ('include', 'include_str', 'include_bytes')
+KEYWORDS = {'use', 'pub', 'in', 'as', 'where', 'impl', 'for', 'dyn', 'return', 'let', 'mut', 'ref', 'if',
+            'match', 'else', 'while', 'loop', 'move', 'unsafe', 'fn', 'struct', 'enum', 'type', 'const',
+            'static', 'mod', 'trait', 'extern', 'break', 'continue', 'async', 'await'}
 BUILTIN_SEGMENTS = {'std', 'core', 'alloc', 'crate', 'self', 'super', 'Self', 'clippy', 'rustfmt',
                     'rustdoc', 'bool', 'char', 'str',
                     'u8', 'u16', 'u32', 'u64', 'u128', 'usize', 'i8', 'i16', 'i32', 'i64', 'i128',
@@ -492,7 +502,7 @@ def guard_call_graph(ws, policy):
                 before = _at(toks, i - 2)
                 if t[1] != 'freemkv' or _is(before, 'ident') or _is(before, 'punct', '>'):
                     continue
-            elif _is(prev, 'punct', '.') or _is(prev, 'punct', '$'):
+            elif _is(prev, 'punct', '.') or (_is(prev, 'punct', '$') and t[1] != 'crate'):
                 continue
             j = i
             if t[1] == 'super' and 'super' not in roots:
@@ -513,8 +523,10 @@ def guard_call_graph(ws, policy):
                     elif toks[k][1] in '})]':
                         depth -= 1
                     elif depth == 0 and _is(toks[k], 'ident') and not _is(_at(toks, k - 1), 'punct', '::'):
-                        if not _is(_at(toks, k - 1), 'ident', 'as'):
-                            names.append(toks[k][1])
+                        if _is(_at(toks, k - 1), 'ident', 'as'):
+                            continue
+                        names.append('* (self re-exported under an alias)' if toks[k][1] == 'self'
+                                     and _is(_at(toks, k + 1), 'ident', 'as') else toks[k][1])
             elif _is(nxt, 'ident'):
                 names = [nxt[1]]
             else:
@@ -545,6 +557,8 @@ def guard_crate_tokens(ws, policy, k_names):
             if _is(t, 'ident', 'use') and not _is(_at(toks, i - 1), 'punct', '::'):
                 k = i + 2 if _is(_at(toks, i + 1), 'punct', '::') else i + 1
                 nxt = _at(toks, k + 1)
+                if _is(_at(toks, k), 'ident') and toks[k][1] in BUILTIN_SEGMENTS:
+                    continue
                 if _is(_at(toks, k), 'ident') and (_is(nxt, 'punct', ';') or _is(nxt, 'ident', 'as')):
                     starts.append((toks[k][1], k))
         for seg, i in starts:
@@ -650,7 +664,7 @@ def project_freemkv_manifest(manifest, policy):
     for name in gui:
         gui_deps.update(v[4:] for v in features.pop(name, []) if v.startswith('dep:'))
     for values in features.values():
-        gui_deps -= {v[4:] if v.startswith('dep:') else v.split('/')[0] for v in values}
+        gui_deps -= {v[4:] if v.startswith('dep:') else v.split('/')[0].rstrip('?') for v in values}
     manifest['bin'] = [b for b in manifest.get('bin', [])
                        if not gui & set(b.get('required-features', []))]
     _drop_dev(manifest)
@@ -1149,8 +1163,162 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, post=No
                 'lock_sha256': sha256(lock_text.encode()), 'run_id': int(env['GITHUB_RUN_ID'])}
     outputs = {'status': status, 'run': str(go).lower(), 'fingerprint': f, 'reason': reason,
                'revisions': json.dumps(revisions, sort_keys=True), 'toolchain': inputs['toolchain'],
-               'evidence_url': proven['url'] if proven else '', 'warnings': warnings}
+               'evidence_url': proven['url'] if proven else '', 'harness': policy['harness']['sha'],
+               'launch_templates': json.dumps({k: v for k, v in externals.get('launch_templates', {}).items()
+                                               if isinstance(v, dict)}, sort_keys=True),
+               'warnings': warnings}
     return outputs, evidence, lock_text
+
+
+# ── qa.yml wiring (§3.2): pin, externals, leg identity, record, verdict ────
+
+def pin(ref_name, sha, requested, request=gh_api):
+    """C for this run: the dispatched revisions (each reachable from the branch) or the sibling tips."""
+    if ref_name not in ('qa', 'dev'):
+        raise ValueError(f'the media gate runs on qa and dev only, not {ref_name!r}')
+    if requested:
+        revisions = json.loads(requested)
+        if not valid_revisions(revisions) or revisions['freemkv'] != sha:
+            raise ValueError('dispatched revisions are malformed or not this freemkv sha')
+        for repo in SIBLINGS:
+            status = request(f'repos/{OWNER}/{repo}/compare/{revisions[repo]}...{ref_name}')['status']
+            if status not in ('ahead', 'identical'):
+                raise ValueError(f'{repo} {revisions[repo][:12]} is not on {ref_name} ({status})')
+    else:
+        revisions = {'freemkv': sha}
+        for repo in SIBLINGS:
+            revisions[repo] = request(f'repos/{OWNER}/{repo}/commits/{ref_name}')['sha']
+        if not valid_revisions(revisions):
+            raise ValueError('could not read every sibling tip')
+    superseded = False
+    if ref_name == 'qa':
+        superseded = request(f'repos/{OWNER}/freemkv/git/ref/heads/qa')['object']['sha'] != sha
+    return revisions, superseded
+
+
+def launch_templates(policy):
+    names = [n for n in policy['launch_templates'] if not n.endswith('-perf')]
+    return names + ([n for n in policy['launch_templates'] if n.endswith('-perf')] if policy['perf']['enabled'] else [])
+
+
+def aws_json(*args, run=subprocess.run):
+    res = run(['aws', *args, '--output', 'json'], capture_output=True, text=True, check=True)
+    return json.loads(res.stdout)
+
+
+def read_externals(part, policy, bucket=None, run=subprocess.run):
+    """The fixture pins (S3 HEAD) or the launch-template pins (the $Default version)."""
+    if part == 'fixtures':
+        out = {}
+        for key in policy['fixtures']:
+            head = aws_json('s3api', 'head-object', '--bucket', bucket, '--key', key, run=run)
+            version = head.get('VersionId')
+            pin = {'etag': head['ETag'], 'size': head['ContentLength'],
+                   'version_id': version if version not in (None, 'null') else None}
+            if '-' in head['ETag'].strip('"'):
+                # The exact upload part size, so tests/media_fetch.py can verify the ETag in flight.
+                first = aws_json('s3api', 'head-object', '--bucket', bucket, '--key', key, '--part-number', '1',
+                                 '--if-match', head['ETag'], run=run)
+                pin.update(part_size=first['ContentLength'], parts=first.get('PartsCount'))
+            out[key] = pin
+        return out
+    out = {}
+    for name in launch_templates(policy):
+        data = aws_json('ec2', 'describe-launch-template-versions', '--launch-template-name', name,
+                        '--versions', '$Default', run=run)['LaunchTemplateVersions'][0]
+        lt = data['LaunchTemplateData']
+        out[name] = {'version': data['VersionNumber'], 'image_id': lt.get('ImageId'),
+                     'instance_type': lt.get('InstanceType')}
+    return out
+
+
+def imds(path, opener=None):
+    import urllib.request
+    opener = opener or urllib.request.urlopen
+    token = opener(urllib.request.Request('http://169.254.169.254/latest/api/token', method='PUT', headers={
+        'X-aws-ec2-metadata-token-ttl-seconds': '60'}), timeout=5).read().decode()
+    return opener(urllib.request.Request(f'http://169.254.169.254/latest/meta-data/{path}', headers={
+        'X-aws-ec2-metadata-token': token}), timeout=5).read().decode().strip()
+
+
+def leg_identity(leg, target, c_toolchain, env, run=subprocess.run, meta=imds):
+    """What an EC2 leg records about itself; record-media-evidence cross-checks every field."""
+    rustc = run(['rustc', '-Vv'], capture_output=True, text=True, check=True).stdout
+    release = next((l.split(':', 1)[1].strip() for l in rustc.splitlines() if l.startswith('release:')), '')
+    return {'leg': leg, 'runner_name': env.get('RUNNER_NAME', ''), 'target': target, 'rustc_release': release,
+            'rustc': rustc.strip(), 'instance_id': meta('instance-id'), 'instance_type': meta('instance-type'),
+            'c_toolchain': c_toolchain.strip(), 'env_clean': True}
+
+
+def gh_post(endpoint, body):
+    res = subprocess.run(['gh', 'api', '-X', 'POST', endpoint, '--input', '-'], input=json.dumps(body),
+                         capture_output=True, text=True, check=True)
+    return json.loads(res.stdout)
+
+
+def write_evidence_tag(f, run_id, evidence_bytes, lock_bytes, post=gh_post):
+    """The orphan commit holding evidence.json and Cargo.lock, and its annotated tag (decision 6)."""
+    base = f'repos/{OWNER}/freemkv/git'
+    blobs = [post(f'{base}/blobs', {'content': base64.b64encode(data).decode(), 'encoding': 'base64'})['sha']
+             for data in (evidence_bytes, lock_bytes)]
+    tree = post(f'{base}/trees', {'tree': [
+        {'path': 'evidence.json', 'mode': '100644', 'type': 'blob', 'sha': blobs[0]},
+        {'path': 'Cargo.lock', 'mode': '100644', 'type': 'blob', 'sha': blobs[1]}]})['sha']
+    commit = post(f'{base}/commits', {'message': f'media evidence {f} (run {run_id})', 'tree': tree,
+                                      'parents': []})['sha']
+    name = f'media-evidence/{f}/{run_id}'
+    tag = post(f'{base}/tags', {'tag': name, 'message': f'full-disc evidence for {f} from run {run_id}',
+                                'object': commit, 'type': 'commit'})['sha']
+    post(f'{base}/refs', {'ref': f'refs/tags/{name}', 'sha': tag})
+    return name, commit
+
+
+def record(plan_dir, legs_dir, policy, env, request=gh_api, aws=aws_json, post=gh_post):
+    """Seal the plan, cross-check every leg against the jobs API and EC2, then write the evidence tag."""
+    run_id = int(env['GITHUB_RUN_ID'])
+    ev = seal(plan_dir, run_id, env['GITHUB_SHA'])
+    lock = (plan_dir / 'Cargo.lock').read_bytes()
+    run = request(f'repos/{OWNER}/freemkv/actions/runs/{run_id}')
+    jobs = request(f'repos/{OWNER}/freemkv/actions/runs/{run_id}/jobs?filter=latest&per_page=100')['jobs']
+    by_name = {j['name']: j for j in jobs}
+    runner_re = re.compile(policy['runner_name_re'])
+    legs_out = {}
+    for leg in legs(policy):
+        rec = json.loads((legs_dir / f'leg-{leg}.json').read_text())
+        job = by_name.get(LEG_JOB[leg]) or {}
+        m = runner_re.fullmatch(job.get('runner_name') or '')
+        if not m or rec.get('runner_name') != job.get('runner_name') or rec.get('instance_id') != m.group(3):
+            raise ValueError(f'leg {leg}: runner {job.get("runner_name")!r} does not match its record')
+        tags = {}
+        for res in aws('ec2', 'describe-instances', '--instance-ids', rec['instance_id'])['Reservations']:
+            for inst in res['Instances']:
+                tags = {t['Key']: t['Value'] for t in inst.get('Tags', [])}
+        if tags.get('launched-by') != str(run_id) or f'run-{run_id}' not in tags.get('runner-labels', '').split(','):
+            raise ValueError(f'leg {leg}: instance {rec["instance_id"]} was not launched by run {run_id}')
+        rec['launched_by'] = run_id
+        legs_out[leg] = rec
+    ev['legs'] = legs_out
+    evidence_bytes = json.dumps(ev, indent=1, sort_keys=True).encode()
+    done = jobs + [{'name': 'record-media-evidence', 'conclusion': 'success'}]
+    check_evidence(ev['fingerprint'], run_id, evidence_bytes, lock, run, done, policy)
+    return write_evidence_tag(ev['fingerprint'], run_id, evidence_bytes, lock, post)
+
+
+def verdict(env):
+    """I-1: (green, lines). The one media answer for this qa run."""
+    status, reason = env.get('STATUS', ''), env.get('REASON', '')
+    lines = [f'### Full-disc media: {status or "no plan"}', '', reason]
+    if env.get('PLAN_RESULT') != 'success':
+        return False, lines + ['', 'plan-media failed: the candidate could not be pinned or a classification '
+                                   'guard fired (see its log). qa is red.']
+    if status == 'reuse':
+        return True, lines + ['', f'full-disc not needed: evidence {env.get("EVIDENCE_URL", "")}']
+    if status == 'run':
+        results = {k: env.get(k, '') for k in ('MATRIX', 'COMPARE', 'RECORD')}
+        ok = all(v == 'success' for v in results.values())
+        lines += ['', ', '.join(f'{k.lower()}={v or "not run"}' for k, v in results.items())]
+        return ok, lines + ([f'evidence tag: {env.get("TAG", "")}'] if ok else ['the full-disc run is not green: qa is red'])
+    return False, lines + ['', f'{status}: qa is red (unproven)']
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
@@ -1175,7 +1343,8 @@ def _write_outputs(outputs):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('mode', choices=('guards', 'checkout', 'plan', 'restore', 'seal',
-                                         'release-lock-assert', 'fingerprint'))
+                                         'release-lock-assert', 'fingerprint', 'pin', 'externals',
+                                         'leg', 'record', 'verdict'))
     parser.add_argument('--workspace', type=Path, default=Path.cwd())
     parser.add_argument('--plan-directory', type=Path, default=Path('media-plan'))
     parser.add_argument('--revisions')
@@ -1184,6 +1353,13 @@ def main(argv=None):
     parser.add_argument('--candidate', type=Path)
     parser.add_argument('--k-only', action='store_true')
     parser.add_argument('--policy', type=Path, default=POLICY)
+    parser.add_argument('--part', choices=('fixtures', 'launch_templates'))
+    parser.add_argument('--bucket')
+    parser.add_argument('--out', type=Path)
+    parser.add_argument('--leg')
+    parser.add_argument('--target')
+    parser.add_argument('--c-toolchain', default='')
+    parser.add_argument('--legs', type=Path)
     args = parser.parse_args(argv)
     policy = load_policy(args.policy)
     ws = args.workspace
@@ -1203,6 +1379,42 @@ def main(argv=None):
         if args.mode == 'seal':
             seal(args.plan_directory, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_SHA'])
             return 0
+        if args.mode == 'pin':
+            revisions, superseded = pin(os.environ['GITHUB_REF_NAME'], os.environ['GITHUB_SHA'],
+                                        os.environ.get('REQUESTED', ''))
+            checkout(ws, revisions)
+            _write_outputs({'revisions': json.dumps(revisions, sort_keys=True),
+                            'superseded': str(superseded).lower()})
+            return 0
+        if args.mode == 'externals':
+            current = json.loads(args.out.read_text()) if args.out.exists() else {}
+            try:
+                current[args.part] = read_externals(args.part, policy, args.bucket)
+            except Exception as exc:  # noqa: BLE001 — fail-safe: unreadable externals can only force a run
+                print(f'::warning::could not read the {args.part} pins ({exc}); the plan will run, not reuse')
+                current[args.part] = {'error': str(exc)[:500]}
+            args.out.write_text(json.dumps(current, indent=1, sort_keys=True) + '\n')
+            return 0
+        if args.mode == 'leg':
+            rec = leg_identity(args.leg, args.target, args.c_toolchain, os.environ)
+            args.out.write_text(json.dumps(rec, indent=1, sort_keys=True) + '\n')
+            print(json.dumps(rec, indent=1, sort_keys=True))
+            return 0
+        if args.mode == 'record':
+            name, commit = record(args.plan_directory, args.legs, policy, os.environ)
+            print(f'wrote refs/tags/{name} -> {commit}')
+            _write_outputs({'tag': name})
+            return 0
+        if args.mode == 'verdict':
+            green, lines = verdict(os.environ)
+            text = '\n'.join(lines) + '\n'
+            print(text)
+            if os.environ.get('GITHUB_STEP_SUMMARY'):
+                with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+                    out.write(text)
+            if not green:
+                print(f'::error title=Media verdict::{lines[0].lstrip("# ")} — see the summary')
+            return 0 if green else 1
         if args.mode == 'release-lock-assert':
             diff = lock_assert(args.base.read_text(), args.candidate.read_text(), args.k_only, policy)
             for d in diff:

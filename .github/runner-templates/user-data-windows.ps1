@@ -23,7 +23,10 @@ $hdr    = @{"X-aws-ec2-metadata-token"=$tok}
 $param  = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/tags/instance/runner-token-param" -Headers $hdr
 $repo   = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/tags/instance/runner-repo"  -Headers $hdr
 $region = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/placement/region" -Headers $hdr
+# The launching run's labels (freemkv-media,windows,run-<run_id>): only that run's jobs can land here.
+$labels = Invoke-RestMethod -Uri "http://169.254.169.254/latest/meta-data/tags/instance/runner-labels" -Headers $hdr
 if (-not $param -or -not $repo) { throw "tags not visible via IMDS" }
+if ($labels -notmatch '^freemkv-media(-perf)?,windows,run-[0-9]+$') { throw "bad runner-labels tag '$labels'" }
 
 # Toolchain: rustup + ffmpeg (the suite shells out to ffprobe).
 Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile C:\rustup-init.exe
@@ -98,7 +101,7 @@ Set-Location C:\actions-runner
 Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v$rv/actions-runner-win-x64-$rv.zip" -OutFile r.zip
 Expand-Archive -Path r.zip -DestinationPath . -Force; Remove-Item r.zip
 
-.\config.cmd --url "https://github.com/$repo" --token $reg --name "ephemeral-win-$iid" --labels freemkv-media,windows --unattended --ephemeral
+.\config.cmd --url "https://github.com/$repo" --token $reg --name "ephemeral-windows-$iid" --labels $labels --unattended --ephemeral
 .\run.cmd
 } finally {
   Stop-Computer -Force

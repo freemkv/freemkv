@@ -190,6 +190,11 @@ class FetchTests(unittest.TestCase):
         s3.get_object = mock.Mock(side_effect=ClientError('AccessDenied', 403))
         with self.assertRaisesRegex(IOError, 'GetObjectVersion'):
             mf.fetch(s3, 'b', manifest, self.dest, log=lambda *_: None)
+        s3 = FakeS3(self.objects)
+        manifest = mf.resolve(s3, 'b', ['bd.iso'])
+        s3.get_object = mock.Mock(side_effect=ClientError('AccessDenied', 403))
+        with self.assertRaisesRegex(IOError, r's3:GetObject\b'):
+            mf.fetch(s3, 'b', manifest, self.dest, log=lambda *_: None)
 
     def test_wrong_bytes_fail_the_content_check(self):
         s3 = FakeS3(self.objects)

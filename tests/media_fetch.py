@@ -132,8 +132,8 @@ class Fetch:
                     raise Precondition(f'{self.key} changed in S3 during the fetch (ETag is no longer '
                                        f'{self.pin["etag"]}); re-run to pin the new object') from exc
                 if code in ('AccessDenied', 'NoSuchKey', 'NoSuchVersion') or status in (403, 404):
-                    hint = ' (a VersionId GET needs s3:GetObjectVersion)' if 'VersionId' in args else ''
-                    raise IOError(f'{self.key}: {code or status}{hint}') from exc
+                    need = 's3:GetObjectVersion' if 'VersionId' in args else 's3:GetObject'
+                    raise IOError(f'{self.key}: {code or status} (the fetch needs {need} on it)') from exc
                 if attempt == 3:
                     raise
                 time.sleep(2 ** attempt)
@@ -229,8 +229,10 @@ def main(argv=None):
         manifest = json.loads(args.manifest.read_text())
         report = fetch(s3, args.bucket, manifest, args.dest, args.workers)
     except Exception as exc:  # noqa: BLE001 — one clear error line for the job log
-        print(f'::error title=Fixture {args.mode} failed::{" ".join(str(exc).splitlines())} — the BD/UHD '
-              'legs cannot decrypt without keydb.cfg and every leg needs all four ISOs')
+        text = ' '.join(str(exc).splitlines())
+        if 'keydb.cfg' in text:
+            text += ' — without keydb.cfg the BD family cannot decrypt'
+        print(f'::error title=Fixture {args.mode} failed::{text}')
         return 1
     if args.report:
         args.report.write_text(json.dumps(report, indent=1, sort_keys=True) + '\n')

@@ -74,3 +74,16 @@ Three independent mechanisms, because each fails alone:
 
 Both platforms were observed completing the full cycle: register, take one job,
 `Removed .runner`, shut down, instance terminated.
+
+## Run-scoped labels, and user-data from the commit under test
+
+qa.yml's `launch (<os>)` job passes **this directory's user-data at the commit
+being tested** to `run-instances --user-data`, overriding the launch template's
+copy, and pins the template version `plan-media` fingerprinted. It tags the
+instance `runner-labels=freemkv-media,<os>,run-<run_id>`; the user-data reads
+that tag from IMDS and registers with exactly those labels, as
+`ephemeral-<os>-<instance-id>`. The leg's `runs-on` includes `run-<run_id>`, so
+only the instance its own run launched can take the job — a stray runner (the
+1.6.5 incident) or another run's instance cannot. A user-data change therefore
+takes effect on the next qa run without touching AWS; applying it to the
+templates as well only matters for `ci-runner-launch.yml`.
