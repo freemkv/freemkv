@@ -77,7 +77,7 @@ RUN apk add --no-cache ffmpeg \
     done
 
 FROM scratch
-LABEL org.opencontainers.image.source=https://github.com/freemkv/freemkv-library
+LABEL org.opencontainers.image.source=https://github.com/freemkv/freemkv
 COPY --from=harvest /out/ /
 # Pin perms explicitly on both COPYs; the bootstrap's udev rule runs
 # /usr/local/bin/udev-trigger.sh on disc insertion.

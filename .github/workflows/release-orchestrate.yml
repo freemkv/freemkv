@@ -85,7 +85,7 @@ jobs:
           }
           ref_err() { echo "::error::$1: cannot read $2 ($(tr '\n' ' ' </tmp/ref.err))"; }
           for r in freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n \
-                   freemkv-engine bdemu freemkv autorip; do
+                   freemkv-engine bdemu freemkv; do
             st=0; sha=$(ref_sha "$r" qa) || st=$?
             [ "$st" -ne 2 ] || { ref_err "$r" qa; fail=1; continue; }
             [ -n "$sha" ] || { echo "::error::$r has no qa branch"; fail=1; continue; }
@@ -176,8 +176,6 @@ jobs:
         with: { repository: freemkv/bdemu,              ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/bdemu,              fetch-depth: 0 }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { repository: freemkv/freemkv,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv,            fetch-depth: 0 }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { repository: freemkv/autorip,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/autorip,            fetch-depth: 0 }
       # The public docs site: no dev/qa, it IS the deployed artifact, so main.
       # Repo was renamed from `freemkv.github.io` (GitHub Pages era) to
       # `marketing` (Cloudflare era). GitHub redirects the old name, but the
@@ -192,7 +190,7 @@ jobs:
         run: |
           set -uo pipefail
           fail=0
-          bash ci-private/scripts/scan-public.sh qa freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n freemkv-engine bdemu freemkv autorip .github homebrew-tap || fail=1
+          bash ci-private/scripts/scan-public.sh qa freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n freemkv-engine bdemu freemkv .github homebrew-tap || fail=1
           if ! out=$(bash ci-private/scripts/scan-secrets.sh --strict ws/marketing/src 2>&1); then
             fail=1; echo "::error::website has private-info findings:"
             printf '%s\n' "$out" | grep -oE '\[[A-Z0-9-]+\] [^ ]+' | sed 's|ws/marketing/src/||; s/^/  /'
@@ -253,7 +251,7 @@ jobs:
           # release.sh — unified, cross-repo, GIT-TAG-ONLY release for the freemkv crates.
           #
           # Order:  freemkv-unlock (base) → libfreemkv → freemkv-keysources (libs) →
-          #         bdemu + freemkv + autorip (binaries)
+          #         bdemu + freemkv (binaries)
           #
           # ── The git-tag-only model (2026-06, off crates.io) ───────────────────────
           #
@@ -267,10 +265,10 @@ jobs:
           #   dispatches):
           #       freemkv-unlock  ◄── libfreemkv ◄── freemkv-keysources
           #              ▲                 ▲                  ▲
-          #              └── bdemu         └── freemkv / autorip (+ keysources)
+          #              └── bdemu         └── freemkv (+ keysources)
           #
           #   Committed dep forms (CI-resolvable + locally buildable):
-          #     - binaries (freemkv/autorip/bdemu) + keysources carry a committed
+          #     - binaries (freemkv/bdemu) + keysources carry a committed
           #       [patch.crates-io] redirecting `libfreemkv`/`freemkv-keysources` to a GIT
           #       TAG. A gitignored .cargo/config.toml overrides those to local paths for
           #       dev. release.sh re-pins the committed tags.
@@ -337,7 +335,7 @@ jobs:
           CANONICAL_ROOT="${FMKV_ROOT:-$HOME/Developer/freemkv}"
           LIBFREEMKV_DIR="$CANONICAL_ROOT/libfreemkv"
           # freemkv-i18n — the i18n string loader. A dependency-free LEAF (no deps of its
-          # own); consumed only by the freemkv + autorip binaries via a committed
+          # own); consumed only by the freemkv binary via a committed
           # [patch.crates-io] git-tag redirect (NOT by libfreemkv/keysources/bdemu). Off
           # crates.io like the rest; tagged as a leaf lib before the binaries, then the
           # binaries re-pin its tag. Ships the unified version even when it has no
@@ -380,10 +378,11 @@ jobs:
           LIB_CRATES=(freemkv-keysources)
           # BINARY crates — git-tag-pin libfreemkv/keysources via [patch.crates-io]; bdemu
           # additionally swaps its freemkv-unlock path dep → git tag. No crates.io publish;
-          # each tag triggers a CI binary build (autorip → GHCR).
+          # each tag triggers a CI binary build (freemkv's server image → GHCR, which
+          # replaced autorip at 1.8.0).
           # (freemkv-tools was retired from the public release 2026-06-23 — it now lives
           # in an internal debug crate, not version-locked here.)
-          BINARY_CRATES=(bdemu freemkv autorip)
+          BINARY_CRATES=(bdemu freemkv)
           # Nothing publishes to crates.io anymore (libfreemkv left crates.io when it began
           # git-deping the firmware crate; keysources followed since it deps libfreemkv).
           # Kept as an (empty) hook so the orchestration's publish step is a clean no-op.
@@ -1459,7 +1458,7 @@ jobs:
 
           # ─────────────────── step 3: freemkv-i18n (a LEAF LIB) ────────────────────
           # A dependency-free string loader — nothing to re-pin, just bump + tag. Off
-          # crates.io; consumed by freemkv/autorip via a git-tag [patch.crates-io]. Its
+          # crates.io; consumed by freemkv via a git-tag [patch.crates-io]. Its
           # Cargo.lock is gitignored (nothing lockfile-ish to stage). Scan the source.
           release_i18n() {
             local name="freemkv-i18n"
@@ -1504,7 +1503,7 @@ jobs:
           # freemkv-engine — the shared rip engine (new in 1.6.0). Owns the orchestration
           # that used to be duplicated between the freemkv binary and autorip: optical
           # bring-up, the multipass recovery loop and its abort math, key-source
-          # orchestration, extract_tree, mux_title_session. Consumed by freemkv + autorip
+          # orchestration, extract_tree, mux_title_session. Consumed by freemkv
           # (NOT by bdemu). It git-deps BOTH libfreemkv and freemkv-keysources, so it is
           # tagged after both of them and before the binaries that re-pin it.
           release_engine() {
@@ -1543,16 +1542,16 @@ jobs:
             say "step 3.$name: re-pin git tags + bump + regen lock + verify + commit + tag"
 
             # Re-pin the [patch.crates-io] git tags to this release. (libfreemkv +
-            # keysources are both git-only now; freemkv/autorip reach freemkv-unlock
+            # keysources are both git-only now; freemkv reaches freemkv-unlock
             # transitively through libfreemkv's tagged Cargo.toml, so they carry no
             # freemkv-unlock dep of their own to re-pin.)
             repin_git_patch "$dir" libfreemkv "$VERSION"
             repin_git_patch "$dir" freemkv-keysources "$VERSION"
-            # freemkv-i18n is a git-tag [patch.crates-io] dep of freemkv + autorip only;
+            # freemkv-i18n is a git-tag [patch.crates-io] dep of freemkv only;
             # both helpers no-op on bdemu (no i18n dep line), so calling unconditionally
             # is safe.
             repin_git_patch "$dir" freemkv-i18n "$VERSION"
-            # freemkv-engine is a git-tag [patch.crates-io] dep of freemkv + autorip only
+            # freemkv-engine is a git-tag [patch.crates-io] dep of freemkv only
             # (bdemu has no engine dep line, so both helpers no-op there).
             repin_git_patch "$dir" freemkv-engine "$VERSION"
             # Bump the base crates.io version reqs so they're satisfiable by the patched
@@ -1878,12 +1877,6 @@ jobs:
             )
             # Each asset ships with a .sha256.
             freemkv_expected+=("${freemkv_expected[@]/%/.sha256}")
-            local autorip_expected=(
-              autorip-aarch64-macos
-              autorip-x86_64-linux
-              autorip-aarch64-linux
-              autorip-x86_64-windows.zip
-            )
 
             # How long to wait for a release's assets to appear. The release workflow
             # builds them after the tag lands, so an empty list right after tagging is
@@ -1895,15 +1888,13 @@ jobs:
             local poll_secs=30
 
             local missing=0 repo names want checked=0
-            for repo in freemkv autorip; do
+            for repo in freemkv; do
               if $DRY_RUN; then
                 printf '  [dry-run] gh release view v%s --repo %s/%s --json assets\n' \
                   "$VERSION" "$GIT_ORG" "$repo"
                 continue
               fi
-              local -a expected
-              if [ "$repo" = freemkv ]; then expected=("${freemkv_expected[@]}");
-              else expected=("${autorip_expected[@]}"); fi
+              local -a expected=("${freemkv_expected[@]}")
               # Wait for the assets we actually NEED, not merely for the first one to
               # appear. Breaking on "any asset exists" made this report a complete
               # release as broken: the Linux leg finishes in about two minutes while the
@@ -1985,7 +1976,7 @@ jobs:
           #   3.  tag keysources      — git-tag-pins libfreemkv; off crates.io.
           #   3b. tag freemkv-i18n    — dependency-free leaf.
           #   3c. tag freemkv-engine  — NEW in 1.6.0; git-tag-pins libfreemkv AND
-          #       keysources, so it is tagged after both. freemkv + autorip re-pin it
+          #       keysources, so it is tagged after both. freemkv re-pins it
           #       (bdemu has no engine dep).
           #       └── confirm all five lib tags on remote (~seconds)
           #   4.  release each binary (re-pin git tags, regen lock, tag) — builds start the
@@ -2026,8 +2017,8 @@ jobs:
             release_unlock       # base crate — tagged first
             release_libfreemkv   # git-deps freemkv-unlock (path→git swap in the tag)
             release_keysources   # git-tag-pins libfreemkv
-            release_i18n         # dependency-free leaf; freemkv/autorip re-pin its tag
-            release_engine       # git-tag-pins libfreemkv + keysources; freemkv/autorip re-pin its tag
+            release_i18n         # dependency-free leaf; freemkv re-pins its tag
+            release_engine       # git-tag-pins libfreemkv + keysources; freemkv re-pins its tag
           fi
 
           # Structural barrier: the lib TAGS must be on the remote before a binary's lock
