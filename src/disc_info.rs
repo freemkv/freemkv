@@ -1445,8 +1445,13 @@ mod tests {
             .unit_keys(vec![(3, [0x11; 16]), (7, [0x22; 16])])
             .volume_id([0x9C; 16])
             .build();
+        // KU §3.3: "`disc_info.rs:679` reads `status()`" — the count is the set's, never
+        // the banked keys (KU §11.6: "The key count in `info` … comes from the resolved set").
+        let mut status = libfreemkv::keys::ResolvedKeySet::none().status();
+        status.proven = 1;
+        status.origin = Some("keydb");
         let ((), text) = crate::output::capture(|| {
-            emit_aacs_block(&Output::new(true, false), &aacs);
+            emit_aacs_block(&Output::new(true, false), &aacs, Some(&status));
         });
         let lower = text.to_ascii_lowercase();
         for secret in ["eeeeeeee", "11111111", "22222222"] {
@@ -1456,7 +1461,11 @@ mod tests {
             );
         }
         assert!(!text.contains("VUK") && !text.contains("CPS"), "{text}");
-        assert!(text.contains("(2 unit keys)"), "{text}");
+        assert!(text.contains("Keys: keydb (1 unit keys)"), "{text}");
+        let ((), text) = crate::output::capture(|| {
+            emit_aacs_block(&Output::new(true, false), &aacs, None);
+        });
+        assert!(text.contains("Keys: none (0 unit keys)"), "{text}");
         assert!(text.contains("Disc hash: 0xfeedface"), "{text}");
         assert!(text.contains("MKB v77"), "{text}");
         assert!(text.contains("VID: 0x9c9c"), "{text}");
