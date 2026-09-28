@@ -2000,27 +2000,19 @@ fn copy_verdict(r: &freemkv_engine::CopyResult) -> CopyVerdict {
 }
 
 fn disc_copy_options<'a>(
-    disc: &libfreemkv::Disc,
+    keys: Option<&libfreemkv::keys::ResolvedKeySet>,
     raw: bool,
     multipass: bool,
     progress: &'a dyn libfreemkv::progress::Progress,
 ) -> freemkv_engine::CopyOptions<'a> {
-    // Mirrors `recover_to_iso`'s wiring (the GUI's path): persist the resolved
-    // keys (or the VID, if unresolved) into the mapfile so a later resume can
-    // decrypt directly instead of re-scanning.
-    let vid = disc.aacs.as_ref().map(|a| a.volume_id);
-    let unit_keys = disc
-        .aacs
-        .as_ref()
-        .map(|a| a.unit_keys.clone())
-        .unwrap_or_default();
+    // KU §2.1 invariant 5: "No key byte and no raw VID is written to any file" (FK6). The
+    // rip's up-front set rides in memory; the engine writes only `disc` + `vidfp` lines.
     freemkv_engine::CopyOptions {
         decrypt: !raw,
         multipass,
         halt: None,
         progress: Some(progress),
-        vid,
-        unit_keys,
+        keys: keys.cloned(),
         ..Default::default()
     }
 }
@@ -2387,7 +2379,7 @@ fn disc_to_iso(
         speed_est: &speed_est,
     };
 
-    let copy_opts = disc_copy_options(&disc, raw, multipass, &progress);
+    let copy_opts = disc_copy_options(None, raw, multipass, &progress);
     let exit_code = match freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts) {
         Ok(r) if copy_verdict(&r) == CopyVerdict::Interrupted => {
             // Ctrl-C halted the copy. Don't print "Complete" over a partial
@@ -5684,8 +5676,7 @@ mod verdict_tests {
     fn the_disc_copy_options_honour_raw_multipass_and_progress() {
         let nop = |_: &libfreemkv::progress::PassProgress| true;
 
-        let d = super::iso_key_tests::disc(None, false);
-        let default_flags = disc_copy_options(&d, false, false, &nop);
+        let default_flags = disc_copy_options(None, false, false, &nop);
         assert!(
             default_flags.decrypt,
             "a plain disc->iso rip must DECRYPT; ciphertext is only ever --raw"
@@ -5697,7 +5688,7 @@ mod verdict_tests {
         );
         assert!(default_flags.halt.is_none());
 
-        let raw = disc_copy_options(&d, true, true, &nop);
+        let raw = disc_copy_options(None, true, true, &nop);
         assert!(!raw.decrypt, "--raw is ciphertext passthrough");
         assert!(
             raw.multipass,
@@ -5710,11 +5701,11 @@ mod verdict_tests {
     /// no raw VID is written to any file". A disc→ISO copy hands the mapfile neither.
     #[test]
     fn disc_copy_options_persist_no_keys() {
-        use super::iso_key_tests::{aacs, disc};
         let nop = |_: &libfreemkv::progress::PassProgress| true;
-        let keyed = disc(Some(aacs(vec![(1, [7u8; 16])])), true);
+        let set = libfreemkv::keys::ResolvedKeySet::none();
         for raw in [false, true] {
-            let o = disc_copy_options(&keyed, raw, false, &nop);
+            let o = disc_copy_options(Some(&set), raw, false, &nop);
+            assert!(o.keys.is_some(), "the rip's set rides in memory");
             assert!(o.unit_keys.is_empty(), "no key reaches the mapfile");
             assert_eq!(o.vid, None, "no raw VID reaches the mapfile");
             assert!(o.key_fetch.is_none(), "no mid-rip lookup (KU §2.1 invariant 4)");
