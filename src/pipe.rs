@@ -6187,6 +6187,7 @@ mod dest_is_source_tests {
             ("mkv", "Movie.mkv"),
             ("m2ts", "Movie.m2ts"),
             ("mp4", "Movie.mp4"),
+            ("mpg", "Movie.mpg"),
             ("iso", "Disc.iso"),
         ] {
             let p = t.file(name, BODY);
