@@ -67,10 +67,15 @@ struct SigintHalt {
 
 impl SigintHalt {
     fn install() -> Self {
+        Self::watching(&INTERRUPTED)
+    }
+
+    // A halt cancelled once `flag` is set: [`INTERRUPTED`] in production, a test's own flag.
+    fn watching(flag: &'static AtomicBool) -> Self {
         let halt = libfreemkv::Halt::new();
         let done = Arc::new(AtomicBool::new(false));
         // A SIGINT that already landed (before the mux starts) cancels up front.
-        if INTERRUPTED.load(Ordering::SeqCst) {
+        if flag.load(Ordering::SeqCst) {
             halt.cancel();
         }
         let handle = {
@@ -78,7 +83,7 @@ impl SigintHalt {
             let done = done.clone();
             std::thread::spawn(move || {
                 while !done.load(Ordering::SeqCst) {
-                    if INTERRUPTED.load(Ordering::SeqCst) {
+                    if flag.load(Ordering::SeqCst) {
                         halt.cancel();
                         return;
                     }
@@ -2044,23 +2049,21 @@ use crate::file_identity::same_file;
 
 /// Decrypt a whole image into `dest` through libfreemkv's shared whole-disc reader, the
 /// one the engine's disc → ISO sweep uses, so the GUI, CLI and image paths never diverge.
-/// Every key is settled (and `fetch` asked) before `dest` is created, so a refusal or a
-/// stop while keying leaves no file behind.
+/// Every key is settled before `dest` is created, so a refusal, or a stop (`interrupt`)
+/// while keying, leaves no file behind.
 fn write_decrypted_image(
     disc: &libfreemkv::Disc,
     reader: Box<dyn libfreemkv::SectorSource>,
     dest: &std::path::Path,
     fetch: Option<&libfreemkv::sector::KeyFetch>,
-    halt: &libfreemkv::halt::Halt,
+    interrupt: &'static AtomicBool,
 ) -> libfreemkv::error::Result<u64> {
+    // Watched from the start, so a Ctrl-C during keying (probes, key-service calls)
+    // stops before `write_image` creates `dest`.
+    let sigint = SigintHalt::watching(interrupt);
+    let halt = sigint.halt();
     let mut src = libfreemkv::whole_disc::whole_disc_reader(disc, reader, true, fetch, Some(halt))?;
-    libfreemkv::write_image(&mut src, dest, disc.capacity_sectors, halt, |_| {
-        // `write_image` checks `halt` once per batch and this runs at the end of
-        // each batch, so a Ctrl-C is honored on the next one.
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            halt.cancel();
-        }
-    })
+    libfreemkv::write_image(&mut src, dest, disc.capacity_sectors, halt, |_| {})
 }
 
 fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
@@ -2103,14 +2106,13 @@ fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> boo
 
     let total_sectors = disc.capacity_sectors;
     let start = std::time::Instant::now();
-    let halt = libfreemkv::halt::Halt::new();
     let fetch = build_iso_key_fetch(source, keys);
     let result = write_decrypted_image(
         &disc,
         reader,
         std::path::Path::new(&iso_path),
         fetch.as_ref(),
-        &halt,
+        &INTERRUPTED,
     );
 
     match result {
@@ -6861,8 +6863,8 @@ mod image_copy_tests {
             image: fx.source.clone(),
             probe_fail,
         });
-        let halt = libfreemkv::halt::Halt::new();
-        let r = write_decrypted_image(d, reader, &dest, fetch, &halt);
+        static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let r = write_decrypted_image(d, reader, &dest, fetch, &NEVER);
         (dest, r)
     }
 
@@ -6899,22 +6901,47 @@ mod image_copy_tests {
         );
     }
 
-    /// A stop during key probing ends the copy before the destination exists.
+    /// Ctrl-C that already landed ends the copy before the destination exists.
     #[test]
-    fn a_stop_while_keying_creates_no_output() {
+    fn a_stop_before_keying_creates_no_output() {
+        static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
         let fx = fixture("halt", [K0, K1]);
         let dest = fx.dir.join("out.iso");
         let reader = Box::new(Mem {
             image: fx.source.clone(),
             probe_fail: None,
         });
-        let halt = libfreemkv::halt::Halt::new();
-        halt.cancel();
-        let r = write_decrypted_image(&disc(&fx, 2, &[K0, K1]), reader, &dest, None, &halt);
+        let r = write_decrypted_image(&disc(&fx, 2, &[K0, K1]), reader, &dest, None, &STOP);
         assert!(matches!(r, Err(Error::Halted)), "{:?}", r.err());
         assert!(
             !dest.exists(),
-            "a stop while keying must precede creating the ISO"
+            "a stop before keying must precede creating the ISO"
+        );
+    }
+
+    /// Ctrl-C DURING keying (here, while the key service is asked) is honoured before
+    /// the destination exists, not one written batch later.
+    #[test]
+    fn a_ctrl_c_during_the_key_lookup_creates_no_output() {
+        static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let fx = fixture("sigint", [K0, K1]);
+        let dest = fx.dir.join("out.iso");
+        let reader = Box::new(Mem {
+            image: fx.source.clone(),
+            probe_fail: None,
+        });
+        let fetch = libfreemkv::sector::KeyFetch::unit_only(std::sync::Arc::new(|_| {
+            STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Let the SIGINT watcher (200 ms poll) see it, as a real lookup would.
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            Ok(vec![K1])
+        }));
+        let d = disc(&fx, 3, &[K0, K2]);
+        let r = write_decrypted_image(&d, reader, &dest, Some(&fetch), &STOP);
+        assert!(matches!(r, Err(Error::Halted)), "{:?}", r.err());
+        assert!(
+            !dest.exists(),
+            "a Ctrl-C while keying must precede creating the ISO"
         );
     }
 
