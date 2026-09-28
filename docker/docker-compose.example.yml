@@ -1,0 +1,81 @@
+# freemkv-library: the freemkv server build (`freemkv server`) in a container.
+# It reads an existing autorip /config (settings.json, logs, keydb) as-is, so
+# an autorip install can point this at the same ./config directory.
+#
+# No image is published yet: build it from the repository root with
+#   docker build -f docker/Dockerfile -t freemkv-library .
+# or let compose build it (the `build:` block below).
+services:
+  freemkv-library:
+    image: freemkv-library:local
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: freemkv-library
+    restart: unless-stopped
+    privileged: true                    # required for optical SCSI access; also enables in-container NFS mount (see below)
+    # Give a rip time to cancel + drain on SIGTERM (redeploy/reboot/Watchtower)
+    # so it shuts down cleanly instead of being SIGKILLed mid-read. The default
+    # 10 s is too short for a drive mid-recovery (up to ~60 s). The server also
+    # clears its in-progress markers on shutdown, so a stop is never miscounted
+    # as a crash regardless — but a clean drain still avoids a partial ISO write.
+    stop_grace_period: 75s
+    environment:
+      # v0.25.7 cleanup: only bootstrap-only knobs live in env now.
+      # Everything else (output dirs, TMDB key, AUTO_EJECT, MAX_RETRIES,
+      # KEEP_ISO, MIN_LENGTH, ON_INSERT, abort_on_lost_secs, decrypt_threads,
+      # log_retention_days, …) is set via the Settings page in the web UI
+      # and persisted to /config/settings.json. Old env vars are silently
+      # ignored — operators upgrading from <0.25.7 should move their
+      # values into the UI on first deploy.
+      #
+      - AUTORIP_DIR=/config              # where settings.json + logs live
+      - PORT=8080                        # web bind port (can't change at runtime)
+      # Tracing filter (env-filter syntax). Default `autorip=info,libfreemkv=warn`
+      # (`autorip` directives also cover the daemon's `freemkv::server` targets).
+      # Crank to debug for deep-dives: `AUTORIP_LOG_LEVEL=autorip=debug`. The
+      # JSON stream lands in /config/logs/autorip.jsonl (never rolled), human-
+      # readable in /config/logs/autorip.log.<UTC-date> (daily-rolled). Env-only
+      # because the tracing filter is built at startup, before the web server is up.
+      - AUTORIP_LOG_LEVEL=autorip=info,libfreemkv=warn
+      #
+      # OPTIONAL: in-container NFS mount (v0.25.4+). Use this instead of
+      # the host bind-mount for /output if your NFS share goes stale on
+      # container restart (Unraid disk spindown, idle TCP drop, etc.).
+      # Each container start gets a fresh NFS session so stale handles
+      # self-heal automatically — no host-side `umount -fl` dance.
+      #
+      # If you set these, REMOVE the corresponding bind-mount line in
+      # `volumes:` below. The bootstrap (`freemkv server --bootstrap`) creates
+      # the mountpoint and mounts it before the daemon starts.
+      #
+      # - NFS_HOST=nas.example.com
+      # - NFS_EXPORT=/mnt/user/media
+      # - NFS_MOUNTPOINT=/output
+      # - NFS_OPTS=vers=4.1,nconnect=4,nolock,actimeo=3,hard,_netdev
+    volumes:
+      - /dev:/dev                       # live host /dev — handles USB re-enumeration (sg4 ↔ sg5 between reconnects)
+      - ./config:/config
+      - /mnt/media:/output              # remove this line if using the in-container NFS_HOST mount above
+      - /tmp/autorip:/staging
+      - /sys:/sys:ro
+    ports:
+      - 8080:8080
+    healthcheck:
+      # Mirrors the Dockerfile HEALTHCHECK; redeclared here so a user who
+      # builds locally without the image-baked one still gets recovery.
+      test: ["CMD", "/usr/local/bin/freemkv", "server", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+# Optional: if running freemkv-library behind an existing reverse proxy (Caddy /
+# Traefik / nginx) on a shared Docker network, override the default network
+# so the container joins the existing one instead of getting its own
+# stack-local bridge. One network, no duplication.
+#
+# networks:
+#   default:
+#     name: your-existing-proxy-net
+#     external: true
