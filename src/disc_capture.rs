@@ -16,8 +16,7 @@
 //! code), or the disc has no AACS at all (DVD / unencrypted Blu-ray).
 
 use crate::info::{
-    base64_encode, json_escape, present_for_submission, push_zip_section, save_bin, try_save_bin,
-    zip_files,
+    base64_encode, json_escape, present_for_submission, push_zip_section, try_save_bin, zip_files,
 };
 use crate::strings;
 use libfreemkv::{Disc, SectorSource};
@@ -117,16 +116,24 @@ pub(crate) fn all_skipped_line(summary: &DiscSummary) -> String {
 
 // Tell the user which disc files were left out of the profile, and why.
 pub(crate) fn report_skipped(summary: &DiscSummary) {
-    for line in &summary.skipped {
-        eprintln!(
-            "{}",
+    for line in skipped_lines(summary) {
+        eprintln!("{line}");
+    }
+}
+
+// The localized "Skipped disc file …" lines `report_skipped` prints.
+fn skipped_lines(summary: &DiscSummary) -> Vec<String> {
+    summary
+        .skipped
+        .iter()
+        .map(|line| {
             strings::fmt_or(
                 "disc.capture_skipped",
                 "Skipped disc file {file}",
                 &[("file", line)],
             )
-        );
-    }
+        })
+        .collect()
 }
 
 /// Non-secret AACS diagnostics distilled from a scanned disc, for keydb / AACS
@@ -288,98 +295,107 @@ pub(crate) fn selection_json(disc: &Disc) -> String {
 // a paste/email base64 bundle. Exits on a hard I/O failure, like the drive path.
 pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str, quiet: bool) {
     let profile_name = format!("disc-profile-{}", crate::info::sanitize_component(label));
-    let profile_dir = std::path::PathBuf::from(&profile_name);
-    if let Err(e) = std::fs::create_dir_all(&profile_dir) {
-        eprintln!(
-            "{}",
-            strings::fmt_or(
-                "disc.capture_mkdir_failed",
-                "Could not create {path}: {error}",
-                &[
-                    ("path", &profile_dir.display().to_string()),
-                    ("error", &e.to_string()),
-                ],
-            )
-        );
-        std::process::exit(1);
+    match capture(disc, reader, Path::new(&profile_name), quiet) {
+        Ok(c) => {
+            c.stderr.iter().for_each(|l| eprintln!("{l}"));
+            c.stdout.iter().for_each(|l| println!("{l}"));
+            present_for_submission(&profile_name, &c.zip_path, &c.title, &c.body, c.inlined);
+        }
+        Err(lines) => {
+            lines.iter().for_each(|l| eprintln!("{l}"));
+            std::process::exit(1);
+        }
+    }
+}
+
+// One `--share` capture: the console lines `run` prints (stderr first, as the
+// flow emits them) and the issue it hands to `present_for_submission`.
+pub(crate) struct Capture {
+    pub stdout: Vec<String>,
+    pub stderr: Vec<String>,
+    pub zip_path: std::path::PathBuf,
+    pub title: String,
+    pub body: String,
+    pub inlined: bool,
+}
+
+// Write the profile into `profile_dir` and build the submission, printing
+// nothing. `Err` holds the stderr lines of a hard failure (`run` exits 1).
+pub(crate) fn capture(
+    disc: &Disc,
+    reader: &mut dyn SectorSource,
+    profile_dir: &Path,
+    quiet: bool,
+) -> Result<Capture, Vec<String>> {
+    let cannot_write = |path: &Path, e: &dyn std::fmt::Display| {
+        vec![strings::fmt(
+            "error.cannot_write",
+            &[
+                ("path", &path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        )]
+    };
+    if let Err(e) = std::fs::create_dir_all(profile_dir) {
+        return Err(vec![strings::fmt_or(
+            "disc.capture_mkdir_failed",
+            "Could not create {path}: {error}",
+            &[
+                ("path", &profile_dir.display().to_string()),
+                ("error", &e.to_string()),
+            ],
+        )]);
     }
 
     let mut written: Vec<String> = Vec::new();
-
-    // freemkv's selection view (always available — we have the scanned disc).
-    save_bin(
-        &profile_dir,
-        "selection.json",
-        selection_json(disc).as_bytes(),
-        &mut written,
-    );
-
-    // Non-secret AACS diagnostics for keydb / AACS resolution triage (issue #46):
-    // the disc hash (keydb lookup key) + crypto shape, or why there is none.
-    // Never carries key material — see `aacs_json`.
-    save_bin(
-        &profile_dir,
-        "aacs.json",
-        aacs_json(disc).as_bytes(),
-        &mut written,
-    );
+    // freemkv's selection view, then the non-secret AACS diagnostics for keydb
+    // triage (issue #46; never key material, see `aacs_json`).
+    for (name, data) in [
+        ("selection.json", selection_json(disc)),
+        ("aacs.json", aacs_json(disc)),
+    ] {
+        try_save_bin(profile_dir, name, data.as_bytes())
+            .map_err(|e| cannot_write(&profile_dir.join(name), &e))?;
+        written.push(name.to_string());
+    }
 
     // Raw structure files. If none are readable there is nothing to report.
-    let folded = fold_structure(&profile_dir, &mut written, reader);
-    let summary = match folded {
+    let mut stderr = Vec::new();
+    let summary = match fold_structure(profile_dir, &mut written, reader) {
         Ok(Some(s)) if s.file_count > 0 => {
             if !quiet {
-                report_skipped(&s);
+                stderr.extend(skipped_lines(&s));
             }
             s
         }
         // Every file was refused: the reasons ARE the error, so show them even under -q.
         Ok(Some(s)) => {
-            report_skipped(&s);
-            eprintln!("{}", all_skipped_line(&s));
-            std::process::exit(1);
+            let mut lines = skipped_lines(&s);
+            lines.push(all_skipped_line(&s));
+            return Err(lines);
         }
         other => {
-            eprintln!(
-                "{}",
-                strings::get_or(
-                    "disc.capture_no_structure",
-                    "No readable disc structure (BDMV / VIDEO_TS) was found; nothing to share.",
-                )
-            );
+            let mut lines = vec![strings::get_or(
+                "disc.capture_no_structure",
+                "No readable disc structure (BDMV / VIDEO_TS) was found; nothing to share.",
+            )];
             if let Err(e) = other {
-                eprintln!("  {}", crate::pipe::fmt_err(&e));
+                lines.push(format!("  {}", crate::pipe::fmt_err(&e)));
             }
-            std::process::exit(1);
+            return Err(lines);
         }
     };
-
-    if !quiet {
-        print_capture_notes(disc, &summary);
-    }
+    let stdout = if quiet {
+        Vec::new()
+    } else {
+        capture_notes(disc, &summary)
+    };
 
     // Zip + base64, same helpers as the drive path.
-    let zip_data = match zip_files(&profile_dir, &written) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("{}", crate::info::zip_failed_line(&*e));
-            std::process::exit(1);
-        }
-    };
+    let zip_data =
+        zip_files(profile_dir, &written).map_err(|e| vec![crate::info::zip_failed_line(&*e)])?;
     let zip_path = profile_dir.join("profile.zip");
-    if let Err(e) = std::fs::write(&zip_path, &zip_data) {
-        eprintln!(
-            "{}",
-            strings::fmt(
-                "error.cannot_write",
-                &[
-                    ("path", &zip_path.display().to_string()),
-                    ("error", &e.to_string()),
-                ],
-            )
-        );
-        std::process::exit(1);
-    }
+    std::fs::write(&zip_path, &zip_data).map_err(|e| cannot_write(&zip_path, &e))?;
 
     let (body, inlined) = issue_body(disc, &summary, &base64_encode(&zip_data));
     let title = format!(
@@ -387,21 +403,25 @@ pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str, quiet
         disc.format,
         disc.titles.len()
     );
-    present_for_submission(&profile_name, &zip_path, &title, &body, inlined);
+    Ok(Capture {
+        stdout,
+        stderr,
+        zip_path,
+        title,
+        body,
+        inlined,
+    })
 }
 
 // The on-run summary + AACS triage lines (localized; suppressed by `-q`).
-fn print_capture_notes(disc: &Disc, summary: &DiscSummary) {
-    println!(
-        "{}",
-        strings::fmt_or(
-            "disc.capture_summary",
-            "Captured disc structure: {files} files ({bytes} bytes).",
-            &[
-                ("files", &summary.file_count.to_string()),
-                ("bytes", &summary.total_bytes.to_string()),
-            ],
-        )
+fn capture_notes(disc: &Disc, summary: &DiscSummary) -> Vec<String> {
+    let files = strings::fmt_or(
+        "disc.capture_summary",
+        "Captured disc structure: {files} files ({bytes} bytes).",
+        &[
+            ("files", &summary.file_count.to_string()),
+            ("bytes", &summary.total_bytes.to_string()),
+        ],
     );
     let diag = aacs_diag(disc);
     let line = match (&diag.disc_hash, &disc.aacs_error) {
@@ -424,7 +444,7 @@ fn print_capture_notes(disc: &Disc, summary: &DiscSummary) {
             "No AACS on this disc — no AACS diagnostics to capture.",
         ),
     };
-    println!("{line}");
+    vec![files, line]
 }
 
 // The GitHub issue / email body (literal English markdown, a machine artifact): a
@@ -604,12 +624,23 @@ mod aacs_diag_tests {
         assert!(sel.contains("\"libfreemkv\": "), "{sel}");
     }
 
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    // Every text rendering of `secret` a capture could leak: hex, base64 (padded
+    // or not) and decimal byte arrays in Debug (`1, 2`) and JSON (`1,2`) spacing.
+    fn encodings(secret: &[u8]) -> Vec<String> {
+        let dec: Vec<String> = secret.iter().map(|b| b.to_string()).collect();
+        let b64 = base64_encode(secret);
+        vec![
+            secret.iter().map(|b| format!("{b:02x}")).collect(),
+            b64.trim_end_matches('=').to_string(),
+            b64,
+            dec.join(", "),
+            dec.join(","),
+        ]
     }
 
-    /// FK9 (KU design §3.3, §7.3): the full `--share` capture of a disc whose streams
-    /// are encrypted under the rip's key writes no key, raw VID or MKB bytes anywhere.
+    /// FK9 (KU design §3.3, §7.3): the `--share` capture of a disc whose stream is
+    /// encrypted under the rip's key leaks no key, raw VID or MKB bytes into any file
+    /// it writes, any console line, or the issue title and body.
     #[test]
     fn bug_report_capture_leaks_no_key_vid_or_mkb() {
         use libfreemkv::aacs::mkb::AacsVersion;
@@ -636,31 +667,32 @@ mod aacs_diag_tests {
         };
         assert_eq!(mask(&unit), mask(&img.plain[at..at + 6144]));
 
-        // The capture, as `run` does it: selection + AACS JSON, the folded
-        // structure, the zip, and the issue body carrying the zip's base64.
         let disc = disc_with(Some(aacs_with_secrets(
             "0x1111111111111111111111111111111111111111",
         )));
         let dir = std::env::temp_dir().join(format!("fmkv-fk9-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("profile dir");
-        let mut written = Vec::new();
-        let sel = selection_json(&disc);
-        save_bin(&dir, "selection.json", sel.as_bytes(), &mut written);
-        save_bin(&dir, "aacs.json", aacs_json(&disc).as_bytes(), &mut written);
-        let summary = fold_structure(&dir, &mut written, &mut img.source())
-            .expect("structure read")
-            .expect("structure files");
-        assert_eq!(summary.file_count, 2, "{written:?}");
-        let zip = zip_files(&dir, &written).expect("zip");
-        let (body, _) = issue_body(&disc, &summary, &base64_encode(&zip));
+        // A directory where the clip info would go: one skipped-file console line.
+        std::fs::create_dir_all(dir.join("BDMV/CLIPINF/00001.clpi")).expect("blocker");
+        let c = match capture(&disc, &mut img.source(), &dir, false) {
+            Ok(c) => c,
+            Err(lines) => panic!("capture failed: {lines:?}"),
+        };
+        assert_eq!(c.stderr.len(), 1, "{:?}", c.stderr);
+        assert_eq!(c.stdout.len(), 2, "{:?}", c.stdout);
 
-        let mut artifacts: Vec<(String, Vec<u8>)> = written
-            .iter()
-            .map(|n| (n.clone(), std::fs::read(dir.join(n)).expect("artifact")))
-            .collect();
-        artifacts.push(("profile.zip".into(), zip));
-        artifacts.push(("issue body".into(), body.into_bytes()));
+        let read = |n: &str| std::fs::read(dir.join(n)).expect("artifact");
+        let text = |n: &str| String::from_utf8(read(n)).expect("utf-8");
+        let mut texts: Vec<(String, String)> = vec![
+            ("selection.json".into(), text("selection.json")),
+            ("aacs.json".into(), text("aacs.json")),
+            ("issue title".into(), c.title.clone()),
+            ("issue body".into(), c.body.clone()),
+        ];
+        for (i, line) in c.stdout.iter().chain(&c.stderr).enumerate() {
+            texts.push((format!("console line {i}"), line.clone()));
+        }
+        let structure = [("BDMV/PLAYLIST/00000.mpls", read("BDMV/PLAYLIST/00000.mpls"))];
         let _ = std::fs::remove_dir_all(&dir);
 
         let secrets: [(&str, &[u8]); 4] = [
@@ -669,17 +701,22 @@ mod aacs_diag_tests {
             ("MKB bytes", &SECRET_MKB),
             ("uk_ro bytes", &[0x12, 0x34, 0x56]),
         ];
-        for (name, data) in &artifacts {
-            let text = String::from_utf8_lossy(data).to_ascii_lowercase();
-            for (what, secret) in secrets {
-                assert!(
-                    !text.contains(&hex(secret)),
-                    "{what} hex leaked into {name}"
-                );
-                assert!(
-                    !data.windows(secret.len()).any(|w| w == secret),
-                    "{what} bytes leaked into {name}"
-                );
+        for (what, secret) in secrets {
+            for (name, t) in &texts {
+                let lower = t.to_ascii_lowercase();
+                // Hex in either case; base64 and decimal are case-exact.
+                for (i, enc) in encodings(secret).into_iter().enumerate() {
+                    let hit = if i == 0 {
+                        lower.contains(&enc)
+                    } else {
+                        t.contains(&enc)
+                    };
+                    assert!(!hit, "{what} leaked into {name} as {enc:?}");
+                }
+            }
+            for (name, data) in &structure {
+                let hit = data.windows(secret.len()).any(|w| w == secret);
+                assert!(!hit, "{what} bytes leaked into {name}");
             }
         }
     }
