@@ -3591,8 +3591,8 @@ mod routing_tests {
     use super::{
         DiscPlan, KeyConfig, OutKind, RipRequest, RunState, TitleIdentity, UiSink, damage_note,
         demux_needs_subdirs, disc_device, disc_raw_copy, fe, image_or_dir_scheme, is_disc_source,
-        is_stream_source, iso_recovery_result, mux_opts, out_kind, recovery_plan,
-        recovery_produced_no_data, recovery_raw, remap_against, remap_title_pids,
+        is_stream_source, iso_recovery_result, mux_opts, mux_selected_titles, out_kind,
+        recovery_plan, recovery_produced_no_data, recovery_raw, remap_against, remap_title_pids,
         run_disc_scanning, should_delete_staging_iso, source_scheme, staging_not_kept_note,
         stream_selection_for, title_input_options, title_session_mux_opts,
         verify_selection_identity, verify_title_identity, whole_image_gate, won_from_trace,
@@ -4606,6 +4606,49 @@ mod routing_tests {
         assert!(staging_not_kept_note(true, true).contains("was not kept"));
         assert_eq!(staging_not_kept_note(true, false), "");
         assert_eq!(staging_not_kept_note(false, true), "");
+    }
+
+    // G4: the GUI's pre-mux note must land in the run log, not just be computed.
+    #[test]
+    fn mux_selected_titles_logs_the_excluded_note_to_the_run() {
+        crate::strings::set_locale("en");
+        let dir = std::env::temp_dir().join(format!("fmkv-g4-gui-note-{}", std::process::id()));
+        let mut r = req();
+        r.format = "Selected titles → MP4".into();
+        r.dest_dir = dir.to_string_lossy().into_owned();
+        let truehd = libfreemkv::Stream::Audio(libfreemkv::AudioStream {
+            pid: 0x1100,
+            codec: libfreemkv::Codec::TrueHd,
+            channels: libfreemkv::AudioChannels::Surround51,
+            language: "eng".into(),
+            sample_rate: libfreemkv::SampleRate::S48,
+            secondary: false,
+            purpose: libfreemkv::LabelPurpose::Normal,
+            label: String::new(),
+        });
+        let mut disc = super::key_summary_tests::disc(false);
+        disc.titles = vec![libfreemkv::DiscTitle {
+            streams: vec![truehd],
+            codec_privates: vec![None],
+            ..libfreemkv::DiscTitle::empty()
+        }];
+        let state = Arc::new(RunState::default());
+        let sink = UiSink(state.clone());
+        // No such image: the mux itself fails, after the note is logged.
+        let missing = format!("iso://{}/missing.iso", dir.display());
+        let _ = mux_selected_titles(&disc, &missing, &r, &[0], &sink, &state);
+        let _ = std::fs::remove_dir_all(&dir);
+        let lines = state
+            .lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("left out") && l.contains("MP4")),
+            "the excluded note reaches the run log, got: {lines:?}"
+        );
     }
 
     fn req() -> RipRequest {
