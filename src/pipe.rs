@@ -3471,6 +3471,7 @@ mod tests {
                     *b = (i as u8).wrapping_mul(31).wrapping_add(7);
                 }
                 buf[0] = 0xC0; // CPI bits set on the unit's first byte
+                buf[4] = 0x47; // TS sync in the clear seed: on the unit grid
                 Ok(n)
             }
         }
@@ -3503,6 +3504,7 @@ mod tests {
 
         // The complement: a unit INSIDE the content extent is decrypted.
         let mut inside = vec![0u8; UNIT];
+        src.set_unit_base(300);
         let n = src
             .read_sectors(300, 3, &mut inside, false)
             .expect("a keyed unit inside the content extent decrypts");
