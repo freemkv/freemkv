@@ -407,22 +407,35 @@ function parseDebugLine(line) {
 export function openDeviceTerminal(dev, debugOn) {
   const tools = debugOn && dev !== 'system' ? '<button class="tb" data-mode="log">Log</button><button class="tb" data-mode="debug">Debug</button>' : '';
   const t = terminal({ title: 'freemkv — ' + (dev === 'system' ? 'system log' : dev), tools });
-  let mode = 'log', shown = 0, timer = null, closed = false;
+  // Log mode follows the ring by sequence number (`since=`), so it keeps
+  // up after the server's 500-line ring wraps. Debug mode re-reads its
+  // window and appends whatever follows the last line it showed.
+  let mode = 'log', since = 0, lastDebug = null, timer = null, closed = false;
+  const reset = () => { since = 0; lastDebug = null; t.clear(); };
   const paintTools = () => t.box.querySelectorAll('.tb').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
-  t.box.querySelectorAll('.tb').forEach(b => b.addEventListener('click', () => { mode = b.dataset.mode; shown = 0; t.clear(); paintTools(); poll(); }));
+  t.box.querySelectorAll('.tb').forEach(b => b.addEventListener('click', () => { mode = b.dataset.mode; reset(); paintTools(); poll(); }));
   paintTools();
   async function poll() {
     clearTimeout(timer);
     if (closed) return;
     try {
-      const url = mode === 'debug' ? '/api/debug?device=' + encodeURIComponent(dev) + '&n=1000' : '/api/logs/' + encodeURIComponent(dev);
-      const text = await api('GET', url);
-      const raw = String(text || '').split('\n').filter(Boolean);
-      const lines = raw.map(mode === 'debug' ? parseDebugLine : parseLogLine);
-      if (lines.length < shown) { t.clear(); shown = 0; }
-      t.append(lines.slice(shown));
-      shown = lines.length;
-      if (!lines.length) t.idle(mode === 'debug' ? 'no debug lines yet' : 'no log lines yet'); else t.idle(null);
+      if (mode === 'debug') {
+        const text = await api('GET', '/api/debug?device=' + encodeURIComponent(dev) + '&n=1000');
+        const raw = String(text || '').split('\n').filter(Boolean);
+        let from = 0;
+        if (lastDebug != null) {
+          const at = raw.lastIndexOf(lastDebug);
+          if (at >= 0) from = at + 1; else t.clear();
+        }
+        t.append(raw.slice(from).map(parseDebugLine));
+        if (raw.length) lastDebug = raw[raw.length - 1];
+        t.idle(t.lines().length ? null : 'no debug lines yet');
+      } else {
+        const r = await api('GET', '/api/logs/' + encodeURIComponent(dev) + '?since=' + since);
+        t.append(r.lines.map(([, line]) => parseLogLine(line)));
+        since = r.seq;
+        t.idle(t.lines().length ? null : 'no log lines yet');
+      }
     } catch (e) {
       t.idle('could not load the log: ' + e.message);
     }
@@ -445,7 +458,7 @@ export function openDeviceTerminal(dev, debugOn) {
 export default {
   title: 'Ripper',
   mount(view, ctx) {
-    view.innerHTML = `
+    view.innerHTML = `<div id="rp">
       <div class="page-head">
         <div><h1>Ripper</h1><p class="lede" id="lede">Waiting for the drives…</p></div>
         <div class="actions"><button class="btn btn-ghost" id="syslog">${ICON.term} System log</button></div>
@@ -457,7 +470,8 @@ export default {
         <section class="card"><div class="card-head"><h2>Move queue</h2></div><div id="move"></div></section>
       </div>
       <section class="card" id="review-card" style="margin-top:1.25rem" hidden><div class="card-head"><h2>Held for review <span class="count" id="review-n"></span></h2></div>
-        <p class="small muted" style="margin:-.4rem 0 .6rem">These rips finished but their title was not certain enough to file on their own.</p><div id="review"></div></section>`;
+        <p class="small muted" style="margin:-.4rem 0 .6rem">These rips finished but their title was not certain enough to file on their own.</p><div id="review"></div></section></div>`;
+    const root = $('#rp', view);
     const cards = new Map();
     let state = {};
     let sys = {};
@@ -465,14 +479,16 @@ export default {
     const drivesEl = $('#drives', view);
 
     const render = (s) => {
+      if (ctx.stale()) return;
       state = s || {};
       const devs = Object.keys(state).filter(k => !k.startsWith('_')).sort();
       put($('#lede', view), devs.length
         ? plural(devs.length, 'drive') + ' · ' + devs.filter(d => ACTIVE.includes(state[d].status)).length + ' busy'
         : 'No drives detected. A drive shows up here a minute after it is connected.');
-      if (!devs.length) put(drivesEl, '<div class="card empty" style="grid-column:1/-1">' + ICON.disc + 'No drives detected</div>');
-      else if (drivesEl.querySelector('.empty')) drivesEl.innerHTML = '';
       for (const [dev, el] of cards) if (!devs.includes(dev)) { el.remove(); cards.delete(dev); }
+      const emptyEl = drivesEl.querySelector(':scope > .empty');
+      if (!devs.length && !emptyEl) drivesEl.insertAdjacentHTML('beforeend', '<div class="card empty" style="grid-column:1/-1">' + ICON.disc + 'No drives detected</div>');
+      if (devs.length && emptyEl) emptyEl.remove();
       devs.forEach((dev, i) => {
         let el = cards.get(dev);
         if (!el) { el = makeCard(dev); cards.set(dev, el); }
@@ -484,8 +500,9 @@ export default {
     };
     ctx.onState(render);
 
-    const loadSys = () => api('GET', '/api/system').then(d => { sys = d; render(state); }).catch(() => {});
+    const loadSys = () => api('GET', '/api/system').then(d => { if (!ctx.stale()) { sys = d; render(state); } }).catch(() => {});
     const loadReview = () => api('GET', '/api/review').then(items => {
+      if (ctx.stale()) return;
       reviews = items || [];
       $('#review-card', view).hidden = !reviews.length;
       put($('#review-n', view), reviews.length ? '(' + reviews.length + ')' : '');
@@ -513,23 +530,29 @@ export default {
       const go = (btn) => driveAction(btn, dev, b.dataset.label, b.dataset.url);
       if (b.dataset.two != null) twoStep(b, go); else go(b);
     });
-    view.addEventListener('click', async (e) => {
+    root.addEventListener('click', async (e) => {
       const c = e.target.closest('[data-clear]');
       if (c) {
         const kind = c.dataset.clear;
-        await act(c, () => api('POST', '/api/' + kind + '-errors/clear?path=' + encodeURIComponent(c.dataset.path)), 'Clear');
-        toast('Cleared. It comes back if it is still stuck.', 'info');
+        if (await act(c, () => api('POST', '/api/' + kind + '-errors/clear?path=' + encodeURIComponent(c.dataset.path)), 'Clear') !== undefined) {
+          toast('Cleared. It comes back if it is still stuck.', 'info');
+        }
         loadSys();
         return;
       }
       const ca = e.target.closest('[data-clearall]');
       if (ca) {
-        await act(ca, () => api('POST', '/api/' + ca.dataset.clearall + '-errors/clear-all'), 'Clear all');
-        toast('Cleared all', 'info');
+        if (await act(ca, () => api('POST', '/api/' + ca.dataset.clearall + '-errors/clear-all'), 'Clear all') !== undefined) {
+          toast('Cleared all', 'info');
+        }
         loadSys();
         return;
       }
-      if (e.target.closest('[data-refresh]')) { loadSys(); toast('Rechecked', 'info'); return; }
+      if (e.target.closest('[data-refresh]')) {
+        const ok = await api('GET', '/api/system').then(d => { sys = d; render(state); return true; }).catch(err => { toast('Recheck failed: ' + err.message, 'bad'); return false; });
+        if (ok) toast('Rechecked', 'info');
+        return;
+      }
       const rv = e.target.closest('[data-review]');
       if (rv) reviewDialog(reviews[+rv.dataset.review], loadReview);
     });

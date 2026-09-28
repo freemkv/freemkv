@@ -18,12 +18,14 @@ const DEFAULT_ROUTE = '/library';
 // ── Router ─────────────────────────────────────────────────────────────────
 
 let current = null;
+let renderToken = 0;
 
 function routeOf(path) {
   return ROUTES[path] ? path : DEFAULT_ROUTE;
 }
 
 async function render(path) {
+  const token = ++renderToken;
   const route = routeOf(path);
   if (location.pathname !== route) history.replaceState(null, '', route + location.search + location.hash);
   if (current && current.cleanup) current.cleanup.forEach(f => { try { f(); } catch (e) { /* next */ } });
@@ -34,6 +36,8 @@ async function render(path) {
   const view = $('#view');
   view.innerHTML = '';
   const mod = (await ROUTES[route]()).default;
+  // A newer navigation started while this module loaded: let it win.
+  if (token !== renderToken) return;
   const ctx = {
     cleanup: [],
     onState(f) { ctx.cleanup.push(subscribe('state', f)); if (live.state) f(live.state); },
@@ -41,8 +45,10 @@ async function render(path) {
     every(ms, f) { const t = setInterval(f, ms); ctx.cleanup.push(() => clearInterval(t)); },
   };
   current = ctx;
+  ctx.stale = () => token !== renderToken;
   document.title = mod.title + ' · freemkv library';
   await mod.mount(view, ctx);
+  if (token !== renderToken) ctx.cleanup.forEach(f => { try { f(); } catch (e) { /* next */ } });
 }
 
 export function navigate(path) {

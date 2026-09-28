@@ -1516,6 +1516,34 @@ mod web_tests {
         std::str::from_utf8(body).expect("text asset")
     }
 
+    // Review fixes the browser tests exercise, pinned so they cannot regress quietly.
+    #[test]
+    fn the_ui_keeps_its_review_fixes() {
+        let ripper = asset("ripper.js");
+        assert!(
+            ripper.contains("?since="),
+            "drive logs follow by sequence, not line count"
+        );
+        assert!(
+            !ripper.contains("view.addEventListener"),
+            "handlers bind to the page's own root"
+        );
+        let app = asset("app.js");
+        assert!(
+            app.contains("token !== renderToken"),
+            "stale renders are dropped"
+        );
+        let ui = asset("ui.js");
+        assert!(ui.contains("MAX_LINES"), "the terminal caps its scrollback");
+        let menu = &ui[ui.find("export function menu").unwrap()..ui.find("// ── Modals").unwrap()];
+        assert!(
+            !menu.contains("document.addEventListener"),
+            "menus share one document listener"
+        );
+        assert!(asset("settings.js").contains("new-password"));
+        assert!(asset("system.js").contains("r.reachable"));
+    }
+
     // Every module the shell imports is embedded and served.
     #[test]
     fn every_imported_module_is_embedded() {

@@ -16,7 +16,7 @@ function ctlHtml(f, v) {
     case 'number':
       return '<input class="txt num" type="number" min="0" max="' + (f.max || '') + '" id="' + id + '" data-key="' + f.key + '" value="' + esc(v == null ? '' : v) + '">';
     case 'secret':
-      return '<input class="txt" type="password" autocomplete="off" id="' + id + '" data-key="' + f.key + '" value="' + esc(v || '') + '"' + (v ? '' : ' placeholder="Not set"') + '>';
+      return '<input class="txt" type="password" autocomplete="new-password" id="' + id + '" data-key="' + f.key + '" value="' + esc(v || '') + '"' + (v ? '' : ' placeholder="Not set"') + '>';
     case 'info':
       return '<div class="info-line" id="' + id + '">' + esc(v || '') + '</div>';
     case 'action':
@@ -45,15 +45,18 @@ function fieldHtml(f, v, sub) {
     + lbl + '<div class="ctl">' + ctlHtml(f, v) + '</div>' + (f.help ? '<div class="help">' + esc(f.help) + '</div>' : '') + '</div>';
 }
 
-async function mount(view) {
+async function mount(view, ctx) {
     view.innerHTML = '<div class="page-head"><div><h1>Settings</h1><p class="lede">Saved to <span class="mono">settings.json</span> in the config folder. Changes apply to the next rip.</p></div></div><div id="body" class="muted">Loading…</div>';
     let schema, values;
     try {
       [schema, values] = await Promise.all([api('GET', '/api/settings/schema'), api('GET', '/api/settings')]);
     } catch (e) {
+      if ((ctx && ctx.stale()) || !$('#body', view)) return;
       $('#body', view).innerHTML = '<div class="banner bad" style="margin:0">Could not load the settings: ' + esc(e.message) + '</div>';
       return;
     }
+    // The user navigated away while this loaded: the view is someone else's now.
+    if ((ctx && ctx.stale()) || !$('#body', view)) return;
     const groups = schema.groups.filter(g => schema.fields.some(f => f.group === g.id));
     const html = groups.map(g => {
       const fields = schema.fields.filter(f => f.group === g.id);
@@ -88,7 +91,12 @@ async function mount(view) {
         const k = el.dataset.key;
         if (el.type === 'radio') { if (el.checked) out[k] = el.value; }
         else if (el.type === 'checkbox') out[k] = el.checked;
-        else if (el.type === 'number') out[k] = el.value === '' ? 0 : Math.max(0, parseInt(el.value, 10) || 0);
+        else if (el.type === 'number') {
+          // Empty means "the default", not 0.
+          const f = schema.fields.find(x => x.key === k);
+          out[k] = el.value.trim() === '' ? (f && f.default != null ? f.default : undefined) : Math.max(0, parseInt(el.value, 10) || 0);
+          if (out[k] === undefined) delete out[k];
+        }
         else out[k] = el.value;
       });
       const hooks = $('#hooks', form);
@@ -134,21 +142,22 @@ async function mount(view) {
         } else if (st) st.textContent = '';
       }
     });
-    $('#revert', form).addEventListener('click', () => mount(view));
+    $('#revert', form).addEventListener('click', () => mount(view, ctx));
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const btn = $('#save', form);
       const msg = $('#msg', form);
       const body = collect();
-      const r = await act(btn, () => api('POST', '/api/settings', body), 'Save');
+      let lastError = '';
+      const r = await act(btn, () => api('POST', '/api/settings', body).catch(err => { lastError = err.message; throw err; }), 'Save');
       if (r) {
         const y = window.scrollY;
-        await mount(view);
+        await mount(view, ctx);
         window.scrollTo(0, y);
         toast('Settings saved', 'ok');
       } else {
         msg.classList.add('bad');
-        msg.textContent = 'Not saved. Nothing was changed.';
+        msg.textContent = 'Not saved: ' + (lastError || 'the server refused it');
       }
     });
     applyConditions();

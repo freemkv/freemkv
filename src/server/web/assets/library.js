@@ -92,8 +92,9 @@ export default {
       const b = e.target.closest('button');
       if (!b) return;
       if (b.dataset.a === 'rescan') {
-        await act(null, () => api('POST', '/api/library/rescan'), 'Rescan');
-        toast('Rescanning the library folders', 'info');
+        if (await act(null, () => api('POST', '/api/library/rescan'), 'Rescan') !== undefined) {
+          toast('Rescanning the library folders', 'info');
+        }
       } else if (b.dataset.a === 'reaudit') {
         const r = await act(null, () => api('POST', '/api/library/reaudit', { all: true }), 'Re-audit');
         if (r) { toast('Re-auditing ' + plural(r.requeued, 'file'), 'info'); refreshNow(); }

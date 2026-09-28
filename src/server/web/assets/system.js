@@ -38,7 +38,7 @@ export default {
     let sys = null;
     const paint = () => {
       const d = sys;
-      if (!d) return;
+      if (!d || ctx.stale()) return;
       put($('#lede', view), 'freemkv <b>' + esc(d.version_label) + '</b> · ' + plural((d.drives || []).length, 'drive') + ' · '
         + ((d.mounts || []).every(m => m.ok) ? 'every folder answering' : '<span style="color:var(--bad)">a folder needs attention</span>'));
       put($('#about', view), '<dt>freemkv</dt><dd class="mono">' + esc(d.version_label) + '</dd>'
@@ -61,7 +61,7 @@ export default {
       if (document.activeElement !== dbg) { dbg.checked = !!d.debug_enabled; dbg.nextElementSibling.textContent = d.debug_enabled ? 'On' : 'Off'; }
       put($('#logdir', view), 'Logs live in <span class="mono">' + esc(d.log_dir) + '</span>. The download bundles every one of them.');
     };
-    const load = () => api('GET', '/api/system').then(d => { sys = d; paint(); }).catch(e => put($('#lede', view), '<span style="color:var(--bad)">Could not load: ' + esc(e.message) + '</span>'));
+    const load = () => api('GET', '/api/system').then(d => { sys = d; paint(); }).catch(e => ctx.stale() || put($('#lede', view), '<span style="color:var(--bad)">Could not load: ' + esc(e.message) + '</span>'));
     load();
     ctx.every(10000, load);
 
@@ -77,7 +77,7 @@ export default {
     });
     $('#kst', view).addEventListener('click', async (e) => {
       const r = await act(e.currentTarget, () => api('POST', '/api/system/keyserver-test'), 'Keyserver test');
-      if (r) toast(r.ok ? 'The keyserver answered' : 'The keyserver did not answer properly: ' + r.result, r.ok ? 'ok' : 'bad');
+      if (r) toast(r.reachable ? 'The keyserver answered' : 'The keyserver did not answer properly: ' + r.result, r.reachable ? 'ok' : 'bad');
     });
     $('#kdb', view).addEventListener('click', async (e) => {
       const r = await act(e.currentTarget, () => api('POST', '/api/update-keydb'), 'KEYDB update');

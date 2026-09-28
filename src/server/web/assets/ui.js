@@ -38,7 +38,7 @@ export async function api(method, url, body) {
   let data = text;
   try { data = text ? JSON.parse(text) : null; } catch (e) { /* plain text */ }
   if (!r.ok || (data && data.ok === false)) {
-    throw new Error((data && data.error) || ('HTTP ' + r.status));
+    throw new Error((data && (data.error || data.result)) || ('HTTP ' + r.status));
   }
   return data;
 }
@@ -103,19 +103,29 @@ export function anyArmed(root = document) { return !!root.querySelector('.btn.co
 
 // ── Menus ──────────────────────────────────────────────────────────────────
 
+// Open menus, closed by one document-wide listener (added once, not per page).
+const openMenus = new Set();
+document.addEventListener('click', (e) => {
+  for (const m of openMenus) if (!m.list.contains(e.target) || !m.list.isConnected) m.close();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') openMenus.forEach(m => m.close()); });
+
 /** A ⋯ button that toggles `list`; closes on outside click and Esc. */
 export function menu(btn, list) {
-  const close = () => { list.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
+  const m = {
+    list,
+    close() { list.hidden = true; btn.setAttribute('aria-expanded', 'false'); openMenus.delete(m); },
+  };
   btn.setAttribute('aria-haspopup', 'true');
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
-    const open = list.hidden;
-    list.hidden = !open;
-    btn.setAttribute('aria-expanded', String(open));
+    if (list.hidden) {
+      list.hidden = false;
+      btn.setAttribute('aria-expanded', 'true');
+      openMenus.add(m);
+    } else m.close();
   });
-  document.addEventListener('click', (e) => { if (!list.contains(e.target)) close(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
-  list.addEventListener('click', (e) => { if (e.target.closest('button')) close(); });
+  list.addEventListener('click', (e) => { if (e.target.closest('button')) m.close(); });
 }
 
 // ── Modals ─────────────────────────────────────────────────────────────────
@@ -188,6 +198,8 @@ export function terminal({ title = 'freemkv', tools = '' } = {}) {
   const titleEl = box.querySelector('.term-bar .title');
   let prog = null;
   let lines = [];
+  // The terminal keeps the last MAX_LINES lines, like a scrollback buffer.
+  const MAX_LINES = 5000;
   const atEnd = () => body.scrollTop + body.clientHeight >= body.scrollHeight - 30;
   const stick = (f) => { const end = atEnd(); f(); if (end) body.scrollTop = body.scrollHeight; };
   const row = (l) => {
@@ -224,6 +236,11 @@ export function terminal({ title = 'freemkv', tools = '' } = {}) {
         const frag = document.createDocumentFragment();
         ls.forEach(l => { lines.push(l); frag.appendChild(row(l)); });
         if (prog) body.insertBefore(frag, prog); else body.appendChild(frag);
+        const over = lines.length - MAX_LINES;
+        if (over > 0) {
+          lines.splice(0, over);
+          for (let i = 0; i < over; i++) { const first = body.querySelector('.ln'); if (first) first.remove(); }
+        }
       });
     },
     /** The line a terminal rewrites in place; null removes it. */
