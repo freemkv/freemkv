@@ -374,9 +374,9 @@ fn en_json_has_no_string_for_a_code_libfreemkv_does_not_declare() {
 }
 
 // Codes libfreemkv adds before this fixture can name them (the fixture compiles against
-// libfreemkv dev). CC-F1a: "`PENDING_VARIANTS` is emptied" (stop-design-v5
-// §6 R7.4) now that CC-L0 declares both and the fixture enumerates them.
-const PENDING_VARIANTS: &[&str] = &[];
+// libfreemkv dev), each enumerated and dropped here once libfreemkv dev declares it.
+// Holds LB9's E6021 (CC-F1a emptied it: stop-design-v5 §6 R7.4).
+const PENDING_VARIANTS: &[&str] = &["E_BUS_STREAM_UNMAPPED"];
 
 // Every code libfreemkv can put inside an `Error` must appear in `all_error_variants()`, and
 // vice versa. A forgotten variant is INVISIBLE to every other assertion here.
