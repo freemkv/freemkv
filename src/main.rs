@@ -25,6 +25,9 @@ mod disc_info;
 mod file_identity;
 mod info;
 mod keydb_fetch;
+#[cfg(test)]
+#[allow(dead_code)]
+mod ku_fixtures;
 // Also declared in `lib.rs`: the CLI and GUI each rendered half of what
 // `MuxOutcome` carried, and the half neither rendered was the byte loss.
 mod lossy;
@@ -33,6 +36,7 @@ mod output;
 mod pipe;
 // Also declared in `lib.rs`: the CLI and the GUI route container sources by one table.
 mod sources;
+mod rip_keys;
 mod strings;
 // Also declared in `lib.rs`: `pipe` (here) and `engine` (GUI) both re-scan
 // between picking a title and muxing it, and need ONE shared answer type.

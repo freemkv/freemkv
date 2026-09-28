@@ -29,6 +29,9 @@ pub mod file_identity;
 /// Declared here as well as in `main.rs` because `settings.rs` — the GUI's
 /// Update-keydb path — lives in this tree and could not otherwise reach it.
 pub mod keydb_fetch;
+#[cfg(test)]
+#[allow(dead_code)]
+mod ku_fixtures;
 /// What a finished mux still has to tell the user — the ONE renderer both
 /// shells use for a completed-but-lossy export. Declared here as well as in
 /// `main.rs`, same reason as `title_identity`.
@@ -42,6 +45,7 @@ pub mod lossy;
 /// no matter what the real `messaging::level_for` did.
 pub mod messaging;
 pub mod platform;
+pub mod rip_keys;
 pub mod settings;
 pub mod sources;
 // The i18n string facade — the core (`ui`) localizes through it, so the lib
