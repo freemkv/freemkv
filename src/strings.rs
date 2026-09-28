@@ -58,3 +58,31 @@ pub fn is_unsafe_display_char(c: char) -> bool {
             | '\u{2066}'..='\u{2069}'
             | '\u{FEFF}')
 }
+
+#[cfg(test)]
+mod front_end_error_tests {
+    use super::*;
+
+    /// A front end's own error wording wins when the catalog has it; the shared
+    /// `error.<code>` text (front-end-neutral: the library server shows it too) otherwise.
+    #[test]
+    fn a_front_end_prefers_its_own_error_wording() {
+        let catalog = |key: &str| match key {
+            "error_cli.E7013" => "refresh it with: freemkv update-keys".to_string(),
+            k => k.to_string(),
+        };
+        assert_eq!(front_end_error_key_in("cli", "E7013", catalog), "error_cli.E7013");
+        assert_eq!(front_end_error_key_in("gui", "E7013", catalog), "error.E7013");
+        assert_eq!(front_end_error_key_in("cli", "E7022", catalog), "error.E7022");
+    }
+
+    /// The keydb-fixing codes name a step on every front end: the CLI its command
+    /// (shared text before the neutral wording lands, its own after).
+    #[test]
+    fn the_cli_still_names_update_keys_for_every_keydb_code() {
+        for code in ["E7000", "E7013", "E7026", "E8001", "E8002", "E8004"] {
+            let text = get(&front_end_error_key(FrontEnd::Cli, code));
+            assert!(text.contains("freemkv update-keys"), "{code}: {text}");
+        }
+    }
+}
