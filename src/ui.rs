@@ -1687,26 +1687,29 @@ pub enum LogKind {
 // Scan a source by its kind. The ONE dispatch from a URL to a scan, shared
 // by the synchronous open and the launch probe's worker thread. Free-standing
 // rather than a method because the worker holds no `App`.
-fn scan_source(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+fn scan_source(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
     if is_container(path) {
         crate::engine::scan_stream(path)
     } else if crate::engine::is_disc_source(path) {
-        crate::engine::scan_disc_with_keys(path, keys)
+        crate::engine::scan_disc_with_keys(path, keys, tok)
     } else {
-        crate::engine::scan_with_keys(path, keys)
+        crate::engine::scan_with_keys_under(path, keys, tok)
     }
 }
 
 // The launch probe's scan: no drive at all is the same quiet failure as an empty tray.
-fn probe_source(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+fn probe_source(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
     if crate::engine::is_disc_source(path) && crate::engine::list_optical_drives().is_empty() {
         return Err(String::new());
     }
-    scan_source(path, keys)
+    scan_source(path, keys, tok)
 }
 
-/// A source scan, as a value so unit tests can swap in one that never touches a drive.
-type ScanFn = fn(&str, &KeyConfig) -> Result<Scanned, String>;
+use crate::engine::OpenToken;
+
+/// A source scan under its open's token, as a value so unit tests can swap in one that
+/// never touches a drive.
+type ScanFn = fn(&str, &KeyConfig, &OpenToken) -> Result<Scanned, String>;
 
 /// (open scan, probe scan). Unit tests get a pair that refuses `disc://` outright.
 #[cfg(not(test))]
@@ -1781,6 +1784,10 @@ pub struct App {
     opening: Option<std::sync::mpsc::Receiver<OpenedSource>>,
     /// An explicit drive open waiting for the probe to let go of the drive.
     pending: Option<PendingOpen>,
+    /// The in-flight background open's token (stop design v5 §4.3).
+    open_token: Option<OpenToken>,
+    /// T29's idle window for the launch probe: [`PROBE_GRACE`], shorter in tests.
+    probe_window: std::time::Duration,
     /// The folder the current run writes to, fixed at Start: the setting can change mid-rip.
     run_dest: String,
     scan: ScanFn,
@@ -1816,6 +1823,21 @@ pub struct ProbeState {
     /// When the worker was spawned, so a probe that never answers can be
     /// abandoned instead of keeping the timer alive for the life of the app.
     started: std::time::Instant,
+    /// The probe's open token: its Stop and its progress (stop design v5 §4.3, T29).
+    token: OpenToken,
+}
+
+impl ProbeState {
+    fn new(path: &str, window: std::time::Duration) -> Self {
+        let _ = window;
+        ProbeState {
+            path: path.to_string(),
+            result: Mutex::new(None),
+            done: AtomicBool::new(false),
+            started: std::time::Instant::now(),
+            token: OpenToken::default(),
+        }
+    }
 }
 
 /// How long the launch probe is given before the UI stops waiting for it.
@@ -1875,6 +1897,8 @@ impl App {
             probe: None,
             opening: None,
             pending: None,
+            open_token: None,
+            probe_window: PROBE_GRACE,
             run_dest: String::new(),
             scan: SCANNERS.0,
             probe_scan: SCANNERS.1,
@@ -2170,11 +2194,13 @@ impl App {
         let path = path.to_owned();
         let keys = KeyConfig::from_settings(&self.settings);
         let scan = self.scan;
+        let tok = OpenToken::default();
+        self.open_token = Some(tok.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("open-source".into())
             .spawn(move || {
-                let scanned = scan(&path, &keys);
+                let scanned = scan(&path, &keys, &tok);
                 // The preflight reuses Open's key set: no second key request (KU §2.5).
                 let seed = scanned.as_ref().ok().and_then(|sc| sc.keys.as_ref());
                 let preflight = (scanned.is_ok()
@@ -2298,12 +2324,7 @@ impl App {
         if self.probe.is_some() || self.opening() || self.running() || self.ejecting.is_some() {
             return vec![Effect::Redraw];
         }
-        let state = Arc::new(ProbeState {
-            path: path.to_string(),
-            result: Mutex::new(None),
-            done: AtomicBool::new(false),
-            started: std::time::Instant::now(),
-        });
+        let state = Arc::new(ProbeState::new(path, self.probe_window));
         // Everything the scan needs is copied out HERE, on the UI thread. The
         // worker gets no reference to `App`.
         let keys = KeyConfig::from_settings(&self.settings);
@@ -2313,7 +2334,7 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("launch-probe".into())
             .spawn(move || {
-                let scanned = scan(&path, &keys);
+                let scanned = scan(&path, &keys, &worker.token);
                 if let Ok(mut slot) = worker.result.lock() {
                     *slot = Some(scanned);
                 }
@@ -2329,7 +2350,8 @@ impl App {
     }
 
     fn open_inner(&mut self, path: &str, quiet: bool) -> Vec<Effect> {
-        let scanned = (self.scan)(path, &KeyConfig::from_settings(&self.settings));
+        let tok = OpenToken::default();
+        let scanned = (self.scan)(path, &KeyConfig::from_settings(&self.settings), &tok);
         self.apply_scan(path, scanned, quiet)
     }
 
@@ -2607,7 +2629,7 @@ impl App {
         // `Acquire`, pairing with the worker's `Release` store: seeing `true`
         // guarantees the `result` write is visible.
         if !p.done.load(Ordering::Acquire) {
-            if p.started.elapsed() >= PROBE_GRACE {
+            if p.started.elapsed() >= self.probe_window {
                 // Past deadline: the worker (blocked in drive timeouts) can't be killed,
                 // but dropping our `Arc<ProbeState>` lets it exit quietly, ending the
                 // 5 Hz repaint. SILENT, like every probe failure: nobody asked for this.
@@ -3334,12 +3356,11 @@ mod tests {
     #[test]
     fn ticking_continues_while_the_probe_is_outstanding() {
         let mut app = App::new();
-        app.probe = Some(Arc::new(ProbeState {
-            path: PROBE_SOURCE.to_string(),
-            result: Mutex::new(None),
-            done: AtomicBool::new(false),
-            started: std::time::Instant::now(),
-        }));
+        app.probe = Some(Arc::new(probe_state(
+            None,
+            false,
+            std::time::Instant::now(),
+        )));
         let fx = app.tick();
         assert!(
             !fx.contains(&Effect::StopTicking),
@@ -3358,12 +3379,11 @@ mod tests {
     #[test]
     fn a_probe_that_never_answers_is_abandoned_instead_of_ticking_forever() {
         let mut app = App::new();
-        app.probe = Some(Arc::new(ProbeState {
-            path: PROBE_SOURCE.to_string(),
-            result: Mutex::new(None),
-            done: AtomicBool::new(false),
-            started: std::time::Instant::now() - (PROBE_GRACE + std::time::Duration::from_secs(1)),
-        }));
+        app.probe = Some(Arc::new(probe_state(
+            None,
+            false,
+            std::time::Instant::now() - (PROBE_GRACE + std::time::Duration::from_secs(1)),
+        )));
         let fx = app.tick();
         assert!(
             app.probe.is_none(),
@@ -3384,12 +3404,11 @@ mod tests {
     #[test]
     fn a_probe_still_within_its_deadline_is_kept() {
         let mut app = App::new();
-        app.probe = Some(Arc::new(ProbeState {
-            path: PROBE_SOURCE.to_string(),
-            result: Mutex::new(None),
-            done: AtomicBool::new(false),
-            started: std::time::Instant::now(),
-        }));
+        app.probe = Some(Arc::new(probe_state(
+            None,
+            false,
+            std::time::Instant::now(),
+        )));
         let fx = app.tick();
         assert!(app.probe.is_some(), "a live probe was thrown away");
         assert!(!fx.contains(&Effect::StopTicking), "{fx:?}");
@@ -3399,12 +3418,11 @@ mod tests {
     #[test]
     fn a_probe_result_is_applied_by_the_tick() {
         let mut app = App::new();
-        app.probe = Some(Arc::new(ProbeState {
-            path: PROBE_SOURCE.to_string(),
-            result: Mutex::new(Some(Ok(probe_scan()))),
-            done: AtomicBool::new(true),
-            started: std::time::Instant::now(),
-        }));
+        app.probe = Some(Arc::new(probe_state(
+            Some(Ok(probe_scan())),
+            true,
+            std::time::Instant::now(),
+        )));
         let fx = app.tick();
         assert!(app.probe.is_none(), "a collected probe must clear its slot");
         assert_eq!(app.source, PROBE_SOURCE, "the scanned source must be set");
@@ -3420,12 +3438,11 @@ mod tests {
         let mut app = App::new();
         app.source = "iso:///the/one/they/chose.iso".to_string();
         app.page = Page::Titles;
-        app.probe = Some(Arc::new(ProbeState {
-            path: PROBE_SOURCE.to_string(),
-            result: Mutex::new(Some(Ok(probe_scan()))),
-            done: AtomicBool::new(true),
-            started: std::time::Instant::now(),
-        }));
+        app.probe = Some(Arc::new(probe_state(
+            Some(Ok(probe_scan())),
+            true,
+            std::time::Instant::now(),
+        )));
         app.tick();
         assert_eq!(
             app.source, "iso:///the/one/they/chose.iso",
@@ -3444,12 +3461,7 @@ mod tests {
     fn a_probe_that_left_no_result_is_dropped_silently() {
         let mut app = App::new();
         let before = app.log.len();
-        app.probe = Some(Arc::new(ProbeState {
-            path: PROBE_SOURCE.to_string(),
-            result: Mutex::new(None),
-            done: AtomicBool::new(true),
-            started: std::time::Instant::now(),
-        }));
+        app.probe = Some(Arc::new(probe_state(None, true, std::time::Instant::now())));
         app.tick();
         assert!(app.probe.is_none());
         assert_eq!(app.log.len(), before, "a dead probe must say nothing");
@@ -3554,17 +3566,25 @@ mod tests {
 
     /// The unit-test scan: a live drive is refused without being touched, so no test
     /// depends on (or waits on) whatever hardware the machine running it has.
-    pub(super) fn no_drive_scan(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+    pub(super) fn no_drive_scan(
+        path: &str,
+        keys: &KeyConfig,
+        tok: &OpenToken,
+    ) -> Result<Scanned, String> {
         if crate::engine::is_disc_source(path) {
             return Err(NO_DRIVE_IN_TESTS.to_string());
         }
-        scan_source(path, keys)
+        scan_source(path, keys, tok)
     }
-    pub(super) fn no_drive_probe(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+    pub(super) fn no_drive_probe(
+        path: &str,
+        keys: &KeyConfig,
+        tok: &OpenToken,
+    ) -> Result<Scanned, String> {
         if crate::engine::is_disc_source(path) {
             return Err(NO_DRIVE_IN_TESTS.to_string());
         }
-        probe_source(path, keys)
+        probe_source(path, keys, tok)
     }
     const NO_DRIVE_IN_TESTS: &str = "unit tests never open a drive";
 
@@ -3584,13 +3604,231 @@ mod tests {
 
     // ── An explicit open while the launch probe holds the drive ─────────────
 
+    fn probe_state(
+        result: Option<Result<Scanned, String>>,
+        done: bool,
+        started: std::time::Instant,
+    ) -> ProbeState {
+        let mut p = ProbeState::new(PROBE_SOURCE, PROBE_GRACE);
+        p.result = Mutex::new(result);
+        p.done = AtomicBool::new(done);
+        p.started = started;
+        p
+    }
+
+    // ── Stop design v5 §4.3: the open token and the launch probe (T29) ──────────
+    // T29 scaled: a 100 ms idle window, so each case runs in well under a second.
+    const T29: std::time::Duration = std::time::Duration::from_millis(100);
+
+    // Wait up to `cap` for `tok`'s Stop; `true` if it came.
+    fn stopped_within(tok: &OpenToken, cap: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + cap;
+        loop {
+            if tok.halt.is_cancelled() {
+                return true;
+            }
+            if std::time::Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    // Tick until the probe is collected and no open is outstanding; the elapsed time.
+    fn settle(app: &mut App) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        while app.probe.is_some() || app.opening() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "never settled"
+            );
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        started.elapsed()
+    }
+
+    fn progressing_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+        for _ in 0..8 {
+            std::thread::sleep(T29 / 2);
+            tok.progress.bump();
+        }
+        Ok(probe_scan())
+    }
+
+    // FT15a (T29): "the probe's `Progress` moves every 0.5 × window for 4 windows → the
+    // result is adopted". Per spec; do not change without a spec citation.
+    #[test]
+    fn probe_progressing_past_30s_is_kept() {
+        let mut app = App::new();
+        (app.probe_scan, app.probe_window) = (progressing_probe, T29);
+        app.open_probe(PROBE_SOURCE);
+        assert!(
+            settle(&mut app) > T29 * 2,
+            "the probe outlasted two windows"
+        );
+        assert_eq!(
+            app.source, PROBE_SOURCE,
+            "a progressing probe's result is kept"
+        );
+        assert!(matches!(app.page, Page::Titles));
+    }
+
+    static FROZEN_SAW_STOP: AtomicBool = AtomicBool::new(false);
+    fn frozen_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+        let stopped = stopped_within(tok, std::time::Duration::from_secs(3));
+        FROZEN_SAW_STOP.store(stopped, Ordering::SeqCst);
+        Err(String::new())
+    }
+
+    // FT15b (T29): "no progress → the open token is cancelled at window; the worker releases
+    // the drive; silent" (§5.0: "must fire within window + 1 s").
+    #[test]
+    fn probe_frozen_30s_is_cancelled_and_releases() {
+        let mut app = App::new();
+        (app.probe_scan, app.probe_window) = (frozen_probe, T29);
+        let before = app.log.len();
+        app.open_probe(PROBE_SOURCE);
+        let took = settle(&mut app);
+        assert!(
+            FROZEN_SAW_STOP.load(Ordering::SeqCst),
+            "the probe's token was never cancelled"
+        );
+        assert!(took <= T29 + std::time::Duration::from_secs(1), "{took:?}");
+        assert_eq!(
+            app.log.len(),
+            before,
+            "a probe nobody asked for stays silent"
+        );
+        assert!(app.source.is_empty() && matches!(app.page, Page::Empty));
+    }
+
+    static HOLD_RELEASED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    fn holding_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+        stopped_within(tok, std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        *HOLD_RELEASED.lock().unwrap() = Some(std::time::Instant::now());
+        Err("stopped".to_string())
+    }
+    static OTHER_OPENED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    fn other_open(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+        *OTHER_OPENED.lock().unwrap() = Some(std::time::Instant::now());
+        Ok(probe_scan())
+    }
+
+    // FT15c (§4.3): an Open of another source "cancels the probe's open token and keeps the
+    // `PendingOpen` pending"; it runs "only once the probe worker reports `done`", and "The UI
+    // shows 'waiting for the drive' meanwhile". The Open no longer fails with "busy".
+    #[test]
+    fn open_during_probe_cancels_probe_then_opens() {
+        const OTHER: &str = "disc:///dev/ft15c-other";
+        let mut app = App::new();
+        (app.probe_scan, app.probe_window, app.scan) = (holding_probe, PROBE_GRACE, other_open);
+        app.open_probe(PROBE_SOURCE);
+        let probe = app.probe.clone().expect("probe out");
+        app.open(OTHER);
+        assert!(
+            stopped_within(&probe.token, std::time::Duration::ZERO),
+            "probe not cancelled"
+        );
+        let waiting = crate::strings::get("stop.waiting_for_drive");
+        assert!(
+            app.log.iter().any(|l| l.text == waiting),
+            "no 'waiting for the drive'"
+        );
+        settle(&mut app);
+        let (held, opened) = (
+            *HOLD_RELEASED.lock().unwrap(),
+            *OTHER_OPENED.lock().unwrap(),
+        );
+        assert!(opened.expect("the Open ran") >= held.expect("the probe let go"));
+        assert_eq!(app.source, OTHER, "the Open succeeded");
+    }
+
+    static IDLE_SAW_STOP: AtomicBool = AtomicBool::new(false);
+    fn idle_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+        if stopped_within(tok, T29 * 4) {
+            IDLE_SAW_STOP.store(true, Ordering::SeqCst);
+            return Err("stopped".to_string());
+        }
+        Ok(probe_scan())
+    }
+
+    static FT15D_RESCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn counted_open(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+        FT15D_RESCANS.fetch_add(1, Ordering::SeqCst);
+        Ok(probe_scan())
+    }
+
+    // FT15d (T29): "a same-source Open adopts a probe that then idles past the window
+    // (scaled) → not cancelled; the result is adopted; a source change still cancels it".
+    #[test]
+    fn adopted_probe_is_never_cancelled_by_t29() {
+        let mut app = App::new();
+        (app.probe_scan, app.probe_window, app.scan) = (idle_probe, T29, counted_open);
+        app.open_probe(PROBE_SOURCE);
+        app.open(PROBE_SOURCE);
+        settle(&mut app);
+        assert!(
+            !IDLE_SAW_STOP.load(Ordering::SeqCst),
+            "T29 cancelled an adopted probe"
+        );
+        assert_eq!(
+            FT15D_RESCANS.load(Ordering::SeqCst),
+            0,
+            "not adopted: scanned again"
+        );
+        assert_eq!(app.source, PROBE_SOURCE, "the probe's result is adopted");
+
+        let mut app = App::new();
+        (app.probe_scan, app.probe_window, app.scan) = (idle_probe, T29, other_open);
+        app.open_probe(PROBE_SOURCE);
+        let probe = app.probe.clone().expect("probe out");
+        app.open(PROBE_SOURCE);
+        app.open("disc:///dev/ft15d-other");
+        assert!(
+            stopped_within(&probe.token, std::time::Duration::ZERO),
+            "source change"
+        );
+        settle(&mut app);
+    }
+
+    static FT14_HELD: Mutex<Vec<OpenToken>> = Mutex::new(Vec::new());
+    fn held_open(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+        FT14_HELD.lock().unwrap().push(tok.clone());
+        stopped_within(tok, std::time::Duration::from_secs(3));
+        Err("stopped".to_string())
+    }
+
+    // FT14 (§4.3), App half: "the source changing (a new Open); the window closing; Quit"
+    // each cancel the in-flight open's token.
+    #[test]
+    fn gui_open_token_is_cancelled_by_a_new_open_close_and_quit() {
+        for how in ["open", "close", "quit"] {
+            FT14_HELD.lock().unwrap().clear();
+            let mut app = App::new();
+            app.scan = held_open;
+            app.open_async("iso:///ft14/a.iso");
+            let tok = loop {
+                if let Some(t) = FT14_HELD.lock().unwrap().first().cloned() {
+                    break t;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            };
+            match how {
+                "open" => drop(app.open("iso:///ft14/b.iso")),
+                "close" => drop(app.dispatch(Cmd::Close)),
+                _ => drop(app.dispatch(Cmd::Quit)),
+            }
+            assert!(
+                stopped_within(&tok, std::time::Duration::from_secs(1)),
+                "{how}"
+            );
+        }
+    }
+
     fn in_flight_probe(app: &mut App) -> Arc<ProbeState> {
-        let p = Arc::new(ProbeState {
-            path: PROBE_SOURCE.to_string(),
-            result: Mutex::new(None),
-            done: AtomicBool::new(false),
-            started: std::time::Instant::now(),
-        });
+        let p = Arc::new(probe_state(None, false, std::time::Instant::now()));
         app.probe = Some(p.clone());
         p
     }
@@ -3612,7 +3850,7 @@ mod tests {
     }
 
     static ADOPT_SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    fn busy_drive_adopt(_: &str, _: &KeyConfig) -> Result<Scanned, String> {
+    fn busy_drive_adopt(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
         ADOPT_SCANS.fetch_add(1, Ordering::SeqCst);
         Err("drive busy".to_string())
     }
@@ -3643,7 +3881,7 @@ mod tests {
 
     static ADOPT_ASYNC_SCANS: std::sync::atomic::AtomicUsize =
         std::sync::atomic::AtomicUsize::new(0);
-    fn busy_drive_adopt_async(_: &str, _: &KeyConfig) -> Result<Scanned, String> {
+    fn busy_drive_adopt_async(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
         ADOPT_ASYNC_SCANS.fetch_add(1, Ordering::SeqCst);
         Err("drive busy".to_string())
     }
@@ -3662,7 +3900,7 @@ mod tests {
     }
 
     /// Adopted, the probe's failure is the answer to a question the user asked.
-    fn drive_busy(_: &str, _: &KeyConfig) -> Result<Scanned, String> {
+    fn drive_busy(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
         Err("drive busy".to_string())
     }
 
@@ -3694,7 +3932,7 @@ mod tests {
     }
 
     static QUEUED_SCANS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    fn record_queued(path: &str, _: &KeyConfig) -> Result<Scanned, String> {
+    fn record_queued(path: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
         QUEUED_SCANS.lock().unwrap().push(path.to_string());
         Ok(probe_scan())
     }

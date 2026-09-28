@@ -359,9 +359,27 @@ pub fn scan(path: &str) -> Result<Scanned, String> {
     scan_with_keys(path, &KeyConfig::default())
 }
 
+/// One open's own Stop token and progress (stop design v5 §4.3, "The open token"): a user
+/// Open or the launch probe. The source changing, the window closing or Quit cancels it.
+#[derive(Clone, Default)]
+pub struct OpenToken {
+    pub halt: libfreemkv::Halt,
+    pub progress: libfreemkv::halt::Progress,
+}
+
 /// Scan an image and resolve its main title's keys once (KU §2.5 "GUI open"), so the key
 /// strip reflects a real resolution; the set seeds the rip. Key bytes are never logged.
 pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+    scan_with_keys_under(path, keys, &OpenToken::default())
+}
+
+/// [`scan_with_keys`] under an open's token: its Stop ends the key lookup mid-flight.
+pub fn scan_with_keys_under(
+    path: &str,
+    keys: &KeyConfig,
+    tok: &OpenToken,
+) -> Result<Scanned, String> {
+    let _ = (&tok.halt, &tok.progress);
     // A FOLDER is an image-level source too: "Open Folder" / drag-and-drop.
     let src = fe::ImageSource::from_path(path);
     let (disc, _reader) = fe::scan_image(&src).map_err(|e| format!("E{} scan failed", e.code()))?;
@@ -671,7 +689,12 @@ fn key_factory(keys: &KeyConfig) -> libfreemkv::KeySourceFactory {
 /// Scan a live optical drive (`disc://<device>` or bare `disc://` autodetect) with no key
 /// call, then resolve the main title's keys once (KU §2.5 "GUI open"): the SAME `Scanned`
 /// shape the ISO path returns, seed set included. NEEDS HARDWARE to exercise.
-pub fn scan_disc_with_keys(source: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+pub fn scan_disc_with_keys(
+    source: &str,
+    keys: &KeyConfig,
+    tok: &OpenToken,
+) -> Result<Scanned, String> {
+    let _ = tok;
     let (disc, mut reader) = drive_scan(source, keys, false)?;
     let main = fe::resolve_selection(&disc, &fe::Selection::MainMovie);
     let scope = libfreemkv::keys::KeyScope::Titles(main.clone());
@@ -5786,6 +5809,39 @@ mod ku_gui_tests {
         let st = Arc::new(RunState::default());
         let out = run_blocking(r, &UiSink(st.clone()), &st);
         (out, st)
+    }
+
+    // FT14 (stop design v5 §4.3, §5.5): a GUI open of an `iso://` source against a
+    // never-answering key service; its token is cancelled → the open "returns `Halted` ≤ 1 s;
+    // no key strip update". Per spec; do not change without a spec citation.
+    #[test]
+    fn gui_open_token_cancels_inflight_key_lookup() {
+        let fx = bd_image(&[Some(K1)], 1);
+        let dir = TempDir::new("ft14");
+        let iso = fx.write(dir.path(), "disc.iso");
+        let calls = Calls::default();
+        let f = factory(&[(Answer::Hang, &[K1])], &calls);
+        let tok = OpenToken::default();
+        let stop = tok.halt.clone();
+        let press = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            stop.cancel();
+            std::time::Instant::now()
+        });
+        let r = with_sources(f, || {
+            scan_with_keys_under(&iso.display().to_string(), &KeyConfig::default(), &tok)
+        });
+        let pressed = press.join().unwrap();
+        assert!(
+            pressed.elapsed() <= std::time::Duration::from_secs(1),
+            "Stop took too long"
+        );
+        assert_eq!(calls.len(), 1, "the key lookup was in flight");
+        let e = r.expect_err("a stopped open yields no scan, so no key strip update");
+        assert!(
+            e.contains(&format!("E{}", libfreemkv::Error::Halted.code())),
+            "{e}"
+        );
     }
 
     /// FK2 (KU §2.5: "GUI open | `Titles([main])` for status. The result seeds the rip's
