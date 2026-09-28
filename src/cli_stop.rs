@@ -47,7 +47,7 @@ pub(crate) fn on_ctrl(event: u32, already_interrupted: bool) -> CtrlAction {
 /// [`WAIT_SLICE`](libfreemkv::halt::WAIT_SLICE) of the first Ctrl-C once [`install`] ran.
 pub(crate) fn token() -> &'static libfreemkv::Halt {
     static TOKEN: std::sync::OnceLock<libfreemkv::Halt> = std::sync::OnceLock::new();
-    TOKEN.get_or_init(|| watching(&INTERRUPTED))
+    TOKEN.get_or_init(|| watch(&INTERRUPTED, true))
 }
 
 /// Install the Ctrl-C handler and the process token's watcher, once per process.
@@ -114,13 +114,22 @@ extern "C" fn handle_sigint(_sig: libc::c_int) {
 
 /// A `Halt` cancelled within one `WAIT_SLICE` of `flag` being set: the test hook (§4.3, "`watching(flag)` survives as
 /// the test hook"). Its watcher ends once `flag` is set or the returned token is dropped.
+#[cfg(test)]
 pub(crate) fn watching(flag: &'static AtomicBool) -> libfreemkv::Halt {
+    watch(flag, false)
+}
+
+// The watcher; `say`: tell the user once, on stderr, that the Stop was taken (§3.2 (A)).
+fn watch(flag: &'static AtomicBool, say: bool) -> libfreemkv::Halt {
     let halt = libfreemkv::Halt::new();
     let watched = halt.clone();
     std::thread::spawn(move || {
         while std::sync::Arc::strong_count(watched.as_arc()) > 1 {
             if flag.load(Ordering::Acquire) {
                 watched.cancel();
+                if say {
+                    eprintln!("{}", crate::strings::get_or("stop.stopping", "Stopping …"));
+                }
                 return;
             }
             std::thread::sleep(libfreemkv::halt::WAIT_SLICE);
