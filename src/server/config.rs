@@ -216,6 +216,16 @@ pub struct Config {
     /// How long to keep per-device `.log` files in `$AUTORIP_DIR/logs`
     /// before the in-process prune thread deletes them.
     pub log_retention_days: u64,
+
+    /// Library: the folder of `Title/Title.mkv` files. Empty = the movie folder.
+    #[serde(default)]
+    pub library_dir: String,
+    /// Library: the folder of source ISOs. Empty = the ISO folder above, if set.
+    #[serde(default)]
+    pub library_iso_dir: String,
+    /// Library: also list ISOs one folder down (`dvd/`, `bd/`, ...). Off = top level only.
+    #[serde(default)]
+    pub library_iso_subfolders: bool,
 }
 
 // Manual `Debug` that redacts secret-bearing fields (tmdb_api_key,
@@ -268,6 +278,9 @@ impl std::fmt::Debug for Config {
             .field("autorip_dir", &self.autorip_dir)
             .field("decrypt_threads", &self.decrypt_threads)
             .field("log_retention_days", &self.log_retention_days)
+            .field("library_dir", &self.library_dir)
+            .field("library_iso_dir", &self.library_iso_dir)
+            .field("library_iso_subfolders", &self.library_iso_subfolders)
             .finish()
     }
 }
@@ -316,6 +329,9 @@ impl Default for Config {
             autorip_dir: "/config".into(),
             decrypt_threads: 0, // 0 = auto-detect cores
             log_retention_days: 30,
+            library_dir: String::new(),
+            library_iso_dir: String::new(),
+            library_iso_subfolders: false,
         }
     }
 }
@@ -520,6 +536,18 @@ fn load_saved(mut cfg: Config) -> Config {
     }
     if let Some(v) = saved.get("iso_dir").and_then(|v| v.as_str()) {
         cfg.iso_dir = v.to_string();
+    }
+    if let Some(v) = saved.get("library_dir").and_then(|v| v.as_str()) {
+        cfg.library_dir = v.to_string();
+    }
+    if let Some(v) = saved.get("library_iso_dir").and_then(|v| v.as_str()) {
+        cfg.library_iso_dir = v.to_string();
+    }
+    if let Some(v) = saved
+        .get("library_iso_subfolders")
+        .and_then(|v| v.as_bool())
+    {
+        cfg.library_iso_subfolders = v;
     }
     if let Some(v) = saved.get("tmdb_api_key").and_then(|v| v.as_str()) {
         cfg.tmdb_api_key = v.to_string();
@@ -1157,6 +1185,29 @@ mod tests {
     fn load_with(dir: &std::path::Path, json: &str) -> Config {
         std::fs::write(cfg_in(dir).settings_file(), json).unwrap();
         load_saved(cfg_in(dir))
+    }
+
+    #[test]
+    fn library_fields_are_additive_and_tolerant() {
+        let d = scratch("library-fields");
+        let cfg = load_with(&d, r#"{"movie_dir": "Films"}"#);
+        assert_eq!(cfg.library_dir, "");
+        assert_eq!(cfg.library_iso_dir, "");
+        assert!(
+            !cfg.library_iso_subfolders,
+            "top-level ISOs only by default"
+        );
+        let cfg = load_with(
+            &d,
+            r#"{"library_dir": "/lib", "library_iso_dir": 7, "library_iso_subfolders": "yes", "movie_dir": "Films"}"#,
+        );
+        assert_eq!(cfg.library_dir, "/lib");
+        assert_eq!(cfg.library_iso_dir, "", "wrong type keeps the default");
+        assert!(!cfg.library_iso_subfolders);
+        assert_eq!(cfg.movie_dir, "Films");
+        let cfg = load_with(&d, r#"{"library_iso_subfolders": true}"#);
+        assert!(cfg.library_iso_subfolders);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
