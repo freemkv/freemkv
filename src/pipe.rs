@@ -1740,8 +1740,7 @@ fn warn_ssrf_rejected(keys: &KeyConfig, out: &Output) {
 
 fn key_source_factory(keys: &KeyConfig, out: &Output) -> libfreemkv::KeySourceFactory {
     warn_ssrf_rejected(keys, out);
-    let keys = keys.clone();
-    std::sync::Arc::new(move || build_key_sources_quiet(&keys))
+    crate::rip_keys::sources(&key_params(keys))
 }
 
 /// Render the AACS resolution trace to STDERR (never stdout — that may carry the
@@ -7255,6 +7254,132 @@ mod image_copy_tests {
         assert!(
             cpi_masked_eq(&fx, &std::fs::read(&dest).unwrap()),
             "decrypted image (CPI-masked)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ku_cli_tests {
+    //! The CLI half of KU-F1 over a real image file (keys-upfront design §7.3): one resolve
+    //! per rip, before any output; E7034 and `--vid-from`; nothing key-shaped on disk.
+    use crate::ku_fixtures::*;
+    use crate::rip_keys::{with_drive, with_sources};
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn run_cli(source: &str, dest: &str, a: &[&str]) -> (i32, String) {
+        crate::output::capture(|| super::run(source, dest, &args(a)))
+    }
+
+    /// FK1 (KU §2.1 invariant 1, "exactly one `ResolvedKeySet::resolve`" before "R's first
+    /// output byte"): `-t 1,2,3` and `-t all` over a 3-title, 2-group image make exactly
+    /// 2 requests, every one before any output exists. FK10: no key or VID on disk.
+    #[test]
+    fn cli_rip_resolves_once_per_rip() {
+        let fx = bd_image(&[Some(K1), Some(K2), Some(K1)], 2);
+        for titles in [&["-t", "1", "-t", "2", "-t", "3"][..], &["-t", "all"][..]] {
+            let dir = TempDir::new("fk1");
+            let iso = fx.write(dir.path(), "disc.iso");
+            let out = dir.path().join("out");
+            let calls = Calls::default();
+            calls.watch(&out);
+            let f = factory(&[(Answer::Online, &[K1, K2])], &calls);
+            let src = format!("iso://{}", iso.display());
+            let dest = format!("mkv://{}/", out.display());
+            let (code, text) = with_sources(f, || run_cli(&src, &dest, titles));
+            assert_eq!(code, 0, "{text}");
+            assert_eq!(calls.len(), 2, "one request per key group: {text}");
+            assert!(calls.all().iter().all(|c| c.outputs == 0), "asked mid-rip");
+            assert_eq!(files_under(&out).len(), 3, "{text}");
+            assert_no_secret_on_disk(dir.path(), &[K1, K2, VID]);
+        }
+    }
+
+    /// FK1/FK10 for a decrypted image: iso:// → iso:// resolves the whole disc once (both
+    /// groups), before the destination exists, and writes no key.
+    #[test]
+    fn cli_image_decrypt_resolves_once() {
+        let fx = bd_image(&[Some(K1), Some(K2)], 2);
+        let dir = TempDir::new("fk1iso");
+        let iso = fx.write(dir.path(), "disc.iso");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let calls = Calls::default();
+        calls.watch(&out);
+        let f = factory(&[(Answer::Online, &[K1, K2])], &calls);
+        let src = format!("iso://{}", iso.display());
+        let dest = format!("iso://{}", out.join("plain.iso").display());
+        let (code, text) = with_sources(f, || run_cli(&src, &dest, &[]));
+        assert_eq!(code, 0, "{text}");
+        assert_eq!(calls.len(), 2, "{text}");
+        assert!(calls.all().iter().all(|c| c.outputs == 0), "asked mid-copy");
+        assert_no_secret_on_disk(dir.path(), &[K1, K2, VID]);
+    }
+
+    fn drive() -> libfreemkv::Disc {
+        drive_disc(&bd_image(&[Some(K1)], 1))
+    }
+
+    /// FK11 (KU §4.2, J11/J12): an image whose key only the VID derives (KS-16 "Kvu =
+    /// AES-G(Km, IDv)") asks once, then exits with E7034 and the `--vid-from` hint, writing
+    /// nothing; `--vid-from disc://` scans the drive (no key call) and finishes.
+    #[test]
+    fn cli_surfaces_e7034_then_vid_from_finishes() {
+        use libfreemkv::spec::keys::KS_16_KVU;
+        assert!(KS_16_KVU.text.contains("Kvu = AES-G(Km, IDv)"));
+        let fx = bd_image(&[Some(K1)], 1);
+        let dir = TempDir::new("fk11");
+        let iso = fx.write(dir.path(), "capture.iso");
+        sidecar(&fx, &iso, true);
+        let src = format!("iso://{}", iso.display());
+        let mkv = dir.path().join("movie.mkv");
+        let dest = format!("mkv://{}", mkv.display());
+
+        let calls = Calls::default();
+        let f = factory(&[(Answer::OnlineNeedsVid, &[K1])], &calls);
+        let (code, text) = with_sources(f, || run_cli(&src, &dest, &[]));
+        assert_eq!(code, 1, "{text}");
+        assert_eq!(calls.len(), 1, "asked once, without the VID");
+        assert!(text.contains(&crate::strings::get("error.E7034")), "{text}");
+        assert!(text.contains("--vid-from disc://"), "{text}");
+        assert!(!mkv.exists(), "E7034 comes before any output");
+
+        let calls = Calls::default();
+        let f = factory(&[(Answer::OnlineNeedsVid, &[K1])], &calls);
+        let (code, text) = with_drive(drive, || {
+            with_sources(f, || run_cli(&src, &dest, &["--vid-from", "disc://"]))
+        });
+        assert_eq!(code, 0, "{text}");
+        assert_eq!(calls.len(), 1, "one more request, now with the VID");
+        assert_eq!(calls.all()[0].vid, Some(VID));
+        assert!(mkv.exists(), "{text}");
+        assert_no_secret_on_disk(dir.path(), &[K1, VID]);
+    }
+
+    /// `--vid-from` names a drive for an `iso://` image only (a folder is always scanned,
+    /// KU §3.2 D6; a disc source has its own VID), and must be a `disc://` URL.
+    #[test]
+    fn vid_from_needs_an_iso_source_and_a_drive() {
+        let dir = TempDir::new("vidfrom");
+        let fx = bd_image(&[None], 1);
+        let iso = fx.write(dir.path(), "a.iso");
+        let src = format!("iso://{}", iso.display());
+        let dest = format!("mkv://{}", dir.path().join("a.mkv").display());
+        let unknown = crate::strings::fmt("error.unknown_flag", &[("flag", "--vid-from")]);
+        let (code, text) = run_cli(&src, &dest, &["--vid-from", "iso://x.iso"]);
+        assert_eq!(code, 1, "{text}");
+        assert!(
+            text.contains("disc://") && !text.contains(&unknown),
+            "{text}"
+        );
+        let folder = format!("dir://{}", dir.path().display());
+        let (code, text) = run_cli(&folder, &dest, &["--vid-from", "disc://"]);
+        assert_eq!(code, 1, "{text}");
+        assert!(
+            text.contains("iso://") && !text.contains(&unknown),
+            "{text}"
         );
     }
 }

@@ -208,13 +208,27 @@ pub struct Call {
     pub vid: Option<[u8; 16]>,
     /// A forensic (FMTS index-key) request (KU §5.1).
     pub forensic: bool,
+    /// Files under the watched directory when the request was made.
+    pub outputs: usize,
 }
 
-/// Every request the fakes of one factory answered, shared across its builds.
+/// Every request the fakes of one factory answered, shared across its builds, and the
+/// directory whose files a request counts (FK1: every request before the first output).
 #[derive(Clone, Default)]
-pub struct Calls(pub Arc<Mutex<Vec<Call>>>);
+pub struct Calls(pub Arc<Mutex<Vec<Call>>>, pub Arc<Mutex<Option<PathBuf>>>);
 
 impl Calls {
+    /// Count the files under `dir` at each later request (see [`Call::outputs`]).
+    pub fn watch(&self, dir: &Path) {
+        *self.1.lock().unwrap() = Some(dir.to_path_buf());
+    }
+    fn outputs(&self) -> usize {
+        self.1
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map_or(0, |d| files_under(d).len())
+    }
     pub fn len(&self) -> usize {
         self.0.lock().unwrap().len()
     }
@@ -273,10 +287,12 @@ fn opens(unit: &[u8], key: &[u8; 16]) -> bool {
 impl KeySource for Fake {
     fn get_unit_keys(&self, ctx: &dyn ResolveCtx) -> libfreemkv::Result<Vec<UnitKey>> {
         let vid = ctx.vid().map(|v| v.0);
+        let outputs = self.calls.outputs();
         self.calls.0.lock().unwrap().push(Call {
             who: self.who,
             vid,
             forensic: false,
+            outputs,
         });
         if matches!(self.answer, Answer::Unavailable | Answer::Down) {
             return Err(libfreemkv::Error::KeyServiceUnavailable);
@@ -318,6 +334,7 @@ impl KeySource for Fake {
             who: self.who,
             vid: ctx.vid().map(|v| v.0),
             forensic: true,
+            outputs: self.calls.outputs(),
         };
         self.calls.0.lock().unwrap().push(call);
         Ok(self
