@@ -3,12 +3,14 @@
 import base64
 import copy
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 import media_gate as mg  # noqa: E402
@@ -232,7 +234,9 @@ class ClassificationTests(unittest.TestCase):
         ws = Workspace(self)
         base = ws.f()
         for old, new in (('edition = "2024"', 'edition = "2021"'),
-                         ('[package]\n', '[package]\nresolver = "3"\nbuild = "build2.rs"\nlinks = "x"\n'),
+                         ('[package]\n', '[package]\nresolver = "3"\n'),
+                         ('[package]\n', '[package]\nbuild = "build2.rs"\n'),
+                         ('[package]\n', '[package]\nlinks = "x"\n'),
                          ('rust-version = "1.98.0"', 'rust-version = "1.98.1"')):
             with self.subTest(new=new):
                 ws.edit('freemkv', 'Cargo.toml', old, new)
@@ -265,6 +269,17 @@ class GuardTests(unittest.TestCase):
         ws.edit('freemkv', 'src/main.rs', '\nmod pipe;', '\n')
         self.assert_fires(ws, 'G1', '`pipe` is not declared')
 
+    def test_g1_nested_decl_cannot_hide_a_moved_top_level_one(self):
+        ws = Workspace(self)
+        ws.edit('freemkv', 'src/main.rs', '\nmod pipe;', '\n#[path = "rip/pipe2.rs"]\nmod pipe;\n'
+                '#[cfg(test)]\nmod t {\n    mod pipe;\n}')
+        self.assert_fires(ws, 'G1', 'mod pipe')
+
+    def test_g1_lib_root_declarations_are_plain_too(self):
+        ws = Workspace(self)
+        ws.edit('freemkv', 'src/lib.rs', 'pub mod keydb_fetch;', '#[path = "x.rs"]\npub mod keydb_fetch;')
+        self.assert_fires(ws, 'G1', 'src/lib.rs')
+
     def test_g1_include_and_out_of_line_mod_in_required_file(self):
         ws = Workspace(self)
         ws.write('freemkv', 'src/pipe.rs', real('src/pipe.rs') + '\ninclude!("../x.rs");\n')
@@ -291,6 +306,11 @@ class GuardTests(unittest.TestCase):
         ws.write('libfreemkv', 'src/udf.rs', 'include!(concat!(env!("HOME"), "/gen.rs"));\n')
         self.assert_fires(ws, 'G2', 'non-literal')
 
+    def test_g2_freemkv_required_file(self):
+        ws = Workspace(self)
+        ws.write('freemkv', 'src/keydb_fetch.rs', real('src/keydb_fetch.rs') + '\nconst R: &str = include_str!("../README.md");\n')
+        self.assert_fires(ws, 'G2', 'README.md')
+
     def test_g3_rerun_target_outside_required(self):
         ws = Workspace(self)
         ws.edit('libfreemkv', 'build.rs', 'src/scsi/macos_shim.c', 'docs/x')
@@ -314,6 +334,15 @@ class GuardTests(unittest.TestCase):
         ws.write('freemkv', 'src/pipe.rs', real('src/pipe.rs') + '\nuse crate::{strings, rip_util::f};\n')
         self.assert_fires(ws, 'G4', 'rip_util')
 
+    def test_g4_through_the_lib_crate_or_an_alias(self):
+        for extra in ('\nfn a() { freemkv::rip_util::f(); }\n', '\nfn b() { ::freemkv::settings::g(); }\n',
+                      '\nuse crate as root;\nfn c() { root::rip_util::f(); }\n',
+                      '\nuse freemkv::{strings, rip_util};\n'):
+            with self.subTest(extra=extra):
+                ws = Workspace(self)
+                ws.write('freemkv', 'src/pipe.rs', real('src/pipe.rs') + extra)
+                self.assertTrue(any(e.startswith('G4') for e in ws.guards()), extra)
+
     def test_g4_inline_test_module_super_is_fine(self):
         ws = Workspace(self)
         ws.write('freemkv', 'src/pipe.rs', real('src/pipe.rs') +
@@ -324,6 +353,33 @@ class GuardTests(unittest.TestCase):
         ws = Workspace(self)
         ws.write('freemkv', 'src/pipe.rs', real('src/pipe.rs') + '\nfn f() { foo::bar(); }\n')
         self.assert_fires(ws, 'G5', '`foo::`')
+
+    def test_g5_single_segment_use_is_a_crate(self):
+        ws = Workspace(self)
+        ws.write('freemkv', 'src/pipe.rs', real('src/pipe.rs') + '\nuse foo;\nfn f() { foo::x(); }\n')
+        self.assert_fires(ws, 'G5', '`foo::`')
+        ws = Workspace(self)
+        ws.write('freemkv', 'src/pipe.rs', real('src/pipe.rs') + '\nuse foo as bar;\nfn f() { bar::x(); }\n')
+        self.assert_fires(ws, 'G5', '`foo::`')
+
+    def test_g6_manifest_declared_build_inputs(self):
+        cases = [('libfreemkv', 'Cargo.toml', '[package]\n', '[package]\nbuild = "docs/b.rs"\n', 'package.build'),
+                 ('libfreemkv', 'Cargo.toml', '[package]\n', '[lib]\npath = "benches/lib.rs"\n\n[package]\n', 'lib.path'),
+                 ('freemkv', 'Cargo.toml', 'path = "src/lib.rs"', 'path = "src/lib2.rs"', 'lib.path'),
+                 ('freemkv', 'Cargo.toml', 'path = "src/main.rs"', 'path = "src/cli2.rs"', 'CLI bin'),
+                 ('freemkv', 'Cargo.toml', '[package]\n', '[package]\nbuild = "build2.rs"\n', 'package.build')]
+        for repo, path, old, new, text in cases:
+            with self.subTest(new=new):
+                ws = Workspace(self)
+                if repo == 'libfreemkv' and 'build =' in new:
+                    ws.write('libfreemkv', 'docs/b.rs', 'fn main() {}\n')
+                ws.edit(repo, path, old, new)
+                self.assert_fires(ws, 'G6', text)
+        for tracked in ('.cargo/config.toml', 'rust-toolchain.toml', 'rust-toolchain'):
+            with self.subTest(tracked=tracked):
+                ws = Workspace(self)
+                ws.write('freemkv', tracked, '[build]\nrustflags = []\n')
+                self.assert_fires(ws, 'G6', tracked)
 
     def test_g5_comments_strings_and_aliases(self):
         ws = Workspace(self)
@@ -380,6 +436,9 @@ class FingerprintTests(unittest.TestCase):
             'manifest (res)': lambda: self.ws.write('freemkv', 'res/freemkv.manifest', '<x/>'),
             'build.rs': lambda: self.ws.write('freemkv', 'build.rs', real('build.rs') + '\n'),
             'allocator removed': lambda: self.ws.edit('freemkv', 'src/main.rs', '#[global_allocator]', ''),
+            'allocator cfg-gated': lambda: self.ws.edit('freemkv', 'src/main.rs', '#[global_allocator]',
+                                                        '#[cfg(target_os = "none")]\n#[global_allocator]'),
+            'nested lib doc': lambda: self.ws.write('libfreemkv', 'assets/table.md', '| x |'),
             'rust-version': lambda: self.ws.edit('freemkv', 'Cargo.toml', '"1.98.0"', '"1.98.1"'),
             'resolver': lambda: self.ws.edit('freemkv', 'Cargo.toml', '[package]\n', '[package]\nresolver = "2"\n'),
             'profile': lambda: self.ws.write('freemkv', 'Cargo.toml', real('Cargo.toml') +
@@ -471,7 +530,8 @@ class FingerprintTests(unittest.TestCase):
 
 def leg_record(leg):
     target = mg.LEG_TARGET[leg]
-    return {'runner_name': f'ephemeral-{leg}-i-0123456789abcdef0', 'launched_by': RUN_ID,
+    return {'runner_name': f'ephemeral-{leg}-i-0123456789abcdef0', 'instance_id': 'i-0123456789abcdef0',
+            'launched_by': RUN_ID,
             'rustc_release': '1.98.0', 'target': target, 'instance_type': 'c7i.4xlarge',
             'c_toolchain': 'musl-gcc: gcc 13.2.0', 'env_clean': True}
 
@@ -571,6 +631,7 @@ class DecideTests(unittest.TestCase):
             'gnu target': lambda e: e.ev['legs']['linux'].update(target='x86_64-unknown-linux-gnu'),
             'no instance type': lambda e: e.ev['legs']['linux'].update(instance_type=''),
             'no C toolchain': lambda e: e.ev['legs']['windows'].pop('c_toolchain'),
+            'instance is not the runner': lambda e: e.ev['legs']['windows'].update(instance_id='i-0fedcba9876543210'),
             'dirty env': lambda e: e.ev['legs']['windows'].update(env_clean=False),
             'leg missing': lambda e: e.ev['legs'].pop('windows'),
             'oversized': lambda e: e.ev.update(pad='x' * (mg.MAX_EVIDENCE + 1)),
@@ -741,7 +802,64 @@ class LockTests(unittest.TestCase):
             mg.resolve(ws.root, run=run)
 
 
+class PlanTests(unittest.TestCase):
+    def setUp(self):
+        self.ws = Workspace(self)
+        lock = (self.ws.root / 'freemkv' / 'Cargo.lock').read_text()
+        ws = self.ws
+
+        def run(cmd, cwd=None, **kw):
+            (Path(cwd) / 'Cargo.lock').write_text(lock)
+            packages = [{'name': r, 'manifest_path': str(ws.root / r / 'Cargo.toml')} for r in mg.FIRST_PARTY]
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({'packages': packages}), stderr='')
+        self.run = run
+
+    def plan(self, request=lambda e, **kw: [], **env):
+        base = {'REVISIONS': json.dumps(SIB_SHA), 'GITHUB_RUN_ID': str(RUN_ID)}
+        return mg.plan(self.ws.root, POLICY, dict(base, **env), EXTERNALS, request=request, run=self.run,
+                       tree=lambda root, k, run: FEATURES)[0]
+
+    def test_matching_evidence_is_reused(self):
+        e = Evidence(self)
+        out = self.plan(request=e.request)
+        self.assertEqual(out['fingerprint'], e.f, 'plan and evidence must fingerprint the same candidate alike')
+        self.assertEqual((out['status'], out['run']), ('reuse', 'false'))
+        self.assertIn(str(RUN_ID), out['evidence_url'])
+
+    def test_env_driven_decisions(self):
+        self.assertEqual(self.plan()['status'], 'run')
+        self.assertEqual(self.plan(HEAD_MESSAGE='fix typo [skip-media]')['status'], 'waived')
+        self.assertEqual(self.plan(SKIP_MEDIA='true', SKIP_REASON='key service outage')['status'], 'waived')
+        with self.assertRaises(ValueError):
+            self.plan(SKIP_MEDIA='true', SKIP_REASON='')
+        e = Evidence(self)
+        self.assertEqual(self.plan(request=e.request, RUN_MEDIA='true')['status'], 'run')
+        self.assertEqual(self.plan(request=e.request, HEAD_MESSAGE='[skip-media]')['status'], 'reuse')
+        self.assertEqual(self.plan(SUPERSEDED='true')['status'], 'superseded')
+
+    def test_outputs_cannot_be_injected(self):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        out = d / 'out'
+        env = dict(os.environ, GITHUB_OUTPUT=str(out))
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            mg._write_outputs({'status': 'waived', 'reason': 'outage\nstatus=reuse\nrun=false'})
+        parsed, lines = {}, out.read_text().splitlines()
+        i = 0
+        while i < len(lines):
+            key, delim = lines[i].split('<<', 1)
+            j = lines.index(delim, i + 1)
+            parsed.setdefault(key, []).append('\n'.join(lines[i + 1:j]))
+            i = j + 1
+        self.assertEqual(parsed['status'], ['waived'])
+        self.assertNotIn('run', parsed)
+
+
 class TokenizerTests(unittest.TestCase):
+    def test_c_strings(self):
+        toks = mg.tokenize('let a = c"x::y"; let b = cr#"q"::"#; z::w();')
+        self.assertEqual([t[1] for t in toks if t[0] == 'ident'], ['let', 'a', 'let', 'b', 'z', 'w'])
+
     def test_comments_strings_and_lifetimes(self):
         toks = mg.tokenize('/* a /* nested */ foo:: */ fn f<\'a>(x: &\'a str) -> char { let s = r#"x::y"#; '
                            '\'"\' ; b\'x\'; "q\\"::" ; bar::baz() } // tail::x')

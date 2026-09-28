@@ -60,8 +60,17 @@ def sha256(data):
 # ── Path classification (§2.1) ─────────────────────────────────────────────
 
 def _match(path, patterns):
-    return any(fnmatch.fnmatchcase(path, p) or (p.endswith('/**') and path.startswith(p[:-2]))
-               for p in patterns)
+    """Glob match; a pattern without '/' matches a top-level name only ('*' never crosses '/')."""
+    for p in patterns:
+        if p.endswith('/**'):
+            if path.startswith(p[:-2]):
+                return True
+        elif '/' not in p:
+            if '/' not in path and fnmatch.fnmatchcase(path, p):
+                return True
+        elif fnmatch.fnmatchcase(path, p) and path.count('/') == p.count('/'):
+            return True
+    return False
 
 
 def classify(repo, path, policy):
@@ -73,8 +82,7 @@ def classify(repo, path, policy):
             return 'required'
         if _match(path, policy['library_required']):
             return 'required'
-        top = path.split('/', 1)[0]
-        if _match(path, policy['library_inert']) or _match(top, policy['library_inert']):
+        if _match(path, policy['library_inert']):
             return None
         return 'required'
     if repo == 'freemkv':
@@ -89,7 +97,7 @@ def classify(repo, path, policy):
 
 # ── Rust tokenizer (comments and literal contents never become tokens) ────
 
-_RAW = re.compile(r'b?r(#*)"')
+_RAW = re.compile(r'[bc]?r(#*)"')
 _IDENT = re.compile(r'(?:r#)?[A-Za-z_][A-Za-z0-9_]*')
 _CHAR = re.compile(r"b?'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]{1,6}\}|.)|[^\\'\n])'")
 
@@ -126,7 +134,7 @@ def tokenize(src):
             toks.append(('str', value, line))
             line += value.count('\n')
             i = j + len(end)
-        elif c == '"' or src.startswith('b"', i):
+        elif c == '"' or src.startswith(('b"', 'c"'), i):
             start = line
             i += 1 if c == '"' else 2
             out = []
@@ -248,13 +256,13 @@ class Module:
             j = k - 2
         return attrs
 
-    def mod_decls(self):
-        """[(name, out_of_line, attrs, line)] for every `mod x;` / `mod x {`."""
+    def mod_decls(self, top_only=False):
+        """[(name, out_of_line, attrs, line)] for every `mod x;` / `mod x {` (top level only if asked)."""
         out = []
         for i, t in enumerate(self.toks):
             if _is(t, 'ident', 'mod') and _is(_at(self.toks, i + 1), 'ident'):
                 nxt = _at(self.toks, i + 2)
-                if _is(nxt, 'punct', ';') or _is(nxt, 'punct', '{'):
+                if (_is(nxt, 'punct', ';') or _is(nxt, 'punct', '{')) and not (top_only and self.depth[i]):
                     out.append((self.toks[i + 1][1], _is(nxt, 'punct', ';'),
                                 self.attributes_before(i), t[2]))
         return out
@@ -303,9 +311,12 @@ class Module:
                     if not (k > 0 and _is(body[k - 1], 'ident', 'as')):
                         leaves.append(b[1])
                         prev = b[1]
+            if body and _is(body[0], 'punct', '::'):
+                body = body[1:]
             root = body[0][1] if body and _is(body[0], 'ident') else None
-            if root == 'self' or (body and _is(body[0], 'punct', '::')):
-                root = body[1][1] if len(body) > 1 and _is(body[1], 'ident') else root
+            if not any(_is(b, 'punct', '::') for b in body):
+                # `use foo;` / `use foo as bar;` names a crate: only the alias is local.
+                leaves = [body[2][1]] if len(body) == 3 and _is(body[1], 'ident', 'as') else []
             out.append((leaves, root, t[2]))
         return out
 
@@ -355,8 +366,11 @@ def guard_crate_root(ws, policy):
     errors = []
     for n, root in enumerate(policy['freemkv_crate_roots']):
         mod = Module((ws / 'freemkv' / root).read_text())
-        decls = {name: (ool, attrs, line) for name, ool, attrs, line in mod.mod_decls()
-                 if mod.depth[0] == 0}
+        decls = {}
+        for name, ool, attrs, line in mod.mod_decls(top_only=True):
+            if name in decls:
+                errors.append(f'G1 freemkv/{root}:{line}: `mod {name}` declared twice')
+            decls[name] = (ool, attrs, line)
         for name in policy['freemkv_modules']:
             if name not in decls:
                 if n > 0:
@@ -458,13 +472,30 @@ def guard_call_graph(ws, policy):
             continue
         mod = Module((ws / 'freemkv' / path).read_text())
         toks = mod.toks
+        # The binary's `crate`, its lib crate `freemkv`, and any alias of either.
+        roots = {'crate', 'freemkv'}
         for i, t in enumerate(toks):
-            if not _is(t, 'ident') or t[1] not in ('crate', 'super'):
+            if _is(t, 'ident', 'use') or (_is(t, 'ident', 'crate') and _is(_at(toks, i - 1), 'ident', 'extern')):
+                k = i + 1
+                if _is(_at(toks, k), 'punct', '::'):
+                    k += 1
+                if _is(_at(toks, k), 'ident') and toks[k][1] in ('crate', 'freemkv') \
+                        and _is(_at(toks, k + 1), 'ident', 'as') and _is(_at(toks, k + 2), 'ident'):
+                    roots.add(toks[k + 2][1])
+        for i, t in enumerate(toks):
+            if not _is(t, 'ident') or not (t[1] in roots or t[1] == 'super'):
                 continue
-            if _is(_at(toks, i - 1), 'punct', '::') or not _is(_at(toks, i + 1), 'punct', '::'):
+            if not _is(_at(toks, i + 1), 'punct', '::'):
+                continue
+            prev = _at(toks, i - 1)
+            if _is(prev, 'punct', '::'):
+                before = _at(toks, i - 2)
+                if t[1] != 'freemkv' or _is(before, 'ident') or _is(before, 'punct', '>'):
+                    continue
+            elif _is(prev, 'punct', '.') or _is(prev, 'punct', '$'):
                 continue
             j = i
-            if t[1] == 'super':
+            if t[1] == 'super' and 'super' not in roots:
                 ups = 0
                 while _is(_at(toks, j), 'ident', 'super') and _is(_at(toks, j + 1), 'punct', '::'):
                     ups, j = ups + 1, j + 2
@@ -508,7 +539,15 @@ def guard_crate_tokens(ws, policy, k_names):
         for leaves, _, _ in mod.use_trees():
             local.update(leaves)
         seen = set()
-        for seg, i in mod.path_starts():
+        starts = mod.path_starts()
+        toks = mod.toks
+        for i, t in enumerate(toks):
+            if _is(t, 'ident', 'use') and not _is(_at(toks, i - 1), 'punct', '::'):
+                k = i + 2 if _is(_at(toks, i + 1), 'punct', '::') else i + 1
+                nxt = _at(toks, k + 1)
+                if _is(_at(toks, k), 'ident') and (_is(nxt, 'punct', ';') or _is(nxt, 'ident', 'as')):
+                    starts.append((toks[k][1], k))
+        for seg, i in starts:
             if seg in local or seg in known or seg[:1].isupper() or seg in seen:
                 continue
             seen.add(seg)
@@ -517,12 +556,42 @@ def guard_crate_tokens(ws, policy, k_names):
     return errors
 
 
+def guard_manifest_targets(ws, policy, files_by_repo):
+    """G6: build.rs, the lib and the CLI bin are where the required list expects them;
+    no tracked cargo or rustup config can change the freemkv build."""
+    errors = []
+    for repo in list(policy['libraries']) + ['freemkv']:
+        manifest = read_toml((ws / repo / 'Cargo.toml').read_text())
+        build = manifest.get('package', {}).get('build')
+        if build not in (None, True, False) and (build not in files_by_repo[repo]
+                                                 or classify(repo, build, policy) != 'required'):
+            errors.append(f'G6 {repo}/Cargo.toml: package.build = {build!r} is not a required build script')
+        lib = manifest.get('lib', {}).get('path')
+        if repo == 'freemkv':
+            if lib not in (None, 'src/lib.rs'):
+                errors.append(f'G6 freemkv/Cargo.toml: lib.path = {lib!r} (the projection reads src/lib.rs)')
+            if build not in (None, True, 'build.rs'):
+                errors.append(f'G6 freemkv/Cargo.toml: package.build = {build!r} (the required build script is build.rs)')
+            gui = set(policy['gui_features'])
+            for b in manifest.get('bin', []):
+                if not gui & set(b.get('required-features', [])) and b.get('path', 'src/main.rs') != 'src/main.rs':
+                    errors.append(f'G6 freemkv/Cargo.toml: CLI bin {b.get("name")!r} is built from {b.get("path")!r}, '
+                                  'not src/main.rs (remedy: update the crate-root list in the policy)')
+            for path in files_by_repo[repo]:
+                if path.startswith('.cargo/') or PurePosixPath(path).name in ('rust-toolchain', 'rust-toolchain.toml'):
+                    errors.append(f'G6 freemkv/{path}: a tracked cargo/rustup config would change the build '
+                                  'outside the fingerprint (remedy: remove it; toolchain and flags live in Cargo.toml)')
+        elif lib is not None and classify(repo, lib, policy) != 'required':
+            errors.append(f'G6 {repo}/Cargo.toml: lib.path = {lib!r} is not a required path')
+    return errors
+
+
 def run_guards(ws, policy, lock_text):
     files = {repo: git_files(ws / repo) for repo in list(policy['libraries']) + ['freemkv']}
     k_names = {entry[0] for entry in closure(parse_lock(lock_text), policy)}
     errors = (guard_crate_root(ws, policy) + guard_inclusions(ws, policy, files)
               + guard_build_scripts(ws, policy, files) + guard_call_graph(ws, policy)
-              + guard_crate_tokens(ws, policy, k_names))
+              + guard_crate_tokens(ws, policy, k_names) + guard_manifest_targets(ws, policy, files))
     return errors
 
 
@@ -552,6 +621,8 @@ def _each_dep_table(manifest):
                 yield target, key
     for table in manifest.get('patch', {}).values():
         yield {'_': table}, '_'
+    if 'dependencies' in manifest.get('workspace', {}):
+        yield manifest['workspace'], 'dependencies'
 
 
 def _drop_dev(manifest):
@@ -639,7 +710,7 @@ def closure(packages, policy):
     seen, out = set(), set()
     while todo:
         p = todo.pop()
-        key = (p['name'], p.get('version'))
+        key = (p['name'], p.get('version'), p.get('source'))
         if key in seen or p['name'] in skip:
             continue
         seen.add(key)
@@ -692,7 +763,8 @@ def project_crate_root(text, policy):
             j = i
             while j < len(toks) and not _is(toks[j], 'punct', ';'):
                 j += 1
-            items.append(' '.join(repr(x[1]) if x[0] == 'str' else x[1] for x in toks[i:j + 1]))
+            outer = [x for a in mod.attributes_before(i) for x in a]
+            items.append(' '.join(repr(x[1]) if x[0] == 'str' else x[1] for x in outer + toks[i:j + 1]))
     for name, ool, attrs, _ in mod.mod_decls():
         if name in policy['freemkv_modules']:
             head = ' '.join(x[1] for a in attrs for x in a)
@@ -820,13 +892,18 @@ def checkout(ws, revisions):
 
 # ── Evidence (§1 E, I-2) ───────────────────────────────────────────────────
 
-def gh_api(endpoint):
-    return json.loads(subprocess.check_output(['gh', 'api', endpoint]))
+def gh_api(endpoint, paginate=False):
+    if not paginate:
+        return json.loads(subprocess.check_output(['gh', 'api', endpoint]))
+    # --paginate --slurp: one JSON array of pages.
+    pages = json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp', endpoint]))
+    return [item for page in pages for item in (page if isinstance(page, list) else [page])]
 
 
 def evidence_candidates(f, request):
     """Tags for F, newest run first: [(ref, run_id)]."""
-    refs = request(f'repos/{OWNER}/freemkv/git/matching-refs/tags/media-evidence/{f}/')
+    endpoint = f'repos/{OWNER}/freemkv/git/matching-refs/tags/media-evidence/{f}/'
+    refs = request(endpoint, paginate=True) if request is gh_api else request(endpoint)
     out = []
     for ref in refs:
         m = re.fullmatch(rf'refs/tags/media-evidence/{f}/(\d+)', ref.get('ref', ''))
@@ -912,6 +989,8 @@ def check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, per
         m = runner_re.fullmatch(job.get('runner_name') or '')
         if not m:
             raise ValueError(f'leg {leg} ran on {job.get("runner_name")!r}')
+        if rec.get('instance_id') != m.group(3):
+            raise ValueError(f'leg {leg} instance {rec.get("instance_id")!r} is not the runner {job["runner_name"]!r}')
         if rec.get('runner_name') != job.get('runner_name'):
             raise ValueError(f'leg {leg} record names {rec.get("runner_name")!r}, the job ran on {job["runner_name"]!r}')
         if bool(m.group(2)) != leg.endswith('-perf'):
@@ -1056,6 +1135,9 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, post=No
                              externals)
     f = fingerprint(inputs)
     canary_ok = canary(policy, post) if post else not policy['canary'].get('probes')
+    if not policy['canary'].get('probes'):
+        warnings.append('the key-service canary has no probes configured (policy canary.probes); '
+                        'decision 15 is not enforced until one is added')
     proven = find_evidence(f, policy, request, perf_check) if canary_ok else None
     status, go, reason = decide(proven is not None, env.get('RUN_MEDIA') == 'true',
                                 env.get('SKIP_MEDIA') == 'true' or '[skip-media]' in env.get('HEAD_MESSAGE', ''),
@@ -1074,12 +1156,20 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, post=No
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 def _write_outputs(outputs):
+    """GITHUB_OUTPUT lines. Values are single-line (newlines folded) and written with a random
+    delimiter, so text such as a skip reason can never inject a second output."""
     path = os.environ.get('GITHUB_OUTPUT')
-    lines = [f'{k}={v}' for k, v in outputs.items() if k != 'warnings']
+    chunks = []
+    for key, value in outputs.items():
+        if key == 'warnings':
+            continue
+        value = ' '.join(str(value).splitlines())
+        delim = 'EOF_' + os.urandom(8).hex()
+        chunks.append(f'{key}<<{delim}\n{value}\n{delim}\n')
+        print(f'{key}={value}')
     if path:
         with open(path, 'a') as out:
-            out.write('\n'.join(lines) + '\n')
-    print('\n'.join(lines))
+            out.write(''.join(chunks))
 
 
 def main(argv=None):
@@ -1118,6 +1208,8 @@ def main(argv=None):
             for d in diff:
                 print(f'::error::third-party lock entry differs: {d}')
             return 1 if diff else 0
+        if args.mode == 'plan' and not args.externals:
+            raise ValueError('plan needs --externals (the fixture and launch-template pins)')
         externals = json.loads(args.externals.read_text()) if args.externals else {}
         if args.mode == 'fingerprint':
             lock = (ws / 'freemkv' / 'Cargo.lock').read_text()
@@ -1135,6 +1227,9 @@ def main(argv=None):
     except GuardError as exc:
         for line in str(exc).splitlines():
             print(f'::error title=Media gate classification guard::{line}')
+        return 1
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        print(f'::error title=Media gate ({args.mode})::{" ".join(str(exc).splitlines())}')
         return 1
 
 
