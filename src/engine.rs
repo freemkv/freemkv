@@ -801,6 +801,17 @@ impl fe::Sink for UiSink {
     fn should_cancel(&self) -> bool {
         self.0.cancel.load(Ordering::Relaxed)
     }
+    // G4/D4: the pre-mux note at the output opening, the hook the CLI prints it from.
+    fn event(&self, e: &fe::Event<'_>) {
+        if let fe::Event::OutputOpened { dest, title } = e {
+            let note = crate::lossy::excluded_lines(dest, title);
+            self.0
+                .lines
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(note);
+        }
+    }
 }
 
 /// Resolve AACS keys onto a scanned disc. Without this the mux fails E7022 on
@@ -1725,15 +1736,6 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
                 .to_string(),
         );
     }
-    // G4: the same pre-mux note the CLI prints, from the same plan (`lossy::excluded_lines`).
-    if let Ok(src) = libfreemkv::input(&src_url, &libfreemkv::InputOptions::default()) {
-        let note = crate::lossy::excluded_lines(&dest_url, src.info());
-        state
-            .lines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend(note);
-    }
     let o = fe::mux_title(
         &src_url,
         &dest_url,
@@ -1840,18 +1842,6 @@ fn mux_selected_titles(
         };
         let hint = disc.titles.get(idx).map(|t| t.size_bytes).unwrap_or(0);
         let input = title_input_options(disc, req, idx);
-        // G4: the pre-mux note the CLI prints, for the title as it will be muxed.
-        if let Some(t) = disc.titles.get(idx) {
-            let mut planned = t.clone();
-            if input.selection.apply(&mut planned).is_ok() {
-                let note = crate::lossy::excluded_lines(&dest_url, &planned);
-                state
-                    .lines
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .extend(note);
-            }
-        }
         let mux = mux_opts(req);
         match fe::mux_title(source_url, &dest_url, input, &mux, hint, sink) {
             Ok(o) => {
@@ -3591,8 +3581,8 @@ mod routing_tests {
     use super::{
         DiscPlan, KeyConfig, OutKind, RipRequest, RunState, TitleIdentity, UiSink, damage_note,
         demux_needs_subdirs, disc_device, disc_raw_copy, fe, image_or_dir_scheme, is_disc_source,
-        is_stream_source, iso_recovery_result, mux_opts, mux_selected_titles, out_kind,
-        recovery_plan, recovery_produced_no_data, recovery_raw, remap_against, remap_title_pids,
+        is_stream_source, iso_recovery_result, mux_opts, out_kind, recovery_plan,
+        recovery_produced_no_data, recovery_raw, remap_against, remap_title_pids,
         run_disc_scanning, run_stream, should_delete_staging_iso, source_scheme,
         staging_not_kept_note, stream_selection_for, title_input_options, title_session_mux_opts,
         verify_selection_identity, verify_title_identity, whole_image_gate, won_from_trace,
