@@ -879,6 +879,8 @@ mod tests {
         let iso = dirs.isos.as_ref().unwrap().join("A.iso");
         std::fs::write(&iso, &fx.img.image).unwrap();
         crate::ku_fixture::write_sidecar(&fx, &iso, true);
+        let keydb = t.path().join("keydb.cfg");
+        crate::ku_fixture::write_media_key_keydb(&fx, &keydb);
         let mkv_path = dirs.library.join("A/A.mkv");
         let old_mkv = std::fs::read(&mkv_path).unwrap();
         lib.index_now(&dirs);
@@ -886,7 +888,7 @@ mod tests {
         let job = lib.queue.claim_next().expect("the stale MKV is queued");
         assert_eq!(job.iso, iso);
         let cfg = Config {
-            keydb_path: Some(t.path().join("no-keydb.cfg").to_string_lossy().into_owned()),
+            keydb_path: Some(keydb.to_string_lossy().into_owned()),
             ..Config::default()
         };
         let arbiter = Arbiter::new();

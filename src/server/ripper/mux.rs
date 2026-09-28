@@ -1095,12 +1095,21 @@ fn map_iso_mux_outcome(
 // or a Stop.
 fn outcome_error(outcome: &freemkv_engine::RipOutcome) -> std::io::Error {
     match outcome {
+        // `E<code>: <data>`, the library's own error form, so `error_code` still reads it.
+        freemkv_engine::RipOutcome::Failed {
+            code: Some(code),
+            data,
+            ..
+        } if !data.is_empty() => std::io::Error::other(format!("E{code}: {data}")),
         freemkv_engine::RipOutcome::Failed {
             code: Some(code), ..
         } => std::io::Error::other(format!("E{code}")),
-        freemkv_engine::RipOutcome::Failed { kind, .. } => {
-            std::io::Error::new(*kind, "image mux failed before any title")
-        }
+        freemkv_engine::RipOutcome::Failed { kind, data, .. } => std::io::Error::new(
+            *kind,
+            format!("image mux failed before any title {data}")
+                .trim_end()
+                .to_string(),
+        ),
         freemkv_engine::RipOutcome::NoKey => {
             std::io::Error::other(format!("E{}", libfreemkv::error::E_NO_DISC_KEY))
         }
@@ -2096,12 +2105,25 @@ mod tests {
             title_index: 0,
             code: Some(code),
             kind: std::io::ErrorKind::Other,
+            data: String::new(),
         };
         for code in [7022u16, 7026, 7032, 7034] {
             let e = sink.take_result(&refused(code)).expect_err("refused");
             assert!(!super::super::is_halt_error(&e), "E{code} is not a Stop");
             assert_eq!(super::super::io_key_refusal(&e), Some(code));
         }
+        let with_data = RipOutcome::Failed {
+            title_index: 0,
+            code: Some(7022),
+            kind: std::io::ErrorKind::Other,
+            data: "abcd".into(),
+        };
+        let e = sink.take_result(&with_data).expect_err("refused");
+        assert_eq!(super::super::io_key_refusal(&e), Some(7022));
+        assert!(
+            e.to_string().contains("abcd"),
+            "the data reaches the message: {e}"
+        );
         let no_key = sink.take_result(&RipOutcome::NoKey).expect_err("no key");
         assert_eq!(super::super::io_key_refusal(&no_key), Some(7022));
 
@@ -2149,47 +2171,19 @@ mod tests {
 
     // ── mux_iso end to end through the engine (no media) ────────────────────
 
+    // A keyed image of the KU fixture, repointed at `path`: the mux opens its own reader
+    // there. The fixture's file is left in place for the test's lifetime.
     fn image_of(path: &str) -> freemkv_engine::OpenedImage {
-        struct NoRead;
-        impl libfreemkv::SectorSource for NoRead {
-            fn read_sectors(
-                &mut self,
-                _: u32,
-                _: u16,
-                _: &mut [u8],
-                _: bool,
-            ) -> libfreemkv::Result<usize> {
-                unreachable!("the engine mux opens its own reader")
-            }
-            fn capacity_sectors(&self) -> u32 {
-                0
-            }
-        }
-        freemkv_engine::OpenedImage {
-            source: freemkv_engine::ImageSource::Iso(path.into()),
-            disc: libfreemkv::Disc {
-                volume_id: "TEST".into(),
-                meta_title: None,
-                format: libfreemkv::DiscFormat::BluRay,
-                capacity_sectors: 0,
-                capacity_bytes: 0,
-                layers: 1,
-                titles: vec![libfreemkv::DiscTitle::empty()],
-                region: libfreemkv::disc::DiscRegion::Free,
-                aacs: None,
-                css: None,
-                encrypted: false,
-                aacs_error: None,
-                css_error: None,
-                content_format: libfreemkv::ContentFormat::BdTs,
-            },
-            reader: Box::new(NoRead),
-            keys: libfreemkv::keys::ResolvedKeySet::none(),
-            sources: None,
-            prescanned: false,
-            trace: libfreemkv::aacs::trace::ResolutionTrace::new(),
-            won: None,
-        }
+        let fx = crate::ku_fixture::bd_image();
+        let dir = tempfile::tempdir().unwrap().keep();
+        let iso = fx.write(&dir, "fixture.iso");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let keys = crate::ku_fixture::holding(&calls, crate::ku_fixture::K1);
+        let opts = freemkv_engine::OpenImageOptions::resolve(keys);
+        let src = freemkv_engine::ImageSource::Iso(iso);
+        let mut image = freemkv_engine::open_image_with(&src, opts).expect("the fixture opens");
+        image.source = freemkv_engine::ImageSource::Iso(path.into());
+        image
     }
 
     fn inputs_for<'a>(device: &'a str, dest: &std::path::Path) -> MuxInputs<'a> {

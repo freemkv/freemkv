@@ -1431,11 +1431,7 @@ fn run_extract_folder(
             "extracting decrypted file tree → {}",
             dest.display()
         ));
-    let extracted = match keys {
-        Some(set) => extract_tree_keyed(disc, reader, &dest, req.force, set, &state.cancel),
-        None => fe::extract_tree(disc, reader, &dest, req.force, sink),
-    };
-    match extracted {
+    match fe::extract_tree_with(disc, reader, &dest, req.force, keys, sink) {
         Ok(res) => {
             for f in &res.files {
                 if f.bytes_unreadable > 0 {
@@ -1454,49 +1450,6 @@ fn run_extract_folder(
         }
         Err(e) => Err(format!("Extraction failed: E{}", e.code())),
     }
-}
-
-// `fe::extract_tree` with the rip's key set (an image's disc carries no banked key).
-// TODO(KU-E1 engine): switch to `fe::extract_tree` once it takes `ExtractOptions.keys`.
-fn extract_tree_keyed(
-    disc: &libfreemkv::Disc,
-    reader: &mut dyn libfreemkv::SectorSource,
-    dest: &std::path::Path,
-    force: bool,
-    keys: &libfreemkv::keys::ResolvedKeySet,
-    cancel: &AtomicBool,
-) -> Result<libfreemkv::ExtractResult, libfreemkv::Error> {
-    // Ends the watcher on every exit, a panic included, so the scope can join it.
-    struct Done<'a>(&'a AtomicBool);
-    impl Drop for Done<'_> {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Relaxed);
-        }
-    }
-    let halt = libfreemkv::Halt::new();
-    let done = AtomicBool::new(false);
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            while !done.load(Ordering::Relaxed) {
-                if cancel.load(Ordering::Relaxed) {
-                    halt.cancel();
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        });
-        if cancel.load(Ordering::Relaxed) {
-            halt.cancel();
-        }
-        let _done = Done(&done);
-        let opts = libfreemkv::ExtractOptions {
-            force,
-            progress: None,
-            halt: Some(halt.clone()),
-            keys: Some(keys),
-        };
-        disc.extract_tree(reader, dest, &opts)
-    })
 }
 
 fn is_stream_source(path: &str) -> bool {

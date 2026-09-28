@@ -250,20 +250,15 @@ fn rip_key_scope(
 }
 
 // Whether the rip's set covers `scope` for `disc`, forensic keys aside (a multipass rip asks
-// for Pending ones once, from its image). A keyless set (a raw scope's) "covers" anything,
-// so on an encrypted disc it must also key it.
+// for Pending ones once, from its image). `covers` holds for any non-AACS set, so an AACS
+// disc's titles also need an AACS set.
 fn keys_cover(
     disc: &libfreemkv::Disc,
     set: &libfreemkv::keys::ResolvedKeySet,
     scope: &libfreemkv::keys::KeyScope,
 ) -> bool {
-    let keyless = matches!(
-        freemkv_engine::keys::key_status(disc, set),
-        libfreemkv::keys::DecryptStatus::AacsKeysMissing(_)
-    );
-    set.is_for(disc)
-        && set.covers(scope)
-        && (*scope == libfreemkv::keys::KeyScope::None || !keyless)
+    let aacs_titles = disc.aacs.is_some() && *scope != libfreemkv::keys::KeyScope::None;
+    set.is_for(disc) && set.covers(scope) && (set.is_aacs() || !aacs_titles)
 }
 
 // Whether the rip can decrypt what it produces: no scope needs no key; otherwise the set's

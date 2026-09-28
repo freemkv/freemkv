@@ -214,3 +214,34 @@ pub(crate) fn counting(calls: &Arc<AtomicUsize>) -> libfreemkv::KeySourceFactory
     let calls = calls.clone();
     Arc::new(move || vec![Box::new(Counting(calls.clone())) as Box<dyn libfreemkv::KeySource>])
 }
+
+/// A key source that holds `key` and counts its requests.
+pub(crate) struct Holds(pub Arc<AtomicUsize>, pub [u8; 16]);
+
+impl libfreemkv::KeySource for Holds {
+    fn get_unit_keys(
+        &self,
+        _: &dyn libfreemkv::keysource::ResolveCtx,
+    ) -> libfreemkv::Result<Vec<libfreemkv::aacs::types::UnitKey>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![libfreemkv::aacs::types::UnitKey::new(0, self.1)])
+    }
+
+    fn label(&self) -> &'static str {
+        "online"
+    }
+}
+
+/// A factory of [`Holds`] sources for `key`, sharing `calls`.
+pub(crate) fn holding(calls: &Arc<AtomicUsize>, key: [u8; 16]) -> libfreemkv::KeySourceFactory {
+    let calls = calls.clone();
+    Arc::new(move || vec![Box::new(Holds(calls.clone(), key)) as Box<dyn libfreemkv::KeySource>])
+}
+
+/// A keydb at `path` whose entry for this disc holds only a media key: its unit key can be
+/// derived only with the disc's Volume ID (KS-16), which is what makes E7034 apply (J23).
+pub(crate) fn write_media_key_keydb(fx: &Fx, path: &Path) {
+    let hash = &fx.disc.aacs.as_ref().unwrap().disc_hash;
+    let hash = libfreemkv::hex::strip_hex_prefix(hash);
+    std::fs::write(path, format!("0x{hash} = KU | M | 0x{}\n", "11".repeat(16))).unwrap();
+}

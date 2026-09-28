@@ -4079,6 +4079,58 @@ mod vid_needs_disc_tests {
     // worker then holds (never re-dispatched), with the ISO and mapfile untouched.
     #[test]
     fn a_resume_whose_keys_need_the_disc_is_held_not_retried() {
+        let (staging, outcome, _t) = resume_after_restart(true);
+        assert!(!outcome.success);
+        assert!(outcome.failure_needs_disc, "held for the disc");
+        assert!(!outcome.failure_retryable && !outcome.failure_finalize);
+        let reason = outcome.failure_reason.unwrap_or_default();
+        assert!(
+            reason.starts_with("E7034 ") && reason.contains("Insert the disc to finish"),
+            "{reason}"
+        );
+
+        let snap = staging::snapshot_staging_disc(&staging).unwrap();
+        assert!(snap.needs_disc && snap.has_ripped && !snap.has_failed);
+        assert_eq!(
+            crate::server::muxer::mux_dispatch_verdict(Some(&snap)),
+            crate::server::muxer::MuxVerdict::SkipNeedsDisc,
+            "the worker must not re-dispatch it"
+        );
+
+        // Inserting the disc makes it drive-resumable again (the worker still skips it).
+        assert!(!super::super::resumable_dir_blocked(&snap));
+        staging::set_needs_disc(&staging, false);
+        let snap = staging::snapshot_staging_disc(&staging).unwrap();
+        assert_eq!(
+            crate::server::muxer::mux_dispatch_verdict(Some(&snap)),
+            crate::server::muxer::MuxVerdict::Dispatch
+        );
+    }
+
+    // J23: when no VID could help (no media-key path, no VID-consuming source) a resume after
+    // a restart is a plain "no key yet" (E7022): the retryable keyless deferral, never held.
+    #[test]
+    fn a_resume_no_vid_would_help_is_a_retryable_deferral() {
+        let (staging, outcome, _t) = resume_after_restart(false);
+        assert!(!outcome.success);
+        assert!(!outcome.failure_needs_disc);
+        assert!(
+            outcome.failure_retryable,
+            "a keyless deferral re-muxes once keys land"
+        );
+        let snap = staging::snapshot_staging_disc(&staging).unwrap();
+        assert!(!snap.needs_disc && !snap.has_failed);
+        assert_eq!(
+            crate::server::muxer::mux_dispatch_verdict(Some(&snap)),
+            crate::server::muxer::MuxVerdict::Dispatch
+        );
+    }
+
+    // A `.ripped` KU fixture resumed by the mux worker with no set in memory (a restart): the
+    // keydb holds only a media key (`media_key`), or nothing.
+    fn resume_after_restart(
+        media_key: bool,
+    ) -> (std::path::PathBuf, MuxHandoffOutcome, tempfile::TempDir) {
         let _guard = crate::server::log::env_guard();
         let _g = crate::server::mover::TEST_STATE_LOCK
             .lock()
@@ -4093,6 +4145,10 @@ mod vid_needs_disc_tests {
         let fx = bd_image();
         let iso = fx.write(&staging, "KU_Disc.iso");
         let mapfile = write_sidecar(&fx, &iso, true);
+        let keydb = t.path().join("keydb.cfg");
+        if media_key {
+            crate::ku_fixture::write_media_key_keydb(&fx, &keydb);
+        }
         let before = (
             std::fs::read(&iso).unwrap(),
             std::fs::read(&mapfile).unwrap(),
@@ -4126,40 +4182,16 @@ mod vid_needs_disc_tests {
         crate::server::muxer::write_marker(&staging, &marker).unwrap();
         let cfg = Arc::new(RwLock::new(Config {
             staging_dir: staging.parent().unwrap().to_string_lossy().into_owned(),
-            keydb_path: Some(t.path().join("no-keydb.cfg").to_string_lossy().into_owned()),
+            keydb_path: Some(keydb.to_string_lossy().into_owned()),
             ..Config::default()
         }));
 
         let outcome = remux_from_ripped_marker(&cfg, &staging, &marker);
-        assert!(!outcome.success);
-        assert!(outcome.failure_needs_disc, "held for the disc");
-        assert!(!outcome.failure_retryable && !outcome.failure_finalize);
-        let reason = outcome.failure_reason.unwrap_or_default();
-        assert!(
-            reason.starts_with("E7034 ") && reason.contains("Insert the disc to finish"),
-            "{reason}"
-        );
-
-        let snap = staging::snapshot_staging_disc(&staging).unwrap();
-        assert!(snap.needs_disc && snap.has_ripped && !snap.has_failed);
-        assert_eq!(
-            crate::server::muxer::mux_dispatch_verdict(Some(&snap)),
-            crate::server::muxer::MuxVerdict::SkipNeedsDisc,
-            "the worker must not re-dispatch it"
-        );
         let after = (
             std::fs::read(&iso).unwrap(),
             std::fs::read(&mapfile).unwrap(),
         );
         assert!(after == before, "the ISO and its mapfile are untouched");
-
-        // Inserting the disc makes it drive-resumable again (the worker still skips it).
-        assert!(!super::super::resumable_dir_blocked(&snap));
-        staging::set_needs_disc(&staging, false);
-        let snap = staging::snapshot_staging_disc(&staging).unwrap();
-        assert_eq!(
-            crate::server::muxer::mux_dispatch_verdict(Some(&snap)),
-            crate::server::muxer::MuxVerdict::Dispatch
-        );
+        (staging, outcome, t)
     }
 }

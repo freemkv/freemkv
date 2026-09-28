@@ -238,7 +238,11 @@ fn resolve_with(
 ) -> Result<libfreemkv::keys::ResolvedKeySet, libfreemkv::Error> {
     // Drain an earlier decode verdict so the caller's take sees only this resolve's.
     let _ = take_online_decode_reachability();
-    let set = freemkv_engine::keys::resolve_for_rip(disc, reader, scope, factory, seed, halt)?;
+    let (set, trace) =
+        freemkv_engine::keys::resolve_for_rip_traced(disc, reader, scope, factory, seed, halt);
+    let hash = disc.aacs.as_ref().map_or("", |a| a.disc_hash.as_str());
+    log_key_walk(&trace, hash);
+    let set = set?;
     let st = set.status();
     tracing::info!(
         phase = "key_resolve",
@@ -340,23 +344,46 @@ fn open_staged(
         vid,
         halt,
     };
-    let mut opened = freemkv_engine::open_image_with(&src, opts)?;
+    let hash = disc_hash_of(&opts);
+    let (opened, trace) = freemkv_engine::open_image_with_traced(&src, opts);
+    // The walk, always: on a refusal it is the operator's only view of why a key missed.
+    log_key_walk(&trace, &hash);
+    let mut opened = opened?;
     // The set covers every title this open muxes; with no sources kept, a mux outside
     // them refuses instead of asking a key source mid-rip.
     opened.sources = None;
-    log_resolution(&opened);
     Ok(opened)
 }
 
-// The per-source key walk, always (success or not): the operator's only view of why a key missed.
-fn log_resolution(opened: &freemkv_engine::OpenedImage) {
-    let hash = opened
-        .disc
-        .aacs
+fn disc_hash_of(opts: &freemkv_engine::OpenImageOptions) -> String {
+    opts.disc
         .as_ref()
-        .map_or("", |a| a.disc_hash.as_str());
-    for line in render_resolution_trace(&opened.trace, hash) {
+        .and_then(|d| d.aacs.as_ref())
+        .map_or_else(String::new, |a| a.disc_hash.clone())
+}
+
+// The per-source key walk, always (success or refusal): the operator's only view of why a
+// key missed. A matched entry also logs its shape (booleans and lengths, no key material).
+fn log_key_walk(trace: &ResolutionTrace, disc_hash: &str) {
+    for line in render_resolution_trace(trace, disc_hash) {
         tracing::info!(phase = "key_resolve", "{line}");
+    }
+    for step in &trace.keys {
+        if let Some(m) = step.matched_entry {
+            tracing::info!(
+                phase = "key_resolve",
+                source = %step.who,
+                disc_hash,
+                has_vuk = m.has_vuk,
+                has_unit_keys = m.has_unit_keys,
+                unit_keys_len = m.unit_keys_len,
+                has_media_key = m.has_media_key,
+                has_keydb_vid = m.has_keydb_vid,
+                enc_title_keys_len = m.enc_title_keys_len,
+                vid_available = m.vid_available,
+                "matched keydb entry shape"
+            );
+        }
     }
 }
 
@@ -1718,24 +1745,8 @@ mod ku_e1_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // A key source that holds `K1`, counting its requests: the fixture's only key.
-    struct HasK1(Arc<AtomicUsize>);
-    impl KeySource for HasK1 {
-        fn get_unit_keys(
-            &self,
-            _: &dyn freemkv_keysources::ResolveCtx,
-        ) -> Result<Vec<freemkv_keysources::UnitKey>, libfreemkv::Error> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![libfreemkv::aacs::types::UnitKey::new(0, K1)])
-        }
-        fn label(&self) -> &'static str {
-            "online"
-        }
-    }
-
     fn has_k1(calls: &Arc<AtomicUsize>) -> libfreemkv::KeySourceFactory {
-        let calls = calls.clone();
-        Arc::new(move || vec![Box::new(HasK1(calls.clone())) as Box<dyn KeySource>])
+        crate::ku_fixture::holding(calls, K1)
     }
 
     // KU-E1 invariant: a fresh multipass rip asks the key service ONCE, at the drive scan
@@ -1788,6 +1799,52 @@ mod ku_e1_tests {
         let r = resolve_with(&fx.scan(), &mut drive, scope, &counting(&calls), None, None);
         let e = r.expect_err("no key");
         assert_eq!(e.code(), libfreemkv::error::E_NO_DISC_KEY, "{e}");
+    }
+
+    // A refused resolve still logs its per-source walk: on a refusal it is the operator's only
+    // view of why a key missed.
+    #[test]
+    fn a_refused_resolve_logs_its_key_walk() {
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(buf.clone())
+                .with_ansi(false),
+        );
+        let fx = bd_image();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut drive = libfreemkv::test_util::MemSource::new(fx.img.image.clone());
+        let scope = libfreemkv::keys::KeyScope::Titles(vec![0]);
+        let r = tracing::subscriber::with_default(subscriber, || {
+            resolve_with(&fx.scan(), &mut drive, scope, &counting(&calls), None, None)
+        });
+        assert!(r.is_err(), "no key");
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.lines().any(|l| l.contains("online >")),
+            "the refused walk is logged: {out}"
+        );
     }
 
     // The ripping process lends its set to the mux worker by ISO path, in memory.
