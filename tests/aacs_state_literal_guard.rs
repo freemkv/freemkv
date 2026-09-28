@@ -222,6 +222,10 @@ const BANNED: &[&str] = &[
     ".ensure_title_decryptable(",
 ];
 
+/// Banned in production code only (KU-F1 review M5): the legacy key field and resolver. A
+/// test's own fixture may still name a `unit_keys:` parameter.
+const BANNED_IN_PRODUCTION: &[&str] = &["unit_keys:", "resolve_keys_with_reason("];
+
 /// `src` with comments blanked, and with string and char literal contents blanked too
 /// when `strings` is set. Byte offsets and newlines are kept, so the views line up.
 fn blank(src: &str, strings: bool) -> Vec<u8> {
@@ -361,6 +365,15 @@ fn banned_uses(src: &str, is_test: bool) -> Vec<(usize, &'static str)> {
             ));
         }
     }
+    for word in BANNED_IN_PRODUCTION {
+        for at in 0..view.len() {
+            let in_test = tests.iter().any(|&(s, e)| (s..e).contains(&at));
+            if !in_test && view[at..].starts_with(word.as_bytes()) {
+                let line = view[..at].iter().filter(|&&c| c == b'\n').count() + 1;
+                hits.push((line, *word));
+            }
+        }
+    }
     hits.sort();
     hits
 }
@@ -458,7 +471,10 @@ fn the_structural_guard_skips_comments_and_test_strings() {
     assert_eq!(banned_uses(&prod, false).len(), 1, "{prod}");
     assert!(banned_uses(&prod, true).is_empty(), "a test may: {prod}");
     let reason = ["resolve_keys", "_with_reason("].concat();
-    assert_eq!(banned_uses(&format!("fn f() {{ d.{reason}r); }}"), false).len(), 1);
+    assert_eq!(
+        banned_uses(&format!("fn f() {{ d.{reason}r); }}"), false).len(),
+        1
+    );
     let unit = ["decrypt", "_unit"].concat();
     let helper =
         format!("use libfreemkv::test_util::{{BdFile, {unit}}};\nfn t() {{ {unit}(&mut u, &k); }}");
