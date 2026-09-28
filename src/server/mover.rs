@@ -1220,6 +1220,12 @@ fn check_and_move(cfg: &Config) {
             continue;
         }
 
+        // A rip filed as one MKV plus its ISO: remember the pair for the Library.
+        crate::server::library::links::record_delivery(
+            &cfg.autorip_dir,
+            planned_moves.iter().map(|(_, d)| d.as_str()),
+        );
+
         // Every file this pass could SEE is accounted for, not every file that IS there: a
         // listing error drops an entry the destructive remove_dir_all teardown would then
         // silently delete. Treat like a failed copy: leave the dir and retry next tick.
