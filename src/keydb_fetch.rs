@@ -29,10 +29,6 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// trips it; a slow-but-progressing body does not.
 const STALL_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Total-transfer ceiling on the keydb body once headers are in — sized to a
-/// real few-MiB keydb over a slow link, not a per-read bound.
-const BODY_TRANSFER_BUDGET: Duration = Duration::from_secs(120);
-
 /// Bounded DNS resolution so a wedged resolver can't hang the CLI.
 const DNS_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -209,15 +205,14 @@ struct IdleReCapTransport<In> {
 }
 
 impl<In> IdleReCapTransport<In> {
-    // Cap only BODY reads (reason RecvBody) at the idle bound; connect and
-    // header phases keep ureq's own timeouts. min keeps the tighter of a small
-    // total-body budget and idle.
+    // Cap BODY reads, and any wait ureq leaves unbounded (with no body total the body
+    // phase reports `NotHappening`), at the idle bound; connect and headers keep ureq's own.
     fn cap(
         &self,
         timeout: ureq::unversioned::transport::NextTimeout,
     ) -> ureq::unversioned::transport::NextTimeout {
         use ureq::unversioned::transport::time::Duration as UreqDuration;
-        if timeout.reason != ureq::Timeout::RecvBody {
+        if timeout.reason != ureq::Timeout::RecvBody && !timeout.after.is_not_happening() {
             return timeout;
         }
         let idle = UreqDuration::from_millis(self.idle.as_millis() as u64);
@@ -278,15 +273,13 @@ fn hardened_agent_with_timeouts(
     response: Duration,
     idle: Duration,
 ) -> ureq::Agent {
-    let budget = idle.mul_f64(BODY_TRANSFER_BUDGET.as_secs_f64() / STALL_TIMEOUT.as_secs_f64());
-    // Since ureq 3.4.1 (#1194) timeout_recv_body is an ABSOLUTE total-body
-    // deadline that no longer re-arms, and recv_response no longer caps the
-    // body. Set the total ceiling here; layer rolling idle via the connector.
+    // Stop design v5 §2.7 (T20): "keep each no-answer bound and each rolling idle bound,
+    // and **drop every total**". The body is bounded by `idle` and the byte cap only.
     let config = Config::builder()
         .max_redirects(0)
         .timeout_connect(Some(connect))
         .timeout_recv_response(Some(response))
-        .timeout_recv_body(Some(budget))
+        .timeout_recv_body(None)
         // Never the env proxy: PinnedResolver would answer the proxy's lookup with the keydb
         // server's address, and a real proxy re-resolves the host, bypassing the guard.
         .proxy(None)
