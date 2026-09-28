@@ -163,6 +163,7 @@ tr:hover { background:var(--chip); }
 <div class="headerbar">
   <span class="brand">AUTORIP</span>
   <button class="nav active" data-tab="ripper">Ripper</button>
+  <button class="nav" data-tab="library">Library</button>
   <button class="nav" data-tab="system">System</button>
   <button class="nav" data-tab="settings">Settings</button>
   <button class="btn" style="margin-left:auto" onclick="toggleTheme()" id="thm"></button>
@@ -180,6 +181,24 @@ tr:hover { background:var(--chip); }
   <div id="log" class="log" style="flex:1;max-height:none;margin-top:8px"></div></details>
   <details id="debugBox" open style="margin-top:12px;display:none"><summary style="font-size:.7rem;color:var(--accent);text-transform:uppercase;font-weight:600;letter-spacing:1px;cursor:pointer;user-select:none">Debug Log (live) — the patch walk + timings</summary>
   <div id="debuglog" class="log" style="flex:1;max-height:none;margin-top:8px"></div></details>
+</div>
+
+<!-- Library page -->
+<div id="library" class="section">
+  <div class="card" style="margin-top:16px">
+    <div id="libsum" style="font-size:.85rem;color:var(--text2)"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
+      <button class="btn" onclick="libPost('/api/library/queue/out-of-date',null,this)">Remux out of date</button>
+      <button class="btn" onclick="if(confirm('Remux every title that has an ISO?'))libPost('/api/library/queue/all',null,this)">Remux all</button>
+      <button class="btn" id="libpause" onclick="libPost(this.dataset.paused==='1'?'/api/library/queue/resume':'/api/library/queue/pause',null,this)">Pause queue</button>
+      <button class="btn" onclick="libPost('/api/library/queue/clear',null,this)">Clear finished</button>
+      <label class="toggle" style="margin-left:auto;font-size:.8rem"><input type="checkbox" id="libdebug" onchange="libPost('/api/library/debug',{enabled:this.checked},null)"> Debug log</label>
+    </div>
+  </div>
+  <div id="librun"></div>
+  <div id="libtable"></div>
+  <details open style="margin-top:12px"><summary style="font-size:.7rem;color:var(--text3);text-transform:uppercase;font-weight:600;letter-spacing:1px;cursor:pointer">Console</summary>
+  <div id="libconsole" class="log" style="margin-top:8px;max-height:320px"></div></details>
 </div>
 
 <!-- System page -->
@@ -256,6 +275,90 @@ function apiPost(u,btn,label){
   });
 }
 
+/* ---- Library ---- */
+let _libGen=-1,_libBusy=false;
+function libActive(){return document.getElementById('library').classList.contains('active')}
+function libGB(b){return b==null?'':(b/1e9).toFixed(1)+' GB'}
+function libHms(s){if(s==null)return'-';s=Math.round(s);return Math.floor(s/3600)+':'+String(Math.floor(s/60)%60).padStart(2,'0')+':'+String(s%60).padStart(2,'0')}
+function libWhen(t){return t?new Date(t*1000).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):''}
+function libPost(u,body,btn){
+  if(btn)btn.disabled=true;
+  const opt={method:'POST'};if(body){opt.body=JSON.stringify(body);opt.headers={'Content-Type':'application/json'}}
+  return fetch(u,opt).then(r=>r.ok?null:r.text().then(t=>{throw new Error(t||('HTTP '+r.status))}))
+    .catch(e=>alert('Request failed: '+e.message)).then(()=>{if(btn)btn.disabled=false;loadLibrary(false)});
+}
+function libRunHtml(r){
+  if(!r)return'';
+  const pct=r.pct==null?null:r.pct;
+  const bar=pct==null?'':'<div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin:8px 0"><div style="height:100%;width:'+pct.toFixed(1)+'%;background:var(--accent)"></div></div>';
+  const stats=pct==null?esc(r.phase):(pct.toFixed(1)+'% \u00b7 '+(r.speed_bps/1e6).toFixed(1)+' MB/s \u00b7 ETA '+libHms(r.eta_secs)+' \u00b7 '+esc(r.phase));
+  const stall=r.stalled_secs>=60?' <span class="warn">no progress for '+libHms(r.stalled_secs)+'</span>':'';
+  return '<div class="card"><b>'+esc(r.title)+'</b>'+bar+'<div style="font-size:.8rem;color:var(--text2)">'+stats+stall+'</div></div>';
+}
+function libConsole(lines,reset){
+  const el=document.getElementById('libconsole');if(!el)return;
+  const atEnd=el.scrollTop+el.clientHeight>=el.scrollHeight-20;
+  if(reset)el.textContent='';
+  el.textContent+=lines.map(l=>l.text+'\n').join('');
+  if(atEnd)el.scrollTop=el.scrollHeight;
+}
+function libEvent(f){
+  if(!libActive())return;
+  libConsole(f.lines||[],false);
+  upd('librun',libRunHtml(f.running));
+  if(f.queue_generation!==_libGen){_libGen=f.queue_generation;loadLibrary(false)}
+}
+function libMuxed(r){
+  const m=r.muxed_with;
+  if(!r.mkv)return r.kind==='iso_only'?'<span class="warn">no MKV</span>':'';
+  if(m.state==='current')return '<span class="ok">'+esc(m.version)+'</span>';
+  if(m.state==='older')return '<span class="warn" title="not muxed with this version">'+esc(m.version)+'</span>';
+  if(m.state==='other')return '<span class="warn">'+esc(m.app)+'</span>';
+  return '-';
+}
+function libAudit(r){
+  if(!r.mkv)return'';
+  const a=r.audit;if(!a)return '<span style="color:var(--text3)">pending</span>';
+  if(a.ok&&!a.issues.length)return '<span class="ok">ok</span>';
+  const t=a.issues.map(i=>i.kind.replace(/_/g,' ')).join(', ');
+  return '<span class="'+(a.ok?'':'warn')+'" title="'+esc(t)+'">'+esc(t)+'</span>';
+}
+function libStatus(r){
+  const j=r.job,res=r.result;let s='';
+  if(j&&j.state==='queued')s='<span style="color:var(--yellow)">queued'+(j.note?' ('+esc(j.note)+')':'')+'</span>';
+  else if(j&&j.state==='running')s='<span style="color:var(--accent)">running</span>';
+  else if(res&&res.outcome==='done')s='<span class="ok">\u2713 '+libGB(res.size_bytes)+' in '+libHms(res.secs)+'</span> <span style="color:var(--text3)">'+libWhen(res.finished_at)+'</span>';
+  else if(res&&res.outcome==='failed')s='<span class="warn" title="'+esc(res.message)+'">\u2717 '+esc((res.code!=null&&res.message.indexOf('E'+res.code)<0?'E'+res.code+' ':'')+res.message).slice(0,90)+'</span>';
+  if(j||res)s+=' <a href="/api/library/log?title='+encodeURIComponent(r.title)+'" target="_blank" style="font-size:.75rem">log</a>';
+  return s;
+}
+function renderLibrary(d){
+  const rows=d.rows||[],q=d.queue||{};
+  const n=rows.filter(r=>r.needs_remux).length,isos=rows.filter(r=>r.iso).length,mkvs=rows.filter(r=>r.mkv).length;
+  upd('libsum','freemkv <b>'+esc(d.version)+'</b> \u00b7 '+mkvs+' MKVs \u00b7 '+isos+' ISOs \u00b7 '+n+' out of date or missing \u00b7 '+q.queued+' queued'+(q.paused?' \u00b7 <b class="warn">queue paused</b>':'')+(d.iso_dir?'':' \u00b7 <span class="warn">no ISO folder set</span>')+(d.incomplete?' \u00b7 <span class="warn">a folder could not be fully read</span>':''));
+  const pb=document.getElementById('libpause');if(pb){pb.dataset.paused=q.paused?'1':'0';pb.textContent=q.paused?'Resume queue':'Pause queue'}
+  const dbg=document.getElementById('libdebug');if(dbg)dbg.checked=!!q.debug_log;
+  upd('librun',libRunHtml(d.live));
+  const order=r=>(r.kind==='remux'||r.kind==='iso_only')?0:1;
+  const sorted=rows.slice().sort((a,b)=>order(a)-order(b));
+  let h='<table style="display:table"><thead><tr><th>Title</th><th>ISO</th><th>Muxed with</th><th>Audit</th><th>Remux</th><th></th></tr></thead><tbody>';
+  sorted.forEach(r=>{
+    const can=r.kind==='remux'||r.kind==='iso_only';
+    const busy=r.job&&(r.job.state==='queued'||r.job.state==='running');
+    const note=r.note?(r.note.kind==='several_isos'?r.note.count+' ISOs match; rename one':r.note.count+' MKVs match'):(r.iso?'':'no ISO');
+    const iso=r.iso?esc(r.iso.split('/').pop())+(r.linked?' <span title="recorded at rip time">\u{1F517}</span>':''):'<span style="color:var(--text3)">'+esc(note)+'</span>';
+    const btn=can?'<button class="btn" '+(busy?'disabled ':'')+'data-target="'+esc(r.target)+'" onclick="libPost(\'/api/library/queue/add\',{target:this.dataset.target},this)">Remux</button>':'';
+    h+='<tr'+(can?'':' style="opacity:.5"')+'><td><b>'+esc(r.title)+'</b></td><td style="font-size:.75rem">'+iso+'</td><td>'+libMuxed(r)+'</td><td style="font-size:.75rem">'+libAudit(r)+'</td><td style="font-size:.75rem">'+libStatus(r)+'</td><td>'+btn+'</td></tr>';
+  });
+  h+='</tbody></table>';
+  upd('libtable',h);
+}
+function loadLibrary(withConsole){
+  if(_libBusy)return;_libBusy=true;
+  fetch('/api/library',{cache:'no-store'}).then(r=>r.json()).then(d=>renderLibrary(d)).catch(()=>{}).then(()=>{_libBusy=false});
+  if(withConsole)fetch('/api/library/console',{cache:'no-store'}).then(r=>r.json()).then(c=>libConsole(c.lines||[],true)).catch(()=>{});
+}
+
 /* ---- Navigation ---- */
 document.querySelectorAll('.nav[data-tab]').forEach(btn=>{
   btn.addEventListener('click',function(){
@@ -265,6 +368,7 @@ document.querySelectorAll('.nav[data-tab]').forEach(btn=>{
     document.querySelectorAll('.nav[data-tab]').forEach(b=>b.classList.remove('active'));
     this.classList.add('active');
     if(tab==='system')loadSystem();
+    if(tab==='library')loadLibrary(true);
     if(tab==='settings')loadSettings();
   });
 });
@@ -847,6 +951,7 @@ function connectSSE(){
   if(_es){_es.close();_es=null}
   _es=new EventSource('/events');
   _es.onmessage=function(e){try{handleState(JSON.parse(e.data))}catch(x){}};
+  _es.addEventListener('library',function(e){try{libEvent(JSON.parse(e.data))}catch(x){}});
   _es.onerror=function(){_es.close();_es=null;setTimeout(connectSSE,2000)};
 }
 
@@ -1232,6 +1337,11 @@ function renderSettings(s){
       {key:'movie_dir',label:'Movies',type:'text',hint:'',indent:true,placeholder:'Same as output directory'},
       {key:'tv_dir',label:'TV Series',type:'text',hint:'',indent:true,placeholder:'Same as output directory'},
       {key:'iso_dir',label:'ISO Folder',type:'text',hint:'Where kept ISOs are stored (applies when Keep Intermediate ISO is on, or Output Format is ISO). Relative (e.g. isos) sits under the Output Directory; an absolute path (e.g. /mnt/archive/isos) targets another disk. Blank = beside the muxed title.',indent:true,placeholder:'Beside the muxed title'},
+    ]},
+    {title:'Library',fields:[
+      {key:'library_dir',label:'Library Folder',type:'text',hint:'Where the Title/Title.mkv files are. Blank = the Movies folder above.',placeholder:'Movies folder'},
+      {key:'library_iso_dir',label:'Source ISO Folder',type:'text',hint:'Where the source ISOs are, matched to MKVs by title. Blank = the ISO Folder above.',placeholder:'ISO Folder'},
+      {key:'library_iso_subfolders',label:'Include ISO Subfolders',type:'bool',hint:'Also list ISOs one folder down (dvd/, hddvd/, bd/). Off = top-level ISOs only.'},
     ]},
     {title:'API Keys',fields:[
       {key:'tmdb_api_key',label:'TMDB API Key',type:'text',hint:'v3 API key from themoviedb.org'},
@@ -1746,6 +1856,10 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
             return json_response(request, 400, r#"{"error":"invalid device name"}"#);
         }
         handle_title_override(request, &device);
+    } else if url.starts_with("/api/library") {
+        if let Some(request) = crate::server::library::api::handle(request, cfg) {
+            json_response(request, 404, r#"{"error":"not found"}"#);
+        }
     } else {
         json_response(request, 404, r#"{"error":"not found"}"#);
     }
@@ -1972,7 +2086,7 @@ fn serve_favicon(request: tiny_http::Request) {
     let _ = request.respond(response);
 }
 
-fn json_response(request: tiny_http::Request, status: u16, body: &str) {
+pub(crate) fn json_response(request: tiny_http::Request, status: u16, body: &str) {
     let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     // This is a local control app, not a website: NOTHING is cacheable. The API
     // responses (state/version/etc.) are polled live, so a cached body would show
@@ -2214,7 +2328,9 @@ fn read_body_capped(request: &mut tiny_http::Request) -> BodyRead {
 /// Read a JSON POST body with the shared size cap, replying with the
 /// appropriate error status (400 bad body / 413 too large) on failure.
 /// Returns `None` once a response has already been sent.
-fn read_json_body(mut request: tiny_http::Request) -> Result<(tiny_http::Request, String), ()> {
+pub(crate) fn read_json_body(
+    mut request: tiny_http::Request,
+) -> Result<(tiny_http::Request, String), ()> {
     match read_body_capped(&mut request) {
         BodyRead::Ok(body) => Ok((request, body)),
         BodyRead::Err => {
@@ -5462,6 +5578,59 @@ mod web_tests {
         // ── Route dispatch + method gating ──────────────────────────────
 
         #[test]
+        fn library_routes_list_queue_and_gate() {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = cfg_in_tempdir(dir.path());
+            let (lib, isos) = (dir.path().join("movies"), dir.path().join("isos"));
+            std::fs::create_dir_all(&lib).unwrap();
+            std::fs::create_dir_all(&isos).unwrap();
+            std::fs::write(isos.join("New (2020).iso"), b"iso").unwrap();
+            {
+                let mut c = cfg.write().unwrap();
+                c.library_dir = lib.to_string_lossy().into_owned();
+                c.library_iso_dir = isos.to_string_lossy().into_owned();
+            }
+            let (code, body) = roundtrip(&cfg, "GET", "/api/library", None, &[]);
+            assert_eq!(code, 200, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+            assert_eq!(v["rows"][0]["kind"], "iso_only");
+            let target = v["rows"][0]["target"].as_str().unwrap().to_string();
+
+            let add = |t: &str| {
+                let b = serde_json::json!({ "target": t }).to_string();
+                roundtrip(&cfg, "POST", "/api/library/queue/add", Some(&b), &[])
+            };
+            assert!(
+                add("/etc/passwd").1.contains("\"queued\":0"),
+                "only listed rows"
+            );
+            assert!(add(&target).1.contains("\"queued\":1"));
+            assert!(add(&target).1.contains("\"queued\":0"), "already queued");
+            let (_, body) = roundtrip(&cfg, "POST", "/api/library/queue/pause", None, &[]);
+            assert!(body.contains("\"paused\":true"), "{body}");
+            let (code, _) = roundtrip(&cfg, "GET", "/api/library/console", None, &[]);
+            assert_eq!(code, 200);
+            let (code, _) = roundtrip(
+                &cfg,
+                "GET",
+                "/api/library/log?title=New%20(2020)",
+                None,
+                &[],
+            );
+            assert_eq!(code, 200);
+            let (code, _) = roundtrip(&cfg, "GET", "/api/library/log", None, &[]);
+            assert_eq!(code, 400);
+            let (code, _) = roundtrip(&cfg, "GET", "/api/library/nope", None, &[]);
+            assert_eq!(code, 404);
+            let (code, _) = roundtrip(&cfg, "GET", "/api/library/queue/all", None, &[]);
+            assert_eq!(code, 404, "queue actions are POST only");
+            let bad = r#"{"library_dir": "relative/path"}"#;
+            let (code, _) = roundtrip(&cfg, "POST", "/api/settings", Some(bad), &[]);
+            assert_eq!(code, 400);
+        }
+
+        #[test]
         fn get_version_dispatches_and_returns_running_version() {
             let cfg = Arc::new(RwLock::new(Config::default()));
             let (code, body) = roundtrip(&cfg, "GET", "/api/version", None, &[]);
@@ -7483,6 +7652,22 @@ fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
         }
     }
 
+    // The Library folders are absolute (they are not filed under output_dir).
+    for field in ["library_dir", "library_iso_dir"] {
+        if let Some(v) = patch.get(field).and_then(|v| v.as_str())
+            && !v.is_empty()
+            && (!std::path::Path::new(v).is_absolute() || has_parent_dir(std::path::Path::new(v)))
+        {
+            return json_response(
+                request,
+                400,
+                &format!(
+                    r#"{{"ok":false,"error":"{field} must be an absolute path with no '..'"}}"#
+                ),
+            );
+        }
+    }
+
     // Validate keydb_path BEFORE the write guard: require an absolute path,
     // no `..`, and a `.cfg` extension. Exempt: "" (unset) and the redacted
     // basename round-trip (GET returns just the filename, which must survive).
@@ -7653,6 +7838,18 @@ fn handle_settings_post(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
         if let Some(v) = patch.get("max_retries").and_then(|v| v.as_u64()) {
             c.max_retries = v.min(10) as u8;
         }
+        if let Some(v) = patch.get("library_dir").and_then(|v| v.as_str()) {
+            c.library_dir = v.to_string();
+        }
+        if let Some(v) = patch.get("library_iso_dir").and_then(|v| v.as_str()) {
+            c.library_iso_dir = v.to_string();
+        }
+        if let Some(v) = patch
+            .get("library_iso_subfolders")
+            .and_then(|v| v.as_bool())
+        {
+            c.library_iso_subfolders = v;
+        }
         if let Some(v) = patch.get("keep_iso").and_then(|v| v.as_bool()) {
             c.keep_iso = v;
         }
@@ -7800,9 +7997,13 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     }
     let _ = stream.flush();
 
+    let mut library = crate::server::library::api::SseCursor::default();
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
-        let frame = format!("data: {}\n\n", get_state_json(&staging_dir()));
+        let mut frame = format!("data: {}\n\n", get_state_json(&staging_dir()));
+        if let Some(lib) = crate::server::library::api::sse_frame(&mut library) {
+            frame.push_str(&lib);
+        }
         if stream.write_all(frame.as_bytes()).is_err() {
             break;
         }
@@ -8613,7 +8814,7 @@ fn stop_report(drained: bool) -> StopReport {
     }
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let mut result = Vec::new();
     let bytes = s.as_bytes();
     let mut i = 0;

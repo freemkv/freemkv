@@ -196,6 +196,10 @@ pub fn run(argv: Vec<String>) {
         move || muxer::run(&cfg)
     });
 
+    // Library remux worker (plus its auditor). It yields the mux slot to any
+    // rip and is joined on shutdown so a cancelled remux cleans its partial.
+    let library_handle = crate::server::library::start(&cfg);
+
     // Start web server thread
     let _web_handle = std::thread::spawn({
         let cfg = cfg.clone();
@@ -318,6 +322,11 @@ pub fn run(argv: Vec<String>) {
     // Bounded so a wedged NFS write or stuck mux can't pin shutdown forever.
     join_bounded(mover_handle, "mover", std::time::Duration::from_secs(120));
     join_bounded(muxer_handle, "muxer", std::time::Duration::from_secs(120));
+    join_bounded(
+        library_handle,
+        "library",
+        std::time::Duration::from_secs(120),
+    );
 
     log::syslog("autorip stopped");
 }

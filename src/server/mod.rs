@@ -21,6 +21,7 @@ pub const VERSION_LABEL: &str = concat!(env!("SERVER_VERSION"), env!("SERVER_GIT
 pub mod config;
 pub mod daemon;
 pub mod keysource;
+pub mod library;
 pub mod log;
 pub mod mover;
 pub mod muxer;
