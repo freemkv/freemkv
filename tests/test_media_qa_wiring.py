@@ -82,14 +82,14 @@ class StructureTests(unittest.TestCase):
         self.assertIn('{Name: "tag:runner-labels", Values: [$l]}', teardown['run'])
         self.assertNotRegex(teardown['run'], r'Name=tag:runner-labels,Values=[^"]', 'shorthand splits the value on commas')
         launch_run = next(s for s in launch['steps'] if s.get('name') == 'Launch the ephemeral runner')['run']
-        self.assertIn('run-" + $id', launch_run)
+        self.assertIn('{Key: "runner-labels", Value: $l}', launch_run)
         self.assertIn('launched-by', launch_run)
         self.assertIn('--user-data "file://$userdata"', launch_run)
         self.assertIn('Version=$version', launch_run)
 
     def test_launch_attests_and_leg_uploads_survive_reruns(self):
         launch_run = next(s for s in self.jobs['launch']['steps'] if s.get('name') == 'Launch the ephemeral runner')['run']
-        self.assertIn('launch-$OS-$ATTEMPT.json', launch_run)
+        self.assertIn('launch-$LEG-$ATTEMPT.json', launch_run)
         for job in ('launch', 'cli-matrix'):
             for step in self.jobs[job]['steps']:
                 if 'upload-artifact' in step.get('uses', ''):
@@ -157,9 +157,372 @@ class StructureTests(unittest.TestCase):
         self.assertIn("trap 'shutdown -h now' EXIT", linux)
         self.assertIn('tags/instance/runner-labels', windows)
         self.assertIn('--labels $labels', windows)
-        self.assertIn('ephemeral-windows-$iid', windows)
+        self.assertIn('ephemeral-windows$kind-$iid', windows)
+        self.assertIn('ephemeral-linux$KIND-$IID', linux)
         self.assertIn('finally', windows)
         self.assertRegex('ephemeral-windows-i-0123456789abcdef0', POLICY['runner_name_re'])
+
+
+class CanaryWiringTests(unittest.TestCase):
+    """Decision 15 in CI: plan-media runs the canary on qa and the plan reads its result."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.plan = load()['jobs']['plan-media']
+        except ImportError:
+            raise unittest.SkipTest('PyYAML is not installed')
+        cls.names = [s.get('name', s.get('uses', '')) for s in cls.plan['steps']]
+
+    def test_canary_step(self):
+        step = next(s for s in self.plan['steps'] if s.get('name') == 'Key-service canary')
+        self.assertEqual(step['if'], "github.ref == 'refs/heads/qa'",
+                         'where the gate runs: the qa branch, never dev, never a tag named qa')
+        self.assertTrue(step['continue-on-error'], 'a crash leaves no result, which the plan fails closed on')
+        self.assertEqual(step['env']['FMKV_KEY_URL'], '${{ secrets.FMKV_KEY_URL }}')
+        self.assertEqual(step['env']['FMKV_KEY_AUTH'], '${{ secrets.FMKV_KEY_AUTH }}')
+        self.assertIn('media_canary.py --bucket "$B" --externals externals.json --out canary.json', step['run'])
+        self.assertIn('--require-hashes', step['run'])
+
+    def test_a_canary_failure_fails_plan_media(self):
+        gate = next(s for s in self.plan['steps'] if s.get('name') == 'Key-service canary verdict')
+        self.assertEqual(gate['if'], "steps.plan.outputs.status == 'canary-failed'")
+        self.assertIn('exit 1', gate['run'])
+        self.assertGreater(self.names.index('Key-service canary verdict'), self.names.index('Plan'))
+        upload = next(s for s in self.plan['steps'] if s.get('with', {}).get('name') == 'media-plan')
+        self.assertTrue(upload['with']['overwrite'], '"Re-run failed jobs" re-uploads the plan')
+        self.assertLess(self.plan['steps'].index(upload), self.names.index('Key-service canary verdict'))
+
+    def test_canary_reads_with_the_fixtures_role_before_the_plan(self):
+        roles = [i for i, s in enumerate(self.plan['steps']) if 'configure-aws-credentials' in s.get('uses', '')]
+        canary = self.names.index('Key-service canary')
+        self.assertTrue(roles[0] < canary < roles[1], 'after the fixtures role, before the runner role')
+        plan = next(s for s in self.plan['steps'] if s.get('name') == 'Plan')
+        self.assertIn('--canary canary.json', plan['run'])
+        self.assertGreater(self.names.index('Plan'), canary)
+
+
+class LaunchWiringTests(unittest.TestCase):
+    """No manual AWS step: perf legs, the Spot cap and the token parameter all live in the launch job."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.jobs = load()['jobs']
+        except ImportError:
+            raise unittest.SkipTest('PyYAML is not installed')
+        cls.launch = cls.jobs['launch']
+        cls.text = '\n'.join(s.get('run', '') for s in cls.launch['steps'])
+
+    def step(self, name):
+        return next(s for s in self.launch['steps'] if s.get('name') == name)
+
+    def test_superseded_check_uses_the_branch_ref(self):
+        step = self.step('Still the newest candidate')
+        self.assertEqual(step['env']['REF'], '${{ github.ref }}')
+        self.assertIn('[ "$REF" = refs/heads/qa ]', step['run'])
+        self.assertIn('git/ref/heads/qa', step['run'])
+
+    def test_legs_come_from_the_plan(self):
+        self.assertIn('needs.plan-media.outputs.legs', self.launch['strategy']['matrix']['leg'])
+        self.assertEqual(self.jobs['plan-media']['outputs']['legs'], '${{ steps.plan.outputs.legs }}')
+
+    def test_everything_run_instances_gets_comes_from_the_spec(self):
+        self.assertIn('media_gate.py launch-spec --leg "$LEG"', self.step('Launch spec')['run'])
+        run = self.step('Launch the ephemeral runner')['run']
+        for want in ('--instance-market-options "$options"', '--block-device-mappings "$bdm"',
+                     "jq -c '.markets[]'", '--instance-type "$t"'):
+            self.assertIn(want, run)
+        self.assertNotIn("MarketType=spot", run, 'the market (and its price cap) comes from the policy')
+        self.assertNotRegex(run, r'c[67]i\.4xlarge', 'instance types come from the policy')
+        self.assertNotRegex(self.text, r'freemkv-runner-[a-z]+-perf', 'no separate perf launch templates')
+
+    def test_token_parameter_comes_from_the_spec_and_is_not_deleted_by_the_launcher(self):
+        self.assertNotIn('delete-parameter', '\n'.join(json.dumps(s) for s in self.launch['steps']))
+        mint = self.step('Mint a registration token and stash it in SSM (SecureString)')
+        self.assertIn('steps.spec.outputs.param', mint['env']['PARAM'])
+        linux = (ROOT / '.github/runner-templates/user-data-linux.sh').read_text()
+        self.assertIn('aws ssm delete-parameter', linux, 'the instance deletes the token after reading it')
+
+    def test_teardown_matches_the_legs_labels(self):
+        teardown = self.step('Tear down')
+        self.assertEqual(teardown['env']['LABELS'], '${{ steps.spec.outputs.labels }}')
+        self.assertEqual(self.step('Watch the leg')['env']['JOB'], '${{ steps.spec.outputs.job }}')
+
+
+# freemkv-runner-linux $Default (v1) as describe-launch-template-versions returned it on 2026-09-27
+# (read-only), UserData elided.
+LINUX_TEMPLATE = {
+    'IamInstanceProfile': {'Name': 'freemkv-ec2-ssm'},
+    'BlockDeviceMappings': [{'DeviceName': '/dev/sda1', 'Ebs': {
+        'DeleteOnTermination': True, 'Iops': 6000, 'VolumeSize': 300, 'VolumeType': 'gp3', 'Throughput': 500}}],
+    'ImageId': 'ami-0ac74609c6396bed3', 'InstanceType': 'c7i.4xlarge', 'InstanceInitiatedShutdownBehavior': 'terminate',
+    'TagSpecifications': [{'ResourceType': 'instance', 'Tags': [
+        {'Key': 'Name', 'Value': 'freemkv-runner-linux'}, {'Key': 'freemkv-ci', 'Value': 'runner'}]}],
+    'SecurityGroupIds': ['sg-0291858e34b63ce10'],
+    'InstanceMarketOptions': {'MarketType': 'spot', 'SpotOptions': {'MaxPrice': '0.72', 'SpotInstanceType': 'one-time'}},
+    'MetadataOptions': {'HttpTokens': 'required', 'HttpPutResponseHopLimit': 2, 'InstanceMetadataTags': 'enabled'},
+    'UserData': 'IyEvYmluL2Jhc2g=',
+}
+
+
+class LaunchSpecTests(unittest.TestCase):
+    TEMPLATES = {'freemkv-runner-linux': {'version': 7, 'image_id': 'ami-l', 'instance_type': 'c7i.4xlarge'},
+                 'freemkv-runner-windows': {'version': 5, 'image_id': 'ami-w', 'instance_type': 'm7i.4xlarge'}}
+    QA = 'refs/heads/qa'
+
+    def perf_policy(self):
+        import copy
+        policy = copy.deepcopy(POLICY)
+        policy['perf']['enabled'] = True
+        return policy
+
+    def fake_aws(self, calls, data=None):
+        def aws(*args):
+            calls.append(args)
+            return {'LaunchTemplateVersions': [{'LaunchTemplateData': json.loads(json.dumps(data or LINUX_TEMPLATE))}]}
+        return aws
+
+    def spec(self, leg='linux', policy=POLICY, data=None, **kw):
+        calls = []
+        return mg.launch_spec(policy, leg, RUN_ID, kw.pop('ref', self.QA), self.TEMPLATES,
+                              aws=self.fake_aws(calls, data), **kw), calls
+
+    def test_only_the_functional_templates_are_pinned(self):
+        self.assertEqual(mg.launch_templates(POLICY), ['freemkv-runner-linux', 'freemkv-runner-windows'])
+        self.assertEqual(mg.launch_templates(self.perf_policy()), mg.launch_templates(POLICY))
+
+    def test_linux_spot_through_the_template_with_the_policy_cap(self):
+        spec, calls = self.spec()
+        self.assertEqual((spec['template'], spec['version']), ('freemkv-runner-linux', '7'))
+        self.assertEqual([(m['name'], m['template']) for m in spec['markets']], [('spot', True), ('on-demand', False)])
+        spot = spec['markets'][0]['options']
+        self.assertEqual(spot['MarketType'], 'spot')
+        self.assertEqual(spot['SpotOptions']['MaxPrice'], POLICY['launch']['linux']['spot_max_price'])
+        self.assertEqual(spec['types'], POLICY['launch']['linux']['types'])
+        self.assertIsNone(spec['block_device_mappings'])
+        self.assertEqual(spec['labels'], f'freemkv-media,linux,run-{RUN_ID}')
+        self.assertEqual(spec['job'], 'cli-matrix (linux)')
+        self.assertEqual(calls, [('ec2', 'describe-launch-template-versions', '--launch-template-name',
+                                  'freemkv-runner-linux', '--versions', '7')], 'the PINNED version is read')
+
+    def test_on_demand_without_the_template(self):
+        """Review 2 item 3: the template's Spot options cannot be cleared, so On-Demand does not use it."""
+        od = self.spec()[0]['on_demand']
+        inp = od['input']
+        self.assertEqual(inp, {
+            'ImageId': 'ami-0ac74609c6396bed3', 'InstanceType': 'c7i.4xlarge',
+            'IamInstanceProfile': {'Name': 'freemkv-ec2-ssm'}, 'SecurityGroupIds': ['sg-0291858e34b63ce10'],
+            'MetadataOptions': {'HttpTokens': 'required', 'HttpPutResponseHopLimit': 2, 'InstanceMetadataTags': 'enabled'},
+            'InstanceInitiatedShutdownBehavior': 'terminate', 'BlockDeviceMappings': LINUX_TEMPLATE['BlockDeviceMappings']})
+        for absent in ('InstanceMarketOptions', 'UserData', 'LaunchTemplate', 'TagSpecifications'):
+            self.assertNotIn(absent, inp)
+        self.assertEqual(od['tags'], [{'Key': 'Name', 'Value': 'freemkv-runner-linux'}],
+                         'the template\'s own tags ride along; the launcher sets freemkv-ci itself')
+
+    def test_on_demand_refuses_what_it_cannot_reproduce(self):
+        cases = {
+            'unknown field': lambda d: d.update(KeyName='ops'),
+            'network interfaces': lambda d: d.update(NetworkInterfaces=[{'DeviceIndex': 0}]),
+            'no image': lambda d: d.pop('ImageId'),
+            'no instance profile': lambda d: d.pop('IamInstanceProfile'),
+            'no security groups': lambda d: d.pop('SecurityGroupIds'),
+            'no volumes': lambda d: d.pop('BlockDeviceMappings'),
+            'metadata tags off': lambda d: d['MetadataOptions'].update(InstanceMetadataTags='disabled'),
+            'no metadata options': lambda d: d.pop('MetadataOptions'),
+            'shutdown stops': lambda d: d.update(InstanceInitiatedShutdownBehavior='stop'),
+        }
+        for name, change in cases.items():
+            with self.subTest(name=name):
+                data = json.loads(json.dumps(LINUX_TEMPLATE))
+                change(data)
+                with self.assertRaises(ValueError):
+                    self.spec(data=data)
+
+    def test_perf_on_demand_carries_the_perf_volume(self):
+        spec, _ = self.spec('linux-perf', self.perf_policy())
+        self.assertEqual(spec['on_demand']['input']['BlockDeviceMappings'], spec['block_device_mappings'])
+        self.assertEqual(spec['on_demand']['input']['BlockDeviceMappings'][0]['Ebs']['VolumeSize'],
+                         POLICY['perf']['root_volume_gib'])
+        self.assertEqual(LINUX_TEMPLATE['BlockDeviceMappings'][0]['Ebs']['VolumeSize'], 300, 'template data untouched')
+
+    def test_windows_uses_its_template_market_and_type(self):
+        spec, calls = self.spec('windows')
+        self.assertEqual(spec['markets'], [{'name': 'template', 'options': None, 'template': True}])
+        self.assertEqual(spec['types'], [])
+        self.assertIsNone(spec['on_demand'])
+        self.assertEqual(calls, [], 'no template read is needed')
+        self.assertTrue(spec['user_data'].endswith('user-data-windows.ps1'))
+
+    def test_spot_only_when_the_policy_says_so(self):
+        import copy
+        policy = copy.deepcopy(POLICY)
+        policy['launch']['linux']['on_demand_fallback'] = False
+        spec, calls = self.spec(policy=policy)
+        self.assertEqual([m['name'] for m in spec['markets']], ['spot'])
+        self.assertIsNone(spec['on_demand'])
+        self.assertEqual(calls, [])
+
+    def test_perf_legs_override_the_functional_template(self):
+        policy = self.perf_policy()
+        self.assertEqual(mg.legs(policy), ['linux', 'windows', 'linux-perf', 'windows-perf'])
+        windows = dict(LINUX_TEMPLATE, TagSpecifications=[])
+        windows.pop('InstanceMarketOptions')
+        for leg, template, version, data in (('linux-perf', 'freemkv-runner-linux', '7', LINUX_TEMPLATE),
+                                             ('windows-perf', 'freemkv-runner-windows', '5', windows)):
+            with self.subTest(leg=leg):
+                spec, calls = self.spec(leg, policy, data=data)
+                self.assertEqual((spec['template'], spec['version']), (template, version))
+                self.assertEqual(spec['types'], [policy['perf']['instance_type']], 'one type, no fallback')
+                self.assertEqual(spec['labels'], f'freemkv-media-perf,{leg.split("-")[0]},run-{RUN_ID}')
+                self.assertEqual(spec['job'], f'cli-perf ({leg.split("-")[0]})')
+                root = spec['block_device_mappings'][0]
+                self.assertEqual(root['Ebs']['VolumeSize'], policy['perf']['root_volume_gib'])
+                self.assertEqual((root['DeviceName'], root['Ebs']['Throughput']), ('/dev/sda1', 500),
+                                 'every other template setting of the volume is kept')
+                self.assertEqual(calls, [('ec2', 'describe-launch-template-versions', '--launch-template-name',
+                                          template, '--versions', version)])
+
+    def test_perf_legs_only_when_enabled(self):
+        with self.assertRaises(ValueError):
+            self.spec('linux-perf')
+
+    def test_one_parameter_per_run_attempt_and_leg(self):
+        """Review FB5: overlapping runs never share a token parameter."""
+        a = self.spec()[0]['param']
+        self.assertEqual(a, f'/freemkv-ci/runner-reg/{RUN_ID}-1-linux')
+        self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID + 1, self.QA, self.TEMPLATES,
+                                              aws=self.fake_aws([]))['param'])
+        self.assertNotEqual(a, self.spec(attempt=2)[0]['param'])
+        self.assertNotEqual(a, self.spec('windows')[0]['param'])
+        # Both roles grant exactly arn:...:parameter/freemkv-ci/runner-reg/* (checked 2026-09-27).
+        self.assertRegex(a, r'^/freemkv-ci/runner-reg/[0-9]+-[0-9]+-[a-z-]+$')
+
+    def test_only_the_qa_branch_launches(self):
+        """Review FB6 and review 2 item 1: only qa-branch runs record evidence; a tag named qa is not qa."""
+        for ref in ('refs/heads/dev', 'refs/heads/main', 'refs/tags/qa', 'qa', 'refs/heads/qa2'):
+            with self.subTest(ref=ref):
+                with self.assertRaises(ValueError):
+                    self.spec(ref=ref)
+
+    def test_an_unpinned_template_is_refused(self):
+        """Fail closed: '$Default' would be read at launch time, not the version F fingerprinted."""
+        cases = {'unreadable': {'error': 'AccessDenied'}, 'absent': None, 'no version': {'image_id': 'ami-1'},
+                 'string version': {'version': '$Default'}, 'zero': {'version': 0}, 'bool': {'version': True}}
+        for name, pin in cases.items():
+            with self.subTest(name=name):
+                calls = []
+                templates = {} if pin is None else {'freemkv-runner-linux': pin}
+                with self.assertRaisesRegex(ValueError, 'no pinned version'):
+                    mg.launch_spec(POLICY, 'linux', RUN_ID, self.QA, templates, aws=self.fake_aws(calls))
+                self.assertEqual(calls, [], 'nothing is read, nothing is launched')
+
+    def test_on_demand_refuses_non_instance_launch_tags(self):
+        """Volume and network-interface tags in the template are not dropped silently."""
+        for rtype in ('volume', 'network-interface', 'spot-instances-request'):
+            with self.subTest(resource=rtype):
+                data = json.loads(json.dumps(LINUX_TEMPLATE))
+                data['TagSpecifications'].append({'ResourceType': rtype, 'Tags': [{'Key': 'Name', 'Value': 'x'}]})
+                with self.assertRaisesRegex(ValueError, rtype):
+                    self.spec(data=data)
+        self.assertIsNotNone(self.spec()[0]['on_demand'], 'instance-only tags (the live template) are fine')
+
+    def test_cli_prints_one_json_line(self):
+        import io
+        import contextlib
+        import os
+        out = io.StringIO()
+        env = {'GITHUB_RUN_ID': str(RUN_ID), 'GITHUB_REF': self.QA, 'GITHUB_RUN_ATTEMPT': '2',
+               'TEMPLATES': json.dumps(self.TEMPLATES)}
+        with unittest.mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out), \
+                unittest.mock.patch.object(mg, 'aws_json', self.fake_aws([])):
+            self.assertEqual(mg.main(['launch-spec', '--leg', 'linux']), 0)
+        self.assertEqual(len(out.getvalue().strip().splitlines()), 1)
+        self.assertEqual(json.loads(out.getvalue())['version'], '7')
+        self.assertEqual(json.loads(out.getvalue())['param'], f'/freemkv-ci/runner-reg/{RUN_ID}-2-linux')
+
+    def test_record_expects_the_perf_label_on_perf_legs(self):
+        self.assertEqual(mg.leg_labels('linux-perf', 5), 'freemkv-media-perf,linux,run-5')
+        self.assertEqual(mg.leg_labels('windows', 5), 'freemkv-media,windows,run-5')
+        self.assertRegex('ephemeral-linux-perf-i-0123456789abcdef0', POLICY['runner_name_re'])
+
+
+@unittest.skipUnless(shutil.which('bash') and shutil.which('jq'), 'bash and jq')
+class LaunchStepTests(unittest.TestCase):
+    """Runs qa.yml's actual 'Launch the ephemeral runner' script against a fake `aws` that logs its
+    arguments, so the run-instances command lines themselves are checked."""
+
+    FAKE_AWS = r"""#!/bin/bash
+printf '%s\0' "$@" >> "$AWS_LOG"; printf '\n' >> "$AWS_LOG"
+case "$2" in
+  describe-vpcs) echo vpc-1 ;;
+  describe-subnets) echo subnet-a ;;
+  run-instances)
+    for a in "$@"; do
+      if [ "$a" = --launch-template ] && [ -n "${SPOT_FULL:-}" ]; then
+        echo "An error occurred (InsufficientInstanceCapacity) when calling the RunInstances operation" >&2; exit 254
+      fi
+    done
+    echo i-0123456789abcdef0 ;;
+esac
+"""
+
+    def run_step(self, spec, spot_full):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        (d / 'bin').mkdir()
+        (d / 'bin' / 'aws').write_text(self.FAKE_AWS)
+        (d / 'bin' / 'aws').chmod(0o755)
+        (d / 'freemkv').symlink_to(ROOT)
+        script = next(s for s in load()['jobs']['launch']['steps']
+                      if s.get('name') == 'Launch the ephemeral runner')['run']
+        env = {'PATH': f'{d / "bin"}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin', 'AWS_LOG': str(d / 'aws.log'),
+               'GITHUB_OUTPUT': str(d / 'out'), 'SPEC': json.dumps(spec), 'PARAM': '/freemkv-ci/runner-reg/1-1-linux',
+               'REPO': 'freemkv/freemkv', 'RUN_ID': str(RUN_ID), 'ATTEMPT': '1', 'LEG': spec['leg']}
+        if spot_full:
+            env['SPOT_FULL'] = '1'
+        res = subprocess.run(['bash', '-c', script], cwd=d, env=env, capture_output=True, text=True)
+        calls = [c.split('\0')[:-1] for c in (d / 'aws.log').read_text().split('\0\n') if c]
+        runs = [c for c in calls if c[:2] == ['ec2', 'run-instances']]
+        return res, runs, json.loads((d / f'launch-{spec["leg"]}-1.json').read_text()) if res.returncode == 0 else None
+
+    def spec(self):
+        return mg.launch_spec(POLICY, 'linux', RUN_ID, 'refs/heads/qa', LaunchSpecTests.TEMPLATES,
+                              aws=lambda *a: {'LaunchTemplateVersions': [{'LaunchTemplateData': LINUX_TEMPLATE}]})
+
+    def arg(self, call, flag):
+        return call[call.index(flag) + 1] if flag in call else None
+
+    def test_spot_attempt_goes_through_the_template_with_the_cap(self):
+        res, runs, att = self.run_step(self.spec(), spot_full=False)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(len(runs), 1)
+        call = runs[0]
+        self.assertEqual(self.arg(call, '--launch-template'), 'LaunchTemplateName=freemkv-runner-linux,Version=7')
+        self.assertEqual(json.loads(self.arg(call, '--instance-market-options'))['SpotOptions']['MaxPrice'], '0.72')
+        self.assertNotIn('--cli-input-json', call)
+        self.assertEqual(att['market'], 'spot')
+
+    def test_on_demand_after_spot_capacity_runs_without_the_template(self):
+        res, runs, att = self.run_step(self.spec(), spot_full=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        spot = [c for c in runs if '--launch-template' in c]
+        od = [c for c in runs if '--launch-template' not in c]
+        self.assertEqual(len(spot), len(POLICY['launch']['linux']['types']), 'every Spot type tried first')
+        self.assertEqual(len(od), 1)
+        call = od[0]
+        self.assertNotIn('--instance-market-options', call, 'On-Demand: no market options at all')
+        self.assertEqual(json.loads(self.arg(call, '--cli-input-json')), self.spec()['on_demand']['input'])
+        self.assertEqual(self.arg(call, '--instance-type'), POLICY['launch']['linux']['types'][0])
+        self.assertEqual(self.arg(call, '--subnet-id'), 'subnet-a')
+        self.assertTrue(self.arg(call, '--user-data').endswith('user-data-linux.sh'))
+        tags = {t['Key']: t['Value'] for t in json.loads(self.arg(call, '--tag-specifications'))[0]['Tags']}
+        # The IAM condition on RunInstances for the instance: aws:RequestTag/freemkv-ci = runner.
+        self.assertEqual(tags['freemkv-ci'], 'runner')
+        self.assertEqual(tags['launched-by'], str(RUN_ID))
+        self.assertEqual(tags['runner-labels'], f'freemkv-media,linux,run-{RUN_ID}')
+        self.assertEqual(tags['Name'], 'freemkv-runner-linux')
+        self.assertEqual(att['market'], 'on-demand')
 
 
 class LeakGuardTests(unittest.TestCase):
@@ -183,36 +546,50 @@ class LeakGuardTests(unittest.TestCase):
 
 
 class PinTests(unittest.TestCase):
-    def routes(self, qa_head='f' * 40):
-        r = {f'repos/freemkv/{repo}/commits/dev': {'sha': SIB_SHA[repo]} for repo in mg.SIBLINGS}
+    TIPS = {repo: f'{9 - i:x}' * 40 for i, repo in enumerate(mg.SIBLINGS)}
+
+    def routes(self, branch='dev', qa_head='f' * 40):
+        # "Get a commit": ref "Can be a commit SHA, branch name (`heads/BRANCH_NAME`), or tag name
+        # (`tags/TAG_NAME`)." Only the heads/ form is served, so a bare name (which a tag could
+        # shadow) would 404.
+        r = {f'repos/freemkv/{repo}/commits/heads/{branch}': {'sha': SIB_SHA[repo]} for repo in mg.SIBLINGS}
         r['repos/freemkv/freemkv/git/ref/heads/qa'] = {'object': {'sha': qa_head}}
         return r
 
     def test_sibling_tips_on_dev(self):
         routes = self.routes()
-        revisions, superseded = mg.pin('dev', SIB_SHA['freemkv'], '', routes.__getitem__)
+        revisions, superseded = mg.pin('refs/heads/dev', SIB_SHA['freemkv'], '', routes.__getitem__)
         self.assertEqual(revisions, SIB_SHA)
         self.assertFalse(superseded)
 
     def test_superseded_on_qa(self):
-        routes = {f'repos/freemkv/{repo}/commits/qa': {'sha': SIB_SHA[repo]} for repo in mg.SIBLINGS}
-        routes['repos/freemkv/freemkv/git/ref/heads/qa'] = {'object': {'sha': 'e' * 40}}
-        self.assertTrue(mg.pin('qa', SIB_SHA['freemkv'], '', routes.__getitem__)[1])
+        routes = self.routes('qa', qa_head='e' * 40)
+        self.assertTrue(mg.pin('refs/heads/qa', SIB_SHA['freemkv'], '', routes.__getitem__)[1])
         routes['repos/freemkv/freemkv/git/ref/heads/qa'] = {'object': {'sha': SIB_SHA['freemkv']}}
-        self.assertFalse(mg.pin('qa', SIB_SHA['freemkv'], '', routes.__getitem__)[1])
+        self.assertFalse(mg.pin('refs/heads/qa', SIB_SHA['freemkv'], '', routes.__getitem__)[1])
+
+    def test_a_tag_named_qa_is_refused(self):
+        """Review 2 item 1: a dispatch on refs/tags/qa has GITHUB_REF_NAME "qa" too."""
+        routes = self.routes('qa', qa_head=SIB_SHA['freemkv'])
+        for ref in ('refs/tags/qa', 'refs/tags/dev', 'qa', 'refs/heads/main', 'refs/heads/qa/x'):
+            with self.subTest(ref=ref):
+                with self.assertRaises(ValueError):
+                    mg.pin(ref, SIB_SHA['freemkv'], '', routes.__getitem__)
 
     def test_dispatched_revisions_must_be_on_the_branch(self):
         routes = self.routes()
         for repo in mg.SIBLINGS:
-            routes[f'repos/freemkv/{repo}/compare/{SIB_SHA[repo]}...dev'] = {'status': 'ahead'}
-        self.assertEqual(mg.pin('dev', SIB_SHA['freemkv'], json.dumps(SIB_SHA), routes.__getitem__)[0], SIB_SHA)
-        routes['repos/freemkv/libfreemkv/compare/' + SIB_SHA['libfreemkv'] + '...dev'] = {'status': 'diverged'}
+            routes[f'repos/freemkv/{repo}/commits/heads/dev'] = {'sha': self.TIPS[repo]}
+            # compare between shas only: no branch/tag name for a tag to shadow.
+            routes[f'repos/freemkv/{repo}/compare/{SIB_SHA[repo]}...{self.TIPS[repo]}'] = {'status': 'ahead'}
+        self.assertEqual(mg.pin('refs/heads/dev', SIB_SHA['freemkv'], json.dumps(SIB_SHA), routes.__getitem__)[0], SIB_SHA)
+        routes[f'repos/freemkv/libfreemkv/compare/{SIB_SHA["libfreemkv"]}...{self.TIPS["libfreemkv"]}'] = {'status': 'diverged'}
         with self.assertRaises(ValueError):
-            mg.pin('dev', SIB_SHA['freemkv'], json.dumps(SIB_SHA), routes.__getitem__)
+            mg.pin('refs/heads/dev', SIB_SHA['freemkv'], json.dumps(SIB_SHA), routes.__getitem__)
         with self.assertRaises(ValueError):
-            mg.pin('dev', 'a' * 40, json.dumps(SIB_SHA), routes.__getitem__)
+            mg.pin('refs/heads/dev', 'a' * 40, json.dumps(SIB_SHA), routes.__getitem__)
         with self.assertRaises(ValueError):
-            mg.pin('feature-x', SIB_SHA['freemkv'], '', routes.__getitem__)
+            mg.pin('refs/heads/feature-x', SIB_SHA['freemkv'], '', routes.__getitem__)
 
 
 class ExternalsTests(unittest.TestCase):
@@ -364,16 +741,35 @@ class LegAndRecordTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
 
+    def existing_tag(self, tagger, f='f' * 64, run_id=RUN_ID):
+        """A fake API holding refs/tags/media-evidence/<f>/<run_id> written by `tagger`."""
+        name = f'media-evidence/{"f" * 64}/{RUN_ID}'
+        blob = lambda b: {'content': base64.b64encode(b).decode()}
+        routes = {
+            f'repos/freemkv/freemkv/git/ref/tags/{name}': {'ref': f'refs/tags/{name}', 'object': {'sha': 't9', 'type': 'tag'}},
+            'repos/freemkv/freemkv/git/tags/t9': {'tag': name, 'object': {'sha': 'c9', 'type': 'commit'},
+                                                  'tagger': dict(tagger, date='2026-09-20T01:00:00Z')},
+            'repos/freemkv/freemkv/git/commits/c9': {'parents': [], 'tree': {'sha': 'tr9'}},
+            'repos/freemkv/freemkv/git/trees/tr9': {'tree': [
+                {'path': 'evidence.json', 'type': 'blob', 'sha': 'b9', 'size': 1},
+                {'path': 'Cargo.lock', 'type': 'blob', 'sha': 'b8', 'size': 1}]},
+            'repos/freemkv/freemkv/git/blobs/b9': blob(json.dumps({'fingerprint': f, 'run_id': run_id}).encode()),
+            'repos/freemkv/freemkv/git/blobs/b8': blob(b''),
+        }
+        return routes.__getitem__
+
     def test_existing_tag_from_an_earlier_attempt_is_success(self):
         calls = []
 
         def post(endpoint, body):
-            calls.append(endpoint)
+            calls.append((endpoint, body))
             if endpoint.endswith('/refs'):
                 raise subprocess.CalledProcessError(1, 'gh', output='{"message":"Reference already exists"}')
             return {'sha': 'x'}
-        name, _ = mg.write_evidence_tag('f' * 64, RUN_ID, b'{}', b'', post=post)
+        name, commit = mg.write_evidence_tag('f' * 64, RUN_ID, b'{}', b'', post=post,
+                                             request=self.existing_tag(mg.ACTIONS_BOT))
         self.assertTrue(name.endswith(f'/{RUN_ID}'))
+        self.assertEqual(commit, 'c9', 'the standing tag\'s commit is the evidence')
 
         def post_fail(endpoint, body):
             if endpoint.endswith('/refs'):
@@ -381,6 +777,53 @@ class LegAndRecordTests(unittest.TestCase):
             return {'sha': 'x'}
         with self.assertRaises(subprocess.CalledProcessError):
             mg.write_evidence_tag('f' * 64, RUN_ID, b'{}', b'', post=post_fail)
+
+    def test_a_forged_tag_squatting_the_name_is_refused(self):
+        def post(endpoint, body):
+            if endpoint.endswith('/refs'):
+                raise subprocess.CalledProcessError(1, 'gh', output='{"message":"Reference already exists"}')
+            return {'sha': 'x'}
+        person = {'name': 'Someone', 'email': 'someone@users.noreply.github.com'}
+        for label, request in (('person', self.existing_tag(person)),
+                               ('another F', self.existing_tag(mg.ACTIONS_BOT, f='e' * 64)),
+                               ('another run', self.existing_tag(mg.ACTIONS_BOT, run_id=RUN_ID + 1))):
+            with self.subTest(label):
+                with self.assertRaises(ValueError):
+                    mg.write_evidence_tag('f' * 64, RUN_ID, b'{}', b'', post=post, request=request)
+
+    def test_the_writer_names_the_actions_bot_as_tagger(self):
+        posts = []
+
+        def post(endpoint, body):
+            posts.append((endpoint, body))
+            return {'sha': f's{len(posts)}'}
+        import datetime
+        now = datetime.datetime(2026, 9, 20, 1, 0, tzinfo=datetime.timezone.utc)
+        mg.write_evidence_tag('f' * 64, RUN_ID, b'{}', b'', post=post, now=now)
+        tag = next(b for e, b in posts if e.endswith('/tags'))
+        self.assertEqual(tag['tagger'], dict(mg.ACTIONS_BOT, date='2026-09-20T01:00:00Z'))
+
+    def test_record_refuses_a_run_off_the_qa_branch(self):
+        e, plan, legs, env, aws, post, posts, _ = self.setup_record()
+        e.run.update(head_branch='dev', event='workflow_dispatch')
+        with self.assertRaises(ValueError):
+            mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
+        self.assertEqual(posts, [])
+
+    def test_record_refuses_a_run_on_a_tag_named_qa(self):
+        """head_branch "qa" from a tag: the qa branch does not contain the commit, so nothing is written."""
+        e, plan, legs, env, aws, post, posts, _ = self.setup_record()
+        e.run.update(event='workflow_dispatch', head_branch='qa', status='in_progress', conclusion=None)
+        e.qa_compare.update(status='diverged', ahead_by=4)
+        with self.assertRaisesRegex(ValueError, 'not on the qa branch'):
+            mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
+        self.assertEqual(posts, [])
+
+    def test_record_runs_inside_its_own_unfinished_run(self):
+        e, plan, legs, env, aws, post, posts, _ = self.setup_record()
+        e.run.update(status='in_progress', conclusion=None)
+        name, _ = mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
+        self.assertTrue(name.startswith('media-evidence/'))
 
     def test_job_named_accepts_matrix_suffixes(self):
         jobs = [{'name': 'cli-matrix (linux, x86_64-unknown-linux-musl)'}, {'name': 'cli-matrix (windows)'}]
@@ -422,6 +865,7 @@ class VerdictTests(unittest.TestCase):
             (dict(ok, STATUS='waived'), False),
             (dict(ok, STATUS='superseded'), False),
             (dict(ok, STATUS='canary-failed'), False),
+            ({'PLAN_RESULT': 'failure', 'STATUS': 'canary-failed'}, False),
             ({'PLAN_RESULT': 'failure', 'STATUS': 'reuse'}, False),
             ({'PLAN_RESULT': 'success', 'STATUS': ''}, False),
         ]

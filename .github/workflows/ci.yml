@@ -56,6 +56,11 @@ permissions:
 # compiles the crate on macOS, Windows or Linux-glibc covers BOTH builds;
 # `cli-has-no-ui-deps` proves the CLI build links no UI crate on any target.
 #
+# A third build, the server (`--features server`, the rip daemon + web UI of
+# the container image), is Linux-only: `cli-linux` lints and tests it, and
+# `no-server-deps-outside-server` proves neither the CLI nor the app build
+# links a server crate.
+#
 # RELEASE-CANDIDATE-ONLY JOBS. dev is the FAST lane, so the macOS, Windows and
 # Intel jobs below (and cli-linux's release builds) run on qa and main rather
 # than on every push to dev. Nothing stops being checked before a release:
@@ -312,6 +317,10 @@ jobs:
         working-directory: freemkv
       - run: cargo test --tests --features gui
         working-directory: freemkv
+      - run: cargo clippy --all-targets --features server -- -D warnings
+        working-directory: freemkv
+      - run: cargo test --tests --features server
+        working-directory: freemkv
       - run: cargo build --release --bin freemkv
         if: github.ref_name == 'qa' || github.ref_name == 'main'
         working-directory: freemkv
@@ -350,6 +359,50 @@ jobs:
           # Guard the guard: the app build must still find them.
           [ "$(grep -E "$ui" <<<"$app" | cut -d' ' -f1 | sort -u | wc -l)" -eq 4 ] || {
             echo "::error::expected all four UI crates in the gui build's tree"
+            exit 1
+          }
+
+  # The server crates (web server, JSON log sink) belong to the server build
+  # only: the CLI and app builds must link none of them, on any target.
+  no-server-deps-outside-server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+      - uses: freemkv/.github/.github/actions/checkout-siblings@v1
+        with:
+          checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          self: freemkv
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - name: No tiny_http/tracing-serde without the server feature
+        working-directory: freemkv
+        shell: bash
+        run: |
+          set -euo pipefail
+          srv='^(tiny_http|tracing-serde) '
+          ui='^(gtk4|libadwaita|winsafe|objc2-app-kit) '
+          cli=$(cargo tree -e normal --target all --prefix none)
+          app=$(cargo tree -e normal --target all --prefix none --features gui)
+          server=$(cargo tree -e normal --target all --prefix none --features server)
+          if grep -E "$srv" <<<"$cli" | sort -u | grep .; then
+            echo "::error::the CLI build (no features) pulls in the server crates above"
+            exit 1
+          fi
+          if grep -E "$srv" <<<"$app" | sort -u | grep .; then
+            echo "::error::the app build (--features gui) pulls in the server crates above"
+            exit 1
+          fi
+          if grep -E "$ui" <<<"$server" | sort -u | grep .; then
+            echo "::error::the server build (--features server) pulls in the UI crates above"
+            exit 1
+          fi
+          # Guard the guard: the server build must still find them.
+          [ "$(grep -E "$srv" <<<"$server" | cut -d' ' -f1 | sort -u | wc -l)" -eq 2 ] || {
+            echo "::error::expected both server crates in the server build's tree"
             exit 1
           }
 

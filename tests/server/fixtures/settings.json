@@ -1,0 +1,33 @@
+{
+  "staging_dir": "/staging-local",
+  "output_dir": "/alt-output",
+  "movie_dir": "movies",
+  "tv_dir": "tv",
+  "min_length_secs": 900,
+  "main_feature": false,
+  "auto_eject": false,
+  "on_insert": "rip",
+  "output_format": "iso",
+  "network_target": "nas.example.com:9000",
+  "on_read_error": "skip",
+  "max_retries": 3,
+  "keep_iso": true,
+  "abort_on_lost_secs": 30,
+  "capture_without_keys": true,
+  "max_rip_duration_secs": 14400,
+  "min_pass_budget_secs": 1800,
+  "transport_recovery_delay_secs": 10,
+  "tmdb_api_key": "deadbeefcafef00ddeadbeefcafef00d",
+  "keydb_path": "/root/.config/freemkv/keydb.cfg",
+  "keydb_url": "https://keydb.example.org/export/keydb_eng.zip",
+  "key_source": "online",
+  "keyserver_url": "https://keys.example.org/decode",
+  "keyserver_secret": "s3cr3t-token",
+  "webhook_urls": [
+    "https://discord.com/api/webhooks/1/abc",
+    "",
+    "https://jellyfin.example.org/hook"
+  ],
+  "decrypt_threads": 4,
+  "log_retention_days": 14
+}

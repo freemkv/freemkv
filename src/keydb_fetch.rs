@@ -110,8 +110,9 @@ impl std::fmt::Display for Refusal {
 }
 
 impl Refusal {
-    // E8006's text is "uses an address type that isn't supported ({detail})", which fits a
-    // refused scheme and a refused address alike; there is no keydb-specific SSRF code.
+    // E8006 is "...isn't allowed ({detail})" (L130), which already reads as a
+    // policy refusal for a bare IP. `{detail}` must stay locale-neutral — do
+    // not inject English words here; the raw address is the whole payload.
     fn into_error(self, url: &str) -> Error {
         match self {
             Refusal::Scheme(scheme) => Error::KeydbUnsupportedScheme { scheme },
@@ -798,8 +799,9 @@ mod tests {
         assert_eq!(addrs[0].port(), 8443);
     }
 
-    // A policy refusal must not read as a dead server (E8000 "cannot connect"). Literal
-    // addresses and a bad scheme are refused before any socket or DNS lookup.
+    // A policy refusal must not read as a dead server (E8000 "cannot connect").
+    // L130: `{detail}` must stay the bare address — locale-neutral, never an
+    // English phrase spliced into every locale's E8006 text.
     #[test]
     fn a_guard_refusal_is_not_reported_as_could_not_connect() {
         let ip = format!("{}.{}.{}.{}", 192, 168, 1, 10);

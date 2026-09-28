@@ -22,10 +22,14 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features gui -- -D warnings
 cargo test
 cargo test --features gui
+cargo clippy --all-targets --features server -- -D warnings
+cargo test --features server
 ```
 
 The CLI build has no features; the desktop app is `--features gui` (on Linux it
-needs `libgtk-4-dev` and `libadwaita-1-dev`). CI checks both.
+needs `libgtk-4-dev` and `libadwaita-1-dev`). The rip server run by the
+container image (`freemkv server`, see `docker/`) is `--features server`. CI
+checks all three.
 
 Formatting is rustfmt; clippy must be clean with warnings denied. Behavioural
 changes should come with a test.

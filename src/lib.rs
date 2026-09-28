@@ -61,6 +61,12 @@ pub mod win_menu;
 // The GTK shell's toolkit-free glue, ungated for the same reason.
 pub mod linux_glue;
 
+// ── Server shell — `--features server` ONLY ─────────────────────────────────
+// The rip daemon + web UI (`freemkv server`), in the lib so the binary and the
+// integration tests under tests/server/ share one module graph.
+#[cfg(feature = "server")]
+pub mod server;
+
 // ── Win32 shell — WINDOWS ONLY ──────────────────────────────────────────────
 // Lives here so the windowed image can reach the same shell from one
 // compilation; `main.rs` builds it once per target, not per binary.

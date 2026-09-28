@@ -1,0 +1,6 @@
+# Build context filter for docker/Dockerfile (BuildKit reads
+# <Dockerfile>.dockerignore). The local .cargo/config.toml path-patches the
+# sibling crates to checkouts that do not exist inside the image.
+target/
+.cargo/
+**/.DS_Store

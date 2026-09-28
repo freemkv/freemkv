@@ -41,6 +41,11 @@ const RT_ICON: u16 = 3;
 const RT_GROUP_ICON: u16 = 14;
 
 fn main() {
+    // The server build stamps its version label; every other build is unchanged.
+    if std::env::var_os("CARGO_FEATURE_SERVER").is_some() {
+        emit_server_version();
+    }
+
     // Re-run when the manifest changes; otherwise a manifest edit would sit
     // unused behind a cached build.
     println!("cargo:rerun-if-changed=res/freemkv.manifest");
@@ -239,4 +244,49 @@ fn push_res_entry(res: &mut Vec<u8>, type_id: u16, name_id: u16, memory_flags: u
 
     res.extend_from_slice(data);
     res.resize(res.len().next_multiple_of(4), 0);
+}
+
+/// Bake the server's build label into the build as `SERVER_VERSION` +
+/// `SERVER_GIT_SUFFIX`, so the RUNNING daemon is identifiable everywhere it
+/// reports its version (UI footer, `/api/version`, startup log, `--version`) —
+/// e.g. `1.7.7 (g2014a41)`, the same shape libfreemkv stamps into every MKV.
+/// `AUTORIP_BUILD_LABEL` overrides the Cargo package version (when set
+/// non-empty) so a test build can stamp a label without bumping Cargo.toml.
+/// Empty suffix when git or the repo is unavailable; always emitted so both
+/// `env!`s resolve.
+fn emit_server_version() {
+    let version = std::env::var("AUTORIP_BUILD_LABEL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("CARGO_PKG_VERSION").ok())
+        .unwrap_or_default();
+    println!("cargo:rustc-env=SERVER_VERSION={version}");
+    println!("cargo:rerun-if-env-changed=AUTORIP_BUILD_LABEL");
+
+    let suffix = git_short_hash()
+        .map(|h| format!(" (g{h})"))
+        .unwrap_or_default();
+    println!("cargo:rustc-env=SERVER_GIT_SUFFIX={suffix}");
+
+    // Re-run when HEAD (or the branch it points at) moves so the stamp stays
+    // current without a clean rebuild.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    if let Ok(head) = std::fs::read_to_string(".git/HEAD")
+        && let Some(ref_path) = head.strip_prefix("ref: ")
+    {
+        println!("cargo:rerun-if-changed=.git/{}", ref_path.trim());
+    }
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn git_short_hash() -> Option<String> {
+    git_output(&["rev-parse", "--short=7", "HEAD"])
 }
