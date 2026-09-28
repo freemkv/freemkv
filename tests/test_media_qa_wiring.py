@@ -391,7 +391,7 @@ class LegAndRecordTests(unittest.TestCase):
     def test_record_refuses_a_leg_built_with_another_toolchain(self):
         e, plan, legs, env, aws, post, posts, _ = self.setup_record()
         rec = json.loads((legs / 'leg-linux.json').read_text())
-        rec['rustc_release'] = '1.98.1'
+        rec['rustc_release'] = '1.98.2'
         (legs / 'leg-linux.json').write_text(json.dumps(rec))
         with self.assertRaises(ValueError):
             mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)

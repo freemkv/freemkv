@@ -239,7 +239,7 @@ class ClassificationTests(unittest.TestCase):
                          ('[package]\n', '[package]\nresolver = "3"\n'),
                          ('[package]\n', '[package]\nbuild = "build2.rs"\n'),
                          ('[package]\n', '[package]\nlinks = "x"\n'),
-                         ('rust-version = "1.98.0"', 'rust-version = "1.98.1"')):
+                         ('rust-version = "1.98.1"', 'rust-version = "1.98.2"')):
             with self.subTest(new=new):
                 ws.edit('freemkv', 'Cargo.toml', old, new)
                 self.assertNotEqual(ws.f(), base)
@@ -441,7 +441,7 @@ class FingerprintTests(unittest.TestCase):
             'allocator cfg-gated': lambda: self.ws.edit('freemkv', 'src/main.rs', '#[global_allocator]',
                                                         '#[cfg(target_os = "none")]\n#[global_allocator]'),
             'nested lib doc': lambda: self.ws.write('libfreemkv', 'assets/table.md', '| x |'),
-            'rust-version': lambda: self.ws.edit('freemkv', 'Cargo.toml', '"1.98.0"', '"1.98.1"'),
+            'rust-version': lambda: self.ws.edit('freemkv', 'Cargo.toml', '"1.98.1"', '"1.98.2"'),
             'resolver': lambda: self.ws.edit('freemkv', 'Cargo.toml', '[package]\n', '[package]\nresolver = "2"\n'),
             'profile': lambda: self.ws.write('freemkv', 'Cargo.toml', real('Cargo.toml') +
                                              '\n[profile.release]\nlto = true\n'),
@@ -534,7 +534,7 @@ def leg_record(leg):
     target = mg.LEG_TARGET[leg]
     return {'runner_name': f'ephemeral-{leg}-i-0123456789abcdef0', 'instance_id': 'i-0123456789abcdef0',
             'launched_by': RUN_ID,
-            'rustc_release': '1.98.0', 'target': target, 'instance_type': 'c7i.4xlarge',
+            'rustc_release': '1.98.1', 'target': target, 'instance_type': 'c7i.4xlarge',
             'c_toolchain': 'musl-gcc: gcc 13.2.0', 'env_clean': True}
 
 
@@ -609,7 +609,7 @@ class DecideTests(unittest.TestCase):
             'lightweight tag': lambda e: e.tags.__setitem__(0, {**e.tags[0], 'object': {'sha': 't1', 'type': 'commit'}}),
             'API exception': lambda e: setattr(e, 'error', RuntimeError('HTTP 502')),
             'wrong schema': lambda e: e.ev.update(schema=3),
-            'F not recomputable': lambda e: e.ev['inputs'].update(toolchain='1.98.1'),
+            'F not recomputable': lambda e: e.ev['inputs'].update(toolchain='1.98.2'),
             'F not recomputable (files)': lambda e: e.ev['inputs']['files'][0].__setitem__(2, '0' * 64),
             'leg record from another runner': lambda e: e.ev['legs']['linux'].update(
                 runner_name='ephemeral-linux-i-0fedcba9876543210'),
@@ -629,7 +629,7 @@ class DecideTests(unittest.TestCase):
                                        e.ev['legs']['linux'].update(runner_name='freemkv-media-1')],
             'no run label': lambda e: e.job('cli-matrix (linux)').update(labels=['self-hosted', 'freemkv-media']),
             'launched-by unconfirmed': lambda e: e.ev['legs']['windows'].update(launched_by=None),
-            'rustc != TC': lambda e: e.ev['legs']['linux'].update(rustc_release='1.98.1'),
+            'rustc != TC': lambda e: e.ev['legs']['linux'].update(rustc_release='1.98.2'),
             'gnu target': lambda e: e.ev['legs']['linux'].update(target='x86_64-unknown-linux-gnu'),
             'no instance type': lambda e: e.ev['legs']['linux'].update(instance_type=''),
             'no C toolchain': lambda e: e.ev['legs']['windows'].pop('c_toolchain'),
