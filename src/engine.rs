@@ -5965,6 +5965,27 @@ mod ku_gui_tests {
         }
     }
 
+    // Stop design v5 §4.3, "The open token": "Both are threaded into the scan … and into the
+    // up-front resolution". FT15e/FT15g (a) need a live drive, so this reads the wiring.
+    #[test]
+    fn the_open_token_reaches_the_drive_scan_and_the_resolve() {
+        let src = include_str!("engine.rs").replace("\r\n", "\n");
+        let body = |name: &str| {
+            let a = src.find(name).expect(name);
+            src[a..a + src[a..].find("\n}\n").unwrap()].to_string()
+        };
+        let scan = body("\nfn drive_scan(");
+        assert!(scan.contains("fe::open_scan_with(") && scan.contains("&tok.halt,"));
+        assert!(scan.contains("&tok.progress,"), "{scan}");
+        let open = body("\npub fn scan_disc_with_keys(");
+        assert!(open.contains("drive_scan(source, keys, tok)"), "{open}");
+        assert!(
+            open.contains("crate::rip_keys::resolve_observed("),
+            "{open}"
+        );
+        assert!(open.contains("&tok.progress,"), "{open}");
+    }
+
     // §2.5: the lock is "created at op start and held for the whole op". The drive's ISO
     // and staging copy need a live drive, so this reads the wiring; the image arm runs it.
     #[test]

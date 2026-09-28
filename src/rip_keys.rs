@@ -101,6 +101,21 @@ pub fn resolve(
     fe::keys::resolve_for_rip_traced(disc, reader, scope, sources, seed, halt)
 }
 
+/// [`resolve`] for an open (stop design v5 §4.3, "The open token"): under its `halt`, and
+/// reporting to its `progress`, which each source call holds `busy()` and hands out as
+/// `ResolveCtx::progress()` (T29).
+pub fn resolve_observed(
+    disc: &Disc,
+    reader: &mut dyn SectorSource,
+    scope: KeyScope,
+    sources: &KeySourceFactory,
+    halt: &Halt,
+    progress: &libfreemkv::halt::Progress,
+) -> (libfreemkv::Result<ResolvedKeySet>, Trace) {
+    let _ = progress;
+    resolve(disc, reader, scope, sources, None, Some(halt))
+}
+
 /// How an image rip opens its source (KU §3.2 `open_image_with`).
 pub struct ImageOpen {
     /// What the rip decrypts.
@@ -223,6 +238,55 @@ pub fn render_trace(trace: &Trace) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::ku_fixtures::*;
+
+    // Resolve `answer`'s keys on a worker while polling T29's timer over `watched`; whether
+    // it ever expired, and the progress count. `observed`: the open's progress is threaded.
+    fn t29_over_resolve(answer: Answer, observed: bool) -> (bool, u64) {
+        const WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
+        let watched = libfreemkv::halt::Progress::new();
+        let p = watched.clone();
+        let (ready, built) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let fx = bd_image(&[Some(K1)], 1);
+            let f = factory(&[(answer, &[K1])], &Calls::default());
+            let (scope, halt) = (KeyScope::Titles(vec![0]), Halt::new());
+            ready.send(()).unwrap();
+            match observed {
+                true => resolve_observed(&fx.disc, &mut fx.source(), scope, &f, &halt, &p).0,
+                false => super::resolve(&fx.disc, &mut fx.source(), scope, &f, None, Some(&halt)).0,
+            }
+        });
+        built.recv().unwrap();
+        let mut t29 = libfreemkv::halt::StallTimer::idle_only(WINDOW, &watched);
+        let mut expired = false;
+        while !worker.is_finished() {
+            let stall = t29.poll(&watched);
+            expired |= matches!(stall, libfreemkv::halt::Stall::Expired);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(worker.join().unwrap().is_ok(), "the keys resolved");
+        (expired, watched.get())
+    }
+
+    // FT15f (stop design v5): "a key service trickling bytes between long gaps →
+    // `ResolveCtx::progress()` is bumped per chunk; T29 re-arms". Per spec.
+    #[test]
+    fn key_bytes_reach_the_probe_progress() {
+        let (expired, bumps) = t29_over_resolve(Answer::Trickle, true);
+        assert!(bumps >= u64::from(TRICKLE_CHUNKS), "{bumps} bumps");
+        assert!(!expired, "T29 fired while key bytes moved");
+    }
+
+    // FT15g (b): "a parse or a CSS crack inside KU's `resolve`, taking 45 s (scaled)" → "the
+    // probe survives" (`busy()` per source call); the negative control shows T29 would fire.
+    #[test]
+    fn probe_survives_cpu_phases() {
+        assert!(
+            !t29_over_resolve(Answer::Slow, true).0,
+            "T29 fired in a CPU phase"
+        );
+        assert!(t29_over_resolve(Answer::Slow, false).0, "negative control");
+    }
     use libfreemkv::error::{E_CSS_NO_DISC_KEY, E_DECRYPT_FAILED};
     use libfreemkv::keys::{KeyScope, ResolvedKeySet};
 

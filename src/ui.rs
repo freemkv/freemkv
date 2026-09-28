@@ -3692,6 +3692,27 @@ mod tests {
         assert!(matches!(app.page, Page::Titles));
     }
 
+    // One READ in recovery: `busy()` held for 3 windows with no CDB completing.
+    fn recovering_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
+        let _read = tok.progress.busy();
+        std::thread::sleep(T29 * 3);
+        match tok.halt.is_cancelled() {
+            true => Err("stopped".to_string()),
+            false => Ok(probe_scan()),
+        }
+    }
+
+    // FT15e (T29): "one READ `Stall`ed for 60 s (scaled; `busy()` held) with no other
+    // progress → the probe survives and completes". Per spec.
+    #[test]
+    fn probe_not_cancelled_during_long_recovery_read() {
+        let mut app = App::new();
+        (app.probe_scan, app.probe_window) = (recovering_probe, T29);
+        app.open_probe(PROBE_SOURCE);
+        settle(&mut app);
+        assert_eq!(app.source, PROBE_SOURCE, "the probe completed");
+    }
+
     static FROZEN_SAW_STOP: AtomicBool = AtomicBool::new(false);
     fn frozen_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
         let stopped = stopped_within(tok, std::time::Duration::from_secs(3));
