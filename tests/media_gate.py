@@ -1238,7 +1238,7 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, canary_
     if drift:
         warnings.append(f'the committed Cargo.lock is stale against C: {len(drift)} third-party entries '
                         'differ; F uses the resolved L_qa')
-    errors = run_guards(ws, policy, lock_text)
+    errors = run_guards(ws, policy, lock_text) + check_launch_markets(policy, externals.get('launch_templates') or {})
     if errors:
         raise GuardError('\n'.join(errors))
     k_names = [e[0] for e in closure(parse_lock(lock_text), policy)]
@@ -1297,6 +1297,17 @@ def pin(ref_name, sha, requested, request=gh_api):
     return revisions, superseded
 
 
+def check_launch_markets(policy, templates):
+    """Errors for every On-Demand fallback the pinned template would silently turn into Spot."""
+    errors = []
+    for os_name, cfg in policy['launch'].items():
+        pin = templates.get(cfg['template'])
+        if cfg.get('on_demand_fallback') and isinstance(pin, dict) and pin.get('market_options'):
+            errors.append(f'{cfg["template"]} v{pin.get("version")} carries InstanceMarketOptions: '
+                          f'launch.{os_name}.on_demand_fallback cannot work (run-instances cannot clear them)')
+    return errors
+
+
 def launch_templates(policy):
     """The functional templates. Perf legs launch from these too, with run-instances overrides."""
     return sorted({cfg['template'] for cfg in policy['launch'].values()})
@@ -1308,17 +1319,20 @@ def leg_labels(leg, run_id):
     return f'freemkv-media{"-perf" if perf else ""},{os_name},run-{run_id}'
 
 
-def launch_spec(policy, leg, run_id, ref_name, templates, aws=None):
+def launch_spec(policy, leg, run_id, ref_name, templates, aws=None, attempt=1):
     """Everything the launch step passes to run-instances for one leg, from the policy alone:
     - the functional template at its planned version (no separate perf templates exist);
     - perf differences as overrides: the perf instance type, no type fallback, the root volume;
-    - the market: Spot with the policy's price cap (never the template's), then On-Demand;
-    - one registration-token parameter per branch and leg, overwritten by every launch, so nothing
-      is left to delete (the runner role has no ssm:DeleteParameter and needs none)."""
+    - the market: Spot with the policy's price cap (never the template's); On-Demand only if the
+      policy asks for it AND the pinned template carries no InstanceMarketOptions, because
+      run-instances can override a template's market options but never clear them;
+    - a registration-token parameter per run, attempt and leg (the roles' existing
+      /freemkv-ci/runner-reg/* scope); the instance deletes it after reading.
+    qa only: evidence is recorded only for qa runs, so a dev launch would prove nothing."""
+    if ref_name != 'qa':
+        raise ValueError(f'the media legs launch on qa only, not {ref_name!r} (evidence is recorded for qa runs only)')
     if leg not in legs(policy):
         raise ValueError(f'leg {leg!r} is not launched under this policy ({legs(policy)})')
-    if ref_name not in ('qa', 'dev'):
-        raise ValueError(f'the media legs launch on qa and dev only, not {ref_name!r}')
     os_name, perf = leg.split('-')[0], leg.endswith('-perf')
     cfg = policy['launch'][os_name]
     template = cfg['template']
@@ -1331,11 +1345,18 @@ def launch_spec(policy, leg, run_id, ref_name, templates, aws=None):
             'MaxPrice': str(cfg['spot_max_price']), 'SpotInstanceType': 'one-time',
             'InstanceInterruptionBehavior': 'terminate'}}}]
         if cfg.get('on_demand_fallback'):
-            markets.append({'name': 'on-demand', 'options': {}})
-    mappings = None
-    if perf and policy['perf'].get('root_volume_gib'):
+            markets.append({'name': 'on-demand', 'options': None})
+    need_mappings = perf and policy['perf'].get('root_volume_gib')
+    data = {}
+    if need_mappings or any(m['name'] == 'on-demand' for m in markets):
         data = (aws or aws_json)('ec2', 'describe-launch-template-versions', '--launch-template-name', template,
                                  '--versions', version)['LaunchTemplateVersions'][0]['LaunchTemplateData']
+    if any(m['name'] == 'on-demand' for m in markets) and data.get('InstanceMarketOptions'):
+        raise ValueError(f'{template} v{version} carries InstanceMarketOptions, so an On-Demand fallback would '
+                         f'launch Spot anyway; set launch.{os_name}.on_demand_fallback false or use a template '
+                         'version without them')
+    mappings = None
+    if need_mappings:
         mappings = [dict(m, Ebs=dict(m['Ebs'])) if 'Ebs' in m else dict(m)
                     for m in data.get('BlockDeviceMappings') or []]
         root = next((m for m in mappings if 'Ebs' in m), None)
@@ -1344,7 +1365,7 @@ def launch_spec(policy, leg, run_id, ref_name, templates, aws=None):
         root['Ebs']['VolumeSize'] = int(policy['perf']['root_volume_gib'])
     return {'leg': leg, 'os': os_name, 'template': template, 'version': version, 'types': types,
             'markets': markets, 'block_device_mappings': mappings, 'labels': leg_labels(leg, run_id),
-            'job': LEG_JOB[leg], 'param': f'/freemkv-ci/runner-reg/{ref_name}-{leg}',
+            'job': LEG_JOB[leg], 'param': f'/freemkv-ci/runner-reg/{int(run_id)}-{int(attempt)}-{leg}',
             'user_data': f'.github/runner-templates/user-data-{os_name}.{"ps1" if os_name == "windows" else "sh"}'}
 
 
@@ -1375,7 +1396,8 @@ def read_externals(part, policy, bucket=None, run=subprocess.run):
                         '--versions', '$Default', run=run)['LaunchTemplateVersions'][0]
         lt = data['LaunchTemplateData']
         out[name] = {'version': data['VersionNumber'], 'image_id': lt.get('ImageId'),
-                     'instance_type': lt.get('InstanceType')}
+                     'instance_type': lt.get('InstanceType'),
+                     'market_options': bool(lt.get('InstanceMarketOptions'))}
     return out
 
 
@@ -1593,7 +1615,8 @@ def main(argv=None):
             return 0
         if args.mode == 'launch-spec':
             spec = launch_spec(policy, args.leg, int(os.environ['GITHUB_RUN_ID']), os.environ['GITHUB_REF_NAME'],
-                               json.loads(os.environ.get('TEMPLATES') or '{}'))
+                               json.loads(os.environ.get('TEMPLATES') or '{}'),
+                               attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT') or 1))
             print(json.dumps(spec, sort_keys=True))
             return 0
         if args.mode == 'record':

@@ -432,11 +432,11 @@ jobs:
             echo "labels=$(jq -r .labels <<<"$spec")"
             echo "job=$(jq -r .job <<<"$spec")"
           } >> "$GITHUB_OUTPUT"
-      # One parameter per branch and leg (/freemkv-ci/runner-reg/<ref>-<leg>),
-      # overwritten by every launch: nothing is left behind to delete. A token
-      # the instance never read dies on its own 60 minutes after it was minted,
-      # and the next launch of the leg overwrites it. The instance deletes it
-      # right after reading (its own role allows that), which shortens its life.
+      # One parameter per run, attempt and leg (/freemkv-ci/runner-reg/<run>-<attempt>-<leg>,
+      # inside the /freemkv-ci/runner-reg/* scope both roles already have), so two
+      # overlapping runs never read each other's token. The instance deletes it right
+      # after reading (its own role allows that); the launcher has no delete permission
+      # and needs none: a token nobody read expires 60 minutes after it was minted.
       - name: Mint a registration token and stash it in SSM (SecureString)
         id: reg
         env:
@@ -508,8 +508,10 @@ jobs:
             done
             return 1
           }
-          # Markets in order (Spot at the policy's cap, then On-Demand; or the
-          # template's own): only capacity exhaustion moves on to the next one.
+          # Markets in order (Spot at the policy's cap, then On-Demand if the policy
+          # allows it; or the template's own): only capacity exhaustion moves on.
+          # On-Demand passes no market options at all (launch-spec refuses a template
+          # whose own market options would turn it back into Spot).
           rc=1
           while read -r market; do
             name=$(jq -r .name <<<"$market")

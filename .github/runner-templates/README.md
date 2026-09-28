@@ -103,16 +103,17 @@ template or IAM change is ever needed for it:
   user-data registers as `ephemeral-<os>-perf-<instance-id>`.
 - **The Spot price cap** is `launch.<os>.spot_max_price`, passed as
   `--instance-market-options` on every Spot attempt, so it no longer depends
-  on (and overrides) whatever the template says.
-- **The registration token** goes to one SecureString per branch and leg,
-  `/freemkv-ci/runner-reg/<ref>-<leg>`, `--overwrite` on every launch. The
-  launcher never deletes it (its role has no `ssm:DeleteParameter`): a token
-  the instance never read expires 60 minutes after it was minted and the next
-  launch of that leg overwrites it, so the set of parameters is fixed and
-  nothing piles up. The instance still deletes it right after reading, which
-  its own role already allows. Two launches of the same leg on the same
-  branch within one boot could hand the second instance an already-deleted
-  parameter; on qa the superseded check lets only the tip candidate launch,
-  and if it ever happens the leg misses its pickup deadline and the run
-  cancels itself (a red, re-runnable run, never a stray runner).
-  `ci-runner-launch.yml` keeps its own per-run names.
+  on (and overrides) whatever the template says. An On-Demand fallback passes
+  no market options at all; run-instances cannot clear a template's own, so
+  `launch-spec` (and the plan, from the pinned template) refuses an
+  `on_demand_fallback` over a template version that has InstanceMarketOptions.
+  The Linux template has them today, so Linux is Spot-only.
+- **The registration token** goes to one SecureString per run, attempt and
+  leg, `/freemkv-ci/runner-reg/<run_id>-<attempt>-<leg>`, inside the
+  `/freemkv-ci/runner-reg/*` scope both roles already grant, so overlapping
+  runs never share one. The instance deletes it right after reading (its role
+  allows that); the launcher never deletes it (its role has no
+  `ssm:DeleteParameter`). A token the instance never read expires 60 minutes
+  after it was minted and leaves one inert parameter behind.
+- **Only qa launches.** Evidence is recorded for qa runs only, so
+  `launch-spec` refuses any other branch.

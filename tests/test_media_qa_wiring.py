@@ -230,12 +230,12 @@ class LaunchWiringTests(unittest.TestCase):
         self.assertNotRegex(run, r'c[67]i\.4xlarge', 'instance types come from the policy')
         self.assertNotRegex(self.text, r'freemkv-runner-[a-z]+-perf', 'no separate perf launch templates')
 
-    def test_no_per_run_token_parameter_and_no_delete(self):
+    def test_token_parameter_comes_from_the_spec_and_is_not_deleted_by_the_launcher(self):
         self.assertNotIn('delete-parameter', '\n'.join(json.dumps(s) for s in self.launch['steps']))
         mint = self.step('Mint a registration token and stash it in SSM (SecureString)')
-        self.assertIn('--overwrite', mint['run'])
         self.assertIn('steps.spec.outputs.param', mint['env']['PARAM'])
-        self.assertNotIn('RUN_ID', mint['run'])
+        linux = (ROOT / '.github/runner-templates/user-data-linux.sh').read_text()
+        self.assertIn('aws ssm delete-parameter', linux, 'the instance deletes the token after reading it')
 
     def test_teardown_matches_the_legs_labels(self):
         teardown = self.step('Tear down')
@@ -265,10 +265,11 @@ class LaunchSpecTests(unittest.TestCase):
         self.assertEqual(mg.launch_templates(POLICY), ['freemkv-runner-linux', 'freemkv-runner-windows'])
         self.assertEqual(mg.launch_templates(self.perf_policy()), mg.launch_templates(POLICY))
 
-    def test_linux_spot_carries_the_policy_cap_then_on_demand(self):
+    def test_linux_spot_carries_the_policy_cap(self):
         spec = mg.launch_spec(POLICY, 'linux', RUN_ID, 'qa', self.TEMPLATES, aws=None)
         self.assertEqual((spec['template'], spec['version']), ('freemkv-runner-linux', '7'))
-        self.assertEqual([m['name'] for m in spec['markets']], ['spot', 'on-demand'])
+        self.assertEqual([m['name'] for m in spec['markets']], ['spot'],
+                         'the live Linux template carries Spot market options, so no On-Demand fallback')
         spot = spec['markets'][0]['options']
         self.assertEqual(spot['MarketType'], 'spot')
         self.assertEqual(spot['SpotOptions']['MaxPrice'], POLICY['launch']['linux']['spot_max_price'])
@@ -276,6 +277,47 @@ class LaunchSpecTests(unittest.TestCase):
         self.assertIsNone(spec['block_device_mappings'])
         self.assertEqual(spec['labels'], f'freemkv-media,linux,run-{RUN_ID}')
         self.assertEqual(spec['job'], 'cli-matrix (linux)')
+
+    def on_demand_policy(self):
+        import copy
+        policy = copy.deepcopy(POLICY)
+        policy['launch']['linux']['on_demand_fallback'] = True
+        return policy
+
+    def template_aws(self, market):
+        def aws(*args):
+            data = {'BlockDeviceMappings': []}
+            if market:
+                data['InstanceMarketOptions'] = {'MarketType': 'spot', 'SpotOptions': {'MaxPrice': '0.72'}}
+            return {'LaunchTemplateVersions': [{'LaunchTemplateData': data}]}
+        return aws
+
+    def test_on_demand_passes_no_market_options(self):
+        """Review FB4: '{}' did not clear the template's Spot options; On-Demand passes none."""
+        spec = mg.launch_spec(self.on_demand_policy(), 'linux', RUN_ID, 'qa', self.TEMPLATES,
+                              aws=self.template_aws(False))
+        self.assertEqual(spec['markets'][1], {'name': 'on-demand', 'options': None})
+
+    def test_on_demand_refuses_a_template_with_market_options(self):
+        with self.assertRaisesRegex(ValueError, 'InstanceMarketOptions'):
+            mg.launch_spec(self.on_demand_policy(), 'linux', RUN_ID, 'qa', self.TEMPLATES,
+                           aws=self.template_aws(True))
+        templates = {'freemkv-runner-linux': {'version': 1, 'market_options': True},
+                     'freemkv-runner-windows': {'version': 3, 'market_options': False}}
+        self.assertEqual(len(mg.check_launch_markets(self.on_demand_policy(), templates)), 1)
+        self.assertEqual(mg.check_launch_markets(POLICY, templates), [], 'Spot-only overrides the template')
+
+    def test_externals_record_the_template_market(self):
+        def run(cmd, **kw):
+            name = cmd[cmd.index('--launch-template-name') + 1]
+            data = {'ImageId': 'ami-1', 'InstanceType': 'c7i.4xlarge'}
+            if name.endswith('linux'):
+                data['InstanceMarketOptions'] = {'MarketType': 'spot'}
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(
+                {'LaunchTemplateVersions': [{'VersionNumber': 1, 'LaunchTemplateData': data}]}), stderr='')
+        pins = mg.read_externals('launch_templates', POLICY, run=run)
+        self.assertEqual({k: v['market_options'] for k, v in pins.items()},
+                         {'freemkv-runner-linux': True, 'freemkv-runner-windows': False})
 
     def test_windows_uses_its_template_market_and_type(self):
         spec = mg.launch_spec(POLICY, 'windows', RUN_ID, 'qa', self.TEMPLATES)
@@ -306,16 +348,22 @@ class LaunchSpecTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mg.launch_spec(POLICY, 'linux-perf', RUN_ID, 'qa', self.TEMPLATES)
 
-    def test_one_overwritten_parameter_per_branch_and_leg(self):
+    def test_one_parameter_per_run_attempt_and_leg(self):
+        """Review FB5: overlapping runs never share a token parameter."""
         a = mg.launch_spec(POLICY, 'linux', RUN_ID, 'qa', self.TEMPLATES)['param']
-        b = mg.launch_spec(POLICY, 'linux', RUN_ID + 1, 'qa', self.TEMPLATES)['param']
-        self.assertEqual(a, b, 'the name must not grow with every run: nothing ever deletes it')
-        self.assertEqual(a, '/freemkv-ci/runner-reg/qa-linux')
+        self.assertEqual(a, f'/freemkv-ci/runner-reg/{RUN_ID}-1-linux')
+        self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID + 1, 'qa', self.TEMPLATES)['param'])
+        self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID, 'qa', self.TEMPLATES, attempt=2)['param'])
         self.assertNotEqual(a, mg.launch_spec(POLICY, 'windows', RUN_ID, 'qa', self.TEMPLATES)['param'])
-        self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID, 'dev', self.TEMPLATES)['param'])
-        self.assertTrue(a.startswith('/freemkv-ci/runner-reg/'), 'inside the scope the roles already grant')
-        with self.assertRaises(ValueError):
-            mg.launch_spec(POLICY, 'linux', RUN_ID, 'feature/x', self.TEMPLATES)
+        # Both roles grant exactly arn:...:parameter/freemkv-ci/runner-reg/* (checked 2026-09-27).
+        self.assertRegex(a, r'^/freemkv-ci/runner-reg/[0-9]+-[0-9]+-[a-z-]+$')
+
+    def test_dev_and_other_branches_launch_nothing(self):
+        """Review FB6: only qa runs record evidence, so only qa launches."""
+        for ref in ('dev', 'main', 'feature/x'):
+            with self.subTest(ref=ref):
+                with self.assertRaises(ValueError):
+                    mg.launch_spec(POLICY, 'linux', RUN_ID, ref, self.TEMPLATES)
 
     def test_unpinned_templates_launch_the_default_version(self):
         spec = mg.launch_spec(POLICY, 'linux', RUN_ID, 'qa', {'freemkv-runner-linux': {'error': 'AccessDenied'}})
@@ -326,11 +374,13 @@ class LaunchSpecTests(unittest.TestCase):
         import contextlib
         import os
         out = io.StringIO()
-        env = {'GITHUB_RUN_ID': str(RUN_ID), 'GITHUB_REF_NAME': 'qa', 'TEMPLATES': json.dumps(self.TEMPLATES)}
+        env = {'GITHUB_RUN_ID': str(RUN_ID), 'GITHUB_REF_NAME': 'qa', 'GITHUB_RUN_ATTEMPT': '2',
+               'TEMPLATES': json.dumps(self.TEMPLATES)}
         with unittest.mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out):
             self.assertEqual(mg.main(['launch-spec', '--leg', 'linux']), 0)
         self.assertEqual(len(out.getvalue().strip().splitlines()), 1)
         self.assertEqual(json.loads(out.getvalue())['version'], '7')
+        self.assertEqual(json.loads(out.getvalue())['param'], f'/freemkv-ci/runner-reg/{RUN_ID}-2-linux')
 
     def test_record_expects_the_perf_label_on_perf_legs(self):
         self.assertEqual(mg.leg_labels('linux-perf', 5), 'freemkv-media-perf,linux,run-5')
