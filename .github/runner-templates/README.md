@@ -102,12 +102,20 @@ template or IAM change is ever needed for it:
   template version), and the `freemkv-media-perf` label, with which the
   user-data registers as `ephemeral-<os>-perf-<instance-id>`.
 - **The Spot price cap** is `launch.<os>.spot_max_price`, passed as
-  `--instance-market-options` on every Spot attempt, so it no longer depends
-  on (and overrides) whatever the template says. An On-Demand fallback passes
-  no market options at all; run-instances cannot clear a template's own, so
-  `launch-spec` (and the plan, from the pinned template) refuses an
-  `on_demand_fallback` over a template version that has InstanceMarketOptions.
-  The Linux template has them today, so Linux is Spot-only.
+  `--instance-market-options` on every Spot attempt through the template, so
+  it no longer depends on (and overrides) whatever the template says.
+- **On-Demand runs without the template.** run-instances can override a
+  template's InstanceMarketOptions but never clear them, so the Linux
+  On-Demand fallback does not use the template. `launch-spec` reads the pinned
+  template version and passes its ImageId, InstanceType, IamInstanceProfile,
+  SecurityGroupIds, BlockDeviceMappings, MetadataOptions (InstanceMetadataTags
+  must be enabled) and InstanceInitiatedShutdownBehavior (must be terminate)
+  via `--cli-input-json`, plus its instance tags, with no market options. A
+  template field it does not reproduce fails the launch instead of being
+  dropped silently. The runner role already allows this: RunInstances on the
+  instance needs only the `freemkv-ci=runner` request tag, the other resources
+  are allowed outright, and PassRole covers `freemkv-ec2-ssm` (checked with
+  `iam simulate-principal-policy`, 2026-09-27).
 - **The registration token** goes to one SecureString per run, attempt and
   leg, `/freemkv-ci/runner-reg/<run_id>-<attempt>-<leg>`, inside the
   `/freemkv-ci/runner-reg/*` scope both roles already grant, so overlapping

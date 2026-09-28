@@ -34,7 +34,7 @@
   "harness": {"repository": "freemkv/freemkv-ci", "sha": "7ff716072c7063aaf4f1a7dd7200f532dab77794"},
   "launch": {
     "linux": {"template": "freemkv-runner-linux", "types": ["c7i.4xlarge", "c6i.4xlarge", "m7i.4xlarge"],
-              "spot_max_price": "0.72", "on_demand_fallback": false},
+              "spot_max_price": "0.72", "on_demand_fallback": true},
     "windows": {"template": "freemkv-runner-windows", "types": []}
   },
   "fixtures": ["dvd.iso", "bd.iso", "uhd.iso", "hddvd.iso", "keydb.cfg"],

@@ -473,21 +473,33 @@ jobs:
           # The functional Linux leg falls back across types (the actual type is recorded
           # by the leg); a perf leg has exactly one type; an empty list is the template's.
           types=$(jq -r '.types | if length == 0 then "template" else join(" ") end' <<<"$SPEC")
+          # On-Demand runs WITHOUT the template (run-instances cannot clear a template's Spot
+          # market options): launch-spec copies the pinned version's image, instance profile,
+          # security groups, volumes, metadata options and shutdown behaviour into $od, plus
+          # its own instance tags (Name) next to ours. aws ec2 run-instances help, --cli-input-json:
+          # "If other arguments are provided on the command line, those values will override
+          # the JSON-provided values." (so --instance-type picks the attempt's type).
+          od=$(jq -c '.on_demand.input // empty' <<<"$SPEC")
+          od_tags=$(jq -c --argjson t "$tags" '[{ResourceType: "instance", Tags: ($t[0].Tags + (.on_demand.tags // []))}]' <<<"$SPEC")
           try_launch() {
-            local market="$1" options="$2"
+            local market="$1" options="$2" via_template="$3"
             local t s id
             for t in $types; do
               for s in $subnets; do
-                echo "attempt: type=$t subnet=$s market=$market"
+                echo "attempt: type=$t subnet=$s market=$market template=$via_template"
                 extra=()
                 [ "$t" = template ] || extra+=(--instance-type "$t")
-                [ "$options" = null ] || extra+=(--instance-market-options "$options")
-                [ "$bdm" = null ] || extra+=(--block-device-mappings "$bdm")
+                if [ "$via_template" = true ]; then
+                  extra+=(--launch-template "LaunchTemplateName=$lt,Version=$version" --tag-specifications "$tags")
+                  [ "$options" = null ] || extra+=(--instance-market-options "$options")
+                  [ "$bdm" = null ] || extra+=(--block-device-mappings "$bdm")
+                else
+                  [ -n "$od" ] || { echo "no On-Demand input in the spec" > launch.err; return 2; }
+                  extra+=(--cli-input-json "$od" --tag-specifications "$od_tags")
+                fi
                 if id=$(aws ec2 run-instances \
-                          --launch-template "LaunchTemplateName=$lt,Version=$version" \
                           --subnet-id "$s" "${extra[@]}" \
                           --user-data "file://$userdata" \
-                          --tag-specifications "$tags" \
                           --query 'Instances[0].InstanceId' --output text 2>launch.err); then
                   echo "instance=$id" >> "$GITHUB_OUTPUT"
                   echo "launched $id ($LEG, type=$t subnet=$s market=$market, template $lt v$version)"
@@ -509,15 +521,14 @@ jobs:
             done
             return 1
           }
-          # Markets in order (Spot at the policy's cap, then On-Demand if the policy
-          # allows it; or the template's own): only capacity exhaustion moves on.
-          # On-Demand passes no market options at all (launch-spec refuses a template
-          # whose own market options would turn it back into Spot).
+          # Markets in order (Spot at the policy's cap through the template, then
+          # On-Demand without it; or the template's own): only capacity exhaustion moves on.
           rc=1
           while read -r market; do
             name=$(jq -r .name <<<"$market")
             options=$(jq -c .options <<<"$market")
-            rc=0; try_launch "$name" "$options" || rc=$?
+            via_template=$(jq -r .template <<<"$market")
+            rc=0; try_launch "$name" "$options" "$via_template" || rc=$?
             [ "$rc" = 1 ] || break
             echo "every $name attempt hit capacity"
           done < <(jq -c '.markets[]' <<<"$SPEC")

@@ -250,9 +250,26 @@ class LaunchWiringTests(unittest.TestCase):
         self.assertEqual(self.step('Watch the leg')['env']['JOB'], '${{ steps.spec.outputs.job }}')
 
 
+# freemkv-runner-linux $Default (v1) as describe-launch-template-versions returned it on 2026-09-27
+# (read-only), UserData elided.
+LINUX_TEMPLATE = {
+    'IamInstanceProfile': {'Name': 'freemkv-ec2-ssm'},
+    'BlockDeviceMappings': [{'DeviceName': '/dev/sda1', 'Ebs': {
+        'DeleteOnTermination': True, 'Iops': 6000, 'VolumeSize': 300, 'VolumeType': 'gp3', 'Throughput': 500}}],
+    'ImageId': 'ami-0ac74609c6396bed3', 'InstanceType': 'c7i.4xlarge', 'InstanceInitiatedShutdownBehavior': 'terminate',
+    'TagSpecifications': [{'ResourceType': 'instance', 'Tags': [
+        {'Key': 'Name', 'Value': 'freemkv-runner-linux'}, {'Key': 'freemkv-ci', 'Value': 'runner'}]}],
+    'SecurityGroupIds': ['sg-0291858e34b63ce10'],
+    'InstanceMarketOptions': {'MarketType': 'spot', 'SpotOptions': {'MaxPrice': '0.72', 'SpotInstanceType': 'one-time'}},
+    'MetadataOptions': {'HttpTokens': 'required', 'HttpPutResponseHopLimit': 2, 'InstanceMetadataTags': 'enabled'},
+    'UserData': 'IyEvYmluL2Jhc2g=',
+}
+
+
 class LaunchSpecTests(unittest.TestCase):
     TEMPLATES = {'freemkv-runner-linux': {'version': 7, 'image_id': 'ami-l', 'instance_type': 'c7i.4xlarge'},
                  'freemkv-runner-windows': {'version': 5, 'image_id': 'ami-w', 'instance_type': 'm7i.4xlarge'}}
+    QA = 'refs/heads/qa'
 
     def perf_policy(self):
         import copy
@@ -260,23 +277,25 @@ class LaunchSpecTests(unittest.TestCase):
         policy['perf']['enabled'] = True
         return policy
 
-    def fake_aws(self, calls):
+    def fake_aws(self, calls, data=None):
         def aws(*args):
             calls.append(args)
-            return {'LaunchTemplateVersions': [{'LaunchTemplateData': {'BlockDeviceMappings': [
-                {'DeviceName': '/dev/sda1', 'Ebs': {'VolumeSize': 600, 'VolumeType': 'gp3', 'Iops': 6000,
-                                                   'Throughput': 500, 'DeleteOnTermination': True}}]}}]}
+            return {'LaunchTemplateVersions': [{'LaunchTemplateData': json.loads(json.dumps(data or LINUX_TEMPLATE))}]}
         return aws
+
+    def spec(self, leg='linux', policy=POLICY, data=None, **kw):
+        calls = []
+        return mg.launch_spec(policy, leg, RUN_ID, kw.pop('ref', self.QA), self.TEMPLATES,
+                              aws=self.fake_aws(calls, data), **kw), calls
 
     def test_only_the_functional_templates_are_pinned(self):
         self.assertEqual(mg.launch_templates(POLICY), ['freemkv-runner-linux', 'freemkv-runner-windows'])
         self.assertEqual(mg.launch_templates(self.perf_policy()), mg.launch_templates(POLICY))
 
-    def test_linux_spot_carries_the_policy_cap(self):
-        spec = mg.launch_spec(POLICY, 'linux', RUN_ID, 'refs/heads/qa', self.TEMPLATES, aws=None)
+    def test_linux_spot_through_the_template_with_the_policy_cap(self):
+        spec, calls = self.spec()
         self.assertEqual((spec['template'], spec['version']), ('freemkv-runner-linux', '7'))
-        self.assertEqual([m['name'] for m in spec['markets']], ['spot'],
-                         'the live Linux template carries Spot market options, so no On-Demand fallback')
+        self.assertEqual([(m['name'], m['template']) for m in spec['markets']], [('spot', True), ('on-demand', False)])
         spot = spec['markets'][0]['options']
         self.assertEqual(spot['MarketType'], 'spot')
         self.assertEqual(spot['SpotOptions']['MaxPrice'], POLICY['launch']['linux']['spot_max_price'])
@@ -284,62 +303,75 @@ class LaunchSpecTests(unittest.TestCase):
         self.assertIsNone(spec['block_device_mappings'])
         self.assertEqual(spec['labels'], f'freemkv-media,linux,run-{RUN_ID}')
         self.assertEqual(spec['job'], 'cli-matrix (linux)')
+        self.assertEqual(calls, [('ec2', 'describe-launch-template-versions', '--launch-template-name',
+                                  'freemkv-runner-linux', '--versions', '7')], 'the PINNED version is read')
 
-    def on_demand_policy(self):
-        import copy
-        policy = copy.deepcopy(POLICY)
-        policy['launch']['linux']['on_demand_fallback'] = True
-        return policy
+    def test_on_demand_without_the_template(self):
+        """Review 2 item 3: the template's Spot options cannot be cleared, so On-Demand does not use it."""
+        od = self.spec()[0]['on_demand']
+        inp = od['input']
+        self.assertEqual(inp, {
+            'ImageId': 'ami-0ac74609c6396bed3', 'InstanceType': 'c7i.4xlarge',
+            'IamInstanceProfile': {'Name': 'freemkv-ec2-ssm'}, 'SecurityGroupIds': ['sg-0291858e34b63ce10'],
+            'MetadataOptions': {'HttpTokens': 'required', 'HttpPutResponseHopLimit': 2, 'InstanceMetadataTags': 'enabled'},
+            'InstanceInitiatedShutdownBehavior': 'terminate', 'BlockDeviceMappings': LINUX_TEMPLATE['BlockDeviceMappings']})
+        for absent in ('InstanceMarketOptions', 'UserData', 'LaunchTemplate', 'TagSpecifications'):
+            self.assertNotIn(absent, inp)
+        self.assertEqual(od['tags'], [{'Key': 'Name', 'Value': 'freemkv-runner-linux'}],
+                         'the template\'s own tags ride along; the launcher sets freemkv-ci itself')
 
-    def template_aws(self, market):
-        def aws(*args):
-            data = {'BlockDeviceMappings': []}
-            if market:
-                data['InstanceMarketOptions'] = {'MarketType': 'spot', 'SpotOptions': {'MaxPrice': '0.72'}}
-            return {'LaunchTemplateVersions': [{'LaunchTemplateData': data}]}
-        return aws
+    def test_on_demand_refuses_what_it_cannot_reproduce(self):
+        cases = {
+            'unknown field': lambda d: d.update(KeyName='ops'),
+            'network interfaces': lambda d: d.update(NetworkInterfaces=[{'DeviceIndex': 0}]),
+            'no image': lambda d: d.pop('ImageId'),
+            'no instance profile': lambda d: d.pop('IamInstanceProfile'),
+            'no security groups': lambda d: d.pop('SecurityGroupIds'),
+            'no volumes': lambda d: d.pop('BlockDeviceMappings'),
+            'metadata tags off': lambda d: d['MetadataOptions'].update(InstanceMetadataTags='disabled'),
+            'no metadata options': lambda d: d.pop('MetadataOptions'),
+            'shutdown stops': lambda d: d.update(InstanceInitiatedShutdownBehavior='stop'),
+        }
+        for name, change in cases.items():
+            with self.subTest(name=name):
+                data = json.loads(json.dumps(LINUX_TEMPLATE))
+                change(data)
+                with self.assertRaises(ValueError):
+                    self.spec(data=data)
 
-    def test_on_demand_passes_no_market_options(self):
-        """Review FB4: '{}' did not clear the template's Spot options; On-Demand passes none."""
-        spec = mg.launch_spec(self.on_demand_policy(), 'linux', RUN_ID, 'refs/heads/qa', self.TEMPLATES,
-                              aws=self.template_aws(False))
-        self.assertEqual(spec['markets'][1], {'name': 'on-demand', 'options': None})
-
-    def test_on_demand_refuses_a_template_with_market_options(self):
-        with self.assertRaisesRegex(ValueError, 'InstanceMarketOptions'):
-            mg.launch_spec(self.on_demand_policy(), 'linux', RUN_ID, 'refs/heads/qa', self.TEMPLATES,
-                           aws=self.template_aws(True))
-        templates = {'freemkv-runner-linux': {'version': 1, 'market_options': True},
-                     'freemkv-runner-windows': {'version': 3, 'market_options': False}}
-        self.assertEqual(len(mg.check_launch_markets(self.on_demand_policy(), templates)), 1)
-        self.assertEqual(mg.check_launch_markets(POLICY, templates), [], 'Spot-only overrides the template')
-
-    def test_externals_record_the_template_market(self):
-        def run(cmd, **kw):
-            name = cmd[cmd.index('--launch-template-name') + 1]
-            data = {'ImageId': 'ami-1', 'InstanceType': 'c7i.4xlarge'}
-            if name.endswith('linux'):
-                data['InstanceMarketOptions'] = {'MarketType': 'spot'}
-            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(
-                {'LaunchTemplateVersions': [{'VersionNumber': 1, 'LaunchTemplateData': data}]}), stderr='')
-        pins = mg.read_externals('launch_templates', POLICY, run=run)
-        self.assertEqual({k: v['market_options'] for k, v in pins.items()},
-                         {'freemkv-runner-linux': True, 'freemkv-runner-windows': False})
+    def test_perf_on_demand_carries_the_perf_volume(self):
+        spec, _ = self.spec('linux-perf', self.perf_policy())
+        self.assertEqual(spec['on_demand']['input']['BlockDeviceMappings'], spec['block_device_mappings'])
+        self.assertEqual(spec['on_demand']['input']['BlockDeviceMappings'][0]['Ebs']['VolumeSize'],
+                         POLICY['perf']['root_volume_gib'])
+        self.assertEqual(LINUX_TEMPLATE['BlockDeviceMappings'][0]['Ebs']['VolumeSize'], 300, 'template data untouched')
 
     def test_windows_uses_its_template_market_and_type(self):
-        spec = mg.launch_spec(POLICY, 'windows', RUN_ID, 'refs/heads/qa', self.TEMPLATES)
-        self.assertEqual(spec['markets'], [{'name': 'template', 'options': None}])
+        spec, calls = self.spec('windows')
+        self.assertEqual(spec['markets'], [{'name': 'template', 'options': None, 'template': True}])
         self.assertEqual(spec['types'], [])
+        self.assertIsNone(spec['on_demand'])
+        self.assertEqual(calls, [], 'no template read is needed')
         self.assertTrue(spec['user_data'].endswith('user-data-windows.ps1'))
+
+    def test_spot_only_when_the_policy_says_so(self):
+        import copy
+        policy = copy.deepcopy(POLICY)
+        policy['launch']['linux']['on_demand_fallback'] = False
+        spec, calls = self.spec(policy=policy)
+        self.assertEqual([m['name'] for m in spec['markets']], ['spot'])
+        self.assertIsNone(spec['on_demand'])
+        self.assertEqual(calls, [])
 
     def test_perf_legs_override_the_functional_template(self):
         policy = self.perf_policy()
         self.assertEqual(mg.legs(policy), ['linux', 'windows', 'linux-perf', 'windows-perf'])
-        for leg, template, version in (('linux-perf', 'freemkv-runner-linux', '7'),
-                                       ('windows-perf', 'freemkv-runner-windows', '5')):
+        windows = dict(LINUX_TEMPLATE, TagSpecifications=[])
+        windows.pop('InstanceMarketOptions')
+        for leg, template, version, data in (('linux-perf', 'freemkv-runner-linux', '7', LINUX_TEMPLATE),
+                                             ('windows-perf', 'freemkv-runner-windows', '5', windows)):
             with self.subTest(leg=leg):
-                calls = []
-                spec = mg.launch_spec(policy, leg, RUN_ID, 'refs/heads/qa', self.TEMPLATES, aws=self.fake_aws(calls))
+                spec, calls = self.spec(leg, policy, data=data)
                 self.assertEqual((spec['template'], spec['version']), (template, version))
                 self.assertEqual(spec['types'], [policy['perf']['instance_type']], 'one type, no fallback')
                 self.assertEqual(spec['labels'], f'freemkv-media-perf,{leg.split("-")[0]},run-{RUN_ID}')
@@ -353,37 +385,42 @@ class LaunchSpecTests(unittest.TestCase):
 
     def test_perf_legs_only_when_enabled(self):
         with self.assertRaises(ValueError):
-            mg.launch_spec(POLICY, 'linux-perf', RUN_ID, 'refs/heads/qa', self.TEMPLATES)
+            self.spec('linux-perf')
 
     def test_one_parameter_per_run_attempt_and_leg(self):
         """Review FB5: overlapping runs never share a token parameter."""
-        a = mg.launch_spec(POLICY, 'linux', RUN_ID, 'refs/heads/qa', self.TEMPLATES)['param']
+        a = self.spec()[0]['param']
         self.assertEqual(a, f'/freemkv-ci/runner-reg/{RUN_ID}-1-linux')
-        self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID + 1, 'refs/heads/qa', self.TEMPLATES)['param'])
-        self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID, 'refs/heads/qa', self.TEMPLATES, attempt=2)['param'])
-        self.assertNotEqual(a, mg.launch_spec(POLICY, 'windows', RUN_ID, 'refs/heads/qa', self.TEMPLATES)['param'])
+        self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID + 1, self.QA, self.TEMPLATES,
+                                              aws=self.fake_aws([]))['param'])
+        self.assertNotEqual(a, self.spec(attempt=2)[0]['param'])
+        self.assertNotEqual(a, self.spec('windows')[0]['param'])
         # Both roles grant exactly arn:...:parameter/freemkv-ci/runner-reg/* (checked 2026-09-27).
         self.assertRegex(a, r'^/freemkv-ci/runner-reg/[0-9]+-[0-9]+-[a-z-]+$')
 
-    def test_dev_and_other_branches_launch_nothing(self):
-        """Review FB6: only qa runs record evidence, so only qa launches."""
+    def test_only_the_qa_branch_launches(self):
+        """Review FB6 and review 2 item 1: only qa-branch runs record evidence; a tag named qa is not qa."""
         for ref in ('refs/heads/dev', 'refs/heads/main', 'refs/tags/qa', 'qa', 'refs/heads/qa2'):
             with self.subTest(ref=ref):
                 with self.assertRaises(ValueError):
-                    mg.launch_spec(POLICY, 'linux', RUN_ID, ref, self.TEMPLATES)
+                    self.spec(ref=ref)
 
     def test_unpinned_templates_launch_the_default_version(self):
-        spec = mg.launch_spec(POLICY, 'linux', RUN_ID, 'refs/heads/qa', {'freemkv-runner-linux': {'error': 'AccessDenied'}})
+        calls = []
+        spec = mg.launch_spec(POLICY, 'linux', RUN_ID, self.QA, {'freemkv-runner-linux': {'error': 'AccessDenied'}},
+                              aws=self.fake_aws(calls))
         self.assertEqual(spec['version'], '$Default')
+        self.assertEqual(calls[0][-1], '$Default')
 
     def test_cli_prints_one_json_line(self):
         import io
         import contextlib
         import os
         out = io.StringIO()
-        env = {'GITHUB_RUN_ID': str(RUN_ID), 'GITHUB_REF': 'refs/heads/qa', 'GITHUB_RUN_ATTEMPT': '2',
+        env = {'GITHUB_RUN_ID': str(RUN_ID), 'GITHUB_REF': self.QA, 'GITHUB_RUN_ATTEMPT': '2',
                'TEMPLATES': json.dumps(self.TEMPLATES)}
-        with unittest.mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out):
+        with unittest.mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out), \
+                unittest.mock.patch.object(mg, 'aws_json', self.fake_aws([])):
             self.assertEqual(mg.main(['launch-spec', '--leg', 'linux']), 0)
         self.assertEqual(len(out.getvalue().strip().splitlines()), 1)
         self.assertEqual(json.loads(out.getvalue())['version'], '7')
@@ -393,6 +430,84 @@ class LaunchSpecTests(unittest.TestCase):
         self.assertEqual(mg.leg_labels('linux-perf', 5), 'freemkv-media-perf,linux,run-5')
         self.assertEqual(mg.leg_labels('windows', 5), 'freemkv-media,windows,run-5')
         self.assertRegex('ephemeral-linux-perf-i-0123456789abcdef0', POLICY['runner_name_re'])
+
+
+@unittest.skipUnless(shutil.which('bash') and shutil.which('jq'), 'bash and jq')
+class LaunchStepTests(unittest.TestCase):
+    """Runs qa.yml's actual 'Launch the ephemeral runner' script against a fake `aws` that logs its
+    arguments, so the run-instances command lines themselves are checked."""
+
+    FAKE_AWS = r"""#!/bin/bash
+printf '%s\0' "$@" >> "$AWS_LOG"; printf '\n' >> "$AWS_LOG"
+case "$2" in
+  describe-vpcs) echo vpc-1 ;;
+  describe-subnets) echo subnet-a ;;
+  run-instances)
+    for a in "$@"; do
+      if [ "$a" = --launch-template ] && [ -n "${SPOT_FULL:-}" ]; then
+        echo "An error occurred (InsufficientInstanceCapacity) when calling the RunInstances operation" >&2; exit 254
+      fi
+    done
+    echo i-0123456789abcdef0 ;;
+esac
+"""
+
+    def run_step(self, spec, spot_full):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        (d / 'bin').mkdir()
+        (d / 'bin' / 'aws').write_text(self.FAKE_AWS)
+        (d / 'bin' / 'aws').chmod(0o755)
+        (d / 'freemkv').symlink_to(ROOT)
+        script = next(s for s in load()['jobs']['launch']['steps']
+                      if s.get('name') == 'Launch the ephemeral runner')['run']
+        env = {'PATH': f'{d / "bin"}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin', 'AWS_LOG': str(d / 'aws.log'),
+               'GITHUB_OUTPUT': str(d / 'out'), 'SPEC': json.dumps(spec), 'PARAM': '/freemkv-ci/runner-reg/1-1-linux',
+               'REPO': 'freemkv/freemkv', 'RUN_ID': str(RUN_ID), 'ATTEMPT': '1', 'LEG': spec['leg']}
+        if spot_full:
+            env['SPOT_FULL'] = '1'
+        res = subprocess.run(['bash', '-c', script], cwd=d, env=env, capture_output=True, text=True)
+        calls = [c.split('\0')[:-1] for c in (d / 'aws.log').read_text().split('\0\n') if c]
+        runs = [c for c in calls if c[:2] == ['ec2', 'run-instances']]
+        return res, runs, json.loads((d / f'launch-{spec["leg"]}-1.json').read_text()) if res.returncode == 0 else None
+
+    def spec(self):
+        return mg.launch_spec(POLICY, 'linux', RUN_ID, 'refs/heads/qa', LaunchSpecTests.TEMPLATES,
+                              aws=lambda *a: {'LaunchTemplateVersions': [{'LaunchTemplateData': LINUX_TEMPLATE}]})
+
+    def arg(self, call, flag):
+        return call[call.index(flag) + 1] if flag in call else None
+
+    def test_spot_attempt_goes_through_the_template_with_the_cap(self):
+        res, runs, att = self.run_step(self.spec(), spot_full=False)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(len(runs), 1)
+        call = runs[0]
+        self.assertEqual(self.arg(call, '--launch-template'), 'LaunchTemplateName=freemkv-runner-linux,Version=7')
+        self.assertEqual(json.loads(self.arg(call, '--instance-market-options'))['SpotOptions']['MaxPrice'], '0.72')
+        self.assertNotIn('--cli-input-json', call)
+        self.assertEqual(att['market'], 'spot')
+
+    def test_on_demand_after_spot_capacity_runs_without_the_template(self):
+        res, runs, att = self.run_step(self.spec(), spot_full=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        spot = [c for c in runs if '--launch-template' in c]
+        od = [c for c in runs if '--launch-template' not in c]
+        self.assertEqual(len(spot), len(POLICY['launch']['linux']['types']), 'every Spot type tried first')
+        self.assertEqual(len(od), 1)
+        call = od[0]
+        self.assertNotIn('--instance-market-options', call, 'On-Demand: no market options at all')
+        self.assertEqual(json.loads(self.arg(call, '--cli-input-json')), self.spec()['on_demand']['input'])
+        self.assertEqual(self.arg(call, '--instance-type'), POLICY['launch']['linux']['types'][0])
+        self.assertEqual(self.arg(call, '--subnet-id'), 'subnet-a')
+        self.assertTrue(self.arg(call, '--user-data').endswith('user-data-linux.sh'))
+        tags = {t['Key']: t['Value'] for t in json.loads(self.arg(call, '--tag-specifications'))[0]['Tags']}
+        # The IAM condition on RunInstances for the instance: aws:RequestTag/freemkv-ci = runner.
+        self.assertEqual(tags['freemkv-ci'], 'runner')
+        self.assertEqual(tags['launched-by'], str(RUN_ID))
+        self.assertEqual(tags['runner-labels'], f'freemkv-media,linux,run-{RUN_ID}')
+        self.assertEqual(tags['Name'], 'freemkv-runner-linux')
+        self.assertEqual(att['market'], 'on-demand')
 
 
 class LeakGuardTests(unittest.TestCase):

@@ -1280,7 +1280,7 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, canary_
     if drift:
         warnings.append(f'the committed Cargo.lock is stale against C: {len(drift)} third-party entries '
                         'differ; F uses the resolved L_qa')
-    errors = run_guards(ws, policy, lock_text) + check_launch_markets(policy, externals.get('launch_templates') or {})
+    errors = run_guards(ws, policy, lock_text)
     if errors:
         raise GuardError('\n'.join(errors))
     k_names = [e[0] for e in closure(parse_lock(lock_text), policy)]
@@ -1351,17 +1351,6 @@ def pin(ref, sha, requested, request=gh_api):
     return revisions, superseded
 
 
-def check_launch_markets(policy, templates):
-    """Errors for every On-Demand fallback the pinned template would silently turn into Spot."""
-    errors = []
-    for os_name, cfg in policy['launch'].items():
-        pin = templates.get(cfg['template'])
-        if cfg.get('on_demand_fallback') and isinstance(pin, dict) and pin.get('market_options'):
-            errors.append(f'{cfg["template"]} v{pin.get("version")} carries InstanceMarketOptions: '
-                          f'launch.{os_name}.on_demand_fallback cannot work (run-instances cannot clear them)')
-    return errors
-
-
 def launch_templates(policy):
     """The functional templates. Perf legs launch from these too, with run-instances overrides."""
     return sorted({cfg['template'] for cfg in policy['launch'].values()})
@@ -1373,16 +1362,51 @@ def leg_labels(leg, run_id):
     return f'freemkv-media{"-perf" if perf else ""},{os_name},run-{run_id}'
 
 
+# The launch-template fields an On-Demand launch reproduces without the template, and the ones it
+# deliberately replaces. Anything else in the pinned version fails the launch rather than silently
+# launching something the template would not have.
+ON_DEMAND_CARRIED = ('ImageId', 'InstanceType', 'IamInstanceProfile', 'SecurityGroupIds', 'BlockDeviceMappings',
+                     'MetadataOptions', 'InstanceInitiatedShutdownBehavior', 'TagSpecifications')
+ON_DEMAND_REPLACED = ('InstanceMarketOptions', 'UserData')   # On-Demand, and this commit's user-data
+OWN_TAGS = ('freemkv-ci', 'runner-token-param', 'runner-repo', 'launched-by', 'runner-labels')
+
+
+def on_demand_launch(data, template, version, mappings):
+    """run-instances input for an On-Demand instance equivalent to `template` v`version`, launched
+    WITHOUT the template: run-instances can override a template's InstanceMarketOptions but never
+    clear them, so an On-Demand launch through a Spot template would still be Spot.
+    Returns {'input': <run-instances JSON>, 'tags': [template instance tags not set by the launcher]}."""
+    unknown = sorted(set(data) - set(ON_DEMAND_CARRIED) - set(ON_DEMAND_REPLACED))
+    if unknown:
+        raise ValueError(f'{template} v{version} sets {unknown}, which an On-Demand launch without the template '
+                         'does not reproduce; add them to ON_DEMAND_CARRIED or drop them from the template')
+    for field in ('ImageId', 'IamInstanceProfile', 'SecurityGroupIds', 'BlockDeviceMappings', 'MetadataOptions'):
+        if not data.get(field):
+            raise ValueError(f'{template} v{version} has no {field} for an On-Demand launch')
+    if (data['MetadataOptions'] or {}).get('InstanceMetadataTags') != 'enabled':
+        raise ValueError(f'{template} v{version} does not enable InstanceMetadataTags: the user-data reads its '
+                         'token parameter and labels from the instance tags')
+    if data.get('InstanceInitiatedShutdownBehavior') != 'terminate':
+        raise ValueError(f'{template} v{version}: InstanceInitiatedShutdownBehavior must be terminate '
+                         '(the runner deletes itself by shutting down)')
+    out = {k: data[k] for k in ('ImageId', 'InstanceType', 'IamInstanceProfile', 'SecurityGroupIds',
+                                'MetadataOptions', 'InstanceInitiatedShutdownBehavior') if k in data}
+    out['BlockDeviceMappings'] = mappings if mappings is not None else data['BlockDeviceMappings']
+    tags = [t for spec in data.get('TagSpecifications') or [] if spec.get('ResourceType') == 'instance'
+            for t in spec.get('Tags') or [] if t.get('Key') not in OWN_TAGS]
+    return {'input': out, 'tags': tags}
+
+
 def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1):
     """Everything the launch step passes to run-instances for one leg, from the policy alone:
     - the functional template at its planned version (no separate perf templates exist);
     - perf differences as overrides: the perf instance type, no type fallback, the root volume;
-    - the market: Spot with the policy's price cap (never the template's); On-Demand only if the
-      policy asks for it AND the pinned template carries no InstanceMarketOptions, because
-      run-instances can override a template's market options but never clear them;
+    - the market: Spot through the template with the policy's price cap (never the template's);
+      then, if the policy asks, On-Demand WITHOUT the template (on_demand_launch), from the pinned
+      version's own image, profile, security groups, volumes and metadata options;
     - a registration-token parameter per run, attempt and leg (the roles' existing
       /freemkv-ci/runner-reg/* scope); the instance deletes it after reading.
-    qa only: evidence is recorded only for qa runs, so a dev launch would prove nothing."""
+    qa branch only: evidence is recorded only for qa-branch runs, so any other launch proves nothing."""
     if ref != 'refs/heads/qa':
         raise ValueError(f'the media legs launch on the qa branch only, not {ref!r} '
                          '(evidence is recorded for qa-branch runs only)')
@@ -1394,22 +1418,19 @@ def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1):
     pin = templates.get(template) if isinstance(templates.get(template), dict) else {}
     version = str(pin.get('version', '$Default'))
     types = [policy['perf']['instance_type']] if perf else list(cfg.get('types', []))
-    markets = [{'name': 'template', 'options': None}]
+    markets = [{'name': 'template', 'options': None, 'template': True}]
     if cfg.get('spot_max_price'):
-        markets = [{'name': 'spot', 'options': {'MarketType': 'spot', 'SpotOptions': {
+        markets = [{'name': 'spot', 'template': True, 'options': {'MarketType': 'spot', 'SpotOptions': {
             'MaxPrice': str(cfg['spot_max_price']), 'SpotInstanceType': 'one-time',
             'InstanceInterruptionBehavior': 'terminate'}}}]
         if cfg.get('on_demand_fallback'):
-            markets.append({'name': 'on-demand', 'options': None})
+            markets.append({'name': 'on-demand', 'options': None, 'template': False})
     need_mappings = perf and policy['perf'].get('root_volume_gib')
+    on_demand = any(not m['template'] for m in markets)
     data = {}
-    if need_mappings or any(m['name'] == 'on-demand' for m in markets):
+    if need_mappings or on_demand:
         data = (aws or aws_json)('ec2', 'describe-launch-template-versions', '--launch-template-name', template,
                                  '--versions', version)['LaunchTemplateVersions'][0]['LaunchTemplateData']
-    if any(m['name'] == 'on-demand' for m in markets) and data.get('InstanceMarketOptions'):
-        raise ValueError(f'{template} v{version} carries InstanceMarketOptions, so an On-Demand fallback would '
-                         f'launch Spot anyway; set launch.{os_name}.on_demand_fallback false or use a template '
-                         'version without them')
     mappings = None
     if need_mappings:
         mappings = [dict(m, Ebs=dict(m['Ebs'])) if 'Ebs' in m else dict(m)
@@ -1418,8 +1439,9 @@ def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1):
         if root is None:
             raise ValueError(f'{template} v{version} has no EBS root volume to resize for {leg}')
         root['Ebs']['VolumeSize'] = int(policy['perf']['root_volume_gib'])
+    od = on_demand_launch(data, template, version, mappings) if on_demand else None
     return {'leg': leg, 'os': os_name, 'template': template, 'version': version, 'types': types,
-            'markets': markets, 'block_device_mappings': mappings, 'labels': leg_labels(leg, run_id),
+            'markets': markets, 'block_device_mappings': mappings, 'on_demand': od, 'labels': leg_labels(leg, run_id),
             'job': LEG_JOB[leg], 'param': f'/freemkv-ci/runner-reg/{int(run_id)}-{int(attempt)}-{leg}',
             'user_data': f'.github/runner-templates/user-data-{os_name}.{"ps1" if os_name == "windows" else "sh"}'}
 
@@ -1451,8 +1473,7 @@ def read_externals(part, policy, bucket=None, run=subprocess.run):
                         '--versions', '$Default', run=run)['LaunchTemplateVersions'][0]
         lt = data['LaunchTemplateData']
         out[name] = {'version': data['VersionNumber'], 'image_id': lt.get('ImageId'),
-                     'instance_type': lt.get('InstanceType'),
-                     'market_options': bool(lt.get('InstanceMarketOptions'))}
+                     'instance_type': lt.get('InstanceType')}
     return out
 
 
