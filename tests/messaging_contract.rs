@@ -143,6 +143,18 @@ fn en_msg(code: u16) -> String {
     lookup(&en, &format!("error.E{code}"))
 }
 
+/// The English message the CLI renders for a code: its own `error_cli.` wording when the
+/// catalog has one (the shared `error.` text is front-end-neutral), else the shared text.
+fn en_cli_msg(code: u16) -> String {
+    let en: Value = serde_json::from_str(locale_en()).expect("en.json invalid");
+    let own = lookup(&en, &format!("error_cli.E{code}"));
+    if own == format!("error_cli.E{code}") {
+        en_msg(code)
+    } else {
+        own
+    }
+}
+
 #[test]
 fn no_drive_message_is_actionable() {
     let en: Value = serde_json::from_str(locale_en()).expect("en.json invalid");
@@ -240,7 +252,7 @@ fn mpg_no_video_track_names_only_video_mpg_carries() {
 
 #[test]
 fn decrypt_failed_message_is_actionable() {
-    let m = en_msg(7013);
+    let m = en_cli_msg(7013);
     assert!(
         m.to_lowercase().contains("decryption failed"),
         "E7013 what: {m}"
