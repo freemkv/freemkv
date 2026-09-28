@@ -321,18 +321,10 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
     // A FOLDER is an image-level source too — `scan_dir` synthesizes a UDF
     // volume over an extracted disc tree, returning the same (Disc, reader)
     // pair `scan_iso` does (needed for "Open Folder" / drag-and-drop).
-    let p = std::path::Path::new(path);
-    let scan = if p.is_dir() {
-        libfreemkv::scan_dir
-    } else {
-        libfreemkv::scan_iso
-    };
-    let (mut disc, mut reader) = scan(p, libfreemkv::ScanOptions::default())
+    let opened = fe::open_image(&fe::ImageSource::from_path(path), &key_params(keys))
         .map_err(|e| format!("E{} scan failed", e.code()))?;
-
-    let won = resolve_disc_keys(&mut disc, reader.as_mut(), keys);
-    let summary = key_summary(&disc, won.as_deref());
-    Ok(scanned_from_disc(&disc, summary))
+    let summary = key_summary(&opened.disc, opened.won.as_deref());
+    Ok(scanned_from_disc(&opened.disc, summary))
 }
 
 /// The `freemkv info -v` detail block for a scanned disc/ISO — the same facts
@@ -640,16 +632,9 @@ pub fn preflight_with_keys(
     // Folder OR image — the third place this dispatch was needed. A preflight
     // that cannot open a folder reports a spurious failure for a source the
     // rip itself handles.
-    let p = std::path::Path::new(path);
-    let scan = if p.is_dir() {
-        libfreemkv::scan_dir
-    } else {
-        libfreemkv::scan_iso
-    };
-    let (mut disc, mut reader) =
-        scan(p, libfreemkv::ScanOptions::default()).map_err(|e| format!("E{}", e.code()))?;
-    resolve_disc_keys(&mut disc, reader.as_mut(), keys);
-    let disc = disc;
+    let disc = fe::open_image(&fe::ImageSource::from_path(path), &key_params(keys))
+        .map_err(|e| format!("E{}", e.code()))?
+        .disc;
     let sel = if titles.is_empty() {
         fe::Selection::MainMovie
     } else {
@@ -795,21 +780,6 @@ impl fe::Sink for UiSink {
     }
 }
 
-/// Resolve AACS keys onto a scanned disc. Without this the mux fails E7022 on
-/// every encrypted title — scanning alone does not consult any key source.
-/// Returns the label of the source that actually produced the key
-/// (`"keydb"` / `"online"`), or `None` when nothing resolved.
-pub fn resolve_disc_keys(
-    disc: &mut libfreemkv::Disc,
-    reader: &mut dyn libfreemkv::SectorSource,
-    keys: &KeyConfig,
-) -> Option<String> {
-    // The trace is the ONLY authoritative record of which source won.
-    // `Disc::aacs.key_source` is `ExternalUk` for every caller-supplied key —
-    // and is also the scan-time placeholder — so it cannot answer this.
-    freemkv_engine::resolve_disc_keys(disc, reader, &key_params(keys))
-}
-
 // Describe the disc's key state honestly. `resolve_keys` reports resolved
 // off `KeyOrigin::ExternalUk` alone, but that origin is stamped as a
 // placeholder before any source runs — gate on real key material instead.
@@ -832,32 +802,10 @@ pub(crate) fn key_summary(disc: &libfreemkv::Disc, won: Option<&str>) -> String 
     }
 }
 
-/// Recover the library's numeric error code from a muxed `std::io::Error`.
-///
-/// The library's `Display` is `E<code>` or `E<code>: <data>` (no English by
-/// design), so this parses the leading digit run rather than the whole
-/// string. Returns `0` if the string does not start with `E<digits>`.
-/// libfreemkv has `io_error_code` internally but does not export it — when
-/// it does, delete this and call it instead.
+/// The library's numeric error code carried by a muxed `std::io::Error`, or
+/// `0` when it carries none. The parsing lives in the engine.
 pub fn error_code(e: &std::io::Error) -> u16 {
-    let s = e.to_string();
-    let Some(rest) = s.strip_prefix('E') else {
-        return 0;
-    };
-    let digits_end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    let digits = &rest[..digits_end];
-    if digits.is_empty() {
-        return 0;
-    }
-    // The run is ASCII digits only, so a parse failure means the value exceeds
-    // the type — a code above `u16::MAX` still names a real error, so parse wide
-    // then saturate into the u16 rather than collapsing to `0` ("no error").
-    digits
-        .parse::<u32>()
-        .map(|v| v.min(u16::MAX as u32) as u16)
-        .unwrap_or(u16::MAX)
+    fe::error_code(e).unwrap_or(0)
 }
 
 // Map a recovery sweep's terminal flags to the run's result before the ISO
@@ -1772,6 +1720,7 @@ fn demux_needs_subdirs(title_count: usize) -> bool {
 // (wrong title muxed), unit_keys (E7022), selection (wrong tracks kept).
 fn title_input_options(
     disc: &libfreemkv::Disc,
+    key_fetch: Option<&libfreemkv::sector::KeyFetch>,
     req: &RipRequest,
     idx: usize,
 ) -> libfreemkv::InputOptions {
@@ -1783,6 +1732,7 @@ fn title_input_options(
             .map(|a| a.unit_keys.clone())
             .unwrap_or_default(),
         selection: stream_selection_for(req, Some(idx)),
+        key_fetch: key_fetch.cloned(),
         ..Default::default()
     }
 }
@@ -1792,6 +1742,7 @@ fn title_input_options(
 // run_blocking's ISO path and run_disc's staging-ISO path — same loop.
 fn mux_selected_titles(
     disc: &libfreemkv::Disc,
+    key_fetch: Option<&libfreemkv::sector::KeyFetch>,
     source_url: &str,
     req: &RipRequest,
     indices: &[usize],
@@ -1836,7 +1787,7 @@ fn mux_selected_titles(
             OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
         };
         let hint = disc.titles.get(idx).map(|t| t.size_bytes).unwrap_or(0);
-        let input = title_input_options(disc, req, idx);
+        let input = title_input_options(disc, key_fetch, req, idx);
         let mux = mux_opts(req);
         match fe::mux_title(source_url, &dest_url, input, &mux, hint, sink) {
             Ok(o) => {
@@ -1958,19 +1909,18 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     if req.decrypt_threads > 0 {
         libfreemkv::set_decrypt_threads(req.decrypt_threads);
     }
-    // Folder OR image — `Ui::open` already scans a folder through `scan_dir`,
-    // so without this the GUI listed a folder's titles and then failed the
-    // moment the user pressed Rip.
-    let src_path = std::path::Path::new(&req.source);
-    let scan = if src_path.is_dir() {
-        libfreemkv::scan_dir
-    } else {
-        libfreemkv::scan_iso
-    };
-    let (mut disc, mut reader) = scan(src_path, libfreemkv::ScanOptions::default())
-        .map_err(|e| format!("E{} scan failed", e.code()))?;
-    // Resolve decryption keys onto the disc BEFORE muxing.
-    resolve_disc_keys(&mut disc, reader.as_mut(), &req.keys);
+    // Folder OR image (`Ui::open` lists a folder's titles too). Keys resolve
+    // BEFORE muxing; the mid-mux key fetch comes from the same chain.
+    let fe::OpenedImage {
+        disc,
+        mut reader,
+        key_fetch,
+        ..
+    } = fe::open_image(
+        &fe::ImageSource::from_path(&req.source),
+        &key_params(&req.keys),
+    )
+    .map_err(|e| format!("E{} scan failed", e.code()))?;
 
     let kind = out_kind(&req.format);
     let label = if disc.volume_id.is_empty() {
@@ -2028,7 +1978,6 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
         }
         _ => {}
     }
-    let disc = disc;
 
     // The ticked numbers were resolved against `Ui::open`'s scan; this is a
     // different one, taken now — a re-authored image would renumber titles
@@ -2060,7 +2009,15 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     // the mux re-opened a folder as an image file and failed after a successful
     // scan and key resolution.
     let src_url = format!("{}://{}", image_or_dir_scheme(&req.source), req.source);
-    mux_selected_titles(&disc, &src_url, req, &indices, sink, state)
+    mux_selected_titles(
+        &disc,
+        key_fetch.as_ref(),
+        &src_url,
+        req,
+        &indices,
+        sink,
+        state,
+    )
 }
 
 /// What a `disc://` rip does with the drive, once the whole-disc extract case
@@ -4787,7 +4744,7 @@ mod routing_tests {
         ]);
 
         for idx in [0usize, 3] {
-            let input = title_input_options(&disc, &r, idx);
+            let input = title_input_options(&disc, None, &r, idx);
             assert_eq!(
                 input.title_index,
                 Some(idx),
@@ -4819,7 +4776,11 @@ mod routing_tests {
 
         // An unencrypted disc contributes no keys — and no placeholder either.
         let clear = super::key_summary_tests::disc(false);
-        assert!(title_input_options(&clear, &r, 0).unit_keys.is_empty());
+        assert!(
+            title_input_options(&clear, None, &r, 0)
+                .unit_keys
+                .is_empty()
+        );
     }
 
     /// One title fans out into the destination directory; two or more each get

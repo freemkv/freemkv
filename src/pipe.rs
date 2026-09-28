@@ -273,7 +273,8 @@ fn scan_failed_msg(e: &dyn std::fmt::Display) -> String {
 }
 
 fn fmt_err_str(s: &str) -> String {
-    if let Some((code_part, data)) = parse_error_code(s) {
+    if let Some((code, data)) = freemkv_engine::parse_error_code(s) {
+        let code_part = format!("E{code}");
         let key = format!("error.{code_part}");
         // `strings::get` returns the dotted path verbatim on a miss, so a
         // present locale entry is one whose lookup does NOT equal its own key.
@@ -281,10 +282,10 @@ fn fmt_err_str(s: &str) -> String {
             // WS2: keep the language-neutral `E<code>` prefix (shown, not
             // stripped). `Error:` is added once at the render site, never
             // here, so this nests as `{cause}`/`{detail}` without doubling it.
-            let localized = if code_part == "E7022" {
+            let localized = if code == 7022 {
                 // E7022 names the disc by hash; keep its dedicated placeholder.
                 strings::fmt(&key, &[("hash", data), ("detail", data)])
-            } else if code_part == "E6000" {
+            } else if code == 6000 {
                 // E6000 (DiscRead) Display is `E6000: <sector> 0x..hex..` — the
                 // status/sense hex tail is diagnostic noise that must not reach
                 // the user. Pass ONLY the leading sector number as {detail}.
@@ -298,7 +299,7 @@ fn fmt_err_str(s: &str) -> String {
         // A code with NO locale entry still SHOWS its code via the generic
         // wrapper (`{code} {detail}`), so a missing string never swallows the
         // code. The contract test makes this unreachable for any real variant.
-        return strings::fmt("error.generic", &[("code", code_part), ("detail", data)]);
+        return strings::fmt("error.generic", &[("code", &code_part), ("detail", data)]);
     }
     // A non-code string: the generic `{code} {detail}` wrapper with an empty
     // code leaves a leading space, so trim it or it shows as `Error:  msg`.
@@ -401,22 +402,6 @@ fn render_stream_sel_error(
             ))
         }
     }
-}
-
-fn parse_error_code(s: &str) -> Option<(&str, &str)> {
-    let rest = s.strip_prefix('E')?;
-    // The code is the leading run of digits after 'E'.
-    let digits_end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    if digits_end == 0 {
-        return None; // "E" not followed by a digit — not a code.
-    }
-    let code = &s[..digits_end + 1]; // include the leading 'E'
-    let after = &s[digits_end + 1..];
-    // Data follows a ": " separator; absent for the bare `E<code>` form.
-    let data = after.strip_prefix(':').map(|d| d.trim()).unwrap_or("");
-    Some((code, data))
 }
 
 // ── CLI entry point ─────────────────────────────────────────────────────────
@@ -991,8 +976,8 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
                     // (E7023 uncrackable, or E6008 empty). Skip with a clear
                     // notice and keep muxing the rest so the command can exit 0.
                     let num = title_idx.map(|i| i + 1).unwrap_or(0);
-                    let key = match parse_error_code(&e.display) {
-                        Some(("E6008", _)) => "rip.title_skipped_empty",
+                    let key = match freemkv_engine::parse_error_code(&e.display) {
+                        Some((6008, _)) => "rip.title_skipped_empty",
                         _ => "rip.title_skipped",
                     };
                     out.raw(Normal, &strings::fmt(key, &[("num", &num.to_string())]));
@@ -1541,10 +1526,6 @@ fn build_jobs(
 
 // ── The pipeline engine ─────────────────────────────────────────────────────
 
-fn keyless_scan_opts() -> libfreemkv::ScanOptions {
-    libfreemkv::ScanOptions::default()
-}
-
 pub(crate) fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOptions {
     libfreemkv::ScanOptions {
         credentials: drive_credentials(keydb_path),
@@ -1588,18 +1569,8 @@ pub(crate) fn resolve_info_keys(
 }
 
 fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>)> {
-    // `dir://` is an image-level source too: `scan_dir` synthesizes a UDF
-    // volume and returns the same pair `scan_iso` does. Without this arm,
-    // opening a source "as an image" silently rejected folders.
-    match libfreemkv::parse_url(source) {
-        libfreemkv::StreamUrl::Iso { path } => {
-            libfreemkv::scan_iso(std::path::Path::new(&path), keyless_scan_opts()).ok()
-        }
-        libfreemkv::StreamUrl::Dir { path } => {
-            libfreemkv::scan_dir(std::path::Path::new(&path), keyless_scan_opts()).ok()
-        }
-        _ => None,
-    }
+    // `iso://` or `dir://` (a folder is an image-level source too), keyless.
+    freemkv_engine::scan_image(&freemkv_engine::ImageSource::from_url(source)?).ok()
 }
 
 fn resolve_iso_unit_keys(
@@ -1615,56 +1586,11 @@ fn resolve_iso_unit_keys(
     }
 }
 
+// Mid-mux key fetch for an image source over the same local-first chain the
+// upfront resolve uses (see `key_params`).
 fn build_iso_key_fetch(source: &str, keys: &KeyConfig) -> Option<libfreemkv::sector::KeyFetch> {
-    let url = keys.key_url.clone()?;
-    // Reuse the SSRF guard the upfront source list uses; a rejected URL means no
-    // fetch (rather than POSTing key material to an internal/metadata host).
-    if freemkv_keysources::validate_keyserver_url(&url).is_err() {
-        return None;
-    }
-    let auth = keys.key_auth.clone().unwrap_or_default();
-    // Iso AND Dir: a folder is an image-level source with the same AACS
-    // inputs. Matching only `Iso` silently disabled online key fetch for
-    // `dir://` even when the same disc's key was retrievable as an ISO.
-    let (path, from_dir) = match libfreemkv::parse_url(source) {
-        libfreemkv::StreamUrl::Iso { path } => (path, false),
-        libfreemkv::StreamUrl::Dir { path } => (path, true),
-        _ => return None,
-    };
-    // Capture the disc's inf + MKB ONCE; a non-AACS source yields an error → None.
-    let p = std::path::Path::new(&path);
-    let (inf, mkb, version) = if from_dir {
-        libfreemkv::Disc::read_aacs_inputs_from_dir(p).ok()?
-    } else {
-        libfreemkv::Disc::read_aacs_inputs(p).ok()?
-    };
-    if inf.is_empty() {
-        return None;
-    }
-    // Disc inputs the lib's `key_fetch` reuses per call (it swaps in the failing
-    // `samples`). An ISO has no live-drive VID (all-zero) — VID-optional. The
-    // version drives the Unit_Key_RO.inf stride for a VUK-from-server reply.
-    let inputs = libfreemkv::DiscInputs {
-        disc_hash: String::new(),
-        volume_id: [0u8; 16],
-        version,
-        mkb,
-        unit_key_ro: inf,
-        samples: Vec::new(),
-        volume_label: None,
-    };
-    // Zero duplicated fetch logic: the lib's `key_fetch` owns the full flow.
-    // The CLI only supplies the disc inputs and a way to rebuild its key
-    // source (the `--key-url` OnlineSource).
-    let make_sources: std::sync::Arc<
-        dyn Fn() -> Vec<Box<dyn libfreemkv::keysource::KeySource>> + Send + Sync,
-    > = std::sync::Arc::new(move || {
-        vec![Box::new(freemkv_keysources::OnlineSource::new(
-            url.clone(),
-            auth.clone(),
-        )) as Box<dyn libfreemkv::keysource::KeySource>]
-    });
-    Some(libfreemkv::keysource::key_fetch(inputs, make_sources))
+    let src = freemkv_engine::ImageSource::from_url(source)?;
+    freemkv_engine::build_key_fetch(&src, &key_params(keys))
 }
 
 pub(crate) fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::PathBuf {
@@ -2498,13 +2424,12 @@ fn dir_to_extract(
         // returning the same pair. Dir used to fall to the `_` arm marked
         // "unreachable", which stopped being true once Dir joined is_disc_source().
         libfreemkv::StreamUrl::Iso { path } | libfreemkv::StreamUrl::Dir { path } => {
-            let scan = if matches!(parsed_source, libfreemkv::StreamUrl::Dir { .. }) {
-                libfreemkv::scan_dir
+            let src = if matches!(parsed_source, libfreemkv::StreamUrl::Dir { .. }) {
+                freemkv_engine::ImageSource::Dir(path.into())
             } else {
-                libfreemkv::scan_iso
+                freemkv_engine::ImageSource::Iso(path.into())
             };
-            let (mut disc, mut reader) = match scan(std::path::Path::new(path), keyless_scan_opts())
-            {
+            let (mut disc, mut reader) = match freemkv_engine::scan_image(&src) {
                 Ok(pair) => pair,
                 Err(e) => {
                     out.raw(Normal, &scan_failed_msg(&e));
@@ -3058,10 +2983,9 @@ mod tests {
         KeyConfig, PipeFail, build_jobs, build_key_sources_quiet, copy_should_continue,
         dest_is_directory, disc_copy_recovered_data, disc_copy_scan_opts, disc_title_nums,
         fmt_disc_damage, fmt_err, fmt_err_str, is_keyserver_url, is_metadata_sink,
-        is_scheme_only_sink, is_url_token, mp4_skip_reason_key, parse_error_code, parse_flags,
-        parse_stream_spec, preflight_validate, render_error, resolved_keydb_path, sanitize_name,
-        scan_failed_msg, title_in_range, validate_dir_input, validate_file_dest,
-        validate_iso_input,
+        is_scheme_only_sink, is_url_token, mp4_skip_reason_key, parse_flags, parse_stream_spec,
+        preflight_validate, render_error, resolved_keydb_path, sanitize_name, scan_failed_msg,
+        title_in_range, validate_dir_input, validate_file_dest, validate_iso_input,
     };
 
     // A raw disc→ISO copy scans on past an unreadable AACS key file; a decrypting one stops.
@@ -3520,20 +3444,6 @@ mod tests {
     // `libfreemkv::mux::mux_stream`, covered by its own tests there.
 
     // ── fmt_err generalization (english errors for ALL codes) ───────────────
-
-    /// `parse_error_code` splits the libfreemkv `E<code>[: <data>]` Display
-    /// form into the code token and its trailing data.
-    #[test]
-    fn parse_error_code_splits_code_and_data() {
-        assert_eq!(parse_error_code("E6009"), Some(("E6009", "")));
-        assert_eq!(parse_error_code("E7022: abcdef"), Some(("E7022", "abcdef")));
-        assert_eq!(parse_error_code("E5000: 13"), Some(("E5000", "13")));
-        // Not an E-code: returns None (falls through to the generic wrapper).
-        assert_eq!(parse_error_code("No drive found"), None);
-        assert_eq!(parse_error_code("Error: boom"), None);
-        assert_eq!(parse_error_code("E"), None);
-        assert_eq!(parse_error_code("Eabc"), None);
-    }
 
     #[test]
     fn fmt_err_renders_codes_to_english() {
