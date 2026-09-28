@@ -90,7 +90,7 @@ class Fetch:
         self.size = pin['size']
         self.part, self.count, self.multipart = layout(pin)
         self.digests = [None] * self.count
-        self.local = threading.local()
+        self.tls = threading.local()
         self.lock = threading.Lock()
         self.handles = []
         self.done = 0
@@ -102,9 +102,9 @@ class Fetch:
             f.truncate(self.size)
 
     def handle(self):
-        f = getattr(self.local, 'f', None)
+        f = getattr(self.tls, 'f', None)
         if f is None:
-            f = self.local.f = open(self.path, 'r+b')
+            f = self.tls.f = open(self.path, 'r+b')
             with self.lock:
                 self.handles.append(f)
         return f
