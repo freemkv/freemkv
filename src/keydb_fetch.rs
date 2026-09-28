@@ -266,25 +266,19 @@ impl<In: ureq::unversioned::transport::Transport> ureq::unversioned::transport::
 }
 
 fn hardened_agent(pinned: Vec<SocketAddr>) -> ureq::Agent {
-    hardened_agent_with_timeouts(
-        pinned,
-        CONNECT_TIMEOUT,
-        READ_TIMEOUT,
-        BODY_TRANSFER_BUDGET,
-        STALL_TIMEOUT,
-    )
+    hardened_agent_with_timeouts(pinned, CONNECT_TIMEOUT, READ_TIMEOUT, STALL_TIMEOUT)
 }
 
 // The agent builder with caller-chosen timeouts so the rolling-idle behaviour
-// is testable with short bounds. `response` bounds header arrival; `budget` is
-// the TOTAL body ceiling; `idle` is the rolling stall bound via IdleReCapConnector.
+// is testable with short bounds. `response` bounds header arrival; `idle` is the
+// rolling stall bound via IdleReCapConnector.
 fn hardened_agent_with_timeouts(
     pinned: Vec<SocketAddr>,
     connect: Duration,
     response: Duration,
-    budget: Duration,
     idle: Duration,
 ) -> ureq::Agent {
+    let budget = idle.mul_f64(BODY_TRANSFER_BUDGET.as_secs_f64() / STALL_TIMEOUT.as_secs_f64());
     // Since ureq 3.4.1 (#1194) timeout_recv_body is an ABSOLUTE total-body
     // deadline that no longer re-arms, and recv_response no longer caps the
     // body. Set the total ceiling here; layer rolling idle via the connector.
@@ -451,117 +445,69 @@ mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
-    // The keydb BODY is bounded, not just its headers (ureq 3's `timeout_recv_response` covers
-    // headers only).
+    // FT8 (stop design v5 §2.7, T20): "v5 **deletes `BODY_TRANSFER_BUDGET`**:
+    // `timeout_recv_body(None)`". Per spec; do not change without a spec citation.
     #[test]
-    fn the_keydb_body_read_is_bounded_not_only_the_headers() {
+    fn keydb_agent_has_no_total_body_budget() {
         let agent = hardened_agent(Vec::new());
         let t = agent.config().timeouts();
+        assert_eq!(t.recv_body, None, "a body total is gone (HR1: stall-only)");
         assert_eq!(
-            t.recv_body,
-            Some(BODY_TRANSFER_BUDGET),
-            "ureq 3.4.1+ recv_response covers headers only and recv_body is the \
-             TOTAL body deadline; without it the body read has no deadline at all"
+            t.recv_response,
+            Some(READ_TIMEOUT),
+            "headers: 60 s no answer"
         );
-        assert_eq!(t.recv_response, Some(READ_TIMEOUT));
-        assert_eq!(t.connect, Some(CONNECT_TIMEOUT));
+        assert_eq!(t.connect, Some(CONNECT_TIMEOUT), "connect: 10 s no answer");
     }
 
-    // A KEYDB body that is SLOW but PROGRESSING must finish. ureq 3.4.1 (#1194)
-    // made timeout_recv_body a TOTAL deadline that no longer re-arms; the idle
-    // re-cap restores the rolling bound so a steady body is not killed.
-    #[test]
-    fn a_slow_but_progressing_keydb_body_is_not_killed_by_the_idle_bound() {
+    // A stub keydb server: read the request head, answer `head`, then run `body`.
+    fn keydb_stub(
+        head: &'static [u8],
+        body: impl FnOnce(&mut std::net::TcpStream) + Send + 'static,
+    ) -> (SocketAddr, std::thread::JoinHandle<()>) {
         use std::io::{Read as _, Write as _};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind stub listener");
+        let listener =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind stub listener");
         let pinned = listener.local_addr().expect("stub listener address");
-
         let server = std::thread::spawn(move || {
             let (mut sock, _peer) = listener.accept().expect("accept failed");
-            let mut head = Vec::new();
+            let mut req = Vec::new();
             let mut byte = [0u8; 1];
-            while !head.ends_with(b"\r\n\r\n") {
+            while !req.ends_with(b"\r\n\r\n") {
                 match sock.read(&mut byte) {
                     Ok(0) | Err(_) => break,
-                    Ok(_) => head.push(byte[0]),
+                    Ok(_) => req.push(byte[0]),
                 }
             }
-            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\n");
+            let _ = sock.write_all(head);
             let _ = sock.flush();
-            // Forty bytes, 100 ms apart: ~4 s of body, no single gap near the
-            // idle bound. A ROLLING bound survives; a TOTAL interpretation fails.
-            for _ in 0..40 {
-                if sock.write_all(b"k").is_err() {
-                    return;
-                }
-                let _ = sock.flush();
-                std::thread::sleep(Duration::from_millis(100));
-            }
+            body(&mut sock);
         });
+        (pinned, server)
+    }
 
-        // 100ms per-gap vs 1s idle bound (10x margin), ~4s total vs 1s (4x, so a
-        // rolling bound passes and a total interpretation of idle fails).
+    // FT7a (T20, §5.0 pair (a)): "a local server trickles a byte every 0.5 × idle, total >
+    // the old 120 s budget (scaled) → `Ok`". Scaled: idle 400 ms, so the old total is
+    // 2.4 s (120 s at a 20 s idle); twenty bytes 200 ms apart take 4 s.
+    #[test]
+    fn keydb_fetch_slow_body_past_old_budget_succeeds() {
+        use std::io::{Read as _, Write as _};
+        let idle = Duration::from_millis(400);
+        let (pinned, server) = keydb_stub(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n",
+            move |sock| {
+                for _ in 0..20 {
+                    std::thread::sleep(idle / 2);
+                    if sock.write_all(b"k").and_then(|()| sock.flush()).is_err() {
+                        return;
+                    }
+                }
+            },
+        );
         let agent = hardened_agent_with_timeouts(
             vec![pinned],
             Duration::from_secs(5),
             Duration::from_secs(30),
-            Duration::from_secs(30),
-            Duration::from_secs(1),
-        );
-        let resp = agent
-            .get("http://keydb-mirror.test/keydb.zip")
-            .call()
-            .expect("headers must arrive");
-        let mut body = Vec::new();
-        let read = resp.into_body().into_reader().read_to_end(&mut body);
-        let _ = server.join();
-
-        assert!(
-            read.is_ok(),
-            "a steadily-progressing body was aborted: {:?}",
-            read.err()
-        );
-        assert_eq!(body, vec![b'k'; 40], "the whole body must arrive");
-    }
-
-    // The other half: a peer sending headers then NOTHING must be cut off by the
-    // rolling idle bound, not held for the whole total budget.
-    #[test]
-    fn a_stalled_keydb_body_is_cut_off_by_the_idle_bound_not_the_total_budget() {
-        use std::io::{Read as _, Write as _};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind stub listener");
-        let pinned = listener.local_addr().expect("stub listener address");
-
-        let server = std::thread::spawn(move || {
-            let (mut sock, _peer) = listener.accept().expect("accept failed");
-            let mut head = Vec::new();
-            let mut byte = [0u8; 1];
-            while !head.ends_with(b"\r\n\r\n") {
-                match sock.read(&mut byte) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => head.push(byte[0]),
-                }
-            }
-            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n");
-            let _ = sock.flush();
-            // Promise a megabyte and send none of it; block on a read so the
-            // stub ends the moment the client drops, not on a sleep.
-            let mut sink = [0u8; 1];
-            let _ = sock.read(&mut sink);
-        });
-
-        let idle = Duration::from_secs(1);
-        let agent = hardened_agent_with_timeouts(
-            vec![pinned],
-            Duration::from_secs(5),
-            Duration::from_secs(30),
-            // A total budget far larger than the idle bound, so only the idle
-            // bound can be what ends this.
-            Duration::from_secs(120),
             idle,
         );
         let started = std::time::Instant::now();
@@ -571,14 +517,51 @@ mod tests {
             .expect("headers must arrive");
         let mut body = Vec::new();
         let read = resp.into_body().into_reader().read_to_end(&mut body);
-        let elapsed = started.elapsed();
+        let _ = server.join();
+        assert!(
+            started.elapsed() > idle * 6,
+            "the trickle outlasted the old total"
+        );
+        assert!(
+            read.is_ok(),
+            "a progressing body was cut off: {:?}",
+            read.err()
+        );
+        assert_eq!(body, vec![b'k'; 20], "the whole body must arrive");
+    }
 
+    // FT7b (T20, §5.0 pair (b)): a stalled body "must fire within window + 1 s".
+    #[test]
+    fn keydb_fetch_stalled_body_fails_after_idle() {
+        use std::io::Read as _;
+        let (pinned, server) = keydb_stub(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n",
+            // Promise a megabyte, send none; end when the client drops.
+            |sock| {
+                let _ = sock.read(&mut [0u8; 1]);
+            },
+        );
+        let idle = Duration::from_secs(1);
+        let agent = hardened_agent_with_timeouts(
+            vec![pinned],
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            idle,
+        );
+        let resp = agent
+            .get("http://keydb-mirror.test/keydb.zip")
+            .call()
+            .expect("headers must arrive");
+        let started = std::time::Instant::now();
+        let mut body = Vec::new();
+        let read = resp.into_body().into_reader().read_to_end(&mut body);
+        let elapsed = started.elapsed();
+        let _ = server.join();
         assert!(read.is_err(), "a stalled body must not read as success");
         assert!(
-            elapsed < Duration::from_secs(20),
-            "a stalled peer was held for {elapsed:?} — the idle bound did not fire"
+            elapsed <= idle + Duration::from_secs(1),
+            "held {elapsed:?} past the idle window"
         );
-        let _ = server.join();
     }
 
     #[test]
