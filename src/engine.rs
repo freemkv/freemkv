@@ -5955,6 +5955,37 @@ mod ku_gui_tests {
         assert_no_secret_on_disk(dir.path(), &[K1, VID]);
     }
 
+    /// M4 (KU §4.3 "GUI multipass: staged raw ISO → mux | The set from Start is reused for
+    /// the mux (`open_image_with(Known)` or `Seeded`)"; J14 no rescan): the staged image's
+    /// playlists are unreadable, yet every title muxes from the drive's scan, 0 requests.
+    #[test]
+    fn a_staged_mux_reuses_the_rips_set_and_the_drive_scan() {
+        let fx = bd_image(&[Some(K1), Some(K2)], 2);
+        let dir = TempDir::new("m4");
+        let iso = fx.write(dir.path(), "staged.iso");
+        sidecar(&fx, &iso, false);
+        let mut bytes = std::fs::read(&iso).unwrap();
+        let playlists = &fx.metadata[..fx.metadata.len() - 1];
+        for &(start, n) in playlists {
+            bytes[start as usize * 2048..(start + n) as usize * 2048].fill(0);
+        }
+        std::fs::write(&iso, bytes).unwrap();
+        let calls = Calls::default();
+        let scope = libfreemkv::keys::KeyScope::Titles(vec![0, 1]);
+        let set = resolve(&fx, scope, &[(Answer::Keydb, &[K1, K2])], &calls).unwrap();
+        let out = dir.path().join("out");
+        let st = Arc::new(RunState::default());
+        let f = factory(&[(Answer::Keydb, &[K1, K2])], &calls);
+        let r = req(&iso, &out, vec![0, 1]);
+        let path = iso.display().to_string();
+        let done = with_sources(f, || {
+            mux_staged_titles(&r, &path, rescan(&fx), set, &[0, 1], "DISC", &UiSink(st.clone()), &st)
+        });
+        done.expect("both titles mux from the drive's scan");
+        assert_eq!(calls.len(), 1, "only Start's resolve asked");
+        assert_eq!(files_under(&out).len(), 2);
+    }
+
     /// FK3 (KU §7.3): the GUI reaches the shared table's requests and verdicts, the same
     /// table the CLI's test checks.
     #[test]
