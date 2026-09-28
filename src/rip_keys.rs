@@ -75,7 +75,7 @@ pub fn drive_scan(
 }
 
 /// What a disc→ISO copy decrypts (KU §2.5): the whole disc, or nothing for a raw copy
-/// ("Raw copy (`--raw`, GUI 'Keep encrypted', GUI `raw_copy`) | `None`: no key call").
+/// (“Raw copy (`--raw`, GUI "Keep encrypted", GUI `raw_copy`) | `None`: no key call”).
 pub fn copy_scope(raw: bool) -> KeyScope {
     if raw {
         KeyScope::None
@@ -84,8 +84,8 @@ pub fn copy_scope(raw: bool) -> KeyScope {
     }
 }
 
-/// The rip's one up-front resolve over `reader` (KU §2.3), with its walk for the "why no
-/// key" log. `KeyScope::None` builds no source at all (FK7). `seed`: a set this rip
+/// The rip's one up-front resolve over `reader` (KU §2.3), with its walk for the log of
+/// why a key is missing. `KeyScope::None` builds no source at all (FK7). `seed`: a set this rip
 /// already holds (the GUI's Open), whose keys join the pool first.
 pub fn resolve(
     disc: &Disc,
@@ -170,7 +170,7 @@ pub fn best_effort_note(status: &KeySetStatus) -> Option<String> {
     })
 }
 
-/// The walk as log lines, one per unlocker and key source ("why no key"). English lives
+/// The walk as log lines, one per unlocker and key source: why a key is missing. English lives
 /// here in the app layer; the library trace is typed enums only.
 pub fn render_trace(trace: &Trace) -> Vec<String> {
     use libfreemkv::aacs::trace::{KeyNode, KeyOutcome as KO, UnlockOutcome};
@@ -230,7 +230,7 @@ mod tests {
         std::sync::Arc::new(|| panic!("a raw copy must not build a key source"))
     }
 
-    /// FK7 (KU §2.5): a raw copy ("--raw, GUI 'Keep encrypted', GUI raw_copy") has scope
+    /// FK7 (KU §2.5): a raw copy (“`--raw`, GUI "Keep encrypted", GUI `raw_copy`”) has scope
     /// `None`: "no key call". The source factory is never even built.
     #[test]
     fn raw_copy_makes_no_key_request() {

@@ -354,7 +354,7 @@ fn banned_uses(src: &str, is_test: bool) -> Vec<(usize, &'static str)> {
                 continue;
             }
             let in_test = tests.iter().any(|&(s, e)| (s..e).contains(&at));
-            // KU §2.2: `decrypt_unit` "move[s] to `libfreemkv::test_util::decrypt_unit`",
+            // KU §2.2 `decrypt_unit`: "Both move to `libfreemkv::test_util::decrypt_unit`",
             // the sanctioned test helper (feature `test-util`, never in a release build).
             if *word == "decrypt_unit(" && in_test && helper {
                 continue;

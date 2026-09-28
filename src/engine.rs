@@ -2195,7 +2195,7 @@ fn answered(e: &libfreemkv::Error) -> bool {
         || (8000..9000).contains(&code)
 }
 
-/// The resolution's per-source walk, in the run log: "why no key" (labels only).
+/// The resolution's per-source walk, in the run log: why a key is missing (labels only).
 fn log_walk(trace: &crate::rip_keys::Trace, sink: &UiSink) {
     use fe::Sink as _;
     for line in crate::rip_keys::render_trace(trace) {
@@ -2225,7 +2225,8 @@ fn key_refusal(e: &libfreemkv::Error, src: &std::path::Path, state: &Arc<RunStat
     format!("{msg}\n{}", insert_disc_retry())
 }
 
-/// E7034's next step in the app (KU §4.2 Q4: "An 'Insert the disc' prompt … and Retry").
+/// E7034's next step in the app (KU §4.2 GUI row: “An "Insert the disc" prompt … and Retry”;
+/// JUDGEMENT against Q4: no drive picker, the drive with media is autodetected).
 pub fn insert_disc_retry() -> String {
     crate::strings::get_or(
         "gui.log.insert_disc_retry",
@@ -2453,7 +2454,7 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
 }
 
 /// What a whole-disc output of a drive decrypts (KU §2.5): nothing for a raw ISO copy
-/// ("GUI 'Keep encrypted', GUI `raw_copy` | `None`: no key call"), else the whole disc.
+/// (“GUI "Keep encrypted", GUI `raw_copy`) | `None`: no key call”), else the whole disc.
 fn disc_copy_scope(kind: OutKind, raw: bool) -> libfreemkv::keys::KeyScope {
     crate::rip_keys::copy_scope(disc_raw_copy(kind, raw))
 }
@@ -2805,7 +2806,7 @@ fn run_disc_scanning(
 }
 
 /// Mux `indices` out of a staged (raw) image with the rip's set, from the drive's scan:
-/// KU §4.3 "GUI multipass: staged raw ISO → mux | The set from Start is reused for the mux
+/// KU §4.3 "GUI multipass: staged raw ISO → mux | Yes | The set from Start is reused for the mux
 /// (`open_image_with(Known)` or `Seeded`)". `Seeded` only for Pending forensic keys (§5.4).
 #[allow(clippy::too_many_arguments)]
 fn mux_staged_titles(
@@ -5864,7 +5865,7 @@ mod ku_gui_tests {
         assert!(r.is_ok() && !armed, "the disc's VID finished it: {r:?}");
     }
 
-    /// FK11 (KU §4.2 "GUI … An 'Insert the disc' prompt with a drive picker and Retry"):
+    /// FK11 (KU §4.2 GUI row: “An "Insert the disc" prompt … and Retry”, no picker):
     /// the E7034 text and the insert-the-disc step, flagged for the shell; Retry scans the
     /// drive (no key call) and makes the one more request, with the VID (KS-16).
     #[test]
@@ -5908,7 +5909,7 @@ mod ku_gui_tests {
         assert_no_secret_on_disk(dir.path(), &[K1, VID]);
     }
 
-    /// M4 (KU §4.3 "GUI multipass: staged raw ISO → mux | The set from Start is reused for
+    /// M4 (KU §4.3 "GUI multipass: staged raw ISO → mux | Yes | The set from Start is reused for
     /// the mux (`open_image_with(Known)` or `Seeded`)"; J14 no rescan): the staged image's
     /// playlists are unreadable, yet every title muxes from the drive's scan, 0 requests.
     #[test]
@@ -5989,7 +5990,7 @@ mod ku_gui_tests {
         }
     }
 
-    /// FK7 (KU §2.5 "GUI 'Keep encrypted', GUI `raw_copy`"): a raw disc copy scans with
+    /// FK7 (KU §2.5 “GUI "Keep encrypted", GUI `raw_copy`”): a raw disc copy scans with
     /// `raw_copy` and makes no key request; the drive half is covered by `rip_keys`.
     #[test]
     fn a_raw_gui_copy_asks_no_key_source() {

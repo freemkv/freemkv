@@ -3853,8 +3853,8 @@ mod tests {
         }
     }
 
-    /// FK11, GUI half (KU §4.2 "GUI (image source or staged ISO) | An 'Insert the disc'
-    /// prompt … and Retry"): an Open that needs the disc says so and arms the Retry, so
+    /// FK11, GUI half (KU §4.2 “GUI (image source or staged ISO) | An "Insert the disc"
+    /// prompt … and Retry”): an Open that needs the disc says so and arms the Retry, so
     /// the next Start scans a drive instead of asking the key service again without it.
     #[test]
     fn an_open_that_needs_the_disc_prompts_and_arms_the_retry() {
@@ -3874,7 +3874,7 @@ mod tests {
         assert!(!app.vid_retry, "a new source starts afresh");
     }
 
-    /// B2 (KU-F1 review; KU §2.1 invariant 4, "never call the key service twice"): Open's
+    /// B2 (KU-F1 review; KU J15, "the key service is never called twice"): Open's
     /// answered refusal is shown again at Start with no request, unless the key settings
     /// changed, the keydb was updated, Start wants more than Open resolved, or Open's
     /// failure was transport-class.
