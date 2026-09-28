@@ -21,6 +21,7 @@ URLs de flux :
   mkv://chemin.mkv         Fichier Matroska
   m2ts://chemin.m2ts       Fichier de flux de transport BD
   mp4://path.mp4           Fichier MP4
+  mpg://path.mpg           Fichier de flux de programme MPEG
   iso://image.iso          Image ISO Blu-ray
   dir://folder/            Arborescence déchiffrée dans un dossier
   network://hote:port      Flux TCP

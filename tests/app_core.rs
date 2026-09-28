@@ -627,11 +627,11 @@ fn a_dvd_hides_mp4_end_to_end() {
     };
     let mut a = App::new();
     a.open(&iso);
-    assert!(!a.mp4_possible(), "a DVD is MPEG-2; MP4 cannot hold it");
+    assert!(!a.fit().mp4, "a DVD is MPEG-2; MP4 cannot hold it");
     let offered = a.view().formats.concat().join(" | ");
     assert!(!offered.contains("MP4"), "MP4 offered for a DVD: {offered}");
     // A fresh app knows no codecs and must not hide the option on a guess.
-    assert!(App::new().mp4_possible());
+    assert!(App::new().fit().mp4);
 }
 
 // The GUI language picker must list exactly the locales the i18n crate

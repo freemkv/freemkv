@@ -21,6 +21,7 @@ Stream URLs:
   mkv://path.mkv           Matroska file
   m2ts://path.m2ts         BD transport stream file
   mp4://path.mp4           MP4 file
+  mpg://path.mpg           MPEG program stream file
   iso://image.iso          Blu-ray ISO image
   dir://folder/            Decrypted file tree in a folder
   network://host:port      TCP stream

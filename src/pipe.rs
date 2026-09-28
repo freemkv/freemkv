@@ -194,9 +194,9 @@ impl CliMuxEvents {
 
 impl MuxEvents for CliMuxEvents {
     fn on_output_opened(&self, title: &libfreemkv::DiscTitle) {
-        // The stream-info block and mp4-fit warnings, from the resolved title.
+        // The stream-info block and the excluded-track note, from the resolved title.
         print_stream_info(&self.out, title);
-        print_mp4_skips(&self.out, &self.dest, title);
+        print_excluded(&self.out, &self.dest, title);
         // The destination open notice (the sink is already open here).
         self.out.raw_inline(
             Normal,
@@ -1154,6 +1154,7 @@ fn preflight_validate(
     match parsed_dest {
         libfreemkv::StreamUrl::Mkv { path }
         | libfreemkv::StreamUrl::Mp4 { path }
+        | libfreemkv::StreamUrl::Mpg { path }
         | libfreemkv::StreamUrl::M2ts { path }
         | libfreemkv::StreamUrl::Iso { path } => {
             // A trailing-slash dest (one-file-per-title directory) is validated by
@@ -2066,6 +2067,7 @@ fn url_path_of(url: &libfreemkv::StreamUrl) -> Option<std::path::PathBuf> {
         U::Mkv { path }
         | U::M2ts { path }
         | U::Mp4 { path }
+        | U::Mpg { path }
         | U::Iso { path }
         | U::Dir { path }
         | U::Fvi { path }
@@ -2077,11 +2079,6 @@ fn url_path_of(url: &libfreemkv::StreamUrl) -> Option<std::path::PathBuf> {
         // No filesystem path to compare: a live drive, a socket, stdio, the
         // bit bucket, and a URL we could not parse at all (rejected earlier).
         U::Disc { .. } | U::Network { .. } | U::Stdio | U::Null | U::Unknown { .. } => None,
-        // A file scheme libfreemkv adds before this match names it (`mpg://`): its path.
-        #[allow(unreachable_patterns)]
-        other => {
-            Some(std::path::PathBuf::from(other.path_str())).filter(|p| !p.as_os_str().is_empty())
-        }
     }
 }
 
@@ -2949,53 +2946,11 @@ fn print_stream_info(out: &Output, meta: &libfreemkv::DiscTitle) {
     }
 }
 
-fn print_mp4_skips(out: &Output, dest: &str, title: &libfreemkv::DiscTitle) {
-    if !matches!(
-        libfreemkv::parse_url(dest),
-        libfreemkv::StreamUrl::Mp4 { .. }
-    ) {
-        return;
-    }
-    let report = libfreemkv::mp4_fit_report(title);
-    if report.skipped.is_empty() {
-        return;
-    }
-    out.raw(
-        Normal,
-        &strings::fmt(
-            "mp4.excluded_header",
-            &[("count", &report.skipped.len().to_string())],
-        ),
-    );
-    for (idx, reason) in &report.skipped {
-        out.raw(
-            Normal,
-            &format!(
-                "    - {} {}: {}",
-                strings::get("stream.track"),
-                idx + 1,
-                strings::get(mp4_skip_reason_key(reason))
-            ),
-        );
-    }
-}
-
-fn mp4_skip_reason_key(reason: &libfreemkv::Mp4SkipReason) -> &'static str {
-    match reason {
-        libfreemkv::Mp4SkipReason::BitmapSubtitle => "mp4.reason.subtitle",
-        libfreemkv::Mp4SkipReason::UnmappableAudio => "mp4.reason.audio",
-        libfreemkv::Mp4SkipReason::SecondaryVideo => "mp4.reason.video",
-        libfreemkv::Mp4SkipReason::UnmappableVideo => "mp4.reason.video_unmappable",
-        // Post-mux reasons added in 1.6.0. Both reuse the existing translated
-        // strings, since dedicated wording would need 29 real translations;
-        // reusing a correct localisation beats shipping English. Follow-up tracked.
-        libfreemkv::Mp4SkipReason::UndescribableAudio | libfreemkv::Mp4SkipReason::NoSamples => {
-            "mp4.reason.audio"
-        }
-        // Mp4SkipReason is #[non_exhaustive] as of 1.6.0, so a new variant must not
-        // break this build again. Falling back to the audio wording is a compromise
-        // a future variant should replace with its own key.
-        _ => "mp4.reason.audio",
+/// The pre-mux excluded-track note (G4): what the destination container cannot carry,
+/// from the same `lossy::excluded_lines` the GUI log shows. Silent when nothing is left out.
+fn print_excluded(out: &Output, dest: &str, title: &libfreemkv::DiscTitle) {
+    for line in crate::lossy::excluded_lines(dest, title) {
+        out.raw(Normal, &line);
     }
 }
 
@@ -3230,10 +3185,9 @@ mod tests {
         KeyConfig, PipeFail, build_jobs, build_key_sources_quiet, copy_should_continue,
         dest_is_directory, disc_copy_recovered_data, disc_copy_scan_opts, disc_title_nums,
         fmt_disc_damage, fmt_err, fmt_err_str, is_keyserver_url, is_metadata_sink,
-        is_scheme_only_sink, is_url_token, mp4_skip_reason_key, parse_error_code, parse_flags,
-        parse_stream_spec, preflight_validate, render_error, resolved_keydb_path, sanitize_name,
-        scan_failed_msg, title_in_range, validate_dir_input, validate_file_dest,
-        validate_iso_input,
+        is_scheme_only_sink, is_url_token, parse_error_code, parse_flags, parse_stream_spec,
+        preflight_validate, render_error, resolved_keydb_path, sanitize_name, scan_failed_msg,
+        title_in_range, validate_dir_input, validate_file_dest, validate_iso_input,
     };
 
     // A raw disc→ISO copy scans on past an unreadable AACS key file; a decrypting one stops.
@@ -4843,6 +4797,27 @@ mod tests {
 
     // ── output destination ───────────────────────────────────────────────────
 
+    /// mpg:// is a single-file destination like mkv:// and mp4:// (design §1.1): preflight
+    /// refuses an unwritable one with the file-dest message, before any work.
+    #[test]
+    fn preflight_checks_every_file_container_dest() {
+        let src = temp_path("pf_src.iso");
+        std::fs::write(&src, vec![0u8; 2048 * 32]).unwrap();
+        let missing_dir = temp_path("pf_no_such_dir");
+        for scheme in ["mkv", "mp4", "mpg", "m2ts"] {
+            let dest = missing_dir.join(format!("movie.{scheme}"));
+            let want = validate_file_dest(&dest).unwrap_err();
+            let got = preflight(
+                &format!("iso://{}", src.display()),
+                &format!("{scheme}://{}", dest.display()),
+                false,
+                false,
+            );
+            assert_eq!(got, Err(want), "{scheme}:// dest");
+        }
+        let _ = std::fs::remove_file(&src);
+    }
+
     #[test]
     fn dest_parent_missing_errors() {
         // mkv:// whose parent directory does not exist must error before work.
@@ -5012,46 +4987,6 @@ mod tests {
                 };
                 assert!(ok, "{scheme}: job URL must re-parse to its own kind: {url}");
             }
-        }
-    }
-
-    #[test]
-    fn mp4_skip_reasons_render_distinct_resolving_strings() {
-        let variants = [
-            libfreemkv::Mp4SkipReason::BitmapSubtitle,
-            libfreemkv::Mp4SkipReason::UnmappableAudio,
-            libfreemkv::Mp4SkipReason::SecondaryVideo,
-            libfreemkv::Mp4SkipReason::UnmappableVideo,
-        ];
-        let mut seen_keys = std::collections::BTreeSet::new();
-        let mut seen_msgs = std::collections::BTreeSet::new();
-        for v in &variants {
-            let key = mp4_skip_reason_key(v);
-            // Each variant maps to a distinct i18n key.
-            assert!(seen_keys.insert(key), "{v:?}: duplicate reason key {key}");
-            // The key resolves — `strings::get` returns the dotted path verbatim
-            // on a miss, so a stale/typo'd key would equal the key itself.
-            let msg = strings::get(key);
-            assert_ne!(msg, key, "{v:?}: key {key} does not resolve in en.json");
-            // …and to a distinct rendered message (no two reasons read alike).
-            assert!(
-                seen_msgs.insert(msg.clone()),
-                "{v:?}: duplicate message {msg:?}"
-            );
-        }
-        // The specific Fix-1 pin: the two video reasons must differ.
-        assert_ne!(
-            strings::get(mp4_skip_reason_key(
-                &libfreemkv::Mp4SkipReason::SecondaryVideo
-            )),
-            strings::get(mp4_skip_reason_key(
-                &libfreemkv::Mp4SkipReason::UnmappableVideo
-            )),
-            "SecondaryVideo and UnmappableVideo must render different strings"
-        );
-        // The other keys the function emits must also resolve.
-        for key in ["stream.track", "mp4.excluded_header"] {
-            assert_ne!(strings::get(key), key, "{key} must resolve in en.json");
         }
     }
 
@@ -6192,6 +6127,7 @@ mod dest_is_source_tests {
             "mkv:///m/Movie.mkv",
             "m2ts:///m/Movie.m2ts",
             "mp4:///m/Movie.mp4",
+            "mpg:///m/Movie.mpg",
             "iso:///m/Disc.iso",
             "dir:///m/BDMV",
             "demux:///m/tracks",
@@ -6218,19 +6154,6 @@ mod dest_is_source_tests {
             assert!(
                 url_path_of(&libfreemkv::parse_url(url)).is_none(),
                 "{url} has no path to compare"
-            );
-        }
-    }
-
-    /// A file scheme libfreemkv declares ahead of this match (`mpg://`, mpg-output-design v5
-    /// L2) still names its path, so the same-file guard sees it on both sides.
-    #[test]
-    fn a_newly_declared_file_scheme_yields_its_path() {
-        let url = libfreemkv::parse_url("mpg:///m/Movie.mpg");
-        if url.scheme() == "mpg" {
-            assert_eq!(
-                url_path_of(&url),
-                Some(std::path::PathBuf::from("/m/Movie.mpg"))
             );
         }
     }
@@ -6701,7 +6624,7 @@ mod title_identity_tests {
 #[cfg(test)]
 mod formatter_tests {
     use super::{
-        CliMuxEvents, fmt_damage_time, fmt_eta, fmt_speed, print_mp4_skips, print_stream_info,
+        CliMuxEvents, fmt_damage_time, fmt_eta, fmt_speed, print_excluded, print_stream_info,
         render_resolution_trace,
     };
     use crate::output::{Output, capture};
@@ -6818,14 +6741,14 @@ mod formatter_tests {
     }
 
     #[test]
-    fn print_mp4_skips_names_the_tracks_mp4_cannot_carry() {
+    fn print_excluded_names_the_tracks_the_container_cannot_carry() {
         crate::strings::set_locale("en");
         // TrueHD (unmappable audio) + PGS (bitmap subtitle) cannot ride in MP4.
         let t = title(
             vec![video(), audio(libfreemkv::Codec::TrueHd), subtitle()],
             7530.0,
         );
-        let (_, printed) = capture(|| print_mp4_skips(&loud(), "mp4:///out/x.mp4", &t));
+        let (_, printed) = capture(|| print_excluded(&loud(), "mp4:///out/x.mp4", &t));
         assert!(
             printed.contains("left out"),
             "the header warns, got:\n{printed}"
@@ -6835,8 +6758,8 @@ mod formatter_tests {
             "each skip is named, got:\n{printed}"
         );
 
-        // A non-mp4 destination is a no-op, whatever the title carries.
-        let (_, none) = capture(|| print_mp4_skips(&loud(), "mkv:///out/x.mkv", &t));
+        // mkv:// carries everything: a no-op, whatever the title carries.
+        let (_, none) = capture(|| print_excluded(&loud(), "mkv:///out/x.mkv", &t));
         assert!(none.is_empty(), "mkv:// prints nothing, got:\n{none}");
 
         // An all-mappable title (H.264 + AC-3) also prints nothing.
@@ -6858,7 +6781,7 @@ mod formatter_tests {
             ],
             7530.0,
         );
-        let (_, empty) = capture(|| print_mp4_skips(&loud(), "mp4:///out/x.mp4", &clean));
+        let (_, empty) = capture(|| print_excluded(&loud(), "mp4:///out/x.mp4", &clean));
         assert!(
             empty.is_empty(),
             "a fully-mappable title is silent, got:\n{empty}"

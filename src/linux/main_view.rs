@@ -178,11 +178,11 @@ pub(super) fn build(shell: &Rc<Shell>) -> Rc<MainView> {
         let Some(label) = list.string(d.selected()) else {
             return;
         };
-        let (disc, mp4) = {
+        let (disc, fit) = {
             let a = me.app.borrow();
-            (!crate::ui::is_container(&a.source), a.mp4_possible())
+            (!crate::ui::is_container(&a.source), a.fit())
         };
-        if let Some(f) = crate::ui::format_from_label(&label, disc, mp4) {
+        if let Some(f) = crate::ui::format_from_label(&label, disc, fit) {
             me.act(Cmd::SetFormat(f));
         }
     });

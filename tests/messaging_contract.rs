@@ -227,6 +227,17 @@ fn mpg_no_video_track_has_a_real_message() {
     assert!(m.contains("mkv://"), "E9074 must point at mkv://: {m}");
 }
 
+// J24: mpg:// carries MPEG-1/2 video only (H.264/HEVC/VC-1 await F8), so E9074 must not
+// promise them.
+#[test]
+fn mpg_no_video_track_names_only_video_mpg_carries() {
+    let m = en_msg(9074);
+    for codec in ["H.264", "HEVC", "VC-1"] {
+        assert!(!m.contains(codec), "E9074 offers {codec}: {m}");
+    }
+    assert!(m.contains("MPEG-1/2"), "{m}");
+}
+
 #[test]
 fn decrypt_failed_message_is_actionable() {
     let m = en_msg(7013);

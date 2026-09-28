@@ -728,16 +728,7 @@ define_class!(
             // A DIRECTORY is a valid source: an extracted disc tree opens as
             // `dir://`. Gating purely on extension rejected every folder,
             // even though the engine accepts that source kind.
-            let ok = std::path::Path::new(&p).is_dir()
-                || matches!(
-                    std::path::Path::new(&p)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_ascii_lowercase()
-                        .as_str(),
-                    "iso" | "mkv" | "m2ts" | "mts" | "mp4"
-                );
+            let ok = std::path::Path::new(&p).is_dir() || crate::ui::is_openable_file(&p);
             if let Some(c) = self.ivars().borrow().as_ref() {
                 if ok {
                     c.step(|a| a.open(&p));
@@ -1155,11 +1146,11 @@ define_class!(
             let Some(t) = p.titleOfSelectedItem() else { return };
             let src = self.ivars().app.borrow().source.clone();
             let disc = !crate::ui::is_container(&src);
-            let mp4 = self.ivars().app.borrow().mp4_possible();
+            let fit = self.ivars().app.borrow().fit();
             // Resolve the LOCALIZED popup label against the core's list rather
             // than the widget text, so an unknown title can't reach the model
             // and selection works in every locale.
-            if let Some(f) = crate::ui::format_from_label(&t.to_string(), disc, mp4) {
+            if let Some(f) = crate::ui::format_from_label(&t.to_string(), disc, fit) {
                 self.act(crate::ui::Cmd::SetFormat(f));
             }
         }

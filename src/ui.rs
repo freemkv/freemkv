@@ -771,10 +771,14 @@ pub fn lang_is_selected(stored: &str, code: &str) -> bool {
 ///
 /// `disc_source` is "not a container": true for a physical disc AND an ISO file, since both
 /// carry a whole disc to unpack.
-pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>> {
+pub fn output_formats(disc_source: bool, fit: impl Into<Fit>) -> Vec<Vec<&'static str>> {
+    let fit = fit.into();
     let mut titles = vec!["Selected titles → MKV"];
-    if mp4_ok {
+    if fit.mp4 {
         titles.push("Selected titles → MP4");
+    }
+    if fit.mpg {
+        titles.push("Selected titles → MPG");
     }
     titles.push("Selected titles → M2TS");
     titles.push("Selected titles → separate track files");
@@ -797,32 +801,79 @@ pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>>
 // rather than fail at mux time. MUST match the mux gate in `libfreemkv::mux::mp4`.
 const MP4_VIDEO: &[&str] = &["H.264", "HEVC"];
 
+// Video codecs `mpg://` can carry: the 2000 edition of H.222.0 covers MPEG-1/2 only (J24);
+// H.264, HEVC and VC-1 follow with F8. MUST match `libfreemkv::mux::mpg`'s plan.
+const MPG_VIDEO: &[&str] = &["MPEG-2", "MPEG-1"];
+
+/// Which of the codec-gated containers could hold at least one title of the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fit {
+    pub mp4: bool,
+    pub mpg: bool,
+}
+
+impl From<bool> for Fit {
+    /// `true` offers every container (codecs unknown); `false` none of the gated ones.
+    fn from(ok: bool) -> Self {
+        Fit { mp4: ok, mpg: ok }
+    }
+}
+
 /// Resolve a popup's visible text back to the canonical format string.
 ///
 /// Shells hold display text; the core holds the authoritative list. Matching
 /// here means a shell never invents a format, and both shells resolve the same
 /// way instead of each parsing the string.
-pub fn format_by_title(title: &str, disc_source: bool, mp4_ok: bool) -> Option<&'static str> {
-    output_formats(disc_source, mp4_ok)
+pub fn format_by_title(
+    title: &str,
+    disc_source: bool,
+    fit: impl Into<Fit>,
+) -> Option<&'static str> {
+    output_formats(disc_source, fit)
         .into_iter()
         .flatten()
         .find(|f| *f == title)
 }
 
-/// Source formats accepted by the file picker.
-pub const SOURCE_EXTS: &[&str] = &["iso", "ISO", "mkv", "m2ts", "mts", "mp4"];
+/// Container sources by extension, and the `scheme://` that reads each (design §6, G5): the
+/// one table the picker, the drop filter and the engine's source routing derive from.
+pub const CONTAINER_SOURCES: &[(&str, &str)] = &[
+    ("mkv", "mkv"),
+    ("m2ts", "m2ts"),
+    ("mts", "m2ts"),
+    ("mp4", "mp4"),
+    ("mpg", "mpg"),
+    ("mpeg", "mpg"),
+    ("vob", "mpg"),
+];
+
+/// The scheme that reads `path` as a container, from its extension (any case).
+pub fn container_scheme(path: &str) -> Option<&'static str> {
+    let ext = std::path::Path::new(path).extension()?.to_str()?;
+    CONTAINER_SOURCES
+        .iter()
+        .find(|(e, _)| e.eq_ignore_ascii_case(ext))
+        .map(|(_, s)| *s)
+}
+
+/// Source formats accepted by the file picker: ISO images and every [`CONTAINER_SOURCES`]
+/// extension (plus the upper-case forms discs and pickers show).
+pub const SOURCE_EXTS: &[&str] = &[
+    "iso", "ISO", "mkv", "m2ts", "mts", "mp4", "mpg", "mpeg", "vob", "VOB",
+];
 
 /// True for a container source (single title, no disc scan).
 pub fn is_container(path: &str) -> bool {
-    matches!(
-        std::path::Path::new(path)
+    container_scheme(path).is_some()
+}
+
+/// A file a shell may open: an ISO image or a container source.
+pub fn is_openable_file(path: &str) -> bool {
+    is_container(path)
+        || std::path::Path::new(path)
             .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .as_str(),
-        "mkv" | "m2ts" | "mts" | "mp4"
-    )
+            .is_some_and(|e| e.eq_ignore_ascii_case("iso"))
 }
 
 /// Commands that must be unavailable while a rip is in flight. Cancel is
@@ -1266,6 +1317,7 @@ pub fn format_key(canonical: &str) -> Option<&'static str> {
     Some(match canonical {
         "Selected titles → MKV" => "gui.format.mkv",
         "Selected titles → MP4" => "gui.format.mp4",
+        "Selected titles → MPG" => "gui.format.mpg",
         "Selected titles → M2TS" => "gui.format.m2ts",
         "Selected titles → separate track files" => "gui.format.tracks",
         "Selected titles → video tracks only" => "gui.format.video_only",
@@ -1325,11 +1377,16 @@ mod missing_key_fallback_tests {
     }
 }
 
-pub fn format_from_label(label: &str, disc_source: bool, mp4_ok: bool) -> Option<&'static str> {
+pub fn format_from_label(
+    label: &str,
+    disc_source: bool,
+    fit: impl Into<Fit>,
+) -> Option<&'static str> {
     // Canonical (English) fast path first — also covers callers that pass a
     // canonical string directly — then fall back to the localized display.
-    format_by_title(label, disc_source, mp4_ok).or_else(|| {
-        output_formats(disc_source, mp4_ok)
+    let fit = fit.into();
+    format_by_title(label, disc_source, fit).or_else(|| {
+        output_formats(disc_source, fit)
             .into_iter()
             .flatten()
             .find(|canon| format_label(canon) == label)
@@ -1705,7 +1762,7 @@ pub struct App {
     /// Video codec per title, from the scan — used to warn when the chosen
     /// container cannot carry them. Public alongside the rest of the model so
     /// the container gate can be exercised without a real disc: it is the one
-    /// input to `mp4_possible`/`container_mismatch`, and gating those tests
+    /// input to `fit`/`container_mismatch`, and gating those tests
     /// behind a fixture is why they did not run in CI.
     pub video_codecs: Vec<String>,
     /// What each title NUMBER referred to on the scan the tree was built from,
@@ -1869,17 +1926,22 @@ impl App {
         }
     }
 
-    /// True when at least one title on this source could go in an MP4. With no
-    /// codec information (an unscanned or container source) this is true — the
-    /// UI must not hide an option on a guess.
-    pub fn mp4_possible(&self) -> bool {
+    /// Which codec-gated containers could hold at least one title: with no codec information
+    /// (an unscanned or container source) every one: the UI must not hide an option on a guess.
+    pub fn fit(&self) -> Fit {
         let known: Vec<&String> = self.video_codecs.iter().filter(|c| !c.is_empty()).collect();
-        known.is_empty() || known.iter().any(|c| MP4_VIDEO.contains(&c.as_str()))
+        let any = |allowed: &[&str]| {
+            known.is_empty() || known.iter().any(|c| allowed.contains(&c.as_str()))
+        };
+        Fit {
+            mp4: any(MP4_VIDEO),
+            mpg: any(MPG_VIDEO),
+        }
     }
 
     /// The output formats this source can actually produce.
     pub fn offered_formats(&self) -> Vec<Vec<&'static str>> {
-        output_formats(!is_container(&self.source), self.mp4_possible())
+        output_formats(!is_container(&self.source), self.fit())
     }
 
     /// The format this rip will ACTUALLY use.
@@ -1899,15 +1961,20 @@ impl App {
     /// Answered from the scan, before any rip: a container that will certainly
     /// fail should say so while the user can still change it.
     pub fn container_mismatch(&self) -> Option<String> {
-        if !self.effective_format().contains("MP4") {
+        let format = self.effective_format();
+        let (container, allowed) = if format.contains("MP4") {
+            ("MP4", MP4_VIDEO)
+        } else if format.contains("MPG") {
+            ("MPG", MPG_VIDEO)
+        } else {
             return None;
-        }
+        };
         let ticked = self.tree.ticked_titles();
         let mut bad: Vec<&str> = ticked
             .iter()
             .filter_map(|i| self.video_codecs.get(*i))
             .map(|c| c.as_str())
-            .filter(|c| !c.is_empty() && !MP4_VIDEO.contains(c))
+            .filter(|c| !c.is_empty() && !allowed.contains(c))
             .collect();
         bad.sort_unstable();
         bad.dedup();
@@ -1915,8 +1982,8 @@ impl App {
             return None;
         }
         Some(crate::strings::fmt(
-            "gui.log.mp4_mismatch",
-            &[("codecs", &bad.join(" or "))],
+            "gui.log.container_mismatch",
+            &[("container", container), ("codecs", &bad.join(" or "))],
         ))
     }
 
@@ -2828,6 +2895,79 @@ pub struct View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // G5 (design §6): one table maps container extensions to schemes; every derived list
+    // agrees with it, and mpg/mpeg/vob read as mpg://.
+    #[test]
+    fn container_sources_drive_every_extension_decision() {
+        for (ext, scheme) in CONTAINER_SOURCES {
+            for e in [ext.to_string(), ext.to_ascii_uppercase()] {
+                let path = format!("/m/movie.{e}");
+                assert_eq!(container_scheme(&path), Some(*scheme), "{path}");
+                assert!(is_container(&path), "{path}");
+            }
+            assert!(SOURCE_EXTS.contains(ext), "{ext} missing from the picker");
+        }
+        assert_eq!(container_scheme("/m/a.vob"), Some("mpg"));
+        assert_eq!(container_scheme("/m/a.MPEG"), Some("mpg"));
+        assert_eq!(container_scheme("/m/a.mts"), Some("m2ts"));
+        assert_eq!(container_scheme("/m/a.iso"), None);
+        assert_eq!(container_scheme("/m/a.txt"), None);
+        let extra: Vec<&&str> = SOURCE_EXTS
+            .iter()
+            .filter(|e| {
+                !e.eq_ignore_ascii_case("iso")
+                    && !CONTAINER_SOURCES
+                        .iter()
+                        .any(|(x, _)| x.eq_ignore_ascii_case(e))
+            })
+            .collect();
+        assert!(
+            extra.is_empty(),
+            "picker extensions outside the table: {extra:?}"
+        );
+    }
+
+    // Design §6: "output_formats(disc_source, mp4_ok, mpg_ok) adds Selected titles → MPG";
+    // J24: MPG carries MPEG-1/2 video only.
+    #[test]
+    fn mpg_is_offered_only_when_a_title_could_go_in_it() {
+        let has = |f: Fit| {
+            output_formats(true, f)
+                .concat()
+                .contains(&"Selected titles → MPG")
+        };
+        assert!(has(Fit {
+            mp4: false,
+            mpg: true
+        }));
+        assert!(!has(Fit {
+            mp4: true,
+            mpg: false
+        }));
+        assert!(has(true.into()), "unknown codecs offer everything");
+        assert!(app_with_titles(&["MPEG-2"]).fit().mpg);
+        assert!(!app_with_titles(&["H.264"]).fit().mpg);
+        assert_eq!(format_key("Selected titles → MPG"), Some("gui.format.mpg"));
+    }
+
+    // gui.log.container_mismatch names the container, for MP4 and MPG alike.
+    #[test]
+    fn the_mismatch_names_whichever_container_was_chosen() {
+        crate::strings::set_locale("en");
+        let mut app = app_with_titles(&["MPEG-2", "H.264"]);
+        app.format = "Selected titles → MPG".into();
+        let m = app.container_mismatch().expect("H.264 cannot go in an MPG");
+        assert!(
+            m.contains("MPG") && m.contains("H.264") && !m.contains("MPEG-2"),
+            "{m}"
+        );
+        app.format = "Selected titles → MP4".into();
+        let m = app
+            .container_mismatch()
+            .expect("MPEG-2 cannot go in an MP4");
+        assert!(m.contains("MP4") && m.contains("MPEG-2"), "{m}");
+    }
 
     // The CLI refuses `--raw` without a disc:// source and an iso:// dest; the GUI ignores it.
     #[test]

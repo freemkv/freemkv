@@ -21,6 +21,7 @@ Stream-URLs:
   mkv://pfad.mkv          Matroska-Datei
   m2ts://pfad.m2ts        BD-Transportstrom-Datei
   mp4://path.mp4           MP4-Datei
+  mpg://path.mpg           MPEG-Programmstrom-Datei
   iso://abbild.iso         Blu-ray-ISO-Abbild
   dir://folder/            Entschlüsselter Dateibaum in einem Ordner
   network://host:port      TCP-Stream
