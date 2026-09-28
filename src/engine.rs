@@ -4861,6 +4861,39 @@ mod routing_tests {
         );
     }
 
+    // B3 (KU-F1 review): the keyed live-drive mux bridge forwards the output opening too, so
+    // a GUI disc:// rip prints the excluded note, ahead of any progress, as the engine does.
+    #[test]
+    fn the_keyed_live_drive_mux_prints_the_note_from_the_output_opening() {
+        crate::strings::set_locale("en");
+        let truehd = libfreemkv::Stream::Audio(libfreemkv::AudioStream {
+            pid: 0x1100,
+            codec: libfreemkv::Codec::TrueHd,
+            channels: libfreemkv::AudioChannels::Surround51,
+            language: "eng".into(),
+            sample_rate: libfreemkv::SampleRate::S48,
+            secondary: false,
+            purpose: libfreemkv::LabelPurpose::Normal,
+            label: String::new(),
+        });
+        let title = libfreemkv::DiscTitle {
+            streams: vec![truehd],
+            codec_privates: vec![None],
+            ..libfreemkv::DiscTitle::empty()
+        };
+        let state = Arc::new(RunState::default());
+        let sink = UiSink(state.clone());
+        with_session_bridge(&sink, "mp4:///out/x.mp4", |_, events| {
+            events.on_output_opened(&title);
+            events.on_write_progress(10, 100);
+        });
+        let lines = state.lines.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(
+            lines.iter().any(|l| l.contains("left out") && l.contains("MP4")),
+            "the excluded note reaches the run log, got: {lines:?}"
+        );
+    }
+
     // D4 parity: a mux that fails before its output opens prints no pre-mux note, in the GUI
     // as in the CLI (pipe.rs `a_mux_that_fails_before_open_prints_no_note`).
     #[test]
