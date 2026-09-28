@@ -6,13 +6,13 @@ Verwendung: freemkv <quelle> <ziel> [optionen]
            freemkv info <url> [optionen]
        freemkv <command> [args]
 
-Subcommands:
-  info <url>               Inspect a disc, image, or file (titles, streams, sizes)
-  update-keys --url URL    Download and install the AACS keydb
-  version                  Show version (also --version, -V)
-  help [command]           Show this help, or help for one command
+Unterbefehle:
+  info <url>               Disc, Abbild oder Datei untersuchen (Titel, Streams, Größen)
+  update-keys --url URL    AACS-Schlüsseldatenbank herunterladen und installieren
+  version                  Version anzeigen (auch --version, -V)
+  help [command]           Diese Hilfe anzeigen, oder Hilfe zu einem Befehl
 
-  Run 'freemkv <command> --help' (or 'freemkv help <command>') for command-specific help.
+  Führen Sie 'freemkv <command> --help' aus (oder 'freemkv help <command>') für befehlsspezifische Hilfe.
 
 Stream-URLs:
   disc://                  Optisches Laufwerk (automatische Erkennung)
@@ -73,7 +73,14 @@ Optionen:
       --language CODE Oberflächensprache (auch --lang): ein Code wie de oder pt-BR, oder auto.
       --raw           Entschlüsselung überspringen (raw verschlüsselte Ausgabe)
       --multipass    Mapfile für Mehrpass-Wiederherstellung schreiben/aktualisieren
-      --force        Extract into a non-empty dir:// target (overwrite)
-      --share         Laufwerkprofil einreichen (nur info disc://; bei einem Rip bedeutet -s --subtitles)
+      --force        In ein nicht leeres dir://-Ziel extrahieren (überschreiben)
+      --share         Laufwerkprofil und Disc-Struktur einreichen (info disc://, iso:// oder dir://; bei einem Rip bedeutet -s --subtitles)
   -m, --mask          Seriennummern maskieren (mit --share)
+
+Exit-Codes:
+  0    Erfolg.
+  1    Fehlgeschlagen: keine nutzbare Ausgabe, oder ein anderer Fehler.
+  2    Verwendung: falscher Befehl oder falsche Flags (dieser Text wurde auch ausgegeben).
+  3    Beschädigt (nur disc:// -> iso:// oder disc:// -> null://): behalten und nutzbar, aber einige Sektoren fehlen — erneut ausführen (--multipass), um mehr wiederherzustellen.
+  130  Ein zweites Ctrl-C erzwang einen sofortigen Abbruch.
 --- STDERR ---
