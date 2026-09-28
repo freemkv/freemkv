@@ -20,6 +20,20 @@ ROOT = Path(__file__).parents[1]
 POLICY = mg.load_policy()
 RUN_ID = 424242
 QA_TIP = 'd' * 40          # refs/heads/qa of freemkv in the fake API
+
+
+def _run_start():
+    import datetime
+    # A week ago, relative to now: evidence expires at max_age_days, so fixed dates would rot.
+    return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)).replace(microsecond=0)
+
+
+RUN_START = _run_start()
+
+
+def stamp(base, **delta):
+    import datetime
+    return (base + datetime.timedelta(**delta)).strftime('%Y-%m-%dT%H:%M:%SZ')
 SIB_SHA = {r: f'{i + 1:x}' * 40 for i, r in enumerate(mg.FIRST_PARTY)}
 
 LOCK_PACKAGES = [
@@ -557,10 +571,10 @@ class Evidence:
                     'repository': {'full_name': 'freemkv/freemkv'},
                     'head_repository': {'full_name': 'freemkv/freemkv'},
                     'status': 'completed', 'conclusion': 'success',
-                    'created_at': '2026-09-20T00:00:00Z', 'updated_at': '2026-09-20T02:00:00Z'}
+                    'created_at': stamp(RUN_START), 'updated_at': stamp(RUN_START, hours=2)}
         # The tag object as record-media-evidence writes it through GITHUB_TOKEN.
         self.tag = {'tag': f'media-evidence/{self.f}/{RUN_ID}', 'object': {'sha': 'c1', 'type': 'commit'},
-                    'tagger': dict(mg.ACTIONS_BOT, date='2026-09-20T01:50:00Z')}
+                    'tagger': dict(mg.ACTIONS_BOT, date=stamp(RUN_START, hours=1, minutes=50))}
         self.jobs = [{'name': n, 'conclusion': 'success', 'runner_name': None, 'labels': []}
                      for n in mg.required_jobs(policy)]
         for leg in mg.legs(policy):
@@ -705,12 +719,12 @@ class DecideTests(unittest.TestCase):
         """A tag anyone but a real, successful qa.yml run on qa wrote is never evidence."""
         human = {'name': 'Matthew Jackson', 'email': '1085847+MattJackson@users.noreply.github.com'}
         cases = {
-            'pushed by a person': lambda e: e.tag.update(tagger=dict(human, date='2026-09-20T01:50:00Z')),
+            'pushed by a person': lambda e: e.tag.update(tagger=dict(human, date=stamp(RUN_START, hours=1))),
             'bot name, other email': lambda e: e.tag['tagger'].update(email='github-actions@example.com'),
             'no tagger': lambda e: e.tag.pop('tagger'),
             'tag object under another name': lambda e: e.tag.update(tag=f'media-evidence/{e.f}/{RUN_ID + 1}'),
-            'dated before the run': lambda e: e.tag['tagger'].update(date='2026-09-19T23:59:59Z'),
-            'dated after the run': lambda e: e.tag['tagger'].update(date='2026-09-21T00:00:00Z'),
+            'dated before the run': lambda e: e.tag['tagger'].update(date=stamp(RUN_START, seconds=-1)),
+            'dated after the run': lambda e: e.tag['tagger'].update(date=stamp(RUN_START, days=1)),
             'undated': lambda e: e.tag['tagger'].pop('date'),
             'run id that does not exist': lambda e: e.tags.__setitem__(0, {
                 'ref': f'refs/tags/media-evidence/{e.f}/{RUN_ID + 7}', 'object': {'sha': 't1', 'type': 'tag'}}),
@@ -805,7 +819,7 @@ class DecideTests(unittest.TestCase):
     def test_forged_tag_with_otherwise_perfect_evidence_is_rejected(self):
         """Copying a real run's evidence byte for byte does not help a tag the bot did not write."""
         e = Evidence(self)
-        e.tag['tagger'] = {'name': 'github-actions', 'email': mg.ACTIONS_BOT['email'], 'date': '2026-09-20T01:50:00Z'}
+        e.tag['tagger'] = {'name': 'github-actions', 'email': mg.ACTIONS_BOT['email'], 'date': stamp(RUN_START, hours=1)}
         logs = []
         self.assertIsNone(e.found(log=logs.append))
         self.assertTrue(any('not created by github-actions[bot]' in line for line in logs), logs)
@@ -816,12 +830,38 @@ class DecideTests(unittest.TestCase):
                   {'ref': f'refs/tags/media-evidence/{e.f}/{RUN_ID}', 'object': {'sha': 't1', 'type': 'tag'}}]
         self.assertEqual(e.found()['run_id'], RUN_ID)
 
-    def test_age_is_informational(self):
+    def test_evidence_expires_explicitly_at_max_age(self):
+        """Review 2 item 4: at 90 days evidence is expired, and says so; it is not 'still valid'."""
+        import datetime
+
+        def at(days):
+            e = Evidence(self)
+            t = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days, hours=1)
+            e.run['created_at'] = t.strftime('%Y-%m-%dT%H:%M:%SZ')
+            e.run['updated_at'] = (t + datetime.timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            e.tag['tagger']['date'] = (t + datetime.timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            logs = []
+            return e.found(log=logs.append), logs
+        limit = POLICY['max_age_days']
+        self.assertEqual(limit, 90)
+        got, _ = at(10)
+        self.assertEqual(got['warnings'], [])
+        got, _ = at(limit - 5)
+        self.assertTrue(any('expires at 90 days (in 5)' in w for w in got['warnings']), got['warnings'])
+        for days in (limit, limit + 400):
+            got, logs = at(days)
+            self.assertIsNone(got)
+            self.assertTrue(any('evidence expired' in line and 'counts for 90 days' in line for line in logs), logs)
+            self.assertFalse(any('still valid' in line for line in logs))
         e = Evidence(self)
-        e.run['created_at'] = '2025-01-01T00:00:00Z'
-        got = e.found()
-        self.assertIsNotNone(got)
-        self.assertTrue(any('days old' in w for w in got['warnings']))
+        e.run.pop('created_at')
+        self.assertIsNone(e.found())
+
+    def test_expiry_matches_the_plan_artifact_retention(self):
+        import yaml
+        qa = yaml.safe_load((ROOT / '.github/workflows/qa.yml').read_text())
+        upload = next(s for s in qa['jobs']['plan-media']['steps'] if s.get('with', {}).get('name') == 'media-plan')
+        self.assertEqual(upload['with']['retention-days'], POLICY['max_age_days'])
 
     def test_canary(self):
         policy = with_policy(canary={'probes': [{'fixture': 'uhd.iso'}]})

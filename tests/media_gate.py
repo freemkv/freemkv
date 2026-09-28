@@ -921,6 +921,7 @@ def gh_download(endpoint):
 
 
 MAX_PLAN_ARTIFACT = 16 << 20
+EXPIRY_NOTICE_DAYS = 14
 # What a run's own plan fixes about the candidate it tested; the tag's evidence must agree on all of it.
 PLAN_BINDING = ('schema', 'fingerprint', 'inputs', 'revisions', 'lock_sha256', 'run_id')
 
@@ -1155,13 +1156,21 @@ def check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, req
         for os_name, result in perf.items():
             if not perf_check(result, policy):
                 raise ValueError(f'perf verdict for {os_name} does not recompute')
+    # Evidence EXPIRES after policy max_age_days (90): that is the media-plan artifact's
+    # retention-days in qa.yml, and without the artifact the evidence cannot be bound to its run
+    # (bind_to_plan), so it stops counting then. Expiry is stated here, not left to a 404.
     warnings = []
-    created = run.get('created_at')
-    if created:
-        age = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(
-            created.replace('Z', '+00:00'))
-        if age.days > policy['max_age_days']:
-            warnings.append(f'evidence is {age.days} days old (informational; it is still valid)')
+    try:
+        age = (datetime.datetime.now(datetime.timezone.utc) - _when(run['created_at'])).days
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f'run {run_id} has no readable created_at ({exc})') from exc
+    limit = policy['max_age_days']
+    if age >= limit:
+        raise ValueError(f'evidence expired: it is {age} days old and evidence counts for {limit} days '
+                         '(the media-plan retention that binds it to its run); qa runs the full disc again')
+    if age >= limit - EXPIRY_NOTICE_DAYS:
+        warnings.append(f'evidence is {age} days old and expires at {limit} days (in {limit - age}); '
+                        'after that qa runs the full disc again')
     return ev, warnings
 
 
