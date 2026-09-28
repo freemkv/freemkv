@@ -237,7 +237,9 @@ pub(crate) fn finish(
                     finished_at: now,
                 },
             );
-            sink.line(LineKind::Err, format!("{}: {message}", error_word()));
+            if !sink.error_shown() {
+                sink.line(LineKind::Err, format!("{}: {message}", error_word()));
+            }
             if job.replace {
                 sink.line(LineKind::Out, "The old MKV is unchanged.".into());
             }
@@ -277,6 +279,11 @@ fn hms(secs: u64) -> String {
 /// Somewhere a job's human-readable lines go.
 pub(crate) trait LineSink {
     fn line(&self, kind: LineKind, text: String);
+    /// The job's error has already been printed (the engine reported it as
+    /// the title failed), so the ending must not print it again.
+    fn error_shown(&self) -> bool {
+        false
+    }
 }
 
 struct JobLog(Mutex<Option<std::fs::File>>);
@@ -331,6 +338,7 @@ struct Term {
     mux_started: Option<Instant>,
     // The in-place progress line; printed for good when the title finishes.
     progress: String,
+    error_shown: bool,
 }
 
 struct TitleText {
@@ -435,6 +443,10 @@ impl LineSink for JobSink<'_> {
     fn line(&self, kind: LineKind, text: String) {
         self.emit(kind, text);
     }
+
+    fn error_shown(&self) -> bool {
+        self.term().error_shown
+    }
 }
 
 impl Sink for JobSink<'_> {
@@ -515,7 +527,10 @@ impl Sink for JobSink<'_> {
                         };
                         self.emit(kind, transcript::complete_line(o.bytes_written, secs));
                     }
-                    Err(err) => self.emit(LineKind::Err, error_line(err)),
+                    Err(err) => {
+                        self.term().error_shown = true;
+                        self.emit(LineKind::Err, error_line(err));
+                    }
                 }
             }
             Event::Verify {
@@ -912,6 +927,43 @@ mod tests {
         );
         let said = lines.0.lock().unwrap().join("\n");
         assert!(said.contains("The old MKV is unchanged"), "{said}");
+    }
+
+    #[test]
+    fn a_failure_prints_its_error_once() {
+        let (_t, lib, _dirs) = library_with(&[]);
+        let arbiter = Arbiter::new();
+        let sink = test_sink(&lib, &arbiter);
+        let e = std::io::Error::other("E7013: aa");
+        let outcome: Result<&libfreemkv::MuxOutcome, &std::io::Error> = Err(&e);
+        sink.event(&Event::TitleDone {
+            idx: 0,
+            dest: "mkv:///x.partial",
+            result: outcome,
+        });
+        lib.queue.add(vec![NewJob {
+            title: "A".into(),
+            iso: "/i/A.iso".into(),
+            target: "/m/A/A.mkv".into(),
+            replace: true,
+        }]);
+        let job = lib.queue.claim_next().unwrap();
+        finish(
+            &lib,
+            &job,
+            Ending::Failed(std::io::Error::other("E7013: aa")),
+            Duration::ZERO,
+            &sink,
+        );
+        let errs = lib
+            .console_since(0)
+            .into_iter()
+            .filter(|l| l.kind == LineKind::Err)
+            .count();
+        assert_eq!(errs, 1, "one error line, not one per layer");
+        let f = lib.queue.snapshot().jobs[0].failure.clone().unwrap();
+        assert_eq!(f.code, Some(7013));
+        assert!(f.message.starts_with("E7013"), "{f:?}");
     }
 
     #[test]
