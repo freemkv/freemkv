@@ -863,6 +863,13 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         out.blank(Normal);
     }
 
+    // A leftover image staged for an MKV rip only holds the titles it was staged for.
+    if let (Some((disc, _)), Some(src)) = (&iso_disc, source_path_of(source))
+        && refuse_unstaged_titles(&src, disc, &jobs, &out)
+    {
+        return 1;
+    }
+
     // Pipe each title
     let mut ok = true;
 
@@ -2106,11 +2113,45 @@ fn write_decrypted_image(
     libfreemkv::write_image(&mut src, dest, disc.capacity_sectors, halt, |_| {})
 }
 
+/// An image staged for an MKV rip holds only its titles, so it is never a whole-disc
+/// source (`iso://` copy, `dir://` extract): print E6022 and say so. Same engine check
+/// as the GUI's.
+fn refuse_staged_image(image: &std::path::Path, out: &Output) -> bool {
+    match freemkv_engine::ensure_whole_image(image) {
+        Ok(()) => false,
+        Err(e) => {
+            out.raw(Normal, &render_error(&e));
+            true
+        }
+    }
+}
+
+/// A staged image's never-read sectors are zeros: refuse (E6022) any job whose title
+/// extents its scope does not hold. `None` jobs mux title 0. Same engine check as the GUI's.
+fn refuse_unstaged_titles(
+    image: &std::path::Path,
+    disc: &libfreemkv::Disc,
+    jobs: &[(Option<usize>, String)],
+    out: &Output,
+) -> bool {
+    let titles: Vec<usize> = jobs.iter().map(|(t, _)| t.unwrap_or(0)).collect();
+    match freemkv_engine::ensure_titles_staged(image, disc, &titles) {
+        Ok(()) => false,
+        Err(e) => {
+            out.raw(Normal, &render_error(&e));
+            true
+        }
+    }
+}
+
 fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
     let iso_path = match libfreemkv::parse_url(dest) {
         libfreemkv::StreamUrl::Iso { path } => path,
         _ => return false,
     };
+    if source_path_of(source).is_some_and(|src| refuse_staged_image(&src, out)) {
+        return false;
+    }
 
     let (mut disc, reader) = match scan_iso(source) {
         Some(pair) => pair,
@@ -2505,6 +2546,9 @@ fn dir_to_extract(
             let scan = if matches!(parsed_source, libfreemkv::StreamUrl::Dir { .. }) {
                 libfreemkv::scan_dir
             } else {
+                if refuse_staged_image(std::path::Path::new(path), out) {
+                    return false;
+                }
                 libfreemkv::scan_iso
             };
             let (mut disc, mut reader) = match scan(std::path::Path::new(path), keyless_scan_opts())
@@ -3053,6 +3097,127 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
         libfreemkv::LabelPurpose::Score => Some("stream.purpose.score"),
         libfreemkv::LabelPurpose::Ime => Some("stream.purpose.ime"),
         libfreemkv::LabelPurpose::Normal => None,
+    }
+}
+
+#[cfg(test)]
+mod staged_image_tests {
+    use super::{Output, refuse_staged_image, refuse_unstaged_titles};
+
+    // A per-test scratch dir under the system temp dir, removed on drop.
+    struct TmpDir(std::path::PathBuf);
+    impl TmpDir {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let d = std::env::temp_dir().join(format!("fmkv-staged-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&d).unwrap();
+            Self(d)
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // An image staged for an MKV rip is refused as a whole-disc source; others are not.
+    #[test]
+    fn a_staged_image_is_refused_as_a_whole_disc_source() {
+        let tmp = TmpDir::new();
+        let iso = tmp.0.join("STAGED.iso");
+        std::fs::write(&iso, vec![0u8; 2048]).unwrap();
+        let mf = freemkv_engine::mapfile_path_for(&iso);
+        std::fs::write(&mf, "# freemkv-scope: 0x0+0x800\n0x0 ? 1\n0x0 0x800 ?\n").unwrap();
+        let out = Output::new(false, true);
+        assert!(refuse_staged_image(&iso, &out), "E6022");
+        std::fs::write(&mf, "0x0 ? 1\n0x0 0x800 +\n").unwrap();
+        assert!(!refuse_staged_image(&iso, &out), "a whole image");
+        assert!(
+            !refuse_staged_image(&tmp.0.join("none.iso"), &out),
+            "no mapfile"
+        );
+    }
+
+    fn title(start_lba: u32, sector_count: u32) -> libfreemkv::DiscTitle {
+        let mut t = libfreemkv::DiscTitle::empty();
+        t.extents = vec![libfreemkv::Extent {
+            start_lba,
+            sector_count,
+        }];
+        t
+    }
+
+    // A staged image muxes only titles its scope holds; `-t` jobs and the default (None =
+    // title 0) are checked by extents.
+    #[test]
+    fn a_staged_image_muxes_only_titles_its_scope_holds() {
+        let tmp = TmpDir::new();
+        let iso = tmp.0.join("STAGED.iso");
+        std::fs::write(&iso, vec![0u8; 8 * 2048]).unwrap();
+        let mf = freemkv_engine::mapfile_path_for(&iso);
+        std::fs::write(&mf, "# freemkv-scope: 0x0+0x2000\n0x0 ? 1\n0x0 0x4000 ?\n").unwrap();
+        let disc = libfreemkv::Disc {
+            volume_id: "STAGED".into(),
+            meta_title: None,
+            format: libfreemkv::DiscFormat::Uhd,
+            capacity_sectors: 8,
+            capacity_bytes: 8 * 2048,
+            layers: 1,
+            titles: vec![title(0, 4), title(4, 4)],
+            region: libfreemkv::disc::DiscRegion::Free,
+            aacs: None,
+            css: None,
+            encrypted: false,
+            aacs_error: None,
+            css_error: None,
+            content_format: libfreemkv::ContentFormat::BdTs,
+        };
+        let out = Output::new(false, true);
+        let job = |t: Option<usize>| vec![(t, String::new())];
+        assert!(
+            !refuse_unstaged_titles(&iso, &disc, &job(Some(0)), &out),
+            "in scope"
+        );
+        assert!(
+            !refuse_unstaged_titles(&iso, &disc, &job(None), &out),
+            "default = title 0"
+        );
+        assert!(
+            refuse_unstaged_titles(&iso, &disc, &job(Some(1)), &out),
+            "E6022"
+        );
+        std::fs::remove_file(&mf).unwrap();
+        assert!(
+            !refuse_unstaged_titles(&iso, &disc, &job(Some(1)), &out),
+            "not staged"
+        );
+    }
+
+    // Both CLI whole-disc sinks from an image check it before scanning or writing.
+    #[test]
+    fn iso_and_dir_outputs_from_an_image_check_it_first() {
+        let src = include_str!("pipe.rs").replace("\r\n", "\n");
+        let body = |from: &str, to: &str| {
+            let a = src.find(from).expect(from);
+            src[a..a + src[a..].find(to).expect(to)].to_string()
+        };
+        let iso = body("\nfn image_to_iso(", "scan_iso(source)");
+        assert!(
+            iso.contains("refuse_staged_image(&src, out)"),
+            "iso:// -> iso://"
+        );
+        let dir = body("\nfn dir_to_extract(", "libfreemkv::scan_iso\n");
+        assert!(
+            dir.contains("refuse_staged_image(std::path::Path::new(path), out)"),
+            "dir://"
+        );
+        let mux = body("    let iso_disc = if is_disc", "    // Pipe each title");
+        assert!(
+            mux.contains("refuse_unstaged_titles(&src, disc, &jobs, &out)"),
+            "iso:// -> MKV"
+        );
     }
 }
 
