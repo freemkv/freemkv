@@ -108,6 +108,11 @@ objc2-user-notifications = { optional = true, version = "=0.3", default-features
 ] }
 block2 = { version = "=0.6", optional = true }
 
+[dev-dependencies]
+# `test_util` fixtures (`aacs_state`, …) for this crate's tests (keys-upfront
+# KU-P1). CI resolves it through the sibling path patch.
+libfreemkv = { version = "1.7", features = ["test-util"] }
+
 # Resolve the freemkv crates from their GIT TAGS. They are OFF crates.io
 # (libfreemkv git-deps the firmware crate, and keysources deps libfreemkv), so
 # this [patch.crates-io] git-tag redirect is the ONLY resolution path — there is

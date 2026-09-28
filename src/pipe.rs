@@ -966,12 +966,15 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
                 },
                 _ => libfreemkv::StreamSelection::default(),
             };
+            // `..Default`: KU-L2 adds `InputOptions::keys`; until then every field is set.
+            #[allow(clippy::needless_update)]
             let opts = libfreemkv::InputOptions {
                 unit_keys: iso_unit_keys.clone(),
                 title_index: *title_idx,
                 raw,
                 key_fetch: iso_key_fetch.clone(),
                 selection,
+                ..Default::default()
             };
             pipe(source, dest_url, &opts, &out)
         };
@@ -5783,18 +5786,9 @@ mod iso_key_tests {
     }
 
     pub(super) fn aacs(unit_keys: Vec<(u32, [u8; 16])>) -> libfreemkv::AacsState {
-        libfreemkv::AacsState {
-            version: 1,
-            bus_encryption: false,
-            mkb_version: None,
-            disc_hash: String::new(),
-            key_source: libfreemkv::KeyOrigin::ExternalUk,
-            vuk: None,
-            unit_keys,
-            volume_id: [0u8; 16],
-            uk_ro: Vec::new(),
-            mkb: Vec::new(),
-        }
+        libfreemkv::test_util::aacs_state()
+            .unit_keys(unit_keys)
+            .build()
     }
 
     #[test]
@@ -6875,22 +6869,17 @@ mod image_copy_tests {
             layers: 1,
             titles: vec![title],
             region: libfreemkv::disc::DiscRegion::Free,
-            aacs: Some(libfreemkv::AacsState {
-                version: 1,
-                bus_encryption: false,
-                mkb_version: None,
-                disc_hash: String::new(),
-                key_source: libfreemkv::KeyOrigin::ExternalUk,
-                vuk: None,
-                unit_keys: pool
-                    .iter()
-                    .enumerate()
-                    .map(|(i, k)| (i as u32 + 1, *k))
-                    .collect(),
-                volume_id: [0u8; 16],
-                uk_ro,
-                mkb: Vec::new(),
-            }),
+            aacs: Some(
+                libfreemkv::test_util::aacs_state()
+                    .unit_keys(
+                        pool.iter()
+                            .enumerate()
+                            .map(|(i, k)| (i as u32 + 1, *k))
+                            .collect(),
+                    )
+                    .uk_ro(uk_ro)
+                    .build(),
+            ),
             css: None,
             encrypted: true,
             aacs_error: None,

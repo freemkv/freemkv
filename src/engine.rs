@@ -3255,20 +3255,12 @@ mod key_summary_tests {
     }
 
     pub(super) fn aacs(unit_keys: Vec<(u32, [u8; 16])>) -> libfreemkv::AacsState {
-        libfreemkv::AacsState {
-            version: 1,
-            bus_encryption: false,
-            mkb_version: None,
-            disc_hash: String::new(),
-            // The scan-time PLACEHOLDER origin — identical whether or not a key
-            // was ever resolved. That is exactly why it cannot be trusted.
-            key_source: libfreemkv::KeyOrigin::ExternalUk,
-            vuk: None,
-            unit_keys,
-            volume_id: [0u8; 16],
-            uk_ro: Vec::new(),
-            mkb: Vec::new(),
-        }
+        // The scan-time PLACEHOLDER origin (`ExternalUk`, the builder default) —
+        // identical whether or not a key was ever resolved, so it cannot be trusted.
+        libfreemkv::test_util::aacs_state()
+            .key_source(libfreemkv::KeyOrigin::ExternalUk)
+            .unit_keys(unit_keys)
+            .build()
     }
 
     #[test]
