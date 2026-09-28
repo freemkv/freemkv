@@ -12,7 +12,6 @@ pub mod resume;
 mod session;
 pub mod staging;
 pub mod state;
-pub mod tv;
 
 // Re-export every symbol the crate/tests address as `crate::server::ripper::*`.
 // `#[allow(unused_imports)]` stays: the binary build doesn't use every
@@ -5621,7 +5620,7 @@ fn fanout_episode_indices(
         return Vec::new();
     }
     // The episode cluster: drops the play-all sum-title, extras/menus, dupes.
-    let indices = tv::select_episode_titles(titles, cfg.min_length_secs);
+    let indices = freemkv_engine::episode_titles(titles);
     // A single feature that merely carries a TV label (e.g. a TV movie) is one output.
     if indices.len() <= 1 {
         return Vec::new();
