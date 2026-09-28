@@ -794,27 +794,39 @@ fn usage() {
     println!();
     println!(
         "{}",
-        crate::strings::get_or("usage.exit_codes_header", "Exit codes (disc:// -> iso://):")
+        crate::strings::get_or("usage.exit_codes_header", "Exit codes:")
+    );
+    println!(
+        "{}",
+        crate::strings::get_or("usage.exit_code.ok", "  0    Success.")
     );
     println!(
         "{}",
         crate::strings::get_or(
-            "usage.exit_code.ok",
-            "  0  Complete: the whole disc was copied."
+            "usage.exit_code.failed",
+            "  1    Failed: no usable output, or any other error."
+        )
+    );
+    println!(
+        "{}",
+        crate::strings::get_or(
+            "usage.exit_code.usage",
+            "  2    Usage: bad command or flags (this text was also printed)."
         )
     );
     println!(
         "{}",
         crate::strings::get_or(
             "usage.exit_code.damaged",
-            "  3  Damaged: kept and usable, but short some sectors — re-run (--multipass) to try for more.",
+            "  3    Damaged (disc:// -> iso:// or disc:// -> null:// only): kept and \
+             usable, but short some sectors — re-run (--multipass) to try for more.",
         )
     );
     println!(
         "{}",
         crate::strings::get_or(
-            "usage.exit_code.failed",
-            "  1  Failed: no usable image, or any other error."
+            "usage.exit_code.interrupted",
+            "  130  A second Ctrl-C forced an immediate exit."
         )
     );
 }

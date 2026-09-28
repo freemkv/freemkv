@@ -2266,8 +2266,10 @@ fn disc_raw_copy(kind: OutKind, raw: bool) -> bool {
 // loss and points at another run (shared `disc_copy_verdict` renderer, can't drift from the CLI).
 fn iso_recovery_result(result: &fe::MultipassResult, iso_path: &str) -> Result<String, String> {
     if recovery_produced_no_data(result.good_bytes) {
-        return Err(crate::disc_copy_verdict::iso_no_data_error(
-            result.unreadable_bytes,
+        // Names where it was kept, like every other terminal message here does.
+        return Err(format!(
+            "{} ISO kept: {iso_path}",
+            crate::disc_copy_verdict::iso_no_data_error(result.unreadable_bytes)
         ));
     }
     let mut note = damage_note(result);
@@ -4980,9 +4982,11 @@ mod routing_tests {
             complete: false,
             ..clean_result()
         };
+        let err = iso_recovery_result(&no_data, "/x.iso")
+            .expect_err("no data at all is the only failure");
         assert!(
-            iso_recovery_result(&no_data, "/x.iso").is_err(),
-            "no data at all is the only failure"
+            err.contains("/x.iso"),
+            "the no-data error must say where the (unusable but kept) ISO is: {err}"
         );
 
         // Holed but non-empty: still a SUCCESS — the image is kept and usable — but

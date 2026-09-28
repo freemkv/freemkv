@@ -684,7 +684,6 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
     Ok(f)
 }
 
-/// Returns true on success, false on error.
 /// The process exit code: 0 on success, `disc_to_iso`'s own
 /// `DISC_COPY_DAMAGED_EXIT` for a kept-but-damaged disc→ISO copy, 1 on any
 /// other failure.
