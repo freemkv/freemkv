@@ -64,7 +64,7 @@ pub fn drive_scan(
         _ => libfreemkv::DeviceTarget::Autodetect,
     };
     let mut session = fe::open_scan(target, credentials, false)?;
-    session.take_disc().ok_or(Error::DecryptFailed)
+    Ok(session.take_disc().expect("scan populated the disc"))
 }
 
 /// What a disc→ISO copy decrypts (KU §2.5): the whole disc, or nothing for a raw copy
