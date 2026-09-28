@@ -22,9 +22,25 @@ COPY . .
 # than in Cargo.toml so the CLI and app release builds are unchanged.
 ENV CARGO_PROFILE_RELEASE_LTO=thin \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
-# --locked: refuse to modify Cargo.lock during build, so a lock that no longer
-# matches Cargo.toml fails visibly instead of silently re-resolving.
-RUN cargo build --locked --release --features server --bin freemkv
+# SIBLING_REF=dev builds against the sibling crates' branch tips instead of the
+# release tags (the same redirect CI uses); the lock then re-resolves, so
+# --locked applies only to a tag build.
+ARG SIBLING_REF=
+# Version label shown by the server (e.g. 1.7.7-dev.<sha>); empty = the crate version.
+ARG AUTORIP_BUILD_LABEL=
+RUN if [ -n "$SIBLING_REF" ]; then \
+      mkdir -p /siblings .cargo \
+      && for r in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do \
+           git clone -q --depth 1 --branch "$SIBLING_REF" "https://github.com/freemkv/$r" "/siblings/$r"; done \
+      && printf '[patch.crates-io]\n%s\n%s\n%s\n%s\n' \
+           'libfreemkv = { path = "/siblings/libfreemkv" }' \
+           'freemkv-engine = { path = "/siblings/freemkv-engine" }' \
+           'freemkv-keysources = { path = "/siblings/freemkv-keysources" }' \
+           'freemkv-i18n = { path = "/siblings/freemkv-i18n" }' > .cargo/config.toml \
+      && cargo build --release --features server --bin freemkv; \
+    else \
+      cargo build --locked --release --features server --bin freemkv; \
+    fi
 
 # Harvest stage — pull mount.nfs4 + its deps + busybox-static + applet
 # symlinks from an alpine image so the FROM scratch final has a working
@@ -54,6 +70,7 @@ RUN apk add --no-cache nfs-utils busybox-static \
  && cp -r /etc/nsswitch.conf         /out/etc/nsswitch.conf 2>/dev/null || true
 
 FROM scratch
+LABEL org.opencontainers.image.source=https://github.com/freemkv/freemkv-library
 COPY --from=harvest /out/ /
 # Pin perms explicitly on both COPYs; the bootstrap's udev rule runs
 # /usr/local/bin/udev-trigger.sh on disc insertion.
@@ -64,4 +81,7 @@ EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["/usr/local/bin/freemkv", "server", "--healthcheck"]
+
+# --bootstrap mounts NFS / installs the udev rule, then runs the daemon.
+ENTRYPOINT ["/usr/local/bin/freemkv", "server", "--bootstrap"]
 
