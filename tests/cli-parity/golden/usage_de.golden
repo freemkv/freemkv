@@ -65,6 +65,7 @@ Optionen:
                       Mit --keydb wird keydb zuerst versucht (lokal-
                       zuerst); allein ist es die einzige Schlüsselquelle.
       --key-auth TOKEN Träger-Token für den Schlüsseldienst (optional).
+      --vid-from DRIVE Für ein iso://-Abbild, dessen Schlüssel die Volume-ID der Disc benötigen (E7034): sie von der Disc in DRIVE lesen (disc:// oder disc://DEVICE); dabei wird nichts von ihr gerippt.
       --log-level N   1=Warnung 2=Info 3=Debug 4=Trace. Standard: aus —
                       das Terminal bleibt sauber. Schreibt ein
                       Diagnoseprotokoll in ./log.txt (3 für Fehlerberichte).

@@ -65,6 +65,7 @@ Flags:
                       With --keydb the keydb is tried first (local-
                       first); alone it is the only key source.
       --key-auth TOKEN Bearer token sent to the key service (optional).
+      --vid-from DRIVE For an iso:// image whose keys need the disc's Volume ID (E7034): read it from the disc in DRIVE (disc:// or disc://DEVICE); nothing is ripped from it.
       --log-level N   1=warn 2=info 3=debug 4=trace. Off by default —
                       the terminal stays clean. Set it to write a
                       diagnostic log to ./log.txt (use 3 for bug reports).
