@@ -2162,7 +2162,9 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             job.mode = fe::RipMode::Single;
             job.keys = Some(set);
             let lock = hold_iso_lock(&dest, state)?;
-            let res = fe::recover_to_iso(&disc, reader.as_mut(), &dest, &job, sink)
+            let copied = fe::recover_to_iso(&disc, reader.as_mut(), &dest, &job, sink);
+            let halted = matches!(&copied, Ok(r) if r.halted);
+            let res = copied
                 .map_err(|e| format!("image decrypt failed: {e}"))
                 .and_then(|result| {
                     if recovery_produced_no_data(result.bytes_good) {
@@ -2171,7 +2173,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
                     }
                     Ok(summarize_image_decrypt(&result, &dest))
                 });
-            release_iso_lock(lock, &res, false, &dest, state);
+            release_iso_lock(lock, &res, halted, &dest, state);
             return res;
         }
         _ => {}
@@ -2206,10 +2208,8 @@ fn release_iso_lock(
     iso: &std::path::Path,
     state: &Arc<RunState>,
 ) {
-    let _ = halted;
-    let cancelled = state.cancel.load(Ordering::SeqCst);
-    let done = (res.is_ok() && !cancelled) || !iso.exists();
-    if cancelled && !done {
+    let done = (res.is_ok() && !halted) || !iso.exists();
+    if halted && !done {
         let kept = crate::strings::get_or("stop.progress_kept", "Progress kept");
         state
             .lines
@@ -2674,6 +2674,7 @@ fn run_disc_scanning(
                 .map_err(|e| format!("recovery failed: {e}"))?
         };
         let lock = hold_iso_lock(std::path::Path::new(&iso_path), state)?;
+        let mut halted = false;
         let res = (|| -> Result<String, String> {
             let result = fe::multipass_rip_staged(
                 &disc,
@@ -2685,6 +2686,7 @@ fn run_disc_scanning(
                 sink,
             )
             .map_err(|e| format!("recovery failed: {e}"))?;
+            halted = result.halted;
             drop(reader);
             // Read phase done: the deliverable (ISO) or the mux source is on disk,
             // so the drive is no longer needed — eject now, exactly like autorip
@@ -2744,7 +2746,7 @@ fn run_disc_scanning(
                 )
             })
         })();
-        release_iso_lock(lock, &res, false, std::path::Path::new(&iso_path), state);
+        release_iso_lock(lock, &res, halted, std::path::Path::new(&iso_path), state);
         return res;
     }
 
@@ -4087,7 +4089,7 @@ mod routing_tests {
         );
         let staged = slice(
             "        let result = fe::multipass_rip_staged(",
-            "        .map_err(|e| format!(\"recovery failed: {e}\"))?;\n            drop(reader);",
+            "        .map_err(|e| format!(\"recovery failed: {e}\"))?;\n            halted = result.halted;",
         );
         assert!(
             staged.contains("staging.as_deref()"),
