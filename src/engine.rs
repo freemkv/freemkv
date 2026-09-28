@@ -391,7 +391,8 @@ pub fn scan_with_keys_under(
     };
     let (opened, trace) =
         crate::rip_keys::open_image(&src, crate::rip_keys::sources(&key_params(keys)), o);
-    stopped_open(opened.map(|o| o.keys), tok).map(|keys| scanned_with_keys(&disc, keys, &trace, main))
+    stopped_open(opened.map(|o| o.keys), tok)
+        .map(|keys| scanned_with_keys(&disc, keys, &trace, main))
 }
 
 // Stop design v5 §4.3: a cancelled open ends `Halted` with no scan, so no key strip update.
@@ -5848,6 +5849,65 @@ mod ku_gui_tests {
             e.contains(&format!("E{}", libfreemkv::Error::Halted.code())),
             "{e}"
         );
+    }
+
+    // Stop design v5 §2.5: "The lock is taken only by the freemkv CLI/GUI and the engine
+    // `_with` entries"; "Deleted on success … Kept after Stop". While another process holds
+    // `<final>.lock` the GUI writes nothing and Stop ends the wait. Per spec.
+    #[test]
+    fn gui_iso_holds_the_artifact_lock() {
+        let fx = bd_image(&[Some(K1)], 1);
+        let dir = TempDir::new("gui-lock");
+        let iso = fx.write(dir.path(), "disc.iso");
+        let out = dir.path().join("out");
+        let mut r = req(&iso, &out, Vec::new());
+        r.format = "ISO image".into();
+        let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
+        with_sources(f, || run(&r).0.expect("the copy"));
+        let written = files_under(&out);
+        let image = written
+            .iter()
+            .find(|p| p.extension() == Some("iso".as_ref()));
+        let image = image.expect("the image").clone();
+        assert!(
+            !written
+                .iter()
+                .any(|p| p.extension() == Some("lock".as_ref())),
+            "deleted on success: {written:?}"
+        );
+
+        std::fs::remove_dir_all(&out).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let never = libfreemkv::Halt::new();
+        let held = libfreemkv::io::ArtifactLock::acquire(&image, &[], &never).unwrap();
+        let st = Arc::new(RunState::default());
+        let stop = st.clone();
+        let press = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            stop.cancel.store(true, Ordering::SeqCst);
+        });
+        let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
+        let res = with_sources(f, || run_blocking(&r, &UiSink(st.clone()), &st));
+        press.join().unwrap();
+        drop(held);
+        assert!(
+            !image.exists(),
+            "nothing written under another holder's lock: {res:?}"
+        );
+    }
+
+    // §2.5: the lock is "created at op start and held for the whole op". The drive's ISO
+    // and staging copy need a live drive, so this reads the wiring; the image arm runs it.
+    #[test]
+    fn gui_drive_iso_holds_the_artifact_lock() {
+        let src = include_str!("engine.rs").replace("\r\n", "\n");
+        let a = src
+            .find("\nfn run_disc_scanning(")
+            .expect("run_disc_scanning");
+        let body = &src[a..a + src[a..].find("\nfn mux_staged_titles(").expect("next fn")];
+        let lock = body.find("hold_iso_lock(").expect("the lock");
+        assert!(lock < body.find("fe::multipass_rip_staged(").expect("the copy"));
+        assert!(body.contains("release_iso_lock(lock, &res,"));
     }
 
     /// FK2 (KU §2.5: "GUI open | `Titles([main])` for status. The result seeds the rip's

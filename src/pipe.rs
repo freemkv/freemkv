@@ -5505,7 +5505,13 @@ mod verdict_tests {
         for raw in [false, true] {
             let dir = TempDir::new("fk6");
             let iso = dir.path().join("disc.iso");
-            let o = disc_copy_options((!raw).then_some(&set), raw, false, &nop, &libfreemkv::Halt::new());
+            let o = disc_copy_options(
+                (!raw).then_some(&set),
+                raw,
+                false,
+                &nop,
+                &libfreemkv::Halt::new(),
+            );
             let r = freemkv_engine::copy(&disc, &mut fx.source(), &iso, &o).unwrap();
             assert!(r.bytes_good > 0, "the copy ran");
             let map = std::fs::read_to_string(freemkv_engine::mapfile_path_for(&iso)).unwrap();
@@ -7089,6 +7095,70 @@ mod ku_cli_tests {
         assert_eq!(calls.len(), 1, "the key call was in flight");
         assert!(!plain.exists(), "no ISO");
         assert_eq!(files_under(dir.path()), vec![iso], "no partial");
+    }
+
+    // §2.5: the lock is "created at op start and held for the whole op". The disc→ISO copy
+    // needs a live drive to run, so this reads the wiring; `image_to_iso` runs the rest.
+    #[test]
+    fn disc_to_iso_holds_the_artifact_lock() {
+        let src = include_str!("pipe.rs").replace("\r\n", "\n");
+        let a = src.find("\nfn disc_to_iso(").expect("disc_to_iso");
+        let body = &src[a..a + src[a..].find("\nfn dir_to_extract(").expect("next fn")];
+        let lock = body.find("hold_iso_lock(&iso_path").expect("the lock");
+        assert!(lock < body.find("freemkv_engine::copy(").expect("the copy"));
+        assert!(body.contains("crate::artifact_lock::release(lock, done)"));
+    }
+
+    static LOCK_CTRL_C: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    // Stop design v5 §2.5: "The lock is taken only by the freemkv CLI/GUI and the engine
+    // `_with` entries"; "Deleted on success … Kept after Stop". While another process holds
+    // `<final>.lock` the CLI writes nothing and a Ctrl-C ends the wait. Per spec.
+    #[test]
+    fn image_to_iso_holds_the_artifact_lock() {
+        let fx = bd_image(&[Some(K1)], 1);
+        let dir = TempDir::new("cli-lock");
+        let iso = fx.write(dir.path(), "disc.iso");
+        let plain = dir.path().join("plain.iso");
+        let sidecar = dir.path().join("plain.iso.lock");
+        let (src, dest) = (
+            format!("iso://{}", iso.display()),
+            format!("iso://{}", plain.display()),
+        );
+        let out = crate::output::Output::new(false, true);
+        let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
+        let never = libfreemkv::Halt::new();
+        let ok = with_sources(f, || {
+            super::image_to_iso(&src, &dest, &super::KeyConfig::default(), &never, &out)
+        });
+        assert!(ok && plain.exists(), "the copy ran");
+        assert!(!sidecar.exists(), "deleted on success");
+
+        std::fs::remove_file(&plain).unwrap();
+        let held = libfreemkv::io::ArtifactLock::acquire(&plain, &[], &never).unwrap();
+        let token = crate::cli_stop::watching(&LOCK_CTRL_C);
+        let press = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            LOCK_CTRL_C.store(true, std::sync::atomic::Ordering::Release);
+        });
+        let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
+        let loud = crate::output::Output::new(false, false);
+        let (ok, text) = crate::output::capture(|| {
+            with_sources(f, || {
+                super::image_to_iso(&src, &dest, &super::KeyConfig::default(), &token, &loud)
+            })
+        });
+        press.join().unwrap();
+        drop(held);
+        assert!(!ok, "a copy that never got the lock is not a success");
+        assert!(
+            !plain.exists(),
+            "nothing written under another holder's lock"
+        );
+        assert!(
+            text.contains(&crate::strings::get("rip.interrupted")),
+            "{text}"
+        );
     }
 
     /// FK11, CLI half (KU §4.2, J11/J12; USER 2026-09-28: no `--vid-from`): an image whose
