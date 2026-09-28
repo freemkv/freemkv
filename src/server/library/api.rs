@@ -72,6 +72,9 @@ pub fn handle(
         )
     };
     match (get, post, path.as_str()) {
+        (true, _, "/api/library") if query_param(&url, "download").is_some() => {
+            download(request, &library_json(&lib, &c));
+        }
         (true, _, "/api/library") => json_response(request, 200, &library_json(&lib, &c)),
         (true, _, "/api/library/console") => json_response(request, 200, &console_json(&lib)),
         (true, _, "/api/library/log") => {
@@ -190,6 +193,14 @@ pub fn handle(
                 .sum::<usize>();
             json_response(request, 200, &json!({"ok": true, "removed": n}).to_string());
         }
+        (_, true, "/api/library/queue/stop-all") => {
+            let (running, removed) = lib.stop_all();
+            json_response(
+                request,
+                200,
+                &json!({"ok": true, "stopped": running, "removed": removed}).to_string(),
+            );
+        }
         (_, true, "/api/library/queue/clear-queued") => {
             let n = lib.queue.clear_queued();
             json_response(request, 200, &json!({"ok": true, "removed": n}).to_string());
@@ -216,6 +227,28 @@ pub fn handle(
         _ => return Some(request),
     }
     None
+}
+
+// The listing as a file: `freemkv-library-<date>.json`, saved, not shown.
+fn download(request: tiny_http::Request, body: &str) {
+    let disposition = format!(
+        "attachment; filename=\"freemkv-library-{}.json\"",
+        crate::server::util::format_date()
+    );
+    let response = tiny_http::Response::from_string(body)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Disposition"[..], disposition.as_bytes())
+                .expect("ascii header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+                .expect("static header"),
+        );
+    let _ = request.respond(response);
 }
 
 fn text_response(request: tiny_http::Request, body: &str) {

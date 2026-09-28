@@ -83,6 +83,7 @@ footer.foot a { color: var(--muted); }
 .btn-ghost { background: transparent; color: var(--slate); border-color: var(--line); }
 .btn-ghost:hover:not(:disabled) { border-color: var(--muted); color: var(--ink); }
 .btn-sm { padding: 0.3rem 0.75rem; font-size: 0.8rem; border-radius: 8px; }
+.btn-danger, .btn-danger:hover:not(:disabled) { background: var(--bad); color: #fff; border-color: var(--bad); }
 .btn.confirm, .btn.confirm:hover { background: var(--bad); border-color: var(--bad); color: #fff; box-shadow: none; }
 .btn.busy { position: relative; color: transparent !important; }
 .btn.busy::after { content: ""; position: absolute; width: 0.9rem; height: 0.9rem; border: 2px solid currentColor; border-color: var(--muted) transparent var(--muted) transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
@@ -342,6 +343,8 @@ table.det td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); }
 .mrow:hover { background: color-mix(in srgb, var(--bg-soft) 75%, transparent); }
 .mrow:focus-visible { outline: 2px solid var(--teal); outline-offset: -2px; border-radius: 0; }
 .mrow.grey .mtitle, .mrow.grey .mmeta, .mrow.grey .mside { color: var(--muted); }
+/* Remux: a row that needs a remux is the point of the page; tinted, never shifted. */
+.mrow.need { box-shadow: inset 2px 0 0 rgba(245, 158, 11, 0.55); }
 .mrow.grey .mtitle { font-weight: 550; }
 .mdot { display: flex; align-items: center; justify-content: center; width: 1.1rem; }
 .sdot { display: inline-flex; align-items: center; justify-content: center; width: 10px; height: 10px; border-radius: 50%; flex: none; }
@@ -359,6 +362,7 @@ table.det td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); }
 .mside { min-width: 0; text-align: right; font-size: 0.86rem; display: flex; justify-content: flex-end; }
 .mside .iso { color: var(--muted); font-size: 0.8rem; }
 .mact { display: flex; justify-content: flex-end; min-width: 2.25rem; }
+.mact:empty { min-width: 0; }
 .m-only { display: none; }
 .pill { display: inline-flex; align-items: center; gap: 0.3rem; height: 1.45rem; padding: 0 0.55rem; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--slate); font: 600 0.72rem var(--font); white-space: nowrap; }
 .pill.strong { color: var(--ink); border-color: var(--line-strong); }
@@ -377,9 +381,12 @@ table.det td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); }
 .sortsel { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--muted); }
 .sortsel select { font: 600 0.84rem var(--font); color: var(--ink); background: var(--card); border: 1px solid var(--line-strong); border-radius: 8px; padding: 0.3rem 0.5rem; }
 .sortdir { width: 2rem; height: 2rem; font: 700 0.9rem var(--font); }
-.row-more { width: 2rem; height: 2rem; }
+.upd { font-size: 0.78rem; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dl-json { font-size: 0.8rem; font-weight: 600; color: var(--muted); padding: 0.3rem 0.4rem; border-radius: 6px; white-space: nowrap; }
+.dl-json:hover { color: var(--teal-dark); background: var(--teal-tint); }
 
 /* The running remux, above the list: its own progress and the Console. */
+.now-ico { display: inline-flex; width: 1rem; justify-content: center; color: var(--teal-darker); }
 .now { display: flex; align-items: center; gap: 0.9rem; padding: 0.7rem 1rem; margin-bottom: 1rem; border: 1px solid var(--teal-line); background: var(--teal-tint); border-radius: var(--radius); }
 .now-main { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
 .now-main b { color: var(--teal-darker); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -403,6 +410,8 @@ table.det td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); }
   .now { flex-wrap: wrap; }
   .now .bar { flex-basis: 100%; order: 3; }
   .sort { margin-left: 0; }
+  .sortsel > span { display: none; }
+  .sortsel select { max-width: 7.5rem; }
   .toolbar .search { max-width: none; }
 }
 

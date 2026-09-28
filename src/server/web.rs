@@ -47,6 +47,11 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("web/assets/ui.js"),
     ),
     (
+        "chips.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/chips.js"),
+    ),
+    (
         "medialist.js",
         "text/javascript; charset=utf-8",
         include_bytes!("web/assets/medialist.js"),
@@ -1546,6 +1551,26 @@ mod web_tests {
         let library = asset("library.js");
         assert!(!library.contains("href=\"/remux\""));
         assert!(library.contains("remux: false"));
+        assert!(
+            !library.contains("row-more"),
+            "the row itself opens the details"
+        );
+        // Never a browser-native dialog: every confirm and message is the app's modal.
+        for (name, _, body) in super::ASSETS {
+            let text = std::str::from_utf8(body).unwrap_or("");
+            for native in ["alert(", "confirm(", "prompt(", "window.confirm"] {
+                let hits = text
+                    .match_indices(native)
+                    .filter(|(i, _)| {
+                        !text[..*i].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
+                    })
+                    .count();
+                assert_eq!(hits, 0, "{name} calls the browser's {native}");
+            }
+        }
+        // Both lists filter with the one chip component.
+        assert!(library.contains("chipFilter(") && asset("remux.js").contains("chipFilter("));
+        assert!(library.contains("download=1") && asset("remux.js").contains("download=1"));
         assert!(!super::INDEX_HTML.contains("jobchip"));
         assert!(
             !asset("system.js").contains("id=\"keys\""),
@@ -4330,6 +4355,12 @@ mod web_tests {
             assert_eq!(code, 409);
             std::fs::remove_dir(&lib).unwrap();
             std::fs::rename(&away, &lib).unwrap();
+            let (code, body) = roundtrip(&cfg, "GET", "/api/library?download=1", None, &[]);
+            assert_eq!(code, 200);
+            assert!(
+                body.contains("\"rows\""),
+                "the download is the same listing"
+            );
             let (_, body) = roundtrip(&cfg, "POST", "/api/library/queue/pause", None, &[]);
             assert!(body.contains("\"paused\":true"), "{body}");
             let (code, _) = roundtrip(&cfg, "GET", "/api/library/console", None, &[]);

@@ -176,6 +176,25 @@ function mountModal(back) {
   return m;
 }
 
+/** A confirm dialog in the app's own modal. Resolves true on the action,
+    false on Cancel, Esc or a backdrop click. Cancel has the focus. */
+export function confirmDialog({ title, body = '', action = 'Confirm', danger = true } = {}) {
+  return new Promise((resolve) => {
+    let answered = false;
+    const m = modal({
+      title: esc(title),
+      body: '<p style="margin:0;color:var(--slate)">' + esc(body) + '</p>',
+      foot: '<button class="btn btn-ghost btn-sm" data-c="no">Cancel</button>'
+        + '<button class="btn btn-sm ' + (danger ? 'btn-danger' : 'btn-primary') + '" data-c="yes">' + esc(action) + '</button>',
+    });
+    const done = (v) => { if (!answered) { answered = true; resolve(v); } m.close(); };
+    m.onClose(() => { if (!answered) { answered = true; resolve(false); } });
+    m.el.querySelector('[data-c=no]').onclick = () => done(false);
+    m.el.querySelector('[data-c=yes]').onclick = () => done(true);
+    m.el.querySelector('[data-c=no]').focus();
+  });
+}
+
 // ── The terminal ───────────────────────────────────────────────────────────
 
 /** A terminal window in a modal: window chrome, a live status bar, a mono
@@ -277,6 +296,14 @@ export function clock(ts) {
 export function when(ts) {
   if (!ts) return '';
   return new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+/** "Updated 08:37" today, "Updated Sep 27, 08:37" on another day. */
+export function updated(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const today = d.toDateString() === new Date().toDateString();
+  return 'Updated ' + (today ? time : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + time);
 }
 export function date(ts) {
   if (!ts) return '';
