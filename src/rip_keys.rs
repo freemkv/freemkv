@@ -11,11 +11,15 @@ use libfreemkv::{Disc, Error, Halt, KeySourceFactory, SectorSource};
 /// The per-source walk of a resolution: labels, node enums and counts, never key bytes.
 pub type Trace = libfreemkv::aacs::trace::ResolutionTrace;
 
+/// A test's stand-in for [`drive_scan`].
+#[cfg(test)]
+pub type FakeDrive = fn() -> Result<Disc, Error>;
+
 #[cfg(test)]
 thread_local! {
     static TEST_SOURCES: std::cell::RefCell<Option<KeySourceFactory>> =
         const { std::cell::RefCell::new(None) };
-    static TEST_DRIVE: std::cell::RefCell<Option<fn() -> Result<Disc, Error>>> =
+    static TEST_DRIVE: std::cell::RefCell<Option<FakeDrive>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -41,7 +45,7 @@ pub fn with_sources<T>(fake: KeySourceFactory, f: impl FnOnce() -> T) -> T {
 /// Run `f` with every [`drive_scan`] on this thread answered by `scan` (no drive in CI).
 #[cfg(test)]
 #[allow(dead_code)] // GUI tests only
-pub fn with_drive<T>(scan: fn() -> Result<Disc, Error>, f: impl FnOnce() -> T) -> T {
+pub fn with_drive<T>(scan: FakeDrive, f: impl FnOnce() -> T) -> T {
     TEST_DRIVE.with(|t| *t.borrow_mut() = Some(scan));
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     TEST_DRIVE.with(|t| *t.borrow_mut() = None);

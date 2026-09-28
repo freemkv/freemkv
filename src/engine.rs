@@ -2104,6 +2104,11 @@ fn open_rip_image(
     sink: &UiSink,
     state: &Arc<RunState>,
 ) -> Result<fe::OpenedImage, String> {
+    // A Retry stays the Retry until the key sources answered it (no drive, the wrong disc
+    // or a Stop leaves it armed): KU §4.2 "Retry does the same `open_scan` and re-open".
+    if req.vid_from.is_some() {
+        state.needs_disc.store(true, Ordering::SeqCst);
+    }
     let drive_disc = match &req.vid_from {
         Some(drive) => Some(
             crate::rip_keys::drive_scan(drive, session_credentials(&req.keys))
@@ -2121,9 +2126,27 @@ fn open_rip_image(
     let (opened, trace) = crate::rip_keys::open_image(src, key_factory(&req.keys), o);
     drop(watch);
     log_walk(&trace, sink);
+    if req.vid_from.is_some() && opened.as_ref().map_or_else(answered, |_| true) {
+        state.needs_disc.store(false, Ordering::SeqCst);
+    }
     let opened = opened.map_err(|e| key_refusal(&e, src.path(), state))?;
     note_best_effort(&opened.keys, state);
     Ok(opened)
+}
+
+// Whether the key sources answered a resolve with a verdict (a missing key, a source or
+// keydb failure), as opposed to it never running: a drive, disc-identity or Stop error.
+fn answered(e: &libfreemkv::Error) -> bool {
+    use libfreemkv::error as c;
+    let code = e.code();
+    matches!(
+        code,
+        c::E_NO_DISC_KEY
+            | c::E_WHOLE_DISC_KEY_MISSING
+            | c::E_FMTS_KEY_MISSING
+            | c::E_DECRYPT_FAILED
+    ) || (c::E_KEY_SERVICE_UNAVAILABLE..=c::E_KEY_SERVICE_RATE_LIMITED).contains(&code)
+        || (8000..9000).contains(&code)
 }
 
 /// The resolution's per-source walk, in the run log: "why no key" (labels only).
