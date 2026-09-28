@@ -1718,6 +1718,11 @@ fn report_keys(
             }
             Some(set)
         }
+        // A Ctrl-C during the resolve is an interrupt, not an error (KU §2.3 step 13).
+        Err(libfreemkv::Error::Halted) => {
+            out.raw(Normal, &strings::get("rip.interrupted"));
+            None
+        }
         Err(e) => {
             out.raw(Normal, &render_error(&e));
             None

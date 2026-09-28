@@ -1352,20 +1352,15 @@ pub fn start_rip(req: RipRequest, state: Arc<RunState>) {
         let _done = SignalDone(state.clone());
         let sink = UiSink(state.clone());
         let res = run_blocking(&req, &sink, &state);
-        let (text, verdict) = match res {
-            // A user stop is resumable, not a failure. `cancel` is the typed
-            // signal the sink already polls, so it beats reading the prose.
-            Ok(s) if state.cancel.load(Ordering::Relaxed) => (s, RunOutcome::Cancelled),
-            Ok(s) => (s, RunOutcome::Completed),
-            Err(e) => {
-                state
-                    .lines
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(e.clone());
-                (e, RunOutcome::Failed)
-            }
-        };
+        let cancelled = state.cancel.load(Ordering::Relaxed);
+        if let (Err(e), false) = (&res, cancelled) {
+            state
+                .lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(e.clone());
+        }
+        let (text, verdict) = run_verdict(res, cancelled);
         *state
             .summary
             .lock()
@@ -1375,6 +1370,21 @@ pub fn start_rip(req: RipRequest, state: Arc<RunState>) {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = verdict;
     });
+}
+
+/// A finished run's summary and verdict. A user stop is resumable, not a failure, even
+/// when it ended the run with an error (a Stop during the up-front resolve): `cancelled`
+/// is the typed signal the sink polls, so it beats reading the prose.
+fn run_verdict(res: Result<String, String>, cancelled: bool) -> (String, RunOutcome) {
+    match res {
+        Ok(s) if cancelled => (s, RunOutcome::Cancelled),
+        Ok(s) => (s, RunOutcome::Completed),
+        Err(_) if cancelled => (
+            crate::strings::get("rip.interrupted"),
+            RunOutcome::Cancelled,
+        ),
+        Err(e) => (e, RunOutcome::Failed),
+    }
 }
 
 /// The decrypted-folder target for a rip: a per-disc subdirectory of the
