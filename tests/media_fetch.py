@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+from threading import local as thread_local
 import time
 
 MIB = 1 << 20
@@ -90,7 +91,7 @@ class Fetch:
         self.size = pin['size']
         self.part, self.count, self.multipart = layout(pin)
         self.digests = [None] * self.count
-        self.tls = threading.local()
+        self.tls = thread_local()
         self.lock = threading.Lock()
         self.handles = []
         self.done = 0
