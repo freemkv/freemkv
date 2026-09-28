@@ -5543,3 +5543,159 @@ mod pure_helper_tests {
         assert_eq!(purpose_label(LabelPurpose::Normal), None);
     }
 }
+
+#[cfg(test)]
+mod ku_gui_tests {
+    //! The GUI half of KU-F1 over a real image file (keys-upfront design §7.3): Open,
+    //! preflight and Run make one resolution; E7034 and the insert-the-disc Retry; the
+    //! same requests and verdicts as the CLI (FK3); nothing key-shaped on disk (FK10).
+    use super::*;
+    use crate::ku_fixtures::*;
+    use crate::rip_keys::{with_drive, with_sources};
+
+    fn req(iso: &std::path::Path, out: &std::path::Path, titles: Vec<usize>) -> RipRequest {
+        RipRequest {
+            source: iso.display().to_string(),
+            dest_dir: out.display().to_string(),
+            titles,
+            title_ids: Vec::new(),
+            format: "MKV".into(),
+            audio_pids: vec![],
+            sub_pids: vec![],
+            title_pids: TitleStreams::Unspecified,
+            explicit_streams: false,
+            raw: false,
+            force: false,
+            filename_template: String::new(),
+            decrypt_threads: 0,
+            multipass: false,
+            max_passes: 0,
+            abort_lost_secs: 0,
+            keep_iso: false,
+            auto_eject: false,
+            keys: KeyConfig::default(),
+            seed: None,
+            vid_from: None,
+        }
+    }
+
+    fn run(r: &RipRequest) -> (Result<String, String>, Arc<RunState>) {
+        let st = Arc::new(RunState::default());
+        let out = run_blocking(r, &UiSink(st.clone()), &st);
+        (out, st)
+    }
+
+    /// FK2 (KU §2.5: "GUI open | `Titles([main])` for status. The result seeds the rip's
+    /// `resolve`"): Open, preflight and Start over a 3-title, 2-group image make 2 requests
+    /// in total, all before any output. FK10: no key or VID on disk.
+    #[test]
+    fn gui_rip_resolves_once_per_rip() {
+        let fx = bd_image(&[Some(K1), Some(K2), Some(K1)], 2);
+        let dir = TempDir::new("fk2");
+        let iso = fx.write(dir.path(), "disc.iso");
+        let out = dir.path().join("out");
+        let calls = Calls::default();
+        calls.watch(&out);
+        let f = factory(&[(Answer::Online, &[K1, K2])], &calls);
+        with_sources(f, || {
+            let sc = scan_with_keys(&iso.display().to_string(), &KeyConfig::default()).unwrap();
+            assert_eq!(calls.len(), 1, "Open resolves the main title's group");
+            let seed = sc.keys.clone().expect("Open holds the seed set");
+            let path = iso.display().to_string();
+            let blocked = preflight_with_keys(&path, "/tmp", &[], Some(&seed)).unwrap();
+            assert!(blocked.is_empty(), "{blocked:?}");
+            assert_eq!(calls.len(), 1, "preflight asks nothing");
+            let mut r = req(&iso, &out, vec![0, 1, 2]);
+            r.seed = Some(seed);
+            let (done, _) = run(&r);
+            done.expect("the rip");
+        });
+        assert_eq!(calls.len(), 2, "Start asks only for the group Open lacked");
+        assert!(calls.all().iter().all(|c| c.outputs == 0), "asked mid-rip");
+        assert_eq!(files_under(&out).len(), 3);
+        assert_no_secret_on_disk(dir.path(), &[K1, K2, VID]);
+    }
+
+    fn drive() -> libfreemkv::Disc {
+        drive_disc(&bd_image(&[Some(K1)], 1))
+    }
+
+    /// FK11 (KU §4.2 "GUI … An 'Insert the disc' prompt with a drive picker and Retry"):
+    /// the E7034 text and the insert-the-disc step, flagged for the shell; Retry scans the
+    /// drive (no key call) and makes the one more request, with the VID (KS-16).
+    #[test]
+    fn gui_surfaces_e7034_then_retry_finishes() {
+        use libfreemkv::spec::keys::KS_29_VID_FROM_MEDIA;
+        assert!(KS_29_VID_FROM_MEDIA.text.contains("from the media"));
+        let fx = bd_image(&[Some(K1)], 1);
+        let dir = TempDir::new("fk11");
+        let iso = fx.write(dir.path(), "capture.iso");
+        sidecar(&fx, &iso, true);
+        let out = dir.path().join("out");
+        let path = iso.display().to_string();
+        // A Start with no Open (a staged ISO's mux): one request, then E7034 and Retry.
+        let calls = Calls::default();
+        let f = factory(&[(Answer::OnlineNeedsVid, &[K1])], &calls);
+        let (done, st) = with_sources(f, || run(&req(&iso, &out, vec![0])));
+        let msg = done.unwrap_err();
+        assert!(msg.contains(&explain(7034)), "{msg}");
+        assert!(msg.contains(&insert_disc_retry()), "{msg}");
+        assert!(
+            st.needs_disc.load(Ordering::SeqCst),
+            "the shell offers Retry"
+        );
+        assert_eq!(calls.len(), 1);
+        assert!(files_under(&out).is_empty(), "before any output");
+        // Open already knows; Start is then the Retry: "at most one more resolve, now with
+        // the VID" (KU §4.2), after a drive scan with no key call.
+        let calls = Calls::default();
+        let f = factory(&[(Answer::OnlineNeedsVid, &[K1])], &calls);
+        with_sources(f, || {
+            let sc = scan_with_keys(&path, &KeyConfig::default()).unwrap();
+            assert!(sc.needs_disc && sc.keys.is_none(), "{sc:?}");
+            let mut retry = req(&iso, &out, vec![0]);
+            retry.vid_from = Some("disc://".into());
+            let (done, _) = with_drive(drive, || run(&retry));
+            done.expect("Retry with the disc");
+        });
+        let vids: Vec<_> = calls.all().iter().map(|c| c.vid).collect();
+        assert_eq!(vids, vec![None, Some(VID)], "Open, then Retry with the VID");
+        assert_eq!(files_under(&out).len(), 1);
+        assert_no_secret_on_disk(dir.path(), &[K1, VID]);
+    }
+
+    /// FK3 (KU §7.3): the GUI reaches the shared table's requests and verdicts, the same
+    /// table the CLI's test checks.
+    #[test]
+    fn cli_and_gui_same_requests_same_verdicts() {
+        for case in fk3_cases() {
+            let dir = TempDir::new(case.name);
+            let iso = case.image(dir.path());
+            let calls = Calls::default();
+            let out = dir.path().join("out");
+            let r = req(&iso, &out, vec![0, 1][..case.clips.len()].to_vec());
+            let (done, _) = with_sources(case.sources(&calls), || run(&r));
+            assert_eq!(calls.len(), case.requests, "{}: {done:?}", case.name);
+            match (case.code, done) {
+                (None, done) => assert!(done.is_ok(), "{}: {done:?}", case.name),
+                (Some(c), Err(msg)) => {
+                    assert_eq!(named_code(&msg), Some(c), "{}: {msg}", case.name)
+                }
+                (Some(_), Ok(s)) => panic!("{}: refused expected, got {s}", case.name),
+            }
+        }
+    }
+
+    /// FK7 (KU §2.5 "GUI 'Keep encrypted', GUI `raw_copy`"): a raw disc copy scans with
+    /// `raw_copy` and makes no key request; the drive half is covered by `rip_keys`.
+    #[test]
+    fn a_raw_gui_copy_asks_no_key_source() {
+        assert_eq!(
+            disc_copy_scope(OutKind::IsoImage, true),
+            libfreemkv::keys::KeyScope::None
+        );
+        let whole = libfreemkv::keys::KeyScope::WholeDisc;
+        assert_eq!(disc_copy_scope(OutKind::IsoImage, false), whole);
+        assert_eq!(disc_copy_scope(OutKind::DecryptedFolder, true), whole);
+    }
+}

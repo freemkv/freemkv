@@ -3802,7 +3802,30 @@ mod tests {
             video_codecs: vec!["HEVC".to_string()],
             title_ids: Vec::new(),
             details: Vec::new(),
+            keys: None,
+            needs_disc: false,
         }
+    }
+
+    /// FK11, GUI half (KU §4.2 "GUI (image source or staged ISO) | An 'Insert the disc'
+    /// prompt … and Retry"): an Open that needs the disc says so and arms the Retry, so
+    /// the next Start scans a drive instead of asking the key service again without it.
+    #[test]
+    fn an_open_that_needs_the_disc_prompts_and_arms_the_retry() {
+        let mut app = App::new();
+        let mut sc = probe_scan();
+        sc.needs_disc = true;
+        app.apply_scan("/media/capture.iso", Ok(sc), false);
+        assert!(app.vid_retry, "the next Start is the Retry");
+        let said = app
+            .log
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(said.contains(&crate::engine::insert_disc_retry()), "{said}");
+        app.apply_scan("/media/other.iso", Ok(probe_scan()), false);
+        assert!(!app.vid_retry, "a new source starts afresh");
     }
 
     fn app_with_titles(codecs: &[&str]) -> App {

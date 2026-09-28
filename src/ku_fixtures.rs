@@ -514,3 +514,74 @@ pub fn assert_no_secret_on_disk(dir: &Path, secrets: &[[u8; 16]]) {
         }
     }
 }
+
+/// FK3 (KU §7.3 "cli_and_gui_same_requests_same_verdicts"): one scenario both shells rip
+/// (every title, to MKV) from the same image, and the requests and verdict both must reach.
+pub struct Fk3Case {
+    pub name: &'static str,
+    pub clips: Vec<Option<[u8; 16]>>,
+    pub specs: Vec<(Answer, Vec<[u8; 16]>)>,
+    pub vidfp: bool,
+    pub requests: usize,
+    /// The refusal's code, `None` for a finished rip.
+    pub code: Option<u16>,
+}
+
+impl Fk3Case {
+    /// The image, written into `dir` (with its sidecar mapfile when `vidfp`).
+    pub fn image(&self, dir: &Path) -> PathBuf {
+        let fx = bd_image(&self.clips, self.clips.len());
+        let iso = fx.write(dir, "disc.iso");
+        if self.vidfp {
+            sidecar(&fx, &iso, true);
+        }
+        iso
+    }
+    pub fn sources(&self, calls: &Calls) -> KeySourceFactory {
+        let specs: Vec<(Answer, &[[u8; 16]])> =
+            self.specs.iter().map(|(a, k)| (*a, k.as_slice())).collect();
+        factory(&specs, calls)
+    }
+}
+
+/// The FK3 table: every key held; one group missing (E7022, KU §2.5 "`-t all` … refuse
+/// the whole rip up front"); a key only the VID derives (E7034, KU §4.2).
+pub fn fk3_cases() -> Vec<Fk3Case> {
+    vec![
+        Fk3Case {
+            name: "keyed",
+            clips: vec![Some(K1), Some(K2)],
+            specs: vec![(Answer::Online, vec![K1, K2])],
+            vidfp: false,
+            requests: 2,
+            code: None,
+        },
+        Fk3Case {
+            name: "missing",
+            clips: vec![Some(K1), Some(K2)],
+            specs: vec![(Answer::Online, vec![K1])],
+            vidfp: false,
+            requests: 2,
+            code: Some(libfreemkv::error::E_NO_DISC_KEY),
+        },
+        Fk3Case {
+            name: "needs-vid",
+            clips: vec![Some(K1)],
+            specs: vec![(Answer::OnlineNeedsVid, vec![K1])],
+            vidfp: true,
+            requests: 1,
+            code: Some(libfreemkv::error::E_AACS_VID_NEEDS_DISC),
+        },
+    ]
+}
+
+/// The `E<code>` a shell's failure text names, if any.
+pub fn named_code(text: &str) -> Option<u16> {
+    text.match_indices('E').find_map(|(at, _)| {
+        let digits: String = text[at + 1..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        (digits.len() == 4).then(|| digits.parse().ok()).flatten()
+    })
+}

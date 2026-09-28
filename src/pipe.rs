@@ -7198,6 +7198,27 @@ mod ku_cli_tests {
         assert_no_secret_on_disk(dir.path(), &[K1, VID]);
     }
 
+    /// FK3 (KU §7.3): the CLI reaches the shared table's requests and verdicts; the GUI's
+    /// `engine` test checks the same table, so the two shells never deviate.
+    #[test]
+    fn cli_and_gui_same_requests_same_verdicts() {
+        for case in fk3_cases() {
+            let dir = TempDir::new(case.name);
+            let iso = case.image(dir.path());
+            let calls = Calls::default();
+            let src = format!("iso://{}", iso.display());
+            let dest = format!("mkv://{}/", dir.path().join("out").display());
+            let (code, text) = with_sources(case.sources(&calls), || {
+                run_cli(&src, &dest, &["-t", "all"])
+            });
+            assert_eq!(calls.len(), case.requests, "{}: {text}", case.name);
+            match case.code {
+                None => assert_eq!(code, 0, "{}: {text}", case.name),
+                Some(c) => assert_eq!(named_code(&text), Some(c), "{}: {text}", case.name),
+            }
+        }
+    }
+
     /// FK7 (KU §2.5: "Raw copy (`--raw`, …) | `None`: no key call"): the disc→ISO copy
     /// scans with `open_scan(.., raw)` and resolves only on its decrypting arm (a live
     /// drive is needed to run it, so this reads the wiring; `rip_keys` proves the rest).
