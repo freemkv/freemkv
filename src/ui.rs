@@ -3866,6 +3866,60 @@ mod tests {
         }
     }
 
+    // A probe the drive never answers, even after its Stop, is abandoned rather than waited
+    // on for the life of the process: the worker can't be killed (blocked in the driver),
+    // but the UI stops waiting for it. Per spec (§4.3: "The UI thread never blocks").
+    #[test]
+    fn a_probe_that_never_answers_is_abandoned_instead_of_ticking_forever() {
+        let mut app = App::new();
+        app.probe_window = T29;
+        let probe = Arc::new(ProbeState::new(PROBE_SOURCE, T29));
+        app.probe = Some(probe.clone());
+        let started = std::time::Instant::now();
+        let mut fx = Vec::new();
+        while app.probe.is_some() && started.elapsed() < std::time::Duration::from_secs(2) {
+            fx = app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            app.probe.is_none(),
+            "still waiting on a probe that never answers"
+        );
+        assert!(
+            probe.token.halt.is_cancelled(),
+            "abandoned only after its Stop"
+        );
+        assert!(fx.contains(&Effect::StopTicking), "{fx:?}");
+        assert!(app.source.is_empty() && matches!(app.page, Page::Empty));
+    }
+
+    static FRESH_OPENS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn fresh_open(_: &str, _: &KeyConfig, _: &OpenToken) -> Result<Scanned, String> {
+        FRESH_OPENS.fetch_add(1, Ordering::SeqCst);
+        Ok(probe_scan())
+    }
+
+    // §4.3: "A pending Open for the **same** source still adopts the probe's result", but a
+    // probe its Stop ended has no result: the Open runs afresh, with no stop error shown.
+    #[test]
+    fn a_cancelled_probe_that_failed_is_not_adopted() {
+        let mut app = App::new();
+        app.scan = fresh_open;
+        let probe = Arc::new(probe_state(None, false));
+        probe.token.halt.cancel();
+        app.probe = Some(probe.clone());
+        app.open(PROBE_SOURCE);
+        let before = app.log.len();
+        finish_probe(&probe, Err("E9001 stopped".to_string()));
+        settle(&mut app);
+        assert_eq!(FRESH_OPENS.load(Ordering::SeqCst), 1, "the Open ran afresh");
+        assert_eq!(app.source, PROBE_SOURCE);
+        assert!(
+            !app.log[before..].iter().any(|l| l.text.contains("stopped")),
+            "a spurious stop error"
+        );
+    }
+
     fn in_flight_probe(app: &mut App) -> Arc<ProbeState> {
         let p = Arc::new(probe_state(None, false));
         app.probe = Some(p.clone());
