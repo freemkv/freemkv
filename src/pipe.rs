@@ -1536,6 +1536,15 @@ pub(crate) fn drive_scan_opts(keydb_path: &Option<String>) -> libfreemkv::ScanOp
     }
 }
 
+// disc→ISO scan options: a raw copy never decrypts, so it scans on past an unreadable
+// AACS key file (libfreemkv records E7031 and refuses keys).
+fn disc_copy_scan_opts(keys: &KeyConfig, raw: bool) -> libfreemkv::ScanOptions {
+    libfreemkv::ScanOptions {
+        raw_copy: raw,
+        ..drive_scan_opts(keys.keydb_path())
+    }
+}
+
 fn dest_is_directory(dest: &str, parsed_dest: &libfreemkv::StreamUrl) -> bool {
     dest.ends_with('/') || std::path::Path::new(parsed_dest.path_str()).is_dir()
 }
@@ -2603,7 +2612,7 @@ fn disc_to_iso(
     // the scan below re-derives what it needs, so its result stays discarded.
     let _ = drive.probe_disc();
 
-    let mut disc = match libfreemkv::Disc::scan(&mut drive, &drive_scan_opts(keys.keydb_path())) {
+    let mut disc = match libfreemkv::Disc::scan(&mut drive, &disc_copy_scan_opts(keys, raw)) {
         Ok(d) => d,
         Err(e) => {
             out.raw(Normal, &scan_failed_msg(&e));
@@ -3415,13 +3424,24 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 mod tests {
     use super::{
         KeyConfig, PipeFail, UnitAligned, build_jobs, build_key_sources_quiet,
-        copy_should_continue, dest_is_directory, disc_copy_recovered_data, disc_title_nums,
-        fmt_disc_damage, fmt_err, fmt_err_str, is_keyserver_url, is_metadata_sink,
+        copy_should_continue, dest_is_directory, disc_copy_recovered_data, disc_copy_scan_opts,
+        disc_title_nums, fmt_disc_damage, fmt_err, fmt_err_str, is_keyserver_url, is_metadata_sink,
         is_scheme_only_sink, is_url_token, mp4_skip_reason_key, parse_error_code, parse_flags,
         parse_stream_spec, preflight_validate, render_error, resolved_keydb_path, sanitize_name,
         scan_failed_msg, title_in_range, validate_dir_input, validate_file_dest,
         validate_iso_input, whole_image_decrypting_source, whole_image_plan,
     };
+
+    // A raw disc→ISO copy scans on past an unreadable AACS key file; a decrypting one stops.
+    #[test]
+    fn disc_copy_scan_opts_sets_raw_copy_only_for_a_raw_copy() {
+        let keys = KeyConfig {
+            keydb_path: Some("/nonexistent/freemkv-test/keydb.cfg".into()),
+            ..Default::default()
+        };
+        assert!(disc_copy_scan_opts(&keys, true).raw_copy);
+        assert!(!disc_copy_scan_opts(&keys, false).raw_copy);
+    }
 
     /// freemkv#55: an `iso:// → iso://` decrypt walks the WHOLE image, so the
     /// clear UDF/BDMV sectors outside every title extent must pass through the
