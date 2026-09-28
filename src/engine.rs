@@ -229,19 +229,9 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
 /// tracks are real and worth showing. `Stream::info()` carries the parsed
 /// `DiscTitle`.
 pub fn scan_stream(path: &str) -> Result<Scanned, String> {
-    let url = {
-        let ext = std::path::Path::new(path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let scheme = match ext.as_str() {
-            "mkv" => "mkv",
-            "mp4" => "mp4",
-            _ => "m2ts",
-        };
-        format!("{scheme}://{path}")
-    };
+    let scheme = crate::ui::container_scheme(path)
+        .ok_or_else(|| format!("not a container source: {path}"))?;
+    let url = format!("{scheme}://{path}");
     let opts = libfreemkv::InputOptions::default();
     let stream = libfreemkv::input(&url, &opts).map_err(|e| format!("{e}"))?;
     let t = stream.info();
@@ -861,6 +851,17 @@ impl fe::Sink for UiSink {
     fn should_cancel(&self) -> bool {
         self.0.cancel.load(Ordering::Relaxed)
     }
+    // G4/D4: the pre-mux note at the output opening, the hook the CLI prints it from.
+    fn event(&self, e: &fe::Event<'_>) {
+        if let fe::Event::OutputOpened { dest, title } = e {
+            let note = crate::lossy::excluded_lines(dest, title);
+            self.0
+                .lines
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(note);
+        }
+    }
 }
 
 // Describe the disc's key state honestly. `resolve_keys` reports resolved
@@ -1069,7 +1070,7 @@ pub fn summarize_stream(outcome: &libfreemkv::MuxOutcome, target: &str, dest_dir
         format!(
             "Written to {dest_dir} — {}",
             // Container-agnostic wording (like the CLI's `lossy_lines`): an
-            // undelivered stream isn't mp4-specific, so `mp4.excluded_header`'s
+            // undelivered stream isn't mp4-specific, so the MP4-only excluded header's
             // "in an MP4" phrasing is wrong for mkv/m2ts. English until catalog.
             crate::strings::fmt_or(
                 "mux.undelivered_header",
@@ -1453,15 +1454,7 @@ fn run_extract_folder(
 }
 
 fn is_stream_source(path: &str) -> bool {
-    matches!(
-        std::path::Path::new(path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .as_str(),
-        "mkv" | "m2ts" | "mts" | "mp4"
-    )
+    crate::ui::container_scheme(path).is_some()
 }
 
 // The URL scheme for a source already established as neither a drive nor a stream container: a
@@ -1475,18 +1468,8 @@ fn image_or_dir_scheme(source: &str) -> &'static str {
 }
 
 fn source_scheme(path: &str) -> &'static str {
-    match std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "mkv" => "mkv",
-        "mp4" => "mp4",
-        "iso" => "iso",
-        _ => "m2ts",
-    }
+    // A container by the one table (G5), else an image: never a guessed m2ts.
+    crate::ui::container_scheme(path).unwrap_or("iso")
 }
 
 // What real operation an output format maps to. The picker offers twelve
@@ -1534,6 +1517,8 @@ fn out_kind(format: &str) -> OutKind {
         OutKind::Demux("sub")
     } else if format.contains("MP4") {
         OutKind::File("mp4")
+    } else if format.contains("MPG") {
+        OutKind::File("mpg")
     } else if format.contains("M2TS") {
         OutKind::File("m2ts")
     } else if format.contains("Chapters") {
@@ -1606,6 +1591,7 @@ pub fn planned_output_name(
 pub fn container_word(format: &str) -> &'static str {
     match out_kind(format) {
         OutKind::File("mp4") => "MP4",
+        OutKind::File("mpg") => "MPG",
         OutKind::File("m2ts") => "M2TS",
         OutKind::File("chapters") => "chapter",
         OutKind::File("json") => "JSON",
@@ -1894,6 +1880,10 @@ impl fe::Sink for TitleReport<'_> {
         self.ui.should_cancel()
     }
     fn event(&self, e: &fe::Event<'_>) {
+        // Every event reaches the run's own sink first: the excluded-track note
+        // prints on OutputOpened (G4/D4), the same hook a stream source uses.
+        // Before the lines lock below, which UiSink takes itself.
+        self.ui.event(e);
         let fe::Event::TitleDone { idx, dest, result } = e else {
             return;
         };
@@ -3606,15 +3596,16 @@ mod disc_details_tests {
 #[cfg(test)]
 mod routing_tests {
     use super::{
-        DiscPlan, KeyConfig, OutKind, RipRequest, RunState, TitleIdentity, UiSink, damage_note,
-        demux_needs_subdirs, disc_device, disc_raw_copy, fe, image_or_dir_scheme, is_disc_source,
-        is_stream_source, iso_recovery_result, mux_opts, out_kind, recovery_plan,
+        DiscPlan, KeyConfig, OutKind, RipRequest, RunState, TitleIdentity, TitleReport, UiSink,
+        damage_note, demux_needs_subdirs, disc_device, disc_raw_copy, fe, image_or_dir_scheme,
+        is_disc_source, is_stream_source, iso_recovery_result, mux_opts, out_kind, recovery_plan,
         recovery_produced_no_data, recovery_raw, remap_against, remap_title_pids,
-        run_disc_scanning, should_delete_staging_iso, source_scheme, staging_not_kept_note,
-        stream_selection_for, title_session_mux_opts, title_streams, verify_selection_identity,
-        verify_title_identity, whole_image_gate, won_from_trace,
+        run_disc_scanning, run_stream, should_delete_staging_iso, source_scheme,
+        staging_not_kept_note, stream_selection_for, title_session_mux_opts, title_streams,
+        verify_selection_identity, verify_title_identity, whole_image_gate, won_from_trace,
     };
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // ── The recovery job's `raw` flag ── `multipass_rip` refuses a real
     // sweep-plus-patch plan with `raw = false`; `ui::raw_applies` forces
@@ -3967,7 +3958,7 @@ mod routing_tests {
 
         // 3. The ISO/image per-title loop.
         let iso_loop = slice(
-            "    fn event(&self, e: &fe::Event<'_>) {",
+            "        // Every event reaches the run's own sink first: the excluded-track note",
             "            Err(e) =>",
         );
         assert!(
@@ -4625,6 +4616,130 @@ mod routing_tests {
         assert_eq!(staging_not_kept_note(false, true), "");
     }
 
+    // G4/D4: the GUI prints the pre-mux note where the CLI does, at the output opening
+    // (fe::Event::OutputOpened, from MuxEvents::on_output_opened), into the run log.
+    #[test]
+    fn the_gui_note_comes_from_the_output_opening() {
+        crate::strings::set_locale("en");
+        let truehd = libfreemkv::Stream::Audio(libfreemkv::AudioStream {
+            pid: 0x1100,
+            codec: libfreemkv::Codec::TrueHd,
+            channels: libfreemkv::AudioChannels::Surround51,
+            language: "eng".into(),
+            sample_rate: libfreemkv::SampleRate::S48,
+            secondary: false,
+            purpose: libfreemkv::LabelPurpose::Normal,
+            label: String::new(),
+        });
+        let title = libfreemkv::DiscTitle {
+            streams: vec![truehd],
+            codec_privates: vec![None],
+            ..libfreemkv::DiscTitle::empty()
+        };
+        let state = Arc::new(RunState::default());
+        let sink = UiSink(state.clone());
+        fe::Sink::event(
+            &sink,
+            &fe::Event::OutputOpened {
+                dest: "mp4:///out/x.mp4",
+                title: &title,
+            },
+        );
+        let lines = state
+            .lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("left out") && l.contains("MP4")),
+            "the excluded note reaches the run log, got: {lines:?}"
+        );
+    }
+
+    // An image mux reports through TitleReport, not UiSink: the OutputOpened note must
+    // still reach the run log, so the wrapper forwards every event to the sink it wraps.
+    #[test]
+    fn title_report_forwards_output_opened_to_the_ui_sink() {
+        crate::strings::set_locale("en");
+        let truehd = libfreemkv::Stream::Audio(libfreemkv::AudioStream {
+            pid: 0x1100,
+            codec: libfreemkv::Codec::TrueHd,
+            channels: libfreemkv::AudioChannels::Surround51,
+            language: "eng".into(),
+            sample_rate: libfreemkv::SampleRate::S48,
+            secondary: false,
+            purpose: libfreemkv::LabelPurpose::Normal,
+            label: String::new(),
+        });
+        let title = libfreemkv::DiscTitle {
+            streams: vec![truehd],
+            codec_privates: vec![None],
+            ..libfreemkv::DiscTitle::empty()
+        };
+        let state = Arc::new(RunState::default());
+        let sink = UiSink(state.clone());
+        let report = TitleReport {
+            ui: &sink,
+            state: &state,
+            written: AtomicUsize::new(0),
+            partial: AtomicUsize::new(0),
+        };
+        fe::Sink::event(
+            &report,
+            &fe::Event::OutputOpened {
+                dest: "mp4:///out/t01.mp4",
+                title: &title,
+            },
+        );
+        let lines = state
+            .lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("left out") && l.contains("MP4")),
+            "the image mux's excluded note reaches the run log, got: {lines:?}"
+        );
+        assert_eq!(
+            report.written.load(Ordering::Relaxed),
+            0,
+            "not a title result"
+        );
+    }
+
+    // D4 parity: a mux that fails before its output opens prints no pre-mux note, in the GUI
+    // as in the CLI (pipe.rs `a_mux_that_fails_before_open_prints_no_note`).
+    #[test]
+    fn a_mux_that_fails_before_open_logs_no_note() {
+        crate::strings::set_locale("en");
+        let dir = std::env::temp_dir().join(format!("fmkv-d4-gui-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.mpg");
+        crate::lossy::mpg_source_fixture(&src);
+        let mut r = req();
+        r.source = src.to_string_lossy().into_owned();
+        r.format = "Selected titles → MP4".into();
+        r.dest_dir = dir.join("missing").to_string_lossy().into_owned();
+        let state = Arc::new(RunState::default());
+        let sink = UiSink(state.clone());
+        let res = run_stream(&r, &sink, &state);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(res.is_err(), "no such output directory");
+        let lines = state
+            .lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            !lines.iter().any(|l| l.contains("left out")),
+            "no note for an output that never opened, got: {lines:?}"
+        );
+    }
+
     fn req() -> RipRequest {
         RipRequest {
             source: "/media/movie.iso".into(),
@@ -4688,8 +4803,8 @@ mod routing_tests {
         }
     }
 
-    /// The scheme half of the mux source URL. An extension we do not recognise
-    /// falls back to `m2ts`, which is the raw-transport-stream reader.
+    /// The scheme half of the mux source URL, from the one `CONTAINER_SOURCES` table (G5).
+    /// An extension it does not name is read as an image, never guessed as m2ts.
     #[test]
     fn the_source_scheme_follows_the_extension() {
         assert_eq!(source_scheme("a.mkv"), "mkv");
@@ -4698,12 +4813,15 @@ mod routing_tests {
         assert_eq!(source_scheme("a.iso"), "iso");
         assert_eq!(source_scheme("a.m2ts"), "m2ts");
         assert_eq!(source_scheme("a.mts"), "m2ts");
-        assert_eq!(source_scheme(""), "m2ts");
+        assert_eq!(source_scheme("a.mpg"), "mpg");
+        assert_eq!(source_scheme("a.MPEG"), "mpg");
+        assert_eq!(source_scheme("VTS_01_1.VOB"), "mpg");
+        assert_eq!(source_scheme(""), "iso");
     }
 
     // source_scheme and image_or_dir_scheme answer DIFFERENT questions and
-    // were conflated twice while fixing folder support — source_scheme's
-    // m2ts fallback is right only for a container guarded by is_stream_source.
+    // were conflated twice while fixing folder support — source_scheme is
+    // right only for a container guarded by is_stream_source.
     #[test]
     fn image_or_dir_scheme_is_not_source_scheme() {
         // An image whose extension is not `.iso` must still be an image.
@@ -4713,10 +4831,10 @@ mod routing_tests {
                 "iso",
                 "{p} is a disc image, not an elementary stream"
             );
-            assert_eq!(
+            assert_ne!(
                 source_scheme(p),
                 "m2ts",
-                "source_scheme falls through for {p} — which is why it must not be used here"
+                "{p} is not a transport stream: no scheme is guessed from an unknown extension"
             );
         }
         // A real directory is dir://.
@@ -4766,6 +4884,7 @@ mod routing_tests {
         let want: &[(&str, &str)] = &[
             ("Selected titles → MKV", "mkv"),
             ("Selected titles → MP4", "mp4"),
+            ("Selected titles → MPG", "mpg"),
             ("Selected titles → M2TS", "m2ts"),
             ("Selected titles → separate track files", "demux"),
             ("Selected titles → video tracks only", "video"),
@@ -4845,16 +4964,29 @@ mod routing_tests {
         // `dir://` needs a disc file tree. Neither exists for a container.
         let whole_disc: &[&str] = &["iso", "dir"];
 
-        for (disc_source, mp4_ok) in [(true, true), (true, false), (false, true), (false, false)] {
+        for (disc_source, mp4_ok, mpg_ok) in [
+            (true, true, true),
+            (true, false, true),
+            (false, true, false),
+            (false, false, false),
+            (true, true, false),
+        ] {
             let mut want: BTreeSet<String> = per_title.iter().map(|s| s.to_string()).collect();
             if mp4_ok {
                 want.insert("mp4".to_string());
+            }
+            if mpg_ok {
+                want.insert("mpg".to_string());
             }
             if disc_source {
                 want.extend(whole_disc.iter().map(|s| s.to_string()));
             }
 
-            let got: BTreeSet<String> = crate::ui::output_formats(disc_source, mp4_ok)
+            let fit = crate::ui::Fit {
+                mp4: mp4_ok,
+                mpg: mpg_ok,
+            };
+            let got: BTreeSet<String> = crate::ui::output_formats(disc_source, fit)
                 .into_iter()
                 .flatten()
                 .map(dest_scheme)
@@ -4863,7 +4995,7 @@ mod routing_tests {
             assert_eq!(
                 got,
                 want,
-                "disc_source={disc_source} mp4_ok={mp4_ok}: picker sinks diverge from the CLI's\
+                "disc_source={disc_source} {fit:?}: picker sinks diverge from the CLI's\
                  \n  picker-only: {:?}\n  cli-only: {:?}",
                 got.difference(&want).collect::<Vec<_>>(),
                 want.difference(&got).collect::<Vec<_>>(),

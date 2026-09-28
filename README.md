@@ -81,6 +81,7 @@ Every operation is `freemkv <source> <dest>`. Sources and destinations are strea
 | MKV | Yes | Yes | `mkv://path` |
 | M2TS | Yes | Yes | `m2ts://path` |
 | MP4 | Yes | Yes | `mp4://path` |
+| MPG | Yes | Yes | `mpg://path.mpg` — MPEG program stream (DVD `.VOB`/`.mpg`); writes MPEG-1/2 video |
 | Network | Yes (listen) | Yes (connect) | `network://host:port` |
 | Stdio | Yes (stdin) | Yes (stdout) | `stdio://` |
 | Null | -- | Yes | `null://` |
