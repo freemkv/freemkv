@@ -638,6 +638,49 @@ mod aacs_diag_tests {
         ]
     }
 
+    // The fixture image scanned as a disc (its AACS state from the image's Unit_Key_RO.inf).
+    fn scan(img: &libfreemkv::test_util::EncryptedBdImage) -> Disc {
+        use libfreemkv::SectorSource;
+        let mut src = img.source();
+        let cap = src.capacity_sectors();
+        Disc::scan_image(&mut src, cap, &libfreemkv::ScanOptions::default()).expect("scan")
+    }
+
+    // A keydb-like source that knows the rip's unit key: its answer needs no samples.
+    struct KnownKey;
+
+    impl libfreemkv::KeySource for KnownKey {
+        fn get_unit_keys(
+            &self,
+            _: &dyn libfreemkv::keysource::ResolveCtx,
+        ) -> libfreemkv::error::Result<Vec<libfreemkv::aacs::types::UnitKey>> {
+            Ok(vec![libfreemkv::aacs::types::UnitKey::new(
+                0,
+                SECRET_UNIT_KEY,
+            )])
+        }
+        fn answer_depends_on_samples(&self) -> bool {
+            false
+        }
+    }
+
+    // The rip's up-front key set over the fixture image (KU §3.3; the type lands at KU-L2).
+    fn rip_key_set(
+        img: &libfreemkv::test_util::EncryptedBdImage,
+    ) -> libfreemkv::keys::ResolvedKeySet {
+        let factory: libfreemkv::KeySourceFactory =
+            std::sync::Arc::new(|| vec![Box::new(KnownKey) as Box<dyn libfreemkv::KeySource>]);
+        libfreemkv::keys::ResolvedKeySet::resolve(
+            &scan(img),
+            &mut img.source(),
+            libfreemkv::keys::KeyScope::WholeDisc,
+            &factory,
+            libfreemkv::keys::ResolveKeysOptions::default(),
+        )
+        .expect("the known key is proven on the stream")
+        .keys
+    }
+
     /// FK9 (KU design §3.3, §7.3): the `--share` capture of a disc whose stream is
     /// encrypted under the rip's key leaks no key, raw VID or MKB bytes into any file
     /// it writes, any console line, or the issue title and body.
@@ -665,6 +708,21 @@ mod aacs_diag_tests {
             u.chunks_mut(192).for_each(|p| p[0] &= 0x3F);
             u
         };
+        assert_eq!(mask(&unit), mask(&img.plain[at..at + 6144]));
+
+        // §3.3: the rip's key set over the same image, holding the known key and proven on
+        // the stream, exists in memory while the capture runs (and the capture never sees it).
+        let set = rip_key_set(&img);
+        let status = set.status();
+        assert_eq!((status.keyed, status.proven), (1, 1), "{status:?}");
+        let scanned = scan(&img);
+        let mut reader = set
+            .whole_disc_reader(&scanned, img.source(), None)
+            .expect("the set is for this image");
+        let mut unit = vec![0u8; 6144];
+        reader
+            .read_sectors(img.files[2].0, 3, &mut unit, false)
+            .expect("the set's key opens the stream");
         assert_eq!(mask(&unit), mask(&img.plain[at..at + 6144]));
 
         let disc = disc_with(Some(aacs_with_secrets(

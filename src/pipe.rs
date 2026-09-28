@@ -973,9 +973,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
                 },
                 _ => libfreemkv::StreamSelection::default(),
             };
-            // `..Default` for `InputOptions::keys` (KU-L2). `allow`, not `expect`: green
-            // before and after KU-L2 lands (KU-L2a); KU-L2b removes the `allow`.
-            #[allow(clippy::needless_update)]
+            // `..Default`: `InputOptions::keys` stays `None` here until KU-F1 hands in the set.
             let opts = libfreemkv::InputOptions {
                 unit_keys: iso_unit_keys.clone(),
                 title_index: *title_idx,
