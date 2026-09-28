@@ -3941,9 +3941,9 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 wedged_threshold: 50,
                 progress: Some(&patch_progress),
                 halt: Some(pass_halt.clone()),
-                key_fetch: None,
                 // A raw capture decrypts nothing; the set checks the mapfile's identity.
                 keys: rip_keys.as_ref().ok().cloned(),
+                ..Default::default()
             };
             // Un-wedge the drive in SOFTWARE before each retry pass: grinding a
             // bad cluster leaves it in a HARDWARE_ERROR wedge needing a power-cycle.
