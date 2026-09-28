@@ -40,6 +40,7 @@ pub fn with_sources<T>(fake: KeySourceFactory, f: impl FnOnce() -> T) -> T {
 
 /// Run `f` with every [`drive_scan`] on this thread answered by `scan` (no drive in CI).
 #[cfg(test)]
+#[allow(dead_code)] // GUI tests only
 pub fn with_drive<T>(scan: fn() -> Disc, f: impl FnOnce() -> T) -> T {
     TEST_DRIVE.with(|t| *t.borrow_mut() = Some(scan));
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
@@ -48,8 +49,10 @@ pub fn with_drive<T>(scan: fn() -> Disc, f: impl FnOnce() -> T) -> T {
 }
 
 /// Scan the disc in the drive at `source` (`disc://` or `disc://DEVICE`) with NO key call
-/// (KU §4.2, Q4): the disc's in-memory VID for an image whose keys need it (E7034).
-/// "`--vid-from` runs `open_scan` on the drive (no key call, no sweep)".
+/// (KU §4.2): the disc's in-memory VID for an image whose keys need it (E7034), for the
+/// GUI's Start after the disc is inserted. The CLI has no such step (USER 2026-09-28).
+// The GUI's; the CLI binary builds this module without the GUI off macOS.
+#[allow(dead_code)]
 pub fn drive_scan(
     source: &str,
     credentials: Option<libfreemkv::DriveCredentials>,
@@ -100,7 +103,7 @@ pub struct ImageOpen {
     pub scope: KeyScope,
     /// The set from Open: asked only for what it lacks (`KeyInput::Seeded`).
     pub seed: Option<ResolvedKeySet>,
-    /// A drive's scan of the same disc (`--vid-from`, the GUI's Retry): the VID comes with
+    /// A drive's scan of the same disc (the GUI's Start after E7034): the VID comes with
     /// it and the image is not scanned (J14).
     pub drive_disc: Option<Disc>,
     pub halt: Option<Halt>,
@@ -148,6 +151,7 @@ pub fn gate(
 }
 
 /// Whether a refusal is E7034: only the disc's VID can finish the key (KU §4.2, J11/J23).
+#[allow(dead_code)] // the GUI's, as `drive_scan`
 pub fn needs_disc(e: &Error) -> bool {
     e.code() == libfreemkv::error::E_AACS_VID_NEEDS_DISC
 }

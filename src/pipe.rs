@@ -275,7 +275,7 @@ fn scan_failed_msg(e: &dyn std::fmt::Display) -> String {
 
 fn fmt_err_str(s: &str) -> String {
     if let Some((code_part, data)) = parse_error_code(s) {
-        let key = strings::front_end_error_key(strings::FrontEnd::Cli, code_part);
+        let key = format!("error.{code_part}");
         // `strings::get` returns the dotted path verbatim on a miss, so a
         // present locale entry is one whose lookup does NOT equal its own key.
         if strings::get(&key) != key {
@@ -434,9 +434,6 @@ struct ParsedFlags {
     keydb_path: Option<String>,
     key_url: Option<String>,
     key_auth: Option<String>,
-    /// `--vid-from disc://…`: the drive holding the disc whose Volume ID an image's keys
-    /// need (E7034, KU §4.2 Q4). Only its scan runs; nothing is ripped from it.
-    vid_from: Option<String>,
     title_nums: Vec<usize>,
     /// `-t all`: rip every title. Without it (and without any `-t N`), the
     /// default is the MAIN TITLE only — obfuscated discs with 50+ similar-
@@ -669,22 +666,6 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
                     }
                 }
             }
-            // KU §4.2 Q4: "insert the disc and re-run with `--vid-from disc://N`".
-            "--vid-from" => {
-                let flag = &args[i];
-                match args.get(i + 1) {
-                    Some(v) if !crate::cli_entry::is_flag_token(v) => {
-                        i += 1;
-                        f.vid_from = Some(v.clone());
-                    }
-                    _ => {
-                        return Err(strings::fmt(
-                            "error.flag_needs_value",
-                            &[("flag", flag), ("example", "--vid-from disc://")],
-                        ));
-                    }
-                }
-            }
             // An unrecognized dash-prefixed token is a typo (`--titel`,
             // `--qiet`), not something to silently ignore. Bare `-` and
             // non-dash positionals (URLs) are left for the caller to interpret.
@@ -726,7 +707,6 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         keydb_path,
         key_url,
         key_auth,
-        vid_from,
         mut title_nums,
         all_titles,
         streams,
@@ -782,17 +762,6 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         out.raw(Normal, &msg);
         return 1;
     }
-    if let Err(msg) = validate_vid_from(vid_from.as_deref(), source, &parsed_source) {
-        out.raw(Normal, &msg);
-        return 1;
-    }
-    // The drive's scan, with no key call: the VID an image's keys need (KU §4.2).
-    let mut drive_disc = match vid_from.as_deref().map(|d| scan_vid_drive(d, &keys, &out)) {
-        Some(Some(disc)) => Some(disc),
-        Some(None) => return 1,
-        None => None,
-    };
-
     // Disc → ISO or Disc → null: use Disc::copy() (not a stream). Its own exit
     // code (0 / DISC_COPY_DAMAGED_EXIT / 1) passes straight through.
     if matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. })
@@ -808,7 +777,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     // decrypts an existing image; `dir://` joins this arm when it becomes a
     // source. Not the recovery path — see `image_to_iso`.
     if matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. }) && parsed_source.is_disc_source() {
-        return if image_to_iso(source, dest, &keys, drive_disc.take(), &out) {
+        return if image_to_iso(source, dest, &keys, &out) {
             0
         } else {
             1
@@ -819,15 +788,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     // Placed before the generic mux path. Byte-stream sources, `--raw`, and
     // `--multipass` are already rejected above, so the source here is a disc.
     if matches!(parsed_dest, libfreemkv::StreamUrl::Dir { .. }) {
-        return if dir_to_extract(
-            source,
-            dest,
-            &keys,
-            &parsed_source,
-            force,
-            drive_disc.take(),
-            &out,
-        ) {
+        return if dir_to_extract(source, dest, &keys, &parsed_source, force, &out) {
             0
         } else {
             1
@@ -936,7 +897,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         let n = titles.as_ref().map_or(0, Vec::len);
         let known = rip_titles.iter().copied().filter(|&t| t < n).collect();
         let scope = libfreemkv::keys::KeyScope::Titles(known);
-        match image_rip_keys(source, scope, drive_disc.take(), &keys, &out) {
+        match image_rip_keys(source, scope, &keys, &out) {
             Some(opened) => Some(opened.keys),
             None => return 1,
         }
@@ -1744,57 +1705,8 @@ fn scan_rip_drive(source: &str, keys: &KeyConfig) -> Result<DriveScan, libfreemk
     Ok((disc, reader, device))
 }
 
-/// The drive `--vid-from` names, scanned with no key call; `None` once the error is shown.
-fn scan_vid_drive(device: &str, keys: &KeyConfig, out: &Output) -> Option<libfreemkv::Disc> {
-    let credentials = drive_credentials(keys.keydb_path());
-    match crate::rip_keys::drive_scan(device, credentials) {
-        Ok(disc) => Some(disc),
-        Err(e) => {
-            out.raw(Normal, &render_drive_open_error(&e));
-            None
-        }
-    }
-}
-
-/// `--vid-from` must name a drive, for an `iso://` image (a `dir://` folder is always
-/// scanned, KU §3.2 D6; a disc source brings its own VID).
-fn validate_vid_from(
-    vid_from: Option<&str>,
-    source: &str,
-    parsed_source: &libfreemkv::StreamUrl,
-) -> Result<(), String> {
-    let Some(v) = vid_from else {
-        return Ok(());
-    };
-    if !matches!(libfreemkv::parse_url(v), libfreemkv::StreamUrl::Disc { .. }) {
-        return Err(strings::fmt_or(
-            "error.vid_from_not_a_drive",
-            "Error: --vid-from needs the drive holding the disc: disc:// (or disc://DEVICE), got '{value}'.",
-            &[("value", v)],
-        ));
-    }
-    if !matches!(parsed_source, libfreemkv::StreamUrl::Iso { .. }) {
-        return Err(strings::fmt_or(
-            "error.vid_from_iso_only",
-            "Error: --vid-from applies only to an iso:// image source, got '{source}'.",
-            &[("source", source)],
-        ));
-    }
-    Ok(())
-}
-
-/// E7034's next step on the command line (KU §4.2: "insert the disc and re-run with
-/// `--vid-from disc://N`").
-fn vid_from_hint() -> String {
-    strings::get_or(
-        "rip.vid_from_hint",
-        "To finish, insert the disc and run the same command again with --vid-from disc:// \
-         (or --vid-from disc://DEVICE to name the drive). Only the disc's Volume ID is read; \
-         it is not ripped again.",
-    )
-}
-
-/// Print a key refusal (E7034 with its hint), or the set's HD DVD note; the set on success.
+/// Print a key refusal, or the set's HD DVD note; the set on success. E7034 renders its
+/// shared text (USER 2026-09-28: no `--vid-from`; the disc is inserted and the rip re-run).
 fn report_keys(
     set: libfreemkv::Result<libfreemkv::keys::ResolvedKeySet>,
     out: &Output,
@@ -1808,9 +1720,6 @@ fn report_keys(
         }
         Err(e) => {
             out.raw(Normal, &render_error(&e));
-            if crate::rip_keys::needs_disc(&e) {
-                out.raw(Normal, &vid_from_hint());
-            }
             None
         }
     }
@@ -1832,12 +1741,11 @@ fn disc_rip_keys(
     report_keys(r.0, out)
 }
 
-/// Open an image rip's source and resolve its keys once (KU §3.2), with `--vid-from`'s
-/// drive scan when given; `halt` stops the resolve. `None` once the refusal is shown.
+/// Open an image rip's source and resolve its keys once (KU §3.2); `halt` stops the
+/// resolve. `None` once the refusal is shown.
 fn open_rip_image(
     source: &str,
     scope: libfreemkv::keys::KeyScope,
-    drive_disc: Option<libfreemkv::Disc>,
     keys: &KeyConfig,
     halt: &libfreemkv::Halt,
     out: &Output,
@@ -1846,7 +1754,7 @@ fn open_rip_image(
     let o = crate::rip_keys::ImageOpen {
         scope,
         seed: None,
-        drive_disc,
+        drive_disc: None,
         halt: Some(halt.clone()),
     };
     let (opened, trace) = crate::rip_keys::open_image(&src, key_source_factory(keys, out), o);
@@ -1866,12 +1774,11 @@ fn open_rip_image(
 fn image_rip_keys(
     source: &str,
     scope: libfreemkv::keys::KeyScope,
-    drive_disc: Option<libfreemkv::Disc>,
     keys: &KeyConfig,
     out: &Output,
 ) -> Option<freemkv_engine::OpenedImage> {
     let sigint = SigintHalt::install();
-    open_rip_image(source, scope, drive_disc, keys, sigint.halt(), out)
+    open_rip_image(source, scope, keys, sigint.halt(), out)
 }
 
 #[allow(clippy::too_many_arguments)] // cohesive single-title disc rip
@@ -2172,13 +2079,7 @@ fn refuse_unstaged_titles(
     }
 }
 
-fn image_to_iso(
-    source: &str,
-    dest: &str,
-    keys: &KeyConfig,
-    drive_disc: Option<libfreemkv::Disc>,
-    out: &Output,
-) -> bool {
+fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
     let iso_path = match libfreemkv::parse_url(dest) {
         libfreemkv::StreamUrl::Iso { path } => path,
         _ => return false,
@@ -2209,7 +2110,7 @@ fn image_to_iso(
     // once, before `dest` exists (KU §2.5 `WholeDisc`). Ctrl-C is watched from the start.
     let sigint = SigintHalt::install();
     let scope = libfreemkv::keys::KeyScope::WholeDisc;
-    let Some(opened) = open_rip_image(source, scope, drive_disc, keys, sigint.halt(), out) else {
+    let Some(opened) = open_rip_image(source, scope, keys, sigint.halt(), out) else {
         return false;
     };
     let total_sectors = opened.disc.capacity_sectors;
@@ -2496,7 +2397,6 @@ fn dir_to_extract(
     keys: &KeyConfig,
     parsed_source: &libfreemkv::StreamUrl,
     force: bool,
-    drive_disc: Option<libfreemkv::Disc>,
     out: &Output,
 ) -> bool {
     let dest_path = match libfreemkv::parse_url(dest) {
@@ -2531,7 +2431,7 @@ fn dir_to_extract(
             if is_iso && refuse_staged_image(std::path::Path::new(path), out) {
                 return false;
             }
-            let Some(opened) = image_rip_keys(source, scope.clone(), drive_disc, keys, out) else {
+            let Some(opened) = image_rip_keys(source, scope.clone(), keys, out) else {
                 return false;
             };
             if let Err(e) = crate::rip_keys::gate(&opened.disc, false, Some(&opened.keys), &scope) {
@@ -7099,9 +6999,9 @@ mod image_copy_tests {
 #[cfg(test)]
 mod ku_cli_tests {
     //! The CLI half of KU-F1 over a real image file (keys-upfront design §7.3): one resolve
-    //! per rip, before any output; E7034 and `--vid-from`; nothing key-shaped on disk.
+    //! per rip, before any output; E7034 before any output; nothing key-shaped on disk.
     use crate::ku_fixtures::*;
-    use crate::rip_keys::{with_drive, with_sources};
+    use crate::rip_keys::with_sources;
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -7156,15 +7056,11 @@ mod ku_cli_tests {
         assert_no_secret_on_disk(dir.path(), &[K1, K2, VID]);
     }
 
-    fn drive() -> libfreemkv::Disc {
-        drive_disc(&bd_image(&[Some(K1)], 1))
-    }
-
-    /// FK11 (KU §4.2, J11/J12): an image whose key only the VID derives (KS-16 "Kvu =
-    /// AES-G(Km, IDv)") asks once, then exits with E7034 and the `--vid-from` hint, writing
-    /// nothing; `--vid-from disc://` scans the drive (no key call) and finishes.
+    /// FK11, CLI half (KU §4.2, J11/J12; USER 2026-09-28: no `--vid-from`): an image whose
+    /// key only the VID derives (KS-16 "Kvu = AES-G(Km, IDv)") asks once, then exits with
+    /// the shared E7034 text before any output. Nothing key-shaped is written.
     #[test]
-    fn cli_surfaces_e7034_then_vid_from_finishes() {
+    fn cli_surfaces_e7034_before_any_output() {
         use libfreemkv::spec::keys::KS_16_KVU;
         assert!(KS_16_KVU.text.contains("Kvu = AES-G(Km, IDv)"));
         let fx = bd_image(&[Some(K1)], 1);
@@ -7174,87 +7070,16 @@ mod ku_cli_tests {
         let src = format!("iso://{}", iso.display());
         let mkv = dir.path().join("movie.mkv");
         let dest = format!("mkv://{}", mkv.display());
-
         let calls = Calls::default();
         let f = factory(&[(Answer::OnlineNeedsVid, &[K1])], &calls);
         let (code, text) = with_sources(f, || run_cli(&src, &dest, &[]));
         assert_eq!(code, 1, "{text}");
         assert_eq!(calls.len(), 1, "asked once, without the VID");
         assert!(text.contains(&crate::strings::get("error.E7034")), "{text}");
-        assert!(text.contains("--vid-from disc://"), "{text}");
+        assert!(!text.contains("--vid-from"), "no flag is suggested: {text}");
         assert!(!mkv.exists(), "E7034 comes before any output");
-
-        let calls = Calls::default();
-        let f = factory(&[(Answer::OnlineNeedsVid, &[K1])], &calls);
-        let (code, text) = with_drive(drive, || {
-            with_sources(f, || run_cli(&src, &dest, &["--vid-from", "disc://"]))
-        });
-        assert_eq!(code, 0, "{text}");
-        assert_eq!(calls.len(), 1, "one more request, now with the VID");
-        assert_eq!(calls.all()[0].vid, Some(VID));
-        assert!(mkv.exists(), "{text}");
         assert_no_secret_on_disk(dir.path(), &[K1, VID]);
-    }
-
-    /// FK3 (KU §7.3): the CLI reaches the shared table's requests and verdicts; the GUI's
-    /// `engine` test checks the same table, so the two shells never deviate.
-    #[test]
-    fn cli_and_gui_same_requests_same_verdicts() {
-        for case in fk3_cases() {
-            let dir = TempDir::new(case.name);
-            let iso = case.image(dir.path());
-            let calls = Calls::default();
-            let src = format!("iso://{}", iso.display());
-            let dest = format!("mkv://{}/", dir.path().join("out").display());
-            let (code, text) = with_sources(case.sources(&calls), || {
-                run_cli(&src, &dest, &["-t", "all"])
-            });
-            assert_eq!(calls.len(), case.requests, "{}: {text}", case.name);
-            match case.code {
-                None => assert_eq!(code, 0, "{}: {text}", case.name),
-                Some(c) => assert_eq!(named_code(&text), Some(c), "{}: {text}", case.name),
-            }
-        }
-    }
-
-    /// FK7 (KU §2.5: "Raw copy (`--raw`, …) | `None`: no key call"): the disc→ISO copy
-    /// scans with `open_scan(.., raw)` and resolves only on its decrypting arm (a live
-    /// drive is needed to run it, so this reads the wiring; `rip_keys` proves the rest).
-    #[test]
-    fn raw_disc_copy_makes_no_key_request() {
-        let src = include_str!("pipe.rs").replace("\r\n", "\n");
-        let a = src.find("\nfn disc_to_iso(").expect("disc_to_iso");
-        let body = &src[a..a + src[a..].find("\nfn dir_to_extract(").expect("next fn")];
-        assert!(body.contains("open_scan(device_target(source), credentials, raw)"));
-        let keyed = body.find("disc_rip_keys(").expect("the decrypting resolve");
-        assert!(
-            body[..keyed].contains("let set = if raw {"),
-            "resolve only when decrypting"
-        );
-    }
-
-    /// `--vid-from` names a drive for an `iso://` image only (a folder is always scanned,
-    /// KU §3.2 D6; a disc source has its own VID), and must be a `disc://` URL.
-    #[test]
-    fn vid_from_needs_an_iso_source_and_a_drive() {
-        let dir = TempDir::new("vidfrom");
-        let fx = bd_image(&[None], 1);
-        let iso = fx.write(dir.path(), "a.iso");
-        let src = format!("iso://{}", iso.display());
-        let dest = format!("mkv://{}", dir.path().join("a.mkv").display());
-        let unknown = crate::strings::fmt("error.unknown_flag", &[("flag", "--vid-from")]);
-        let (code, text) = run_cli(&src, &dest, &["--vid-from", "iso://x.iso"]);
-        assert_eq!(code, 1, "{text}");
-        assert!(
-            text.contains("disc://") && !text.contains(&unknown),
-            "{text}"
-        );
-        let folder = format!("dir://{}", dir.path().display());
-        let (code, text) = run_cli(&folder, &dest, &["--vid-from", "disc://"]);
-        assert_eq!(code, 1, "{text}");
-        assert!(
-            text.contains("iso://") && !text.contains(&unknown),
-            "{text}"
-        );
+        let (code, _) = run_cli(&src, &dest, &["--vid-from", "disc://"]);
+        assert_eq!(code, 1, "--vid-from is not a flag");
     }
 }

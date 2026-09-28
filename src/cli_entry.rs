@@ -782,13 +782,6 @@ fn usage() {
     println!("{}", crate::strings::get("usage.flag.key_url_2"));
     println!("{}", crate::strings::get("usage.flag.key_url_3"));
     println!("{}", crate::strings::get("usage.flag.key_auth"));
-    println!(
-        "{}",
-        crate::strings::get_or(
-            "usage.flag.vid_from",
-            "      --vid-from DRIVE For an iso:// image whose keys need the disc's Volume ID (E7034): read it from the disc in DRIVE (disc:// or disc://DEVICE); nothing is ripped from it.",
-        )
-    );
     println!("{}", crate::strings::get("usage.flag.log_level_1"));
     println!("{}", crate::strings::get("usage.flag.log_level_2"));
     println!("{}", crate::strings::get("usage.flag.log_level_3"));

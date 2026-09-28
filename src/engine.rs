@@ -944,7 +944,7 @@ pub fn explain(code: u16) -> String {
         7022 | 8005 => 7018,
         c => c,
     };
-    let msg = gui_error_message(key_code, None);
+    let msg = crate::strings::error_message(u32::from(key_code));
     if msg != format!("error.E{key_code}") && !msg.contains('{') {
         return msg;
     }
@@ -2411,25 +2411,8 @@ fn whole_image_gate(format: &str, src: &std::path::Path) -> Result<(), String> {
 
 // An engine refusal about the image at `src`, localized with its path as `{detail}`.
 fn gui_error(e: &libfreemkv::Error, src: &std::path::Path) -> String {
-    let msg = gui_error_message(e.code(), Some(&src.display().to_string()));
+    let msg = crate::strings::error_message_with(u32::from(e.code()), &src.display().to_string());
     format!("E{} {msg}", e.code())
-}
-
-// `error.E<code>` in the GUI's own wording when the catalog has one (`error_gui.`: it names
-// the Settings action, not the CLI's command), else the shared text; `{detail}` filled.
-fn gui_error_message(code: u16, detail: Option<&str>) -> String {
-    let key =
-        crate::strings::front_end_error_key(crate::strings::FrontEnd::Gui, &format!("E{code}"));
-    if key.starts_with("error.") {
-        return match detail {
-            Some(d) => crate::strings::error_message_with(u32::from(code), d),
-            None => crate::strings::error_message(u32::from(code)),
-        };
-    }
-    match detail {
-        Some(d) => crate::strings::fmt(&key, &[("detail", d)]),
-        None => crate::strings::get(&key),
-    }
 }
 
 // Why "keep the image" was not honoured: the staging held only the chosen titles.

@@ -143,18 +143,6 @@ fn en_msg(code: u16) -> String {
     lookup(&en, &format!("error.E{code}"))
 }
 
-/// The English message the CLI renders for a code: its own `error_cli.` wording when the
-/// catalog has one (the shared `error.` text is front-end-neutral), else the shared text.
-fn en_cli_msg(code: u16) -> String {
-    let en: Value = serde_json::from_str(locale_en()).expect("en.json invalid");
-    let own = lookup(&en, &format!("error_cli.E{code}"));
-    if own == format!("error_cli.E{code}") {
-        en_msg(code)
-    } else {
-        own
-    }
-}
-
 #[test]
 fn no_drive_message_is_actionable() {
     let en: Value = serde_json::from_str(locale_en()).expect("en.json invalid");
@@ -198,14 +186,19 @@ fn drive_not_ready_message_is_actionable() {
 }
 
 #[test]
-fn aacs_no_keys_message_points_at_update_keys() {
-    // The known-good remediation pattern: an AACS-needs-keys failure must guide
-    // the user to fetch a key database, not just state the fact (the CLI names its command).
-    let m = en_cli_msg(7000);
+fn aacs_no_keys_message_points_at_the_key_database() {
+    // The known-good remediation pattern: an AACS-needs-keys failure must guide the user
+    // to a key database, not just state the fact. Front-end-neutral: the library server
+    // shows it too, so it names no CLI command (KU-F1).
+    let m = en_msg(7000);
     assert!(m.contains("AACS"), "E7000 must name AACS: {m}");
     assert!(
-        m.contains("update-keys"),
-        "E7000 must point at `freemkv update-keys`: {m}"
+        m.contains("key database"),
+        "E7000 must point at a key database: {m}"
+    );
+    assert!(
+        !m.contains("update-keys"),
+        "E7000 must name no CLI command: {m}"
     );
 }
 
@@ -252,14 +245,14 @@ fn mpg_no_video_track_names_only_video_mpg_carries() {
 
 #[test]
 fn decrypt_failed_message_is_actionable() {
-    let m = en_cli_msg(7013);
+    let m = en_msg(7013);
     assert!(
         m.to_lowercase().contains("decryption failed"),
         "E7013 what: {m}"
     );
     assert!(
-        m.contains("update-keys"),
-        "E7013 must offer a remediation (refresh keys): {m}"
+        m.contains("key database") && !m.contains("update-keys"),
+        "E7013 must offer a front-end-neutral remediation (update the key database): {m}"
     );
 }
 
