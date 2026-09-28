@@ -358,6 +358,93 @@ class SecretTests(unittest.TestCase):
         self.assertNotIn('5ecret', (d / 'c.json').read_text() + out.getvalue())
 
 
+class RedirectTests(unittest.TestCase):
+    """Review 2 item 2: urllib's default HTTPRedirectHandler follows 301/302/303 for a POST (docs:
+    "the default implementation reproduces this behavior") and copies every header but
+    Content-Length/Content-Type, Authorization included, to the new URL, whatever its host or
+    scheme. The canary must never do that. Two real HTTP servers on the loopback: one redirects,
+    the other records whatever reaches it."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+        cls.stolen = []
+
+        class Thief(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                cls.stolen.append(dict(self.headers))
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(b'{"UK": "00112233445566778899aabbccddeeff"}')
+            do_POST = do_GET
+
+            def log_message(self, *a):
+                pass
+        cls.thief = http.server.HTTPServer(('127.0.0.1', 0), Thief)
+        thief_url = f'http://127.0.0.1:{cls.thief.server_port}/steal'
+
+        class Redirector(http.server.BaseHTTPRequestHandler):
+            code = 302
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length') or 0))
+                self.send_response(int(self.path.rsplit('/', 1)[1]))
+                self.send_header('Location', thief_url)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        cls.redirector = http.server.HTTPServer(('127.0.0.1', 0), Redirector)
+        for server in (cls.thief, cls.redirector):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        cls.base = f'http://127.0.0.1:{cls.redirector.server_port}/decode'
+
+    @classmethod
+    def tearDownClass(cls):
+        for server in (cls.thief, cls.redirector):
+            server.shutdown()
+            server.server_close()
+
+    def setUp(self):
+        self.stolen.clear()
+
+    def test_the_default_urllib_opener_would_leak_the_token(self):
+        """The hazard is real: plain urlopen follows a POST 302 and forwards Authorization."""
+        req = urllib.request.Request(f'{self.base}/302', data=b'{}', method='POST',
+                                     headers={'Authorization': 'Bearer tok-5ecret'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        self.assertEqual(self.stolen[0].get('Authorization'), 'Bearer tok-5ecret')
+
+    def test_no_redirect_is_followed(self):
+        for code in (301, 302, 303, 307, 308):
+            with self.subTest(code=code):
+                with self.assertRaisesRegex(mc.CanaryError, f'HTTP {code} .*not followed') as cm:
+                    mc._post_once(f'{self.base}/{code}', {'Authorization': 'Bearer tok-5ecret'}, b'{}', None)
+                self.assertNotIsInstance(cm.exception, mc.Transient, 'a redirect is not retried')
+                self.assertEqual(self.stolen, [], 'nothing reached the redirect target')
+                self.assertNotIn('5ecret', str(cm.exception))
+
+    def test_post_decode_does_not_retry_a_redirect(self):
+        calls, sleeps = [], []
+
+        def opener(req, timeout):
+            calls.append(req)
+            raise urllib.error.HTTPError(req.full_url, 302, 'Found', {'Location': 'http://elsewhere.example/'},
+                                         io.BytesIO(b''))
+        with self.assertRaisesRegex(mc.CanaryError, 'HTTP 302'):
+            mc.post_decode('https://k/d', 'tok', {}, opener, sleep=sleeps.append)
+        self.assertEqual((len(calls), sleeps), (1, []))
+
+    def test_the_default_opener_has_no_following_redirect_handler(self):
+        opener = urllib.request.build_opener(mc.NoRedirect)
+        handlers = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPRedirectHandler)]
+        self.assertEqual([type(h) for h in handlers], [mc.NoRedirect])
+
+
 class RetryTests(unittest.TestCase):
     """Review FB3: a transient failure is retried with backoff; a wrong or missing key is not."""
 

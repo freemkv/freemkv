@@ -441,12 +441,43 @@ def disc_inputs(udf, count=SAMPLES):
     return inf, mkb, samples
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: the request carries `Authorization: Bearer <FMKV_KEY_AUTH>`.
+
+    Python 3.12 urllib.request docs, HTTPRedirectHandler.redirect_request(req, fp, code, msg, hdrs,
+    newurl): "Return a Request or None in response to a redirect. This is called by the default
+    implementations of the http_error_30* methods when a redirection is received from the server.
+    If a redirection should take place, return a new Request to allow http_error_30* to perform the
+    redirect to newurl. Otherwise, raise HTTPError if no other handler should try to handle this URL,
+    or return None if you can't but another handler might."
+    And its note: "The default implementation of this method does not strictly follow RFC 2616,
+    which says that 301 and 302 responses to POST requests must not be automatically redirected
+    without confirmation by the user. In reality, browsers do allow automatic redirection of these
+    responses, changing the POST to a GET, and the default implementation reproduces this behavior."
+    The default implementation (CPython 3.12 Lib/urllib/request.py) builds the new Request with
+    `newheaders = {k: v for k, v in req.headers.items() if k.lower() not in CONTENT_HEADERS}`, i.e.
+    it copies Authorization to whatever host, and scheme, the Location names. So: raise HTTPError."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+
+def no_redirect_opener():
+    """Python 3.12 docs, build_opener([handler, ...]): "Instances of the following classes will be in
+    front of the handlers, unless the handlers contain them, instances of them or subclasses of them:
+    ... HTTPRedirectHandler ..." NoRedirect is such a subclass, so the default one is not added."""
+    return urllib.request.build_opener(NoRedirect).open
+
+
 def _post_once(url, headers, body, opener):
     req = urllib.request.Request(url, data=body, headers=headers, method='POST')
     try:
-        with (opener or urllib.request.urlopen)(req, timeout=TIMEOUT) as resp:
+        with (opener or no_redirect_opener())(req, timeout=TIMEOUT) as resp:
             data = resp.read(MAX_RESPONSE + 1)
     except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise CanaryError(f'the key service answered HTTP {exc.code} (a redirect: not followed, '
+                              'so the token goes nowhere else; fix FMKV_KEY_URL)') from None
         if exc.code >= 500 or exc.code == 429:
             raise Transient(f'the key service answered HTTP {exc.code}') from None
         raise CanaryError(f'the key service answered HTTP {exc.code}') from None
