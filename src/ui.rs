@@ -859,7 +859,7 @@ pub fn container_scheme(path: &str) -> Option<&'static str> {
 /// Source formats accepted by the file picker: ISO images and every [`CONTAINER_SOURCES`]
 /// extension (plus the upper-case forms discs and pickers show).
 pub const SOURCE_EXTS: &[&str] = &[
-    "iso", "ISO", "mkv", "m2ts", "mts", "mp4", "mpg", "mpeg", "vob", "VOB",
+    "iso", "ISO", "mkv", "m2ts", "mts", "mp4", "mpg", "MPG", "mpeg", "MPEG", "vob", "VOB",
 ];
 
 /// True for a container source (single title, no disc scan).
