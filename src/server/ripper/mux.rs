@@ -643,12 +643,17 @@ impl EngineMuxSink {
     }
 
     // The title's result. None means the engine stopped before starting it: a halt.
-    fn take_result(&self) -> std::io::Result<libfreemkv::MuxOutcome> {
+    // The title's result, else the loop's `outcome`: a refusal before any title (a key
+    // refusal before `TitleStart`) must not read as a Stop.
+    fn take_result(
+        &self,
+        outcome: &freemkv_engine::RipOutcome,
+    ) -> std::io::Result<libfreemkv::MuxOutcome> {
         self.result
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .take()
-            .unwrap_or_else(|| Err(libfreemkv::Error::Halted.into()))
+            .unwrap_or_else(|| Err(outcome_error(outcome)))
     }
 }
 
@@ -996,9 +1001,9 @@ fn map_iso_mux_outcome(
             })
         }
         Err(e) => {
-            // Propagate the two classifications the call site handles specially
-            // (staging-preserving resume, FMTS retryable deferral).
-            if super::is_halt_error(&e) || super::is_fmts_key_missing_error(&e) {
+            // Propagate what the call site classifies itself: a Stop (staging kept) and a
+            // key refusal (E7034 "insert the disc", else a key deferral), never damage.
+            if super::is_halt_error(&e) || super::io_key_refusal(&e).is_some() {
                 return Err(e);
             }
             if !opened {
@@ -1086,6 +1091,32 @@ fn map_iso_mux_outcome(
     }
 }
 
+// The error a title-less `RipOutcome` stands for: its code, a disc-level no-key (E7022),
+// or a Stop.
+fn outcome_error(outcome: &freemkv_engine::RipOutcome) -> std::io::Error {
+    match outcome {
+        // `E<code>: <data>`, the library's own error form, so `error_code` still reads it.
+        freemkv_engine::RipOutcome::Failed {
+            code: Some(code),
+            data,
+            ..
+        } if !data.is_empty() => std::io::Error::other(format!("E{code}: {data}")),
+        freemkv_engine::RipOutcome::Failed {
+            code: Some(code), ..
+        } => std::io::Error::other(format!("E{code}")),
+        freemkv_engine::RipOutcome::Failed { kind, data, .. } => std::io::Error::new(
+            *kind,
+            format!("image mux failed before any title {data}")
+                .trim_end()
+                .to_string(),
+        ),
+        freemkv_engine::RipOutcome::NoKey => {
+            std::io::Error::other(format!("E{}", libfreemkv::error::E_NO_DISC_KEY))
+        }
+        _ => libfreemkv::Error::Halted.into(),
+    }
+}
+
 // Run the ISO/multipass (and resume) mux through the engine's `mux_image_titles`; live
 // single-pass sibling is `mux_live`. `Err` only for the two call-site classifications
 // (halt, FMTS deferral); everything else maps into `MuxOutcome`.
@@ -1160,9 +1191,9 @@ pub(crate) fn mux_iso(
         &format!("Opening output: {}", inputs.dest_url),
     );
     let dest = inputs.dest_url.clone();
-    let _ = freemkv_engine::mux_image_titles(src.image, &plan, &|_| dest.clone(), &sink);
+    let outcome = freemkv_engine::mux_image_titles(src.image, &plan, &|_| dest.clone(), &sink);
 
-    let result = sink.take_result();
+    let result = sink.take_result(&outcome);
     let opened = sink.opened.load(Ordering::Relaxed);
     let partial_bytes = wd_bytes.load(Ordering::Relaxed);
     let final_errors = atomics_in.input_errors.load(Ordering::Relaxed);
@@ -1189,14 +1220,10 @@ pub(crate) struct LiveMuxSource {
     pub(crate) title: libfreemkv::DiscTitle,
     /// Container format (TS vs PS demux selection).
     pub(crate) format: libfreemkv::ContentFormat,
-    /// Decryption keys autorip already resolved as its own app-layer policy
-    /// (`disc.decrypt_keys()`). The driver consumes them as-is.
-    pub(crate) keys: libfreemkv::decrypt::DecryptKeys,
-    /// Retained pre-rip FMTS forensic key map (`fmts_key_map`). `mux_stream`
-    /// applies it via `DiscStream::with_key_map` so single-pass FMTS reads only
-    /// our-phase units and decrypts the forensic segment correctly. `None` for
-    /// every non-FMTS disc, leaving the read walk unchanged.
-    pub(crate) key_map: Option<std::sync::Arc<libfreemkv::decrypt::AacsKeyMap>>,
+    /// The rip's up-front key set (KU §2.1): its keys, its FMTS forensic map and the
+    /// on-arrival proof. `None` (or a non-AACS set) decrypts no AACS; a DVD cracks its CSS
+    /// title key in the stream.
+    pub(crate) keys: Option<libfreemkv::keys::ResolvedKeySet>,
     /// Skip-past-read-errors (zero-fill + continue) — wired onto
     /// `DiscStream::skip_errors` (was `on_read_error == "skip"`).
     pub(crate) skip_errors: bool,
@@ -1288,18 +1315,15 @@ pub(crate) fn mux_live(
         inputs.device,
         &format!("Opening output: {}", inputs.dest_url),
     );
-    let input = libfreemkv::MuxInput::Live {
+    let source = libfreemkv::MuxSource::Live {
         reader: src.reader,
         title: src.title,
         format: src.format,
-        keys: src.keys,
-        // The forensic FMTS map — applied via `DiscStream::with_key_map` inside
-        // `mux_stream`, exactly the pre-migration `s.with_key_map(map)`.
-        key_map: src.key_map,
     };
 
-    let result = libfreemkv::mux_stream(
-        input,
+    let result = libfreemkv::mux_with_keys(
+        source,
+        src.keys.as_ref(),
         &inputs.dest_url,
         &opts,
         &halt_token,
@@ -2039,7 +2063,7 @@ mod tests {
         use freemkv_engine::{Event, Sink};
         let (sink, ..) = engine_sink("engine_sink_result");
         let halted = sink
-            .take_result()
+            .take_result(&freemkv_engine::RipOutcome::Halted)
             .expect_err("no TitleDone means stopped before start");
         assert!(super::super::is_halt_error(&halted));
 
@@ -2057,7 +2081,8 @@ mod tests {
             dest: "mkv:///x.mkv",
             result: Ok(&done),
         });
-        assert_eq!(sink.take_result().expect("ok").bytes_written, 1234);
+        let ok = freemkv_engine::RipOutcome::Ok { titles_written: 1 };
+        assert_eq!(sink.take_result(&ok).expect("ok").bytes_written, 1234);
 
         let fmts: std::io::Error = libfreemkv::Error::FmtsKeyMissing.into();
         sink.event(&Event::TitleDone {
@@ -2065,8 +2090,64 @@ mod tests {
             dest: "mkv:///x.mkv",
             result: Err(&fmts),
         });
-        let err = sink.take_result().expect_err("err");
+        let err = sink.take_result(&ok).expect_err("err");
         assert!(super::super::is_fmts_key_missing_error(&err), "{err}");
+    }
+
+    // KU-E1: a key refusal is never a Stop. Before any title the loop's outcome carries it;
+    // as a `TitleDone(Err)` with no output it reaches the call site as the key error
+    // (E7034 "insert the disc", else a key deferral), not a quarantining setup failure.
+    #[test]
+    fn a_key_refusal_is_a_key_error_not_a_stop_or_damage() {
+        use freemkv_engine::{Event, RipOutcome, Sink};
+        let (sink, ..) = engine_sink("engine_sink_key_refusal");
+        let refused = |code: u16| RipOutcome::Failed {
+            title_index: 0,
+            code: Some(code),
+            kind: std::io::ErrorKind::Other,
+            data: String::new(),
+        };
+        for code in [7022u16, 7026, 7032, 7034] {
+            let e = sink.take_result(&refused(code)).expect_err("refused");
+            assert!(!super::super::is_halt_error(&e), "E{code} is not a Stop");
+            assert_eq!(super::super::io_key_refusal(&e), Some(code));
+        }
+        let with_data = RipOutcome::Failed {
+            title_index: 0,
+            code: Some(7022),
+            kind: std::io::ErrorKind::Other,
+            data: "abcd".into(),
+        };
+        let e = sink.take_result(&with_data).expect_err("refused");
+        assert_eq!(super::super::io_key_refusal(&e), Some(7022));
+        assert!(
+            e.to_string().contains("abcd"),
+            "the data reaches the message: {e}"
+        );
+        let no_key = sink.take_result(&RipOutcome::NoKey).expect_err("no key");
+        assert_eq!(super::super::io_key_refusal(&no_key), Some(7022));
+
+        for err in [
+            libfreemkv::Error::AacsVidNeedsDisc,
+            libfreemkv::Error::NoDiscKey {
+                disc_hash: "ab".into(),
+            },
+            libfreemkv::Error::FmtsKeyMissing,
+        ] {
+            let code = err.code();
+            let io: std::io::Error = err.into();
+            sink.event(&Event::TitleDone {
+                idx: 0,
+                dest: "mkv:///x.mkv",
+                result: Err(&io),
+            });
+            let result = sink.take_result(&RipOutcome::Halted);
+            let Err(mapped) = map_iso_mux_outcome(result, false, "ku", 0.0, Instant::now(), 0, 0)
+            else {
+                panic!("E{code}: the call site classifies a key refusal");
+            };
+            assert_eq!(super::super::io_key_refusal(&mapped), Some(code));
+        }
     }
 
     // `/api/stop` cancels the device's Halt; the engine polls it through the sink.
@@ -2090,45 +2171,19 @@ mod tests {
 
     // ── mux_iso end to end through the engine (no media) ────────────────────
 
+    // A keyed image of the KU fixture, repointed at `path`: the mux opens its own reader
+    // there. The fixture's file is left in place for the test's lifetime.
     fn image_of(path: &str) -> freemkv_engine::OpenedImage {
-        struct NoRead;
-        impl libfreemkv::SectorSource for NoRead {
-            fn read_sectors(
-                &mut self,
-                _: u32,
-                _: u16,
-                _: &mut [u8],
-                _: bool,
-            ) -> libfreemkv::Result<usize> {
-                unreachable!("the engine mux opens its own reader")
-            }
-            fn capacity_sectors(&self) -> u32 {
-                0
-            }
-        }
-        freemkv_engine::OpenedImage {
-            source: freemkv_engine::ImageSource::Iso(path.into()),
-            disc: libfreemkv::Disc {
-                volume_id: "TEST".into(),
-                meta_title: None,
-                format: libfreemkv::DiscFormat::BluRay,
-                capacity_sectors: 0,
-                capacity_bytes: 0,
-                layers: 1,
-                titles: vec![libfreemkv::DiscTitle::empty()],
-                region: libfreemkv::disc::DiscRegion::Free,
-                aacs: None,
-                css: None,
-                encrypted: false,
-                aacs_error: None,
-                css_error: None,
-                content_format: libfreemkv::ContentFormat::BdTs,
-            },
-            reader: Box::new(NoRead),
-            key_fetch: None,
-            trace: libfreemkv::aacs::trace::ResolutionTrace::new(),
-            won: None,
-        }
+        let fx = crate::ku_fixture::bd_image();
+        let dir = tempfile::tempdir().unwrap().keep();
+        let iso = fx.write(&dir, "fixture.iso");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let keys = crate::ku_fixture::holding(&calls, crate::ku_fixture::K1);
+        let opts = freemkv_engine::OpenImageOptions::resolve(keys);
+        let src = freemkv_engine::ImageSource::Iso(iso);
+        let mut image = freemkv_engine::open_image_with(&src, opts).expect("the fixture opens");
+        image.source = freemkv_engine::ImageSource::Iso(path.into());
+        image
     }
 
     fn inputs_for<'a>(device: &'a str, dest: &std::path::Path) -> MuxInputs<'a> {

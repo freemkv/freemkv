@@ -426,6 +426,7 @@ mod tests {
             type_s: t.into(),
             desc: format!("d{i}"),
             check: Some(Check::Off),
+            check_enabled: true,
         }
     }
 

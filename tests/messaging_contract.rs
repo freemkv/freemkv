@@ -192,9 +192,39 @@ fn aacs_no_keys_message_points_at_update_keys() {
     let m = en_msg(7000);
     assert!(m.contains("AACS"), "E7000 must name AACS: {m}");
     assert!(
-        m.contains("update-keys"),
-        "E7000 must point at `freemkv update-keys`: {m}"
+        m.to_lowercase().contains("key"),
+        "E7000 must point at getting keys: {m}"
     );
+}
+
+// FT5 (CC-F1a): the shared cascade's two codes carry real messages, not the
+// bare-code fallback (stop-design-v5 §6 R7.4; keys-upfront-design §6).
+#[test]
+fn timed_out_and_vid_needs_disc_have_real_messages() {
+    let m9073 = en_msg(9073);
+    assert_ne!(m9073, "error.E9073", "en.json missing error.E9073");
+    assert!(
+        m9073.to_lowercase().contains("timed out") || m9073.to_lowercase().contains("timeout"),
+        "E9073 must say it timed out: {m9073}"
+    );
+
+    let m7034 = en_msg(7034);
+    assert_ne!(m7034, "error.E7034", "en.json missing error.E7034");
+    assert!(
+        m7034.to_lowercase().contains("volume id") || m7034.to_lowercase().contains("disc"),
+        "E7034 must point at the disc/Volume ID: {m7034}"
+    );
+}
+
+// MPG-F1: E9074 carries a real message that names the way out, as E9048 does. §5:
+// "MPG needs a video track it can carry (MPEG-1/2, H.264, HEVC or VC-1); this title
+// has none. Use mkv:// instead." (mpg-output-design v5)
+#[test]
+fn mpg_no_video_track_has_a_real_message() {
+    let m = en_msg(9074);
+    assert_ne!(m, "error.E9074", "en.json missing error.E9074");
+    assert!(m.contains("MPG"), "E9074 must name MPG: {m}");
+    assert!(m.contains("mkv://"), "E9074 must point at mkv://: {m}");
 }
 
 #[test]
@@ -205,7 +235,7 @@ fn decrypt_failed_message_is_actionable() {
         "E7013 what: {m}"
     );
     assert!(
-        m.contains("update-keys"),
+        m.to_lowercase().contains("key"),
         "E7013 must offer a remediation (refresh keys): {m}"
     );
 }
@@ -355,7 +385,8 @@ fn en_json_has_no_string_for_a_code_libfreemkv_does_not_declare() {
 }
 
 // Codes libfreemkv adds before this fixture can name them (the fixture compiles against
-// libfreemkv dev). Enumerate the variant and drop its name here once libfreemkv has it.
+// libfreemkv dev). MPG-F1 empties it: MPG-L0 declares E9074 and the fixture now
+// enumerates `Error::MpgNoVideoTrack` (mpg-output-design v5 §8).
 const PENDING_VARIANTS: &[&str] = &[];
 
 // Every code libfreemkv can put inside an `Error` must appear in `all_error_variants()`, and

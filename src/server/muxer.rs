@@ -352,6 +352,10 @@ pub(crate) enum MuxVerdict {
     /// `state.json` exists but can't be used, so the deliverable plan is unknown.
     /// Held for the operator (one card, no re-dispatch, state.json untouched).
     SkipUnreadableState,
+    /// A `.ripped` dir held for its disc (E7034): only the disc's Volume ID can finish
+    /// its keys, so re-muxing without it asks the key service for the same refusal.
+    /// Held with one card until the disc is inserted (which finishes it).
+    SkipNeedsDisc,
     /// No `.ripped` hand-off marker — nothing for the worker to do here.
     SkipNoMarker,
     /// Snapshot is `None` — the dir's contents are UNKNOWN (read_dir / DirEntry
@@ -383,6 +387,9 @@ pub(crate) fn mux_dispatch_verdict(
     // operator (Accept, another pass, raised threshold), per `staging.rs`.
     if snap.has_aborted_loss {
         return MuxVerdict::SkipAbortedLoss;
+    }
+    if snap.needs_disc {
+        return MuxVerdict::SkipNeedsDisc;
     }
     if !snap.has_ripped {
         return MuxVerdict::SkipNoMarker;
@@ -527,6 +534,15 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
                 record_error(&dir.to_string_lossy(), &reason, ABORTED_LOSS_HINT);
                 continue;
             }
+            MuxVerdict::SkipNeedsDisc => {
+                // E7034: one de-duped card and no dispatch — the disc, not a retry, fixes it.
+                record_error(
+                    &dir.to_string_lossy(),
+                    &crate::server::ripper::vid_needs_disc_text(),
+                    NEEDS_DISC_HINT,
+                );
+                continue;
+            }
             MuxVerdict::SkipUnreadableState => {
                 // Hold like SkipAbortedLoss: one de-duped card, no dispatch (so no
                 // undismiss, no mux-log spam) and state.json left for the operator.
@@ -611,7 +627,11 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
             let (reason, hint) = if let Some((r, _)) = &aborted_loss {
                 (r.clone(), ABORTED_LOSS_HINT.to_string())
             } else if let Some(r) = outcome.failure_reason.clone() {
-                let hint = worker_failure_hint(outcome.failure_retryable, outcome.failure_space);
+                let hint = if outcome.failure_needs_disc {
+                    NEEDS_DISC_HINT
+                } else {
+                    worker_failure_hint(outcome.failure_retryable, outcome.failure_space)
+                };
                 (r, hint.to_string())
             } else {
                 // Defensive fallback (no reason came back from the worker):
@@ -687,6 +707,8 @@ fn origin_done_state(
     }
 }
 
+pub(crate) const NEEDS_DISC_HINT: &str = "insert this disc into any drive: the mux finishes from the staged image without re-reading the disc; until then the mux is not retried";
+
 pub(crate) const STAGING_SPACE_HINT: &str = "staging is too full to hold this disc's mux outputs — free space on the staging volume or set Staging Directory in Settings to a larger volume; the disc image stays staged and the mux retries automatically";
 
 // Operator hint for a worker-reported mux failure, by cause.
@@ -751,6 +773,7 @@ pub fn pending_queue(staging_dir: &Path) -> Vec<String> {
             continue;
         };
         if !snap.has_ripped
+            || snap.needs_disc
             || snap.has_muxing
             || snap.completed
             || snap.has_failed

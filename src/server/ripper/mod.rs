@@ -43,8 +43,6 @@ use std::time::Duration;
 
 use crate::server::config::Config;
 
-use crate::server::keysource::DriveAccess;
-
 // Live-drive structure scan options: lookup-free, plus AACS host credentials for the
 // handshake. With capture_without_keys an unreadable AACS key file does not stop the
 // scan: the disc is captured raw (libfreemkv records E7031 and refuses keys).
@@ -141,6 +139,31 @@ pub(crate) fn is_halt_error(e: &std::io::Error) -> bool {
     freemkv_engine::error_code(e) == Some(libfreemkv::error::E_HALTED)
 }
 
+// A staged image's up-front key refusal (KU §3.2): no key (E7022/E7032), FMTS forensic keys
+// (E7026), a key source failed (E7028–30), or only the disc's VID can finish (E7034).
+pub(crate) fn is_key_refusal(e: &libfreemkv::Error) -> bool {
+    KEY_REFUSAL_CODES.contains(&e.code())
+}
+
+const KEY_REFUSAL_CODES: [u16; 7] = {
+    use libfreemkv::error as c;
+    [
+        c::E_NO_DISC_KEY,
+        c::E_WHOLE_DISC_KEY_MISSING,
+        c::E_FMTS_KEY_MISSING,
+        c::E_KEY_SERVICE_UNAVAILABLE,
+        c::E_KEY_SERVICE_UNAUTHORIZED,
+        c::E_KEY_SERVICE_RATE_LIMITED,
+        c::E_AACS_VID_NEEDS_DISC,
+    ]
+};
+
+// The code of a key refusal (see `is_key_refusal`) carried through an `io::Error`, e.g. a
+// mux's `TitleDone(Err)`; `None` for anything else.
+pub(crate) fn io_key_refusal(e: &std::io::Error) -> Option<u16> {
+    freemkv_engine::error_code(e).filter(|code| KEY_REFUSAL_CODES.contains(code))
+}
+
 // True when a mux-construction `io::Error` is a missing-FMTS-forensic-key error (E7026): base
 // AACS keys resolved but online forensic keys did not.
 pub(crate) fn is_fmts_key_missing_error(e: &std::io::Error) -> bool {
@@ -185,32 +208,89 @@ pub(crate) fn output_scheme_for(output_format: &str) -> &'static str {
     }
 }
 
-// Resolve keys for a freshly-scanned live disc via the configured
-// sources: thin live-drive binding over keysource::resolve_keys. No
-// mapfile yet on a fresh rip, so the source list is just the config.
-fn resolve_keys_from_drive(
+// The rip's key set, or why its resolve refused (KU §2.1). Memory only.
+type KeyResult = Result<libfreemkv::keys::ResolvedKeySet, libfreemkv::Error>;
+
+// Resolve the rip's key set off the live drive, once (see `keysource::resolve_drive_keys`).
+fn resolve_rip_keys(
+    device: &str,
     cfg: &Config,
     drive: &mut libfreemkv::Drive,
-    disc: libfreemkv::Disc,
-) -> (libfreemkv::Disc, crate::server::keysource::KeyOutcome) {
-    let sources = crate::server::keysource::build_sources(cfg);
-    let mut access = DriveAccess::new(drive);
-    crate::server::keysource::resolve_keys(sources, &mut access, disc)
+    disc: &libfreemkv::Disc,
+    scope: &libfreemkv::keys::KeyScope,
+    seed: Option<&libfreemkv::keys::ResolvedKeySet>,
+) -> KeyResult {
+    let halt = device_halt(device);
+    crate::server::keysource::resolve_drive_keys(
+        cfg,
+        disc,
+        drive,
+        scope.clone(),
+        seed,
+        halt.as_ref(),
+    )
+}
+
+// What a rip of `disc` decrypts (KU §2.5): nothing for an ISO output (the swept image is
+// delivered raw), else title 0 (the rip's feature) and every episode a TV plan fans out to.
+fn rip_key_scope(
+    disc: &libfreemkv::Disc,
+    cfg: &Config,
+    media_type: &str,
+    disc_name: &str,
+) -> libfreemkv::keys::KeyScope {
+    if output_is_iso_image(&cfg.output_format) || disc.titles.is_empty() {
+        return libfreemkv::keys::KeyScope::None;
+    }
+    let mut titles = fanout_episode_indices(&disc.titles, cfg, media_type, disc_name);
+    titles.push(0);
+    titles.sort_unstable();
+    titles.dedup();
+    libfreemkv::keys::KeyScope::Titles(titles)
+}
+
+// Whether the rip's set covers `scope` for `disc`, forensic keys aside (a multipass rip asks
+// for Pending ones once, from its image). `covers` holds for any non-AACS set, so an AACS
+// disc's titles also need an AACS set.
+fn keys_cover(
+    disc: &libfreemkv::Disc,
+    set: &libfreemkv::keys::ResolvedKeySet,
+    scope: &libfreemkv::keys::KeyScope,
+) -> bool {
+    let aacs_titles = disc.aacs.is_some() && *scope != libfreemkv::keys::KeyScope::None;
+    set.is_for(disc) && set.covers(scope) && (set.is_aacs() || !aacs_titles)
+}
+
+// Whether the rip can decrypt what it produces: no scope needs no key; otherwise the set's
+// status (CSS and clear discs as the library reads them).
+fn rip_keyed(
+    disc: &libfreemkv::Disc,
+    scope: &libfreemkv::keys::KeyScope,
+    keys: &KeyResult,
+) -> bool {
+    use libfreemkv::keys::DecryptStatus as S;
+    if *scope == libfreemkv::keys::KeyScope::None || !disc.encrypted {
+        return true;
+    }
+    keys.as_ref().is_ok_and(|set| {
+        matches!(
+            freemkv_engine::keys::key_status(disc, set),
+            S::Ready | S::NotEncrypted | S::ForensicPending
+        )
+    })
 }
 
 // Human-readable key readiness for the dashboard tile: "Ready to rip", "Capture without keys —
 // …", or "Missing keys — <reason>". The tile keys its action button off the "Missing keys"
-// prefix.
+// prefix. `error` is why the rip's resolve refused, if it did.
 fn key_readiness(
     disc: &libfreemkv::Disc,
-    outcome: crate::server::keysource::KeyOutcome,
+    keyed: bool,
+    error: Option<&libfreemkv::Error>,
     capture_without_keys: bool,
     online: Option<crate::server::keysource::ServiceReachability>,
 ) -> String {
-    use crate::server::keysource::KeyOutcome;
-    let no_keys =
-        disc.encrypted && matches!(disc.decrypt_keys(), libfreemkv::decrypt::DecryptKeys::None);
-    if !no_keys {
+    if keyed {
         return "Ready to rip".to_string();
     }
     if capture_without_keys {
@@ -230,21 +310,17 @@ fn key_readiness(
     // Prefer the disc's own AACS-resolution error (`disc.aacs_error`) over the
     // coarse `KeyOutcome`: it's the true cause (e.g. E7025 bus key unavailable)
     // and renders via the shared `freemkv_i18n` catalog, matching the CLI.
+    use libfreemkv::error as ec;
     let reason = if let Some(err) = disc.aacs_error.as_ref() {
         freemkv_i18n::error_message(u32::from(err.code()))
     } else {
-        match outcome {
-            KeyOutcome::NoKey => "no key source has a key for this disc".to_string(),
-            // `inputs()` was None yet no AACS error was recorded — not expected
-            // from a real scan, but keep a sane, actionable generic.
-            KeyOutcome::MissingInputs => {
-                "couldn't read this disc's key files — the disc may be dirty, or the drive \
-                 may need an eject + reload"
-                    .to_string()
+        match error {
+            Some(e) if matches!(e.code(), ec::E_NO_DISC_KEY | ec::E_WHOLE_DISC_KEY_MISSING) => {
+                "no key source has a key for this disc".to_string()
             }
-            // Resolve ran but left the disc keyless: defer to the libfreemkv
-            // AACS failure message, concise prefix stripped.
-            KeyOutcome::Resolved => {
+            Some(e) => strip_error_prefix(&aacs_failure_message(Some(e))).to_string(),
+            // No refusal yet keyless (e.g. an encrypted disc with no readable key file).
+            None => {
                 let msg = keyless_failure_message(disc);
                 strip_error_prefix(&msg).to_string()
             }
@@ -257,7 +333,7 @@ fn key_readiness(
 // and the operator's capture setting.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FmtsGate {
-    /// Full map resolved — rip normally (forensic keys are proven + banked).
+    /// The forensic keys came with the rip's set — rip normally.
     Proceed,
     /// Map incomplete but the operator opted into capture-without-keys — sweep the
     /// raw ISO now, defer the forensic mux until the keys are available.
@@ -267,7 +343,7 @@ enum FmtsGate {
 }
 
 /// Pure decision for the FMTS pre-rip gate (crypto/drive resolution is done by
-/// libfreemkv's `resolve_mux_key_map`, tested there; this is just the policy).
+/// the rip's up-front key set; this is just the policy).
 fn fmts_gate_decision(map_resolved: bool, capture_without_keys: bool) -> FmtsGate {
     if map_resolved {
         FmtsGate::Proceed
@@ -451,20 +527,19 @@ fn log_terminal_key_verdict(reach: crate::server::keysource::ServiceReachability
     );
 }
 
-// Classify the key service after a no-key online resolution and bounded-retry a transient
-// outage. The third return value is the final verdict whenever the disc is still keyless.
+// Classify the key service after a refused online resolution and bounded-retry a transient
+// outage. The verdict is `Some` whenever the rip is still keyless.
 fn retry_online_keys_on_outage(
     device: &str,
     cfg: &Config,
     drive: &mut libfreemkv::Drive,
-    mut disc: libfreemkv::Disc,
+    (disc, scope): (&libfreemkv::Disc, &libfreemkv::keys::KeyScope),
+    refused: libfreemkv::Error,
     decode_reach: Option<crate::server::keysource::ServiceReachability>,
 ) -> (
-    libfreemkv::Disc,
-    crate::server::keysource::KeyOutcome,
+    KeyResult,
     Option<crate::server::keysource::ServiceReachability>,
 ) {
-    use crate::server::keysource::KeyOutcome;
     // Classify from the REAL decode's HTTP outcome — no second empty probe (its
     // 0-byte POST to the POST-only `/decode` logged a spurious `404` after every
     // real no-key). Probe only when the decode made no HTTP answer (`None`).
@@ -475,12 +550,13 @@ fn retry_online_keys_on_outage(
         // retry — a 422 "no key for this disc" took the server ~30s of
         // exhausting every candidate source; repeating it changes nothing.
         log_terminal_key_verdict(reach);
-        return (disc, KeyOutcome::NoKey, Some(reach));
+        return (Err(refused), Some(reach));
     }
     crate::server::log::device_log(
         device,
         "Online key service appears DOWN (not a missing key) — retrying key resolution.",
     );
+    let mut last = refused;
     let mut last_reach = reach;
     for attempt in 1..=KEY_SERVICE_RETRY_ATTEMPTS {
         if crate::server::SHUTDOWN.load(Ordering::Relaxed) {
@@ -495,24 +571,22 @@ fn retry_online_keys_on_outage(
             ),
         );
         std::thread::sleep(backoff);
-        // Re-attempt the full resolution — the real retry against the service
-        // (also re-samples the disc). A recovered service resolves here.
-        let (d, outcome) = resolve_keys_from_drive(cfg, drive, disc);
-        disc = d;
+        // Re-attempt the full resolution — the real retry against the service.
+        let result = resolve_rip_keys(device, cfg, drive, disc, scope, None);
         // Consume THIS retry's decode outcome immediately (before the next loop
-        // overwrites it), so the re-classify below reads the real POST rather
-        // than a fresh empty probe.
+        // overwrites it), so the re-classify below reads the real POST.
         let retry_reach = crate::server::keysource::take_online_decode_reachability();
-        if outcome == KeyOutcome::Resolved {
-            crate::server::log::device_log(
-                device,
-                "Key service recovered — keys resolved on retry.",
-            );
-            return (disc, KeyOutcome::Resolved, None);
+        match result {
+            Ok(set) => {
+                crate::server::log::device_log(
+                    device,
+                    "Key service recovered — keys resolved on retry.",
+                );
+                return (Ok(set), None);
+            }
+            Err(e) => last = e,
         }
-        // Still no key — re-classify from the retry's decode outcome: is the
-        // service back (genuine no-key now) or still down (keep the transient,
-        // retryable state)? Probe only if the retry made no HTTP answer.
+        // Still no key — is the service back (genuine no-key now) or still down?
         last_reach =
             retry_reach.unwrap_or_else(|| crate::server::keysource::probe_online_reachability(cfg));
         if !last_reach.is_transient() {
@@ -521,7 +595,7 @@ fn retry_online_keys_on_outage(
                 "Key service answered but has no key — genuine missing key for this disc.",
             );
             log_terminal_key_verdict(last_reach);
-            return (disc, KeyOutcome::NoKey, Some(last_reach));
+            return (Err(last), Some(last_reach));
         }
     }
     crate::server::log::device_log(
@@ -529,7 +603,7 @@ fn retry_online_keys_on_outage(
         "Key service still unavailable after retries — leaving disc in a retryable state \
          (a later insert / rescan will pick it up). Not ejecting.",
     );
-    (disc, KeyOutcome::NoKey, Some(last_reach))
+    (Err(last), Some(last_reach))
 }
 
 // Verdict rip_disc seeds the outage classifier with: this rip's fresh decode verdict, else
@@ -1289,7 +1363,7 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         return;
     }
     // Decompose the session into the owned disc + live drive the rest of
-    // scan_disc (resolve_keys_from_drive, unlocker matrix, store_session) uses.
+    // scan_disc (the key resolve, unlocker matrix, store_session) uses.
     let Some(disc) = session.take_disc() else {
         let msg = "Disc scan failed: the scan produced no disc".to_string();
         crate::server::log::device_log(device, &msg);
@@ -1338,41 +1412,40 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
         crate::server::log::device_log(device, &format!("Unlockers — {matrix}"));
     }
 
-    // Sample-based key resolve (online path can take a minute or two — status
-    // update avoids that looking like a hang). DVD is CSS not AACS, so skip
-    // resolve entirely or the scan reads it as AACS/UHD and stalls.
-    let (disc, key_outcome, key_reach) = if matches!(disc.format, libfreemkv::DiscFormat::Dvd) {
-        tracing::info!(device = %device, "resolve_keys: skipped (DVD/CSS — no AACS)");
-        (disc, crate::server::keysource::KeyOutcome::Resolved, None)
-    } else {
-        if crate::server::keysource::uses_online(&cfg_read) {
-            crate::server::log::device_log(device, "Communicating with online keyserver...");
-            update_state_with(device, |s| {
-                s.key_status = "Communicating with online keyserver…".to_string();
-            });
+    // The rip's key set, resolved ONCE here, right after the scan, for every title the rip
+    // produces (KU §2.1); memory only, it keys the whole rip. Online can take a minute or
+    // two, so the status says so. A DVD's CSS needs no key source (the resolve is a no-op).
+    let media_type = tmdb.as_ref().map(|t| t.media_type.as_str()).unwrap_or("");
+    let scan_name = disc
+        .meta_title
+        .clone()
+        .unwrap_or_else(|| disc.volume_id.clone());
+    let key_scope = rip_key_scope(&disc, &cfg_read, media_type, &scan_name);
+    if crate::server::keysource::uses_online(&cfg_read)
+        && !matches!(disc.format, libfreemkv::DiscFormat::Dvd)
+        && key_scope != libfreemkv::keys::KeyScope::None
+    {
+        crate::server::log::device_log(device, "Communicating with online keyserver...");
+        update_state_with(device, |s| {
+            s.key_status = "Communicating with online keyserver…".to_string();
+        });
+    }
+    scan_wd.enter_resolve();
+    let resolve_t0 = std::time::Instant::now();
+    tracing::info!(device = %device, "resolve_keys: begin");
+    let keys = resolve_rip_keys(device, &cfg_read, &mut drive, &disc, &key_scope, None);
+    // Capture the real decode's reachability now, before anything else can overwrite the
+    // per-thread slot — it classifies a no-key without a second empty probe.
+    let decode_reach = crate::server::keysource::take_online_decode_reachability();
+    tracing::info!(device = %device, elapsed_ms = resolve_t0.elapsed().as_millis() as u64, "resolve_keys: end");
+    // Down-vs-no-key: bounded-retry a transient online outage rather than reporting a
+    // permanent "no keys found". `key_reach` is `Some` only when the rip is still keyless.
+    let (keys, key_reach) = match keys {
+        Err(e) if crate::server::keysource::uses_online(&cfg_read) => {
+            let at = (&disc, &key_scope);
+            retry_online_keys_on_outage(device, &cfg_read, &mut drive, at, e, decode_reach)
         }
-        scan_wd.enter_resolve();
-        let resolve_t0 = std::time::Instant::now();
-        tracing::info!(device = %device, "resolve_keys: begin");
-        let (disc, outcome) = resolve_keys_from_drive(&cfg_read, &mut drive, disc);
-        // Capture the real decode's reachability now, before anything else can
-        // overwrite the per-thread slot — it classifies a no-key without a
-        // second empty probe.
-        let decode_reach = crate::server::keysource::take_online_decode_reachability();
-        tracing::info!(device = %device, elapsed_ms = resolve_t0.elapsed().as_millis() as u64, "resolve_keys: end");
-        // Down-vs-no-key: bounded-retry a transient online outage rather than
-        // reporting a permanent "no keys found". `key_reach` is `Some` only
-        // when the service never recovered — drives the status below.
-        let no_keys =
-            disc.encrypted && matches!(disc.decrypt_keys(), libfreemkv::decrypt::DecryptKeys::None);
-        if crate::server::keysource::uses_online(&cfg_read)
-            && outcome == crate::server::keysource::KeyOutcome::NoKey
-            && no_keys
-        {
-            retry_online_keys_on_outage(device, &cfg_read, &mut drive, disc, decode_reach)
-        } else {
-            (disc, outcome, None)
-        }
+        keys => (keys, None),
     };
     // Scan + resolve are done; stand the watchdog down explicitly (drop also
     // covers any early return above).
@@ -1380,7 +1453,18 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     // Every key-service outcome gets its OWN tile text — `key_readiness` picks
     // it from the verdict (outage vs definitive no-key vs licence wall vs
     // unexpected status) rather than from one collapsed error code.
-    let key_status = key_readiness(&disc, key_outcome, cfg_read.capture_without_keys, key_reach);
+    let keyed = rip_keyed(&disc, &key_scope, &keys);
+    let key_status = key_readiness(
+        &disc,
+        keyed,
+        keys.as_ref().err(),
+        cfg_read.capture_without_keys,
+        key_reach,
+    );
+    let (keys, key_error) = match keys {
+        Ok(set) => (Some(set), None),
+        Err(e) => (None, Some(e)),
+    };
 
     // Update format from full scan (UHD vs BD now known)
     let disc_name = disc
@@ -1427,6 +1511,8 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
             tmdb: tmdb.clone(),
             device_path: device_path.to_string(),
             key_verdict: key_reach,
+            keys,
+            key_error,
         },
     );
 
@@ -1520,6 +1606,19 @@ fn dispatch_rip_request(
     device_path: &str,
     mode: crate::server::web::ResumeMode,
 ) {
+    // E7034: this disc is what its staged image waits for; finish that mux, never re-rip.
+    if mode != crate::server::web::ResumeMode::Wipe
+        && disc_staging_hold(cfg, device, false) == Some(StagingHold::NeedsDisc)
+        && let Some(class) = find_resumable_for_disc(cfg, device)
+    {
+        crate::server::log::device_log(
+            device,
+            "Disc inserted for its staged image (E7034) — finishing the mux from the image",
+        );
+        resume::resume_remux(cfg, device, class);
+        drop_session(device);
+        return;
+    }
     match mode {
         crate::server::web::ResumeMode::Require => {
             if resume_refused_by_staging(cfg, device) {
@@ -1641,6 +1740,8 @@ enum StagingHold {
     LossAborted,
     /// `.sweeping` by another drive's live rip of the same disc.
     LiveSweep,
+    /// A staged image held for this disc (E7034): inserting it finishes the mux.
+    NeedsDisc,
 }
 
 /// What the caller of [`staging_hold_stands_down`] is about to do to the staging dir.
@@ -1659,7 +1760,9 @@ enum GuardFor {
 fn staging_hold_stands_down(cfg: &Arc<RwLock<Config>>, device: &str, purpose: GuardFor) -> bool {
     let hold = match disc_staging_hold(cfg, device, purpose == GuardFor::Wipe) {
         None => return false,
-        Some(StagingHold::LossAborted) if purpose == GuardFor::Resume => return false,
+        Some(StagingHold::LossAborted | StagingHold::NeedsDisc) if purpose == GuardFor::Resume => {
+            return false;
+        }
         Some(hold) => hold,
     };
     let why = match hold {
@@ -1713,6 +1816,9 @@ fn staging_hold_stands_down(cfg: &Arc<RwLock<Config>>, device: &str, purpose: Gu
         }
         StagingHold::LiveSweep => {
             "Another drive is sweeping this disc's staging dir right now — NOT re-ripping."
+        }
+        StagingHold::NeedsDisc => {
+            "This disc's staged image is waiting for it (E7034) but could not be resumed — NOT re-ripping. Use Resume to finish it."
         }
         StagingHold::Unreadable => {
             "Cannot read this disc's staging dir cleanly (staging share degraded?) — NOT re-ripping, so a finished rip can't be destroyed. Retry once staging is readable."
@@ -1803,7 +1909,9 @@ fn disc_staging_hold(
 // Pure: the hold a cleanly-read snapshot imposes. `.done` counts on its own for old-format
 // dirs that crashed between the `.done` and `.completed` writes.
 fn snapshot_hold(snap: &staging::StagingSnapshot) -> Option<StagingHold> {
-    if snap.has_ripped || snap.has_muxing {
+    if snap.needs_disc && !snap.has_muxing {
+        Some(StagingHold::NeedsDisc)
+    } else if snap.has_ripped || snap.has_muxing {
         Some(StagingHold::OwnedByWorker)
     } else if snap.has_review {
         Some(StagingHold::HeldForReview)
@@ -1954,7 +2062,7 @@ fn staging_disc_owned_by_worker(staging_root: &std::path::Path, sanitized: &str)
         // mount after a restart can hide the marker from a raw stat, letting
         // Default auto-rip fall through to rip_disc and O_TRUNC the ISO.
         if let Some(snap) = staging::snapshot_staging_disc(&path)
-            && (snap.has_ripped || snap.has_muxing)
+            && ((snap.has_ripped && !snap.needs_disc) || snap.has_muxing)
         {
             return true;
         }
@@ -1968,7 +2076,11 @@ fn resumable_dir_blocked(snap: &staging::StagingSnapshot) -> bool {
     // `completed` also blocks: with `keep_iso = true` the ISO survives past
     // completion, so a manual Require on a just-finished dir could otherwise
     // pass this gate and delete_partial_output would destroy the delivered MKV.
-    snap.has_ripped || snap.has_muxing || snap.has_review || snap.has_failed || snap.completed
+    (snap.has_ripped && !snap.needs_disc)
+        || snap.has_muxing
+        || snap.has_review
+        || snap.has_failed
+        || snap.completed
 }
 
 // End-of-recovery loss figure in milliseconds, or NaN when untrustworthy (`promotion_intact ==
@@ -2220,7 +2332,7 @@ fn resumable_for_disc(cfg: &Config, display_name: &str, disc_label: &str) -> Opt
             // A dir the mux worker owns (.ripped/.muxing) must NOT be offered
             // as resumable — resuming would race a fresh sweep against the
             // worker's reads. Mirrors disc_owned_by_worker's Wipe guard.
-            if snap.has_ripped || snap.has_muxing {
+            if (snap.has_ripped && !snap.needs_disc) || snap.has_muxing {
                 return None;
             }
         }
@@ -2518,22 +2630,6 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 }
             };
             tracing::info!(device = %device, elapsed_ms = scan_t0.elapsed().as_millis() as u64, "scan: structure done");
-            // DVD is CSS (resolved in scan) — skip the AACS key-resolution path
-            // entirely; it doesn't apply and reads the disc as if it were UHD.
-            let disc = if matches!(disc.format, libfreemkv::DiscFormat::Dvd) {
-                tracing::info!(device = %device, "resolve_keys: skipped (DVD/CSS — no AACS)");
-                disc
-            } else {
-                scan_wd.enter_resolve();
-                let (disc, _key_outcome) = resolve_keys_from_drive(&cfg_read, &mut drive, disc);
-                // Capture the real decode's reachability from this fresh resolve
-                // so the outage retry below classifies a no-key without a second
-                // empty probe.
-                resume_decode_reach = crate::server::keysource::take_online_decode_reachability();
-                disc
-            };
-            drop(scan_wd);
-
             let disc_name = disc
                 .meta_title
                 .as_deref()
@@ -2541,6 +2637,20 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 .to_string();
 
             let tmdb = crate::server::tmdb::lookup(&disc_name, &cfg_read.tmdb_api_key);
+
+            // The rip's key set, once, right after the scan (KU §2.1); see scan_disc.
+            let media_type = tmdb.as_ref().map(|t| t.media_type.as_str()).unwrap_or("");
+            let scope = rip_key_scope(&disc, &cfg_read, media_type, &disc_name);
+            scan_wd.enter_resolve();
+            let keys = resolve_rip_keys(device, &cfg_read, &mut drive, &disc, &scope, None);
+            // Capture the real decode's reachability from this fresh resolve so the outage
+            // retry below classifies a no-key without a second empty probe.
+            resume_decode_reach = crate::server::keysource::take_online_decode_reachability();
+            drop(scan_wd);
+            let (keys, key_error) = match keys {
+                Ok(set) => (Some(set), None),
+                Err(e) => (None, Some(e)),
+            };
 
             DriveSession {
                 drive,
@@ -2550,11 +2660,13 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 tmdb,
                 device_path: device_path.to_string(),
                 key_verdict: None,
+                keys,
+                key_error,
             }
         }
     };
 
-    let mut disc = match session.disc.take() {
+    let disc = match session.disc.take() {
         Some(d) => d,
         None => {
             tracing::error!(
@@ -2678,10 +2790,32 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     let banked_verdict = session.key_verdict.take();
     let reresolve = seed_needs_reresolve(resume_decode_reach, banked_verdict);
     let mut seed_verdict = rip_seed_verdict(resume_decode_reach, banked_verdict);
-    let keyless =
-        disc.encrypted && matches!(disc.decrypt_keys(), libfreemkv::decrypt::DecryptKeys::None);
+    // The rip's key set, resolved once at the scan (KU §2.1). A scope that outgrew the scan's
+    // (a title override made it a TV rip) tops up only the titles it lacks.
+    let key_scope = rip_key_scope(&disc, &cfg_read, &tmdb_media_type, &disc_name);
+    let mut rip_keys: KeyResult = match (session.keys.take(), session.key_error.take()) {
+        (Some(set), _) if keys_cover(&disc, &set, &key_scope) => Ok(set),
+        (Some(set), _) => resolve_rip_keys(
+            device,
+            &cfg_read,
+            &mut session.drive,
+            &disc,
+            &key_scope,
+            Some(&set),
+        ),
+        (None, Some(e)) => Err(e),
+        (None, None) => resolve_rip_keys(
+            device,
+            &cfg_read,
+            &mut session.drive,
+            &disc,
+            &key_scope,
+            None,
+        ),
+    };
+    let mut keyed = rip_keyed(&disc, &key_scope, &rip_keys);
     // Runs under capture-without-keys too: the fixed setting may still find the key.
-    if reresolve && keyless && crate::server::keysource::uses_online(&cfg_read) {
+    if reresolve && !keyed && crate::server::keysource::uses_online(&cfg_read) {
         // The operator may have fixed Settings since the scan: resolve once with the current config.
         crate::server::log::device_log(
             device,
@@ -2690,10 +2824,23 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         update_state_with(device, |s| {
             s.key_status = "Communicating with online keyserver…".to_string();
         });
-        let (rdisc, outcome) = resolve_keys_from_drive(&cfg_read, &mut session.drive, disc);
-        disc = rdisc;
+        rip_keys = resolve_rip_keys(
+            device,
+            &cfg_read,
+            &mut session.drive,
+            &disc,
+            &key_scope,
+            None,
+        );
         seed_verdict = crate::server::keysource::take_online_decode_reachability();
-        let status = key_readiness(&disc, outcome, cfg_read.capture_without_keys, seed_verdict);
+        keyed = rip_keyed(&disc, &key_scope, &rip_keys);
+        let status = key_readiness(
+            &disc,
+            keyed,
+            rip_keys.as_ref().err(),
+            cfg_read.capture_without_keys,
+            seed_verdict,
+        );
         update_state_with(device, |s| s.key_status = status);
     }
     let mut key_verdict: Option<crate::server::keysource::ServiceReachability> = None;
@@ -2701,22 +2848,26 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         crate::server::keysource::uses_online(&cfg_read),
         cfg_read.capture_without_keys,
         disc.encrypted,
-        matches!(disc.decrypt_keys(), libfreemkv::decrypt::DecryptKeys::None),
-    ) {
-        let (rdisc, _outcome, reach) =
-            retry_online_keys_on_outage(device, &cfg_read, &mut session.drive, disc, seed_verdict);
-        disc = rdisc;
+        !keyed,
+    ) && let Err(e) = rip_keys
+    {
+        let at = (&disc, &key_scope);
+        let (retried, reach) =
+            retry_online_keys_on_outage(device, &cfg_read, &mut session.drive, at, e, seed_verdict);
+        rip_keys = retried;
         key_verdict = reach;
+        keyed = rip_keyed(&disc, &key_scope, &rip_keys);
     }
-
-    // Base decode keys; `mut` because the shared FMTS pre-decode step below
-    // may re-derive them after banking forensic index keys onto the disc.
-    let mut keys = disc.decrypt_keys();
+    // FMTS forensic keys missing (or Pending for a live single-pass mux, which cannot ask
+    // later) go to the FMTS gate below, not the base no-key decision.
+    let fmts_missing = matches!(rip_keys, Err(libfreemkv::Error::FmtsKeyMissing))
+        || (!uses_multipass(cfg_read.max_retries)
+            && rip_keys.as_ref().is_ok_and(|s| s.forensic_pending()));
 
     // No-keys decision: a keyless encrypted disc can still be swept to a raw
     // ISO (only the mux needs keys). `capture_without_keys` decides: enabled
     // → capture now, defer mux; disabled → don't rip, surface the reason.
-    let keys_missing = disc.encrypted && matches!(keys, libfreemkv::decrypt::DecryptKeys::None);
+    let keys_missing = !keyed && !fmts_missing;
     if keys_missing {
         // A persistent outage is NOT a missing key: park in a retryable/pending
         // state so a later insert/rescan retries. ONLY transient verdicts park —
@@ -2733,9 +2884,10 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         }
         // What the service actually said beats the library's collapsed E7028
         // "could not be reached" code, which is only true for an outage.
-        let msg = match key_verdict.and_then(key_service_no_key_reason) {
-            Some(reason) => format!("No keys — {reason}"),
-            None => keyless_failure_message(&disc),
+        let msg = match (key_verdict.and_then(key_service_no_key_reason), &rip_keys) {
+            (Some(reason), _) => format!("No keys — {reason}"),
+            (None, Err(e)) if disc.aacs_error.is_none() => aacs_failure_message(Some(e)),
+            (None, _) => keyless_failure_message(&disc),
         };
         if cfg_read.capture_without_keys {
             crate::server::log::device_log(
@@ -3045,87 +3197,16 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // (which inflates the card when out-of-title menus are scratched).
     let mut main_lost_ms_for_history_outer = 0.0f64;
 
-    // Retained FMTS forensic key map, set by the shared pre-decode gate below
-    // and read by the single-pass inline reader; bridges those scopes.
-    // `None` for every non-FMTS disc.
-    let mut fmts_key_map: Option<std::sync::Arc<libfreemkv::decrypt::AacsKeyMap>> = None;
-    // FMTS CaptureOnly deferral: set when the pre-decode gate resolved an
-    // INCOMPLETE forensic map with capture-without-keys on. Base keys are
-    // present, but muxing now would emit garbage — defer and preserve the ISO.
+    // FMTS CaptureOnly deferral: set when the rip's set lacks the forensic keys with
+    // capture-without-keys on. Muxing now would emit garbage — defer and preserve the ISO.
     let mut defer_forensic_mux = false;
-    // On-decrypt-miss key fetch: when a read hits an orphan CPS unit no held
-    // key opens, asks the same key sources with its ciphertext and retries.
-    // `None` for non-AACS discs; skipped for single-pass non-FMTS (unused).
-    let key_fetch: Option<libfreemkv::sector::KeyFetch> = disc
-        .inputs()
-        .filter(|_| {
-            disc.format == libfreemkv::DiscFormat::Fmts || uses_multipass(cfg_read.max_retries)
-        })
-        .map(|mut inputs| {
-            // The scan doesn't retain the MKB on disc state, so disc.inputs()
-            // carries an empty one — but an online key service needs it to
-            // derive an orphan unit's key. Read it once here, up front.
-            if inputs.mkb.is_empty()
-                && let Ok((inf, mkb, _version)) =
-                    libfreemkv::Disc::read_aacs_inputs_from_drive(&mut session.drive)
-            {
-                if inputs.unit_key_ro.is_empty() {
-                    inputs.unit_key_ro = inf;
-                }
-                inputs.mkb = mkb;
-            }
-            let cfg = Arc::clone(cfg);
-            let make: std::sync::Arc<
-                dyn Fn() -> Vec<Box<dyn libfreemkv::keysource::KeySource>> + Send + Sync,
-            > = std::sync::Arc::new(move || {
-                // Recover if the config lock was poisoned rather than
-                // panicking this rip thread — matches the file's convention.
-                crate::server::keysource::build_sources(
-                    &cfg.read().unwrap_or_else(|e| e.into_inner()),
-                )
-            });
-            libfreemkv::keysource::key_fetch(inputs, make)
-        });
 
-    // Shared pre-decode FMTS forensic key resolution, before the single-
-    // pass/multipass split (previously multipass-only, so single-pass FMTS
-    // muxed garbage). Fails fast up front instead of after an hour-long sweep.
-    if disc.format == libfreemkv::DiscFormat::Fmts {
-        // Honor a Stop during forensic key resolution: resolve_mux_key_map
-        // runs before the sweep, so gate with a halt check on the same flag
-        // the sweep polls — a Stop exits cleanly with no `.failed` marker.
-        let gate_stopped = || -> bool {
-            if halt.load(Ordering::Relaxed) {
-                crate::server::log::device_log(
-                    device,
-                    "Rip stopped by user during FMTS key resolution — staging preserved.",
-                );
-                unregister_halt(device);
-                true
-            } else {
-                false
-            }
-        };
-        if gate_stopped() {
-            return;
-        }
-        let gate_title = disc.titles[0].clone();
-        let mut gate_keys = disc.decrypt_keys();
-        let resolved_map = libfreemkv::resolve_mux_key_map(
-            &mut session.drive,
-            &gate_title,
-            &mut gate_keys,
-            key_fetch.as_ref(),
-            disc.content_format,
-            // Thread the SAME cancel token the sweep polls: the resolve now unwinds
-            // at its next read boundary on a Stop by signature (the surrounding
-            // `gate_stopped()` checks only catch a Stop before/after the call).
-            Some(&halt_token),
-        );
-        if gate_stopped() {
-            return;
-        }
-        let gate = fmts_gate_decision(resolved_map.is_ok(), cfg_read.capture_without_keys);
+    // FMTS forensic keys came with the rip's up-front set (KU §5): the gate decides from it
+    // before the sweep, instead of after an hour-long one. A multipass rip whose set left
+    // them Pending proceeds: its image asks for them once at the mux (KU §5.4).
+    if disc.format == libfreemkv::DiscFormat::Fmts && key_scope != libfreemkv::keys::KeyScope::None
+    {
+        let gate = fmts_gate_decision(!fmts_missing, cfg_read.capture_without_keys);
         // Pure side-effect routing (unit-tested via `fmts_gate_plan`): CaptureOnly sets
         // the deferred-mux flag; Skip quarantines the staging dir. Driving both from the
         // plan keeps the gate's behavior mutation-verifiable.
@@ -3133,21 +3214,9 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         defer_forensic_mux = plan.defer_forensic_mux;
         match gate {
             FmtsGate::Proceed => {
-                // Bank the resolved forensic keys onto the disc so the sweep's
-                // key persist + the mux reuse them.
-                if let libfreemkv::decrypt::DecryptKeys::Aacs { unit_keys, .. } = &gate_keys
-                    && let Some(a) = disc.aacs.as_mut()
-                {
-                    a.unit_keys = unit_keys.clone();
-                }
-                // Re-derive shared decode keys so both paths see the banked
-                // forensic keys — essential for single-pass, whose inline
-                // reader is handed `keys` directly (stale pool → DecryptFailed).
-                keys = disc.decrypt_keys();
-                fmts_key_map = resolved_map.ok().map(std::sync::Arc::new);
                 crate::server::log::device_log(
                     device,
-                    "FMTS: complete forensic key map resolved pre-rip.",
+                    "FMTS: forensic keys resolved up front with the rip's key set.",
                 );
             }
             FmtsGate::CaptureOnly => {
@@ -3335,16 +3404,13 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 skip_on_error: true,
                 progress: Some(&pass1_progress),
                 halt: Some(pass1_halt.clone()),
-                // Persist decryption state so it survives to deferred-mux/
-                // resume. KEYS XOR VID: unit keys if resolved (mux decrypts
-                // directly), else VID as the retry marker.
+                // The mapfile records only the disc's identity from these: the VID and
+                // the set's proven keys as fingerprints, never a key or the VID (J6).
                 vid: disc.aacs.as_ref().map(|a| a.volume_id),
-                unit_keys: disc
-                    .aacs
-                    .as_ref()
-                    .map(|a| a.unit_keys.clone())
-                    .unwrap_or_default(),
-                key_fetch: key_fetch.clone(),
+                unit_keys: Vec::new(),
+                key_fetch: None,
+                // A raw capture decrypts nothing; the set only stamps the identity.
+                keys: rip_keys.as_ref().ok().cloned(),
             };
 
             match freemkv_engine::sweep(&disc, &mut session.drive, iso_path, &sweep_opts) {
@@ -3886,7 +3952,9 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 wedged_threshold: 50,
                 progress: Some(&patch_progress),
                 halt: Some(pass_halt.clone()),
-                key_fetch: key_fetch.clone(),
+                key_fetch: None,
+                // A raw capture decrypts nothing; the set checks the mapfile's identity.
+                keys: rip_keys.as_ref().ok().cloned(),
             };
             // Un-wedge the drive in SOFTWARE before each retry pass: grinding a
             // bad cluster leaves it in a HARDWARE_ERROR wedge needing a power-cycle.
@@ -4439,6 +4507,14 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // override) so resume_remux doesn't second-guess a deliberate pick.
             title_confident,
         };
+        // The worker muxes with no drive: lend it the rip's key set, in memory only (J6),
+        // so its open asks no key source for what the scan resolved.
+        if let Ok(set) = &rip_keys {
+            crate::server::keysource::hold_rip_keys(
+                std::path::Path::new(&iso_path_str),
+                set.clone(),
+            );
+        }
         let staging_path = std::path::Path::new(&staging);
         if let Err(e) = crate::server::muxer::write_marker(staging_path, &marker) {
             // Couldn't hand off — fall back to the inline mux below
@@ -4736,12 +4812,32 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         MuxSource::StagedImage => {
             // Multipass: mux the staged ISO through the engine, keyed with what the
             // drive already resolved (FMTS forensic keys included) — no second lookup.
-            let image = match crate::server::keysource::open_staged_image(
-                &cfg_read,
-                std::path::Path::new(&iso_path_str),
-                None,
-                disc.aacs.as_ref(),
-            ) {
+            let iso_path = std::path::Path::new(&iso_path_str);
+            let staged_keys = match &rip_keys {
+                Ok(set) => crate::server::keysource::StagedKeys::Rip(set.clone()),
+                Err(_) => crate::server::keysource::StagedKeys::Resolve {
+                    vid: disc
+                        .aacs
+                        .as_ref()
+                        .map(|a| a.volume_id)
+                        .filter(|v| *v != [0u8; 16]),
+                },
+            };
+            let opened = freemkv_engine::scan_image(&freemkv_engine::ImageSource::Iso(
+                iso_path.to_path_buf(),
+            ))
+            .and_then(|(image_disc, _)| {
+                let idx = image_title_index(&image_disc, &title);
+                crate::server::keysource::open_staged_image(
+                    &cfg_read,
+                    iso_path,
+                    image_disc,
+                    &[idx],
+                    staged_keys,
+                    Some(halt_token.clone()),
+                )
+            });
+            let image = match opened {
                 Ok(image) => {
                     crate::server::log::device_log(
                         device,
@@ -4751,6 +4847,28 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                         ),
                     );
                     image
+                }
+                Err(libfreemkv::Error::Halted) => {
+                    crate::server::log::device_log(
+                        device,
+                        "Rip stopped by user while keying the ISO — staging preserved for resume.",
+                    );
+                    unregister_halt(device);
+                    return;
+                }
+                Err(e) if is_key_refusal(&e) => {
+                    // Keys, not the image: keep the ISO for a resume, never `.failed`.
+                    let msg = format_lib_error("Open ISO", &e);
+                    crate::server::log::device_log(
+                        device,
+                        &format!("{msg}\nStaging preserved ({staging}) for a resume."),
+                    );
+                    update_state_with(device, |s| {
+                        s.status = "error".to_string();
+                        s.last_error = msg.clone();
+                    });
+                    unregister_halt(device);
+                    return;
                 }
                 Err(e) => {
                     let msg = format_lib_error("Open ISO", &e);
@@ -4800,6 +4918,18 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                         unregister_halt(device);
                         return;
                     }
+                    // A key refusal is not the image's fault: keep the ISO for a resume.
+                    if io_key_refusal(&e).is_some() {
+                        let msg =
+                            format!("Mux refused for keys — staging preserved for a resume ({e}).");
+                        crate::server::log::device_log(device, &msg);
+                        update_state_with(device, |s| {
+                            s.status = "error".to_string();
+                            s.last_error = msg.clone();
+                        });
+                        unregister_halt(device);
+                        return;
+                    }
                     // A pipeline BUILD failure is structural and permanent — retries
                     // won't fix it. Quarantine with `.failed` (mirrors header-phase path below).
                     tracing::error!(target: "mux", device=%device, "image mux setup failed: {e}");
@@ -4828,8 +4958,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 reader,
                 title,
                 format,
-                keys,
-                key_map: fmts_key_map.clone(),
+                keys: rip_keys.as_ref().ok().cloned(),
                 skip_errors: skip_read_errors(&cfg_read.on_read_error),
             };
             match mux::mux_live(mux_inputs, live_src, mux_atomics) {
@@ -5991,6 +6120,15 @@ fn aacs_failure_message(err: Option<&libfreemkv::Error>) -> String {
              fails, the disc may be damaged.",
         ),
 
+        // KU §3.2 up-front refusals: no key source holds a key that opens the content.
+        ec::E_NO_DISC_KEY | ec::E_WHOLE_DISC_KEY_MISSING => error_line(
+            code,
+            "No key source has a key that opens this disc's content. Add or update a \
+             key source in Settings.",
+        ),
+
+        ec::E_AACS_VID_NEEDS_DISC => error_line(code, VID_NEEDS_DISC_MESSAGE),
+
         // Host certs were offered, but every one failed a local check before any
         // drive round-trip — a keydb problem, not a rejection (distinct from
         // E_AACS_NO_HOST_CERT: certs WERE present here).
@@ -6016,6 +6154,21 @@ fn aacs_failure_message(err: Option<&libfreemkv::Error>) -> String {
              via /api/debug for details.",
         ),
     }
+}
+
+/// E7034 in words: the keys need the disc's Volume ID, which is read from the disc and
+/// never saved (J6), so only the disc can finish the mux.
+pub(crate) const VID_NEEDS_DISC_MESSAGE: &str = "Insert the disc to finish. This disc's keys \
+     can only be finished with its Volume ID, which is read from the disc and never saved. \
+     The ripped image is kept; inserting the disc muxes it without re-reading it.";
+
+/// E7034 as the device tile and the mux worker's card show it (one string, so the card
+/// de-dupes across ticks).
+pub(crate) fn vid_needs_disc_text() -> String {
+    format!(
+        "E{} {VID_NEEDS_DISC_MESSAGE}",
+        libfreemkv::error::E_AACS_VID_NEEDS_DISC
+    )
 }
 
 // Render a user-facing error line in the locked rc.6 format:
@@ -6270,7 +6423,12 @@ fn format_lib_error(phase: &str, e: &libfreemkv::Error) -> String {
         | Error::AacsNoUsableHostCert
         | Error::CssKeyMissing
         | Error::CssAuthFailed
-        | Error::NoDiscKey { .. } => {
+        | Error::NoDiscKey { .. }
+        | Error::WholeDiscKeyMissing
+        | Error::AacsVidNeedsDisc
+        | Error::KeyServiceUnavailable
+        | Error::KeyServiceUnauthorized
+        | Error::KeyServiceRateLimited => {
             return format!(
                 "{phase} failed: {}",
                 strip_error_prefix(&aacs_failure_message(Some(e)))
@@ -8319,7 +8477,7 @@ mod tests {
     // must NOT (the disc is parked, not failed).
     #[test]
     fn key_readiness_reports_the_key_service_verdict() {
-        use crate::server::keysource::{KeyOutcome, ServiceReachability};
+        use crate::server::keysource::ServiceReachability;
         let mut disc = encrypted_keyless_disc();
         // The precise shape of the bug: the library stamped E7028 ("could not be
         // reached") on a disc the service definitively answered about.
@@ -8327,7 +8485,8 @@ mod tests {
 
         let tile = super::key_readiness(
             &disc,
-            KeyOutcome::NoKey,
+            false,
+            None,
             false,
             Some(ServiceReachability::NoKeyForDisc),
         );
@@ -8348,7 +8507,8 @@ mod tests {
         // is parked and retryable, so the tile must not offer the failed action).
         let down = super::key_readiness(
             &disc,
-            KeyOutcome::NoKey,
+            false,
+            None,
             false,
             Some(ServiceReachability::Unreachable),
         );
@@ -8356,18 +8516,50 @@ mod tests {
         assert!(down.contains("could not connect"), "{down}");
 
         // No online verdict → unchanged: fall back to the disc's own error.
-        let local = super::key_readiness(&disc, KeyOutcome::NoKey, false, None);
+        let local = super::key_readiness(&disc, false, None, false, None);
         assert!(local.starts_with("Missing keys — "), "{local}");
 
         // capture-without-keys still overrides every verdict.
         assert_eq!(
             super::key_readiness(
                 &disc,
-                KeyOutcome::NoKey,
+                false,
+                None,
                 true,
                 Some(ServiceReachability::NoKeyForDisc)
             ),
             "Capture without keys — no decryption"
+        );
+    }
+
+    // KU-E1: a raw scope's keyless set never passes for a title rip's: the rip resolves.
+    #[test]
+    fn a_keyless_set_does_not_cover_a_title_rip() {
+        use libfreemkv::keys::{KeyScope, ResolvedKeySet};
+        let disc = crate::ku_fixture::bd_image().disc;
+        let none = ResolvedKeySet::none();
+        assert!(!super::keys_cover(&disc, &none, &KeyScope::Titles(vec![0])));
+        assert!(super::keys_cover(&disc, &none, &KeyScope::None));
+    }
+
+    // KU-E1: the rip's refusal names the cause; a keyed set is ready.
+    #[test]
+    fn key_readiness_names_the_rip_refusal() {
+        let disc = encrypted_keyless_disc();
+        let no_key = libfreemkv::Error::NoDiscKey {
+            disc_hash: "ab".into(),
+        };
+        let tile = super::key_readiness(&disc, false, Some(&no_key), false, None);
+        assert_eq!(tile, "Missing keys — no key source has a key for this disc");
+        let fmts = libfreemkv::Error::FmtsKeyMissing;
+        let tile = super::key_readiness(&disc, false, Some(&fmts), false, None);
+        assert!(
+            tile.starts_with("Missing keys — ") && !tile.contains("E70"),
+            "{tile}"
+        );
+        assert_eq!(
+            super::key_readiness(&disc, true, None, false, None),
+            "Ready to rip"
         );
     }
 

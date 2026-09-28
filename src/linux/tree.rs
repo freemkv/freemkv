@@ -125,6 +125,8 @@ impl TitleTree {
             };
             let state = b_rows.borrow().get(idx).and_then(|r| r.check);
             cb.set_visible(state.is_some());
+            // A mirror row (the MPEG-2 extension) shows its base's tick, disabled.
+            cb.set_sensitive(b_rows.borrow().get(idx).is_some_and(|r| r.check_enabled));
             if let Some(s) = state {
                 paint(&cb, s);
             }

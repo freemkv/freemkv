@@ -193,11 +193,10 @@ pub struct Config {
     pub tmdb_api_key: String,
     pub keydb_path: Option<String>,
     pub keydb_url: String,
-    /// autorip's "local" / "online" key-source choice. Read and saved for
-    /// compatibility and still gates the keydb download; key lookup itself is
-    /// the local-first chain (keydb, then `keyserver_url` when set).
+    /// Where keys come from, and only from: "local" (the keydb) or "online"
+    /// (the key service at `keyserver_url`).
     pub key_source: String,
-    /// Base URL of the external key service, tried after the local keydb.
+    /// Base URL of the online key service, used when `key_source` is "online".
     pub keyserver_url: String,
     /// Optional bearer token for the key service. Empty = none.
     pub keyserver_secret: String,

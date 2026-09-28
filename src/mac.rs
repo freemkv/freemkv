@@ -498,6 +498,8 @@ impl TitlesSource {
                 b.setButtonType(NSButtonType::Switch);
                 b.setTitle(&NSString::from_str(""));
                 set_check(&b, state);
+                // A mirror row (the MPEG-2 extension) shows its base's tick, disabled.
+                b.setEnabled(row.check_enabled);
                 b.setTag(row.index as isize);
                 b.setTarget(Some(self));
                 b.setAction(Some(sel!(onToggle:)));
@@ -5196,6 +5198,7 @@ mod tests {
                 type_s: String::new(),
                 desc: "Disc".into(),
                 check: None,
+                check_enabled: false,
             },
             crate::ui::Row {
                 index: 1,
@@ -5203,6 +5206,7 @@ mod tests {
                 type_s: "Title".into(),
                 desc: "Main Feature".into(),
                 check: Some(crate::ui::Check::Off),
+                check_enabled: true,
             },
             crate::ui::Row {
                 index: 2,
@@ -5210,6 +5214,7 @@ mod tests {
                 type_s: "Audio".into(),
                 desc: "English 5.1".into(),
                 check: Some(crate::ui::Check::On),
+                check_enabled: true,
             },
         ]
     }
@@ -5750,6 +5755,7 @@ mod tests {
             type_s: "Title".into(),
             desc: format!("t{i}"),
             check: c,
+            check_enabled: c.is_some(),
         };
         let a = vec![row(0, Some(Check::On)), row(1, None)];
         assert!(ticks_match(&a, &a.clone()));

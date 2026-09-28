@@ -27,9 +27,20 @@ pub struct Node {
     pub pid: Option<u16>,
     /// Canonical disc title index — NOT the tree position.
     pub title_idx: usize,
+    /// Arena index of the row whose tick this row shows (see [`Node::mirrors`]).
+    mirror: Option<usize>,
 }
 
 impl Node {
+    /// The arena index of the row this one mirrors, if it is no choice of its own.
+    ///
+    /// The DVD MPEG-2 multichannel extension row: "Its checkbox is **disabled and mirrors
+    /// the base**" (mpg-output-design v5 §3). It shows its base's tick, is never
+    /// [`checkable`](Node::checkable), and its PID is never sent as a selection.
+    pub fn mirrors(&self) -> Option<usize> {
+        self.mirror
+    }
+
     /// Whether this row carries a checkbox.
     ///
     /// Taken from the scan, NOT re-derived from the display string: matching
@@ -320,6 +331,7 @@ impl Tree {
                 info: r.info.clone(),
                 pid: r.pid,
                 title_idx: r.title,
+                mirror: None,
             });
             match r.depth {
                 0 => roots.push(idx),
@@ -331,6 +343,15 @@ impl Tree {
                 }
                 _ => {
                     if let Some(t) = last_title {
+                        // A mirror row names its base by PID; the base is a sibling
+                        // declared before it (libfreemkv places the extension after it).
+                        arena[idx].mirror = r.mirrors.and_then(|base| {
+                            arena[t]
+                                .children
+                                .iter()
+                                .copied()
+                                .find(|&c| arena[c].pid == Some(base) && arena[c].checkable)
+                        });
                         arena[t].children.push(idx);
                         // A stream row starts checked when its TITLE does, narrowed by
                         // language preferences if the PID isn't one they keep. A row
@@ -378,6 +399,11 @@ impl Tree {
     /// title becomes fully ticked; clicking again clears it, the only reading that makes a
     /// second click undo the first.
     pub fn toggle(&self, i: usize) {
+        // A mirror row's box is drawn disabled; a click that reaches the model anyway
+        // (a shell whose widget cannot be disabled per row) changes nothing.
+        if self.arena[i].mirror.is_some() {
+            return;
+        }
         let on = matches!(self.check_state(i), Check::Off | Check::Mixed);
         self.set_checked(i, on);
     }
@@ -440,6 +466,11 @@ impl Tree {
         let (mut total, mut on) = (0usize, 0usize);
         for n in &self.arena {
             let Some(pid) = n.pid else { continue };
+            // Only a choice is a selection: a mirror row's PID follows its base in
+            // libfreemkv, and counting it would make an all-ticked title look narrowed.
+            if !n.checkable() {
+                continue;
+            }
             total += 1;
             if *n.checked.borrow() {
                 on += 1;
@@ -463,6 +494,10 @@ impl Tree {
         let mut out: Vec<(usize, Vec<u16>, Vec<u16>)> = Vec::new();
         for n in &self.arena {
             let Some(pid) = n.pid else { continue };
+            // As in `ticked_streams`: a mirror row is no choice, so it is never sent.
+            if !n.checkable() {
+                continue;
+            }
             // The disc/file header row carries the `usize::MAX` sentinel, not a
             // real title index; never let it become a phantom per-title entry (the
             // engine would rip title usize::MAX), as `ticked_titles` guards it.
@@ -2715,8 +2750,9 @@ impl App {
                 check: if n.checkable() {
                     Some(self.tree.check_state(i))
                 } else {
-                    None
+                    n.mirrors().map(|base| self.tree.check_state(base))
                 },
+                check_enabled: n.checkable(),
             });
         }
         out
@@ -2738,6 +2774,9 @@ pub struct Row {
     pub desc: String,
     /// `None` means the row carries no checkbox at all.
     pub check: Option<Check>,
+    /// Whether a click on the box does anything. `false` for a mirror row
+    /// ([`Node::mirrors`]): the box shows its base's tick and is drawn disabled.
+    pub check_enabled: bool,
 }
 
 /// The Result page heading for a verdict, matched on the TYPED outcome.
@@ -2851,6 +2890,7 @@ mod tests {
             duration_secs: 0.0,
             lang: lang.to_string(),
             forced,
+            mirrors: None,
         }
     }
 
@@ -3580,6 +3620,7 @@ mod tests {
             info: String::new(),
             pid,
             title_idx,
+            mirror: None,
         }
     }
 
@@ -3625,6 +3666,7 @@ mod tests {
                 duration_secs: 600.0,
                 lang: String::new(),
                 forced: false,
+                mirrors: None,
             }],
             key_summary: "none".to_string(),
             title_count: 1,

@@ -141,12 +141,8 @@ pub fn classify_resume(hint: &StagingResumeHint, abort_on_lost_secs: u64) -> Res
             return ResumeClass::NotEligible;
         }
     };
-    // Log the persisted AACS Volume ID (if Pass 1 recorded one) — the resume
-    // key resolution reads it back from the mapfile below.
-    if let Some(vid) = map.vid() {
-        let hex: String = vid.iter().map(|b| format!("{b:02x}")).collect();
-        tracing::info!(vid = %hex, mapfile = %mapfile_path.display(), "resume: recovered AACS Volume ID from mapfile");
-    }
+    // No Volume ID is read from the mapfile: it holds only its fingerprint (J6), and the
+    // resume's keys resolve in memory (see `resume_staged_keys`).
     let stats = map.stats();
 
     // ISO-size validation. The `bytes_pending==0` and coverage gates below both
@@ -370,6 +366,110 @@ fn defer_status_after_ripping(
         Some(reason),
     );
     super::update_state_with(device, |s| s.failure_deferred = true);
+}
+
+// Every title this resume muxes, in range of the image: a TV plan's episodes, else title 0.
+// The open resolves keys for all of them at once (one key-service ask per resume).
+fn resume_titles(disc: &libfreemkv::Disc, is_fanout: bool, plan: &[staging::Output]) -> Vec<usize> {
+    let mut titles: Vec<usize> = if is_fanout {
+        plan.iter().map(|o| o.title_index).collect()
+    } else {
+        vec![0]
+    };
+    titles.retain(|&i| i < disc.titles.len());
+    titles.sort_unstable();
+    titles.dedup();
+    if titles.is_empty() {
+        titles.push(0);
+    }
+    titles
+}
+
+// A resume's keys, memory only: the inserted disc's up-front set, else the set the process
+// that ripped this image resolved at its scan, else the key chain, asked once (with the
+// inserted disc's VID, if any). The flag: a drive in hand lent its scan.
+fn resume_staged_keys(device: &str, iso: &Path) -> (crate::server::keysource::StagedKeys, bool) {
+    use crate::server::keysource::StagedKeys;
+    let (drive_keys, drive_vid) = super::session::session_rip_keys(device);
+    let from_drive = drive_keys.is_some() || drive_vid.is_some();
+    let keys = match drive_keys.or_else(|| crate::server::keysource::rip_keys_for(iso)) {
+        Some(set) => StagedKeys::Rip(set),
+        None => StagedKeys::Resolve { vid: drive_vid },
+    };
+    (keys, from_drive)
+}
+
+// E7034: the keys need the disc's Volume ID and no drive supplied it.
+fn is_vid_needs_disc(e: &libfreemkv::Error) -> bool {
+    matches!(e, libfreemkv::Error::AacsVidNeedsDisc)
+}
+
+/// Surface a refused resume open once. E7034 is a hold the mux worker does not retry (the
+/// disc finishes it); a key miss or key-service failure defers like a keyless capture; a
+/// sidecar that is corrupt or another disc's is terminal (a retry reads the same map); a
+/// Stop preserves staging; anything else aborts as before.
+fn refuse_resume_open(
+    cfg: &Config,
+    device: &str,
+    display_name: &str,
+    (iso_path, staging_dir): (&Path, &Path),
+    from_drive: bool,
+    e: &libfreemkv::Error,
+) {
+    let log = |line: &str| crate::server::log::device_log(device, line);
+    match e {
+        libfreemkv::Error::Halted => {
+            log("Auto-resume stopped by user while resolving keys; staging preserved.");
+            reset_status_after_ripping(device, "idle", display_name, "", "", None);
+        }
+        libfreemkv::Error::AacsVidNeedsDisc => {
+            let msg = super::vid_needs_disc_text();
+            log(&format!("Auto-resume waiting for the disc: {msg}"));
+            reset_status_after_ripping(device, "error", display_name, "", "", Some(msg));
+        }
+        libfreemkv::Error::MapfileInvalid { kind } if *kind == "disc-mismatch" && from_drive => {
+            // The inserted disc, not the image, is wrong: leave the staging alone.
+            let msg = "The disc in the drive is not the disc this staged image was ripped \
+                       from. Insert the original disc to finish it."
+                .to_string();
+            log(&format!("Auto-resume aborted: {msg}"));
+            reset_status_after_ripping(device, "error", display_name, "", "", Some(msg));
+        }
+        libfreemkv::Error::MapfileInvalid { .. } => {
+            let msg = super::format_lib_error("checking the saved recovery map", e);
+            log(&format!("Auto-resume aborted: {msg}"));
+            if !staging::write_failed_marker(staging_dir, &msg) {
+                log("The terminal quarantine could not be written; staging is unwritable.");
+            }
+            reset_status_after_ripping(device, "error", display_name, "", "", Some(msg));
+        }
+        libfreemkv::Error::FmtsKeyMissing => {
+            log(
+                "Auto-resume: FMTS forensic keys unavailable — mux deferred. Staging \
+                 preserved; will mux automatically once keys are available.",
+            );
+            let reason = "Ripped to ISO — forensic keys unavailable, mux deferred.".to_string();
+            defer_status_after_ripping(device, display_name, "", "", reason);
+        }
+        e if super::is_key_refusal(e) => {
+            let decode_reach = crate::server::keysource::take_online_decode_reachability();
+            let src = freemkv_engine::ImageSource::Iso(iso_path.to_path_buf());
+            let (log_line, reason) = match freemkv_engine::scan_image(&src) {
+                Ok((disc, _)) => super::deferred_keyless_texts(cfg, &disc, decode_reach),
+                Err(_) => {
+                    let msg = super::format_lib_error("resolving the disc image's keys", e);
+                    (msg.clone(), msg)
+                }
+            };
+            log(&log_line);
+            defer_status_after_ripping(device, display_name, "", "", reason);
+        }
+        e => {
+            let msg = super::format_lib_error("reading the saved disc image", e);
+            log(&format!("Auto-resume aborted: {msg}"));
+            reset_status_after_ripping(device, "error", display_name, "", "", Some(msg));
+        }
+    }
 }
 
 // resume_remux callers/behavior notes:
@@ -770,24 +870,32 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     }
     forget_space_refusal(&staging_dir);
 
-    // Open the image through the engine and resolve its keys from the key chain,
-    // with the Volume ID the rip recorded in the mapfile (an image has none).
-    let vid = freemkv_engine::Mapfile::load(&mapfile_path)
-        .ok()
-        .and_then(|m| m.vid());
-    drop(disc);
-    let image = match crate::server::keysource::open_staged_image(&cfg_read, &iso_path, vid, None) {
-        Ok(image) => image,
+    // Open the image through the engine. Its keys resolve here, once, for every title
+    // this resume muxes (the primary and a TV plan's other episodes), so no later mux of
+    // it asks a key source. The Volume ID is never on disk (J6): only a drive has it.
+    let titles = resume_titles(&disc, is_fanout, &plan_outputs);
+    let (staged_keys, from_drive) = resume_staged_keys(device, &iso_path);
+    let halt = super::device_halt(device);
+    let image = match crate::server::keysource::open_staged_image(
+        &cfg_read,
+        &iso_path,
+        disc,
+        &titles,
+        staged_keys,
+        halt,
+    ) {
+        Ok(image) => {
+            staging::set_needs_disc(&staging_dir, false);
+            image
+        }
         Err(e) => {
-            let msg = super::format_lib_error("reading the saved disc image", &e);
-            crate::server::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
-            reset_status_after_ripping(device, "error", &display_name, "", "", Some(msg));
+            staging::set_needs_disc(&staging_dir, is_vid_needs_disc(&e));
+            let paths = (iso_path.as_path(), staging_dir.as_path());
+            refuse_resume_open(&cfg_read, device, &display_name, paths, from_drive, &e);
             return;
         }
     };
     let disc = &image.disc;
-    // Consume the real decode's verdict now; the keyless deferral below reports it.
-    let decode_reach = crate::server::keysource::take_online_decode_reachability();
 
     // Real-bitrate re-validation: recompute bytes-bad-in-title (vs the
     // classifier's whole-disc estimate) and re-check abort_on_lost_secs.
@@ -927,16 +1035,18 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
 
     // 4. Build MuxInputs + run mux exactly as rip_disc does.
     // (`disc_format` + `duration` were computed up front, above.)
-    let keys = disc.decrypt_keys();
     let batch = libfreemkv::disc::detect_max_batch_sectors(DEFAULT_BATCH_PROBE_PATH);
 
-    // Keyless-capture deferral: the ISO was swept raw (no keys), but the MUX
-    // needs keys. If this encrypted disc still has none, resume the second half
-    // of the no-keys capture flow started in `rip_disc`.
-    if disc.encrypted
-        && matches!(keys, libfreemkv::decrypt::DecryptKeys::None)
-        && !super::output_is_iso_image(&cfg_read.output_format)
-    {
+    // Keyless-capture deferral: the ISO was swept raw (no keys), but the MUX needs
+    // them. An AACS miss already refused at the open; this catches an uncracked CSS
+    // disc, from the rip's key set (the image's disc carries no banked key).
+    let undecryptable = matches!(
+        freemkv_engine::keys::key_status(disc, &image.keys),
+        libfreemkv::keys::DecryptStatus::AacsKeysMissing(_)
+            | libfreemkv::keys::DecryptStatus::CssNotCracked(_)
+    );
+    if undecryptable && !super::output_is_iso_image(&cfg_read.output_format) {
+        let decode_reach = crate::server::keysource::take_online_decode_reachability();
         let (log_line, reason) = super::deferred_keyless_texts(&cfg_read, disc, decode_reach);
         crate::server::log::device_log(device, &log_line);
         // We have not set status="ripping" yet (that happens via the
@@ -1295,6 +1405,25 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 super::unregister_halt(device);
                 return;
             }
+            // E7034 from the mux's top-up: hold for the disc, like a refused open.
+            if super::io_key_refusal(&e) == Some(libfreemkv::error::E_AACS_VID_NEEDS_DISC) {
+                staging::set_needs_disc(&staging_dir, true);
+                let msg = super::vid_needs_disc_text();
+                crate::server::log::device_log(
+                    device,
+                    &format!("Auto-resume waiting for the disc: {msg}"),
+                );
+                reset_status_after_ripping(
+                    device,
+                    "error",
+                    &display_name,
+                    &disc_format,
+                    &duration,
+                    Some(msg),
+                );
+                super::unregister_halt(device);
+                return;
+            }
             // FMTS forensic-key deferral: base keys resolved but the online-only
             // forensic index keys did not (`Error::FmtsKeyMissing`). Muxing now
             // the mux worker re-attempts once a keydb/online update supplies keys.
@@ -1311,6 +1440,15 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                     &duration,
                     "Ripped to ISO — forensic keys unavailable, mux deferred.".to_string(),
                 );
+                super::unregister_halt(device);
+                return;
+            }
+            // Any other key refusal: a keyless deferral, as a refused open is.
+            if super::io_key_refusal(&e).is_some() {
+                let reach = crate::server::keysource::take_online_decode_reachability();
+                let (log_line, reason) = super::deferred_keyless_texts(&cfg_read, disc, reach);
+                crate::server::log::device_log(device, &log_line);
+                defer_status_after_ripping(device, &display_name, &disc_format, &duration, reason);
                 super::unregister_halt(device);
                 return;
             }
@@ -1781,6 +1919,8 @@ pub(crate) struct MuxHandoffOutcome {
     pub failure_finalize: bool,
     // True when the re-mux was refused up front for lack of staging space (retryable).
     pub failure_space: bool,
+    // True for the E7034 hold: only the disc can finish the keys (not retried).
+    pub failure_needs_disc: bool,
 }
 
 // Whether resume_remux finished this staging dir cleanly (.completed written). Probes via
@@ -1841,7 +1981,10 @@ pub(crate) fn remux_from_ripped_marker(
     // leaves `.completed` absent.
     let success = mux_handoff_success(staging_dir);
     let mut outcome = build_mux_handoff_outcome(success);
+    outcome.failure_needs_disc =
+        !success && staging::snapshot_staging_disc(staging_dir).is_some_and(|snap| snap.needs_disc);
     if success {
+        crate::server::keysource::forget_rip_keys(&iso_path);
         // Hand-off consumed. Drop the marker so this dir doesn't get
         // re-queued on the next muxer tick. If the delete fails, surface
         // marker is still worth a warning so the operator can clear it.
@@ -1966,7 +2109,7 @@ mod remux_space_tests {
         let check = f
             .find("remux_space_refusal(&cfg_read, &staging_dir")
             .unwrap();
-        let keys = f.find("keysource::open_staged_image(&cfg_read").unwrap();
+        let keys = f.find("keysource::open_staged_image(").unwrap();
         assert!(check < keys, "space check must precede key resolution");
         assert!(f[check..keys].contains("s.failure_space = true"));
     }
@@ -3923,5 +4066,175 @@ mod accept_loss_override_tests {
             );
             delivered_by.push(w);
         }
+    }
+}
+
+#[cfg(test)]
+mod vid_needs_disc_tests {
+    use super::*;
+    use crate::ku_fixture::{bd_image, write_sidecar};
+
+    // KU-E1 (J6, J11): the mapfile holds no Volume ID. A resume with no drive in hand whose
+    // keys need it refuses E7034 up front: one clear "insert the disc" state that the mux
+    // worker then holds (never re-dispatched), with the ISO and mapfile untouched.
+    #[test]
+    fn a_resume_whose_keys_need_the_disc_is_held_not_retried() {
+        let (staging, outcome, _t) = resume_after_restart(Keys::MediaKeyOnly);
+        assert!(!outcome.success);
+        assert!(outcome.failure_needs_disc, "held for the disc");
+        assert!(!outcome.failure_retryable && !outcome.failure_finalize);
+        let reason = outcome.failure_reason.unwrap_or_default();
+        assert!(
+            reason.starts_with("E7034 ") && reason.contains("Insert the disc to finish"),
+            "{reason}"
+        );
+
+        let snap = staging::snapshot_staging_disc(&staging).unwrap();
+        assert!(snap.needs_disc && snap.has_ripped && !snap.has_failed);
+        assert_eq!(
+            crate::server::muxer::mux_dispatch_verdict(Some(&snap)),
+            crate::server::muxer::MuxVerdict::SkipNeedsDisc,
+            "the worker must not re-dispatch it"
+        );
+
+        // Inserting the disc makes it drive-resumable again (the worker still skips it).
+        assert!(!super::super::resumable_dir_blocked(&snap));
+        staging::set_needs_disc(&staging, false);
+        let snap = staging::snapshot_staging_disc(&staging).unwrap();
+        assert_eq!(
+            crate::server::muxer::mux_dispatch_verdict(Some(&snap)),
+            crate::server::muxer::MuxVerdict::Dispatch
+        );
+    }
+
+    // J23: when no VID could help (no media-key path, no VID-consuming source) a resume after
+    // a restart is a plain "no key yet" (E7022): the retryable keyless deferral, never held.
+    #[test]
+    fn a_resume_no_vid_would_help_is_a_retryable_deferral() {
+        let (staging, outcome, _t) = resume_after_restart(Keys::None);
+        assert!(!outcome.success);
+        assert!(!outcome.failure_needs_disc);
+        assert!(
+            outcome.failure_retryable,
+            "a keyless deferral re-muxes once keys land"
+        );
+        let snap = staging::snapshot_staging_disc(&staging).unwrap();
+        assert!(!snap.needs_disc && !snap.has_failed);
+        assert_eq!(
+            crate::server::muxer::mux_dispatch_verdict(Some(&snap)),
+            crate::server::muxer::MuxVerdict::Dispatch
+        );
+    }
+
+    // An online key service that is down is an outage (E7028), never Missing: the resume
+    // defers retryably (the worker re-asks next tick), never holds for the disc or fails.
+    #[test]
+    fn a_resume_with_the_key_service_down_is_a_retryable_outage() {
+        let (staging, outcome, _t) = resume_after_restart(Keys::ServiceDown);
+        assert!(!outcome.success);
+        assert!(
+            !outcome.failure_needs_disc,
+            "an outage is never 'insert the disc'"
+        );
+        assert!(outcome.failure_retryable, "the worker retries it");
+        assert!(!outcome.failure_finalize);
+        let reason = outcome.failure_reason.unwrap_or_default();
+        assert!(
+            reason.starts_with("Ripped to ISO — no keys, mux deferred"),
+            "{reason}"
+        );
+        let snap = staging::snapshot_staging_disc(&staging).unwrap();
+        assert!(
+            !snap.needs_disc && !snap.has_failed,
+            "never held, never .failed"
+        );
+        assert_eq!(
+            crate::server::muxer::mux_dispatch_verdict(Some(&snap)),
+            crate::server::muxer::MuxVerdict::Dispatch
+        );
+    }
+
+    // The key chain a restarted resume has.
+    enum Keys {
+        // A keydb entry with only a media key: the VID would finish it (J23).
+        MediaKeyOnly,
+        // No key source holds anything.
+        None,
+        // An online service that refuses at the first query (E7028).
+        ServiceDown,
+    }
+
+    // A `.ripped` KU fixture resumed by the mux worker with no set in memory (a restart).
+    fn resume_after_restart(
+        keys: Keys,
+    ) -> (std::path::PathBuf, MuxHandoffOutcome, tempfile::TempDir) {
+        let _guard = crate::server::log::env_guard();
+        let _g = crate::server::mover::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let t = tempfile::tempdir().unwrap();
+        // SAFETY: env access in tests, serialized by env_guard.
+        unsafe {
+            std::env::set_var("AUTORIP_DIR", t.path());
+        }
+        let staging = t.path().join("staging").join("KU_Disc");
+        std::fs::create_dir_all(&staging).unwrap();
+        let fx = bd_image();
+        let iso = fx.write(&staging, "KU_Disc.iso");
+        let mapfile = write_sidecar(&fx, &iso, true);
+        let keydb = t.path().join("keydb.cfg");
+        if matches!(keys, Keys::MediaKeyOnly) {
+            crate::ku_fixture::write_media_key_keydb(&fx, &keydb);
+        }
+        // `localhost` resolves to a private address: refused at the first query, no network.
+        let keyserver_url = match keys {
+            Keys::ServiceDown => "https://localhost:9/decode".to_string(),
+            _ => String::new(),
+        };
+        let before = (
+            std::fs::read(&iso).unwrap(),
+            std::fs::read(&mapfile).unwrap(),
+        );
+        let marker = crate::server::muxer::RippedMarker {
+            schema_version: crate::server::muxer::RIPPED_MARKER_SCHEMA,
+            iso_path: iso.to_string_lossy().into_owned(),
+            mapfile_path: mapfile.to_string_lossy().into_owned(),
+            display_name: "KU_Disc".into(),
+            disc_format: "bluray".into(),
+            mkv_filename: "KU_Disc.mkv".into(),
+            tmdb_title: String::new(),
+            tmdb_year: 0,
+            tmdb_poster: String::new(),
+            tmdb_overview: String::new(),
+            tmdb_media_type: String::new(),
+            max_retries: 1,
+            abort_on_lost_secs: 0,
+            rip_elapsed_secs: 0.0,
+            rip_errors: 0,
+            rip_lost_video_secs: 0.0,
+            rip_last_sector: 0,
+            origin_device: String::new(),
+            sweep_errors: 0,
+            sweep_total_lost_ms: 0.0,
+            sweep_main_lost_ms: 0.0,
+            sweep_num_bad_ranges: 0,
+            sweep_largest_gap_ms: 0.0,
+            title_confident: true,
+        };
+        crate::server::muxer::write_marker(&staging, &marker).unwrap();
+        let cfg = Arc::new(RwLock::new(Config {
+            staging_dir: staging.parent().unwrap().to_string_lossy().into_owned(),
+            keydb_path: Some(keydb.to_string_lossy().into_owned()),
+            keyserver_url,
+            ..Config::default()
+        }));
+
+        let outcome = remux_from_ripped_marker(&cfg, &staging, &marker);
+        let after = (
+            std::fs::read(&iso).unwrap(),
+            std::fs::read(&mapfile).unwrap(),
+        );
+        assert!(after == before, "the ISO and its mapfile are untouched");
+        (staging, outcome, t)
     }
 }

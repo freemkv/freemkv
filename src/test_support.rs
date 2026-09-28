@@ -87,6 +87,11 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
             have: 1_024,
             want: 4_096,
         },
+        // E6021/E6022 carry a path list / an image path as `{detail}`.
+        Error::BusStreamUnmapped {
+            files: "/BDMV/STREAM/00002.m2ts (E6000: 12345)".into(),
+        },
+        Error::ImageScoped { path: p() },
         Error::AacsNoKeys,
         Error::AacsCertShort,
         Error::AacsAgidAlloc,
@@ -203,6 +208,11 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::SyncTimeout,
         Error::SyncWorkerLost,
         Error::DriveInquiryShort,
+        // CC-F1a (stop-design-v5 §6 R7.4): the shared cascade's two codes.
+        Error::AacsVidNeedsDisc,
+        Error::TimedOut { op: "verify" },
+        // MPG-F1 (mpg-output-design v5 §8): the mpg:// cascade's one code, E9074.
+        Error::MpgNoVideoTrack,
     ]
 }
 

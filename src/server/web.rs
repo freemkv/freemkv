@@ -47,9 +47,9 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("web/assets/ui.js"),
     ),
     (
-        "table.js",
+        "medialist.js",
         "text/javascript; charset=utf-8",
-        include_bytes!("web/assets/table.js"),
+        include_bytes!("web/assets/medialist.js"),
     ),
     (
         "libdata.js",
@@ -1541,7 +1541,16 @@ mod web_tests {
             "menus share one document listener"
         );
         assert!(asset("settings.js").contains("new-password"));
-        assert!(asset("system.js").contains("r.reachable"));
+        assert!(asset("settings.js").contains("r.reachable"));
+        // Library is the MKVs and never remuxes; the header carries no job.
+        let library = asset("library.js");
+        assert!(!library.contains("href=\"/remux\""));
+        assert!(library.contains("remux: false"));
+        assert!(!super::INDEX_HTML.contains("jobchip"));
+        assert!(
+            !asset("system.js").contains("id=\"keys\""),
+            "keys live in Settings"
+        );
     }
 
     // Every module the shell imports is embedded and served.
@@ -5968,7 +5977,11 @@ fn key_status(c: &Config) -> serde_json::Value {
         "keydb_bytes": meta.as_ref().map(|m| m.len()),
         "keydb_modified": modified,
         "keydb_url_set": !c.keydb_url.trim().is_empty(),
-        "keyserver_set": crate::server::keysource::uses_online(c),
+        "keyserver_set": !c.keyserver_url.trim().is_empty(),
+        "keyserver_host": crate::server::web::mask_webhook_url(c.keyserver_url.trim())
+            .trim_end_matches(crate::server::settings_schema::SECRET_SENTINEL)
+            .trim_end_matches('/')
+            .to_string(),
         "key_source": c.key_source,
         "tmdb_set": !c.tmdb_api_key.is_empty(),
     })

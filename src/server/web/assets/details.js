@@ -5,6 +5,20 @@ import { esc, modal, bytes, runtime, when, api, act, toast, confirmButton } from
 import { openTitleLog } from './console.js';
 import { refreshNow } from './libdata.js';
 
+/** Out of date: an MKV written by anything but this freemkv. The one
+    definition both pages count with. */
+export function outdated(r) {
+  return !!(r.mkv && r.probed && r.muxed_with && (r.muxed_with.state === 'older' || r.muxed_with.state === 'other'));
+}
+
+/** Video codecs, each once; a second HEVC stream is the Dolby Vision layer. */
+export function videoLabel(codecs) {
+  const hevc = codecs.filter(c => c === 'HEVC').length;
+  const rest = [...new Set(codecs.filter(c => c !== 'HEVC'))];
+  const out = hevc ? [hevc > 1 ? 'HEVC + DV' : 'HEVC'] : [];
+  return out.concat(rest);
+}
+
 /** "freemkv 1.6.11" with an out-of-date badge; "probing…" until read. */
 export function muxedHtml(r, plain = false) {
   if (!r.mkv) return r.kind === 'iso_only' ? '<span class="badge badge-warn">no MKV yet</span>' : '';
@@ -12,9 +26,9 @@ export function muxedHtml(r, plain = false) {
   const m = r.muxed_with;
   const label = esc(r.muxed_label || (m.version ? 'freemkv ' + m.version : ''));
   const tip = esc(r.writing_app || 'no writing-app stamp');
-  if (m.state === 'current' || (plain && m.state !== 'unknown')) return '<span title="' + tip + '">' + label + '</span>';
+  if (m.state === 'current' || (plain && m.state !== 'unknown')) return '<span class="one" title="' + tip + '"><span class="ell">' + label + '</span></span>';
   if (m.state === 'unknown') return '<span class="muted" title="The file carries no writing-app stamp">unknown</span>';
-  return '<span title="' + tip + '">' + label + '</span> <span class="badge badge-warn" title="Not muxed by this freemkv">out of date</span>';
+  return '<span class="one" title="' + tip + ' (not muxed by this freemkv)"><span class="ell">' + label + '</span><span class="badge badge-warn">out of date</span></span>';
 }
 
 const ISSUE_TEXT = {
@@ -92,10 +106,10 @@ export function openDetails(r, ctx = {}) {
         : '<span style="color:var(--bad)">✗ ' + esc(res.message) + '</span>, ' + esc(when(res.finished_at)))
       + '</p>';
   }
-  const can = r.kind === 'remux' || r.kind === 'iso_only';
+  const can = ctx.remux !== false && (r.kind === 'remux' || r.kind === 'iso_only');
   const busy = r.job && (r.job.state === 'queued' || r.job.state === 'running');
   const foot = (r.mkv ? '<button class="btn btn-ghost btn-sm" data-a="reaudit">Re-audit</button>' : '')
-    + (r.job || r.result ? '<button class="btn btn-ghost btn-sm" data-a="log">Remux log</button>' : '')
+    + (ctx.remux !== false && (r.job || r.result) ? '<button class="btn btn-ghost btn-sm" data-a="log">Remux log</button>' : '')
     + (can ? '<button class="btn btn-primary btn-sm" data-a="remux"' + (busy ? ' disabled' : '') + '>' + (busy ? 'Queued' : 'Remux') + '</button>' : '');
   const m = modal({ title: esc(r.title), body, foot, wide: true });
   const q = (s) => m.el.querySelector(s);

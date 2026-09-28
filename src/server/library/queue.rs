@@ -54,6 +54,16 @@ pub struct Job {
     pub finished_at: Option<u64>,
     #[serde(default)]
     pub note: Option<JobNote>,
+    /// Why the job failed, kept on the job itself so the queue explains it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<Failure>,
+}
+
+/// A failed job's reason: the library error code, when there is one, and the text.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Failure {
+    pub code: Option<u16>,
+    pub message: String,
 }
 
 /// What to queue.
@@ -203,6 +213,7 @@ impl Queue {
                     started_at: None,
                     finished_at: None,
                     note: None,
+                    failure: None,
                 });
                 n += 1;
             }
@@ -225,6 +236,7 @@ impl Queue {
             }
             let job = f.jobs.iter_mut().find(|j| j.state == JobState::Queued)?;
             job.state = JobState::Running;
+            job.failure = None;
             job.started_at = Some(crate::server::util::epoch_secs());
             job.finished_at = None;
             Some(job.clone())
@@ -240,6 +252,13 @@ impl Queue {
             job.state = match result {
                 JobResult::Done { .. } => JobState::Done,
                 JobResult::Failed { .. } => JobState::Failed,
+            };
+            job.failure = match &result {
+                JobResult::Failed { code, message, .. } => Some(Failure {
+                    code: *code,
+                    message: message.clone(),
+                }),
+                JobResult::Done { .. } => None,
             };
             job.finished_at = Some(crate::server::util::epoch_secs());
             let key = job.target.to_string_lossy().into_owned();
@@ -445,6 +464,36 @@ mod tests {
             1,
             "results outlive the cleared job"
         );
+    }
+
+    #[test]
+    fn a_failure_is_kept_on_the_job_and_survives_a_restart() {
+        let t = tempfile::tempdir().unwrap();
+        {
+            let q = Queue::open(t.path());
+            q.add(vec![job(t.path(), "a")]);
+            let a = q.claim_next().unwrap();
+            q.finish(
+                a.id,
+                JobResult::Failed {
+                    code: Some(7013),
+                    message: "E7013 Decryption failed".into(),
+                    finished_at: 1,
+                },
+            );
+        }
+        let q = Queue::open(t.path());
+        let f = q.snapshot();
+        assert_eq!(
+            f.jobs[0].failure,
+            Some(Failure {
+                code: Some(7013),
+                message: "E7013 Decryption failed".into()
+            })
+        );
+        // A retry clears it while it runs.
+        q.add(vec![job(t.path(), "a")]);
+        assert_eq!(q.claim_next().unwrap().failure, None);
     }
 
     #[test]
