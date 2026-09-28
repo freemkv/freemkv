@@ -379,7 +379,6 @@ pub fn scan_with_keys_under(
     keys: &KeyConfig,
     tok: &OpenToken,
 ) -> Result<Scanned, String> {
-    let _ = (&tok.halt, &tok.progress);
     // A FOLDER is an image-level source too: "Open Folder" / drag-and-drop.
     let src = fe::ImageSource::from_path(path);
     let (disc, _reader) = fe::scan_image(&src).map_err(|e| format!("E{} scan failed", e.code()))?;
@@ -388,16 +387,24 @@ pub fn scan_with_keys_under(
         scope: libfreemkv::keys::KeyScope::Titles(main.clone()),
         seed: None,
         drive_disc: None,
-        halt: None,
+        halt: Some(tok.halt.clone()),
     };
     let (opened, trace) =
         crate::rip_keys::open_image(&src, crate::rip_keys::sources(&key_params(keys)), o);
-    Ok(scanned_with_keys(
-        &disc,
-        opened.map(|o| o.keys),
-        &trace,
-        main,
-    ))
+    stopped_open(opened.map(|o| o.keys), tok).map(|keys| scanned_with_keys(&disc, keys, &trace, main))
+}
+
+// Stop design v5 §4.3: a cancelled open ends `Halted` with no scan, so no key strip update.
+fn stopped_open<T>(
+    r: libfreemkv::Result<T>,
+    tok: &OpenToken,
+) -> Result<libfreemkv::Result<T>, String> {
+    match r {
+        Err(e) if tok.halt.is_cancelled() && matches!(e, libfreemkv::Error::Halted) => {
+            Err(format!("E{} {}", e.code(), explain(e.code())))
+        }
+        r => Ok(r),
+    }
 }
 
 /// A scan's display rows, plus its key set or refusal and the walk behind it.
@@ -694,7 +701,6 @@ pub fn scan_disc_with_keys(
     keys: &KeyConfig,
     tok: &OpenToken,
 ) -> Result<Scanned, String> {
-    let _ = tok;
     let (disc, mut reader) = drive_scan(source, keys, false)?;
     let main = fe::resolve_selection(&disc, &fe::Selection::MainMovie);
     let scope = libfreemkv::keys::KeyScope::Titles(main.clone());
@@ -704,9 +710,9 @@ pub fn scan_disc_with_keys(
         scope,
         &key_factory(keys),
         None,
-        None,
+        Some(&tok.halt),
     );
-    Ok(scanned_with_keys(&disc, set, &trace, main))
+    stopped_open(set, tok).map(|set| scanned_with_keys(&disc, set, &trace, main))
 }
 
 /// Open and scan the drive behind `source` with NO key call (`fe::open_scan`): the disc

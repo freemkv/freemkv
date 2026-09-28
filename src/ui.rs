@@ -1820,33 +1820,41 @@ pub struct ProbeState {
     /// guarantees the `result` write is visible — the same pairing
     /// `RunState::finished` uses.
     done: AtomicBool,
-    /// When the worker was spawned, so a probe that never answers can be
-    /// abandoned instead of keeping the timer alive for the life of the app.
-    started: std::time::Instant,
     /// The probe's open token: its Stop and its progress (stop design v5 §4.3, T29).
     token: OpenToken,
+    /// T29: idle-only over `token.progress`, so a CDB or key call in flight never counts.
+    stall: Mutex<libfreemkv::halt::StallTimer>,
 }
 
 impl ProbeState {
     fn new(path: &str, window: std::time::Duration) -> Self {
-        let _ = window;
+        let token = OpenToken::default();
+        let stall = libfreemkv::halt::StallTimer::idle_only(window, &token.progress);
         ProbeState {
             path: path.to_string(),
             result: Mutex::new(None),
             done: AtomicBool::new(false),
-            started: std::time::Instant::now(),
-            token: OpenToken::default(),
+            token,
+            stall: Mutex::new(stall),
         }
+    }
+
+    // T29 (stop design v5 §3.1): "30 s of **idle** no-progress"; true once it cancelled.
+    fn stalled(&self) -> bool {
+        let mut t = self.stall.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(
+            t.poll(&self.token.progress),
+            libfreemkv::halt::Stall::Expired
+        ) {
+            self.token.halt.cancel();
+        }
+        self.token.halt.is_cancelled()
     }
 }
 
-/// How long the launch probe is given before the UI stops waiting for it.
-///
-/// A drive scan is seconds; a drive with a disc it cannot read can sit inside
-/// SCSI timeouts for far longer, and nothing about the probe is worth that —
-/// nobody asked for it, and the window keeps redrawing at 5 Hz for as long as
-/// it is outstanding. Generous enough that a slow-but-working drive still
-/// lands its result.
+/// T29, the launch probe's idle window (stop design v5 §3.1): with no progress for this
+/// long the probe's open token is cancelled, and the worker lets go of the drive. A CDB
+/// or key call in flight pauses it, so a slow-but-working drive still lands its result.
 pub const PROBE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A drive is single-open, so a second scan while the probe holds it fails for a
@@ -2074,7 +2082,10 @@ impl App {
                 }
                 vec![Effect::Redraw]
             }
-            Cmd::Quit => vec![Effect::Quit],
+            Cmd::Quit => {
+                self.stop_opens();
+                vec![Effect::Quit]
+            }
         }
     }
 
@@ -2149,9 +2160,13 @@ impl App {
             return vec![Effect::Redraw];
         }
         self.opening = None;
+        if let Some(tok) = self.open_token.take() {
+            tok.halt.cancel();
+        }
         if let Some(fx) = self.wait_for_probe(path, false) {
             return fx;
         }
+        self.stop_opens();
         self.probe = None;
         self.pending = None;
         self.open_inner(path, false)
@@ -2166,20 +2181,41 @@ impl App {
         if let Some(fx) = self.wait_for_probe(path, true) {
             return fx;
         }
+        self.stop_opens();
         self.probe = None;
         self.spawn_open(path)
     }
 
     // Park a drive open behind an outstanding probe; `poll_probe` resumes it.
     fn wait_for_probe(&mut self, path: &str, background: bool) -> Option<Vec<Effect>> {
-        if self.probe.is_none() || !crate::engine::is_disc_source(path) {
+        let probe = self.probe.clone()?;
+        if !crate::engine::is_disc_source(path) {
             return None;
+        }
+        // §4.3: an Open of another source "cancels the probe's open token and keeps the
+        // `PendingOpen` pending"; "The UI shows 'waiting for the drive' meanwhile".
+        if path != probe.path {
+            probe.token.halt.cancel();
+            self.say(
+                LogKind::Detail,
+                &crate::strings::get_or("stop.waiting_for_drive", "Waiting for the drive …"),
+            );
         }
         self.pending = Some(PendingOpen {
             path: path.to_owned(),
             background,
         });
         Some(vec![Effect::Redraw, Effect::StartTicking])
+    }
+
+    // Cancel every open in flight: the source changing, the window closing, or Quit (§4.3).
+    fn stop_opens(&mut self) {
+        if let Some(tok) = self.open_token.take() {
+            tok.halt.cancel();
+        }
+        if let Some(p) = &self.probe {
+            p.token.halt.cancel();
+        }
     }
 
     fn run_pending(&mut self, open: PendingOpen) -> Vec<Effect> {
@@ -2195,7 +2231,9 @@ impl App {
         let keys = KeyConfig::from_settings(&self.settings);
         let scan = self.scan;
         let tok = OpenToken::default();
-        self.open_token = Some(tok.clone());
+        if let Some(old) = self.open_token.replace(tok.clone()) {
+            old.halt.cancel();
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("open-source".into())
@@ -2232,6 +2270,7 @@ impl App {
 
     // Forget the open source (Close, or after its disc was ejected).
     fn close_source(&mut self) {
+        self.stop_opens();
         self.probe = None;
         self.pending = None;
         self.tree = Tree::default();
@@ -2629,15 +2668,11 @@ impl App {
         // `Acquire`, pairing with the worker's `Release` store: seeing `true`
         // guarantees the `result` write is visible.
         if !p.done.load(Ordering::Acquire) {
-            if p.started.elapsed() >= self.probe_window {
-                // Past deadline: the worker (blocked in drive timeouts) can't be killed,
-                // but dropping our `Arc<ProbeState>` lets it exit quietly, ending the
-                // 5 Hz repaint. SILENT, like every probe failure: nobody asked for this.
-                self.probe = None;
-                return match self.pending.take() {
-                    Some(open) => self.run_pending(open),
-                    None => Vec::new(),
-                };
+            // T29 "is disabled once a same-source `PendingOpen` has adopted the probe"; a
+            // cancelled probe is waited on until its worker lets go of the drive (§4.3).
+            let adopted = self.pending.as_ref().is_some_and(|o| o.path == p.path);
+            if !adopted {
+                p.stalled();
             }
             return Vec::new();
         }
@@ -2871,6 +2906,13 @@ impl App {
             });
         }
         out
+    }
+}
+
+// The window closing cancels every open in flight (stop design v5 §4.3).
+impl Drop for App {
+    fn drop(&mut self) {
+        self.stop_opens();
     }
 }
 
@@ -3356,11 +3398,7 @@ mod tests {
     #[test]
     fn ticking_continues_while_the_probe_is_outstanding() {
         let mut app = App::new();
-        app.probe = Some(Arc::new(probe_state(
-            None,
-            false,
-            std::time::Instant::now(),
-        )));
+        app.probe = Some(Arc::new(probe_state(None, false)));
         let fx = app.tick();
         assert!(
             !fx.contains(&Effect::StopTicking),
@@ -3373,42 +3411,12 @@ mod tests {
         );
     }
 
-    // A probe the drive never answers must be abandoned, not waited on for the life of the
-    // process: the worker thread can't be killed (blocked in the driver), but the UI must stop
-    // waiting for it.
-    #[test]
-    fn a_probe_that_never_answers_is_abandoned_instead_of_ticking_forever() {
-        let mut app = App::new();
-        app.probe = Some(Arc::new(probe_state(
-            None,
-            false,
-            std::time::Instant::now() - (PROBE_GRACE + std::time::Duration::from_secs(1)),
-        )));
-        let fx = app.tick();
-        assert!(
-            app.probe.is_none(),
-            "the UI is still waiting on a probe that is past its deadline"
-        );
-        assert!(
-            fx.contains(&Effect::StopTicking),
-            "and it is still repainting on its behalf: {fx:?}"
-        );
-        assert!(
-            app.source.is_empty() && matches!(app.page, Page::Empty),
-            "abandoning a probe nobody asked for must not disturb the model"
-        );
-    }
-
     /// ...and one that is merely slow is still waited for: the deadline must
     /// not cancel the working case.
     #[test]
     fn a_probe_still_within_its_deadline_is_kept() {
         let mut app = App::new();
-        app.probe = Some(Arc::new(probe_state(
-            None,
-            false,
-            std::time::Instant::now(),
-        )));
+        app.probe = Some(Arc::new(probe_state(None, false)));
         let fx = app.tick();
         assert!(app.probe.is_some(), "a live probe was thrown away");
         assert!(!fx.contains(&Effect::StopTicking), "{fx:?}");
@@ -3418,11 +3426,7 @@ mod tests {
     #[test]
     fn a_probe_result_is_applied_by_the_tick() {
         let mut app = App::new();
-        app.probe = Some(Arc::new(probe_state(
-            Some(Ok(probe_scan())),
-            true,
-            std::time::Instant::now(),
-        )));
+        app.probe = Some(Arc::new(probe_state(Some(Ok(probe_scan())), true)));
         let fx = app.tick();
         assert!(app.probe.is_none(), "a collected probe must clear its slot");
         assert_eq!(app.source, PROBE_SOURCE, "the scanned source must be set");
@@ -3438,11 +3442,7 @@ mod tests {
         let mut app = App::new();
         app.source = "iso:///the/one/they/chose.iso".to_string();
         app.page = Page::Titles;
-        app.probe = Some(Arc::new(probe_state(
-            Some(Ok(probe_scan())),
-            true,
-            std::time::Instant::now(),
-        )));
+        app.probe = Some(Arc::new(probe_state(Some(Ok(probe_scan())), true)));
         app.tick();
         assert_eq!(
             app.source, "iso:///the/one/they/chose.iso",
@@ -3461,7 +3461,7 @@ mod tests {
     fn a_probe_that_left_no_result_is_dropped_silently() {
         let mut app = App::new();
         let before = app.log.len();
-        app.probe = Some(Arc::new(probe_state(None, true, std::time::Instant::now())));
+        app.probe = Some(Arc::new(probe_state(None, true)));
         app.tick();
         assert!(app.probe.is_none());
         assert_eq!(app.log.len(), before, "a dead probe must say nothing");
@@ -3604,15 +3604,10 @@ mod tests {
 
     // ── An explicit open while the launch probe holds the drive ─────────────
 
-    fn probe_state(
-        result: Option<Result<Scanned, String>>,
-        done: bool,
-        started: std::time::Instant,
-    ) -> ProbeState {
+    fn probe_state(result: Option<Result<Scanned, String>>, done: bool) -> ProbeState {
         let mut p = ProbeState::new(PROBE_SOURCE, PROBE_GRACE);
         p.result = Mutex::new(result);
         p.done = AtomicBool::new(done);
-        p.started = started;
         p
     }
 
@@ -3828,7 +3823,7 @@ mod tests {
     }
 
     fn in_flight_probe(app: &mut App) -> Arc<ProbeState> {
-        let p = Arc::new(probe_state(None, false, std::time::Instant::now()));
+        let p = Arc::new(probe_state(None, false));
         app.probe = Some(p.clone());
         p
     }
