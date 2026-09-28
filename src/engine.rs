@@ -2,7 +2,7 @@
 //! rips comes through here — no engine types leak into the AppKit shell.
 
 use freemkv_engine as fe;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// One row of the title tree, already formatted for display.
@@ -1615,17 +1615,10 @@ fn stream_selection_for(req: &RipRequest, title: Option<usize>) -> libfreemkv::S
     }
 }
 
+// The engine's rip options; selection travels per title (see `title_streams`), and
+// the live-drive arm sets it on MuxOptions via `title_session_mux_opts`.
 fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
-    libfreemkv::MuxOptions {
-        skip_errors: false,
-        batch_sectors: 64,
-        raw: req.raw,
-        // Selection lives on InputOptions for the Url mux path — see
-        // stream_selection_for. The Session (live-drive) arm gets its own
-        // per-title options from title_session_mux_opts.
-        selection: libfreemkv::StreamSelection::default(),
-        send_deadline: Some(std::time::Duration::from_secs(60)),
-    }
+    fe::mux_options(req.raw)
 }
 
 // Mux options for ONE title of a live-drive rip. The Session arm reads
@@ -1715,45 +1708,28 @@ fn demux_needs_subdirs(title_count: usize) -> bool {
     title_count > 1
 }
 
-// The per-title mux input for `idx`. Named function (not a struct literal in
-// a closure) because three fields fail silently if missing: title_index
-// (wrong title muxed), unit_keys (E7022), selection (wrong tracks kept).
-fn title_input_options(
-    disc: &libfreemkv::Disc,
-    key_fetch: Option<&libfreemkv::sector::KeyFetch>,
-    req: &RipRequest,
-    idx: usize,
-) -> libfreemkv::InputOptions {
-    libfreemkv::InputOptions {
-        title_index: Some(idx),
-        unit_keys: disc
-            .aacs
-            .as_ref()
-            .map(|a| a.unit_keys.clone())
-            .unwrap_or_default(),
-        selection: stream_selection_for(req, Some(idx)),
-        key_fetch: key_fetch.cloned(),
-        ..Default::default()
-    }
+// Each title's OWN stream selection, never the union across titles (see `TitleStreams`).
+fn title_streams(req: &RipRequest, indices: &[usize]) -> Vec<(usize, libfreemkv::StreamSelection)> {
+    indices
+        .iter()
+        .map(|&i| (i, stream_selection_for(req, Some(i))))
+        .collect()
 }
 
-// Mux the selected titles from `source_url` (original ISO or a staging ISO
-// multipass just produced) into the sinks the format maps to. Shared by
-// run_blocking's ISO path and run_disc's staging-ISO path — same loop.
+// Mux the selected titles of an opened image into the sinks the format maps to.
+// The engine runs the loop; this side names destinations and reports each title.
 fn mux_selected_titles(
-    disc: &libfreemkv::Disc,
-    key_fetch: Option<&libfreemkv::sector::KeyFetch>,
-    source_url: &str,
+    opened: &fe::OpenedImage,
     req: &RipRequest,
     indices: &[usize],
     sink: &UiSink,
     state: &Arc<RunState>,
 ) -> Result<String, String> {
     let kind = out_kind(&req.format);
-    let label = if disc.volume_id.is_empty() {
+    let label = if opened.disc.volume_id.is_empty() {
         "disc".to_string()
     } else {
-        disc.volume_id.clone()
+        opened.disc.volume_id.clone()
     };
     // Demux fans a single title straight into the dest dir but gives each title
     // of a multi-title rip its own subdir so their track files never collide.
@@ -1761,89 +1737,83 @@ fn mux_selected_titles(
 
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
 
-    // The engine owns the per-title loop (skip/abort policy); we only supply
-    // "mux one title".
-    let written = std::cell::Cell::new(0usize);
-    let partial = std::cell::Cell::new(0usize);
-    let outcome = fe::run_titles(indices, !req.titles.is_empty(), sink, |idx| {
-        // Destination per output kind: a per-title file for the container /
-        // metadata / index sinks, or a demux directory (its own per-track
-        // naming) for separate track files.
-        let (dest_url, target) = match kind {
-            OutKind::File(scheme) => {
-                let base = title_basename(&req.filename_template, &label, idx + 1);
-                let out = format!("{}/{}.{}", req.dest_dir, base, scheme);
-                (format!("{scheme}://{out}"), out)
-            }
-            OutKind::Demux(scheme) => {
-                let dir = if multi {
-                    format!("{}/t{:02}/", req.dest_dir, idx + 1)
-                } else {
-                    format!("{}/", req.dest_dir)
-                };
-                (format!("{scheme}://{dir}"), dir)
-            }
-            // Whole-disc kinds handled by their own callers.
-            OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
-        };
-        let hint = disc.titles.get(idx).map(|t| t.size_bytes).unwrap_or(0);
-        let input = title_input_options(disc, key_fetch, req, idx);
-        let mux = mux_opts(req);
-        match fe::mux_title(source_url, &dest_url, input, &mux, hint, sink) {
-            Ok(o) => {
-                if !o.completed {
-                    // Cancelled or truncated: a partial file is on disk. Keep it,
-                    // don't count it as a full write, and SAY it's partial —
-                    // never "nothing written" when a file is in the folder.
-                    partial.set(partial.get() + 1);
-                    state
-                        .lines
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(format!(
-                            "title {} cancelled — partial output kept: {}",
-                            idx + 1,
-                            target
-                        ));
-                    return Ok(());
-                }
-                {
-                    let mut lines = state.lines.lock().unwrap_or_else(|e| e.into_inner());
-                    lines.push(format!("title {} -> {}", idx + 1, target));
-                    // Completed, but not everything: a lossy export is never
-                    // silent. See `lossy_lines`.
-                    lines.extend(lossy_lines(&o, &target));
-                }
-                written.set(written.get() + 1);
-                state
-                    .titles_done
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(())
-            }
-            Err(e) => {
-                state
-                    .lines
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(format!("Title {}: {}", idx + 1, explain(error_code(&e))));
-                // A failed per-title FILE mux leaves a 0-byte file behind that
-                // looks like output. Remove it so the folder never shows a broken
-                // result. (Demux writes into a directory — nothing to clean.)
-                if matches!(kind, OutKind::File(_)) {
-                    let _ = std::fs::remove_file(&target);
-                }
-                Err(e)
-            }
+    // A per-title file for the container / metadata / index sinks, or a demux
+    // directory (its own per-track naming) for separate track files.
+    let dest = |idx: usize| match kind {
+        OutKind::File(scheme) => {
+            let base = title_basename(&req.filename_template, &label, idx + 1);
+            format!("{scheme}://{}/{}.{}", req.dest_dir, base, scheme)
         }
-    });
-
+        OutKind::Demux(scheme) if multi => format!("{scheme}://{}/t{:02}/", req.dest_dir, idx + 1),
+        OutKind::Demux(scheme) => format!("{scheme}://{}/", req.dest_dir),
+        // Whole-disc kinds handled by their own callers.
+        OutKind::DecryptedFolder | OutKind::IsoImage => unreachable!(),
+    };
+    let plan = fe::MuxPlan {
+        titles: indices.to_vec(),
+        explicit_selection: !req.titles.is_empty(),
+        streams: title_streams(req, indices),
+        mux: mux_opts(req),
+    };
+    let report = TitleReport {
+        ui: sink,
+        state,
+        written: AtomicUsize::new(0),
+        partial: AtomicUsize::new(0),
+    };
+    let outcome = fe::mux_image_titles(opened, &plan, &dest, &report);
     summarize_outcome(
         &outcome,
-        written.get(),
-        partial.get(),
+        report.written.load(Ordering::Relaxed),
+        report.partial.load(Ordering::Relaxed),
         indices.len(),
         &req.dest_dir,
     )
+}
+
+// The run's sink for an image mux, plus the per-title lines and counts the summary needs.
+struct TitleReport<'a> {
+    ui: &'a UiSink,
+    state: &'a Arc<RunState>,
+    written: AtomicUsize,
+    partial: AtomicUsize,
+}
+
+impl fe::Sink for TitleReport<'_> {
+    fn log(&self, level: fe::Level, msg: &str) {
+        self.ui.log(level, msg);
+    }
+    fn progress(&self, p: &fe::Progress) {
+        self.ui.progress(p);
+    }
+    fn should_cancel(&self) -> bool {
+        self.ui.should_cancel()
+    }
+    fn event(&self, e: &fe::Event<'_>) {
+        let fe::Event::TitleDone { idx, dest, result } = e else {
+            return;
+        };
+        let (n, target) = (idx + 1, dest.split_once("://").map_or(*dest, |(_, p)| p));
+        let mut lines = self.state.lines.lock().unwrap_or_else(|e| e.into_inner());
+        match result {
+            // Cancelled or truncated: the partial file is kept, not counted as a
+            // full write, and SAID to be partial.
+            Ok(o) if !o.completed => {
+                self.partial.fetch_add(1, Ordering::Relaxed);
+                lines.push(format!(
+                    "title {n} cancelled — partial output kept: {target}"
+                ));
+            }
+            Ok(o) => {
+                lines.push(format!("title {n} -> {target}"));
+                // Completed, but not everything: a lossy export is never silent.
+                lines.extend(lossy_lines(o, target));
+                self.written.fetch_add(1, Ordering::Relaxed);
+                self.state.titles_done.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(e) => lines.push(format!("Title {n}: {}", explain(error_code(e)))),
+        }
+    }
 }
 
 // Human time for a lost-playback duration, e.g. "4m" or "12.4s". A tiny
@@ -1911,22 +1881,17 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     }
     // Folder OR image (`Ui::open` lists a folder's titles too). Keys resolve
     // BEFORE muxing; the mid-mux key fetch comes from the same chain.
-    let fe::OpenedImage {
-        disc,
-        mut reader,
-        key_fetch,
-        ..
-    } = fe::open_image(
+    let mut opened = fe::open_image(
         &fe::ImageSource::from_path(&req.source),
         &key_params(&req.keys),
     )
     .map_err(|e| format!("E{} scan failed", e.code()))?;
 
     let kind = out_kind(&req.format);
-    let label = if disc.volume_id.is_empty() {
+    let label = if opened.disc.volume_id.is_empty() {
         "disc".to_string()
     } else {
-        disc.volume_id.clone()
+        opened.disc.volume_id.clone()
     };
 
     // Whole-disc sinks bypass the per-title mux loop entirely — they operate on
@@ -1934,7 +1899,14 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     match kind {
         OutKind::DecryptedFolder => {
             std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
-            return run_extract_folder(req, &disc, reader.as_mut(), &label, sink, state);
+            return run_extract_folder(
+                req,
+                &opened.disc,
+                opened.reader.as_mut(),
+                &label,
+                sink,
+                state,
+            );
         }
         OutKind::IsoImage => {
             // Decrypt an image without the disc: `iso://In.iso iso://Out.iso`.
@@ -1968,8 +1940,9 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             );
             job.raw = req.raw;
             job.mode = fe::RipMode::Single;
-            let result = fe::recover_to_iso(&disc, reader.as_mut(), &dest, &job, sink)
-                .map_err(|e| format!("image decrypt failed: {e}"))?;
+            let result =
+                fe::recover_to_iso(&opened.disc, opened.reader.as_mut(), &dest, &job, sink)
+                    .map_err(|e| format!("image decrypt failed: {e}"))?;
             if recovery_produced_no_data(result.bytes_good) {
                 let _ = std::fs::remove_file(&dest);
                 return Err("No readable data — no image was written.".into());
@@ -1985,7 +1958,8 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     verify_selection_identity(
         &req.titles,
         &req.title_ids,
-        &disc
+        &opened
+            .disc
             .titles
             .iter()
             .map(TitleIdentity::of)
@@ -1996,7 +1970,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     } else {
         fe::Selection::Titles(req.titles.clone())
     };
-    let indices = fe::resolve_selection(&disc, &sel);
+    let indices = fe::resolve_selection(&opened.disc, &sel);
     state
         .lines
         .lock()
@@ -2005,19 +1979,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     if indices.is_empty() {
         return Err("Nothing selected to rip.".into());
     }
-    // A folder is `dir://`, an image `iso://`. Hardcoding `iso://` here meant
-    // the mux re-opened a folder as an image file and failed after a successful
-    // scan and key resolution.
-    let src_url = format!("{}://{}", image_or_dir_scheme(&req.source), req.source);
-    mux_selected_titles(
-        &disc,
-        key_fetch.as_ref(),
-        &src_url,
-        req,
-        &indices,
-        sink,
-        state,
-    )
+    mux_selected_titles(&opened, req, &indices, sink, state)
 }
 
 /// What a `disc://` rip does with the drive, once the whole-disc extract case
@@ -3483,8 +3445,8 @@ mod routing_tests {
         is_stream_source, iso_recovery_result, mux_opts, out_kind, recovery_plan,
         recovery_produced_no_data, recovery_raw, remap_against, remap_title_pids,
         run_disc_scanning, should_delete_staging_iso, source_scheme, stream_selection_for,
-        title_input_options, title_session_mux_opts, verify_selection_identity,
-        verify_title_identity, won_from_trace,
+        title_session_mux_opts, title_streams, verify_selection_identity, verify_title_identity,
+        won_from_trace,
     };
     use std::sync::Arc;
 
@@ -3721,7 +3683,7 @@ mod routing_tests {
             .expect("run_blocking definition present");
         let end = start
             + src[start..]
-                .find("\n    let indices = fe::resolve_selection(&disc, &sel);")
+                .find("\n    let indices = fe::resolve_selection(&opened.disc, &sel);")
                 .expect("the selection is still resolved in run_blocking");
         let body = &src[start..end];
         // Whitespace-stripped, not whitespace-collapsed: rustfmt splits this
@@ -3746,7 +3708,7 @@ mod routing_tests {
             .expect("the ISO-image arm is still there");
         let end = start
             + src[start..]
-                .find("\n            let result = fe::recover_to_iso(")
+                .find("fe::recover_to_iso(")
                 .expect("the decrypt call still closes the arm's setup");
         let body = &src[start..end];
         assert!(
@@ -3800,11 +3762,11 @@ mod routing_tests {
 
         // 3. The ISO/image per-title loop.
         let iso_loop = slice(
-            "        match fe::mux_title(source_url, &dest_url, input, &mux, hint, sink) {",
-            "            Err(e) => {",
+            "    fn event(&self, e: &fe::Event<'_>) {",
+            "            Err(e) =>",
         );
         assert!(
-            iso_loop.contains("lossy_lines(&o, &target)"),
+            iso_loop.contains("lossy_lines(o, target)"),
             "the ISO per-title loop must report everything the mux lost"
         );
 
@@ -4724,14 +4686,10 @@ mod routing_tests {
         assert!(!mux_opts(&r).raw);
     }
 
-    /// The three fields whose absence is invisible: the wrong title, a lost
-    /// key, or a discarded track selection, each under the right filename.
+    /// Each title is planned with its OWN ticked streams. (Index, keys and the
+    /// key fetch are set by `fe::OpenedImage::input_options`, tested there.)
     #[test]
-    fn per_title_input_options_carry_the_index_the_keys_and_the_selection() {
-        let mut disc = super::key_summary_tests::disc(true);
-        let keys = vec![(0u32, [7u8; 16]), (1u32, [9u8; 16])];
-        disc.aacs = Some(super::key_summary_tests::aacs(keys.clone()));
-
+    fn per_title_streams_are_each_titles_own() {
         let mut r = req();
         r.explicit_streams = true;
         r.audio_pids = vec![4353, 4354];
@@ -4743,18 +4701,9 @@ mod routing_tests {
             (3, vec![4353], vec![]),
         ]);
 
-        for idx in [0usize, 3] {
-            let input = title_input_options(&disc, None, &r, idx);
-            assert_eq!(
-                input.title_index,
-                Some(idx),
-                "a missing title_index muxes title 0 under title {}'s name",
-                idx + 1
-            );
-            assert_eq!(
-                input.unit_keys, keys,
-                "the resolved AACS keys must be passed"
-            );
+        let plan = title_streams(&r, &[0, 3]);
+        assert_eq!(plan.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 3]);
+        for (idx, sel) in plan {
             // PER TITLE, not the union: the union encoded the defect where a
             // PID unticked under one title was still written whenever a
             // sibling kept it ticked. `want` is written out, not re-derived.
@@ -4763,7 +4712,7 @@ mod routing_tests {
             } else {
                 vec![4353]
             };
-            match &input.selection.audio {
+            match &sel.audio {
                 libfreemkv::PidFilter::Only(got) => assert_eq!(
                     *got,
                     want,
@@ -4773,14 +4722,6 @@ mod routing_tests {
                 other => panic!("an explicit selection must be a PidFilter::Only, got {other:?}"),
             }
         }
-
-        // An unencrypted disc contributes no keys — and no placeholder either.
-        let clear = super::key_summary_tests::disc(false);
-        assert!(
-            title_input_options(&clear, None, &r, 0)
-                .unit_keys
-                .is_empty()
-        );
     }
 
     /// One title fans out into the destination directory; two or more each get
