@@ -3,11 +3,12 @@
 //! its own job.
 
 use super::arbiter::Arbiter;
-use super::queue::{Job, JobNote, JobResult};
+use super::queue::{Job, JobNote, JobResult, JobState};
 use super::{Library, LineKind, Running, transcript};
 use crate::server::config::Config;
 use freemkv_engine::{Event, Level, Progress, Sink};
 use std::io::Write as _;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -648,50 +649,96 @@ pub fn index_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>) {
     }
 }
 
-/// The deep-audit loop: while the setting is on and nothing else wants the disks (a remux
-/// or a rip), decode the next fast-audited MKV in full, oldest first.
-pub fn deep_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
+/// The audit worker: one file at a time from the audit queue, after rips and remuxes
+/// (Rip > Remux > Audit). Each audit is the quick read, then the full decode while deep
+/// audit is on. A decode a rip or remux interrupts goes back to the front of the queue.
+pub fn audit_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
     let enabled = || cfg.read().unwrap_or_else(|e| e.into_inner()).deep_audit;
-    let busy = || lib.queue.snapshot().running().is_some() || arbiter.rip_active();
+    let busy = || remux_or_rip_busy(lib, arbiter);
+    let mut filled = Instant::now();
     while !shutting_down() {
+        let was = lib.deep_enabled();
         lib.set_deep_enabled(enabled());
-        let ffmpeg = super::deep::ffmpeg();
-        let d = super::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner()));
-        let target = match &ffmpeg {
-            Some(_) if enabled() && !busy() && !lib.indexing() => super::deep::next_target(
-                &lib.deep,
-                &deep_candidates(lib),
-                crate::server::util::epoch_secs(),
-            ),
-            _ => None,
-        };
-        let (Some(ffmpeg), Some((path, sig))) = (ffmpeg, target) else {
-            nap(Duration::from_secs(DEEP_IDLE_SECS));
+        // Turning deep audit on owes every file its decode; refill now, else each minute.
+        if (lib.deep_enabled() && !was) || filled.elapsed() >= Duration::from_secs(60) {
+            filled = Instant::now();
+            if !lib.indexing() {
+                let complete = !lib.snapshot().incomplete;
+                lib.fill_audits(&lib.mkv_files(), complete);
+            }
+        }
+        if busy() {
+            nap(Duration::from_secs(2));
+            continue;
+        }
+        let Some(path) = lib.audits.next() else {
+            nap(Duration::from_secs(2));
             continue;
         };
-        tracing::info!(file = %path.display(), "deep audit: decoding");
-        lib.touch_index();
-        let stop = || shutting_down() || !enabled() || busy();
-        let err_file = lib.log_dir.join("deep-audit.stderr");
-        let _ = std::fs::create_dir_all(&lib.log_dir);
-        super::deep::audit_one(&lib.deep, &ffmpeg, &path, sig, &d.library, &err_file, &stop);
+        let library = super::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner())).library;
+        let stop = || {
+            shutting_down() || !enabled() || busy() || lib.audits.paused() || lib.audits.cancelled()
+        };
+        audit_one(lib, &path, &library, enabled(), &stop);
         lib.touch_index();
     }
 }
 
-const DEEP_IDLE_SECS: u64 = 30;
+// A remux running, or queued and not paused, goes before an audit; so does any rip.
+fn remux_or_rip_busy(lib: &Library, arbiter: &Arbiter) -> bool {
+    let q = lib.queue.snapshot();
+    arbiter.rip_active() || q.running().is_some() || (!q.paused && q.count(JobState::Queued) > 0)
+}
 
-// The MKVs the fast audit has read, at the size and mtime it read them.
-fn deep_candidates(lib: &Library) -> Vec<(std::path::PathBuf, super::probe::FileSig)> {
-    let snap = lib.snapshot();
-    snap.rows
+// Audit one file: the quick read, then (deep on) the full decode.
+pub(crate) fn audit_one(
+    lib: &Library,
+    path: &Path,
+    library: &Path,
+    deep_on: bool,
+    stop: &dyn Fn() -> bool,
+) {
+    let Some(sig) = super::probe::FileSig::stat(path) else {
+        return;
+    };
+    let title = lib
+        .snapshot()
+        .rows
         .iter()
-        .filter_map(|r| r.mkv.as_ref())
-        .filter_map(|m| {
-            let sig = *snap.sigs.get(m)?;
-            lib.probes.audit(m, sig).map(|_| (m.clone(), sig))
-        })
-        .collect()
+        .find(|r| r.mkv.as_deref() == Some(path))
+        .map(|r| r.title.clone())
+        .unwrap_or_else(|| super::index::mkv_title(library, path));
+    lib.audits.start(path, title);
+    lib.touch_index();
+    let now = crate::server::util::epoch_secs;
+    match super::probe::audit_fast(path) {
+        Some(report) => {
+            let duration = report.duration_secs;
+            lib.audits.record_fast(path, sig, report, now());
+            let ffmpeg = super::deep::ffmpeg();
+            if let Some(ffmpeg) =
+                ffmpeg.filter(|_| deep_on && lib.audits.deep_due_for(path, sig, now()))
+            {
+                tracing::info!(file = %path.display(), "deep audit: decoding");
+                let _ = std::fs::create_dir_all(&lib.log_dir);
+                let err_file = lib.log_dir.join("deep-audit.stderr");
+                let progress =
+                    |stage: &'static str, secs: f64| lib.audits.progress(stage, secs, duration);
+                match super::deep::full_decode(&ffmpeg, path, library, &err_file, stop, &progress) {
+                    Some(v) => lib.audits.record_deep(path, sig, v, now()),
+                    None if !lib.audits.cancelled() => lib.audits.requeue_front(path.to_path_buf()),
+                    None => {}
+                }
+            }
+        }
+        // The storage failed, not the file: try again after the queue.
+        None => {
+            lib.audits.finish();
+            lib.audits.enqueue([path.to_path_buf()]);
+            return;
+        }
+    }
+    lib.audits.finish();
 }
 
 #[cfg(test)]

@@ -456,11 +456,11 @@ export function openDeviceTerminal(dev, debugOn) {
 // ── The page ───────────────────────────────────────────────────────────────
 
 export default {
-  title: 'Ripper',
+  title: 'Drives',
   mount(view, ctx) {
     view.innerHTML = `<div id="rp">
       <div class="page-head">
-        <div><h1>Ripper</h1><p class="lede" id="lede">Waiting for the drives…</p></div>
+        <div><h1>Drives</h1><p class="lede" id="lede">Waiting for the drives…</p></div>
         <div class="actions"><button class="btn btn-ghost" id="syslog">${ICON.term} System log</button></div>
       </div>
       <div class="drives" id="drives"></div>

@@ -8,7 +8,7 @@ import { live, connect, subscribe, publishState } from './bus.js';
 const ROUTES = {
   '/library': () => import('./library.js'),
   '/remux': () => import('./remux.js'),
-  '/ripper': () => import('./ripper.js'),
+  '/drives': () => import('./ripper.js'),
   '/settings': () => import('./settings.js'),
   '/system': () => import('./system.js'),
 };
@@ -19,7 +19,11 @@ const DEFAULT_ROUTE = '/library';
 let current = null;
 let renderToken = 0;
 
+// Old bookmarks: the Drives page was called Ripper.
+const RENAMED = { '/ripper': '/drives' };
+
 function routeOf(path) {
+  path = RENAMED[path] || path;
   return ROUTES[path] ? path : DEFAULT_ROUTE;
 }
 
@@ -84,7 +88,7 @@ $('#theme').addEventListener('click', () => {
 paintThemeButton();
 
 // ── Activity: a small badge on the tab that owns the work ──────────────────
-// Ripper shows how many drives are busy; Remux a dot while a remux runs. Each
+// Drives shows how many drives are busy; Remux a dot while a remux runs. Each
 // page shows its own jobs' progress; nothing picks one job for the header.
 
 function badge(href, text, label) {
@@ -103,7 +107,7 @@ function badge(href, text, label) {
 const RIPPING = ['ripping', 'scanning', 'detecting'];
 subscribe('state', (s) => {
   const busy = Object.keys(s).filter(k => !k.startsWith('_') && RIPPING.includes(s[k].status)).length;
-  badge('/ripper', busy ? String(busy) : '', busy + (busy === 1 ? ' drive' : ' drives') + ' busy');
+  badge('/drives', busy ? String(busy) : '', busy + (busy === 1 ? ' drive' : ' drives') + ' busy');
 });
 const paintRemux = (running) => badge('/remux', running ? '●' : '', running ? 'Remuxing ' + running.title : '');
 subscribe('library', (f) => paintRemux(f.running));

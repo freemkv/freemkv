@@ -34,12 +34,13 @@ export function refresh() {
 export function refreshNow() { clearTimeout(timer); timer = null; return fetchNow(); }
 
 subscribe('library', (f) => {
-  const g = f.queue_generation + ':' + f.index_generation;
+  const g = f.queue_generation + ':' + f.index_generation + ':' + f.audit_generation;
   if (g !== gens) { gens = g; if (subs.size) refresh(); }
   if (data) {
     data.live = f.running;
     data.indexing = f.indexing;
     if (data.queue) { data.queue.paused = f.paused; data.queue.queued = f.queued; }
+    if (f.audits) data.audits = f.audits;
     subs.forEach(fn => fn(data, null, true));
   }
 });

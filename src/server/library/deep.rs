@@ -6,17 +6,13 @@
 //! (packet integrity for the whole file, Dolby Vision layer and subtitles included),
 //! then decode the base video and every audio track. A decode that eats memory without
 //! bound is killed and judged; a timeout, a signal or a dropped share is inconclusive
-//! and retried with backoff. Verdicts persist in `deep-audit.json`.
+//! and retried with backoff. [`super::audit`] queues the files and keeps the verdicts.
 
-use super::probe::FileSig;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const FILE: &str = "deep-audit.json";
 // A normal decode stays near 1 GB; some HEVC streams grow without bound (one took a host down).
 const RSS_CAP_MIB: u64 = 3072;
 const TIMEOUT: Duration = Duration::from_secs(3 * 3600);
@@ -46,156 +42,8 @@ pub struct Verdict {
     pub scanned: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EntryState {
-    Done,
-    Error,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Entry {
-    size: u64,
-    mtime_ns: i128,
-    state: EntryState,
-    verdict: Verdict,
-    attempts: u32,
-    last_try: u64,
-}
-
-impl Entry {
-    fn matches(&self, sig: FileSig) -> bool {
-        self.size == sig.size && self.mtime_ns == sig.mtime_ns
-    }
-}
-
-/// A row's deep-audit state as the Library shows it.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct DeepView {
-    /// `clean` | `corrupt` | `scanning` | `aborted` | `pending`.
-    pub state: &'static str,
-    pub verdict: Option<Verdict>,
-}
-
-/// The persisted verdicts and the file being decoded now.
-pub struct Store {
-    path: PathBuf,
-    entries: Mutex<HashMap<PathBuf, Entry>>,
-    scanning: Mutex<Option<PathBuf>>,
-}
-
-impl Store {
-    pub fn open(config_dir: &Path) -> Self {
-        let path = config_dir.join(FILE);
-        let entries = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        Self {
-            path,
-            entries: Mutex::new(entries),
-            scanning: Mutex::new(None),
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Entry>> {
-        self.entries.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn save(&self, entries: &HashMap<PathBuf, Entry>) {
-        let Ok(json) = serde_json::to_vec(entries) else {
-            return;
-        };
-        let tmp = self.path.with_extension("json.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, &self.path);
-        }
-    }
-
-    /// What the Library shows for `path` at `sig`; `None` when deep audit is off.
-    pub fn view(&self, path: &Path, sig: FileSig, enabled: bool) -> Option<DeepView> {
-        let scanning = self.scanning.lock().unwrap_or_else(|e| e.into_inner());
-        if scanning.as_deref() == Some(path) {
-            return Some(DeepView {
-                state: "scanning",
-                verdict: None,
-            });
-        }
-        drop(scanning);
-        let e = self.lock().get(path).filter(|e| e.matches(sig)).cloned();
-        match e {
-            Some(e) if e.state == EntryState::Done => Some(DeepView {
-                state: if e.verdict.clean { "clean" } else { "corrupt" },
-                verdict: Some(e.verdict),
-            }),
-            _ if !enabled => None,
-            Some(e) => Some(DeepView {
-                state: "aborted",
-                verdict: Some(e.verdict),
-            }),
-            None => Some(DeepView {
-                state: "pending",
-                verdict: None,
-            }),
-        }
-    }
-
-    /// Whether `path` at `sig` is due a decode at `now`.
-    fn due(&self, path: &Path, sig: FileSig, now: u64) -> bool {
-        match self.lock().get(path) {
-            None => true,
-            Some(e) if !e.matches(sig) => true,
-            Some(e) if e.state == EntryState::Done => false,
-            Some(e) => retry_due(e.attempts, e.last_try, now),
-        }
-    }
-
-    /// Forget the verdicts of `paths`, so they decode again. Returns how many.
-    pub fn forget(&self, paths: &[PathBuf]) -> usize {
-        let mut e = self.lock();
-        let n = paths.iter().filter(|p| e.remove(*p).is_some()).count();
-        if n > 0 {
-            self.save(&e);
-        }
-        n
-    }
-
-    // Record a finished run, unless the file changed under it.
-    fn record(&self, path: &Path, sig: FileSig, v: Verdict, now: u64) {
-        if FileSig::stat(path) != Some(sig) {
-            return;
-        }
-        let mut e = self.lock();
-        let attempts = match e.get(path) {
-            Some(prev) if prev.matches(sig) && prev.state == EntryState::Error => prev.attempts,
-            _ => 0,
-        };
-        let entry = if v.completed {
-            Entry {
-                size: sig.size,
-                mtime_ns: sig.mtime_ns,
-                state: EntryState::Done,
-                verdict: v,
-                attempts: 0,
-                last_try: now,
-            }
-        } else {
-            Entry {
-                size: sig.size,
-                mtime_ns: sig.mtime_ns,
-                state: EntryState::Error,
-                verdict: v,
-                attempts: attempts + 1,
-                last_try: now,
-            }
-        };
-        e.insert(path.to_path_buf(), entry);
-        self.save(&e);
-    }
-}
-
 // A bailed decode retries after 10 min, doubling per attempt, capped at 6 h.
-fn retry_due(attempts: u32, last_try: u64, now: u64) -> bool {
+pub(super) fn retry_due(attempts: u32, last_try: u64, now: u64) -> bool {
     if attempts == 0 {
         return true;
     }
@@ -368,8 +216,14 @@ fn rss_mib(_pid: u32) -> u64 {
 }
 
 /// Run `argv` at low CPU and IO priority, stderr to `err_file`, under the memory cap and
-/// timeout; `stop` ends it early (setting off, a remux or rip wants the disks).
-pub fn run_monitored(argv: &[&str], err_file: &Path, stop: &dyn Fn() -> bool) -> Run {
+/// timeout; `stop` ends it early (setting off, a remux or rip wants the disks). Each
+/// `out_time_us=` line ffmpeg's `-progress pipe:1` writes reaches `on_secs`.
+pub fn run_monitored(
+    argv: &[&str],
+    err_file: &Path,
+    stop: &dyn Fn() -> bool,
+    on_secs: &(dyn Fn(f64) + Sync),
+) -> Run {
     let mut run = Run::default();
     let Ok(err) = std::fs::File::create(err_file) else {
         run.rc = Some(-1);
@@ -379,7 +233,7 @@ pub fn run_monitored(argv: &[&str], err_file: &Path, stop: &dyn Fn() -> bool) ->
     let mut cmd = std::process::Command::new(argv[0]);
     cmd.args(&argv[1..])
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(err);
     #[cfg(unix)]
     {
@@ -403,6 +257,34 @@ pub fn run_monitored(argv: &[&str], err_file: &Path, stop: &dyn Fn() -> bool) ->
         }
     };
     let started = Instant::now();
+    let stdout = child.stdout.take();
+    std::thread::scope(|scope| {
+        if let Some(out) = stdout {
+            scope.spawn(move || {
+                for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                    if let Some(us) = line
+                        .strip_prefix("out_time_us=")
+                        .and_then(|v| v.trim().parse::<f64>().ok())
+                    {
+                        on_secs(us / 1e6);
+                    }
+                }
+            });
+        }
+        watch(&mut child, &mut run, started, stop);
+    });
+    read_stderr(err_file, &mut run);
+    let _ = std::fs::remove_file(err_file);
+    run
+}
+
+// Poll the child until it exits or must be killed, recording why.
+fn watch(
+    child: &mut std::process::Child,
+    run: &mut Run,
+    started: Instant,
+    stop: &dyn Fn() -> bool,
+) {
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
@@ -435,9 +317,6 @@ pub fn run_monitored(argv: &[&str], err_file: &Path, stop: &dyn Fn() -> bool) ->
     if run.runaway || run.timed_out || run.cancelled {
         run.signal = None;
     }
-    read_stderr(err_file, &mut run);
-    let _ = std::fs::remove_file(err_file);
-    run
 }
 
 // Count desync lines across all of stderr; keep only its last 2 MB as lines.
@@ -464,18 +343,30 @@ fn read_stderr(path: &Path, run: &mut Run) {
 }
 
 /// The full audit of one MKV: demux every stream, then decode base video and audio.
-/// `None` when stopped early. A failure while the file or library is unreachable is
-/// the share, not the file.
+/// `None` when stopped early. `progress` hears the stage (`reading`, `decoding`) and how
+/// many seconds of the movie it has reached. A failure while the file or library is
+/// unreachable is the share, not the file.
 pub fn full_decode(
     ffmpeg: &Path,
     mkv: &Path,
     library: &Path,
     err_file: &Path,
     stop: &dyn Fn() -> bool,
+    progress: &(dyn Fn(&'static str, f64) + Sync),
 ) -> Option<Verdict> {
     let bin = ffmpeg.to_string_lossy();
     let file = mkv.to_string_lossy();
-    let head = [&*bin, "-nostdin", "-v", "error", "-i", &*file];
+    let head = [
+        &*bin,
+        "-nostdin",
+        "-nostats",
+        "-progress",
+        "pipe:1",
+        "-v",
+        "error",
+        "-i",
+        &*file,
+    ];
     let guard = |v: Verdict| {
         if !v.clean && (std::fs::metadata(mkv).is_err() || std::fs::read_dir(library).is_err()) {
             return Verdict {
@@ -492,7 +383,7 @@ pub fn full_decode(
         .copied()
         .chain(["-map", "0", "-c", "copy", "-f", "null", "-"])
         .collect();
-    let run = run_monitored(&demux, err_file, stop);
+    let run = run_monitored(&demux, err_file, stop, &|t| progress("reading", t));
     if run.cancelled {
         return None;
     }
@@ -506,7 +397,7 @@ pub fn full_decode(
         .copied()
         .chain(["-map", "0:v:0", "-map", "0:a?", "-f", "null", "-"])
         .collect();
-    let mut run = run_monitored(&decode, err_file, stop);
+    let mut run = run_monitored(&decode, err_file, stop, &|t| progress("decoding", t));
     if run.cancelled {
         return None;
     }
@@ -525,42 +416,6 @@ pub fn ffmpeg() -> Option<PathBuf> {
         .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
         .map(|d| d.join("ffmpeg"))
         .find(|p| p.is_file())
-}
-
-/// Pick the next file to decode: oldest first, audited fast, not already judged.
-pub fn next_target(
-    store: &Store,
-    files: &[(PathBuf, FileSig)],
-    now: u64,
-) -> Option<(PathBuf, FileSig)> {
-    let mut due: Vec<&(PathBuf, FileSig)> = files
-        .iter()
-        .filter(|(p, s)| store.due(p, *s, now))
-        .collect();
-    due.sort_by_key(|(_, s)| s.mtime_ns);
-    due.first().map(|(p, s)| (p.clone(), *s))
-}
-
-/// Decode `path` and record the verdict; false when stopped early.
-pub fn audit_one(
-    store: &Store,
-    ffmpeg: &Path,
-    path: &Path,
-    sig: FileSig,
-    library: &Path,
-    err_file: &Path,
-    stop: &dyn Fn() -> bool,
-) -> bool {
-    *store.scanning.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.to_path_buf());
-    let v = full_decode(ffmpeg, path, library, err_file, stop);
-    *store.scanning.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    match v {
-        Some(v) => {
-            store.record(path, sig, v, crate::server::util::epoch_secs());
-            true
-        }
-        None => false,
-    }
 }
 
 #[cfg(test)]
@@ -647,48 +502,6 @@ mod tests {
         assert!(retry_due(30, 0, RETRY_CAP_SECS));
     }
 
-    fn sig_of(p: &Path) -> FileSig {
-        FileSig::stat(p).unwrap()
-    }
-
-    #[test]
-    fn verdicts_persist_and_follow_the_file() {
-        let t = tempfile::tempdir().unwrap();
-        let mkv = t.path().join("A.mkv");
-        std::fs::write(&mkv, b"one").unwrap();
-        let sig = sig_of(&mkv);
-        let store = Store::open(t.path());
-        assert_eq!(store.view(&mkv, sig, true).unwrap().state, "pending");
-        assert!(
-            store.view(&mkv, sig, false).is_none(),
-            "off shows nothing new"
-        );
-        store.record(&mkv, sig, classify(&run(0, &[]), "decode", 1), 1);
-        let reopened = Store::open(t.path());
-        assert_eq!(reopened.view(&mkv, sig, false).unwrap().state, "clean");
-        assert!(!reopened.due(&mkv, sig, 2));
-        std::fs::write(&mkv, b"changed").unwrap();
-        let moved = sig_of(&mkv);
-        assert!(reopened.due(&mkv, moved, 2), "a changed file decodes again");
-        assert_eq!(reopened.forget(std::slice::from_ref(&mkv)), 1);
-        assert!(reopened.due(&mkv, sig, 2));
-    }
-
-    #[test]
-    fn an_inconclusive_run_backs_off() {
-        let t = tempfile::tempdir().unwrap();
-        let mkv = t.path().join("A.mkv");
-        std::fs::write(&mkv, b"x").unwrap();
-        let sig = sig_of(&mkv);
-        let store = Store::open(t.path());
-        let mut r = run(0, &[]);
-        r.timed_out = true;
-        store.record(&mkv, sig, classify(&r, "decode", 1), 1000);
-        assert_eq!(store.view(&mkv, sig, true).unwrap().state, "aborted");
-        assert!(!store.due(&mkv, sig, 1000 + 599));
-        assert!(store.due(&mkv, sig, 1000 + 600));
-    }
-
     #[cfg(unix)]
     #[test]
     fn the_runner_keeps_stderr_and_counts_floods() {
@@ -702,10 +515,19 @@ mod tests {
             ],
             &err,
             &|| false,
+            &|_| {},
         );
         assert_eq!((r.rc, r.flood, r.lines.len()), (Some(3), 1, 2));
         assert!(!err.exists());
-        let stopped = run_monitored(&["sh", "-c", "sleep 30"], &err, &|| true);
+        let stopped = run_monitored(&["sh", "-c", "sleep 30"], &err, &|| true, &|_| {});
         assert!(stopped.cancelled);
+        let seen = std::sync::Mutex::new(Vec::new());
+        run_monitored(
+            &["sh", "-c", "echo out_time_us=2500000; echo progress=end"],
+            &err,
+            &|| false,
+            &|t| seen.lock().unwrap().push(t),
+        );
+        assert_eq!(*seen.lock().unwrap(), [2.5]);
     }
 }

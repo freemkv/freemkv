@@ -77,7 +77,7 @@ export function deepText(r) {
 export function auditState(r) {
   if (!r.mkv) return ['dot-idle', '', 'No MKV', 9];
   const a = r.audit;
-  if (!a) return ['dot-warn', '●', 'Not checked yet', 3];
+  if (!a) return ['dot-warn', '●', 'Not audited yet', 3];
   const deep = deepText(r);
   const tip = (t) => deep ? t + ' · ' + deep : t;
   if (!a.ok) return ['dot-bad', '●', tip(a.issues.map(issueText).join('; ')), 5];
@@ -105,7 +105,7 @@ export function openDetails(r, ctx = {}) {
   const a = r.audit;
   const [cls] = auditState(r);
   const verdict = !r.mkv ? '<span class="badge badge-muted">no MKV</span>'
-    : !a ? '<span class="badge badge-warn">not checked yet</span>'
+    : !a ? '<span class="badge badge-warn">not audited yet</span>'
     : cls === 'dot-bad' ? '<span class="badge badge-bad">issue</span>'
     : cls === 'dot-warn' ? '<span class="badge badge-warn">checks out, with a note</span>'
     : '<span class="badge badge-ok">✓ checks out</span>';

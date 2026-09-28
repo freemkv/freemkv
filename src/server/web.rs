@@ -114,6 +114,7 @@ const PAGES: &[&str] = &[
     "/index.html",
     "/library",
     "/remux",
+    "/drives",
     "/ripper",
     "/settings",
     "/system",

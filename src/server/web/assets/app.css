@@ -52,7 +52,7 @@ a:hover { color: var(--teal-darker); }
 .icon-btn:hover { color: var(--ink); border-color: var(--muted); }
 .icon-btn svg { width: 1.05rem; height: 1.05rem; }
 
-/* Activity badge on a nav tab: busy drives on Ripper, a running remux on Remux. */
+/* Activity badge on a nav tab: busy drives on Drives, a running remux on Remux. */
 .nav-links a { position: relative; }
 .nav-badge.dot { min-width: 0.55rem; width: 0.55rem; height: 0.55rem; padding: 0; vertical-align: 0.2em; }
 .nav-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 1.1rem; height: 1.1rem; padding: 0 0.3rem; margin-left: 0.35rem; border-radius: 999px; background: var(--teal); color: #fff; font: 700 0.68rem var(--font); vertical-align: 0.1em; animation: pulse 1.8s ease-in-out infinite; }

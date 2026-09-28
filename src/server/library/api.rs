@@ -209,6 +209,20 @@ pub fn handle(
             let n = lib.queue.clear_finished();
             json_response(request, 200, &json!({"ok": true, "cleared": n}).to_string());
         }
+        (_, true, "/api/library/audit/pause") | (_, true, "/api/library/audit/resume") => {
+            lib.audits.set_paused(path.ends_with("/pause"));
+            json_response(request, 200, &audit_json(&lib).to_string());
+        }
+        (_, true, "/api/library/audit/stop-all") => {
+            let running = lib.audits.status().running.is_some();
+            let removed = lib.audits.stop_all();
+            lib.touch_index();
+            json_response(
+                request,
+                200,
+                &json!({"ok": true, "stopped": running, "removed": removed}).to_string(),
+            );
+        }
         (_, true, "/api/library/queue/pause") | (_, true, "/api/library/queue/resume") => {
             lib.queue.set_paused(path.ends_with("/pause"));
             json_response(request, 200, &queue_json(&lib).to_string());
@@ -277,6 +291,10 @@ fn queue_json(lib: &Library) -> serde_json::Value {
     })
 }
 
+fn audit_json(lib: &Library) -> serde_json::Value {
+    json!(lib.audits.status())
+}
+
 /// The body of `GET /api/library`. Reads memory only.
 pub fn library_json(lib: &Library, cfg: &Config) -> String {
     let d = dirs(cfg);
@@ -299,6 +317,8 @@ pub fn library_json(lib: &Library, cfg: &Config) -> String {
         "rows": listing.rows,
         "queue": queue_json(lib),
         "live": lib.running(),
+        "audits": audit_json(lib),
+        "deep_audit": lib.deep_enabled(),
     })
     .to_string()
 }
@@ -338,7 +358,7 @@ fn log_tail(lib: &Library, title: &str) -> String {
 /// What an `/events` client has already been sent.
 #[derive(Default)]
 pub struct SseCursor {
-    generation: (u64, u64, u64),
+    generation: (u64, u64, u64, u64, u64),
     seq: u64,
     started: bool,
 }
@@ -353,7 +373,13 @@ pub fn sse_frame(cursor: &mut SseCursor) -> Option<String> {
         cursor.seq = lib.last_seq();
     }
     let (q, live) = lib.generation();
-    let generation = (q, live, lib.index_generation());
+    let generation = (
+        q,
+        live,
+        lib.index_generation(),
+        lib.audits.generation(),
+        lib.audits.progress_generation(),
+    );
     if generation == cursor.generation {
         return None;
     }
@@ -366,6 +392,8 @@ pub fn sse_frame(cursor: &mut SseCursor) -> Option<String> {
     let body = json!({
         "queue_generation": q,
         "index_generation": generation.2,
+        "audit_generation": generation.3,
+        "audits": audit_json(&lib),
         "indexing": lib.indexing(),
         "running": lib.running(),
         "job_title": lib.job_title(),
