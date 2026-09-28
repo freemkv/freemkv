@@ -1766,7 +1766,9 @@ fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
         // stream_selection_for. The Session (live-drive) arm gets its own
         // per-title options from title_session_mux_opts.
         selection: libfreemkv::StreamSelection::default(),
-        send_deadline: Some(std::time::Duration::from_secs(60)),
+        // Stop design v5 T27: "retired in freemkv and the engine"; a halt-aware send only,
+        // so progressing flush backpressure never ends a mux, and Stop is the bound (GUI = CLI).
+        send_deadline: None,
     }
 }
 
@@ -5190,9 +5192,10 @@ mod routing_tests {
         assert!(o.selection.is_all());
         r.raw = false;
         assert!(!mux_opts(&r).raw);
-        // GUI = CLI: every CLI `MuxOptions` literal names no deadline either.
+        // GUI = CLI: every CLI `MuxOptions` literal names no deadline either (the tests'
+        // `libfreemkv::MuxOptions` literals are not the CLI's).
         let cli = include_str!("pipe.rs");
-        let literals = cli.matches("MuxOptions {").count();
+        let literals = cli.matches("= MuxOptions {").count();
         assert!(literals >= 2, "the CLI's mux options moved");
         assert_eq!(cli.matches("send_deadline: None,").count(), literals);
     }
