@@ -925,7 +925,12 @@ MAX_PLAN_ARTIFACT = 16 << 20
 PLAN_BINDING = ('schema', 'fingerprint', 'inputs', 'revisions', 'lock_sha256', 'run_id')
 
 
-def plan_of_run(run_id, request, download):
+# GitHub REST API, "List workflow run artifacts" (`GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts`):
+#   "Lists artifacts for a workflow run."
+# artifact schema: "workflow_run": {"type": "object", "nullable": true, "properties": {"id": ...,
+#   "repository_id": ..., "head_repository_id": ..., "head_branch": ..., "head_sha": ...}}
+# Every artifact used is checked to say it belongs to this run id at this head sha.
+def plan_of_run(run_id, head_sha, request, download):
     """The evidence.json of run `run_id`'s own media-plan artifact(s). Only that run could upload
     them, so they say what it tested, whoever wrote the tag. Raises ValueError if none is readable."""
     import io
@@ -935,6 +940,10 @@ def plan_of_run(run_id, request, download):
     for art in listing.get('artifacts') or []:
         if art.get('name') != 'media-plan' or art.get('expired'):
             continue
+        origin = art.get('workflow_run') or {}
+        if origin.get('id') != run_id or origin.get('head_sha') != head_sha:
+            raise ValueError(f'media-plan artifact {art.get("id")} belongs to run {origin.get("id")} at '
+                             f'{str(origin.get("head_sha"))[:12]}, not run {run_id} at {str(head_sha)[:12]}')
         if not 0 < int(art.get('size_in_bytes') or 0) <= MAX_PLAN_ARTIFACT:
             raise ValueError(f'media-plan artifact {art.get("id")} has an implausible size')
         with zipfile.ZipFile(io.BytesIO(download(f'repos/{OWNER}/freemkv/actions/artifacts/{int(art["id"])}/zip'))) as z:
@@ -994,9 +1003,40 @@ def check_tag_provenance(tag, name, run):
                          f'({lo.isoformat()} .. {hi.isoformat()})')
 
 
-def trusted_run(run, run_id, sha, finished=True):
-    """Raise ValueError unless `run` is a freemkv qa.yml run on the qa branch at `sha`; `finished`
-    also requires it to have completed successfully (an evidence consumer; record runs inside it)."""
+# GitHub REST API, "Get a reference": `GET /repos/{owner}/{repo}/git/ref/{ref}` names a ref
+# unambiguously as `heads/<branch>`. By contrast, a workflow run's `head_branch` is only a name:
+# the workflow-run schema is `"head_branch": {"type": "string", "nullable": true, "example":
+# "master"}`, and a run on a tag reports the tag there (freemkv release.yml run 36272420399,
+# event push on tag v1.7.7, has head_branch "v1.7.7"). A tag named `qa` therefore yields
+# head_branch "qa" (review 2, item 1). The schema has no `ref` or `ref_type` field, so the run's
+# ref cannot be read back; what is checked instead is that the qa BRANCH contains head_sha.
+#
+# GitHub REST API, "Compare two commits" (`GET /repos/{owner}/{repo}/compare/{basehead}`):
+#   "You can compare refs (branches or tags) and commit SHAs in the same repository"
+#   "This endpoint is equivalent to running the `git log BASE..HEAD` command"
+#   commit-comparison schema: "status": {"type": "string",
+#                                        "enum": ["diverged", "ahead", "behind", "identical"]}
+# With BASE = the qa branch tip (a sha, so no branch/tag ambiguity) and HEAD = head_sha,
+# "identical" or "behind" (and ahead_by == 0: `git log BASE..HEAD` is empty) means head_sha is
+# the qa tip or one of its ancestors.
+QA_CONTAINS = ('identical', 'behind')
+
+
+def on_qa_branch(sha, request):
+    """Raise ValueError unless refs/heads/qa of freemkv/freemkv contains commit `sha`."""
+    tip = request(f'repos/{OWNER}/freemkv/git/ref/heads/qa')
+    if tip.get('ref') != 'refs/heads/qa' or not SHA.fullmatch(str((tip.get('object') or {}).get('sha'))):
+        raise ValueError('could not read refs/heads/qa')
+    cmp = request(f'repos/{OWNER}/freemkv/compare/{tip["object"]["sha"]}...{sha}')
+    if cmp.get('status') not in QA_CONTAINS or cmp.get('ahead_by') != 0:
+        raise ValueError(f'{str(sha)[:12]} is not on the qa branch (compare status {cmp.get("status")!r}, '
+                         f'ahead_by {cmp.get("ahead_by")!r}): a run on a tag named qa proves nothing')
+
+
+def trusted_run(run, run_id, sha, request, finished=True):
+    """Raise ValueError unless `run` is a freemkv qa.yml run whose commit is on the qa BRANCH;
+    `finished` also requires it to have completed successfully (an evidence consumer; record runs
+    inside it). `head_branch == 'qa'` alone is only a name: see on_qa_branch()."""
     if not (isinstance(run, dict) and run.get('id') == run_id
             and run.get('path', '').split('@')[0] == '.github/workflows/qa.yml'
             and run.get('event') in ('push', 'workflow_dispatch')
@@ -1005,6 +1045,7 @@ def trusted_run(run, run_id, sha, finished=True):
             and (run.get('head_repository') or {}).get('full_name') == f'{OWNER}/freemkv'
             and run.get('head_sha') == sha):
         raise ValueError('run is not a freemkv qa.yml run on the qa branch at the evidence sha')
+    on_qa_branch(sha, request)
     if finished and (run.get('status') != 'completed' or run.get('conclusion') != 'success'):
         raise ValueError(f'run {run_id} is {run.get("status")}/{run.get("conclusion")}, not a successful run')
 
@@ -1056,7 +1097,8 @@ LEG_TARGET = {'linux': 'x86_64-unknown-linux-musl', 'windows': 'x86_64-pc-window
               'linux-perf': 'x86_64-unknown-linux-musl', 'windows-perf': 'x86_64-pc-windows-msvc'}
 
 
-def check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, perf_check=None, finished=True):
+def check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, request, perf_check=None,
+                   finished=True):
     """Raise ValueError unless this evidence proves F (I-2). Returns warnings. `finished=False` is
     record's self-check from inside the still-running run."""
     if len(evidence_bytes) > MAX_EVIDENCE:
@@ -1074,7 +1116,7 @@ def check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, per
     revisions = ev.get('revisions')
     if not valid_revisions(revisions) or ev.get('run_id') != run_id:
         raise ValueError('revisions or run id malformed')
-    trusted_run(run, run_id, revisions['freemkv'], finished=finished)
+    trusted_run(run, run_id, revisions['freemkv'], request, finished=finished)
     for name in required_jobs(policy):
         if (job_named(jobs, name) or {}).get('conclusion') != 'success':
             raise ValueError(f'job {name!r} is not success')
@@ -1139,8 +1181,8 @@ def find_evidence(f, policy, request=gh_api, perf_check=None, log=print, downloa
             jobs = request(f'repos/{OWNER}/freemkv/actions/runs/{run_id}/jobs?filter=latest&per_page=100')['jobs']
             # Who wrote the tag, and for which real run: a tag anyone else pushed is not evidence.
             check_tag_provenance(tag, f'media-evidence/{f}/{run_id}', run)
-            ev, warnings = check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, perf_check)
-            bind_to_plan(ev, plan_of_run(run_id, request, download))
+            ev, warnings = check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, request, perf_check)
+            bind_to_plan(ev, plan_of_run(run_id, run['head_sha'], request, download))
             return {'run_id': run_id, 'evidence': ev, 'warnings': warnings,
                     'url': f'https://github.com/{OWNER}/freemkv/actions/runs/{run_id}'}
         except Exception as exc:  # noqa: BLE001 — one bad tag never blocks a newer or older good one
@@ -1166,15 +1208,15 @@ def decide(proven, run_media=False, skip=False, skip_reason='', canary_ok=True, 
     return 'run', True, 'rip-affecting inputs lack green evidence'
 
 
-def canary(policy, result, ref_name):
+def canary(policy, result, ref):
     """D2 / decision 15: (ok, why, notice) from tests/media_canary.py's result for this run.
     It runs where the gate runs (qa); elsewhere it is not asked. On qa, a missing, malformed or
     failed result, or one that skipped a configured probe, fails closed."""
     probes = [p['fixture'] for p in policy['canary'].get('probes', [])]
     if not probes:
         return True, '', None
-    if ref_name != 'qa':
-        return True, '', f'the key-service canary runs on qa only (this run is on {ref_name})'
+    if ref != 'refs/heads/qa':
+        return True, '', f'the key-service canary runs on the qa branch only (this run is on {ref})'
     if not isinstance(result, dict):
         return False, 'the canary did not run or wrote no result', None
     got = {p.get('fixture'): p for p in result.get('probes') or [] if isinstance(p, dict)}
@@ -1249,7 +1291,7 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, canary_
     if not policy['canary'].get('probes'):
         warnings.append('the key-service canary has no probes configured (policy canary.probes); '
                         'decision 15 is not enforced until one is added')
-    canary_ok, canary_why, note = canary(policy, canary_result, env.get('GITHUB_REF_NAME', ''))
+    canary_ok, canary_why, note = canary(policy, canary_result, env.get('GITHUB_REF', ''))
     if note:
         notices.append(note)
     proven = find_evidence(f, policy, request, perf_check, download=download) if canary_ok else None
@@ -1273,26 +1315,38 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, canary_
 
 # ── qa.yml wiring (§3.2): pin, externals, leg identity, record, verdict ────
 
-def pin(ref_name, sha, requested, request=gh_api):
-    """C for this run: the dispatched revisions (each reachable from the branch) or the sibling tips."""
-    if ref_name not in ('qa', 'dev'):
-        raise ValueError(f'the media gate runs on qa and dev only, not {ref_name!r}')
+BRANCH_REFS = {'refs/heads/qa': 'qa', 'refs/heads/dev': 'dev'}
+
+
+def pin(ref, sha, requested, request=gh_api):
+    """C for this run: the dispatched revisions (each on the branch) or the sibling branch tips.
+    `ref` is the full GITHUB_REF: a workflow dispatched on a TAG named qa has GITHUB_REF_NAME "qa"
+    too, and is refused here.
+
+    GitHub REST API, "Get a commit" (`GET /repos/{owner}/{repo}/commits/{ref}`), parameter ref:
+    "The commit reference. Can be a commit SHA, branch name (`heads/BRANCH_NAME`), or tag name
+    (`tags/TAG_NAME`)." So sibling tips are read as `heads/<branch>`, never a bare name that a tag
+    could shadow, and every comparison is between shas."""
+    if ref not in BRANCH_REFS:
+        raise ValueError(f'the media gate runs on the qa and dev branches only, not {ref!r}')
+    branch = BRANCH_REFS[ref]
+    tips = {}
+    for repo in SIBLINGS:
+        tips[repo] = request(f'repos/{OWNER}/{repo}/commits/heads/{branch}')['sha']
     if requested:
         revisions = json.loads(requested)
         if not valid_revisions(revisions) or revisions['freemkv'] != sha:
             raise ValueError('dispatched revisions are malformed or not this freemkv sha')
         for repo in SIBLINGS:
-            status = request(f'repos/{OWNER}/{repo}/compare/{revisions[repo]}...{ref_name}')['status']
+            status = request(f'repos/{OWNER}/{repo}/compare/{revisions[repo]}...{tips[repo]}')['status']
             if status not in ('ahead', 'identical'):
-                raise ValueError(f'{repo} {revisions[repo][:12]} is not on {ref_name} ({status})')
+                raise ValueError(f'{repo} {revisions[repo][:12]} is not on {branch} ({status})')
     else:
-        revisions = {'freemkv': sha}
-        for repo in SIBLINGS:
-            revisions[repo] = request(f'repos/{OWNER}/{repo}/commits/{ref_name}')['sha']
+        revisions = dict(tips, freemkv=sha)
         if not valid_revisions(revisions):
             raise ValueError('could not read every sibling tip')
     superseded = False
-    if ref_name == 'qa':
+    if branch == 'qa':
         superseded = request(f'repos/{OWNER}/freemkv/git/ref/heads/qa')['object']['sha'] != sha
     return revisions, superseded
 
@@ -1319,7 +1373,7 @@ def leg_labels(leg, run_id):
     return f'freemkv-media{"-perf" if perf else ""},{os_name},run-{run_id}'
 
 
-def launch_spec(policy, leg, run_id, ref_name, templates, aws=None, attempt=1):
+def launch_spec(policy, leg, run_id, ref, templates, aws=None, attempt=1):
     """Everything the launch step passes to run-instances for one leg, from the policy alone:
     - the functional template at its planned version (no separate perf templates exist);
     - perf differences as overrides: the perf instance type, no type fallback, the root volume;
@@ -1329,8 +1383,9 @@ def launch_spec(policy, leg, run_id, ref_name, templates, aws=None, attempt=1):
     - a registration-token parameter per run, attempt and leg (the roles' existing
       /freemkv-ci/runner-reg/* scope); the instance deletes it after reading.
     qa only: evidence is recorded only for qa runs, so a dev launch would prove nothing."""
-    if ref_name != 'qa':
-        raise ValueError(f'the media legs launch on qa only, not {ref_name!r} (evidence is recorded for qa runs only)')
+    if ref != 'refs/heads/qa':
+        raise ValueError(f'the media legs launch on the qa branch only, not {ref!r} '
+                         '(evidence is recorded for qa-branch runs only)')
     if leg not in legs(policy):
         raise ValueError(f'leg {leg!r} is not launched under this policy ({legs(policy)})')
     os_name, perf = leg.split('-')[0], leg.endswith('-perf')
@@ -1509,7 +1564,7 @@ def record(plan_dir, legs_dir, policy, env, request=gh_api, aws=aws_json, post=g
     ev['legs'] = legs_out
     evidence_bytes = json.dumps(ev, indent=1, sort_keys=True).encode()
     done = jobs + [{'name': 'record-media-evidence', 'conclusion': 'success'}]
-    check_evidence(ev['fingerprint'], run_id, evidence_bytes, lock, run, done, policy, finished=False)
+    check_evidence(ev['fingerprint'], run_id, evidence_bytes, lock, run, done, policy, request, finished=False)
     return write_evidence_tag(ev['fingerprint'], run_id, evidence_bytes, lock, post, request)
 
 
@@ -1593,7 +1648,7 @@ def main(argv=None):
             seal(args.plan_directory, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_SHA'])
             return 0
         if args.mode == 'pin':
-            revisions, superseded = pin(os.environ['GITHUB_REF_NAME'], os.environ['GITHUB_SHA'],
+            revisions, superseded = pin(os.environ['GITHUB_REF'], os.environ['GITHUB_SHA'],
                                         os.environ.get('REQUESTED', ''))
             checkout(ws, revisions)
             _write_outputs({'revisions': json.dumps(revisions, sort_keys=True),
@@ -1614,7 +1669,7 @@ def main(argv=None):
             print(json.dumps(rec, indent=1, sort_keys=True))
             return 0
         if args.mode == 'launch-spec':
-            spec = launch_spec(policy, args.leg, int(os.environ['GITHUB_RUN_ID']), os.environ['GITHUB_REF_NAME'],
+            spec = launch_spec(policy, args.leg, int(os.environ['GITHUB_RUN_ID']), os.environ['GITHUB_REF'],
                                json.loads(os.environ.get('TEMPLATES') or '{}'),
                                attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT') or 1))
             print(json.dumps(spec, sort_keys=True))

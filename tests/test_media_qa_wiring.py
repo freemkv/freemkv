@@ -176,7 +176,8 @@ class CanaryWiringTests(unittest.TestCase):
 
     def test_canary_step(self):
         step = next(s for s in self.plan['steps'] if s.get('name') == 'Key-service canary')
-        self.assertEqual(step['if'], "github.ref_name == 'qa'", 'where the gate runs, never on dev')
+        self.assertEqual(step['if'], "github.ref == 'refs/heads/qa'",
+                         'where the gate runs: the qa branch, never dev, never a tag named qa')
         self.assertTrue(step['continue-on-error'], 'a crash leaves no result, which the plan fails closed on')
         self.assertEqual(step['env']['FMKV_KEY_URL'], '${{ secrets.FMKV_KEY_URL }}')
         self.assertEqual(step['env']['FMKV_KEY_AUTH'], '${{ secrets.FMKV_KEY_AUTH }}')
@@ -215,6 +216,12 @@ class LaunchWiringTests(unittest.TestCase):
 
     def step(self, name):
         return next(s for s in self.launch['steps'] if s.get('name') == name)
+
+    def test_superseded_check_uses_the_branch_ref(self):
+        step = self.step('Still the newest candidate')
+        self.assertEqual(step['env']['REF'], '${{ github.ref }}')
+        self.assertIn('[ "$REF" = refs/heads/qa ]', step['run'])
+        self.assertIn('git/ref/heads/qa', step['run'])
 
     def test_legs_come_from_the_plan(self):
         self.assertIn('needs.plan-media.outputs.legs', self.launch['strategy']['matrix']['leg'])
@@ -266,7 +273,7 @@ class LaunchSpecTests(unittest.TestCase):
         self.assertEqual(mg.launch_templates(self.perf_policy()), mg.launch_templates(POLICY))
 
     def test_linux_spot_carries_the_policy_cap(self):
-        spec = mg.launch_spec(POLICY, 'linux', RUN_ID, 'qa', self.TEMPLATES, aws=None)
+        spec = mg.launch_spec(POLICY, 'linux', RUN_ID, 'refs/heads/qa', self.TEMPLATES, aws=None)
         self.assertEqual((spec['template'], spec['version']), ('freemkv-runner-linux', '7'))
         self.assertEqual([m['name'] for m in spec['markets']], ['spot'],
                          'the live Linux template carries Spot market options, so no On-Demand fallback')
@@ -294,13 +301,13 @@ class LaunchSpecTests(unittest.TestCase):
 
     def test_on_demand_passes_no_market_options(self):
         """Review FB4: '{}' did not clear the template's Spot options; On-Demand passes none."""
-        spec = mg.launch_spec(self.on_demand_policy(), 'linux', RUN_ID, 'qa', self.TEMPLATES,
+        spec = mg.launch_spec(self.on_demand_policy(), 'linux', RUN_ID, 'refs/heads/qa', self.TEMPLATES,
                               aws=self.template_aws(False))
         self.assertEqual(spec['markets'][1], {'name': 'on-demand', 'options': None})
 
     def test_on_demand_refuses_a_template_with_market_options(self):
         with self.assertRaisesRegex(ValueError, 'InstanceMarketOptions'):
-            mg.launch_spec(self.on_demand_policy(), 'linux', RUN_ID, 'qa', self.TEMPLATES,
+            mg.launch_spec(self.on_demand_policy(), 'linux', RUN_ID, 'refs/heads/qa', self.TEMPLATES,
                            aws=self.template_aws(True))
         templates = {'freemkv-runner-linux': {'version': 1, 'market_options': True},
                      'freemkv-runner-windows': {'version': 3, 'market_options': False}}
@@ -320,7 +327,7 @@ class LaunchSpecTests(unittest.TestCase):
                          {'freemkv-runner-linux': True, 'freemkv-runner-windows': False})
 
     def test_windows_uses_its_template_market_and_type(self):
-        spec = mg.launch_spec(POLICY, 'windows', RUN_ID, 'qa', self.TEMPLATES)
+        spec = mg.launch_spec(POLICY, 'windows', RUN_ID, 'refs/heads/qa', self.TEMPLATES)
         self.assertEqual(spec['markets'], [{'name': 'template', 'options': None}])
         self.assertEqual(spec['types'], [])
         self.assertTrue(spec['user_data'].endswith('user-data-windows.ps1'))
@@ -332,7 +339,7 @@ class LaunchSpecTests(unittest.TestCase):
                                        ('windows-perf', 'freemkv-runner-windows', '5')):
             with self.subTest(leg=leg):
                 calls = []
-                spec = mg.launch_spec(policy, leg, RUN_ID, 'qa', self.TEMPLATES, aws=self.fake_aws(calls))
+                spec = mg.launch_spec(policy, leg, RUN_ID, 'refs/heads/qa', self.TEMPLATES, aws=self.fake_aws(calls))
                 self.assertEqual((spec['template'], spec['version']), (template, version))
                 self.assertEqual(spec['types'], [policy['perf']['instance_type']], 'one type, no fallback')
                 self.assertEqual(spec['labels'], f'freemkv-media-perf,{leg.split("-")[0]},run-{RUN_ID}')
@@ -346,27 +353,27 @@ class LaunchSpecTests(unittest.TestCase):
 
     def test_perf_legs_only_when_enabled(self):
         with self.assertRaises(ValueError):
-            mg.launch_spec(POLICY, 'linux-perf', RUN_ID, 'qa', self.TEMPLATES)
+            mg.launch_spec(POLICY, 'linux-perf', RUN_ID, 'refs/heads/qa', self.TEMPLATES)
 
     def test_one_parameter_per_run_attempt_and_leg(self):
         """Review FB5: overlapping runs never share a token parameter."""
-        a = mg.launch_spec(POLICY, 'linux', RUN_ID, 'qa', self.TEMPLATES)['param']
+        a = mg.launch_spec(POLICY, 'linux', RUN_ID, 'refs/heads/qa', self.TEMPLATES)['param']
         self.assertEqual(a, f'/freemkv-ci/runner-reg/{RUN_ID}-1-linux')
-        self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID + 1, 'qa', self.TEMPLATES)['param'])
-        self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID, 'qa', self.TEMPLATES, attempt=2)['param'])
-        self.assertNotEqual(a, mg.launch_spec(POLICY, 'windows', RUN_ID, 'qa', self.TEMPLATES)['param'])
+        self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID + 1, 'refs/heads/qa', self.TEMPLATES)['param'])
+        self.assertNotEqual(a, mg.launch_spec(POLICY, 'linux', RUN_ID, 'refs/heads/qa', self.TEMPLATES, attempt=2)['param'])
+        self.assertNotEqual(a, mg.launch_spec(POLICY, 'windows', RUN_ID, 'refs/heads/qa', self.TEMPLATES)['param'])
         # Both roles grant exactly arn:...:parameter/freemkv-ci/runner-reg/* (checked 2026-09-27).
         self.assertRegex(a, r'^/freemkv-ci/runner-reg/[0-9]+-[0-9]+-[a-z-]+$')
 
     def test_dev_and_other_branches_launch_nothing(self):
         """Review FB6: only qa runs record evidence, so only qa launches."""
-        for ref in ('dev', 'main', 'feature/x'):
+        for ref in ('refs/heads/dev', 'refs/heads/main', 'refs/tags/qa', 'qa', 'refs/heads/qa2'):
             with self.subTest(ref=ref):
                 with self.assertRaises(ValueError):
                     mg.launch_spec(POLICY, 'linux', RUN_ID, ref, self.TEMPLATES)
 
     def test_unpinned_templates_launch_the_default_version(self):
-        spec = mg.launch_spec(POLICY, 'linux', RUN_ID, 'qa', {'freemkv-runner-linux': {'error': 'AccessDenied'}})
+        spec = mg.launch_spec(POLICY, 'linux', RUN_ID, 'refs/heads/qa', {'freemkv-runner-linux': {'error': 'AccessDenied'}})
         self.assertEqual(spec['version'], '$Default')
 
     def test_cli_prints_one_json_line(self):
@@ -374,7 +381,7 @@ class LaunchSpecTests(unittest.TestCase):
         import contextlib
         import os
         out = io.StringIO()
-        env = {'GITHUB_RUN_ID': str(RUN_ID), 'GITHUB_REF_NAME': 'qa', 'GITHUB_RUN_ATTEMPT': '2',
+        env = {'GITHUB_RUN_ID': str(RUN_ID), 'GITHUB_REF': 'refs/heads/qa', 'GITHUB_RUN_ATTEMPT': '2',
                'TEMPLATES': json.dumps(self.TEMPLATES)}
         with unittest.mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out):
             self.assertEqual(mg.main(['launch-spec', '--leg', 'linux']), 0)
@@ -409,36 +416,50 @@ class LeakGuardTests(unittest.TestCase):
 
 
 class PinTests(unittest.TestCase):
-    def routes(self, qa_head='f' * 40):
-        r = {f'repos/freemkv/{repo}/commits/dev': {'sha': SIB_SHA[repo]} for repo in mg.SIBLINGS}
+    TIPS = {repo: f'{9 - i:x}' * 40 for i, repo in enumerate(mg.SIBLINGS)}
+
+    def routes(self, branch='dev', qa_head='f' * 40):
+        # "Get a commit": ref "Can be a commit SHA, branch name (`heads/BRANCH_NAME`), or tag name
+        # (`tags/TAG_NAME`)." Only the heads/ form is served, so a bare name (which a tag could
+        # shadow) would 404.
+        r = {f'repos/freemkv/{repo}/commits/heads/{branch}': {'sha': SIB_SHA[repo]} for repo in mg.SIBLINGS}
         r['repos/freemkv/freemkv/git/ref/heads/qa'] = {'object': {'sha': qa_head}}
         return r
 
     def test_sibling_tips_on_dev(self):
         routes = self.routes()
-        revisions, superseded = mg.pin('dev', SIB_SHA['freemkv'], '', routes.__getitem__)
+        revisions, superseded = mg.pin('refs/heads/dev', SIB_SHA['freemkv'], '', routes.__getitem__)
         self.assertEqual(revisions, SIB_SHA)
         self.assertFalse(superseded)
 
     def test_superseded_on_qa(self):
-        routes = {f'repos/freemkv/{repo}/commits/qa': {'sha': SIB_SHA[repo]} for repo in mg.SIBLINGS}
-        routes['repos/freemkv/freemkv/git/ref/heads/qa'] = {'object': {'sha': 'e' * 40}}
-        self.assertTrue(mg.pin('qa', SIB_SHA['freemkv'], '', routes.__getitem__)[1])
+        routes = self.routes('qa', qa_head='e' * 40)
+        self.assertTrue(mg.pin('refs/heads/qa', SIB_SHA['freemkv'], '', routes.__getitem__)[1])
         routes['repos/freemkv/freemkv/git/ref/heads/qa'] = {'object': {'sha': SIB_SHA['freemkv']}}
-        self.assertFalse(mg.pin('qa', SIB_SHA['freemkv'], '', routes.__getitem__)[1])
+        self.assertFalse(mg.pin('refs/heads/qa', SIB_SHA['freemkv'], '', routes.__getitem__)[1])
+
+    def test_a_tag_named_qa_is_refused(self):
+        """Review 2 item 1: a dispatch on refs/tags/qa has GITHUB_REF_NAME "qa" too."""
+        routes = self.routes('qa', qa_head=SIB_SHA['freemkv'])
+        for ref in ('refs/tags/qa', 'refs/tags/dev', 'qa', 'refs/heads/main', 'refs/heads/qa/x'):
+            with self.subTest(ref=ref):
+                with self.assertRaises(ValueError):
+                    mg.pin(ref, SIB_SHA['freemkv'], '', routes.__getitem__)
 
     def test_dispatched_revisions_must_be_on_the_branch(self):
         routes = self.routes()
         for repo in mg.SIBLINGS:
-            routes[f'repos/freemkv/{repo}/compare/{SIB_SHA[repo]}...dev'] = {'status': 'ahead'}
-        self.assertEqual(mg.pin('dev', SIB_SHA['freemkv'], json.dumps(SIB_SHA), routes.__getitem__)[0], SIB_SHA)
-        routes['repos/freemkv/libfreemkv/compare/' + SIB_SHA['libfreemkv'] + '...dev'] = {'status': 'diverged'}
+            routes[f'repos/freemkv/{repo}/commits/heads/dev'] = {'sha': self.TIPS[repo]}
+            # compare between shas only: no branch/tag name for a tag to shadow.
+            routes[f'repos/freemkv/{repo}/compare/{SIB_SHA[repo]}...{self.TIPS[repo]}'] = {'status': 'ahead'}
+        self.assertEqual(mg.pin('refs/heads/dev', SIB_SHA['freemkv'], json.dumps(SIB_SHA), routes.__getitem__)[0], SIB_SHA)
+        routes[f'repos/freemkv/libfreemkv/compare/{SIB_SHA["libfreemkv"]}...{self.TIPS["libfreemkv"]}'] = {'status': 'diverged'}
         with self.assertRaises(ValueError):
-            mg.pin('dev', SIB_SHA['freemkv'], json.dumps(SIB_SHA), routes.__getitem__)
+            mg.pin('refs/heads/dev', SIB_SHA['freemkv'], json.dumps(SIB_SHA), routes.__getitem__)
         with self.assertRaises(ValueError):
-            mg.pin('dev', 'a' * 40, json.dumps(SIB_SHA), routes.__getitem__)
+            mg.pin('refs/heads/dev', 'a' * 40, json.dumps(SIB_SHA), routes.__getitem__)
         with self.assertRaises(ValueError):
-            mg.pin('feature-x', SIB_SHA['freemkv'], '', routes.__getitem__)
+            mg.pin('refs/heads/feature-x', SIB_SHA['freemkv'], '', routes.__getitem__)
 
 
 class ExternalsTests(unittest.TestCase):
@@ -656,6 +677,15 @@ class LegAndRecordTests(unittest.TestCase):
         e, plan, legs, env, aws, post, posts, _ = self.setup_record()
         e.run.update(head_branch='dev', event='workflow_dispatch')
         with self.assertRaises(ValueError):
+            mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
+        self.assertEqual(posts, [])
+
+    def test_record_refuses_a_run_on_a_tag_named_qa(self):
+        """head_branch "qa" from a tag: the qa branch does not contain the commit, so nothing is written."""
+        e, plan, legs, env, aws, post, posts, _ = self.setup_record()
+        e.run.update(event='workflow_dispatch', head_branch='qa', status='in_progress', conclusion=None)
+        e.qa_compare.update(status='diverged', ahead_by=4)
+        with self.assertRaisesRegex(ValueError, 'not on the qa branch'):
             mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
         self.assertEqual(posts, [])
 

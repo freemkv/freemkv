@@ -19,6 +19,7 @@ import media_gate as mg  # noqa: E402
 ROOT = Path(__file__).parents[1]
 POLICY = mg.load_policy()
 RUN_ID = 424242
+QA_TIP = 'd' * 40          # refs/heads/qa of freemkv in the fake API
 SIB_SHA = {r: f'{i + 1:x}' * 40 for i, r in enumerate(mg.FIRST_PARTY)}
 
 LOCK_PACKAGES = [
@@ -570,6 +571,9 @@ class Evidence:
         self.tags = None
         # What run RUN_ID's own plan-media uploaded: the candidate it planned (no legs yet).
         self.plans = [{k: v for k, v in self.ev.items() if k != 'legs'}]
+        self.plan_origin = {'id': RUN_ID, 'head_sha': revisions['freemkv'], 'head_branch': 'qa'}
+        # compare/{QA_TIP}...{head_sha}: the qa branch contains the run's commit.
+        self.qa_compare = {'status': 'behind', 'ahead_by': 0, 'behind_by': 3}
 
     def job(self, name):
         return next(j for j in self.jobs if j['name'] == name)
@@ -592,8 +596,11 @@ class Evidence:
             f'actions/runs/{RUN_ID}': self.run,
             f'actions/runs/{RUN_ID}/jobs?filter=latest&per_page=100': {'jobs': self.jobs},
             f'actions/runs/{RUN_ID}/artifacts?name=media-plan&per_page=100': {'artifacts': [
-                {'id': 900 + i, 'name': 'media-plan', 'expired': False, 'size_in_bytes': 1000}
+                {'id': 900 + i, 'name': 'media-plan', 'expired': False, 'size_in_bytes': 1000,
+                 'workflow_run': dict(self.plan_origin)}
                 for i in range(len(self.plans))]},
+            'git/ref/heads/qa': {'ref': 'refs/heads/qa', 'object': {'sha': QA_TIP, 'type': 'commit'}},
+            f'compare/{QA_TIP}...{self.run.get("head_sha")}': self.qa_compare,
         }
         if path not in routes:
             raise RuntimeError(f'HTTP 404 {endpoint}')
@@ -733,6 +740,52 @@ class DecideTests(unittest.TestCase):
         self.assertIsNone(e.found(log=logs.append))
         self.assertTrue(any("run's own media-plan" in line for line in logs), logs)
 
+    def test_a_run_on_a_tag_named_qa_is_not_a_qa_run(self):
+        """Review 2 item 1. Someone who can push creates refs/tags/qa on their own commit, dispatches
+        qa.yml on it, and so owns run R: head_branch is "qa" (a run on a tag reports the tag name
+        there), R uploads its own media-plan matching the forged evidence, R is successful, and the
+        bot tagger and dates are theirs to write. The qa BRANCH does not contain R's commit."""
+        for status, ahead in (('diverged', 2), ('ahead', 1)):
+            with self.subTest(compare=status):
+                e = Evidence(self)
+                e.run.update(event='workflow_dispatch', head_branch='qa')
+                e.qa_compare.update(status=status, ahead_by=ahead)
+                logs = []
+                self.assertIsNone(e.found(log=logs.append))
+                self.assertTrue(any('is not on the qa branch' in line for line in logs), logs)
+
+    def test_the_qa_branch_must_contain_the_run(self):
+        # GitHub REST API compare, status enum ["diverged", "ahead", "behind", "identical"]; BASE is
+        # the qa tip, HEAD the run's commit: contained means "identical" or "behind" with ahead_by 0.
+        for status, ahead, ok in (('identical', 0, True), ('behind', 0, True), ('ahead', 1, False),
+                                  ('diverged', 1, False), ('behind', 1, False), (None, None, False)):
+            with self.subTest(status=status, ahead_by=ahead):
+                e = Evidence(self)
+                e.qa_compare.clear()
+                if status:
+                    e.qa_compare.update(status=status, ahead_by=ahead)
+                self.assertEqual(e.found() is not None, ok)
+        e = Evidence(self)
+        e.request_error = None
+        routes = e.request
+
+        def no_branch(endpoint):
+            if endpoint.endswith('git/ref/heads/qa'):
+                raise RuntimeError('HTTP 404')
+            return routes(endpoint)
+        self.assertIsNone(mg.find_evidence(e.f, e.policy, no_branch, log=lambda *_: None, download=e.download))
+
+    def test_the_plan_artifact_must_come_from_the_run(self):
+        """The artifact schema's workflow_run {id, head_sha} must name this run at this commit."""
+        for field, value in (('id', RUN_ID + 1), ('head_sha', 'e' * 40), ('id', None)):
+            with self.subTest(field=field):
+                e = Evidence(self)
+                e.plan_origin[field] = value
+                self.assertIsNone(e.found())
+        e = Evidence(self)
+        e.plan_origin.clear()
+        self.assertIsNone(e.found(), 'an artifact without workflow_run is not bound to the run')
+
     def test_evidence_binding_needs_the_runs_plan(self):
         cases = {
             'plan artifact expired': lambda e: e.plans.clear(),
@@ -773,18 +826,19 @@ class DecideTests(unittest.TestCase):
     def test_canary(self):
         policy = with_policy(canary={'probes': [{'fixture': 'uhd.iso'}]})
         ok = {'ok': True, 'probes': [{'fixture': 'uhd.iso', 'ok': True, 'reason': 'known key returned'}]}
-        self.assertEqual(mg.canary(policy, ok, 'qa'), (True, '', None))
+        self.assertEqual(mg.canary(policy, ok, 'refs/heads/qa'), (True, '', None))
         failed = {'ok': False, 'probes': [{'fixture': 'uhd.iso', 'ok': False, 'reason': 'HTTP 503'}]}
-        self.assertEqual(mg.canary(policy, failed, 'qa')[:2], (False, 'uhd.iso: HTTP 503'))
+        self.assertEqual(mg.canary(policy, failed, 'refs/heads/qa')[:2], (False, 'uhd.iso: HTTP 503'))
         for name, result in {'no result': None, 'not a dict': ['ok'], 'probe skipped': {'ok': True, 'probes': []},
                              'probe not ok': {'ok': True, 'probes': [{'fixture': 'uhd.iso', 'ok': 'yes'}]},
                              'crashed': {'ok': False, 'probes': [], 'error': 'KeyError'}}.items():
             with self.subTest(name=name):
-                self.assertFalse(mg.canary(policy, result, 'qa')[0])
-        ok_dev, _, note = mg.canary(policy, None, 'dev')
+                self.assertFalse(mg.canary(policy, result, 'refs/heads/qa')[0])
+        ok_dev, _, note = mg.canary(policy, None, 'refs/heads/dev')
         self.assertTrue(ok_dev, 'the canary runs where the gate runs (qa), not on dev')
-        self.assertIn('qa only', note)
-        self.assertEqual(mg.canary(with_policy(canary={'probes': []}), None, 'qa'), (True, '', None))
+        self.assertIn('qa branch only', note)
+        self.assertIn('qa branch only', mg.canary(policy, None, 'refs/tags/qa')[2], 'a tag named qa is not qa')
+        self.assertEqual(mg.canary(with_policy(canary={'probes': []}), None, 'refs/heads/qa'), (True, '', None))
         self.assertEqual(mg.decide(False, canary_ok=False)[:2], ('canary-failed', False))
         self.assertEqual(mg.decide(True, run_media=True, canary_ok=False)[:2], ('canary-failed', False))
         self.assertIn('HTTP 503', mg.decide(False, canary_ok=False, canary_why='uhd.iso: HTTP 503')[2])
@@ -944,7 +998,7 @@ class PlanTests(unittest.TestCase):
         self.assertIn(str(RUN_ID), out['evidence_url'])
 
     def test_plan_on_qa_runs_the_canary_verdict(self):
-        base = {'REVISIONS': json.dumps(SIB_SHA), 'GITHUB_RUN_ID': str(RUN_ID), 'GITHUB_REF_NAME': 'qa'}
+        base = {'REVISIONS': json.dumps(SIB_SHA), 'GITHUB_RUN_ID': str(RUN_ID), 'GITHUB_REF': 'refs/heads/qa'}
 
         def plan(result):
             return mg.plan(self.ws.root, POLICY, base, EXTERNALS, request=lambda e, **kw: [], run=self.run,
@@ -959,10 +1013,10 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(plan(None)['status'], 'canary-failed', 'a canary that never reported fails closed')
 
     def test_plan_off_qa_notes_the_canary_did_not_run(self):
-        out = self.plan(GITHUB_REF_NAME='dev')
+        out = self.plan(GITHUB_REF='refs/heads/dev')
         self.assertEqual(out['status'], 'run')
         self.assertFalse([w for w in out['warnings'] if 'canary' in w])
-        self.assertTrue(any('qa only' in n for n in out['notices']))
+        self.assertTrue(any('qa branch only' in n for n in out['notices']))
 
     def test_plan_names_the_legs_to_launch(self):
         self.assertEqual(json.loads(self.plan()['legs']), ['linux', 'windows'])

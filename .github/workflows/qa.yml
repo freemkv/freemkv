@@ -95,7 +95,8 @@ jobs:
       # role above). qa only, never dev; a failure or a missing result makes the plan
       # red ("canary-failed") before any EC2.
       - name: Key-service canary
-        if: github.ref_name == 'qa'
+        # The full ref: a dispatch on a TAG named qa has ref_name "qa" too.
+        if: github.ref == 'refs/heads/qa'
         continue-on-error: true
         env:
           B: ${{ secrets.FMKV_FIXTURES_BUCKET }}
@@ -402,11 +403,11 @@ jobs:
         with: { python-version: '3.12' }
       - name: Still the newest candidate
         env:
-          REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ "$REF_NAME" = qa ]; then
+          if [ "$REF" = refs/heads/qa ]; then
             head=$(gh api "repos/$REPO/git/ref/heads/qa" -q .object.sha)
             if [ "$head" != "$SHA" ]; then
               echo "::error title=Superseded::qa moved to ${head:0:12}; this run proves nothing and launches nothing"
