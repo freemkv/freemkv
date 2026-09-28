@@ -1316,8 +1316,11 @@ def record(plan_dir, legs_dir, policy, env, request=gh_api, aws=aws_json, post=g
         # EC2 keeps a terminated instance visible for about an hour; confirm while it can.
         try:
             reservations = aws('ec2', 'describe-instances', '--instance-ids', rec['instance_id'])['Reservations']
-        except Exception as exc:  # noqa: BLE001 — NotFound after termination: the launch record stands
-            print(f'::notice::{leg}: {rec["instance_id"]} no longer visible in EC2 ({exc}); using its launch record')
+        except subprocess.CalledProcessError as exc:
+            # Only "gone after termination" falls back to the launch record; any other error is fatal.
+            if 'InvalidInstanceID.NotFound' not in f'{exc.stdout or ""}{exc.stderr or ""}{exc.output or ""}':
+                raise
+            print(f'::notice::{leg}: {rec["instance_id"]} no longer visible in EC2; using its launch record')
             reservations = []
         for res in reservations:
             for inst in res['Instances']:

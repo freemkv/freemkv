@@ -472,25 +472,26 @@ jobs:
           INSTANCE: ${{ steps.launch.outputs.instance }}
         run: |
           set -uo pipefail
-          leg="cli-matrix ($OS"
+          leg="cli-matrix ($OS)"
           limit=900; [ "$OS" = windows ] && limit=1800
           deadline=$(( $(date +%s) + limit ))
           picked=false
           while :; do
             # A failed poll is retried; only a leg never picked up by the deadline is fatal.
+            # The leg's name, or the same name with further matrix values ("cli-matrix (linux, …)").
             if ! state=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs?per_page=100" \
-                           -q ".jobs[] | select(.name | startswith(\"$leg\")) | \"\(.status) \(.conclusion)\"" \
+                           -q ".jobs[] | select(.name == \"$leg\" or (.name | startswith(\"${leg%)}, \"))) | \"\(.status) \(.conclusion)\"" \
                            2>/dev/null | head -1) || [ -z "$state" ]; then
-              sleep 30; continue
+              state="unknown none"
             fi
             read -r status conclusion <<<"$state"
             [ "$status" = in_progress ] && picked=true
             if [ "$status" = completed ]; then
-              echo "$leg): $conclusion"
+              echo "$leg: $conclusion"
               [ "$conclusion" = success ]; exit $?
             fi
             if [ "$picked" = false ] && [ "$(date +%s)" -gt "$deadline" ]; then
-              echo "::error title=Runner never picked up the leg::$leg) is still '$status' $((limit / 60)) min after launch — terminating $INSTANCE and cancelling the run"
+              echo "::error title=Runner never picked up the leg::$leg is still '$status' $((limit / 60)) min after launch — terminating $INSTANCE and cancelling the run"
               aws ec2 terminate-instances --instance-ids "$INSTANCE" >/dev/null 2>&1 || true
               gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/cancel" || true
               exit 1
@@ -517,9 +518,11 @@ jobs:
           aws ssm delete-parameter --name "$PARAM" 2>/dev/null || true
           # Every live instance this run launched for this leg, including one whose id was
           # never written because the run was cancelled mid-launch.
-          ids=$(aws ec2 describe-instances --filters "Name=tag:launched-by,Values=$RUN_ID" \
-                  "Name=tag:runner-labels,Values=freemkv-media,$OS,run-$RUN_ID" \
-                  "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+          # JSON filters: the CLI's shorthand would split the comma-separated label value.
+          filters=$(jq -cn --arg r "$RUN_ID" --arg l "freemkv-media,$OS,run-$RUN_ID" '[
+            {Name: "tag:launched-by", Values: [$r]}, {Name: "tag:runner-labels", Values: [$l]},
+            {Name: "instance-state-name", Values: ["pending", "running", "stopping", "stopped"]}]')
+          ids=$(aws ec2 describe-instances --filters "$filters" \
                   --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || true)
           for id in $INSTANCE $ids; do
             aws ec2 terminate-instances --instance-ids "$id" --query 'TerminatingInstances[0].CurrentState.Name' --output text || true

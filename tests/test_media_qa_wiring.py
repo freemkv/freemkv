@@ -70,15 +70,17 @@ class StructureTests(unittest.TestCase):
         self.assertIn('actions/runs/$RUN_ID/cancel', watch)
         self.assertIn('picked=true', watch, 'the deadline must stop applying once the leg is picked up')
         self.assertIn('[ "$picked" = false ]', watch)
-        self.assertIn('sleep 30; continue', watch, 'a failed poll is retried, not fatal')
+        self.assertIn('state="unknown none"', watch, 'a failed poll is retried, not fatal')
         cancel = next(s for s in launch['steps'] if s.get('name') == 'Cancel the run (no runner is coming)')
         self.assertEqual(cancel['if'], "failure() && steps.watch.outcome != 'failure'")
         self.assertGreater(names.index('Cancel the run (no runner is coming)'), names.index('Watch the leg'))
         teardown = next(s for s in launch['steps'] if s.get('name') == 'Tear down')
         self.assertTrue(teardown['if'].startswith('always()'))
         self.assertIn('terminate-instances', teardown['run'])
-        self.assertIn('Name=tag:launched-by,Values=$RUN_ID', teardown['run'])
-        self.assertIn('Name=tag:runner-labels,Values=freemkv-media,$OS,run-$RUN_ID', teardown['run'])
+        self.assertIn('{Name: "tag:launched-by", Values: [$r]}', teardown['run'])
+        self.assertIn('--filters "$filters"', teardown['run'])
+        self.assertIn('{Name: "tag:runner-labels", Values: [$l]}', teardown['run'])
+        self.assertNotRegex(teardown['run'], r'Name=tag:runner-labels,Values=[^"]', 'shorthand splits the value on commas')
         launch_run = next(s for s in launch['steps'] if s.get('name') == 'Launch the ephemeral runner')['run']
         self.assertIn('run-" + $id', launch_run)
         self.assertIn('launched-by', launch_run)
@@ -296,7 +298,7 @@ class LegAndRecordTests(unittest.TestCase):
 
         def aws(*a):
             if tags.get('gone'):
-                raise subprocess.CalledProcessError(254, a, 'InvalidInstanceID.NotFound')
+                raise subprocess.CalledProcessError(254, a, output='', stderr=tags['gone'])
             os_name = 'linux' if a[-1].startswith('i-01') else 'windows'
             t = dict(tags, **{'runner-labels': tags.get('labels', f'freemkv-media,{os_name},run-{RUN_ID}')})
             return {'Reservations': [{'Instances': [{'Tags': [{'Key': k, 'Value': v} for k, v in t.items()]}]}]}
@@ -329,9 +331,14 @@ class LegAndRecordTests(unittest.TestCase):
 
     def test_record_uses_the_launch_record_once_ec2_forgets_the_instance(self):
         e, plan, legs, env, aws, post, posts, tags = self.setup_record()
-        tags['gone'] = True
+        tags['gone'] = 'An error occurred (InvalidInstanceID.NotFound) when calling DescribeInstances'
         name, _ = mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
         self.assertTrue(name.startswith('media-evidence/'))
+        e, plan, legs, env, aws, post, posts, tags = self.setup_record()
+        tags['gone'] = 'An error occurred (UnauthorizedOperation) when calling DescribeInstances'
+        with self.assertRaises(subprocess.CalledProcessError):
+            mg.record(plan, legs, POLICY, env, request=e.request, aws=aws, post=post)
+        self.assertEqual(posts, [])
 
     def test_record_refuses_a_leg_without_a_matching_launch_record(self):
         for change in ('delete', 'os', 'run'):
