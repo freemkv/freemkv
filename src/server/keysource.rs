@@ -1253,36 +1253,15 @@ mod tests {
         }
     }
 
-    // A resolve must never hand back a PREVIOUS resolve's decode verdict: plant a
-    // real one (a POST to an unresolvable host records Transport), then resolve
+    // A resolve must never hand back a PREVIOUS resolve's decode verdict: plant one
+    // (Transport), then resolve
     // with no sources / no AACS inputs — both return before any online query.
     #[test]
     fn resolve_drains_a_stale_decode_verdict() {
-        struct PlantCtx;
-        impl freemkv_keysources::ResolveCtx for PlantCtx {
-            fn disc_hash(&self) -> &str {
-                "0xabc"
-            }
-            fn title(&self) -> Option<&str> {
-                None
-            }
-            fn vid(&self) -> Option<libfreemkv::aacs::types::Vid> {
-                None
-            }
-            fn mkb(&self) -> Result<&[u8], libfreemkv::Error> {
-                Ok(&[])
-            }
-            fn enc_title_keys(&self) -> Result<&[[u8; 16]], libfreemkv::Error> {
-                Ok(&[])
-            }
-            fn samples(&self, _n: usize) -> Result<Vec<Vec<u8>>, libfreemkv::Error> {
-                Ok(vec![vec![0u8; 6144]; freemkv_keysources::MIN_SAMPLE_UNITS])
-            }
-        }
         let plant = || {
-            let online =
-                freemkv_keysources::OnlineSource::new("https://keys.example.test/decode", "");
-            let _ = online.get_unit_keys(&PlantCtx);
+            freemkv_keysources::set_last_decode_reachability(Some(
+                freemkv_keysources::DecodeReachability::Transport,
+            ));
         };
         plant();
         assert!(
@@ -1828,48 +1807,34 @@ mod ku_e1_tests {
     }
 
     // A refused resolve still logs its per-source walk: on a refusal it is the operator's only
-    // view of why a key missed.
+    // view of why a key missed. Checked on the trace itself (log capture races other tests'
+    // global level), plus that `resolve_with` hands every trace to the logger.
     #[test]
     fn a_refused_resolve_logs_its_key_walk() {
-        use tracing_subscriber::fmt::MakeWriter;
-        use tracing_subscriber::layer::SubscriberExt;
-
-        #[derive(Clone, Default)]
-        struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Buf {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> MakeWriter<'a> for Buf {
-            type Writer = Buf;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
-        let buf = Buf::default();
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(buf.clone())
-                .with_ansi(false),
-        );
         let fx = bd_image();
         let calls = Arc::new(AtomicUsize::new(0));
         let mut drive = libfreemkv::test_util::MemSource::new(fx.img.image.clone());
         let scope = libfreemkv::keys::KeyScope::Titles(vec![0]);
-        let r = tracing::subscriber::with_default(subscriber, || {
-            resolve_with(&fx.scan(), &mut drive, scope, &counting(&calls), None, None)
-        });
-        assert!(r.is_err(), "no key");
-        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let (set, trace) = freemkv_engine::keys::resolve_for_rip_traced(
+            &fx.scan(),
+            &mut drive,
+            scope,
+            &counting(&calls),
+            None,
+            None,
+        );
+        assert!(set.is_err(), "no key");
+        let walk = render_resolution_trace(&trace, "");
         assert!(
-            out.lines().any(|l| l.contains("online >")),
-            "the refused walk is logged: {out}"
+            walk.iter().any(|l| l.contains("online >")),
+            "the refused walk renders: {walk:?}"
+        );
+        let src = include_str!("keysource.rs");
+        let body = &src[src.find("fn resolve_with(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(
+            body.find("log_key_walk(&trace").unwrap() < body.find("let set = set?").unwrap(),
+            "the walk is logged before a refusal returns"
         );
     }
 

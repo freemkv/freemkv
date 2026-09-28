@@ -27,6 +27,9 @@ mod disc_info;
 mod file_identity;
 mod info;
 mod keydb_fetch;
+#[cfg(test)]
+#[allow(dead_code)]
+mod ku_fixtures;
 // Also declared in `lib.rs`: the CLI and GUI each rendered half of what
 // `MuxOutcome` carried, and the half neither rendered was the byte loss.
 mod lossy;
@@ -34,6 +37,7 @@ mod messaging;
 mod output;
 mod pipe;
 // Also declared in `lib.rs`: the CLI and the GUI route container sources by one table.
+mod rip_keys;
 mod sources;
 mod strings;
 // Also declared in `lib.rs`: `pipe` (here) and `engine` (GUI) both re-scan
@@ -314,6 +318,9 @@ fn dev_harness() -> bool {
                 // unless asked (FMKV_EJECT set).
                 auto_eject: std::env::var("FMKV_EJECT").is_ok(),
                 keys: engine::KeyConfig::from_settings(&settings::Settings::load()),
+                // No Open ran: the rip resolves its own keys, once.
+                seed: None,
+                vid_from: None,
             },
             st.clone(),
         );
@@ -374,12 +381,7 @@ fn dev_harness() -> bool {
                         r.desc
                     );
                 }
-                match engine::preflight_with_keys(
-                    &p,
-                    "/tmp/out",
-                    &[],
-                    &engine::KeyConfig::from_settings(&settings::Settings::load()),
-                ) {
+                match engine::preflight_with_keys(&p, "/tmp/out", &[], sc.keys.as_ref()) {
                     Ok(v) if v.is_empty() => println!("preflight: READY"),
                     Ok(v) => println!("preflight blocked: {v:?}"),
                     Err(e) => println!("preflight err: {e}"),

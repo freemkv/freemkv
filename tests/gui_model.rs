@@ -65,6 +65,9 @@ fn video_only_disc() -> Scanned {
         title_ids: vec![],
         video_codecs: vec!["H.264".into()],
         details: vec![],
+        keys: None,
+        needs_disc: false,
+        refusal: None,
     }
 }
 
@@ -83,6 +86,9 @@ fn disc(titles: &[(f64, usize)]) -> Scanned {
         title_ids: vec![],
         video_codecs: vec!["H.264".into(); titles.len()],
         details: vec![],
+        keys: None,
+        needs_disc: false,
+        refusal: None,
     }
 }
 
@@ -120,6 +126,9 @@ fn mp2_extension_disc() -> Scanned {
         title_ids: vec![],
         video_codecs: vec!["MPEG-2".into()],
         details: vec![],
+        keys: None,
+        needs_disc: false,
+        refusal: None,
     }
 }
 
@@ -1567,6 +1576,8 @@ fn a_failed_run_always_finishes_and_is_reported_as_failed() {
             keep_iso: false,
             auto_eject: false,
             keys: KeyConfig::default(),
+            seed: None,
+            vid_from: None,
         },
         state.clone(),
     );
@@ -1712,6 +1723,9 @@ fn tagged_disc(streams: &[(&str, &str, bool)]) -> Scanned {
         title_ids: vec![],
         video_codecs: vec!["H.264".into()],
         details: vec![],
+        keys: None,
+        needs_disc: false,
+        refusal: None,
     }
 }
 

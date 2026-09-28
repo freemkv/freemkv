@@ -1,4 +1,5 @@
-//! The `AacsState` literal guard (keys-upfront design v3.4 §2.2, EK9/FK8 literal half).
+//! FK8, both halves (keys-upfront design §2.2): the `AacsState` literal guard, and the
+//! structural guard against the legacy key APIs, which freemkv bans with no allow-path.
 //!
 //! Every Rust file under `src/` (`#[cfg(test)]` included) and `tests/` is scanned for
 //! `\b((\w+::)*)AacsState\s*\{`. A match is a return type or a definition, not a
@@ -191,4 +192,305 @@ fn the_guard_skips_signatures_and_catches_literals() {
     for s in &literals {
         assert_eq!(literal_lines(s).len(), 1, "literal missed: {s}");
     }
+}
+
+/// FK8 structural half (KU §2.2): banned in freemkv "as engine, with no allow-path". The
+/// §2.2 "Removed" rows and §3.5's legacy gates are banned too (JUDGEMENT, see `the_*`).
+const BANNED: &[&str] = &[
+    ".get_unit_keys(",
+    ".get_fmts_indexes(",
+    ".resolve_unit_keys(",
+    "decrypt_with(",
+    "AacsKeyMap::from_ranges",
+    "with_key_map(",
+    "set_key_map(",
+    "decrypt_unit(",
+    "DecryptingSectorSource::new(",
+    "DiscStream::new(",
+    "KeyFetch",
+    "key_fetch(",
+    "freemkv-uk",
+    "freemkv-vid:",
+    "set_vid(",
+    "resolve_keys_for(",
+    "inject_unit_keys(",
+    ".resolve_keys(",
+    "open_scan_resolve",
+    "resolve_disc_keys(",
+    ".decrypt_keys()",
+    ".ensure_decryptable(",
+    ".ensure_title_decryptable(",
+];
+
+/// Banned in production code only (KU-F1 review M5): the legacy key field and resolver. A
+/// test's own fixture may still name a `unit_keys:` parameter.
+const BANNED_IN_PRODUCTION: &[&str] = &["unit_keys:", "resolve_keys_with_reason("];
+
+/// `src` with comments blanked, and with string and char literal contents blanked too
+/// when `strings` is set. Byte offsets and newlines are kept, so the views line up.
+fn blank(src: &str, strings: bool) -> Vec<u8> {
+    let b = src.as_bytes();
+    let mut out = b.to_vec();
+    let mut i = 0;
+    let wipe = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for c in &mut out[from..to] {
+            if *c != b'\n' {
+                *c = b' ';
+            }
+        }
+    };
+    while i < b.len() {
+        if b[i..].starts_with(b"//") {
+            let end = src[i..].find('\n').map_or(b.len(), |n| i + n);
+            wipe(&mut out, i, end);
+            i = end;
+        } else if b[i..].starts_with(b"/*") {
+            let end = src[i + 2..].find("*/").map_or(b.len(), |n| i + n + 4);
+            wipe(&mut out, i, end);
+            i = end;
+        } else if b[i] == b'"' || (b[i] == b'r' && matches!(b.get(i + 1), Some(b'"' | b'#'))) {
+            let start = i;
+            let hashes = if b[i] == b'r' {
+                let h = b[i + 1..].iter().take_while(|&&c| c == b'#').count();
+                i += 1 + h;
+                Some(h)
+            } else {
+                None
+            };
+            i += 1;
+            match hashes {
+                Some(h) => {
+                    let close = format!("\"{}", "#".repeat(h));
+                    i = src[i..]
+                        .find(&close)
+                        .map_or(b.len(), |n| i + n + close.len());
+                }
+                None => {
+                    while i < b.len() && b[i] != b'"' {
+                        i += if b[i] == b'\\' { 2 } else { 1 };
+                    }
+                    i += 1;
+                }
+            }
+            if strings {
+                wipe(&mut out, start + 1, i.min(b.len()).saturating_sub(1));
+            }
+        } else if let Some(n) = char_literal_len(&b[i..]) {
+            if strings {
+                wipe(&mut out, i + 1, i + n - 1);
+            }
+            i += n;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The byte length of a char literal (`'x'`, `'\n'`, `'\''`) at the start of `b`; `None`
+/// for anything else, such as a lifetime `'a`.
+fn char_literal_len(b: &[u8]) -> Option<usize> {
+    if b.first() != Some(&b'\'') {
+        return None;
+    }
+    if b.get(1) == Some(&b'\\') {
+        return b.get(3..)?.iter().position(|&c| c == b'\'').map(|p| p + 4);
+    }
+    let text = std::str::from_utf8(&b[1..b.len().min(5)])
+        .unwrap_or_else(|e| std::str::from_utf8(&b[1..1 + e.valid_up_to()]).unwrap_or(""));
+    let c = text.chars().next()?;
+    (b.get(1 + c.len_utf8()) == Some(&b'\'')).then_some(2 + c.len_utf8())
+}
+
+/// Byte ranges of `#[cfg(test)] mod name { .. }` blocks in `code` (comments and strings
+/// already blanked).
+fn test_modules(code: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (at, _) in code.match_indices("#[cfg(test)]") {
+        let rest = &code[at..];
+        let Some(open) = rest.find('{') else { continue };
+        let head = &rest[..open];
+        if !head.split_whitespace().any(|w| w == "mod") || head.contains(';') {
+            continue;
+        }
+        let mut depth = 0usize;
+        for (k, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        out.push((at, at + open + k + 1));
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// `(line, banned)` for every banned use in `src`. Comments never count; string literals
+/// count only outside test code (`is_test`, or a `#[cfg(test)]` module), where a test may
+/// name a banned token to assert its absence (EK9's D9 rule, with no production allow-path).
+fn banned_uses(src: &str, is_test: bool) -> Vec<(usize, &'static str)> {
+    let mut view = blank(src, false);
+    let bare = blank(src, true);
+    let bare_text = String::from_utf8_lossy(&bare);
+    let tests = if is_test {
+        vec![(0, src.len())]
+    } else {
+        test_modules(&bare_text)
+    };
+    for &(s, e) in &tests {
+        view[s..e].copy_from_slice(&bare[s..e]);
+    }
+    let mut hits = Vec::new();
+    let helper = uses_the_test_util_helper(&bare_text);
+    for word in BANNED {
+        for at in 0..view.len() {
+            if !view[at..].starts_with(word.as_bytes()) {
+                continue;
+            }
+            let in_test = tests.iter().any(|&(s, e)| (s..e).contains(&at));
+            // KU §2.2 `decrypt_unit`: "Both move to `libfreemkv::test_util::decrypt_unit`",
+            // the sanctioned test helper (feature `test-util`, never in a release build).
+            if *word == "decrypt_unit(" && in_test && helper {
+                continue;
+            }
+            hits.push((
+                view[..at].iter().filter(|&&c| c == b'\n').count() + 1,
+                *word,
+            ));
+        }
+    }
+    for word in BANNED_IN_PRODUCTION {
+        for at in 0..view.len() {
+            let in_test = tests.iter().any(|&(s, e)| (s..e).contains(&at));
+            if !in_test && view[at..].starts_with(word.as_bytes()) {
+                let line = view[..at].iter().filter(|&&c| c == b'\n').count() + 1;
+                hits.push((line, *word));
+            }
+        }
+    }
+    hits.sort();
+    hits
+}
+
+/// Whether `code` brings in `libfreemkv::test_util::decrypt_unit` (by path or a `use`).
+fn uses_the_test_util_helper(code: &str) -> bool {
+    code.contains("test_util::decrypt_unit")
+        || code.match_indices("test_util::{").any(|(at, _)| {
+            let group = &code[at..];
+            let group = &group[..group.find('}').unwrap_or(group.len())];
+            group
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|w| w == "decrypt_unit")
+        })
+}
+
+/// `src/<name>.rs` of every module the crate roots declare only under `#[cfg(test)]`.
+fn test_only_modules(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for crate_root in ["src/lib.rs", "src/main.rs"] {
+        let text = std::fs::read_to_string(root.join(crate_root)).expect("crate root");
+        let mut test_attr = false;
+        for line in text.lines().map(str::trim) {
+            if line == "#[cfg(test)]" {
+                test_attr = true;
+            } else if let Some(name) = line.strip_prefix("mod ").and_then(|l| l.strip_suffix(';')) {
+                if test_attr {
+                    out.push(Path::new("src").join(format!("{name}.rs")));
+                }
+                test_attr = false;
+            } else if !line.starts_with("#[") {
+                test_attr = false;
+            }
+        }
+    }
+    out
+}
+
+/// FK8 (KU §2.2): no legacy key API anywhere in freemkv's `src/` or `tests/`, with no
+/// allow-path: every rip reads through its up-front `ResolvedKeySet`.
+#[test]
+fn no_legacy_key_api_anywhere_in_freemkv() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    rs_files(&root.join("src"), &mut files);
+    rs_files(&root.join("tests"), &mut files);
+    let test_only = test_only_modules(root);
+    let mut hits = Vec::new();
+    for f in &files {
+        let rel = f.strip_prefix(root).unwrap();
+        let src = std::fs::read_to_string(f).expect("read source");
+        let is_test = rel.starts_with("tests") || test_only.iter().any(|t| rel == t);
+        for (line, word) in banned_uses(&src, is_test) {
+            hits.push(format!("{}:{line}: {word}", rel.display()));
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "legacy key APIs (use the rip's ResolvedKeySet, KU §2.2):\n{}",
+        hits.join("\n")
+    );
+}
+
+/// Self-test: code, a string outside tests, and a test's own code are caught; comments,
+/// doc comments and a test's string literals are not.
+#[test]
+fn the_structural_guard_skips_comments_and_test_strings() {
+    let fetch = ["Key", "Fetch"].concat();
+    let caught = [
+        format!("fn f(x: Option<libfreemkv::sector::{fetch}>) {{}}"),
+        format!(
+            "fn f() {{ let s = \"# {}: 00\"; }}",
+            ["freemkv", "-uk"].concat()
+        ),
+        format!("#[cfg(test)]\nmod t {{\n    fn g() {{ let _ = {fetch}::unit_only; }}\n}}"),
+        format!("fn f() {{ disc{}; }}", [".decrypt", "_keys()"].concat()),
+    ];
+    for s in &caught {
+        assert_eq!(banned_uses(s, false).len(), 1, "missed: {s}");
+    }
+    let skipped = [
+        format!("// the old {fetch} is gone\nfn f() {{}}"),
+        format!("/// [`{fetch}`] was removed\nfn f() {{}}"),
+        format!("/* {fetch} */ fn f() {{}}"),
+        format!("#[cfg(test)]\nmod t {{\n    const B: &str = \"{fetch}\";\n}}"),
+        format!("fn f<'a>(x: &'a str) -> char {{ '\"' }} // {fetch}"),
+    ];
+    for s in &skipped {
+        assert!(banned_uses(s, false).is_empty(), "matched: {s}");
+    }
+    assert!(banned_uses(&format!("const B: &str = \"{fetch}\";"), true).is_empty());
+    // M5: production-only bans; a test's own helpers may still take a `unit_keys:` param.
+    let fields = ["unit", "_keys: vec![]"].concat();
+    let prod = format!("fn f() {{ let o = O {{ {fields} }}; }}");
+    assert_eq!(banned_uses(&prod, false).len(), 1, "{prod}");
+    assert!(banned_uses(&prod, true).is_empty(), "a test may: {prod}");
+    let reason = ["resolve_keys", "_with_reason("].concat();
+    assert_eq!(
+        banned_uses(&format!("fn f() {{ d.{reason}r); }}"), false).len(),
+        1
+    );
+    let unit = ["decrypt", "_unit"].concat();
+    let helper =
+        format!("use libfreemkv::test_util::{{BdFile, {unit}}};\nfn t() {{ {unit}(&mut u, &k); }}");
+    assert!(
+        banned_uses(&helper, true).is_empty(),
+        "the test_util helper"
+    );
+    let door = format!("use libfreemkv::aacs::content::{unit};\nfn t() {{ {unit}(&mut u, &k); }}");
+    assert_eq!(
+        banned_uses(&door, true).len(),
+        1,
+        "the library door, even in a test"
+    );
+    assert_eq!(
+        banned_uses(&helper, false).len(),
+        1,
+        "never in production code"
+    );
 }

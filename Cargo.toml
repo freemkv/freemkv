@@ -159,6 +159,8 @@ block2 = { version = "=0.6", optional = true }
 # `test_util` fixtures (`aacs_state`, …) for this crate's tests (keys-upfront
 # KU-P1). CI resolves it through the sibling path patch.
 libfreemkv = { version = "1.7", features = ["test-util"] }
+# The server's reachability tests plant a decode verdict offline.
+freemkv-keysources = { version = "1.7", features = ["test-hooks"] }
 tempfile = "3"
 
 # Resolve the freemkv crates from their GIT TAGS. They are OFF crates.io

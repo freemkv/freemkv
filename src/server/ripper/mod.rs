@@ -3404,13 +3404,9 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 skip_on_error: true,
                 progress: Some(&pass1_progress),
                 halt: Some(pass1_halt.clone()),
-                // The mapfile records only the disc's identity from these: the VID and
-                // the set's proven keys as fingerprints, never a key or the VID (J6).
-                vid: disc.aacs.as_ref().map(|a| a.volume_id),
-                unit_keys: Vec::new(),
-                key_fetch: None,
                 // A raw capture decrypts nothing; the set only stamps the identity.
                 keys: rip_keys.as_ref().ok().cloned(),
+                ..Default::default()
             };
 
             match freemkv_engine::sweep(&disc, &mut session.drive, iso_path, &sweep_opts) {
