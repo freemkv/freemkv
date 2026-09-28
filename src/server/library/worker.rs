@@ -23,25 +23,6 @@ fn nap(d: Duration) {
     }
 }
 
-/// The key sources a remux uses, from the same settings a rip uses.
-pub fn key_params(cfg: &Config) -> freemkv_engine::KeyParams {
-    if cfg.key_source == "online" {
-        let url = cfg.keyserver_url.trim();
-        freemkv_engine::KeyParams {
-            keydb_path: None,
-            key_url: (!url.is_empty()).then(|| url.to_string()),
-            key_auth: (!cfg.keyserver_secret.is_empty()).then(|| cfg.keyserver_secret.clone()),
-            online_only: true,
-        }
-    } else {
-        let path = crate::server::keysource::keydb_path(cfg);
-        freemkv_engine::KeyParams {
-            keydb_path: Some(path.to_string_lossy().into_owned()),
-            ..Default::default()
-        }
-    }
-}
-
 /// The worker loop: waits while a rip holds the slot or the queue is paused.
 pub fn run(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
     tracing::info!("library worker starting");
@@ -132,7 +113,8 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
         target: job.target.clone(),
         replace: job.replace,
     };
-    let result = freemkv_engine::remux_iso(&request, &key_params(cfg), sink);
+    let result =
+        freemkv_engine::remux_iso(&request, &crate::server::keysource::key_params(cfg), sink);
     match result {
         Ok(report) => Ending::Done {
             writing_app: report.writing_app,
@@ -693,22 +675,5 @@ mod tests {
             !body.contains(concat!("process", "::exit")),
             "a remux never exits the daemon"
         );
-    }
-
-    #[test]
-    fn key_params_follow_the_configured_source() {
-        let mut c = Config::default();
-        let local = key_params(&c);
-        assert!(local.keydb_path.is_some() && local.key_url.is_none() && !local.online_only);
-        c.key_source = "online".into();
-        c.keyserver_url = " https://keys.example/decode ".into();
-        c.keyserver_secret = "s".into();
-        let online = key_params(&c);
-        assert_eq!(
-            online.key_url.as_deref(),
-            Some("https://keys.example/decode")
-        );
-        assert_eq!(online.key_auth.as_deref(), Some("s"));
-        assert!(online.online_only && online.keydb_path.is_none());
     }
 }
