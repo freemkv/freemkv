@@ -4,6 +4,7 @@ import base64
 import copy
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -567,6 +568,8 @@ class Evidence:
                        labels=['self-hosted', 'freemkv-media', leg.split('-')[0], f'run-{RUN_ID}'])
         self.error = None
         self.tags = None
+        # What run RUN_ID's own plan-media uploaded: the candidate it planned (no legs yet).
+        self.plans = [{k: v for k, v in self.ev.items() if k != 'legs'}]
 
     def job(self, name):
         return next(j for j in self.jobs if j['name'] == name)
@@ -588,13 +591,38 @@ class Evidence:
             'git/blobs/b2': blob(self.lock),
             f'actions/runs/{RUN_ID}': self.run,
             f'actions/runs/{RUN_ID}/jobs?filter=latest&per_page=100': {'jobs': self.jobs},
+            f'actions/runs/{RUN_ID}/artifacts?name=media-plan&per_page=100': {'artifacts': [
+                {'id': 900 + i, 'name': 'media-plan', 'expired': False, 'size_in_bytes': 1000}
+                for i in range(len(self.plans))]},
         }
         if path not in routes:
             raise RuntimeError(f'HTTP 404 {endpoint}')
         return routes[path]
 
-    def found(self, perf_check=None):
-        return mg.find_evidence(self.f, self.policy, self.request, perf_check, log=lambda *_: None)
+    def download(self, endpoint):
+        """The zip of media-plan artifact 900+i."""
+        import io
+        import zipfile
+        m = re.fullmatch(r'repos/freemkv/freemkv/actions/artifacts/(\d+)/zip', endpoint)
+        if not m or not 0 <= int(m.group(1)) - 900 < len(self.plans):
+            raise RuntimeError(f'HTTP 404 {endpoint}')
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, 'w') as z:
+            z.writestr('evidence.json', json.dumps(self.plans[int(m.group(1)) - 900]))
+            z.writestr('Cargo.lock', self.lock)
+        return out.getvalue()
+
+    def forge(self, change):
+        """Evidence for another F, naming this (real, successful) run: what a tag pusher can write."""
+        ev = copy.deepcopy(self.ev)
+        change(ev['inputs'])
+        ev['fingerprint'] = mg.fingerprint(ev['inputs'])
+        self.f, self.ev = ev['fingerprint'], ev
+        self.tag['tag'] = f'media-evidence/{self.f}/{RUN_ID}'
+        self.tags = None
+
+    def found(self, perf_check=None, log=lambda *_: None):
+        return mg.find_evidence(self.f, self.policy, self.request, perf_check, log=log, download=self.download)
 
 
 class DecideTests(unittest.TestCase):
@@ -693,12 +721,40 @@ class DecideTests(unittest.TestCase):
         # The same fixture untouched is accepted, so each case above fails on its own change.
         self.assertIsNotNone(Evidence(self).found())
 
+    def test_forged_fingerprint_on_a_real_run_is_rejected(self):
+        """Review FB1: a real successful qa run R, and evidence for any F the tag pusher likes
+        (here: a libfreemkv file hash nobody tested). Every tag field checks out; R's own plan
+        says it tested something else."""
+        e = Evidence(self)
+        real_f = e.f
+        e.forge(lambda inputs: inputs['files'][0].__setitem__(2, 'b' * 64))
+        self.assertNotEqual(e.f, real_f)
+        logs = []
+        self.assertIsNone(e.found(log=logs.append))
+        self.assertTrue(any("run's own media-plan" in line for line in logs), logs)
+
+    def test_evidence_binding_needs_the_runs_plan(self):
+        cases = {
+            'plan artifact expired': lambda e: e.plans.clear(),
+            'plan names other revisions': lambda e: e.plans[0].update(revisions=dict(SIB_SHA, libfreemkv='9' * 40)),
+            'plan has another lock': lambda e: e.plans[0].update(lock_sha256='0' * 64),
+            'plan is of another run': lambda e: e.plans[0].update(run_id=RUN_ID + 1),
+        }
+        for name, apply in cases.items():
+            with self.subTest(name=name):
+                e = Evidence(self)
+                apply(e)
+                self.assertIsNone(e.found(), name)
+        e = Evidence(self)
+        e.plans.insert(0, dict(e.plans[0], fingerprint='0' * 64))
+        self.assertIsNotNone(e.found(), 'a re-run attempt\'s other plan does not hide the matching one')
+
     def test_forged_tag_with_otherwise_perfect_evidence_is_rejected(self):
         """Copying a real run's evidence byte for byte does not help a tag the bot did not write."""
         e = Evidence(self)
         e.tag['tagger'] = {'name': 'github-actions', 'email': mg.ACTIONS_BOT['email'], 'date': '2026-09-20T01:50:00Z'}
         logs = []
-        self.assertIsNone(mg.find_evidence(e.f, e.policy, e.request, log=logs.append))
+        self.assertIsNone(e.found(log=logs.append))
         self.assertTrue(any('not created by github-actions[bot]' in line for line in logs), logs)
 
     def test_newest_valid_tag_wins_and_a_bad_one_never_blocks(self):
@@ -875,14 +931,14 @@ class PlanTests(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({'packages': packages}), stderr='')
         self.run = run
 
-    def plan(self, request=lambda e, **kw: [], **env):
+    def plan(self, request=lambda e, **kw: [], download=None, **env):
         base = {'REVISIONS': json.dumps(SIB_SHA), 'GITHUB_RUN_ID': str(RUN_ID)}
         return mg.plan(self.ws.root, POLICY, dict(base, **env), EXTERNALS, request=request, run=self.run,
-                       tree=lambda root, k, run: FEATURES)[0]
+                       tree=lambda root, k, run: FEATURES, download=download)[0]
 
     def test_matching_evidence_is_reused(self):
         e = Evidence(self)
-        out = self.plan(request=e.request)
+        out = self.plan(request=e.request, download=e.download)
         self.assertEqual(out['fingerprint'], e.f, 'plan and evidence must fingerprint the same candidate alike')
         self.assertEqual((out['status'], out['run']), ('reuse', 'false'))
         self.assertIn(str(RUN_ID), out['evidence_url'])
@@ -918,8 +974,8 @@ class PlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.plan(SKIP_MEDIA='true', SKIP_REASON='')
         e = Evidence(self)
-        self.assertEqual(self.plan(request=e.request, RUN_MEDIA='true')['status'], 'run')
-        self.assertEqual(self.plan(request=e.request, HEAD_MESSAGE='[skip-media]')['status'], 'reuse')
+        self.assertEqual(self.plan(request=e.request, download=e.download, RUN_MEDIA='true')['status'], 'run')
+        self.assertEqual(self.plan(request=e.request, download=e.download, HEAD_MESSAGE='[skip-media]')['status'], 'reuse')
         self.assertEqual(self.plan(SUPERSEDED='true')['status'], 'superseded')
 
     def test_outputs_cannot_be_injected(self):

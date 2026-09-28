@@ -915,6 +915,46 @@ def gh_api(endpoint, paginate=False):
     return [item for page in pages for item in (page if isinstance(page, list) else [page])]
 
 
+def gh_download(endpoint):
+    """Raw bytes of an API endpoint (an artifact zip)."""
+    return subprocess.check_output(['gh', 'api', endpoint])
+
+
+MAX_PLAN_ARTIFACT = 16 << 20
+# What a run's own plan fixes about the candidate it tested; the tag's evidence must agree on all of it.
+PLAN_BINDING = ('schema', 'fingerprint', 'inputs', 'revisions', 'lock_sha256', 'run_id')
+
+
+def plan_of_run(run_id, request, download):
+    """The evidence.json of run `run_id`'s own media-plan artifact(s). Only that run could upload
+    them, so they say what it tested, whoever wrote the tag. Raises ValueError if none is readable."""
+    import io
+    import zipfile
+    listing = request(f'repos/{OWNER}/freemkv/actions/runs/{run_id}/artifacts?name=media-plan&per_page=100')
+    plans = []
+    for art in listing.get('artifacts') or []:
+        if art.get('name') != 'media-plan' or art.get('expired'):
+            continue
+        if not 0 < int(art.get('size_in_bytes') or 0) <= MAX_PLAN_ARTIFACT:
+            raise ValueError(f'media-plan artifact {art.get("id")} has an implausible size')
+        with zipfile.ZipFile(io.BytesIO(download(f'repos/{OWNER}/freemkv/actions/artifacts/{int(art["id"])}/zip'))) as z:
+            info = z.getinfo('evidence.json')
+            if info.file_size > MAX_EVIDENCE:
+                raise ValueError('media-plan evidence.json is oversized')
+            plans.append(json.loads(z.read(info)))
+    if not plans:
+        raise ValueError(f'run {run_id} has no unexpired media-plan artifact to bind the evidence to')
+    return plans
+
+
+def bind_to_plan(ev, plans):
+    """The tag's evidence must be the candidate the run itself planned (F, inputs, revisions, lock)."""
+    for plan in plans:
+        if isinstance(plan, dict) and all(canonical(plan.get(k)) == canonical(ev.get(k)) for k in PLAN_BINDING):
+            return
+    raise ValueError('evidence does not match the run\'s own media-plan (F, inputs, revisions or lock differ)')
+
+
 def evidence_candidates(f, request):
     """Tags for F, newest run first: [(ref, run_id)]."""
     endpoint = f'repos/{OWNER}/freemkv/git/matching-refs/tags/media-evidence/{f}/'
@@ -1083,8 +1123,10 @@ def check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, per
     return ev, warnings
 
 
-def find_evidence(f, policy, request=gh_api, perf_check=None, log=print):
-    """Newest valid evidence for F, or None. Any error means 'not proven' (fail-safe run)."""
+def find_evidence(f, policy, request=gh_api, perf_check=None, log=print, download=gh_download):
+    """Newest valid evidence for F, or None. Any error means 'not proven' (fail-safe run).
+    The tag's own fields are forgeable by anyone who can push a tag; what binds F to a real run is
+    that run's media-plan artifact, which only the run itself can upload (retention: 90 days)."""
     try:
         candidates = evidence_candidates(f, request)
     except Exception as exc:  # noqa: BLE001 — fail-safe: an unreadable lookup forces a run
@@ -1098,6 +1140,7 @@ def find_evidence(f, policy, request=gh_api, perf_check=None, log=print):
             # Who wrote the tag, and for which real run: a tag anyone else pushed is not evidence.
             check_tag_provenance(tag, f'media-evidence/{f}/{run_id}', run)
             ev, warnings = check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, perf_check)
+            bind_to_plan(ev, plan_of_run(run_id, request, download))
             return {'run_id': run_id, 'evidence': ev, 'warnings': warnings,
                     'url': f'https://github.com/{OWNER}/freemkv/actions/runs/{run_id}'}
         except Exception as exc:  # noqa: BLE001 — one bad tag never blocks a newer or older good one
@@ -1182,7 +1225,7 @@ def lock_assert(base_text, candidate_text, k_only=False, policy=None):
 # ── Plan (§3.2 job 1) ──────────────────────────────────────────────────────
 
 def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, canary_result=None, perf_check=None,
-         tree=resolved_features):
+         tree=resolved_features, download=gh_download):
     """Pin, resolve, guard, fingerprint, look up, decide. Returns (outputs, evidence dict, lock text)."""
     revisions = json.loads(env['REVISIONS'])
     if not valid_revisions(revisions):
@@ -1209,7 +1252,7 @@ def plan(ws, policy, env, externals, request=gh_api, run=subprocess.run, canary_
     canary_ok, canary_why, note = canary(policy, canary_result, env.get('GITHUB_REF_NAME', ''))
     if note:
         notices.append(note)
-    proven = find_evidence(f, policy, request, perf_check) if canary_ok else None
+    proven = find_evidence(f, policy, request, perf_check, download=download) if canary_ok else None
     status, go, reason = decide(proven is not None, env.get('RUN_MEDIA') == 'true',
                                 env.get('SKIP_MEDIA') == 'true' or '[skip-media]' in env.get('HEAD_MESSAGE', ''),
                                 env.get('SKIP_REASON') or ('[skip-media]' if '[skip-media]' in env.get('HEAD_MESSAGE', '') else ''),
