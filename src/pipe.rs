@@ -5706,22 +5706,19 @@ mod verdict_tests {
         assert!(raw.progress.is_some());
     }
 
-    // The GUI's copy persists the scanned AACS keys (or the VID) in the mapfile; so must the CLI's.
+    /// FK6 (inverts the `1aa14e0` test): KU §2.1 invariant 5, "Memory only. No key byte and
+    /// no raw VID is written to any file". A disc→ISO copy hands the mapfile neither.
     #[test]
-    fn the_disc_copy_options_persist_the_scanned_aacs_keys() {
+    fn disc_copy_options_persist_no_keys() {
         use super::iso_key_tests::{aacs, disc};
         let nop = |_: &libfreemkv::progress::PassProgress| true;
         let keyed = disc(Some(aacs(vec![(1, [7u8; 16])])), true);
-        let o = disc_copy_options(&keyed, true, false, &nop);
-        assert_eq!(
-            o.unit_keys,
-            vec![(1, [7u8; 16])],
-            "resolved keys reach the mapfile"
-        );
-        assert_eq!(o.vid, Some([0u8; 16]));
-        let clear = disc(None, false);
-        let o = disc_copy_options(&clear, true, false, &nop);
-        assert!(o.unit_keys.is_empty() && o.vid.is_none());
+        for raw in [false, true] {
+            let o = disc_copy_options(&keyed, raw, false, &nop);
+            assert!(o.unit_keys.is_empty(), "no key reaches the mapfile");
+            assert_eq!(o.vid, None, "no raw VID reaches the mapfile");
+            assert!(o.key_fetch.is_none(), "no mid-rip lookup (KU §2.1 invariant 4)");
+        }
     }
 
     #[test]
