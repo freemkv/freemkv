@@ -178,17 +178,17 @@ pub fn drive_scan_opts_for_keydb(keydb: &Path) -> libfreemkv::ScanOptions {
     }
 }
 
-/// The engine key chain for this config, local-first: the keydb (explicit
-/// path, else the standard location), then the online key service when a URL
-/// is set. `key_source` no longer picks one of the two; it is still read and
-/// saved so an autorip `settings.json` loads unchanged.
+/// The key source the user picked in settings, and only that one: `key_source = "online"`
+/// asks the online key service; otherwise the local keydb.
 pub fn key_params(cfg: &Config) -> freemkv_engine::KeyParams {
     let url = cfg.keyserver_url.trim();
+    let online = cfg.key_source == "online";
     freemkv_engine::KeyParams {
         keydb_path: Some(keydb_path(cfg).to_string_lossy().into_owned()),
-        key_url: (!url.is_empty()).then(|| url.to_string()),
-        key_auth: (!cfg.keyserver_secret.is_empty()).then(|| cfg.keyserver_secret.clone()),
-        online_only: false,
+        key_url: (online && !url.is_empty()).then(|| url.to_string()),
+        key_auth: (online && !cfg.keyserver_secret.is_empty())
+            .then(|| cfg.keyserver_secret.clone()),
+        online_only: online,
     }
 }
 
@@ -1078,34 +1078,32 @@ mod tests {
 
     // --- the key chain (engine, local-first) ----------------------------------
 
-    // No URL: the local keydb alone, whatever `key_source` says.
+    // No URL: "local" is the keydb; "online" has nothing to ask until a URL is set.
     #[test]
-    fn build_sources_without_a_url_is_the_keydb() {
-        for key_source in ["local", "online", "onlnie"] {
+    fn build_sources_without_a_url() {
+        for (key_source, n) in [("local", 1), ("onlnie", 1), ("online", 0)] {
             let cfg = Config {
                 key_source: key_source.into(),
                 ..Config::default()
             };
             let sources = build_sources(&cfg);
-            assert_eq!(sources.len(), 1, "{key_source}");
-            assert_eq!(sources[0].label(), "keydb");
+            assert_eq!(sources.len(), n, "{key_source}");
+            assert!(sources.iter().all(|s| s.label() == "keydb"));
             assert!(!uses_online(&cfg));
         }
     }
 
-    // A URL adds the online service AFTER the keydb, for either `key_source`
-    // value: the chain replaced autorip's one-source choice.
+    // The picked source only: "online" is the key service, "local" the keydb, URL or not.
     #[test]
-    fn build_sources_is_keydb_then_online_for_any_key_source() {
-        for key_source in ["local", "online"] {
+    fn build_sources_follows_key_source_when_a_url_is_set() {
+        for (key_source, want) in [("local", &["keydb"][..]), ("online", &["online"][..])] {
             let cfg = Config {
                 key_source: key_source.into(),
                 keyserver_url: "https://8.8.8.8/keys".into(),
                 ..Config::default()
             };
             let labels: Vec<_> = build_sources(&cfg).iter().map(|s| s.label()).collect();
-            assert_eq!(labels, ["keydb", "online"], "{key_source}");
-            assert!(uses_online(&cfg));
+            assert_eq!(labels, want, "{key_source}");
         }
     }
 
@@ -1113,7 +1111,7 @@ mod tests {
     #[test]
     fn build_sources_drops_online_source_on_ssrf_blocked_url() {
         let cfg = Config {
-            key_source: "online".into(),
+            key_source: "local".into(),
             keyserver_url: "https://169.254.169.254/keys".into(),
             ..Config::default()
         };
@@ -1138,7 +1136,10 @@ mod tests {
             Some("https://keys.example.org/decode")
         );
         assert_eq!(p.key_auth.as_deref(), Some("tok"));
-        assert!(!p.online_only);
+        assert!(
+            p.online_only,
+            "online with a usable URL asks only the service"
+        );
         let bare = key_params(&Config::default());
         assert_eq!(bare.key_url, None);
         assert_eq!(bare.key_auth, None);
@@ -1454,7 +1455,7 @@ mod tests {
     #[test]
     fn build_sources_drops_online_source_on_http_url() {
         let cfg = Config {
-            key_source: "online".into(),
+            key_source: "local".into(),
             keyserver_url: "http://8.8.8.8/decode".into(),
             ..Config::default()
         };
@@ -1883,6 +1884,7 @@ mod ku_e1_tests {
         write_sidecar(&fx, &iso, true);
         let cfg = Config {
             keydb_path: Some(dir.path().join("none.cfg").to_string_lossy().into_owned()),
+            key_source: "online".into(),
             keyserver_url: "https://localhost:9/decode".into(),
             ..Config::default()
         };
