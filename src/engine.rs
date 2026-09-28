@@ -5169,24 +5169,32 @@ mod routing_tests {
         assert!(stream_selection_for(&r, None).is_all());
     }
 
-    /// `mux_opts` carries the raw passthrough, the read batch and the send
-    /// deadline. Defaulted, `--raw` is ignored and the deadline that stops a
-    /// wedged sink hanging the rip disappears.
+    // FT16 (stop design v5 §2.10, T27): "**ST-F1** sets the GUI to no deadline"; "GUI, CLI
+    // and the engine then behave identically: a halt-aware send only, and the user's Stop
+    // is the bound". Per spec; do not change without a spec citation proving otherwise.
     #[test]
-    fn mux_options_carry_raw_the_batch_size_and_the_send_deadline() {
+    fn gui_mux_on_slow_sink_completes() {
         let mut r = req();
         r.raw = true;
         let o = mux_opts(&r);
         assert!(o.raw, "raw passthrough must reach the mux");
         assert_eq!(o.batch_sectors, 64);
-        assert_eq!(o.send_deadline, Some(std::time::Duration::from_secs(60)));
+        assert_eq!(
+            o.send_deadline, None,
+            "no per-frame deadline: a slow sink blocks"
+        );
+        assert_eq!(title_session_mux_opts(&r, 0).send_deadline, None);
         assert!(!o.skip_errors);
         // Selection is deliberately NOT here — the Url mux arm reads it off
         // InputOptions, and setting it here silently keeps every track.
         assert!(o.selection.is_all());
-
         r.raw = false;
         assert!(!mux_opts(&r).raw);
+        // GUI = CLI: every CLI `MuxOptions` literal names no deadline either.
+        let cli = include_str!("pipe.rs");
+        let literals = cli.matches("MuxOptions {").count();
+        assert!(literals >= 2, "the CLI's mux options moved");
+        assert_eq!(cli.matches("send_deadline: None,").count(), literals);
     }
 
     /// The three fields whose absence is invisible: the wrong title, a lost
