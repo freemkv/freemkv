@@ -14,101 +14,24 @@ use libfreemkv::{MuxEvents, MuxOptions, MuxSource};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
-fn install_signal_handler() {
-    #[cfg(unix)]
-    unsafe {
-        // sigaction, not signal(): on musl, signal() is one-shot and would
-        // kill the double-Ctrl-C _exit(130) guard after the first fire.
-        // SA_RESTART (no SA_RESETHAND) fixes that and restarts syscalls.
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        // Cast through a thin pointer: a bare `fn as usize` is a double
-        // coercion that clippy 1.97 rejects.
-        sa.sa_sigaction = handle_sigint as *const () as usize;
-        libc::sigemptyset(&mut sa.sa_mask);
-        sa.sa_flags = libc::SA_RESTART;
-        // On failure, degrade gracefully: the handler simply isn't installed.
-        let _ = libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
-    }
-
-    #[cfg(windows)]
-    unsafe {
-        extern "system" fn handler(_: u32) -> i32 {
-            INTERRUPTED.store(true, Ordering::SeqCst);
-            1
-        }
-        unsafe extern "system" {
-            fn SetConsoleCtrlHandler(
-                handler: unsafe extern "system" fn(u32) -> i32,
-                add: i32,
-            ) -> i32;
-        }
-        SetConsoleCtrlHandler(handler, 1);
-    }
-}
-
-#[cfg(unix)]
-extern "C" fn handle_sigint(_sig: libc::c_int) {
-    if INTERRUPTED.load(Ordering::SeqCst) {
-        unsafe { libc::_exit(130) };
-    }
-    INTERRUPTED.store(true, Ordering::SeqCst);
-}
+use crate::cli_stop::INTERRUPTED;
 
 struct SigintHalt {
     halt: libfreemkv::Halt,
-    done: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl SigintHalt {
     fn install() -> Self {
-        Self::watching(&INTERRUPTED)
-    }
-
-    // A halt cancelled once `flag` is set: [`INTERRUPTED`] in production, a test's own flag.
-    fn watching(flag: &'static AtomicBool) -> Self {
-        let halt = libfreemkv::Halt::new();
-        let done = Arc::new(AtomicBool::new(false));
-        // A SIGINT that already landed (before the mux starts) cancels up front.
-        if flag.load(Ordering::SeqCst) {
-            halt.cancel();
-        }
-        let handle = {
-            let halt = halt.clone();
-            let done = done.clone();
-            std::thread::spawn(move || {
-                while !done.load(Ordering::SeqCst) {
-                    if flag.load(Ordering::SeqCst) {
-                        halt.cancel();
-                        return;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                }
-            })
-        };
         SigintHalt {
-            halt,
-            done,
-            handle: Some(handle),
+            halt: crate::cli_stop::watching(&INTERRUPTED),
         }
     }
 
     fn halt(&self) -> &libfreemkv::Halt {
         &self.halt
-    }
-}
-
-impl Drop for SigintHalt {
-    fn drop(&mut self) {
-        self.done.store(true, Ordering::SeqCst);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
     }
 }
 
@@ -687,7 +610,7 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
 /// `DISC_COPY_DAMAGED_EXIT` for a kept-but-damaged disc→ISO copy, 1 on any
 /// other failure.
 pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
-    install_signal_handler();
+    crate::cli_stop::install();
 
     let flags = match parse_flags(args) {
         Ok(f) => f,
@@ -777,7 +700,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     // decrypts an existing image; `dir://` joins this arm when it becomes a
     // source. Not the recovery path — see `image_to_iso`.
     if matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. }) && parsed_source.is_disc_source() {
-        return if image_to_iso(source, dest, &keys, &out) {
+        return if image_to_iso(source, dest, &keys, &SigintHalt::install().halt, &out) {
             0
         } else {
             1
@@ -1945,7 +1868,9 @@ fn disc_copy_options<'a>(
     raw: bool,
     multipass: bool,
     progress: &'a dyn libfreemkv::progress::Progress,
+    halt: &libfreemkv::Halt,
 ) -> freemkv_engine::CopyOptions<'a> {
+    let _ = halt;
     // KU §2.1 invariant 5: "No key byte and no raw VID is written to any file" (FK6). The
     // rip's up-front set rides in memory; the engine writes only `disc` + `vidfp` lines.
     // Needless once KU-X1 drops the legacy key fields; needed until it lands.
@@ -2089,7 +2014,14 @@ fn refuse_unstaged_titles(
     }
 }
 
-fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> bool {
+fn image_to_iso(
+    source: &str,
+    dest: &str,
+    keys: &KeyConfig,
+    halt: &libfreemkv::Halt,
+    out: &Output,
+) -> bool {
+    let _ = halt;
     let iso_path = match libfreemkv::parse_url(dest) {
         libfreemkv::StreamUrl::Iso { path } => path,
         _ => return false,
@@ -2295,7 +2227,13 @@ fn disc_to_iso(
         speed_est: &speed_est,
     };
 
-    let copy_opts = disc_copy_options((!raw).then_some(&set), raw, multipass, &progress);
+    let copy_opts = disc_copy_options(
+        (!raw).then_some(&set),
+        raw,
+        multipass,
+        &progress,
+        SigintHalt::install().halt(),
+    );
     let exit_code = match freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts) {
         Ok(r) if copy_verdict(&r) == CopyVerdict::Interrupted => {
             // Ctrl-C halted the copy. Don't print "Complete" over a partial
@@ -5544,7 +5482,7 @@ mod verdict_tests {
     fn the_disc_copy_options_honour_raw_multipass_and_progress() {
         let nop = |_: &libfreemkv::progress::PassProgress| true;
 
-        let default_flags = disc_copy_options(None, false, false, &nop);
+        let default_flags = disc_copy_options(None, false, false, &nop, &libfreemkv::Halt::new());
         assert!(
             default_flags.decrypt,
             "a plain disc->iso rip must DECRYPT; ciphertext is only ever --raw"
@@ -5554,15 +5492,28 @@ mod verdict_tests {
             default_flags.progress.is_some(),
             "a sweep must report progress"
         );
-        assert!(default_flags.halt.is_none());
 
-        let raw = disc_copy_options(None, true, true, &nop);
+        let raw = disc_copy_options(None, true, true, &nop, &libfreemkv::Halt::new());
         assert!(!raw.decrypt, "--raw is ciphertext passthrough");
         assert!(
             raw.multipass,
             "--multipass must reach the copy or recovery never runs"
         );
         assert!(raw.progress.is_some());
+    }
+
+    // FT1 (stop design v5 §4.3): "The global token goes everywhere. That includes
+    // `disc_copy_options` (`pipe.rs:1978`, **`halt: None` at :1996**)".
+    #[test]
+    fn disc_copy_options_carries_global_token() {
+        let nop = |_: &libfreemkv::progress::PassProgress| true;
+        let token = libfreemkv::Halt::new();
+        let o = disc_copy_options(None, false, false, &nop, &token);
+        let carried = o.halt.as_ref().expect("the copy takes the process token");
+        assert!(
+            std::sync::Arc::ptr_eq(carried, token.as_arc()),
+            "the same token"
+        );
     }
 
     /// FK6 (inverts the `1aa14e0` test): KU §2.1 invariant 5, "Memory only. No key byte and
@@ -5583,7 +5534,7 @@ mod verdict_tests {
         for raw in [false, true] {
             let dir = TempDir::new("fk6");
             let iso = dir.path().join("disc.iso");
-            let o = disc_copy_options((!raw).then_some(&set), raw, false, &nop);
+            let o = disc_copy_options((!raw).then_some(&set), raw, false, &nop, &libfreemkv::Halt::new());
             let r = freemkv_engine::copy(&disc, &mut fx.source(), &iso, &o).unwrap();
             assert!(r.bytes_good > 0, "the copy ran");
             let map = std::fs::read_to_string(freemkv_engine::mapfile_path_for(&iso)).unwrap();
@@ -7129,6 +7080,44 @@ mod ku_cli_tests {
             body[..keyed].contains("let set = if raw {"),
             "resolve only when decrypting"
         );
+    }
+
+    static FT10_CTRL_C: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    // FT10 (stop design v5 §4.3 item 2): "A key call in flight stops on the first Ctrl-C";
+    // the token is driven by a test flag (`watching`), and the resolve "returns `Halted` ≤ 1 s;
+    // no ISO or partial created". The never-answering service is `Answer::Hang`.
+    #[test]
+    fn ctrl_c_interrupts_inflight_key_query() {
+        let fx = bd_image(&[Some(K1)], 1);
+        let dir = TempDir::new("ft10");
+        let iso = fx.write(dir.path(), "disc.iso");
+        let plain = dir.path().join("plain.iso");
+        let calls = Calls::default();
+        let f = factory(&[(Answer::Hang, &[K1])], &calls);
+        let (src, dest) = (
+            format!("iso://{}", iso.display()),
+            format!("iso://{}", plain.display()),
+        );
+        let token = crate::cli_stop::watching(&FT10_CTRL_C);
+        let press = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            FT10_CTRL_C.store(true, std::sync::atomic::Ordering::Release);
+            std::time::Instant::now()
+        });
+        let out = crate::output::Output::new(false, true);
+        let ok = with_sources(f, || {
+            super::image_to_iso(&src, &dest, &super::KeyConfig::default(), &token, &out)
+        });
+        let pressed = press.join().unwrap();
+        assert!(!ok, "a stopped copy is not a success");
+        assert!(
+            pressed.elapsed() <= std::time::Duration::from_secs(1),
+            "Stop took too long"
+        );
+        assert_eq!(calls.len(), 1, "the key call was in flight");
+        assert!(!plain.exists(), "no ISO");
+        assert_eq!(files_under(dir.path()), vec![iso], "no partial");
     }
 
     /// FK11, CLI half (KU §4.2, J11/J12; USER 2026-09-28: no `--vid-from`): an image whose

@@ -32,6 +32,7 @@ mod keydb_fetch;
 mod ku_fixtures;
 // Also declared in `lib.rs`: the CLI and GUI each rendered half of what
 // `MuxOutcome` carried, and the half neither rendered was the byte loss.
+mod cli_stop;
 mod lossy;
 mod messaging;
 mod output;

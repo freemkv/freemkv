@@ -258,6 +258,9 @@ pub enum Answer {
     Down,
     /// A keydb that answers its first request, then fails to read (E8002, `KeydbInvalid`).
     KeydbThenUnreadable,
+    /// A key service that never answers: the call returns only on the ctx's Stop, as the
+    /// ST-K1 worker does mid-flight (stop design v5 §2.7), or after 10 s.
+    Hang,
 }
 
 impl Answer {
@@ -294,6 +297,16 @@ impl Fake {
             forensic: false,
             outputs,
         });
+        if self.answer == Answer::Hang {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < until {
+                if let Some(h) = ctx.halt() {
+                    h.check()?;
+                }
+                std::thread::sleep(libfreemkv::halt::WAIT_SLICE);
+            }
+            return Err(libfreemkv::Error::KeyServiceUnavailable);
+        }
         if matches!(self.answer, Answer::Unavailable | Answer::Down) {
             return Err(libfreemkv::Error::KeyServiceUnavailable);
         }
@@ -308,9 +321,11 @@ impl Fake {
             return Err(libfreemkv::Error::KeydbInvalid);
         }
         let keys: Vec<[u8; 16]> = match self.answer {
-            Answer::Keydb | Answer::Unavailable | Answer::Down | Answer::KeydbThenUnreadable => {
-                self.keys.clone()
-            }
+            Answer::Keydb
+            | Answer::Unavailable
+            | Answer::Down
+            | Answer::Hang
+            | Answer::KeydbThenUnreadable => self.keys.clone(),
             Answer::KeydbKmNoVid => Vec::new(),
             Answer::OnlineNeedsVid if vid.is_none() => Vec::new(),
             Answer::Online | Answer::OnlineNeedsVid => {
