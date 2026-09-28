@@ -333,15 +333,44 @@ fn info_rows_output_is_a_file_not_a_folder() {
 }
 
 /// Cancelling must never be summarized as "Finished".
+///
+/// Drives `App` with a `RunState` directly instead of `open()`ing a source:
+/// `open("/nonexistent")` never starts a run, so `Cmd::Cancel` used to be a
+/// no-op and this test's real assertion, guarded behind `page == Result`,
+/// never ran. Injecting the state (the same pattern `video_codecs` documents
+/// using to test the tree without a real disc) reaches `Page::Result` for
+/// real, unconditionally.
 #[test]
 fn a_cancelled_run_is_not_reported_as_finished() {
+    use freemkv::engine::{RunOutcome, RunState};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
     let mut a = App::new();
-    a.open("/nonexistent/x.iso");
+    let run = Arc::new(RunState::default());
+    a.run = Some(Arc::clone(&run));
+    a.page = Page::Progress;
+
     a.dispatch(Cmd::Cancel);
+    assert!(
+        run.cancel.load(Ordering::Relaxed),
+        "Cancel must set the flag"
+    );
+
+    // Simulate the worker observing the cancel and reporting its verdict.
+    *run.summary.lock().unwrap() = "Cancelled - 0 of 1 titles written".to_string();
+    *run.outcome.lock().unwrap() = RunOutcome::Cancelled;
+    run.finished.store(true, Ordering::Release);
+
+    a.tick();
     let v = a.view();
-    if v.page == Page::Result {
-        assert_ne!(v.result_heading, "Finished");
-    }
+    assert_eq!(v.page, Page::Result, "a finished run must reach Result");
+    // Not assert_ne!(.., "Finished"): a dropped locale key returns the key
+    // text itself, which would pass that check too. Assert the real string.
+    assert_eq!(
+        v.result_heading,
+        freemkv::strings::get("gui.result.cancelled")
+    );
 }
 
 /// Only Cancel/About/Docs/Quit survive a running job — everything destructive

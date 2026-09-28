@@ -259,11 +259,11 @@ pub fn run(args: Vec<String>) {
             let urls = collect_urls(&args[1..]);
 
             if urls.len() == 2 {
-                if !crate::pipe::run(&urls[0], &urls[1], &args[1..]) {
-                    // `pipe::run` already printed the curated cause/result (the pretty
-                    // fatal block is emitted inside the rip path, where the cause is
-                    // known); just exit non-zero so a scripted `$?` sees the failure.
-                    std::process::exit(1);
+                let code = crate::pipe::run(&urls[0], &urls[1], &args[1..]);
+                if code != 0 {
+                    // `pipe::run` already printed the curated cause/result; just
+                    // propagate its exit code (`freemkv help` documents each one).
+                    std::process::exit(code);
                 }
             } else if urls.len() == 1 {
                 // Single URL, no dest — show info. `info_cmd` wants the URL at
@@ -791,6 +791,44 @@ fn usage() {
     println!("{}", crate::strings::get("usage.flag.force"));
     println!("{}", crate::strings::get("usage.flag.share"));
     println!("{}", crate::strings::get("usage.flag.mask"));
+    println!();
+    println!(
+        "{}",
+        crate::strings::get_or("usage.exit_codes_header", "Exit codes:")
+    );
+    println!(
+        "{}",
+        crate::strings::get_or("usage.exit_code.ok", "  0    Success.")
+    );
+    println!(
+        "{}",
+        crate::strings::get_or(
+            "usage.exit_code.failed",
+            "  1    Failed: no usable output, or any other error."
+        )
+    );
+    println!(
+        "{}",
+        crate::strings::get_or(
+            "usage.exit_code.usage",
+            "  2    Usage: bad command or flags (this text was also printed)."
+        )
+    );
+    println!(
+        "{}",
+        crate::strings::get_or(
+            "usage.exit_code.damaged",
+            "  3    Damaged (disc:// -> iso:// or disc:// -> null:// only): kept and \
+             usable, but short some sectors — re-run (--multipass) to try for more.",
+        )
+    );
+    println!(
+        "{}",
+        crate::strings::get_or(
+            "usage.exit_code.interrupted",
+            "  130  A second Ctrl-C forced an immediate exit."
+        )
+    );
 }
 
 /// True if a command's argument list requests its help (`--help` / `-h`).

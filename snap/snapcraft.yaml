@@ -73,7 +73,7 @@ parts:
     build-packages: [build-essential, curl, git, pkg-config]
     build-environment:
       # Must match rust-version in Cargo.toml; tests/snap_packaging.rs checks.
-      - RUST_TOOLCHAIN: "1.98.0"
+      - RUST_TOOLCHAIN: "1.98.1"
     override-pull: |
       craftctl default
       base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)

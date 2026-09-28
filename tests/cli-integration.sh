@@ -286,6 +286,7 @@ elif [ -x "$LEDGER_SH" ] && command -v python3 >/dev/null 2>&1; then
   FMKV_VERSION="$("$BIN" version 2>/dev/null | head -1)" \
   FMKV_COMMIT="$(git -C "$CRATE_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
   FMKV_STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  FMKV_LEDGER_STATE="$WORK/ledger-state.json" \
     bash -c '
       set -u
       "$1" reset
