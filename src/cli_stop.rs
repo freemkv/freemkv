@@ -206,6 +206,34 @@ mod tests {
         }
     }
 
+    // Stop design v5 §3.2 (A): "the CLI [updates] on the next tick"; ST-I2's "stopping"
+    // (§5.7), said once on stderr by the watcher that cancels the process token (GUI = CLI).
+    #[cfg(unix)]
+    #[test]
+    fn unix_first_ctrl_c_says_stopping() {
+        use std::io::BufRead as _;
+        let mut c = child()
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn the child");
+        let err = c.stderr.take().expect("piped stderr");
+        await_ready(&mut c);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
+                let _ = tx.send(line);
+            }
+        });
+        unsafe { libc::kill(c.id() as libc::pid_t, libc::SIGINT) };
+        let stopping = crate::strings::get("stop.stopping");
+        let said = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(3)).ok())
+            .filter(|l| l.contains(&stopping))
+            .count();
+        let _ = c.kill();
+        let _ = c.wait();
+        assert_eq!(said, 1, "'{stopping}' once on stderr");
+    }
+
     // FT13 / G15 (SS-22): "Unix keeps `_exit(130)`, so the exit code is **130 on both**".
     #[cfg(unix)]
     #[test]
