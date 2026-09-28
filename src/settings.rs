@@ -518,6 +518,21 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
     }
 }
 
+/// T25's no-answer and idle bounds (stop design v5 §2.7): connect 10 s, headers 10 s,
+/// body idle 10 s; no total.
+#[derive(Clone, Copy)]
+struct UpdateTimeouts {
+    connect: std::time::Duration,
+    headers: std::time::Duration,
+    idle: std::time::Duration,
+}
+
+const UPDATE_TIMEOUTS: UpdateTimeouts = UpdateTimeouts {
+    connect: std::time::Duration::from_secs(10),
+    headers: std::time::Duration::from_secs(10),
+    idle: std::time::Duration::from_secs(10),
+};
+
 /// Ask GitHub for the newest published release tag.
 ///
 /// Deliberately explicit about every outcome: an update check that silently
@@ -525,21 +540,23 @@ pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
 /// no check at all. Blocking — call off the UI thread.
 pub fn check_for_update(current: &str) -> String {
     const URL: &str = "https://api.github.com/repos/freemkv/freemkv/releases/latest";
-    // ureq 3 moved the per-request timeout onto the agent config, so this
-    // one-shot call gets its own configured agent rather than a bare `get`.
+    check_for_update_at(URL, current, UPDATE_TIMEOUTS)
+}
+
+fn check_for_update_at(url: &str, current: &str, t: UpdateTimeouts) -> String {
     let config = ureq::config::Config::builder()
-        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .timeout_global(Some(t.idle))
         .build();
+    let _ = (t.connect, t.headers);
     let resp = ureq::Agent::new_with_config(config)
-        .get(URL)
+        .get(url)
         .header("User-Agent", "freemkv-gui")
         .header("Accept", "application/vnd.github+json")
         .call();
 
     let body = match resp {
         // `Body::read_to_string` is NOT unbounded: ureq applies its own 10 MiB
-        // `limit()`, and the agent bounds the op at 10s — no need for
-        // `keydb_fetch::read_capped`, which exists for the larger, uncapped path.
+        // `limit()` — no need for `keydb_fetch::read_capped` (the larger, uncapped path).
         Ok(r) => match r.into_body().read_to_string() {
             Ok(b) => b,
             Err(e) => return format!("Update check failed: {e}"),
@@ -950,5 +967,85 @@ mod normalize_tests {
              but README.md's own release/download links never mention github.com/{repo_path}/releases — \
              the update check is pointed at the wrong repo"
         );
+    }
+}
+
+#[cfg(test)]
+mod update_check_tests {
+    use super::{UpdateTimeouts, check_for_update_at};
+    use std::time::Duration;
+
+    // A stub release endpoint on localhost: read the request head, answer `head`, run `body`.
+    fn release_stub(
+        head: &'static [u8],
+        body: impl FnOnce(&mut std::net::TcpStream) + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind stub");
+        let port = listener.local_addr().expect("stub address").port();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept failed");
+            let (mut req, mut byte) = (Vec::new(), [0u8; 1]);
+            while !req.ends_with(b"\r\n\r\n") {
+                match sock.read(&mut byte) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => req.push(byte[0]),
+                }
+            }
+            let _ = sock.write_all(head).and_then(|()| sock.flush());
+            body(&mut sock);
+        });
+        (
+            format!("http://localhost:{port}/repos/freemkv/freemkv/releases/latest"),
+            server,
+        )
+    }
+
+    fn scaled(idle: Duration) -> UpdateTimeouts {
+        UpdateTimeouts {
+            connect: Duration::from_secs(5),
+            headers: Duration::from_secs(5),
+            idle,
+        }
+    }
+
+    // FT9a (stop design v5 §2.7, T25): "(a) body trickle past 10 s total (scaled) → a
+    // result". Scaled: idle (and the old 10 s total) 400 ms; a byte every 200 ms.
+    #[test]
+    fn update_check_slow_body_ok() {
+        use std::io::Write as _;
+        const BODY: &[u8] = br#"{"tag_name":"v9.9.9"}"#;
+        let idle = Duration::from_millis(400);
+        let (url, server) = release_stub(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 21\r\n\r\n",
+            move |sock| {
+                for b in BODY {
+                    std::thread::sleep(idle / 2);
+                    if sock.write_all(&[*b]).and_then(|()| sock.flush()).is_err() {
+                        return;
+                    }
+                }
+            },
+        );
+        let msg = check_for_update_at(&url, "1.0.0", scaled(idle));
+        let _ = server.join();
+        assert!(msg.starts_with("Update available: 9.9.9"), "{msg}");
+    }
+
+    // FT9b (T25): "(b) → 'could not check' at idle" (§5.0: "within window + 1 s").
+    #[test]
+    fn update_check_stalled_fails() {
+        use std::io::Read as _;
+        let idle = Duration::from_millis(400);
+        let (url, server) =
+            release_stub(b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n", |sock| {
+                let _ = sock.read(&mut [0u8; 1]);
+            });
+        let started = std::time::Instant::now();
+        let msg = check_for_update_at(&url, "1.0.0", scaled(idle));
+        let elapsed = started.elapsed();
+        let _ = server.join();
+        assert!(msg.starts_with("Update check failed"), "{msg}");
+        assert!(elapsed <= idle + Duration::from_secs(1), "held {elapsed:?}");
     }
 }
