@@ -166,6 +166,8 @@ pub struct Library {
     live_generation: AtomicU64,
     // Set by the watchdog to stop a job that stopped moving.
     stall_cancel: AtomicBool,
+    // The job "Stop all" cancelled (0 = none); the worker's sink polls it.
+    cancel_job: AtomicU64,
     index: RwLock<Arc<Snapshot>>,
     index_generation: AtomicU64,
     // The indexer sleeps on this; `wake` sets it to rescan now.
@@ -269,6 +271,7 @@ impl Library {
             live: Mutex::new(Live::default()),
             live_generation: AtomicU64::new(0),
             stall_cancel: AtomicBool::new(false),
+            cancel_job: AtomicU64::new(0),
             index: RwLock::new(Arc::new(Snapshot::default())),
             index_generation: AtomicU64::new(0),
             wake: (Mutex::new(false), Condvar::new()),
@@ -575,6 +578,23 @@ impl Library {
             ));
         }
         None
+    }
+
+    /// Stop everything: cancel the running remux (its partial is deleted and
+    /// the old MKV kept) and drop every queued job. Leaves the queue unpaused.
+    /// Returns whether a job was running and how many queued ones went.
+    pub fn stop_all(&self) -> (bool, usize) {
+        let removed = self.queue.clear_queued();
+        let running = self.queue.snapshot().running().map(|j| j.id);
+        if let Some(id) = running {
+            self.cancel_job.store(id, Ordering::SeqCst);
+        }
+        (running.is_some(), removed)
+    }
+
+    /// Whether "Stop all" cancelled job `id`.
+    pub fn cancelled(&self, id: u64) -> bool {
+        id != 0 && self.cancel_job.load(Ordering::SeqCst) == id
     }
 
     /// Delete `.mkv.partial` files under the library's title folders that no

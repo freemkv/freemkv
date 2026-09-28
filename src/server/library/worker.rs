@@ -136,6 +136,7 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
         Ok(report) => Ending::Done {
             writing_app: report.writing_app,
         },
+        Err(_) if sink.lib.cancelled(job.id) => Ending::Stopped(JobNote::Cancelled),
         Err(_) if sink.preempted() => Ending::Stopped(JobNote::Preempted),
         Err(_) if shutting_down() => Ending::Stopped(JobNote::Interrupted),
         Err(_) if sink.lib.stall_cancel.load(Ordering::SeqCst) => Ending::Stopped(JobNote::Stalled),
@@ -212,6 +213,14 @@ pub(crate) fn finish(
             sink.line(
                 LineKind::Err,
                 "Stopped: no progress. The old MKV is unchanged.".into(),
+            );
+        }
+        Ending::Stopped(JobNote::Cancelled) => {
+            lib.queue.drop_job(job.id);
+            let _ = std::fs::remove_file(super::queue::partial_path(&job.target));
+            sink.line(
+                LineKind::Warn,
+                "Stopped. The existing MKV is unchanged.".into(),
             );
         }
         Ending::Stopped(note) => {
@@ -550,7 +559,10 @@ impl Sink for JobSink<'_> {
     }
 
     fn should_cancel(&self) -> bool {
-        self.preempted() || shutting_down() || self.lib.stall_cancel.load(Ordering::SeqCst)
+        self.preempted()
+            || shutting_down()
+            || self.lib.stall_cancel.load(Ordering::SeqCst)
+            || self.lib.cancelled(self.job_id)
     }
 }
 
@@ -964,6 +976,42 @@ mod tests {
         let f = lib.queue.snapshot().jobs[0].failure.clone().unwrap();
         assert_eq!(f.code, Some(7013));
         assert!(f.message.starts_with("E7013"), "{f:?}");
+    }
+
+    #[test]
+    fn stop_all_leaves_nothing_running_queued_paused_or_partial() {
+        let (_t, lib, dirs) = library_with(&["A", "B", "C"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        lib.queue.set_paused(false);
+        let a = lib.queue.claim_next().unwrap();
+        let partial = super::super::queue::partial_path(&a.target);
+        std::fs::write(&partial, b"half").unwrap();
+        lib.queue.set_paused(true);
+        let arbiter = Arbiter::new();
+        let mut sink = test_sink(&lib, &arbiter);
+        sink.job_id = a.id;
+        assert!(!sink.should_cancel());
+        assert_eq!(lib.stop_all(), (true, 2));
+        assert!(sink.should_cancel(), "the running remux sees the stop");
+        // The engine returns; the worker records the ending.
+        finish(
+            &lib,
+            &a,
+            Ending::Stopped(JobNote::Cancelled),
+            Duration::ZERO,
+            &sink,
+        );
+        let q = lib.queue.snapshot();
+        assert!(
+            q.jobs
+                .iter()
+                .all(|j| !matches!(j.state, JobState::Queued | JobState::Running)),
+            "{q:?}"
+        );
+        assert!(!q.paused);
+        assert!(!partial.exists());
+        assert!(a.target.exists(), "the old MKV is kept");
     }
 
     #[test]
