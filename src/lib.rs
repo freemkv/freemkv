@@ -13,6 +13,10 @@
 /// Portable and Win32/AppKit-free on purpose — the routing is the part that
 /// can be wrong without a window to look at, so it must be testable here.
 pub mod app_entry;
+/// What a finished `disc:// -> iso://` copy still has to tell the user about
+/// unrecovered sectors — the ONE renderer both shells use. Declared here as
+/// well as in `main.rs` (same reason as `file_identity` below).
+pub mod disc_copy_verdict;
 pub mod engine;
 /// Whether two paths name the same file — the ONE definition both shells use
 /// to refuse a rip whose destination is its own source. Declared here as well

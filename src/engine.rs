@@ -2261,33 +2261,51 @@ fn disc_raw_copy(kind: OutKind, raw: bool) -> bool {
     matches!(kind, OutKind::IsoImage) && raw
 }
 
-// A recovered ISO's result. Single-pass takes the CLI's `copy_verdict`: no data or a holed
-// image is a failure. Multipass damage under the lost-seconds tolerance stays a success.
-fn iso_recovery_result(
-    result: &fe::MultipassResult,
-    single_pass: bool,
-    iso_path: &str,
-) -> Result<String, String> {
+// Matches the CLI's `copy_verdict`: NOTHING readable is the only failure, and that (unusable)
+// ISO is kept, not deleted. Any copy short of some sectors still succeeds and always names the
+// loss and points at another run (shared `disc_copy_verdict` renderer, can't drift from the CLI).
+fn iso_recovery_result(result: &fe::MultipassResult, iso_path: &str) -> Result<String, String> {
     if recovery_produced_no_data(result.good_bytes) {
-        let _ = std::fs::remove_file(iso_path);
-        return Err("Recovery produced no readable data — nothing to keep.".into());
-    }
-    if single_pass && (result.unreadable_bytes > 0 || result.pending_bytes > 0) {
-        return Err(format!(
-            "ISO copy incomplete — unreadable sectors remain (re-run with --multipass to \
-             retry them); partial ISO kept: {iso_path}"
+        return Err(crate::disc_copy_verdict::iso_no_data_error(
+            result.unreadable_bytes,
         ));
     }
-    Ok(format!(
-        "ISO image written to {iso_path}{}",
-        damage_note(result)
-    ))
+    let mut note = damage_note(result);
+    if result.unreadable_bytes > 0 || result.pending_bytes > 0 {
+        note.push('\n');
+        note.push_str(&crate::disc_copy_verdict::retry_with_multipass_hint());
+    }
+    Ok(format!("ISO image written to {iso_path}{note}"))
 }
 
 // Rip from a live optical drive (disc://). Scans once to resolve titles and keys, then runs the
 // chosen sink via fe::run_titles (same loop the ISO path uses). NEEDS HARDWARE VALIDATION
 // end-to-end.
 fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<String, String> {
+    run_disc_scanning(req, sink, state, fe::open_scan_resolve_with)
+}
+
+/// [`run_disc`] with the drive scan as an injectable seam. Production always scans via
+/// `fe::open_scan_resolve_with` (needs a live drive, so THAT path is untestable here); a
+/// test can stub it and observe the exact `raw_copy` `run_disc` handed it — proving the
+/// wiring is real, not just that `disc_raw_copy`'s own logic is right.
+fn run_disc_scanning(
+    req: &RipRequest,
+    sink: &UiSink,
+    state: &Arc<RunState>,
+    scan: impl FnOnce(
+        libfreemkv::DeviceTarget,
+        Option<libfreemkv::DriveCredentials>,
+        libfreemkv::KeySourceFactory,
+        bool,
+    ) -> Result<
+        (
+            libfreemkv::DiscSession,
+            libfreemkv::aacs::trace::ResolutionTrace,
+        ),
+        libfreemkv::Error,
+    >,
+) -> Result<String, String> {
     if req.decrypt_threads > 0 {
         libfreemkv::set_decrypt_threads(req.decrypt_threads);
     }
@@ -2295,7 +2313,7 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
 
     // Scan once (shared drive core): titles, label, key state, per-disc name.
     std::fs::create_dir_all(&req.dest_dir).map_err(|e| format!("{e}"))?;
-    let (mut session, _trace) = fe::open_scan_resolve_with(
+    let (mut session, _trace) = scan(
         disc_target(&req.source),
         session_credentials(&req.keys),
         key_factory(&req.keys),
@@ -2397,8 +2415,7 @@ fn run_disc(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<St
         }
 
         if want_iso {
-            let single_pass = !fe::plan_passes(req.max_passes.min(u8::MAX as u32) as u8).multipass;
-            return iso_recovery_result(&result, single_pass, &iso_path);
+            return iso_recovery_result(&result, &iso_path);
         }
 
         // Title output: mux the selected titles from the recovered ISO via the
@@ -3502,13 +3519,15 @@ mod disc_details_tests {
 #[cfg(test)]
 mod routing_tests {
     use super::{
-        DiscPlan, KeyConfig, OutKind, RipRequest, TitleIdentity, damage_note, demux_needs_subdirs,
-        disc_device, disc_raw_copy, fe, image_or_dir_scheme, is_disc_source, is_stream_source,
-        iso_recovery_result, mux_opts, out_kind, recovery_plan, recovery_produced_no_data,
-        recovery_raw, remap_against, remap_title_pids, should_delete_staging_iso, source_scheme,
-        stream_selection_for, title_input_options, title_session_mux_opts,
-        verify_selection_identity, verify_title_identity, won_from_trace,
+        DiscPlan, KeyConfig, OutKind, RipRequest, RunState, TitleIdentity, UiSink, damage_note,
+        demux_needs_subdirs, disc_device, disc_raw_copy, fe, image_or_dir_scheme, is_disc_source,
+        is_stream_source, iso_recovery_result, mux_opts, out_kind, recovery_plan,
+        recovery_produced_no_data, recovery_raw, remap_against, remap_title_pids,
+        run_disc_scanning, should_delete_staging_iso, source_scheme, stream_selection_for,
+        title_input_options, title_session_mux_opts, verify_selection_identity,
+        verify_title_identity, won_from_trace,
     };
+    use std::sync::Arc;
 
     // ── The recovery job's `raw` flag ── `multipass_rip` refuses a real
     // sweep-plus-patch plan with `raw = false`; `ui::raw_applies` forces
@@ -4928,21 +4947,33 @@ mod routing_tests {
         );
         assert!(!disc_raw_copy(out_kind("Selected titles → MKV"), true));
 
-        let src = include_str!("engine.rs").replace("\r\n", "\n");
-        let start = src.find("fn run_disc(").expect("run_disc");
-        let end = start + src[start..].find("let device = ").expect("device");
-        let scan = &src[start..end];
-        assert!(
-            scan.contains("fe::open_scan_resolve_with(")
-                && scan.contains("disc_raw_copy(kind, req.raw)"),
-            "run_disc must hand disc_raw_copy to the drive scan"
+        // Behavioural seam (no hardware needed): stub the scan and observe the
+        // exact `raw_copy` `run_disc_scanning` handed it for a raw ISO request.
+        let mut r = req();
+        r.format = "Whole disc → ISO image".into();
+        r.raw = true;
+        r.dest_dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let state = Arc::new(RunState::default());
+        let sink = UiSink(state.clone());
+        let seen = std::cell::Cell::new(None);
+        let _ = run_disc_scanning(&r, &sink, &state, |_, _, _, raw_copy| {
+            seen.set(Some(raw_copy));
+            Err(libfreemkv::Error::DeviceNotFound {
+                path: String::new(),
+            })
+        });
+        assert_eq!(
+            seen.get(),
+            Some(true),
+            "run_disc must hand disc_raw_copy's answer to the scan"
         );
     }
 
-    // Single-pass ISO: the CLI's verdict. No data and a holed image fail; clean succeeds.
+    // The CLI's verdict: NOTHING readable is the only failure, and even then the ISO
+    // is kept, not deleted. A holed image always succeeds and always points at another run.
     #[test]
-    fn a_single_pass_iso_takes_the_cli_copy_verdict() {
-        assert!(iso_recovery_result(&clean_result(), true, "/x.iso").is_ok());
+    fn an_iso_copy_takes_the_cli_copy_verdict() {
+        assert!(iso_recovery_result(&clean_result(), "/x.iso").is_ok());
         let no_data = fe::MultipassResult {
             good_bytes: 0,
             unreadable_bytes: 1_048_576,
@@ -4950,23 +4981,24 @@ mod routing_tests {
             ..clean_result()
         };
         assert!(
-            iso_recovery_result(&no_data, true, "/x.iso").is_err(),
-            "no data is a failure"
+            iso_recovery_result(&no_data, "/x.iso").is_err(),
+            "no data at all is the only failure"
         );
+
+        // Holed but non-empty: still a SUCCESS — the image is kept and usable — but
+        // must name the loss and point at another run, whether or not this run
+        // already was multipass (it only retries once per invocation).
         let holed = fe::MultipassResult {
             unreadable_bytes: 1_048_576,
             complete: false,
             ..clean_result()
         };
+        let msg = iso_recovery_result(&holed, "/x.iso").expect("a holed copy still succeeds");
         assert!(
-            iso_recovery_result(&holed, true, "/x.iso").is_err(),
-            "a holed image fails"
+            msg.contains("1.0")
+                && msg.contains(crate::disc_copy_verdict::retry_with_multipass_hint().as_str()),
+            "the loss and the retry hint must both be named: {msg}"
         );
-        assert!(
-            iso_recovery_result(&holed, false, "/x.iso").is_ok(),
-            "multipass damage under tolerance stays a success"
-        );
-        assert!(iso_recovery_result(&no_data, false, "/x.iso").is_err());
     }
 
     // ── damage under tolerance is still disclosed ───────────────────────────

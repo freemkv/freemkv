@@ -1484,6 +1484,18 @@ pub fn wants_multipass(rip_mode: &str, max_passes: u32) -> bool {
     rip_mode == "Multi-pass" && max_passes > 0
 }
 
+/// The `max_passes` a rip request actually carries: zeroed for anything but
+/// Multi-pass. `max_passes` alone drives multipass recovery downstream
+/// (`fe::plan_passes`), so a stale non-zero setting (left over from a prior
+/// Multi-pass run) must not smuggle multipass recovery into a Single-pass rip.
+pub fn effective_max_passes(rip_mode: &str, typed_passes: u32) -> u32 {
+    if wants_multipass(rip_mode, typed_passes) {
+        typed_passes
+    } else {
+        0
+    }
+}
+
 /// Whether `--raw` (keep-encrypted) actually applies to this output.
 ///
 /// Ciphertext passthrough only means anything for a whole-disc ISO image; for
@@ -2420,7 +2432,9 @@ impl App {
             LogKind::Result,
             &crate::strings::fmt("gui.log.starting_rip", &[("dir", &self.output_dir)]),
         );
-        let max_passes: u32 = self.settings.max_passes.trim().parse().unwrap_or(0);
+        let typed_passes: u32 = self.settings.max_passes.trim().parse().unwrap_or(0);
+        let multipass = wants_multipass(&self.settings.rip_mode, typed_passes);
+        let max_passes = effective_max_passes(&self.settings.rip_mode, typed_passes);
         crate::engine::start_rip(
             RipRequest {
                 source: self.source.clone(),
@@ -2444,7 +2458,7 @@ impl App {
                     .trim()
                     .parse::<usize>()
                     .unwrap_or(0),
-                multipass: wants_multipass(&self.settings.rip_mode, max_passes),
+                multipass,
                 max_passes,
                 abort_lost_secs: self.settings.abort_lost_secs.trim().parse().unwrap_or(0),
                 keep_iso: self.settings.keep_iso,
@@ -2786,6 +2800,22 @@ mod tests {
             "an image source is not a disc"
         );
         assert!(!raw_applies(false, true, true));
+    }
+
+    // Single pass must stay single pass even with a stale Multi-pass `max_passes`
+    // setting still typed in: `fe::plan_passes` decides multipass from the COUNT
+    // alone, so a non-zero leftover would have silently run multipass recovery.
+    #[test]
+    fn single_pass_zeroes_max_passes_whatever_is_typed() {
+        assert_eq!(effective_max_passes("Single pass", 5), 0);
+        assert_eq!(effective_max_passes("Single pass", 0), 0);
+        assert_eq!(effective_max_passes("", 5), 0);
+        assert_eq!(effective_max_passes("Multi-pass", 5), 5);
+        assert_eq!(
+            effective_max_passes("Multi-pass", 0),
+            0,
+            "zero passes is not multipass whatever the mode says"
+        );
     }
 
     // A source pin: the disc can be swapped while the operator reviews the tree, so the request

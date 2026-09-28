@@ -685,7 +685,10 @@ fn parse_flags(args: &[String]) -> Result<ParsedFlags, String> {
 }
 
 /// Returns true on success, false on error.
-pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
+/// The process exit code: 0 on success, `disc_to_iso`'s own
+/// `DISC_COPY_DAMAGED_EXIT` for a kept-but-damaged disc→ISO copy, 1 on any
+/// other failure.
+pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     install_signal_handler();
 
     let flags = match parse_flags(args) {
@@ -694,7 +697,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
             // Build a quiet-agnostic Output just to emit the error; flag parse
             // errors must surface even before we know verbose/quiet intent.
             Output::new(false, false).raw(Normal, &msg);
-            return false;
+            return 1;
         }
     };
     let ParsedFlags {
@@ -759,10 +762,11 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         selection_flags_used,
     ) {
         out.raw(Normal, &msg);
-        return false;
+        return 1;
     }
 
-    // Disc → ISO or Disc → null: use Disc::copy() (not a stream)
+    // Disc → ISO or Disc → null: use Disc::copy() (not a stream). Its own exit
+    // code (0 / DISC_COPY_DAMAGED_EXIT / 1) passes straight through.
     if matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. })
         && matches!(
             parsed_dest,
@@ -776,14 +780,22 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
     // decrypts an existing image; `dir://` joins this arm when it becomes a
     // source. Not the recovery path — see `image_to_iso`.
     if matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. }) && parsed_source.is_disc_source() {
-        return image_to_iso(source, dest, &keys, &out);
+        return if image_to_iso(source, dest, &keys, &out) {
+            0
+        } else {
+            1
+        };
     }
 
     // Disc / ISO → dir://: decrypted file-tree extraction, not a stream.
     // Placed before the generic mux path. Byte-stream sources, `--raw`, and
     // `--multipass` are already rejected above, so the source here is a disc.
     if matches!(parsed_dest, libfreemkv::StreamUrl::Dir { .. }) {
-        return dir_to_extract(source, dest, &keys, &parsed_source, force, &out);
+        return if dir_to_extract(source, dest, &keys, &parsed_source, force, &out) {
+            0
+        } else {
+            1
+        };
     }
 
     // Everything else: figure out titles, pipe each one
@@ -816,7 +828,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
                          disc and drive and try again.",
                     ),
                 );
-                return false;
+                return 1;
             }
         }
     } else {
@@ -832,7 +844,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         &out,
     ) {
         Some(j) => j,
-        None => return false,
+        None => return 1,
     };
 
     // Show summary for multi-title
@@ -1015,7 +1027,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> bool {
         out.blank(Normal);
     }
 
-    ok
+    if ok { 0 } else { 1 }
 }
 
 // ── Pre-flight invocation validation (fail loud and EARLY) ──────────────────
@@ -1924,16 +1936,29 @@ enum CopyVerdict {
     /// all zeroes.
     NoData,
     /// The sweep finished and produced a usable image that is NOT the whole
-    /// disc: sectors were unreadable, or were skipped and left pending. The
-    /// image is worth keeping and worth retrying with `--multipass`; what it
-    /// is not is complete, and it must not be reported as if it were.
+    /// disc: sectors were unreadable, or were skipped and left pending. Still
+    /// KEPT and reported with a warning naming the loss and pointing at another
+    /// run, but a scripted caller must be able to tell it apart from a clean
+    /// copy — see [`DISC_COPY_DAMAGED_EXIT`].
     Lossy,
     /// A usable image, and all of it.
     Complete,
 }
 
-fn disc_copy_succeeded(verdict: CopyVerdict) -> bool {
-    matches!(verdict, CopyVerdict::Complete)
+/// The `disc:// -> iso://` exit code for a `Lossy` copy: kept and reported, but
+/// short some sectors. Distinct from both 0 (clean) and 1 (no usable image /
+/// interrupted), so `$?` can tell "damaged but usable" apart from either.
+const DISC_COPY_DAMAGED_EXIT: i32 = 3;
+
+// NOTHING readable (or an interrupted sweep) is the only hard failure (exit 1).
+// `Lossy` is its own exit code — still kept, still reported — never silently
+// folded into either a clean 0 or a hard 1.
+fn disc_copy_exit_code(verdict: CopyVerdict) -> i32 {
+    match verdict {
+        CopyVerdict::Complete => 0,
+        CopyVerdict::Lossy => DISC_COPY_DAMAGED_EXIT,
+        CopyVerdict::NoData | CopyVerdict::Interrupted => 1,
+    }
 }
 
 fn copy_verdict(r: &freemkv_engine::CopyResult) -> CopyVerdict {
@@ -2171,9 +2196,9 @@ fn image_to_iso(source: &str, dest: &str, keys: &KeyConfig, out: &Output) -> boo
     }
 }
 
-/// Returns true on success, false on any failure (no drive, scan error,
-/// `Disc::copy` error). The caller propagates this to `main`'s exit code so a
-/// scripted `$?` check sees the failure.
+/// The process exit code: 0 on a complete copy, `DISC_COPY_DAMAGED_EXIT` on a copy that is
+/// kept and usable but short some sectors, 1 on any other failure (no drive, scan error,
+/// `Disc::copy` error). The caller propagates this straight to `main`'s exit code.
 fn disc_to_iso(
     source: &str,
     dest: &str,
@@ -2181,7 +2206,7 @@ fn disc_to_iso(
     raw: bool,
     multipass: bool,
     out: &Output,
-) -> bool {
+) -> i32 {
     let parsed_source = libfreemkv::parse_url(source);
     let parsed_dest = libfreemkv::parse_url(dest);
     let device = match &parsed_source {
@@ -2194,14 +2219,14 @@ fn disc_to_iso(
             Ok(d) => d,
             Err(e) => {
                 out.raw(Normal, &render_error(&e));
-                return false;
+                return 1;
             }
         },
         None => match libfreemkv::find_drive() {
             Some(d) => d,
             None => {
                 out.raw(Normal, &strings::get("error.no_drive"));
-                return false;
+                return 1;
             }
         },
     };
@@ -2219,7 +2244,7 @@ fn disc_to_iso(
         Ok(d) => d,
         Err(e) => {
             out.raw(Normal, &scan_failed_msg(&e));
-            return false;
+            return 1;
         }
     };
     // Resolve + apply the AACS key so the keys persist in the mapfile during
@@ -2232,7 +2257,7 @@ fn disc_to_iso(
     // locking the tray, so `Disc::copy`'s gate is surfaced with a localized message.
     if let Err(e) = disc.ensure_decryptable(raw) {
         out.raw(Normal, &render_error(&e));
-        return false;
+        return 1;
     }
 
     let disc_name = sanitize_name(disc.meta_title.as_deref().unwrap_or(&disc.volume_id));
@@ -2305,7 +2330,7 @@ fn disc_to_iso(
     };
 
     let copy_opts = disc_copy_options(&disc, raw, multipass, &progress);
-    let success = match freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts) {
+    let exit_code = match freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts) {
         Ok(r) if copy_verdict(&r) == CopyVerdict::Interrupted => {
             // Ctrl-C halted the copy. Don't print "Complete" over a partial
             // ISO — report interrupted/failure so exit is non-zero. Mapfile
@@ -2314,21 +2339,20 @@ fn disc_to_iso(
                 eprint!("\r\x1b[K");
             }
             out.raw(Normal, &strings::get("rip.interrupted"));
-            false
+            1
         }
         Ok(r) if copy_verdict(&r) == CopyVerdict::NoData => {
             // The copy completed but recovered ZERO readable bytes: the ISO on
-            // disk is unusable. Don't print "Complete" — a scripted caller
-            // checking $? must see non-zero, like the mux paths' NoStreams guard.
+            // disk is unusable (but kept). Don't print "Complete" — a scripted
+            // caller checking $? must see non-zero, like the mux paths' NoStreams guard.
             if !out.is_quiet() {
                 eprint!("\r\x1b[K");
             }
-            let mb_bad = r.bytes_unreadable as f64 / 1_048_576.0;
             out.raw(
                 Normal,
-                &strings::fmt("rip.no_data", &[("unreadable", &format!("{mb_bad:.1}"))]),
+                &crate::disc_copy_verdict::iso_no_data_error(r.bytes_unreadable),
             );
-            false
+            1
         }
         Ok(r) => {
             if !out.is_quiet() {
@@ -2338,10 +2362,10 @@ fn disc_to_iso(
             let elapsed = start.elapsed().as_secs_f64();
             let mb = r.bytes_total as f64 / (1024.0 * 1024.0);
             let speed = if elapsed > 0.0 { mb / elapsed } else { 0.0 };
-            // Report the LOSS whenever there is any, not only on requested
-            // recovery: gated on `multipass`, a single-pass rip of a scratched
-            // disc printed only completion. Printed BEFORE so "Complete" is last.
-            if !disc_copy_succeeded(verdict) {
+            // Report the LOSS whenever there is any, printed BEFORE so
+            // "Complete" is last. `Lossy` is still a SUCCESS — the image is
+            // kept and usable — this warning names what's missing.
+            if verdict == CopyVerdict::Lossy {
                 let gb_good = r.bytes_good as f64 / 1_073_741_824.0;
                 let mb_bad = r.bytes_unreadable as f64 / 1_048_576.0;
                 let mb_pending = r.bytes_pending as f64 / 1_048_576.0;
@@ -2376,6 +2400,12 @@ fn disc_to_iso(
                         &strings::fmt("rip.damage_lost_movie", &[("time", &main_str)]),
                     );
                 }
+                // Always shown, even if this run WAS `--multipass`: it only
+                // retries once per invocation, so residual damage is never hidden.
+                out.raw(
+                    Normal,
+                    &crate::disc_copy_verdict::retry_with_multipass_hint(),
+                );
             }
             out.raw(
                 Normal,
@@ -2389,18 +2419,18 @@ fn disc_to_iso(
                     ],
                 ),
             );
-            // The verdict IS the exit code. Returning a bare `true` here is
-            // what let a holed image exit 0.
-            disc_copy_succeeded(verdict)
+            // `Lossy` gets its own DISTINCT exit code: still kept and usable,
+            // and the warning above already said what is missing.
+            disc_copy_exit_code(verdict)
         }
         Err(e) => {
             out.raw(Normal, &render_error(&e));
-            false
+            1
         }
     };
 
     drive.unlock_tray();
-    success
+    exit_code
 }
 
 // ── dir:// decrypted file-tree extraction ───────────────────────────────────
@@ -5267,8 +5297,9 @@ mod tests {
 #[cfg(test)]
 mod verdict_tests {
     use super::{
-        CopyVerdict, PipeFail, check_selection_coverage, copy_verdict, disc_copy_options,
-        disc_copy_succeeded, extract_succeeded, finalize_mux, is_feature_title, title_policy,
+        CopyVerdict, DISC_COPY_DAMAGED_EXIT, PipeFail, check_selection_coverage, copy_verdict,
+        disc_copy_exit_code, disc_copy_options, extract_succeeded, finalize_mux, is_feature_title,
+        title_policy,
     };
     use crate::output::Output;
 
@@ -5461,22 +5492,34 @@ mod verdict_tests {
     }
 
     #[test]
-    fn a_lossy_copy_reports_its_loss_and_fails_the_exit_code() {
-        assert!(disc_copy_succeeded(CopyVerdict::Complete));
-        for v in [
-            CopyVerdict::Lossy,
-            CopyVerdict::NoData,
-            CopyVerdict::Interrupted,
-        ] {
-            assert!(
-                !disc_copy_succeeded(v),
-                "{v:?} must not exit 0 — the image is not what was asked for"
+    fn a_lossy_copy_reports_its_loss_and_exits_with_its_own_code() {
+        // NOTHING readable (or an interrupted sweep) is the only hard failure
+        // (exit 1). A lossy-but-usable image is KEPT and gets its OWN distinct
+        // exit code — never silently folded into 0 (clean) or 1 (no image).
+        assert_eq!(disc_copy_exit_code(CopyVerdict::Complete), 0);
+        assert_eq!(
+            disc_copy_exit_code(CopyVerdict::Lossy),
+            DISC_COPY_DAMAGED_EXIT
+        );
+        assert_ne!(
+            DISC_COPY_DAMAGED_EXIT, 0,
+            "a damaged copy must not read as clean to a scripted caller"
+        );
+        assert_ne!(
+            DISC_COPY_DAMAGED_EXIT, 1,
+            "a damaged (but kept) copy must not read as a hard failure"
+        );
+        for v in [CopyVerdict::NoData, CopyVerdict::Interrupted] {
+            assert_eq!(
+                disc_copy_exit_code(v),
+                1,
+                "{v:?} must exit 1 — there is no usable image to keep"
             );
         }
 
-        // The reporting half. `pipe_disc` needs a real drive, so the wiring is
-        // pinned in the source: the loss block must be reached by the VERDICT,
-        // never by `if multipass`.
+        // The reporting half, source-pinned (needs a real drive): the loss block
+        // must be reached by the VERDICT, never `if multipass` — and must always
+        // print the retry hint, or unretried pending bytes go unmentioned.
         let src = include_str!("pipe.rs").replace("\r\n", "\n");
         let start = src
             .find("            let verdict = copy_verdict(&r);")
@@ -5491,8 +5534,12 @@ mod verdict_tests {
             "the loss report must not depend on the recovery strategy"
         );
         assert!(
-            arm.contains("rip.mapfile_summary") && arm.contains("disc_copy_succeeded(verdict)"),
-            "a lossy sweep must print what it lost and return the verdict"
+            arm.contains("rip.mapfile_summary") && arm.contains("disc_copy_exit_code(verdict)"),
+            "a lossy sweep must print what it lost and return its own exit code"
+        );
+        assert!(
+            arm.contains("retry_with_multipass_hint()"),
+            "a lossy sweep must always point at another run"
         );
     }
 
