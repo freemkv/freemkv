@@ -193,10 +193,11 @@ pub struct Config {
     pub tmdb_api_key: String,
     pub keydb_path: Option<String>,
     pub keydb_url: String,
-    /// Where AACS keys come from: "local" (a key database on disk) or "online"
-    /// (an external key service). Mutually exclusive.
+    /// autorip's "local" / "online" key-source choice. Read and saved for
+    /// compatibility and still gates the keydb download; key lookup itself is
+    /// the local-first chain (keydb, then `keyserver_url` when set).
     pub key_source: String,
-    /// Base URL of the external key service used when `key_source = "online"`.
+    /// Base URL of the external key service, tried after the local keydb.
     pub keyserver_url: String,
     /// Optional bearer token for the key service. Empty = none.
     pub keyserver_secret: String,

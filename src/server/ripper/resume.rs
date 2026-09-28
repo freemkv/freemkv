@@ -703,11 +703,10 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     // this guard serializes the mux; its Drop clears the marker when done.
     let _muxing_guard = ResumeMuxingGuard::acquire(device, &staging_dir);
 
-    // 2. Open + scan the ISO via the library's `scan_iso` entry point (opens a
-    //    FileSectorSource, reads capacity, runs the structure scan). A later
-    //    key-fetch closure opens its own handle for ciphertext sampling.
-    let struct_opts = crate::server::keysource::iso_scan_opts();
-    let disc = match libfreemkv::scan_iso(&iso_path, struct_opts) {
+    // 2. Keyless structure scan through the engine, for the cheap gates below
+    //    (usable title, staging space) before any key-service round-trip.
+    let disc = match freemkv_engine::scan_image(&freemkv_engine::ImageSource::Iso(iso_path.clone()))
+    {
         Ok((d, _reader)) => d,
         Err(e) => {
             crate::server::log::device_log(
@@ -771,10 +770,22 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     }
     forget_space_refusal(&staging_dir);
 
-    // Sample-based key source: read the disc's files + Volume ID (from the
-    // mapfile) + on-disc samples (from the ISO), resolve a Unit Key, and re-scan
-    // with it so decryption keys populate. No-op for a local source.
-    let (disc, _key_outcome) = resolve_keys_from_iso(&cfg_read, &iso_path, &mapfile_path, disc);
+    // Open the image through the engine and resolve its keys from the key chain,
+    // with the Volume ID the rip recorded in the mapfile (an image has none).
+    let vid = freemkv_engine::Mapfile::load(&mapfile_path)
+        .ok()
+        .and_then(|m| m.vid());
+    drop(disc);
+    let image = match crate::server::keysource::open_staged_image(&cfg_read, &iso_path, vid, None) {
+        Ok(image) => image,
+        Err(e) => {
+            let msg = super::format_lib_error("reading the saved disc image", &e);
+            crate::server::log::device_log(device, &format!("Auto-resume aborted: {msg}"));
+            reset_status_after_ripping(device, "error", &display_name, "", "", Some(msg));
+            return;
+        }
+    };
+    let disc = &image.disc;
     // Consume the real decode's verdict now; the keyless deferral below reports it.
     let decode_reach = crate::server::keysource::take_online_decode_reachability();
 
@@ -916,7 +927,6 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
 
     // 4. Build MuxInputs + run mux exactly as rip_disc does.
     // (`disc_format` + `duration` were computed up front, above.)
-    let format = disc.content_format;
     let keys = disc.decrypt_keys();
     let batch = libfreemkv::disc::detect_max_batch_sectors(DEFAULT_BATCH_PROBE_PATH);
 
@@ -927,7 +937,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         && matches!(keys, libfreemkv::decrypt::DecryptKeys::None)
         && !super::output_is_iso_image(&cfg_read.output_format)
     {
-        let (log_line, reason) = super::deferred_keyless_texts(&cfg_read, &disc, decode_reach);
+        let (log_line, reason) = super::deferred_keyless_texts(&cfg_read, disc, decode_reach);
         crate::server::log::device_log(device, &log_line);
         // We have not set status="ripping" yet (that happens via the
         // update_state call further below). reset_status_after_ripping
@@ -937,7 +947,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     }
 
     let output_format = cfg_read.output_format.clone();
-    let ext = super::output_extension_for(&output_format, &disc);
+    let ext = super::output_extension_for(&output_format, disc);
     // TV fan-out: the primary episode's staging leaf comes from the plan; movies
     // keep the `{display_name}.{ext}` name (unchanged).
     let filename = if is_fanout {
@@ -970,7 +980,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     super::register_halt(device, libfreemkv::Halt::new());
     // Registered so `/api/stop` (and `mux_iso`'s own `device_halt` lookup) can
     // cancel the resume mux; the bound handle itself is unused now that
-    // `mux_stream` looks the token up by device.
+    // the mux looks the token up by device.
     let _halt_token = match super::device_halt(device) {
         Some(h) => h,
         None => {
@@ -1023,9 +1033,8 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             return;
         }
     };
-    // Compute sweep damage snapshot before `title` is moved into
-    // `build_iso_pipeline`. Re-derives all damage fields from the
-    // scoped to the longest title.
+    // Sweep damage snapshot, re-derived from the mapfile and scoped to the
+    // title being muxed.
     let sweep_damage_for_resume = {
         use freemkv_engine::SectorStatus;
         let (bad_ranges, num_bad_ranges, bad_ranges_truncated, total_lost_ms, largest_gap_ms) =
@@ -1054,31 +1063,22 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     let done_sweep_damage = sweep_damage_for_resume.clone();
 
     // The pre-opened `iso_reader_for_mux` above is a reachability/permission
-    // probe only; `mux_stream` (below, inside `mux_iso`) opens its own
-    // `FileSectorSource` from `iso_path`, so drop the probe handle.
+    // probe only; the engine mux (inside `mux_iso`) opens its own reader.
     drop(iso_reader_for_mux);
 
     // Progress + watchdog atomics shared between this function's terminal-state
-    // updates, the `AutoripMuxEvents` bridge, and `mux_iso`'s `MuxAtomics`.
+    // updates, the engine mux sink, and `mux_iso`'s `MuxAtomics`.
     let latest_bytes_read = Arc::new(AtomicU64::new(0));
     let rip_last_lba = Arc::new(AtomicU64::new(0));
     let rip_current_batch = Arc::new(AtomicU16::new(batch));
     let wd_last_frame = Arc::new(AtomicU64::new(crate::server::util::epoch_secs()));
     let mux_input_errors = Arc::new(AtomicU32::new(0));
 
-    // STEP 4c-i: the resume mux routes through `libfreemkv::mux_stream` (via
-    // `mux::mux_iso`) exactly like the fresh multipass path. Gather the ISO mux
-    // where the Err arm preserves the deferral semantics.
+    // The resume mux runs through the engine (via `mux::mux_iso`) exactly like
+    // the fresh multipass path; the Err arm keeps the deferral semantics.
     let iso_src = super::mux::IsoMuxSource {
-        iso_path: iso_path.clone(),
-        title,
-        format,
-        keys,
-        // Fresh-key-on-failure fetch (recover a 2nd/Nth CPS-unit key MID-MUX) —
-        // the SAME closure the pre-migration build_iso_pipeline call took.
-        key_fetch: crate::server::keysource::build_iso_key_fetch(&cfg_read, &iso_path),
-        raw: false,
-        skip_errors: false,
+        image: &image,
+        title_index: primary_index,
     };
 
     // TMDB metadata source of truth: the DURABLE on-disk `.ripped` marker, NOT
@@ -1316,7 +1316,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             }
             // Any other setup failure is structural — surface as "error" (staging
             // preserved, no `.failed`), mirroring the pre-migration build arm.
-            tracing::error!(target: "mux", device=%device, "mux_stream failed: {e}");
+            tracing::error!(target: "mux", device=%device, "image mux failed: {e}");
             let msg = format!(
                 "Mux setup failed — the disc's title or stream layout could not be prepared for muxing. The source may be damaged or use an unsupported format ({e})."
             );
@@ -1559,13 +1559,8 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 sweep_damage: super::mux::SweepDamageSnapshot::default(),
             };
             let ep_src = super::mux::IsoMuxSource {
-                iso_path: iso_path.clone(),
-                title: ep_title,
-                format: disc.content_format,
-                keys: disc.decrypt_keys(),
-                key_fetch: crate::server::keysource::build_iso_key_fetch(&cfg_read, &iso_path),
-                raw: false,
-                skip_errors: false,
+                image: &image,
+                title_index: extra.title_index,
             };
             let ep_atomics = super::mux::MuxAtomics {
                 latest_bytes_read: Arc::new(AtomicU64::new(0)),
@@ -1895,31 +1890,6 @@ pub(crate) fn remux_from_ripped_marker(
     outcome
 }
 
-/// Resolve keys for a resumed disc via the configured source. A thin ISO/mapfile
-/// binding over [`crate::server::keysource::resolve_keys`]; returns the disc re-scanned
-/// with the key (sample-based source) or unchanged (local / no key).
-fn resolve_keys_from_iso(
-    cfg: &Config,
-    iso_path: &Path,
-    mapfile_path: &Path,
-    mut disc: libfreemkv::Disc,
-) -> (libfreemkv::Disc, crate::server::keysource::KeyOutcome) {
-    // On resume / deferred mux the keys are re-resolved from the configured
-    // source (keydb / online). Most AACS inputs (inf/MKB/version/hash) come from
-    // correctly; a genuinely-unkeyed disc returns NoKey.
-    if let Some(a) = disc.aacs.as_mut()
-        && a.volume_id == [0u8; 16]
-        && let Some(vid) = freemkv_engine::Mapfile::load(mapfile_path)
-            .ok()
-            .and_then(|m| m.vid())
-    {
-        a.volume_id = vid;
-    }
-    let sources = crate::server::keysource::build_sources(cfg);
-    let mut access = crate::server::keysource::IsoAccess::new(iso_path);
-    crate::server::keysource::resolve_keys(sources, &mut access, disc)
-}
-
 // Tests live in `tests/resume_remux.rs` (integration tests) — they
 // pattern-match on `ResumeClass` and exercise `classify_resume`. But
 // `find_iso_and_mapfile` is `pub(super)`, so it's unit-tested in-module here.
@@ -1996,7 +1966,7 @@ mod remux_space_tests {
         let check = f
             .find("remux_space_refusal(&cfg_read, &staging_dir")
             .unwrap();
-        let keys = f.find("resolve_keys_from_iso(&cfg_read").unwrap();
+        let keys = f.find("keysource::open_staged_image(&cfg_read").unwrap();
         assert!(check < keys, "space check must precede key resolution");
         assert!(f[check..keys].contains("s.failure_space = true"));
     }

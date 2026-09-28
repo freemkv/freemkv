@@ -19,6 +19,11 @@
 
 - Linux: a strictly confined Snap of the app and CLI, `freemkv-amd64.snap`, attached to every release. Install it with `snap install --dangerous` and connect `freemkv:optical-write` for drive access; Snap Store publishing follows once the listing is approved. See [INSTALL.md](INSTALL.md).
 
+### Server (replaces autorip)
+
+- **Key sources are a chain, not a choice.** `freemkv server` looks keys up in the local KEYDB first and then, when a Keyserver URL is set, the online key service — the same order as the CLI and the app. autorip used only the one source picked by "AACS Key Source". An autorip `settings.json` loads unchanged: `key_source` is still read and saved (it still decides whether the KEYDB is downloaded), `keydb_path`, `keyserver_url` and `keyserver_secret` feed the chain, and a stored `http://` Keyserver URL is now warned about at startup whichever source was selected.
+- A staged disc image (a multi-pass rip, a resumed rip, a deferred mux) is muxed through the same image path as the CLI and the app. A mux that fails removes its partial MKV from staging; the ISO and mapfile stay for the retry.
+
 ## [1.7.7] — 2026-09-26
 
 ### Fixed

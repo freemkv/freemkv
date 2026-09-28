@@ -1,17 +1,16 @@
 //! Where AACS keys come from.
 //!
 //! libfreemkv does no key lookup — its `KeySource`s resolve a disc's terminal
-//! Unit Keys, driving the library's boil-down crypto. autorip resolves from the
-//! configured *published key source* (`local` keydb or `online` key service).
+//! Unit Keys, driving the library's boil-down crypto. The sources are the
+//! engine's local-first chain ([`key_params`]): the keydb, then the online
+//! key service when one is configured.
 //!
-//! The flow is the same for a live drive and a staged ISO: scan the disc
-//! KEYLESS, build [`libfreemkv::DiscInputs`] from its key files, then resolve
-//! via [`resolve_and_apply_traced`] — the first source whose Unit Keys
-//! validate wins. The only drive-vs-ISO difference is the [`DiscKeyAccess`] impl.
+//! A live drive scans KEYLESS and resolves through [`resolve_keys`]; a staged
+//! image opens through the engine ([`open_staged_image`]).
 
 use std::path::{Path, PathBuf};
 
-use freemkv_keysources::{KeySource, KeydbSource, OnlineSource};
+use freemkv_keysources::{KeySource, KeydbSource};
 use libfreemkv::aacs::trace::ResolutionTrace;
 use libfreemkv::keysource::resolve_and_apply_traced;
 
@@ -149,7 +148,7 @@ pub fn save_keydb(
 /// Pure — no DNS — so it is safe on the startup path.
 pub fn keyserver_url_startup_warning(cfg: &Config) -> Option<String> {
     let url = cfg.keyserver_url.trim();
-    if cfg.key_source != "online" || url.is_empty() || url.starts_with("https://") {
+    if url.is_empty() || url.starts_with("https://") {
         return None;
     }
     Some(format!(
@@ -180,164 +179,131 @@ pub fn drive_scan_opts_for_keydb(keydb: &Path) -> libfreemkv::ScanOptions {
     }
 }
 
-/// ScanOptions for an **ISO** structure scan — no handshake, no credentials.
-pub fn iso_scan_opts() -> libfreemkv::ScanOptions {
-    libfreemkv::ScanOptions::default()
+/// The engine key chain for this config, local-first: the keydb (explicit
+/// path, else the standard location), then the online key service when a URL
+/// is set. `key_source` no longer picks one of the two; it is still read and
+/// saved so an autorip `settings.json` loads unchanged.
+pub fn key_params(cfg: &Config) -> freemkv_engine::KeyParams {
+    let url = cfg.keyserver_url.trim();
+    freemkv_engine::KeyParams {
+        keydb_path: Some(keydb_path(cfg).to_string_lossy().into_owned()),
+        key_url: (!url.is_empty()).then(|| url.to_string()),
+        key_auth: (!cfg.keyserver_secret.is_empty()).then(|| cfg.keyserver_secret.clone()),
+        online_only: false,
+    }
 }
 
-/// Build the ordered key-source list from config: `online` → the remote key
-/// service, anything else → the local keydb (explicit path, else the standard
-/// location).
-///
-/// The mapfile key-source was removed in the AACS-trait reshape: on resume /
-/// deferred mux, keys are re-resolved from the keydb / online source rather
-/// than read back from the `.map` header (correct, marginally slower). The
-/// `.map` recovery-state file itself is unaffected — autorip still loads it for
-/// sector status via `IsoAccess`.
+/// The ordered key sources for `cfg` (see [`key_params`]). A keydb that does
+/// not exist yet and no usable online URL leaves every disc at NO KEY, so that
+/// case is logged loudly (issue #46).
 pub fn build_sources(cfg: &Config) -> Vec<Box<dyn KeySource>> {
-    build_sources_with(cfg, &freemkv_keysources::validate_keyserver_url)
-}
-
-// `build_sources` with the keyserver-URL validator injected, so tests need no live DNS.
-fn build_sources_with(
-    cfg: &Config,
-    validate: &dyn Fn(&str) -> Result<(), String>,
-) -> Vec<Box<dyn KeySource>> {
-    let mut sources: Vec<Box<dyn KeySource>> = Vec::new();
-    match cfg.key_source.as_str() {
-        "online" => {
-            let url = cfg.keyserver_url.trim();
-            let online = || Box::new(OnlineSource::new(url, cfg.keyserver_secret.clone()));
-            match validate(url) {
-                Ok(()) => sources.push(online()),
-                // DNS blip: keep the source; its per-POST re-guard retries the
-                // lookup and records a real (transient) reachability verdict.
-                Err(e) if url_error_is_transient(&e) => {
-                    tracing::warn!(
-                        phase = "key_resolve",
-                        url_origin = %crate::server::webhook::webhook_url_origin(url),
-                        "keyserver host lookup failed: {e} — will retry at request time"
-                    );
-                    sources.push(online());
-                }
-                // Standing config fault (bad scheme/host, SSRF-blocked address):
-                // never POST disc-key material there; drop the online source.
-                Err(e) => {
-                    tracing::error!(
-                        phase = "key_resolve",
-                        url_origin = %crate::server::webhook::webhook_url_origin(url),
-                        "keyserver URL rejected: {e} — online key source disabled for this rip"
-                    );
-                }
-            }
-        }
-        "local" => {
-            // Loud diagnostic when local keys are selected but no keydb exists at
-            // the resolved path — else every disc reports a bare "NO KEY" with no
-            // hint the file is just in the wrong place (issue #46).
-            let path = keydb_path(cfg);
-            if !path.exists() {
-                tracing::warn!(
-                    phase = "key_resolve",
-                    keydb_path = %path.display(),
-                    "local key source selected but NO keydb.cfg at the resolved path — every disc will report NO KEY until a keydb exists here; set 'KEYDB.cfg Location' or place the file at this path"
-                );
-            }
-            sources.push(Box::new(KeydbSource::new(path)));
-        }
-        other => {
-            // key_source is user-edited config; a typo ("onlnie") would
-            // silently resolve keydb-only when the operator meant online.
-            // Fall back to the local keydb but make the fallback visible.
-            tracing::warn!(
-                key_source = %other,
-                "unrecognised key_source; falling back to local keydb"
-            );
-            sources.push(Box::new(KeydbSource::new(keydb_path(cfg))));
-        }
+    let params = key_params(cfg);
+    let sources = freemkv_engine::key_sources(&params);
+    if sources.len() < 2 && !keydb_path(cfg).exists() {
+        tracing::warn!(
+            phase = "key_resolve",
+            keydb_path = %keydb_path(cfg).display(),
+            online = sources.len(),
+            "no keydb.cfg at the resolved path — keys come only from the online key service, if one is set"
+        );
     }
     sources
 }
 
-/// Build the fresh-key-on-decrypt-failure closure ([`libfreemkv::sector::KeyFetch`])
-/// for an ISO mux.
+/// Open a staged disc image through the engine, ready to mux titles from.
 ///
-/// The library owns the recovery loop: when the mux hits an AACS unit no held key decrypts, it
-/// hands the ciphertext to this closure, which forwards it to the configured key source(s);
-/// derived Unit Keys are added to the pool and the unit re-decrypted.
-///
-/// Returns `None` for a non-AACS ISO, or when its AACS inputs can't be read.
-pub fn build_iso_key_fetch(cfg: &Config, iso_path: &Path) -> Option<libfreemkv::sector::KeyFetch> {
-    match build_iso_key_fetch_outcome(cfg, iso_path) {
-        IsoKeyFetch::Ready(fetch) => Some(fetch),
-        IsoKeyFetch::NotAacs => None,
-        IsoKeyFetch::Unreadable(err) => {
-            tracing::warn!(
-                phase = "key_resolve",
-                path = %iso_path.display(),
-                err = %err,
-                "could not read the ISO's AACS inputs; mid-mux key recovery is disabled for this rip"
-            );
-            None
+/// `banked` is AACS state a live drive already resolved during the rip: its
+/// keys are used as-is and nothing is looked up again. Otherwise the keys
+/// resolve from [`key_params`]; `vid` is the Volume ID the rip recorded, which
+/// an image alone cannot supply (VID-derived keys need it).
+pub fn open_staged_image(
+    cfg: &Config,
+    iso: &Path,
+    vid: Option<[u8; 16]>,
+    banked: Option<&libfreemkv::AacsState>,
+) -> Result<freemkv_engine::OpenedImage, libfreemkv::Error> {
+    let src = freemkv_engine::ImageSource::Iso(iso.to_path_buf());
+    let params = key_params(cfg);
+    let banked = banked.filter(|a| !a.unit_keys.is_empty());
+    if banked.is_none() && vid.is_none() {
+        let opened = freemkv_engine::open_image(&src, &params)?;
+        log_resolution(&opened);
+        return Ok(opened);
+    }
+    let (mut disc, mut reader) = freemkv_engine::scan_image(&src)?;
+    if let Some(drive) = banked {
+        match disc.aacs.as_mut() {
+            Some(a) => {
+                a.unit_keys = drive.unit_keys.clone();
+                a.volume_id = drive.volume_id;
+            }
+            None => {
+                disc.aacs = Some(libfreemkv::AacsState {
+                    version: drive.version,
+                    bus_encryption: drive.bus_encryption,
+                    mkb_version: drive.mkb_version,
+                    disc_hash: drive.disc_hash.clone(),
+                    key_source: drive.key_source,
+                    vuk: drive.vuk,
+                    unit_keys: drive.unit_keys.clone(),
+                    volume_id: drive.volume_id,
+                    uk_ro: drive.uk_ro.clone(),
+                    mkb: drive.mkb.clone(),
+                })
+            }
         }
+        let key_fetch = disc.inputs().map(|inputs| {
+            libfreemkv::keysource::key_fetch(inputs, freemkv_engine::key_source_factory(&params))
+        });
+        return Ok(freemkv_engine::OpenedImage {
+            source: src,
+            disc,
+            reader,
+            key_fetch,
+            trace: ResolutionTrace::new(),
+            won: None,
+        });
     }
-}
-
-/// Why [`build_iso_key_fetch`] did or did not produce a fetch seam.
-///
-/// Both negative arms collapse to `None` at the call site, but only one of them is normal: a
-/// non-AACS ISO has nothing to fetch, whereas an ISO that could not be READ (ESTALE, truncated,
-/// EACCES) is a fault. This is an enum rather than a log line alone so the distinction can be
-/// asserted directly in tests, independent of log rendering.
-pub enum IsoKeyFetch {
-    /// AACS inputs read; mid-mux CPS-unit key recovery is available.
-    Ready(libfreemkv::sector::KeyFetch),
-    /// The ISO is readable and simply carries no AACS data. Nothing to fetch.
-    NotAacs,
-    /// The ISO's AACS inputs could not be read. A fault, not a normal outcome.
-    Unreadable(libfreemkv::Error),
-}
-
-// Hand-written: `KeyFetch` is a boxed closure and carries no `Debug`. Only the
-// arm matters for diagnostics — the seam itself has nothing printable.
-impl std::fmt::Debug for IsoKeyFetch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            IsoKeyFetch::Ready(_) => f.write_str("Ready(<key fetch>)"),
-            IsoKeyFetch::NotAacs => f.write_str("NotAacs"),
-            IsoKeyFetch::Unreadable(err) => write!(f, "Unreadable({err})"),
-        }
+    if let (Some(vid), Some(a)) = (vid, disc.aacs.as_mut())
+        && a.volume_id == [0u8; 16]
+    {
+        a.volume_id = vid;
     }
-}
-
-/// The decision behind [`build_iso_key_fetch`], as data. See [`IsoKeyFetch`].
-pub fn build_iso_key_fetch_outcome(cfg: &Config, iso_path: &Path) -> IsoKeyFetch {
-    let (inf, mkb, version) = match libfreemkv::Disc::read_aacs_inputs(iso_path) {
-        Ok(v) => v,
-        Err(err) => return IsoKeyFetch::Unreadable(err),
+    // Drain an earlier decode verdict so the caller's take sees only this resolve's.
+    let _ = take_online_decode_reachability();
+    let resolved = libfreemkv::resolve_keys_for(
+        reader.as_mut(),
+        &mut disc,
+        freemkv_engine::key_source_factory(&params),
+    );
+    let opened = freemkv_engine::OpenedImage {
+        source: src,
+        disc,
+        reader,
+        key_fetch: resolved.key_fetch,
+        won: freemkv_engine::won_source(&resolved.trace),
+        trace: resolved.trace,
     };
-    if inf.is_empty() {
-        return IsoKeyFetch::NotAacs;
-    }
-    let inputs = libfreemkv::DiscInputs {
-        disc_hash: String::new(),
-        volume_id: [0u8; 16],
-        version,
-        mkb,
-        unit_key_ro: inf,
-        samples: Vec::new(),
-        volume_label: None,
-    };
-    let cfg = cfg.clone();
-    let make_sources: std::sync::Arc<dyn Fn() -> Vec<Box<dyn KeySource>> + Send + Sync> =
-        std::sync::Arc::new(move || build_sources(&cfg));
-    IsoKeyFetch::Ready(libfreemkv::keysource::key_fetch(inputs, make_sources))
+    log_resolution(&opened);
+    Ok(opened)
 }
 
-/// Whether the configured source talks to a remote key service —
+// The per-source key walk, always (success or not): the operator's only view of why a key missed.
+fn log_resolution(opened: &freemkv_engine::OpenedImage) {
+    let hash = opened
+        .disc
+        .aacs
+        .as_ref()
+        .map_or("", |a| a.disc_hash.as_str());
+    for line in render_resolution_trace(&opened.trace, hash) {
+        tracing::info!(phase = "key_resolve", "{line}");
+    }
+}
+
+/// Whether the key chain includes the remote key service (a URL is set) —
 /// used by the UI to announce a potentially slow keyserver round-trip.
 pub fn uses_online(cfg: &Config) -> bool {
-    cfg.key_source == "online"
+    !cfg.keyserver_url.trim().is_empty()
 }
 
 /// What the online key service actually said about a disc — the verdict the
@@ -545,9 +511,8 @@ fn reachability_from_decode(
     }
 }
 
-/// How a disc's key-resolution inputs are obtained. Decouples [`resolve_keys`]
-/// from WHERE the disc lives — a live drive or a staged ISO — so the resolution
-/// logic is written once. See [`DriveAccess`] and [`IsoAccess`].
+/// How a disc's key-resolution inputs are obtained: a reader to sample
+/// ciphertext from. See [`DriveAccess`].
 pub trait DiscKeyAccess {
     /// A reader over the disc, for sampling ciphertext via
     /// [`libfreemkv::Disc::inputs_with_samples`] — the ONLY thing `resolve_keys`
@@ -559,8 +524,7 @@ pub trait DiscKeyAccess {
 /// Resolve keys for `disc` via the ordered `sources`, reading inputs through
 /// `access`. Returns the disc with keys applied (`Resolved`) or unchanged.
 ///
-/// The disc must have been scanned KEYLESS (see [`drive_scan_opts`] /
-/// [`iso_scan_opts`]). Each source offers candidate keys; the first whose
+/// The disc must have been scanned KEYLESS (see [`drive_scan_opts`]). Each source offers candidate keys; the first whose
 /// [`libfreemkv::Disc::decrypt_with`] derives unit keys wins. A wrong
 /// candidate is rejected by `decrypt_with` and the next tried; it only
 /// mutates the disc on success, so a rejected candidate leaves it untouched.
@@ -780,47 +744,6 @@ impl DiscKeyAccess for DriveAccess<'_> {
     }
 }
 
-/// [`DiscKeyAccess`] backed by a staged ISO (the resume path). Samples
-/// ciphertext from the ISO; all AACS inputs come from `disc.inputs()`.
-pub struct IsoAccess<'a> {
-    iso_path: &'a Path,
-    reader: Option<libfreemkv::FileSectorSource>,
-}
-
-impl<'a> IsoAccess<'a> {
-    pub fn new(iso_path: &'a Path) -> Self {
-        Self {
-            iso_path,
-            reader: None,
-        }
-    }
-}
-
-impl DiscKeyAccess for IsoAccess<'_> {
-    fn sector_source(&mut self) -> Option<&mut dyn libfreemkv::SectorSource> {
-        if self.reader.is_none() {
-            match libfreemkv::FileSectorSource::open(self.iso_path) {
-                Ok(r) => self.reader = Some(r),
-                Err(err) => {
-                    // Without samples an online key request fires with no
-                    // units_b64 and can fail later as NoKey with no visible cause;
-                    // surface the real reason here.
-                    tracing::warn!(
-                        phase = "key_resolve",
-                        path = %self.iso_path.display(),
-                        %err,
-                        "could not open ISO to sample units"
-                    );
-                    return None;
-                }
-            }
-        }
-        self.reader
-            .as_mut()
-            .map(|r| r as &mut dyn libfreemkv::SectorSource)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,60 +874,6 @@ mod tests {
             &clear,
             libfreemkv::disc::ContentFormat::BdTs
         ));
-    }
-
-    // The test above drives `read_encrypted_units` directly, not the real
-    // `IsoAccess` reader `resolve_keys` samples through in production —
-    // route the same fixture through it so a regression there isn't silently missed.
-    #[test]
-    fn iso_access_sample_units_reads_through_the_real_trait_impl() {
-        use std::io::Write;
-
-        const SECTORS: usize = 1200;
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        tmp.write_all(&vec![0xE5u8; SECTORS * 2048]).unwrap();
-        tmp.flush().unwrap();
-
-        let title = libfreemkv::DiscTitle {
-            playlist: "00800.mpls".into(),
-            playlist_id: 800,
-            duration_secs: 0.0,
-            size_bytes: (SECTORS * 2048) as u64,
-            clips: Vec::new(),
-            streams: Vec::new(),
-            chapters: Vec::new(),
-            extents: vec![libfreemkv::Extent {
-                start_lba: 0,
-                sector_count: SECTORS as u32,
-            }],
-            content_format: libfreemkv::ContentFormat::BdTs,
-            codec_privates: Vec::new(),
-        };
-
-        // Through the trait object, exactly as `resolve_keys` calls it.
-        let mut access: Box<dyn DiscKeyAccess> = Box::new(IsoAccess::new(tmp.path()));
-        let reader = access.sector_source().expect("a real ISO must open");
-        let units = read_encrypted_units(reader, &title, SAMPLE_UNITS);
-        assert_eq!(
-            units.len(),
-            SAMPLE_UNITS,
-            "IsoAccess::sample_units must actually sample real ISO content"
-        );
-        for u in &units {
-            assert_eq!(u.len(), 6144);
-        }
-    }
-
-    // `IsoAccess` against a missing ISO must fail SAFE — no reader, not a
-    // panic — since a bad/missing staged ISO must not crash key resolution.
-    #[test]
-    fn iso_access_sample_units_empty_on_open_failure() {
-        let missing = Path::new("/nonexistent-autorip-iso-fixture-xyz.iso");
-        let mut access = IsoAccess::new(missing);
-        assert!(
-            access.sector_source().is_none(),
-            "a missing ISO must yield no reader, not panic"
-        );
     }
 
     // autorip's keydb writes and the startup existence check must land on the
@@ -1237,6 +1106,14 @@ mod tests {
         }
     }
 
+    // `DiscKeyAccess` over an image file, for the sampling tests.
+    struct FileAccess(libfreemkv::FileSectorSource);
+    impl DiscKeyAccess for FileAccess {
+        fn sector_source(&mut self) -> Option<&mut dyn libfreemkv::SectorSource> {
+            Some(&mut self.0)
+        }
+    }
+
     /// `DiscKeyAccess` fixture with no reader (none of the outcome tests use a
     /// sample-needing source).
     struct FixtureAccess;
@@ -1319,7 +1196,7 @@ mod tests {
 
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sources: Vec<Box<dyn KeySource>> = vec![Box::new(SampleSpy(seen.clone()))];
-        let mut access = IsoAccess::new(tmp.path());
+        let mut access = FileAccess(libfreemkv::FileSectorSource::open(tmp.path()).unwrap());
         let _ = resolve_keys(sources, &mut access, disc);
 
         let samples = seen.lock().unwrap();
@@ -1393,24 +1270,40 @@ mod tests {
         }
     }
 
-    // --- build_sources ordering / SSRF / fallback (rc.6 WS3) -----------------
+    // --- the key chain (engine, local-first) ----------------------------------
 
-    /// `build_sources` with a local `key_source` yields exactly the configured
-    /// keydb (the mapfile key-source was removed in the AACS-trait reshape).
+    // No URL: the local keydb alone, whatever `key_source` says.
     #[test]
-    fn build_sources_local_yields_keydb() {
-        let cfg = Config {
-            key_source: "local".into(),
-            ..Config::default()
-        };
-        let sources = build_sources(&cfg);
-        assert_eq!(sources.len(), 1, "just the configured local keydb");
-        assert_eq!(sources[0].label(), "keydb");
+    fn build_sources_without_a_url_is_the_keydb() {
+        for key_source in ["local", "online", "onlnie"] {
+            let cfg = Config {
+                key_source: key_source.into(),
+                ..Config::default()
+            };
+            let sources = build_sources(&cfg);
+            assert_eq!(sources.len(), 1, "{key_source}");
+            assert_eq!(sources[0].label(), "keydb");
+            assert!(!uses_online(&cfg));
+        }
     }
 
-    // An online `key_source` with an SSRF-blocked URL drops the online source
-    // entirely, leaving ZERO sources — the rip surfaces NoKey instead of
-    // exfiltrating disc-key material to an internal address.
+    // A URL adds the online service AFTER the keydb, for either `key_source`
+    // value: the chain replaced autorip's one-source choice.
+    #[test]
+    fn build_sources_is_keydb_then_online_for_any_key_source() {
+        for key_source in ["local", "online"] {
+            let cfg = Config {
+                key_source: key_source.into(),
+                keyserver_url: "https://8.8.8.8/keys".into(),
+                ..Config::default()
+            };
+            let labels: Vec<_> = build_sources(&cfg).iter().map(|s| s.label()).collect();
+            assert_eq!(labels, ["keydb", "online"], "{key_source}");
+            assert!(uses_online(&cfg));
+        }
+    }
+
+    // An SSRF-blocked URL never becomes a source; the keydb still applies.
     #[test]
     fn build_sources_drops_online_source_on_ssrf_blocked_url() {
         let cfg = Config {
@@ -1418,24 +1311,40 @@ mod tests {
             keyserver_url: "https://169.254.169.254/keys".into(),
             ..Config::default()
         };
-        let sources = build_sources(&cfg);
-        assert!(
-            sources.is_empty(),
-            "SSRF-blocked online URL must yield no usable source"
-        );
+        let labels: Vec<_> = build_sources(&cfg).iter().map(|s| s.label()).collect();
+        assert_eq!(labels, ["keydb"]);
     }
 
-    /// An unrecognised `key_source` (operator typo like "onlnie") falls back to
-    /// the local keydb rather than silently producing no source.
+    // The settings fields autorip wrote map onto the engine's parameters as-is.
     #[test]
-    fn build_sources_unknown_key_source_falls_back_to_local_keydb() {
+    fn key_params_reads_the_autorip_settings_fields() {
         let cfg = Config {
-            key_source: "onlnie".into(),
+            key_source: "online".into(),
+            keyserver_url: "  https://keys.example.org/decode ".into(),
+            keyserver_secret: "tok".into(),
+            keydb_path: Some("/config/custom.cfg".into()),
             ..Config::default()
         };
-        let sources = build_sources(&cfg);
-        assert_eq!(sources.len(), 1, "fallback to a single local keydb source");
-        assert!(!uses_online(&cfg), "a typo'd source is not 'online'");
+        let p = key_params(&cfg);
+        assert_eq!(p.keydb_path.as_deref(), Some("/config/custom.cfg"));
+        assert_eq!(
+            p.key_url.as_deref(),
+            Some("https://keys.example.org/decode")
+        );
+        assert_eq!(p.key_auth.as_deref(), Some("tok"));
+        assert!(!p.online_only);
+        let bare = key_params(&Config::default());
+        assert_eq!(bare.key_url, None);
+        assert_eq!(bare.key_auth, None);
+    }
+
+    // A missing image is a scan error on both open routes (engine open, VID resolve).
+    #[test]
+    fn open_staged_image_reports_a_missing_image() {
+        let cfg = Config::default();
+        let missing = Path::new("/nonexistent-autorip-iso-fixture-xyz.iso");
+        assert!(open_staged_image(&cfg, missing, None, None).is_err());
+        assert!(open_staged_image(&cfg, missing, Some([7u8; 16]), None).is_err());
     }
 
     // The PROBE is disc-less (empty POST), so its classification stays coarse:
@@ -1649,42 +1558,6 @@ mod tests {
         assert_eq!(ServiceReachability::Answered.http_status(), None);
     }
 
-    // build_iso_key_fetch (rc.6 WS3 multi-CPS-unit recovery) needs a real UDF
-    // fixture to test the happy path (duplicating libfreemkv's own UDF
-    // tests), so the cheap thing to pin here: an unreadable path → `None`.
-    #[test]
-    fn build_iso_key_fetch_none_for_unreadable_path() {
-        let cfg = Config::default();
-        let missing = Path::new("/nonexistent-autorip-iso-fixture-xyz.iso");
-        assert!(build_iso_key_fetch(&cfg, missing).is_none());
-    }
-
-    // An ISO we could not READ must not vanish silently — a staging mount ESTALE or truncated
-    // ISO used to disable mid-mux key recovery with no visible cause. Asserted on the decision,
-    // not captured logs.
-    #[test]
-    fn an_unreadable_iso_is_distinguishable_from_a_non_aacs_one() {
-        let cfg = Config::default();
-
-        let missing = Path::new("/nonexistent-autorip-iso-fixture-xyz.iso");
-        match build_iso_key_fetch_outcome(&cfg, missing) {
-            IsoKeyFetch::Unreadable(_) => {}
-            other => panic!(
-                "an unreadable ISO must be a distinct fault, not collapsed into \
-                 the same silent outcome as a non-AACS disc; got {other:?}"
-            ),
-        }
-
-        // A file that exists but is not a disc image is equally unreadable as
-        // an ISO — it must not be misreported as "readable, simply no AACS".
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), b"not a disc image").unwrap();
-        match build_iso_key_fetch_outcome(&cfg, tmp.path()) {
-            IsoKeyFetch::Unreadable(_) => {}
-            other => panic!("a truncated non-image file must read as a fault; got {other:?}"),
-        }
-    }
-
     // Permanent verdicts from the REAL keysources producer: the online source is
     // dropped for these, so a no-key is genuine and must NOT be retried as an outage.
     #[test]
@@ -1740,26 +1613,10 @@ mod tests {
         }
     }
 
-    // A DNS blip at build time must not drop the online source: its per-POST
-    // re-guard retries the lookup and records the real reachability verdict.
+    // A stored pre-upgrade http:// keyserver URL is named at boot, whatever
+    // `key_source` says (the chain consults any set URL); https and blank are silent.
     #[test]
-    fn build_sources_keeps_online_source_on_transient_lookup_failure() {
-        let cfg = Config {
-            key_source: "online".into(),
-            keyserver_url: "https://keys.example.org/decode".into(),
-            ..Config::default()
-        };
-        let dns_down =
-            |_: &str| Err("too many concurrent DNS resolutions in flight for this host".into());
-        let sources = build_sources_with(&cfg, &dns_down);
-        assert_eq!(sources.len(), 1, "a DNS failure is not a config verdict");
-        assert_eq!(sources[0].label(), "online");
-    }
-
-    // A stored pre-upgrade http:// keyserver URL is named at boot; https and
-    // non-online configs are silent.
-    #[test]
-    fn keyserver_url_startup_warning_flags_only_non_https_online() {
+    fn keyserver_url_startup_warning_flags_only_non_https() {
         let cfg = |src: &str, url: &str| Config {
             key_source: src.into(),
             keyserver_url: url.into(),
@@ -1771,7 +1628,7 @@ mod tests {
         assert!(!w.contains("  "), "no stray whitespace runs: {w:?}");
         assert!(keyserver_url_startup_warning(&cfg("online", "https://k.example.org/d")).is_none());
         assert!(keyserver_url_startup_warning(&cfg("online", "")).is_none());
-        assert!(keyserver_url_startup_warning(&cfg("local", "http://k.example.org/d")).is_none());
+        assert!(keyserver_url_startup_warning(&cfg("local", "http://k.example.org/d")).is_some());
     }
 
     // Cleartext http:// is a standing config fault: the online source is dropped.
@@ -1782,18 +1639,8 @@ mod tests {
             keyserver_url: "http://8.8.8.8/decode".into(),
             ..Config::default()
         };
-        assert!(build_sources(&cfg).is_empty());
-    }
-
-    /// Same fail-safe expectation for a file that exists but is not a valid
-    /// ISO/UDF image (e.g. a truncated or non-disc file) — `read_aacs_inputs`
-    /// must fail cleanly and `build_iso_key_fetch` must surface `None`.
-    #[test]
-    fn build_iso_key_fetch_none_for_non_iso_file() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), b"not a disc image").unwrap();
-        let cfg = Config::default();
-        assert!(build_iso_key_fetch(&cfg, tmp.path()).is_none());
+        let labels: Vec<_> = build_sources(&cfg).iter().map(|s| s.label()).collect();
+        assert_eq!(labels, ["keydb"]);
     }
 
     // `render_resolution_trace` is the app-layer's ENTIRE English mapping of

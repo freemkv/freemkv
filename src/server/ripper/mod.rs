@@ -137,19 +137,31 @@ pub(crate) fn disc_is_3d(disc: &libfreemkv::Disc) -> bool {
 }
 
 // True when a mux-construction `io::Error` is a user Stop (E6010) vs a structural failure.
-// Match the leading `E<code>` token EXACTLY, never a substring-scan.
 pub(crate) fn is_halt_error(e: &std::io::Error) -> bool {
-    let s = e.to_string();
-    let code = s.split([':', ' ', '\n']).next().unwrap_or("");
-    code == format!("E{}", libfreemkv::error::E_HALTED)
+    freemkv_engine::error_code(e) == Some(libfreemkv::error::E_HALTED)
 }
 
 // True when a mux-construction `io::Error` is a missing-FMTS-forensic-key error (E7026): base
 // AACS keys resolved but online forensic keys did not.
 pub(crate) fn is_fmts_key_missing_error(e: &std::io::Error) -> bool {
-    let s = e.to_string();
-    let code = s.split([':', ' ', '\n']).next().unwrap_or("");
-    code == format!("E{}", libfreemkv::error::E_FMTS_KEY_MISSING)
+    freemkv_engine::error_code(e) == Some(libfreemkv::error::E_FMTS_KEY_MISSING)
+}
+
+// What the rip muxes from: the staged ISO (multipass, opened through the
+// engine at mux time) or the live drive (single-pass).
+enum MuxSource {
+    StagedImage,
+    Drive(Box<dyn libfreemkv::SectorSource>),
+}
+
+// The staged image's index for the drive-scanned `title`: the same playlist,
+// else the first title (the drive rip's pick is always its first title).
+fn image_title_index(image: &libfreemkv::Disc, title: &libfreemkv::DiscTitle) -> usize {
+    image
+        .titles
+        .iter()
+        .position(|t| !title.playlist.is_empty() && t.playlist == title.playlist)
+        .unwrap_or(0)
 }
 
 // Output file extension for a rip of `disc`: `mk3d` for a 3D main
@@ -3176,7 +3188,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         }
     }
 
-    let reader: Box<dyn libfreemkv::SectorSource> = if uses_multipass(cfg_read.max_retries) {
+    let mux_source = if uses_multipass(cfg_read.max_retries) {
         let iso_path = std::path::Path::new(&iso_path_str);
         let bytes_total_disc = (session.drive.read_capacity().unwrap_or(0) as u64) * 2048;
 
@@ -4572,49 +4584,6 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         );
         drop(session);
 
-        // Open the ISO for the mux pipeline.
-        let iso_reader =
-            match libfreemkv::FileSectorSource::open(std::path::Path::new(&iso_path_str)) {
-                Ok(r) => {
-                    use libfreemkv::sector::SectorSource;
-                    crate::server::log::device_log(
-                        device,
-                        &format!("ISO opened successfully: {} sectors", r.capacity_sectors()),
-                    );
-                    r
-                }
-                Err(e) => {
-                    let msg = format_lib_error("Open ISO", &e);
-                    crate::server::log::device_log(device, &msg);
-                    // Cannot open the ISO for mux — if the sweep was interrupted
-                    // and `.ripped` also failed, this ENOENT repeats every startup.
-                    // Quarantine with `.failed` so restart classifies it terminal.
-                    let staging_disc_path = std::path::Path::new(&staging);
-                    quarantine_or_log(device, staging_disc_path, &msg);
-                    staging::clear_restart_count(staging_disc_path);
-                    update_state(
-                        device,
-                        RipState {
-                            device: device.to_string(),
-                            status: "failed".to_string(),
-                            disc_present: true,
-                            last_error: msg.clone(),
-                            failure_reason: Some(msg),
-                            disc_name: display_name,
-                            disc_format,
-                            tmdb_title,
-                            tmdb_year,
-                            tmdb_poster,
-                            tmdb_overview,
-                            duration,
-                            codecs,
-                            ..Default::default()
-                        },
-                    );
-                    unregister_halt(device);
-                    return;
-                }
-            };
         // Capture bytes_unreadable for the mux call site (outside this branch),
         // used to size the total-progress denominator once retries are done.
         bytes_unreadable_at_mux = bytes_unreadable;
@@ -4654,9 +4623,9 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 })
                 .unwrap_or_default()
         };
-        Box::new(iso_reader) as Box<dyn libfreemkv::SectorSource>
+        MuxSource::StagedImage
     } else {
-        Box::new(session.drive) as Box<dyn libfreemkv::SectorSource>
+        MuxSource::Drive(Box::new(session.drive))
     };
 
     // Keyless-capture mux-skip: keys are missing, so muxing now would write
@@ -4763,100 +4732,139 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         input_errors: mux_input_errors,
     };
 
-    let mux_outcome = if uses_multipass(cfg_read.max_retries) {
-        // Multipass ISO mux → libfreemkv::mux_stream (STEP 4c-i). The header
-        // pump / producer / write-pipeline / finish all live inside mux_stream
-        // now; AutoripMuxEvents feeds the same watchdog + UI atomics.
-        let iso_src = mux::IsoMuxSource {
-            iso_path: std::path::PathBuf::from(&iso_path_str),
-            title,
-            format,
-            keys,
-            // Fresh-key-on-failure fetch (recover a 2nd/Nth CPS-unit key mid-mux)
-            // — the SAME closure the pre-migration build_iso_pipeline call took.
-            key_fetch: crate::server::keysource::build_iso_key_fetch(
+    let mux_outcome = match mux_source {
+        MuxSource::StagedImage => {
+            // Multipass: mux the staged ISO through the engine, keyed with what the
+            // drive already resolved (FMTS forensic keys included) — no second lookup.
+            let image = match crate::server::keysource::open_staged_image(
                 &cfg_read,
                 std::path::Path::new(&iso_path_str),
-            ),
-            raw: false,
-            skip_errors: false,
-        };
-        match mux::mux_iso(mux_inputs, iso_src, mux_atomics) {
-            Ok(o) => o,
-            Err(e) => {
-                // A Stop pressed during the CSS crack surfaces as `Error::Halted`
-                // — a user halt, not structural: preserve staging, no `.failed`.
-                if is_halt_error(&e) {
+                None,
+                disc.aacs.as_ref(),
+            ) {
+                Ok(image) => {
                     crate::server::log::device_log(
                         device,
-                        "Rip stopped by user during mux setup — staging preserved for resume.",
+                        &format!(
+                            "ISO opened successfully: {} sectors",
+                            image.disc.capacity_sectors
+                        ),
+                    );
+                    image
+                }
+                Err(e) => {
+                    let msg = format_lib_error("Open ISO", &e);
+                    crate::server::log::device_log(device, &msg);
+                    // Cannot open the ISO for mux — this repeats every startup, so
+                    // quarantine with `.failed` and let restart classify it terminal.
+                    let staging_disc_path = std::path::Path::new(&staging);
+                    quarantine_or_log(device, staging_disc_path, &msg);
+                    staging::clear_restart_count(staging_disc_path);
+                    update_state(
+                        device,
+                        RipState {
+                            device: device.to_string(),
+                            status: "failed".to_string(),
+                            disc_present: true,
+                            last_error: msg.clone(),
+                            failure_reason: Some(msg),
+                            disc_name: display_name,
+                            disc_format,
+                            tmdb_title,
+                            tmdb_year,
+                            tmdb_poster,
+                            tmdb_overview,
+                            duration,
+                            codecs,
+                            ..Default::default()
+                        },
                     );
                     unregister_halt(device);
                     return;
                 }
-                // A pipeline BUILD failure is structural and permanent — retries
-                // won't fix it. Quarantine with `.failed` (mirrors header-phase path below).
-                tracing::error!(target: "mux", device=%device, "mux_stream setup failed: {e}");
-                let msg = format!(
-                    "Mux setup failed — the disc's title or stream layout could not be prepared for muxing. The source may be damaged or use an unsupported format ({e})."
-                );
-                crate::server::log::device_log(device, &msg);
-                let staging_disc_path = std::path::Path::new(&staging);
-                quarantine_or_log(device, staging_disc_path, &msg);
-                staging::clear_restart_count(staging_disc_path);
-                update_state_with(device, |s| {
-                    s.status = "failed".to_string();
-                    s.last_error = msg.clone();
-                    s.failure_reason = Some(msg.clone());
-                });
-                unregister_halt(device);
-                return;
+            };
+            let iso_src = mux::IsoMuxSource {
+                title_index: image_title_index(&image.disc, &title),
+                image: &image,
+            };
+            match mux::mux_iso(mux_inputs, iso_src, mux_atomics) {
+                Ok(o) => o,
+                Err(e) => {
+                    // A Stop pressed during the CSS crack surfaces as `Error::Halted`
+                    // — a user halt, not structural: preserve staging, no `.failed`.
+                    if is_halt_error(&e) {
+                        crate::server::log::device_log(
+                            device,
+                            "Rip stopped by user during mux setup — staging preserved for resume.",
+                        );
+                        unregister_halt(device);
+                        return;
+                    }
+                    // A pipeline BUILD failure is structural and permanent — retries
+                    // won't fix it. Quarantine with `.failed` (mirrors header-phase path below).
+                    tracing::error!(target: "mux", device=%device, "image mux setup failed: {e}");
+                    let msg = format!(
+                        "Mux setup failed — the disc's title or stream layout could not be prepared for muxing. The source may be damaged or use an unsupported format ({e})."
+                    );
+                    crate::server::log::device_log(device, &msg);
+                    let staging_disc_path = std::path::Path::new(&staging);
+                    quarantine_or_log(device, staging_disc_path, &msg);
+                    staging::clear_restart_count(staging_disc_path);
+                    update_state_with(device, |s| {
+                        s.status = "failed".to_string();
+                        s.last_error = msg.clone();
+                        s.failure_reason = Some(msg.clone());
+                    });
+                    unregister_halt(device);
+                    return;
+                }
             }
         }
-    } else {
-        // Drive single-pass path (STEP 4c-ii): live inline `DiscStream` via
-        // `mux_stream`. Stays INLINE, not the prefetch highway, since
-        // `fill_extents`' adaptive batch-retry only fires on the inline reader.
-        let live_src = mux::LiveMuxSource {
-            reader,
-            title,
-            format,
-            keys,
-            key_map: fmts_key_map.clone(),
-            skip_errors: skip_read_errors(&cfg_read.on_read_error),
-        };
-        match mux::mux_live(mux_inputs, live_src, mux_atomics) {
-            Ok(o) => o,
-            Err(e) => {
-                // Same classification as the multipass branch: a Stop pressed
-                // during the CSS crack surfaces as `Error::Halted` — a user
-                // halt, not structural: preserve staging, no `.failed`.
-                if is_halt_error(&e) {
-                    crate::server::log::device_log(
-                        device,
-                        "Rip stopped by user during mux setup — staging preserved for resume.",
+        MuxSource::Drive(reader) => {
+            // Drive single-pass path (STEP 4c-ii): live inline `DiscStream` via
+            // `mux_stream`. Stays INLINE, not the prefetch highway, since
+            // `fill_extents`' adaptive batch-retry only fires on the inline reader.
+            let live_src = mux::LiveMuxSource {
+                reader,
+                title,
+                format,
+                keys,
+                key_map: fmts_key_map.clone(),
+                skip_errors: skip_read_errors(&cfg_read.on_read_error),
+            };
+            match mux::mux_live(mux_inputs, live_src, mux_atomics) {
+                Ok(o) => o,
+                Err(e) => {
+                    // Same classification as the multipass branch: a Stop pressed
+                    // during the CSS crack surfaces as `Error::Halted` — a user
+                    // halt, not structural: preserve staging, no `.failed`.
+                    if is_halt_error(&e) {
+                        crate::server::log::device_log(
+                            device,
+                            "Rip stopped by user during mux setup — staging preserved for resume.",
+                        );
+                        unregister_halt(device);
+                        return;
+                    }
+                    // A build failure (or a scrambled-but-uncrackable CSS DVD →
+                    // CssKeyMissing) is structural — retries won't fix it. Quarantine
+                    // with `.failed` (mirrors the multipass branch and header-phase path).
+                    tracing::error!(target: "mux", device=%device, "mux_stream (live) setup failed: {e}");
+                    let msg = format!(
+                        "Mux setup failed — the disc's title or stream layout could not be prepared for muxing. The source may be damaged or use an unsupported format ({e})."
                     );
+                    crate::server::log::device_log(device, &msg);
+                    let staging_disc_path = std::path::Path::new(&staging);
+                    quarantine_or_log(device, staging_disc_path, &msg);
+                    staging::clear_restart_count(staging_disc_path);
+                    update_state_with(device, |s| {
+                        s.status = "failed".to_string();
+                        s.last_error = msg.clone();
+                        s.failure_reason = Some(msg.clone());
+                    });
                     unregister_halt(device);
                     return;
                 }
-                // A build failure (or a scrambled-but-uncrackable CSS DVD →
-                // CssKeyMissing) is structural — retries won't fix it. Quarantine
-                // with `.failed` (mirrors the multipass branch and header-phase path).
-                tracing::error!(target: "mux", device=%device, "mux_stream (live) setup failed: {e}");
-                let msg = format!(
-                    "Mux setup failed — the disc's title or stream layout could not be prepared for muxing. The source may be damaged or use an unsupported format ({e})."
-                );
-                crate::server::log::device_log(device, &msg);
-                let staging_disc_path = std::path::Path::new(&staging);
-                quarantine_or_log(device, staging_disc_path, &msg);
-                staging::clear_restart_count(staging_disc_path);
-                update_state_with(device, |s| {
-                    s.status = "failed".to_string();
-                    s.last_error = msg.clone();
-                    s.failure_reason = Some(msg.clone());
-                });
-                unregister_halt(device);
-                return;
             }
         }
     };
@@ -5779,7 +5787,7 @@ pub(crate) fn deferred_keyless_texts(
     decode_reach: Option<crate::server::keysource::ServiceReachability>,
 ) -> (String, String) {
     const LEAD: &str = "Ripped to ISO — no keys, mux deferred";
-    let reach = (cfg.key_source == "online").then(|| {
+    let reach = crate::server::keysource::uses_online(cfg).then(|| {
         decode_reach.unwrap_or_else(|| crate::server::keysource::probe_online_reachability(cfg))
     });
     // A 422 here is not terminal: the ISO is kept, and a later key-DB update may bring the key.
@@ -6990,6 +6998,22 @@ mod tests {
         }
     }
 
+    // The staged image is muxed at the drive title's playlist, wherever the
+    // image scan lists it; an unknown playlist falls back to the first title.
+    #[test]
+    fn image_title_index_follows_the_drive_titles_playlist() {
+        let mut image = disc_with_main_streams(vec![]);
+        let mut other = test_title(0, 10);
+        other.playlist = "00001.mpls".into();
+        image.titles = vec![other, test_title(0, 10)];
+        assert_eq!(super::image_title_index(&image, &test_title(0, 10)), 1);
+        let mut unknown = test_title(0, 10);
+        unknown.playlist = "00999.mpls".into();
+        assert_eq!(super::image_title_index(&image, &unknown), 0);
+        unknown.playlist.clear();
+        assert_eq!(super::image_title_index(&image, &unknown), 0);
+    }
+
     /// The scoped loss is the TOTAL of all in-title gaps, not the single
     /// largest one (the old `fold(.., f64::max)` bug). Many scattered
     /// small gaps must accumulate against the threshold.
@@ -8131,13 +8155,13 @@ mod tests {
     }
 
     // the deferred/resume path must report the resume decode's verdict, not a
-    // probe's. Empty keyserver_url makes the probe say NotAsked, so a 422 is visible.
+    // probe's. A cleartext keyserver_url makes the probe say NotAsked, so a 422 is visible.
     #[test]
     fn deferred_keyless_texts_use_the_decode_verdict() {
         use crate::server::keysource::ServiceReachability as R;
         let cfg = crate::server::config::Config {
             key_source: "online".into(),
-            keyserver_url: String::new(),
+            keyserver_url: "http://8.8.8.8/decode".into(),
             ..Default::default()
         };
         let disc = encrypted_keyless_disc();
@@ -8148,7 +8172,7 @@ mod tests {
         );
         let (_, down) = super::deferred_keyless_texts(&cfg, &disc, Some(R::Unreachable));
         assert!(down.contains("could not connect"), "{down}");
-        // No decode verdict → probe fallback (NotAsked for an empty URL).
+        // No decode verdict → probe fallback (NotAsked for a refused URL).
         let (_, probed) = super::deferred_keyless_texts(&cfg, &disc, None);
         assert!(probed.contains("never contacted"), "{probed}");
     }
@@ -8260,7 +8284,7 @@ mod tests {
         use crate::server::keysource::ServiceReachability as R;
         let cfg = crate::server::config::Config {
             key_source: "online".into(),
-            keyserver_url: String::new(),
+            keyserver_url: "http://8.8.8.8/decode".into(),
             ..Default::default()
         };
         let disc = encrypted_keyless_disc();
