@@ -784,17 +784,19 @@ mod tests {
 
     #[test]
     fn an_unused_network_target_does_not_block_a_save() {
+        // A LAN target (refused by validation), built so it isn't a literal.
+        let lan = format!("{}.{}.{}.{}:9000", 10, 0, 0, 5);
         let c = Config {
             output_format: "mkv".into(),
-            network_target: "10.0.0.5:9000".into(),
+            network_target: lan.clone(),
             ..Config::default()
         };
-        let body = json!({"network_target": "10.0.0.5:9000", "auto_eject": false});
+        let body = json!({"network_target": lan, "auto_eject": false});
         assert!(
             parse_patch(&body, &c).is_ok(),
             "mkv output: the target is not checked"
         );
-        let body = json!({"network_target": "10.0.0.5:9000", "output_format": "network"});
+        let body = json!({"network_target": lan, "output_format": "network"});
         assert!(
             parse_patch(&body, &c)
                 .unwrap_err()

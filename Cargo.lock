@@ -412,7 +412,6 @@ dependencies = [
 [[package]]
 name = "freemkv-engine"
 version = "1.7.7"
-source = "git+https://github.com/freemkv/freemkv-engine?tag=v1.7.7#c0cde8c1a2fc2d65631b0203051770260762bda1"
 dependencies = [
  "anyhow",
  "freemkv-keysources",
@@ -425,7 +424,6 @@ dependencies = [
 [[package]]
 name = "freemkv-i18n"
 version = "1.7.7"
-source = "git+https://github.com/freemkv/freemkv-i18n?tag=v1.7.7#135dde0226e026198196cac5a9b1ea0e80b00b48"
 dependencies = [
  "serde_json",
 ]
@@ -433,7 +431,6 @@ dependencies = [
 [[package]]
 name = "freemkv-keysources"
 version = "1.7.7"
-source = "git+https://github.com/freemkv/freemkv-keysources?tag=v1.7.7#d0a3ab852bc9f4fff874de44ab5fca8adb8d9fb7"
 dependencies = [
  "base64",
  "flate2",
@@ -447,7 +444,6 @@ dependencies = [
 [[package]]
 name = "freemkv-unlock"
 version = "1.7.7"
-source = "git+https://github.com/freemkv/freemkv-unlock?tag=v1.7.7#1d20be4a411b5c15bc3e29d4beeb2537d6cd3ebc"
 dependencies = [
  "aes",
  "base64",
@@ -1022,7 +1018,6 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libfreemkv"
 version = "1.7.7"
-source = "git+https://github.com/freemkv/libfreemkv?tag=v1.7.7#c8e67f16b46687fb99a117d42ce4dc4a89001876"
 dependencies = [
  "aes",
  "base64",
@@ -1032,9 +1027,11 @@ dependencies = [
  "memchr",
  "rayon",
  "roxmltree",
+ "rustix",
  "serde",
  "serde_json",
  "sha1",
+ "socket2",
  "tracing",
  "zip",
 ]
@@ -1685,6 +1682,16 @@ name = "smallvec"
 version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
+
+[[package]]
+name = "socket2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "stable_deref_trait"
@@ -2457,3 +2464,7 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
+
+[[patch.unused]]
+name = "freemkv-unlock"
+version = "1.7.7"
