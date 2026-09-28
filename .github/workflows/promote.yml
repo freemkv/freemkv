@@ -65,7 +65,7 @@ jobs:
     steps:
       # Private-info gate: the org-specific scanner lives in the private
       # freemkv-ci repo; its output here is redacted to category + file:line.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: freemkv/freemkv-ci
           token: ${{ secrets.ORG_DISPATCH_TOKEN }}

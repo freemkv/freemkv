@@ -162,31 +162,31 @@ jobs:
 
       # The eight repos side by side under one root, the way the inline mechanics
       # expect (FMKV_ROOT). No freemkv-ci checkout — there is no script to fetch.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { repository: freemkv/freemkv-unlock,     ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-unlock,     fetch-depth: 0 }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { repository: freemkv/libfreemkv,         ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/libfreemkv,         fetch-depth: 0 }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { repository: freemkv/freemkv-keysources, ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-keysources, fetch-depth: 0 }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { repository: freemkv/freemkv-i18n,       ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-i18n,       fetch-depth: 0 }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { repository: freemkv/freemkv-engine,     ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv-engine,     fetch-depth: 0 }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { repository: freemkv/bdemu,              ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/bdemu,              fetch-depth: 0 }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { repository: freemkv/freemkv,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/freemkv,            fetch-depth: 0 }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { repository: freemkv/autorip,            ref: qa, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/autorip,            fetch-depth: 0 }
       # The public docs site: no dev/qa, it IS the deployed artifact, so main.
       # Repo was renamed from `freemkv.github.io` (GitHub Pages era) to
       # `marketing` (Cloudflare era). GitHub redirects the old name, but the
       # canonical name is `marketing` — same for the local checkout path.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { repository: freemkv/marketing,          ref: main, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ws/marketing,          fetch-depth: 0 }
       # Private-info gate over everything this release makes public; output is
       # redacted to category + file:line because this log is public.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { repository: freemkv/freemkv-ci, token: "${{ secrets.ORG_DISPATCH_TOKEN }}", path: ci-private }
       - name: Refuse to release private info (qa of every public repo + the website)
         run: |

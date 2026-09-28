@@ -31,7 +31,7 @@ jobs:
   packaging-tests:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - run: python3 -m unittest discover -s packaging/snap -p 'test_*.py' -v
 
@@ -56,7 +56,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - name: Snap toolchain must match Cargo.toml rust-version
         run: |
@@ -242,7 +242,7 @@ jobs:
           $owned || { echo "::error::org.freemkv.FreeMKV never appeared on the session bus"; exit 1; }
           $window || { echo "::error::no visible freemkv window larger than 1x1 was mapped"; exit 1; }
           $alive || { echo "::error::the app exited before the check finished"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { path: src, persist-credentials: false }
       - name: Store review checks (review-tools)
         run: |
@@ -269,7 +269,7 @@ jobs:
       (github.ref_type == 'tag' || github.ref_name == 'qa' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0, persist-credentials: false }
       - name: Pin matching sibling sources
         if: github.ref_type != 'tag'
@@ -410,7 +410,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: needs.remote-build-arm64.result == 'success'
         with: { name: snap-arm64, path: snap-package }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { path: src, persist-credentials: false }
       - name: Upload and release to the store
         env:
