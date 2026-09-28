@@ -34,6 +34,11 @@ pub struct Row {
     /// libfreemkv put on the stream (including its PGS forced probe) — never
     /// re-derived here. Always `false` for audio and non-stream rows.
     pub forced: bool,
+    /// The PID of the row whose tick this row shows, for a row that is no choice
+    /// of its own: the DVD MPEG-2 multichannel extension (PID 0xD0|n) follows its
+    /// base 0xC0|n, "disabled and mirrors the base" (mpg-output-design v5 §3).
+    /// `None` for every other row.
+    pub mirrors: Option<u16>,
 }
 
 /// What the shell needs after a scan. Pure data — no engine types.
@@ -195,17 +200,26 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                 libfreemkv::Stream::Audio(a) => (a.language.clone(), false),
                 libfreemkv::Stream::Subtitle(s) => (s.language.clone(), s.forced),
             };
+            // libfreemkv's `StreamSelection::apply` keeps the extension iff its base is kept,
+            // so its row is never a choice: it mirrors base PID 0xC0|n.
+            let mirrors = match st {
+                libfreemkv::Stream::Audio(a) if a.is_mp2_extension() => {
+                    Some(0x00C0 | (a.pid & 0x07))
+                }
+                _ => None,
+            };
             Row {
                 type_s: ty.into(),
                 desc,
                 depth: 2,
-                checkable: ty != "Video",
+                checkable: ty != "Video" && mirrors.is_none(),
                 title: ti,
                 info,
                 pid,
                 duration_secs: 0.0,
                 lang,
                 forced,
+                mirrors,
             }
         })
         .collect()
@@ -254,6 +268,7 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
         duration_secs: 0.0,
         lang: String::new(),
         forced: false,
+        mirrors: None,
     }];
     rows.push(Row {
         type_s: "Title".into(),
@@ -275,6 +290,7 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
         duration_secs: t.duration_secs,
         lang: String::new(),
         forced: false,
+        mirrors: None,
     });
     rows.extend(stream_rows(t, 0));
 
@@ -409,6 +425,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
         duration_secs: 0.0,
         lang: String::new(),
         forced: false,
+        mirrors: None,
     });
 
     for (ti, t) in disc.titles.iter().enumerate() {
@@ -447,6 +464,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
             duration_secs: t.duration_secs,
             lang: String::new(),
             forced: false,
+            mirrors: None,
         });
         rows.extend(stream_rows(t, ti));
     }
@@ -4084,6 +4102,7 @@ mod routing_tests {
             duration_secs: if ty == "Title" { 5400.0 } else { 0.0 },
             lang: String::new(),
             forced: false,
+            mirrors: None,
         };
         let mut rows = vec![Row {
             depth: 0,
@@ -5346,6 +5365,47 @@ mod display_sanitisation_tests {
         let disc = hostile_disc();
         let bad = offenders(&stream_rows(&disc.titles[0], 0));
         assert!(bad.is_empty(), "unsanitised stream row text: {bad:?}");
+    }
+
+    /// M1b: "Its checkbox is **disabled and mirrors the base**" (mpg-output-design v5 §3).
+    /// The DVD MPEG-2 extension row is no choice of its own and names base PID 0xC0|n; a
+    /// foreign 0xD3 without the sentinel label stays an ordinary choice.
+    #[test]
+    fn an_mp2_extension_stream_row_mirrors_its_base_pid() {
+        let mk = |pid: u16, label: &str| {
+            Stream::Audio(AudioStream {
+                pid,
+                codec: Codec::Mp2,
+                channels: AudioChannels::Stereo,
+                language: "eng".into(),
+                sample_rate: SampleRate::S48,
+                secondary: false,
+                purpose: LabelPurpose::Normal,
+                label: label.into(),
+            })
+        };
+        let ext_label = libfreemkv::disc::MP2_EXTENSION_LABEL;
+        let mut t = hostile_disc().titles.remove(0);
+        t.streams = vec![mk(0xC2, ""), mk(0xD2, ext_label), mk(0xD3, "")];
+        let rows = stream_rows(&t, 0);
+        assert!(
+            rows[0].checkable && rows[0].mirrors.is_none(),
+            "{:?}",
+            rows[0]
+        );
+        assert!(!rows[1].checkable, "the extension row is not a choice");
+        assert_eq!(rows[1].mirrors, Some(0xC2));
+        assert_eq!(rows[1].pid, Some(0xD2));
+        assert!(
+            rows[1].desc.contains(ext_label),
+            "shown with its label: {}",
+            rows[1].desc
+        );
+        assert!(
+            rows[2].checkable && rows[2].mirrors.is_none(),
+            "{:?}",
+            rows[2]
+        );
     }
 
     /// A crafted field must not be able to add a LINE to a tooltip — the one

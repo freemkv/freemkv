@@ -27,6 +27,7 @@ fn row(type_s: &str, desc: &str, depth: u8, checkable: bool, title: usize) -> Sc
         duration_secs: 0.0,
         lang: String::new(),
         forced: false,
+        mirrors: None,
     }
 }
 
@@ -81,6 +82,43 @@ fn disc(titles: &[(f64, usize)]) -> Scanned {
         title_count: titles.len(),
         title_ids: vec![],
         video_codecs: vec!["H.264".into(); titles.len()],
+        details: vec![],
+    }
+}
+
+/// A DVD title whose MPEG-2 audio (0xC0) has a multichannel extension (0xD0): the
+/// scan marks the extension row uncheckable and mirroring its base's PID.
+fn mp2_extension_disc() -> Scanned {
+    let mut t = row("Title", "1.  VTS_01", 1, true, 0);
+    t.duration_secs = 5400.0;
+    let mut base = row("Audio", "MP2  stereo  eng", 2, true, 0);
+    base.pid = Some(0x00C0);
+    let mut ext = row(
+        "Audio",
+        "MP2  stereo  eng  —  MPEG-2 multichannel extension",
+        2,
+        false,
+        0,
+    );
+    ext.pid = Some(0x00D0);
+    ext.mirrors = Some(0x00C0);
+    let mut other = row("Audio", "AC-3  5.1  fra", 2, true, 0);
+    other.pid = Some(0x0080);
+    Scanned {
+        label: "MP2_EXT".into(),
+        volume_id: "MP2_EXT".into(),
+        rows: vec![
+            row("DVD disc", "MP2_EXT", 0, false, usize::MAX),
+            t,
+            row("Video", "MPEG-2  576i", 2, false, 0),
+            base,
+            ext,
+            other,
+        ],
+        key_summary: "keys: none needed".into(),
+        title_count: 1,
+        title_ids: vec![],
+        video_codecs: vec!["MPEG-2".into()],
         details: vec![],
     }
 }
@@ -299,21 +337,115 @@ fn every_arena_row_becomes_exactly_one_view_row_in_order() {
 
 #[test]
 fn a_view_row_carries_a_tick_only_when_the_row_is_a_choice() {
-    // `Row::check == None` is what both shells render as "no checkbox at
-    // all". If it disagreed with `checkable()`, one shell would show a
-    // checkbox the model refuses to change — the exact macOS bug pinned here.
-    let mut app = App::new();
-    app.tree = tree(&two_title_disc(), "All titles", 0.0);
-    app.page = Page::Titles;
-    for r in app.view().title_rows {
-        assert_eq!(
-            r.check.is_some(),
-            app.tree.arena[r.index].checkable(),
-            "row {} ({}) disagrees about carrying a checkbox",
-            r.index,
-            r.type_s
-        );
+    // `check == None` means no checkbox; an ENABLED box means exactly "the model
+    // will change this" (the macOS bug pinned here). A mirror row (M1b) shows a
+    // tick it does not own, so its box is drawn disabled.
+    for sc in [two_title_disc(), mp2_extension_disc()] {
+        let mut app = App::new();
+        app.tree = tree(&sc, "All titles", 0.0);
+        app.page = Page::Titles;
+        for r in app.view().title_rows {
+            let n = &app.tree.arena[r.index];
+            assert_eq!(
+                r.check.is_some(),
+                n.checkable() || n.mirrors().is_some(),
+                "row {} ({}) disagrees about carrying a checkbox",
+                r.index,
+                r.type_s
+            );
+            assert_eq!(
+                r.check_enabled,
+                n.checkable(),
+                "row {} ({}) offers a click the model would ignore, or hides one it takes",
+                r.index,
+                r.type_s
+            );
+        }
     }
+}
+
+// ══ the MPEG-2 multichannel extension row (mpg-output-design v5 §3, M1b) ═══
+// "Its checkbox is **disabled and mirrors the base**." libfreemkv's
+// `StreamSelection::apply` keeps the extension iff its base is kept.
+
+#[test]
+fn an_mp2_extension_row_mirrors_its_base_tick_and_is_disabled() {
+    let mut app = App::new();
+    app.tree = tree(&mp2_extension_disc(), "All titles", 0.0);
+    app.page = Page::Titles;
+    let base = app
+        .tree
+        .arena
+        .iter()
+        .position(|n| n.pid == Some(0x00C0))
+        .unwrap();
+    let ext = app
+        .tree
+        .arena
+        .iter()
+        .position(|n| n.pid == Some(0x00D0))
+        .unwrap();
+    assert_eq!(app.tree.arena[ext].mirrors(), Some(base));
+    let shown = |app: &App, i: usize| app.view().title_rows[i].clone();
+    assert_eq!(shown(&app, ext).check, Some(Check::On));
+    assert!(
+        !shown(&app, ext).check_enabled,
+        "the extension row is not a choice"
+    );
+    assert!(shown(&app, base).check_enabled);
+
+    app.tree.toggle(base);
+    assert_eq!(shown(&app, base).check, Some(Check::Off));
+    assert_eq!(
+        shown(&app, ext).check,
+        Some(Check::Off),
+        "must follow its base"
+    );
+    app.tree.toggle(base);
+    assert_eq!(
+        shown(&app, ext).check,
+        Some(Check::On),
+        "must follow its base back"
+    );
+}
+
+#[test]
+fn clicking_an_mp2_extension_row_changes_nothing() {
+    let t = tree(&mp2_extension_disc(), "All titles", 0.0);
+    let ext = t.arena.iter().position(|n| n.pid == Some(0x00D0)).unwrap();
+    let before: Vec<Check> = (0..t.arena.len()).map(|i| t.check_state(i)).collect();
+    let picked = t.ticked_streams();
+    t.toggle(ext);
+    let after: Vec<Check> = (0..t.arena.len()).map(|i| t.check_state(i)).collect();
+    assert_eq!(
+        before, after,
+        "a disabled row's click leaked into the model"
+    );
+    assert_eq!(picked, t.ticked_streams());
+}
+
+#[test]
+fn an_mp2_extension_pid_is_never_sent_as_a_choice() {
+    // Not the user's choice, so not in the list: sending it would make an
+    // all-ticked title look narrowed, and libfreemkv follows the base anyway.
+    let t = tree(&mp2_extension_disc(), "All titles", 0.0);
+    let (audio, _, explicit) = t.ticked_streams();
+    assert_eq!(audio, vec![0x00C0, 0x0080]);
+    assert!(!explicit, "everything ticked is not a narrowed selection");
+    let base = t.arena.iter().position(|n| n.pid == Some(0x00C0)).unwrap();
+    t.toggle(base);
+    let (audio, _, explicit) = t.ticked_streams();
+    assert_eq!(audio, vec![0x0080]);
+    assert!(explicit);
+    match t.ticked_streams_by_title() {
+        freemkv::engine::TitleStreams::PerTitle(v) => {
+            assert_eq!(v, vec![(0, vec![0x0080], vec![])]);
+        }
+        other => panic!("expected per-title streams, got {other:?}"),
+    }
+    // The title's tri-state folds only real choices: base off → Mixed.
+    let title = t.arena.iter().position(|n| n.type_s == "Title").unwrap();
+    assert_eq!(t.check_state(title), Check::Mixed);
 }
 
 #[test]
@@ -433,6 +565,7 @@ fn row_parents_never_drops_a_row() {
         type_s: "Audio".into(),
         desc: "stray".into(),
         check: Some(Check::Off),
+        check_enabled: true,
     };
     for rows in [vec![orphan(2)], vec![orphan(1)], vec![orphan(2), orphan(1)]] {
         let parents = row_parents(&rows);
