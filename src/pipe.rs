@@ -6809,6 +6809,25 @@ mod formatter_tests {
     }
 
     #[test]
+    fn on_output_opened_prints_the_excluded_note_first_like_the_gui() {
+        crate::strings::set_locale("en");
+        // The GUI logs the note before the mux starts; the CLI's earliest title
+        // hook is on_output_opened, so the note must lead everything it prints.
+        let t = title(vec![video(), audio(libfreemkv::Codec::TrueHd)], 60.0);
+        let events = CliMuxEvents::new(loud(), "mp4:///out/x.mp4".into(), false);
+        let (_, printed) = capture(|| events.on_output_opened(&t));
+        let note = printed.find("left out").expect("the note prints");
+        let streams = printed.find("Streams: 2").expect("the stream block prints");
+        let opening = printed
+            .find("mp4:///out/x.mp4")
+            .expect("the open line prints");
+        assert!(
+            note < streams && note < opening,
+            "the excluded note leads, got:\n{printed}"
+        );
+    }
+
+    #[test]
     fn on_write_progress_is_silent_when_quiet() {
         // A `stdio://` rip routes to stderr and runs quiet — a progress repaint
         // must never interleave into the piped byte stream.
