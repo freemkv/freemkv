@@ -1835,6 +1835,9 @@ pub struct ProbeState {
     token: OpenToken,
     /// T29: idle-only over `token.progress`, so a CDB or key call in flight never counts.
     stall: Mutex<libfreemkv::halt::StallTimer>,
+    /// After the Stop: [`PROBE_RELEASE`] windows with no CDB completing, then abandoned.
+    release: Mutex<Option<libfreemkv::halt::StallTimer>>,
+    window: std::time::Duration,
 }
 
 impl ProbeState {
@@ -1847,7 +1850,23 @@ impl ProbeState {
             done: AtomicBool::new(false),
             token,
             stall: Mutex::new(stall),
+            release: Mutex::new(None),
+            window,
         }
+    }
+
+    // A cancelled worker that still has not let go after its release bound (a hung driver):
+    // the UI stops waiting for it. Plain stall timer: a CDB hung `busy()` must not pause it.
+    fn abandoned(&self) -> bool {
+        if !self.token.halt.is_cancelled() {
+            return false;
+        }
+        let mut t = self.release.lock().unwrap_or_else(|e| e.into_inner());
+        let p = &self.token.progress;
+        let t = t.get_or_insert_with(|| {
+            libfreemkv::halt::StallTimer::new(self.window * PROBE_RELEASE, p)
+        });
+        matches!(t.poll(p), libfreemkv::halt::Stall::Expired)
     }
 
     // T29 (stop design v5 §3.1): "30 s of **idle** no-progress"; true once it cancelled.
@@ -1867,6 +1886,10 @@ impl ProbeState {
 /// long the probe's open token is cancelled, and the worker lets go of the drive. A CDB
 /// or key call in flight pauses it, so a slow-but-working drive still lands its result.
 pub const PROBE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// T29 windows a cancelled probe gets to let go of the drive before the UI abandons it.
+/// §3.2: a recovery READ's Stop takes "60 s + K" (K ≤ 13 s), within 3 × 30 s.
+const PROBE_RELEASE: u32 = 3;
 
 /// A drive is single-open, so a second scan while the probe holds it fails for a
 /// readable disc. The open waits; if it names the probe's own source it adopts the result.
@@ -2679,17 +2702,28 @@ impl App {
         // `Acquire`, pairing with the worker's `Release` store: seeing `true`
         // guarantees the `result` write is visible.
         if !p.done.load(Ordering::Acquire) {
-            // T29 "is disabled once a same-source `PendingOpen` has adopted the probe"; a
-            // cancelled probe is waited on until its worker lets go of the drive (§4.3).
+            // §4.3 T29: "disabled once a same-source `PendingOpen` has adopted the probe"; a
+            // cancelled probe is waited on until its worker lets go of the drive, or abandoned.
             let adopted = self.pending.as_ref().is_some_and(|o| o.path == p.path);
             if !adopted {
                 p.stalled();
             }
-            return Vec::new();
+            if !p.abandoned() {
+                return Vec::new();
+            }
+            self.probe = None;
+            return match self.pending.take() {
+                Some(open) => self.run_pending(open),
+                None => Vec::new(),
+            };
         }
         self.probe = None;
         let scanned = p.result.lock().ok().and_then(|mut r| r.take());
         let scanned = match (self.pending.take(), scanned) {
+            // A probe its Stop ended has no result to adopt: the Open runs afresh.
+            (Some(open), Some(Err(_))) if p.token.halt.is_cancelled() => {
+                return self.run_pending(open);
+            }
             // Adopted: the user asked for exactly this scan, so failures are reported.
             (Some(open), Some(scanned)) if open.path == p.path => {
                 let scanned = scanned.map_err(|e| {
