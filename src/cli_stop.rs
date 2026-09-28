@@ -34,12 +34,32 @@ pub(crate) enum CtrlAction {
 /// The console handler's decision, pure so every OS tests it (FT11).
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn on_ctrl(event: u32, already_interrupted: bool) -> CtrlAction {
-    let _ = (event, already_interrupted);
-    CtrlAction::Handled
+    // SS-21 `HandlerRoutine`: "If the function handles the control signal, it should return
+    // TRUE. If it returns FALSE, the next handler function in the list … is used."
+    match event {
+        CTRL_C_EVENT | CTRL_BREAK_EVENT if already_interrupted => CtrlAction::ForceExit(130),
+        CTRL_C_EVENT | CTRL_BREAK_EVENT => CtrlAction::Handled,
+        _ => CtrlAction::Default,
+    }
 }
 
-/// Install the Ctrl-C handler.
+/// The process token every CLI op takes (§4.3 item 1): cancelled within one
+/// [`WAIT_SLICE`](libfreemkv::halt::WAIT_SLICE) of the first Ctrl-C once [`install`] ran.
+pub(crate) fn token() -> &'static libfreemkv::Halt {
+    static TOKEN: std::sync::OnceLock<libfreemkv::Halt> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(|| watching(&INTERRUPTED))
+}
+
+/// Install the Ctrl-C handler and the process token's watcher, once per process.
 pub(crate) fn install() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        install_handler();
+        token();
+    });
+}
+
+fn install_handler() {
     #[cfg(unix)]
     unsafe {
         // sigaction, not signal(): on musl, signal() is one-shot and would
@@ -57,15 +77,28 @@ pub(crate) fn install() {
 
     #[cfg(windows)]
     unsafe {
-        extern "system" fn handler(_: u32) -> i32 {
-            INTERRUPTED.store(true, Ordering::SeqCst);
-            1
+        extern "system" fn handler(event: u32) -> i32 {
+            match on_ctrl(event, INTERRUPTED.load(Ordering::SeqCst)) {
+                CtrlAction::Handled => {
+                    INTERRUPTED.store(true, Ordering::SeqCst);
+                    1
+                }
+                // SS-21: "TerminateProcess … is used to unconditionally cause a process to
+                // exit", not ExitProcess: "the DLL detach code … results in a deadlock".
+                CtrlAction::ForceExit(code) => unsafe {
+                    TerminateProcess(GetCurrentProcess(), code);
+                    1
+                },
+                CtrlAction::Default => 0,
+            }
         }
         unsafe extern "system" {
             fn SetConsoleCtrlHandler(
                 handler: unsafe extern "system" fn(u32) -> i32,
                 add: i32,
             ) -> i32;
+            fn GetCurrentProcess() -> isize;
+            fn TerminateProcess(process: isize, exit_code: u32) -> i32;
         }
         SetConsoleCtrlHandler(handler, 1);
     }
@@ -79,7 +112,7 @@ extern "C" fn handle_sigint(_sig: libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
-/// A `Halt` cancelled once `flag` is set: the test hook (§4.3, "`watching(flag)` survives as
+/// A `Halt` cancelled within one `WAIT_SLICE` of `flag` being set: the test hook (§4.3, "`watching(flag)` survives as
 /// the test hook"). Its watcher ends once `flag` is set or the returned token is dropped.
 pub(crate) fn watching(flag: &'static AtomicBool) -> libfreemkv::Halt {
     let halt = libfreemkv::Halt::new();
@@ -90,7 +123,7 @@ pub(crate) fn watching(flag: &'static AtomicBool) -> libfreemkv::Halt {
                 watched.cancel();
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(libfreemkv::halt::WAIT_SLICE);
         }
     });
     halt

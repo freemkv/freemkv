@@ -19,22 +19,6 @@ use std::time::Instant;
 
 use crate::cli_stop::INTERRUPTED;
 
-struct SigintHalt {
-    halt: libfreemkv::Halt,
-}
-
-impl SigintHalt {
-    fn install() -> Self {
-        SigintHalt {
-            halt: crate::cli_stop::watching(&INTERRUPTED),
-        }
-    }
-
-    fn halt(&self) -> &libfreemkv::Halt {
-        &self.halt
-    }
-}
-
 struct PipeFail {
     display: String,
     /// How the multi-title loop should classify this failure. The loop feeds it
@@ -700,7 +684,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     // decrypts an existing image; `dir://` joins this arm when it becomes a
     // source. Not the recovery path — see `image_to_iso`.
     if matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. }) && parsed_source.is_disc_source() {
-        return if image_to_iso(source, dest, &keys, &SigintHalt::install().halt, &out) {
+        return if image_to_iso(source, dest, &keys, crate::cli_stop::token(), &out) {
             0
         } else {
             1
@@ -1664,9 +1648,8 @@ fn disc_rip_keys(
     out: &Output,
 ) -> Option<libfreemkv::keys::ResolvedKeySet> {
     let factory = key_source_factory(keys, out);
-    let sigint = SigintHalt::install();
-    let r = crate::rip_keys::resolve(disc, reader, scope, &factory, None, Some(sigint.halt()));
-    drop(sigint);
+    let token = crate::cli_stop::token();
+    let r = crate::rip_keys::resolve(disc, reader, scope, &factory, None, Some(token));
     emit_resolution_trace(out, &r.1);
     report_keys(r.0, out)
 }
@@ -1700,15 +1683,14 @@ fn open_rip_image(
     Some(opened)
 }
 
-/// [`open_rip_image`] with its own Ctrl-C watch.
+/// [`open_rip_image`] under the process Ctrl-C token.
 fn image_rip_keys(
     source: &str,
     scope: libfreemkv::keys::KeyScope,
     keys: &KeyConfig,
     out: &Output,
 ) -> Option<freemkv_engine::OpenedImage> {
-    let sigint = SigintHalt::install();
-    open_rip_image(source, scope, keys, sigint.halt(), out)
+    open_rip_image(source, scope, keys, crate::cli_stop::token(), out)
 }
 
 #[allow(clippy::too_many_arguments)] // cohesive single-title disc rip
@@ -1782,11 +1764,10 @@ fn pipe_disc(
         raw,
         // Interactive stdout/network sink: no per-frame send deadline. A
         // slow-but-alive downstream (paused pager, backpressured pipe) must
-        // block, not be reported as interrupted. Ctrl-C still works via SIGINT.
+        // block, not be reported as interrupted. Ctrl-C still works via the process token.
         send_deadline: None,
         selection,
     };
-    let sigint = SigintHalt::install();
     let result = libfreemkv::mux_with_keys(
         libfreemkv::MuxSource::Session {
             session: &mut session,
@@ -1795,10 +1776,9 @@ fn pipe_disc(
         Some(set),
         dest,
         &opts,
-        sigint.halt(),
+        crate::cli_stop::token(),
         events.clone() as Arc<dyn MuxEvents>,
     );
-    drop(sigint);
     finalize_mux(result, out, &events)
 }
 
@@ -1870,7 +1850,6 @@ fn disc_copy_options<'a>(
     progress: &'a dyn libfreemkv::progress::Progress,
     halt: &libfreemkv::Halt,
 ) -> freemkv_engine::CopyOptions<'a> {
-    let _ = halt;
     // KU §2.1 invariant 5: "No key byte and no raw VID is written to any file" (FK6). The
     // rip's up-front set rides in memory; the engine writes only `disc` + `vidfp` lines.
     // Needless once KU-X1 drops the legacy key fields; needed until it lands.
@@ -1878,7 +1857,8 @@ fn disc_copy_options<'a>(
     freemkv_engine::CopyOptions {
         decrypt: !raw,
         multipass,
-        halt: None,
+        // Stop design v5 §4.3: "The global token goes everywhere", `disc_copy_options` too.
+        halt: Some(halt.as_arc().clone()),
         progress: Some(progress),
         keys: keys.cloned(),
         ..Default::default()
@@ -1914,11 +1894,10 @@ fn pipe(
         raw: opts.raw,
         // No per-frame send deadline on the CLI's stdout / network sinks — a
         // slow-but-alive consumer must block rather than surface a spurious
-        // interrupt. Ctrl-C still stops the pump via the SIGINT halt.
+        // interrupt. Ctrl-C still stops the pump via the process token.
         send_deadline: None,
         selection: Default::default(),
     };
-    let sigint = SigintHalt::install();
     let result = libfreemkv::mux_with_keys(
         MuxSource::Url {
             url: source,
@@ -1927,10 +1906,9 @@ fn pipe(
         None,
         dest,
         &mux_opts,
-        sigint.halt(),
+        crate::cli_stop::token(),
         events.clone() as Arc<dyn MuxEvents>,
     );
-    drop(sigint);
     finalize_mux(result, out, &events)
 }
 
@@ -2021,7 +1999,6 @@ fn image_to_iso(
     halt: &libfreemkv::Halt,
     out: &Output,
 ) -> bool {
-    let _ = halt;
     let iso_path = match libfreemkv::parse_url(dest) {
         libfreemkv::StreamUrl::Iso { path } => path,
         _ => return false,
@@ -2049,10 +2026,9 @@ fn image_to_iso(
     }
 
     // An `iso://` destination is a DECRYPTED image: every key of the whole disc is resolved
-    // once, before `dest` exists (KU §2.5 `WholeDisc`). Ctrl-C is watched from the start.
-    let sigint = SigintHalt::install();
+    // once, before `dest` exists (KU §2.5 `WholeDisc`). `halt` is the process Ctrl-C token.
     let scope = libfreemkv::keys::KeyScope::WholeDisc;
-    let Some(opened) = open_rip_image(source, scope, keys, sigint.halt(), out) else {
+    let Some(opened) = open_rip_image(source, scope, keys, halt, out) else {
         return false;
     };
     let total_sectors = opened.disc.capacity_sectors;
@@ -2062,9 +2038,8 @@ fn image_to_iso(
         opened.reader,
         std::path::Path::new(&iso_path),
         &opened.keys,
-        sigint.halt(),
+        halt,
     );
-    drop(sigint);
 
     match result {
         Ok(0) => {
@@ -2232,7 +2207,7 @@ fn disc_to_iso(
         raw,
         multipass,
         &progress,
-        SigintHalt::install().halt(),
+        crate::cli_stop::token(),
     );
     let exit_code = match freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts) {
         Ok(r) if copy_verdict(&r) == CopyVerdict::Interrupted => {
@@ -2438,15 +2413,11 @@ fn run_extract(
     );
     out.blank(Normal);
 
-    // Bridge the CLI's SIGINT flag into a libfreemkv Halt the producer polls,
-    // so a long extract stops promptly, leaving the in-flight file as
-    // `.partial`. `SigintHalt` joins the watcher on drop, even on unwind.
-    let sigint = SigintHalt::install();
-
-    let sink = HaltSink(sigint.halt());
+    // The process Ctrl-C token, polled by the producer, stops a long extract promptly,
+    // leaving the in-flight file as `.partial`.
+    let sink = HaltSink(crate::cli_stop::token());
     let outcome =
         freemkv_engine::extract_tree_with(disc, reader, dest_path, force, Some(set), &sink);
-    drop(sigint);
 
     match outcome {
         Ok(res) => {
