@@ -211,6 +211,8 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         // CC-F1a (stop-design-v5 §6 R7.4): the shared cascade's two codes.
         Error::AacsVidNeedsDisc,
         Error::TimedOut { op: "verify" },
+        // MPG-F1 (mpg-output-design v5 §8): the mpg:// cascade's one code, E9074.
+        Error::MpgNoVideoTrack,
     ]
 }
 
