@@ -43,6 +43,7 @@ pub mod lossy;
 pub mod messaging;
 pub mod platform;
 pub mod settings;
+pub mod sources;
 // The i18n string facade — the core (`ui`) localizes through it, so the lib
 // target needs it too (it is just a re-export of `freemkv_i18n`).
 pub mod strings;

@@ -1068,6 +1068,19 @@ fn preflight_validate(
     // 1b. Source must have a recognized scheme too. A bare path as source would
     // otherwise fall through to a no-titles / cryptic error far downstream.
     if matches!(parsed_source, libfreemkv::StreamUrl::Unknown { .. }) {
+        // A container file by its extension (the one CONTAINER_SOURCES table) is pointed at
+        // its own scheme; anything else at iso:// / disc://.
+        if let Some(scheme) = crate::sources::container_scheme(source) {
+            let container = scheme.to_ascii_uppercase();
+            return Err(strings::fmt(
+                "error.source_needs_container_scheme",
+                &[
+                    ("source", source),
+                    ("scheme", scheme),
+                    ("container", &container),
+                ],
+            ));
+        }
         return Err(strings::fmt(
             "error.source_needs_scheme",
             &[("source", source)],

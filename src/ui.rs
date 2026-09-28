@@ -835,28 +835,9 @@ pub fn format_by_title(
         .find(|f| *f == title)
 }
 
-/// Container sources by extension, and the `scheme://` that reads each (design §6, G5): the
-/// one table the picker, the drop filter and the engine's source routing derive from.
-pub const CONTAINER_SOURCES: &[(&str, &str)] = &[
-    ("mkv", "mkv"),
-    ("m2ts", "m2ts"),
-    ("mts", "m2ts"),
-    ("mp4", "mp4"),
-    ("mpg", "mpg"),
-    ("mpeg", "mpg"),
-    ("vob", "mpg"),
-];
+pub use crate::sources::container_scheme;
 
-/// The scheme that reads `path` as a container, from its extension (any case).
-pub fn container_scheme(path: &str) -> Option<&'static str> {
-    let ext = std::path::Path::new(path).extension()?.to_str()?;
-    CONTAINER_SOURCES
-        .iter()
-        .find(|(e, _)| e.eq_ignore_ascii_case(ext))
-        .map(|(_, s)| *s)
-}
-
-/// Source formats accepted by the file picker: ISO images and every [`CONTAINER_SOURCES`]
+/// Source formats accepted by the file picker: ISO images and every [`crate::sources::CONTAINER_SOURCES`]
 /// extension (plus the upper-case forms discs and pickers show).
 pub const SOURCE_EXTS: &[&str] = &[
     "iso", "ISO", "mkv", "m2ts", "mts", "mp4", "mpg", "MPG", "mpeg", "MPEG", "vob", "VOB",
@@ -2900,7 +2881,7 @@ mod tests {
     // agrees with it, and mpg/mpeg/vob read as mpg://.
     #[test]
     fn container_sources_drive_every_extension_decision() {
-        for (ext, scheme) in CONTAINER_SOURCES {
+        for (ext, scheme) in crate::sources::CONTAINER_SOURCES {
             for e in [ext.to_string(), ext.to_ascii_uppercase()] {
                 let path = format!("/m/movie.{e}");
                 assert_eq!(container_scheme(&path), Some(*scheme), "{path}");
@@ -2917,7 +2898,7 @@ mod tests {
             .iter()
             .filter(|e| {
                 !e.eq_ignore_ascii_case("iso")
-                    && !CONTAINER_SOURCES
+                    && !crate::sources::CONTAINER_SOURCES
                         .iter()
                         .any(|(x, _)| x.eq_ignore_ascii_case(e))
             })
