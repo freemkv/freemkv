@@ -356,7 +356,7 @@ fn en_json_has_no_string_for_a_code_libfreemkv_does_not_declare() {
 
 // Codes libfreemkv adds before this fixture can name them (the fixture compiles against
 // libfreemkv dev). Enumerate the variant and drop its name here once libfreemkv has it.
-const PENDING_VARIANTS: &[&str] = &[];
+const PENDING_VARIANTS: &[&str] = &["E_WHOLE_DISC_KEY_MISSING"];
 
 // Every code libfreemkv can put inside an `Error` must appear in `all_error_variants()`, and
 // vice versa. A forgotten variant is INVISIBLE to every other assertion here.
