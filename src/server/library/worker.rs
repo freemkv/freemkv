@@ -13,6 +13,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+// 510 sectors = 1020 KiB, just below the NFS mount's 1 MiB rsize and
+// divisible by the three-sector AACS unit. The old 64-sector setting yielded
+// 126 KiB reads after alignment and capped rip1 at about 60 MB/s.
+const LIBRARY_ISO_BATCH_SECTORS: u16 = 510;
+
 pub(crate) fn shutting_down() -> bool {
     crate::server::SHUTDOWN.load(Ordering::Relaxed)
 }
@@ -142,6 +147,7 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
                 &keys,
                 sink,
                 &dir.join(format!("{}.mkv.partial", job.id)),
+                LIBRARY_ISO_BATCH_SECTORS,
             )
         })
     } else {
