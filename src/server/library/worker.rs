@@ -27,6 +27,9 @@ fn nap(d: Duration) {
 /// The worker loop: waits while a rip holds the slot or the queue is paused.
 pub fn run(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
     tracing::info!("library worker starting");
+    if let Some(dir) = remux_stage_dir() {
+        clean_stale_staging(&dir);
+    }
     while !shutting_down() {
         let Some((job, epoch)) = next_job(lib, arbiter) else {
             nap(Duration::from_secs(1));
@@ -131,8 +134,19 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
         target: job.target.clone(),
         replace: job.replace,
     };
-    let result =
-        freemkv_engine::remux_iso(&request, &crate::server::keysource::key_params(cfg), sink);
+    let keys = crate::server::keysource::key_params(cfg);
+    let result = if let Some(dir) = remux_stage_dir() {
+        std::fs::create_dir_all(&dir).and_then(|()| {
+            freemkv_engine::remux_iso_staged(
+                &request,
+                &keys,
+                sink,
+                &dir.join(format!("{}.mkv.partial", job.id)),
+            )
+        })
+    } else {
+        freemkv_engine::remux_iso(&request, &keys, sink)
+    };
     match result {
         Ok(report) => Ending::Done {
             writing_app: report.writing_app,
@@ -142,6 +156,50 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
         Err(_) if shutting_down() => Ending::Stopped(JobNote::Interrupted),
         Err(_) if sink.lib.stall_cancel.load(Ordering::SeqCst) => Ending::Stopped(JobNote::Stalled),
         Err(e) => Ending::Failed(e),
+    }
+}
+
+fn remux_stage_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("FREEMKV_REMUX_STAGING_DIR")
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+// Only this directory and these numeric job files belong to the library worker.
+// A killed container cannot run the engine's normal partial-file guard.
+fn clean_stale_staging(dir: &Path) {
+    let Ok(files) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in files.flatten() {
+        let path = entry.path();
+        let owned = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_suffix(".mkv.partial"))
+            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+        if owned && path.is_file() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(path = %path.display(), error = %e, "stale remux stage could not be removed");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod staged_cleanup_tests {
+    use super::clean_stale_staging;
+
+    #[test]
+    fn startup_removes_only_library_job_partials() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("42.mkv.partial");
+        let unrelated = dir.path().join("disc.mkv.partial");
+        std::fs::write(&stale, b"interrupted").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+        clean_stale_staging(dir.path());
+        assert!(!stale.exists());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep");
     }
 }
 
