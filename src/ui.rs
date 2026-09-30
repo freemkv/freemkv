@@ -1275,8 +1275,8 @@ pub fn bar_caption(pct: f64, elapsed_secs: u64, eta_secs: Option<u64>) -> String
 }
 
 /// The saving captions once Stop is pressed (stop design v5 §3.2 (A), ST-I2's strings):
-/// "Finishing …" when every title is already written, so the run ends Done; else
-/// "Stopping …". `None` while no Stop is pending.
+/// "Finishing …" when every title is already written; else "Stopping …".
+/// `None` while no Stop is pending.
 pub fn stop_caption(stopping: bool, titles_done: usize, run_titles: usize) -> Option<String> {
     match (stopping, titles_done >= run_titles.max(1)) {
         (false, _) => None,
