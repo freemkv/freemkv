@@ -709,7 +709,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     if is_disc {
         match scan_rip_drive(source, &keys) {
             Ok(pair) => disc_scan = Some(pair),
-            Err(e) if all_titles => {
+            Err(e) if all_titles && !matches!(e, libfreemkv::Error::Halted) => {
                 out.raw(Normal, &scan_failed_msg(&e));
                 out.raw(Normal, &disc_scan_all_titles_failed());
                 return 1;
@@ -1588,6 +1588,7 @@ fn render_drive_open_error(e: &libfreemkv::Error) -> String {
         libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
             strings::get("error.no_drive")
         }
+        libfreemkv::Error::Halted => strings::get("rip.interrupted"),
         _ => render_error(e),
     }
 }
@@ -1600,13 +1601,29 @@ fn device_target(source: &str) -> libfreemkv::DeviceTarget {
     }
 }
 
+// Every CLI drive scan runs under the process Ctrl-C token (stop design v5 §4.3 item 1).
+fn open_drive_scan(
+    target: libfreemkv::DeviceTarget,
+    credentials: Option<libfreemkv::DriveCredentials>,
+    raw: bool,
+) -> Result<libfreemkv::DiscSession, libfreemkv::Error> {
+    let progress = libfreemkv::halt::Progress::new();
+    freemkv_engine::open_scan_with(
+        target,
+        credentials,
+        raw,
+        crate::cli_stop::token(),
+        &progress,
+    )
+}
+
 type DriveScan = (libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>, String);
 
 /// Open and scan the drive at `source` with NO key call (KU §3.2 `open_scan`): the disc,
 /// its raw reader for the rip's one resolve, and the device path.
 fn scan_rip_drive(source: &str, keys: &KeyConfig) -> Result<DriveScan, libfreemkv::Error> {
     let credentials = drive_credentials(keys.keydb_path());
-    let mut session = freemkv_engine::open_scan(device_target(source), credentials, false)?;
+    let mut session = open_drive_scan(device_target(source), credentials, false)?;
     let device = session.device_path().to_string();
     let disc = session.take_disc().expect("scan populated the disc");
     session.stage_drive_as_reader();
@@ -1711,15 +1728,15 @@ fn pipe_disc(
     // KU §3.3: each title reopens the drive with `open_scan` (no key call) and reads
     // through the rip's one set, after `is_for`. Tray unlock is guaranteed by `Drive::drop`.
     let credentials = drive_credentials(keys.keydb_path());
-    let mut session = freemkv_engine::open_scan(device_target(source), credentials, false)
-        .map_err(|e| {
-            PipeFail::fatal(match &e {
-                libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
-                    strings::get("error.no_drive")
-                }
-                _ => format!("{}", e),
-            })
-        })?;
+    let mut session = open_drive_scan(device_target(source), credentials, false).map_err(|e| {
+        PipeFail::fatal(match &e {
+            libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
+                strings::get("error.no_drive")
+            }
+            libfreemkv::Error::Halted => strings::get("rip.interrupted"),
+            _ => format!("{}", e),
+        })
+    })?;
     // ── Pre-flight validation (borrows the scanned disc; no drive I/O) ──
     let batch = libfreemkv::disc::detect_max_batch_sectors(session.device_path());
     // Resolved -a/-s PID selection for this title (default = keep all).
@@ -2137,7 +2154,7 @@ fn disc_to_iso(
     let parsed_dest = libfreemkv::parse_url(dest);
     // A raw copy scans on past an unreadable AACS key file (libfreemkv records E7031).
     let credentials = drive_credentials(keys.keydb_path());
-    let mut session = match freemkv_engine::open_scan(device_target(source), credentials, raw) {
+    let mut session = match open_drive_scan(device_target(source), credentials, raw) {
         Ok(s) => s,
         Err(e) => {
             out.raw(Normal, &render_drive_open_error(&e));
@@ -7097,14 +7114,14 @@ mod ku_cli_tests {
     }
 
     /// FK7 (KU §2.5: "Raw copy (`--raw`, …) | `None`: no key call"): the disc→ISO copy
-    /// scans with `open_scan(.., raw)` and resolves only on its decrypting arm (a live
+    /// scans with `open_drive_scan(.., raw)` and resolves only on its decrypting arm (a live
     /// drive is needed to run it, so this reads the wiring; `rip_keys` proves the rest).
     #[test]
     fn raw_disc_copy_makes_no_key_request() {
         let src = include_str!("pipe.rs").replace("\r\n", "\n");
         let a = src.find("\nfn disc_to_iso(").expect("disc_to_iso");
         let body = &src[a..a + src[a..].find("\nfn dir_to_extract(").expect("next fn")];
-        assert!(body.contains("open_scan(device_target(source), credentials, raw)"));
+        assert!(body.contains("open_drive_scan(device_target(source), credentials, raw)"));
         let keyed = body.find("disc_rip_keys(").expect("the decrypting resolve");
         assert!(
             body[..keyed].contains("let set = if raw {"),
@@ -7123,7 +7140,9 @@ mod ku_cli_tests {
             !prod.contains(&untokened),
             "a CLI drive scan ignores the first Ctrl-C"
         );
-        assert!(prod.contains("open_scan_with(target, credentials, raw, crate::cli_stop::token()"));
+        let a = prod.find("\nfn open_drive_scan(").expect("open_drive_scan");
+        let helper = &prod[a..a + prod[a..].find("\n}\n").expect("fn end")];
+        assert!(helper.contains("open_scan_with(") && helper.contains("crate::cli_stop::token()"));
         let halted = crate::pipe::render_drive_open_error(&libfreemkv::Error::Halted);
         assert_eq!(halted, crate::strings::get("rip.interrupted"));
     }
