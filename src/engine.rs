@@ -4123,7 +4123,7 @@ mod routing_tests {
         // 1. The recovery job's raw flag — the defect that made every rip on
         //    the shipped defaults fail before reading a sector.
         let recover = slice(
-            "        let mut job = fe::Job::new(format!(\"disc://",
+            "        let mut job = recovery_job(&req.source, &iso_path, &indices);",
             "        let result = fe::multipass_rip_staged(",
         );
         assert!(
@@ -4165,7 +4165,7 @@ mod routing_tests {
         );
         let keep = slice(
             "        let keep = req.keep_iso && staging.is_none();",
-            "            let _ = std::fs::remove_file(&iso_path);",
+            "                remove_staging_iso(&iso_path, &map_path);",
         );
         assert!(
             keep.contains("should_delete_staging_iso(keep,"),
