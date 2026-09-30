@@ -7112,6 +7112,22 @@ mod ku_cli_tests {
         );
     }
 
+    /// §4.3 item 1: every CLI op takes the process token, the drive scan included, and
+    /// a Ctrl-C during the scan reads as an interrupt, not an error.
+    #[test]
+    fn every_cli_drive_scan_takes_the_process_token() {
+        let src = include_str!("pipe.rs").replace("\r\n", "\n");
+        let prod = &src[..src.find("\n#[cfg(test)]\nmod tests").expect("tests module")];
+        let untokened = ["freemkv_engine::", "open_scan("].concat();
+        assert!(
+            !prod.contains(&untokened),
+            "a CLI drive scan ignores the first Ctrl-C"
+        );
+        assert!(prod.contains("open_scan_with(target, credentials, raw, crate::cli_stop::token()"));
+        let halted = crate::pipe::render_drive_open_error(&libfreemkv::Error::Halted);
+        assert_eq!(halted, crate::strings::get("rip.interrupted"));
+    }
+
     static FT10_CTRL_C: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     // FT10 (stop design v5 §4.3 item 2): "A key call in flight stops on the first Ctrl-C";
