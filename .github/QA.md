@@ -174,8 +174,8 @@ user-data dying before it arms the other two.
 **Cost control is `needs:`, not decoration.** Nothing touches real media until
 lint, the unit suites, the cross-lint, the Windows build and the synthetic CLI
 matrix are green, so a typo cannot burn a two-hour rip. This is also why the
-matrix is `workflow_dispatch` in `ci-runner-launch.yml`: a push trigger is how
-a busy afternoon becomes a surprise bill.
+EC2 matrix runs only on qa (push or dispatch), never on dev: a dev push trigger
+is how a busy afternoon becomes a surprise bill.
 
 ### What this gate does NOT cover
 

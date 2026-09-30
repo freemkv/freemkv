@@ -45,7 +45,7 @@ The token is **not** in an instance tag. A tag is readable by any principal with
 `ec2:DescribeTags`/`DescribeInstances`, and a GitHub registration token is valid
 for *repeated* registrations for its whole 60-minute life — long enough for an
 account-read to register a rogue runner that then picks up a job carrying repo
-secrets. So the launching workflow (`ci-runner-launch.yml`) stashes the token in
+secrets. So the launching job (qa.yml `launch`) stashes the token in
 **SSM Parameter Store as a SecureString** and tags only its NAME
 (`runner-token-param`, non-secret). The user-data reads the name from IMDS, then
 `aws ssm get-parameter --with-decryption`, then `aws ssm delete-parameter` so the
@@ -85,8 +85,7 @@ that tag from IMDS and registers with exactly those labels, as
 `ephemeral-<os>-<instance-id>`. The leg's `runs-on` includes `run-<run_id>`, so
 only the instance its own run launched can take the job — a stray runner (the
 1.6.5 incident) or another run's instance cannot. A user-data change therefore
-takes effect on the next qa run without touching AWS; applying it to the
-templates as well only matters for `ci-runner-launch.yml`.
+takes effect on the next qa run without touching AWS.
 
 ## qa launches: nothing to set up in AWS
 

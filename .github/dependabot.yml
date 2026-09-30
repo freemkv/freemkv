@@ -2,10 +2,11 @@ version: 2
 
 # Dependency updates land on `dev`, never on `main`.
 #
-# `main` here is a RELEASE POINTER that release.sh moves to each tag. A bot
-# commit on it would put work there that no tag contains, which is exactly the
-# state that aborted the 1.6.2 cascade at the last step -- so pointing
-# Dependabot at main would recreate that failure on a schedule.
+# `main` here is a RELEASE POINTER that freemkv's release-orchestrate.yml
+# moves to each tag. A bot commit on it would put work there that no tag
+# contains, which is exactly the state that aborted the 1.6.2 cascade at the
+# last step -- so pointing Dependabot at main would recreate that failure on a
+# schedule.
 updates:
   - package-ecosystem: cargo
     directory: /
@@ -13,9 +14,7 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    # One PR per week for the routine bumps instead of one per crate. Eight
-    # repos times a handful of crates is a volume nobody reads, and an
-    # unread PR queue is indistinguishable from no updates at all.
+    # One PR per week for the routine bumps instead of one per crate.
     groups:
       minor-and-patch:
         update-types:
@@ -23,18 +22,14 @@ updates:
           - patch
     ignore:
       # The freemkv crates depend on each other by GIT TAG, re-pinned by
-      # release.sh as part of the release commit. Dependabot cannot see that
-      # cascade, so a PR bumping one of these would fight the release process
-      # and could pin a version whose tag does not exist yet.
+      # release-orchestrate.yml in the release commit. A bot bump would fight
+      # the release cascade and could pin a tag that does not exist yet.
       - dependency-name: freemkv-unlock
       - dependency-name: libfreemkv
       - dependency-name: freemkv-keysources
       - dependency-name: freemkv-i18n
       - dependency-name: freemkv-engine
 
-  # The workflows are now real infrastructure -- the release cascade, the
-  # cross-platform hash matrix, the disc gate -- so their actions need the same
-  # attention as the crates.
   - package-ecosystem: github-actions
     directory: /
     target-branch: dev
@@ -47,17 +42,11 @@ updates:
           - minor
           - patch
     ignore:
-      # NOT a dependency: `dtolnay/rust-toolchain` is versioned by the RUST
-      # release it installs, and the tag we pin is the toolchain CI is pinned
-      # to on purpose -- precommit.sh runs the same one locally so a lint that
-      # passes on a developer's newer default cannot pass CI by accident.
-      #
-      # Dependabot reads those tags as semver and proposed 1.98.0 -> 1.100.0,
-      # a Rust version that does not exist. Every such PR 404s on toolchain
-      # download across all eight repos, and they regenerate weekly -- eight
-      # permanently-red PRs that promote.yml then has to special-case when it
-      # decides whether dev is green.
-      #
-      # Bumping the toolchain is a deliberate, all-eight-repos change, made by
-      # hand together with precommit.sh. There is nothing here for a bot.
+      # Versioned by the Rust release it installs; CI picks the toolchain via
+      # `toolchain:` on @master/@stable. Dependabot proposes Rust versions that
+      # do not exist. Toolchain bumps are a deliberate all-repo change.
       - dependency-name: dtolnay/rust-toolchain
+      # The org's own reusable workflows/actions. @v1 and @v2 are independent
+      # moving tags (v2 is only the comment guard), not semver releases: a
+      # "bump" from v1 to v2 would move a caller onto an OLDER guard.
+      - dependency-name: "freemkv/.github*"
