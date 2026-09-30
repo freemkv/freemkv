@@ -217,7 +217,7 @@ fn rss_mib(_pid: u32) -> u64 {
 
 /// Run `argv` at low CPU and IO priority, stderr to `err_file`, under the memory cap and
 /// timeout; `stop` ends it early (setting off, a remux or rip wants the disks). Each
-/// `out_time_us=` line ffmpeg's `-progress pipe:1` writes reaches `on_secs`.
+/// `out_time_us=` line of the `-progress pipe:1` stream reaches `on_secs`.
 pub fn run_monitored(
     argv: &[&str],
     err_file: &Path,
