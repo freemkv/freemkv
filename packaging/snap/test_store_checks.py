@@ -114,7 +114,7 @@ class RealUploads(unittest.TestCase):
     # Verbatim from the first store upload (revision 1, 1.7.7, snapcraft 9.1.3).
     REVISION_1 = (
         "Starting snapcraft, version 9.1.3\n"
-        "Logging execution to '/home/runner/.local/state/snapcraft/log/snapcraft-20260930-011135.726998.log'\n"
+        "Logging execution to '/tmp/snapcraft/log/snapcraft-20260930-011135.726998.log'\n"
         "Unsquashing snap file 'freemkv-amd64.snap'.\n"
         "Uploading... (--->)\n"
         "Uploading... (<---)\n"
@@ -123,7 +123,7 @@ class RealUploads(unittest.TestCase):
         "Issues while processing snap:\n"
         "- human review required due to 'deny-connection' constraint (interface attributes)\n"
         "- human review required due to 'deny-connection' constraint (interface attributes)\n"
-        "Full execution log: '/home/runner/.local/state/snapcraft/log/snapcraft-20260930-011135.726998.log'\n"
+        "Full execution log: '/tmp/snapcraft/log/snapcraft-20260930-011135.726998.log'\n"
     )
 
     def test_revision_1_is_held(self):

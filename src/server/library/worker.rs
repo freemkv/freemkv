@@ -178,10 +178,11 @@ fn clean_stale_staging(dir: &Path) {
             .and_then(|s| s.to_str())
             .and_then(|s| s.strip_suffix(".mkv.partial"))
             .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
-        if owned && path.is_file() {
-            if let Err(e) = std::fs::remove_file(&path) {
-                tracing::warn!(path = %path.display(), error = %e, "stale remux stage could not be removed");
-            }
+        if owned
+            && path.is_file()
+            && let Err(e) = std::fs::remove_file(&path)
+        {
+            tracing::warn!(path = %path.display(), error = %e, "stale remux stage could not be removed");
         }
     }
 }
