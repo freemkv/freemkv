@@ -29,8 +29,8 @@ export function fill(el, pct) {
 
 /** Call the API. Resolves with the JSON (or text) body; rejects with the
     server's error message on any non-2xx, so no failure is ever silent. */
-export async function api(method, url, body) {
-  const opt = { method, headers: {}, cache: 'no-store' };
+export async function api(method, url, body, signal) {
+  const opt = { method, headers: {}, cache: 'no-store', signal };
   if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers['Content-Type'] = 'application/json'; }
   let r;
   try { r = await fetch(url, opt); } catch (e) { throw new Error('the server did not answer'); }

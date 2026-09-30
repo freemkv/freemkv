@@ -69,6 +69,12 @@ permissions:
 # never-scheduled job would leave the run pending and the required checks
 # incomplete forever.
 jobs:
+  web-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: node --experimental-vm-modules --test tests/web/*.test.mjs
+
   # CI owns the changelog: main may never carry a released version without a
   # CHANGELOG.md entry for it. The release orchestrator dates an existing
   # `## [X.Y.Z]` heading — it does NOT invent one — so a version bump that

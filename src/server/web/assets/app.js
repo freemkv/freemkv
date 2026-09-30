@@ -137,9 +137,9 @@ if (typeof Notification !== 'undefined' && Notification.permission === 'default'
 
 // ── Start ──────────────────────────────────────────────────────────────────
 
+connect();
 fetch('/api/state', { cache: 'no-store' })
   .then(r => r.json())
-  .then(publishState)
-  .catch(() => {})
-  .finally(connect);
+  .then(s => { if (!live.state) publishState(s); })
+  .catch(() => {});
 render(location.pathname);
