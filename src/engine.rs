@@ -5998,6 +5998,12 @@ mod ku_gui_tests {
         let scan = body("\nfn drive_scan(");
         assert!(scan.contains("fe::open_scan_with(") && scan.contains("&tok.halt,"));
         assert!(scan.contains("&tok.progress,"), "{scan}");
+        // FT15g(a): the cold keydb parse for the drive's host certs holds `busy()`.
+        let creds = scan.find("session_credentials(keys)").expect("credentials");
+        let busy = scan
+            .find("tok.progress.busy()")
+            .expect("busy over the parse");
+        assert!(busy < creds && creds < scan.find("fe::open_scan_with(").unwrap());
         let open = body("\npub fn scan_disc_with_keys(");
         assert!(open.contains("drive_scan(source, keys, tok)"), "{open}");
         assert!(
