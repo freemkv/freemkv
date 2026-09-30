@@ -2136,29 +2136,15 @@ fn end_of_recovery_loss(
     }
 }
 
-/// Loop-top convergence gate: an EMPTY mapfile has zero bad bytes too, so require
-/// `bytes_good > 0`; `None` (unmeasured) never converges.
-fn pre_pass_converged(mux_scope_bad: Option<u64>, bytes_good: u64) -> bool {
-    bytes_good > 0
-        && mux_scope_bad
-            .is_some_and(|bad| patch_pass_decision(bad, None) == PatchDecision::Converged)
-}
-
-// The patch loop's muxable-scope bad bytes at the top of a pass.
+// The patch loop's muxable-scope bad bytes at the top of a pass; `None` (an
+// unreadable mapfile, or unscopable loss) never converges, as in the engine.
 fn loop_top_scope_bad(
     map: std::io::Result<freemkv_engine::Mapfile>,
     is_iso: bool,
     title: &libfreemkv::DiscTitle,
-    whole_disc_bad: u64,
 ) -> Option<u64> {
-    match map {
-        Ok(map) => Some(scope_bad_bytes(
-            is_iso,
-            &map.ranges_with(&bad_sector_statuses()),
-            title,
-        )),
-        Err(_) => Some(whole_disc_bad),
-    }
+    let map = map.ok()?;
+    measured_scope_bad(is_iso, &map.ranges_with(&bad_sector_statuses()), title)
 }
 
 // Look at the staging dirs for a Remux-eligible entry matching the sanitized display_name of
@@ -3844,11 +3830,20 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // Skip remaining retry passes once the *muxable* scope is 100%
             // recovered: ISO needs the whole disc clean, MKV/M2TS only the
             // muxed title. `abort_on_lost_secs` is NOT the trigger; it gates the END.
+            let map = freemkv_engine::Mapfile::load(std::path::Path::new(&mapfile_path_str));
+            if let Err(e) = &map {
+                crate::server::log::device_log(
+                    device,
+                    &format!(
+                        "PASS {}: could not read the mapfile ({e}); running it",
+                        retry_n + 1
+                    ),
+                );
+            }
             let mux_scope_bad = loop_top_scope_bad(
-                freemkv_engine::Mapfile::load(std::path::Path::new(&mapfile_path_str)),
+                map,
                 output_is_iso_image(&cfg_read.output_format),
                 &title_for_progress,
-                bytes_pending + bytes_unreadable,
             );
             // Loop-top convergence gate (`None` recovery ⇒ pre-pass): Converged
             // means the muxable scope is 100% recovered. Guarded by `bytes_good
@@ -5773,8 +5768,9 @@ fn iso_output_needs_multipass(output_format: &str, max_retries: u8) -> bool {
 // `scope_converged` is reached only by this module's tests, hence the allow.
 #[allow(unused_imports)]
 use freemkv_engine::{
-    PatchDecision, bad_sector_statuses, end_of_recovery_promotion, patch_made_progress,
-    patch_pass_decision, plan_passes, scope_bad_bytes, scope_converged,
+    PatchDecision, bad_sector_statuses, end_of_recovery_promotion, measured_scope_bad,
+    patch_made_progress, patch_pass_decision, plan_passes, pre_pass_converged, scope_bad_bytes,
+    scope_converged,
 };
 
 // Pass-1 transport-failure gating decision-MIRROR, not a wired gate; `#[cfg(test)]` only.
@@ -7340,10 +7336,9 @@ mod tests {
     fn loop_top_gate_runs_the_pass_when_unmeasured() {
         let unreadable = || Err(std::io::Error::other("unreadable mapfile"));
         let title = test_title(0, 10);
-        let scope = loop_top_scope_bad(unreadable(), false, &title, 0);
+        let scope = loop_top_scope_bad(unreadable(), false, &title);
         assert_eq!(scope, None, "an unreadable mapfile is unmeasured");
         assert!(!pre_pass_converged(scope, 4096));
-        assert!(!freemkv_engine::pre_pass_converged(scope, 4096));
 
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("gate.mapfile");
@@ -7359,11 +7354,11 @@ mod tests {
         let mut no_extents = test_title(0, 10);
         no_extents.extents.clear();
         let load = || freemkv_engine::Mapfile::load(&path);
-        let scope = loop_top_scope_bad(load(), false, &no_extents, 0);
+        let scope = loop_top_scope_bad(load(), false, &no_extents);
         assert_eq!(scope, None, "loss with no title extents is unscopable");
         assert!(!pre_pass_converged(scope, 4096));
 
-        let scope = loop_top_scope_bad(load(), true, &title, 0);
+        let scope = loop_top_scope_bad(load(), true, &title);
         assert_eq!(scope, Some(2048), "ISO scope counts the whole disc");
         assert!(!pre_pass_converged(scope, 4096));
     }
