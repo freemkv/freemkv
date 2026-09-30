@@ -226,7 +226,7 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::MuxIncomplete { title: 1 },
         Error::RemuxStagingInvalid,
         Error::StagedCopySizeMismatch { have: 0, want: 1 },
-        Error::VerifyWorkerLost,
+        Error::WorkerLost { op: "copy" },
         Error::MultipassRequiresRaw,
         Error::StreamLanguageUnknown { tag: p() },
         Error::RemuxTargetExists { path: p() },
