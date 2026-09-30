@@ -29,14 +29,16 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
   - exit 1, a last status of `will need manual review`, then
     `Issues while processing snap:` followed only by `(NEEDS REVIEW) <id>`
     items for the two grants in step 4 (optionally with review-tools' reason
-    and a full stop) and craft-cli's `Full execution log:` /
+    and a full stop), or by that reason alone, at most once per grant (what
+    the store printed for revision 1), then craft-cli's `Full execution log:` /
     `For more information, check out:` lines.
 
   Held is a warning and a run-summary line saying it was NOT released. Any
   other line, exit code, status or finding, or an arm64 build that did not
-  succeed (failed or cancelled), fails the job. The first real upload shows
-  whether the store's wording matches; if not, it fails visibly and
-  `store_checks.py` needs updating.
+  succeed (failed or cancelled), fails the job. Revision 1 (2026-09-30) showed
+  the real wording, and `test_store_checks.py` keeps its log verbatim. If the
+  store's wording changes again, the job fails visibly and `store_checks.py`
+  needs updating.
 - Snapcraft is pinned to the `9.x/stable` track (`SNAPCRAFT_CHANNEL`).
   review-tools only has a `latest` track, so the run records its version in
   the summary and `store_checks.py` fails on an unfamiliar report format.
@@ -80,7 +82,15 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
 
    The credentials expire (one year by default); export new ones before then.
 
-4. Ask for store review of the drive interfaces on the
+4. Requested 2026-09-30:
+   [interfaces](https://forum.snapcraft.io/t/freemkv-optical-drive-write-hardware-observe-dbus-slot/53427)
+   (`optical-write` and `hardware-observe` auto-connection, the `freemkv-dbus`
+   slot) and [alias](https://forum.snapcraft.io/t/freemkv-alias-freemkv-cli/53428)
+   (`freemkv-cli`). `removable-media` auto-connection was not requested: the
+   store rarely grants it outside browsers and media editors or players, and
+   manual connection works without a grant. Original instructions follow.
+
+   Ask for store review of the drive interfaces on the
    [Snapcraft forum](https://forum.snapcraft.io/c/store-requests/19): a
    "store-requests" post asking for **allow-connection and auto-connection**
    of `optical-drive` with `write: true` (the `optical-write` plug) for

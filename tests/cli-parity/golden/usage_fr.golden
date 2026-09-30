@@ -6,13 +6,13 @@ Utilisation : freemkv <source> <dest> [options]
               freemkv info <url> [options]
        freemkv <command> [args]
 
-Subcommands:
-  info <url>               Inspect a disc, image, or file (titles, streams, sizes)
-  update-keys --url URL    Download and install the AACS keydb
-  version                  Show version (also --version, -V)
-  help [command]           Show this help, or help for one command
+Sous-commandes :
+  info <url>               Examiner un disque, une image ou un fichier (titres, flux, tailles)
+  update-keys --url URL    Télécharger et installer la base de clés AACS
+  version                  Afficher la version (aussi --version, -V)
+  help [command]           Afficher cette aide, ou l'aide d'une commande
 
-  Run 'freemkv <command> --help' (or 'freemkv help <command>') for command-specific help.
+  Exécutez 'freemkv <command> --help' (ou 'freemkv help <command>') pour l'aide spécifique à une commande.
 
 URLs de flux :
   disc://                  Lecteur optique (détection automatique)
@@ -21,6 +21,7 @@ URLs de flux :
   mkv://chemin.mkv         Fichier Matroska
   m2ts://chemin.m2ts       Fichier de flux de transport BD
   mp4://path.mp4           Fichier MP4
+  mpg://path.mpg           Fichier de flux de programme MPEG
   iso://image.iso          Image ISO Blu-ray
   dir://folder/            Arborescence déchiffrée dans un dossier
   network://hote:port      Flux TCP
@@ -72,7 +73,14 @@ Options :
       --language CODE Langue de l'interface (aussi --lang) : un code comme de ou pt-BR, ou auto.
       --raw           Ignorer le déchiffrement (sortie chiffrée brute)
       --multipass    Écrire/mettre à jour le mapfile pour la récupération multipasse
-      --force        Extract into a non-empty dir:// target (overwrite)
-      --share         Soumettre le profil du lecteur (info disc:// uniquement ; lors d'un rip, -s signifie --subtitles)
+      --force        Extraire dans une cible dir:// non vide (écraser)
+      --share         Soumettre le profil du lecteur et la structure du disque (info disc://, iso:// ou dir:// ; lors d'un rip, -s signifie --subtitles)
   -m, --mask          Masquer les numéros de série (avec --share)
+
+Codes de sortie :
+  0    Succès.
+  1    Échec : aucune sortie utilisable, ou une autre erreur.
+  2    Utilisation : commande ou options incorrectes (ce texte a aussi été affiché).
+  3    Endommagé (disc:// -> iso:// ou disc:// -> null:// uniquement) : conservé et utilisable, mais il manque des secteurs — relancez (--multipass) pour tenter d'en récupérer davantage.
+  130  Un second Ctrl-C a forcé une sortie immédiate.
 --- STDERR ---

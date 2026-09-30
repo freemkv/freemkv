@@ -18,7 +18,7 @@ pub fn lossy_lines(outcome: &libfreemkv::MuxOutcome, target: &str) -> Vec<String
     let mut lines = Vec::new();
     if !outcome.undelivered_streams.is_empty() {
         // Container-agnostic: `undelivered_streams` can come from ANY sink, so
-        // `mp4.excluded_header`'s "in an MP4" phrasing is wrong for non-mp4. Use
+        // the MP4-only excluded header's "in an MP4" phrasing is wrong for non-mp4. Use
         // a generic header (English until the catalog), twin of `summarize_stream`.
         lines.push(crate::strings::fmt_or(
             "mux.undelivered_header",
@@ -48,6 +48,75 @@ pub fn lossy_lines(outcome: &libfreemkv::MuxOutcome, target: &str) -> Vec<String
     lines
 }
 
+/// The note a mux prints BEFORE it starts when the destination cannot carry every track
+/// (G4, mpg-output-design v5 §5): `mux.excluded_header`, then one line per track with its
+/// `mux.reason.*`. Empty when nothing is left out. Both shells print it, from libfreemkv's
+/// container-neutral plan; a declared-only MPEG-2 extension is never in it (J23).
+pub fn excluded_lines(dest: &str, title: &libfreemkv::DiscTitle) -> Vec<String> {
+    let url = libfreemkv::parse_url(dest);
+    let report = libfreemkv::fit_report(&url, title);
+    if report.skipped.is_empty() {
+        return Vec::new();
+    }
+    let container = container_name(&url);
+    let reasons: Vec<libfreemkv::SkipReason> = report.skipped.iter().map(|&(_, r)| r).collect();
+    let mut lines = vec![crate::strings::fmt(
+        "mux.excluded_header",
+        &[
+            ("count", &report.skipped.len().to_string()),
+            ("container", container),
+            ("keep", keep_for(&reasons)),
+        ],
+    )];
+    for (idx, reason) in &report.skipped {
+        lines.push(format!(
+            "    - {} {}: {}",
+            crate::strings::get("stream.track"),
+            idx + 1,
+            crate::strings::fmt(reason_key(*reason), &[("container", container)])
+        ));
+    }
+    lines
+}
+
+/// Design §5 `{keep}`: `mpg` if every excluded track is the MPEG-2 extension (only mpg://
+/// keeps it), otherwise `mkv`.
+pub fn keep_for(reasons: &[libfreemkv::SkipReason]) -> &'static str {
+    if !reasons.is_empty()
+        && reasons
+            .iter()
+            .all(|r| *r == libfreemkv::SkipReason::Mp2Extension)
+    {
+        "mpg"
+    } else {
+        "mkv"
+    }
+}
+
+fn container_name(url: &libfreemkv::StreamUrl) -> &'static str {
+    match url.scheme() {
+        "mp4" => "MP4",
+        "mpg" => "MPG",
+        "m2ts" => "M2TS",
+        "mkv" => "MKV",
+        _ => "this output",
+    }
+}
+
+fn reason_key(reason: libfreemkv::SkipReason) -> &'static str {
+    use libfreemkv::SkipReason as R;
+    match reason {
+        R::BitmapSubtitle | R::UnmappableSubtitle => "mux.reason.subtitle",
+        R::SecondaryVideo => "mux.reason.video",
+        R::UnmappableVideo => "mux.reason.video_unmappable",
+        R::Mp2Extension => "mux.reason.mp2_extension",
+        R::NoStreamId => "mux.reason.no_stream_id",
+        // UnmappableAudio, and the post-mux NoSamples/UndescribableAudio; SkipReason is
+        // #[non_exhaustive], so a new reason reads as an audio mapping gap until named.
+        _ => "mux.reason.audio",
+    }
+}
+
 /// Whether a finished mux lost anything at all — the one question both shells'
 /// summary text has to ask before it can say "written".
 ///
@@ -75,9 +144,214 @@ fn lost_mb(bytes: u64) -> String {
     format!("{}.{:02}", hundredths / 100, hundredths % 100)
 }
 
+/// A small clear `mpg://` file for tests that need a real source whose pre-mux note is not
+/// empty: MPEG-2 video and one DVD subpicture track (neither of which MP4 carries).
+#[cfg(test)]
+pub(crate) fn mpg_source_fixture(path: &std::path::Path) {
+    use libfreemkv::{
+        Codec, ColorSpace, DiscTitle, FrameRate, HdrFormat, LabelQualifier, PesFrame, Resolution,
+        Stream, SubtitleStream, VideoStream,
+    };
+    let title = DiscTitle {
+        streams: vec![
+            Stream::Video(VideoStream {
+                pid: 0xE0,
+                codec: Codec::Mpeg2,
+                resolution: Resolution::R576i,
+                frame_rate: FrameRate::F25,
+                hdr: HdrFormat::Sdr,
+                color_space: ColorSpace::Bt470bg,
+                display_aspect: None,
+                secondary: false,
+                label: String::new(),
+                measured_cicp: None,
+            }),
+            Stream::Subtitle(SubtitleStream {
+                pid: 0x20,
+                codec: Codec::DvdSub,
+                language: "eng".into(),
+                forced: false,
+                qualifier: LabelQualifier::None,
+                codec_data: None,
+            }),
+        ],
+        codec_privates: vec![None, None],
+        ..DiscTitle::empty()
+    };
+    // 13818-2 sequence header (720x576, 25 Hz) + sequence_extension; an I or P picture.
+    const SEQ: [u8; 22] = [
+        0, 0, 1, 0xB3, 0x2D, 0x02, 0x40, 0x23, 0xFF, 0xFF, 0xE3, 0x80, 0, 0, 1, 0xB5, 0x14, 0x8A,
+        0x00, 0x01, 0x00, 0x00,
+    ];
+    let pic = |coding: u8| {
+        let mut v = vec![0, 0, 1, 0x00, 0x00, coding << 3, 0xFF, 0xF8];
+        v.extend_from_slice(&[0, 0, 1, 0xB5, 0x8F, 0xFF, 0xF3, 0x80, 0x80]);
+        v.extend_from_slice(&[0, 0, 1, 0x01, 0x12, 0x34, 0x56]);
+        v
+    };
+    let frame = |track: usize, pts: i64, keyframe: bool, data: Vec<u8>| PesFrame {
+        track,
+        pts,
+        keyframe,
+        data,
+        duration_ns: None,
+        discard_padding_ns: 0,
+        source: None,
+        coding: None,
+    };
+    let url = format!("mpg://{}", path.display());
+    let mut sink = libfreemkv::output(&url, &title, None).expect("mpg:// output");
+    for k in 0..50i64 {
+        let pts = 1_000_000_000 + k * 40_000_000;
+        let key = k % 10 == 0;
+        let mut data = if key { SEQ.to_vec() } else { Vec::new() };
+        data.extend(pic(if key { 1 } else { 2 }));
+        data.resize(2_000, 0x55);
+        sink.write(&frame(0, pts, key, data)).expect("video");
+        if k % 10 == 5 {
+            let mut spu = vec![0x01, 0xF4];
+            spu.resize(500, 0x11);
+            sink.write(&frame(1, pts, true, spu)).expect("subpicture");
+        }
+    }
+    sink.finish().expect("finish");
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_lossy, lossy_lines, lost_mb};
+    use super::{excluded_lines, is_lossy, keep_for, lossy_lines, lost_mb};
+
+    fn title(streams: Vec<libfreemkv::Stream>) -> libfreemkv::DiscTitle {
+        libfreemkv::DiscTitle {
+            streams,
+            ..libfreemkv::DiscTitle::empty()
+        }
+    }
+    fn video(codec: libfreemkv::Codec) -> libfreemkv::Stream {
+        libfreemkv::Stream::Video(libfreemkv::VideoStream {
+            pid: 0x1011,
+            codec,
+            resolution: libfreemkv::Resolution::R1080p,
+            frame_rate: libfreemkv::FrameRate::F23_976,
+            hdr: libfreemkv::HdrFormat::Sdr,
+            color_space: libfreemkv::ColorSpace::Bt709,
+            display_aspect: None,
+            secondary: false,
+            label: String::new(),
+            measured_cicp: None,
+        })
+    }
+    fn audio(pid: u16, codec: libfreemkv::Codec) -> libfreemkv::Stream {
+        libfreemkv::Stream::Audio(libfreemkv::AudioStream {
+            pid,
+            codec,
+            channels: libfreemkv::AudioChannels::Stereo,
+            language: "eng".into(),
+            sample_rate: libfreemkv::SampleRate::S48,
+            secondary: false,
+            purpose: libfreemkv::LabelPurpose::Normal,
+            label: String::new(),
+        })
+    }
+
+    // G4 (mpg-output-design v5 §1.1, §5): one container-neutral pre-mux note for every
+    // destination, from libfreemkv's generic fit plan; `{keep}` is mkv unless every exclusion
+    // is the MPEG-2 extension.
+    #[test]
+    fn excluded_lines_name_the_container_and_each_track() {
+        crate::strings::set_locale("en");
+        let t = title(vec![
+            video(libfreemkv::Codec::Hevc),
+            audio(0x1100, libfreemkv::Codec::TrueHd),
+            audio(0x1101, libfreemkv::Codec::Ac3),
+        ]);
+        let lines = excluded_lines("mp4:///o/x.mp4", &t);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].contains("MP4") && lines[0].contains("mkv://") && lines[0].contains('1'),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains(" 2:") && lines[1].contains("MP4"),
+            "track 2, reason: {lines:?}"
+        );
+        let mpg = excluded_lines("mpg:///o/x.mpg", &t);
+        assert_eq!(mpg.len(), 3, "HEVC and TrueHD, not the AC-3 (J24): {mpg:?}");
+        assert!(mpg[0].contains("MPG"), "{mpg:?}");
+        assert!(
+            excluded_lines("mkv:///o/x.mkv", &t).is_empty(),
+            "mkv keeps everything"
+        );
+    }
+
+    // J23: "the generic pre-mux fit report leaves out declared-only extension tracks".
+    #[test]
+    fn j23_a_declared_only_mp2_extension_is_never_in_the_excluded_note() {
+        crate::strings::set_locale("en");
+        let main = vec![
+            video(libfreemkv::Codec::Mpeg2),
+            audio(0xC0, libfreemkv::Codec::Mp2),
+        ];
+        let mut with_ext = main.clone();
+        with_ext.push(libfreemkv::Stream::Audio(libfreemkv::AudioStream {
+            pid: 0xD0,
+            codec: libfreemkv::Codec::Mp2,
+            channels: libfreemkv::AudioChannels::Stereo,
+            language: "eng".into(),
+            sample_rate: libfreemkv::SampleRate::S48,
+            secondary: false,
+            purpose: libfreemkv::LabelPurpose::Normal,
+            label: libfreemkv::disc::MP2_EXTENSION_LABEL.into(),
+        }));
+        for dest in ["mkv:///o/x.mkv", "mp4:///o/x.mp4", "mpg:///o/x.mpg"] {
+            let lines = excluded_lines(dest, &title(with_ext.clone()));
+            assert!(
+                !lines.iter().any(|l| l.contains(" 3:")),
+                "{dest}: the declared-only extension is listed: {lines:?}"
+            );
+            assert_eq!(
+                lines,
+                excluded_lines(dest, &title(main.clone())),
+                "{dest}: the extension changed the note"
+            );
+        }
+    }
+
+    #[test]
+    fn keep_is_mpg_only_when_every_exclusion_is_the_extension() {
+        use libfreemkv::SkipReason as R;
+        assert_eq!(keep_for(&[R::Mp2Extension]), "mpg");
+        assert_eq!(keep_for(&[R::Mp2Extension, R::UnmappableAudio]), "mkv");
+        assert_eq!(keep_for(&[R::BitmapSubtitle]), "mkv");
+    }
+
+    /// Every pre-mux reason renders its own resolving line (the retired
+    /// `mp4_skip_reasons_render_distinct_resolving_strings`, now container-neutral).
+    #[test]
+    fn skip_reasons_render_distinct_resolving_strings() {
+        use libfreemkv::SkipReason as R;
+        crate::strings::set_locale("en");
+        let mut seen = std::collections::BTreeSet::new();
+        for r in [
+            R::BitmapSubtitle,
+            R::UnmappableAudio,
+            R::SecondaryVideo,
+            R::UnmappableVideo,
+            R::Mp2Extension,
+            R::NoStreamId,
+        ] {
+            let key = super::reason_key(r);
+            let msg = crate::strings::fmt(key, &[("container", "MPG")]);
+            assert!(!msg.starts_with("mux."), "{r:?}: {key} does not resolve");
+            assert!(!msg.contains('{'), "{r:?}: unfilled placeholder in {msg:?}");
+            assert!(seen.insert(msg.clone()), "{r:?}: duplicate message {msg:?}");
+        }
+        assert_eq!(
+            super::reason_key(R::UnmappableSubtitle),
+            super::reason_key(R::BitmapSubtitle)
+        );
+        assert!(!crate::strings::get("mux.excluded_header").starts_with("mux."));
+    }
 
     fn outcome(undelivered: Vec<usize>, errors: u64, lost_bytes: u64) -> libfreemkv::MuxOutcome {
         libfreemkv::MuxOutcome {

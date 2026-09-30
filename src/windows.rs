@@ -2120,11 +2120,11 @@ impl Shell {
         let Ok(Some(label)) = self.cmb_format.items().selected_text() else {
             return;
         };
-        let (disc, mp4) = {
+        let (disc, fit) = {
             let a = self.app.borrow();
-            (!crate::ui::is_container(&a.source), a.mp4_possible())
+            (!crate::ui::is_container(&a.source), a.fit())
         };
-        if let Some(f) = crate::ui::format_from_label(&label, disc, mp4) {
+        if let Some(f) = crate::ui::format_from_label(&label, disc, fit) {
             self.act(Cmd::SetFormat(f));
         }
     }
@@ -4436,6 +4436,9 @@ mod tests {
             // check is inert, which is what a synthetic disc wants.
             title_ids: Vec::new(),
             details: vec![],
+            keys: None,
+            needs_disc: false,
+            refusal: None,
         }
     }
 

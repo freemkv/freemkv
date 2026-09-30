@@ -22,13 +22,20 @@ function makeRow() {
   return el;
 }
 
+// Whether the line's last shown pill ends past the line's own right edge.
+function overflows(line) {
+  const shown = [...line.children].filter(c => !c.hidden && c.getClientRects().length);
+  if (!shown.length) return false;
+  return shown[shown.length - 1].getBoundingClientRect().right > line.getBoundingClientRect().right - 0.5;
+}
+
 /** Fold the pills that overflow their line into a "+N" pill. */
 export function fitPills(line) {
   const pills = [...line.children].filter(c => !c.classList.contains('more'));
   pills.forEach(p => { p.hidden = false; });
   let more = line.querySelector('.more');
   if (more) more.hidden = true;
-  if (line.scrollWidth <= line.clientWidth + 1) return;
+  if (!overflows(line)) return;
   if (!more) {
     more = document.createElement('button');
     more.type = 'button';
@@ -41,7 +48,7 @@ export function fitPills(line) {
   // Unpinned pills go first, from the end; pinned ones (the state) only if
   // the line still does not fit. The first pill always stays.
   for (const pinned of [false, true]) {
-    for (let i = pills.length - 1; i > 0 && line.scrollWidth > line.clientWidth + 1; i--) {
+    for (let i = pills.length - 1; i > 0 && overflows(line); i--) {
       if (pills[i].hidden || !!pills[i].dataset.keep !== pinned) continue;
       pills[i].hidden = true;
       hidden++;
@@ -128,6 +135,7 @@ export function mediaList(host, opts) {
         const cls = ('mrow ' + (v.cls || '')).trim();
         if (el.className !== cls) el.className = cls;
         el.setAttribute('aria-label', r.title);
+        if (v.tip) el.title = v.tip; else el.removeAttribute('title');
         for (const p of PARTS) {
           if (p === 'act' && el._p.act.querySelector('.btn.confirm')) continue;
           const before = el._p[p]._html;

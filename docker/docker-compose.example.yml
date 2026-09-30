@@ -2,15 +2,16 @@
 # It reads an existing autorip /config (settings.json, logs, keydb) as-is, so
 # an autorip install can point this at the same ./config directory.
 #
-# No image is published yet: build it from the repository root with
-#   docker build -f docker/Dockerfile -t freemkv-library .
-# or let compose build it (the `build:` block below).
+# Releases publish the image as ghcr.io/freemkv/freemkv-library (:latest and
+# :vX.Y.Z), and also as ghcr.io/freemkv/autorip for existing installs. To run
+# a local build instead, uncomment the `build:` block below and set
+# `image: freemkv-library:local`.
 services:
   freemkv-library:
-    image: freemkv-library:local
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
+    image: ghcr.io/freemkv/freemkv-library:latest
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile
     container_name: freemkv-library
     restart: unless-stopped
     privileged: true                    # required for optical SCSI access; also enables in-container NFS mount (see below)

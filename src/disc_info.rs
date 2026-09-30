@@ -199,7 +199,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
     }
     // Decompose the session into the owned disc + drive the rest of this command
     // already worked with, so downstream rendering is untouched.
-    let mut disc = session.take_disc().expect("scan populated the disc");
+    let disc = session.take_disc().expect("scan populated the disc");
     // into_drive is fallible: stage_drive_as_reader moves the drive out, so an
     // empty slot is reachable through ordinary API use. Match the local style
     // the session open above uses.
@@ -266,9 +266,11 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
     // resolution runs only here (`-v`): sample ciphertext from the live drive and
     // resolve against the local keydb, so the crypto block shows a real unit-key set.
     if verbose {
-        if disc.aacs.is_some() {
-            crate::pipe::resolve_info_keys(&mut drive, &mut disc, &keydb, &out);
-        }
+        let status = if disc.aacs.is_some() {
+            crate::pipe::resolve_info_keys(&mut drive, &disc, &keydb, &out)
+        } else {
+            None
+        };
 
         // Sanitize SCSI INQUIRY strings: vendor/product/revision come from the
         // drive/bridge firmware (untrusted — a spoofed enclosure could return
@@ -286,7 +288,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
         out.raw(Normal, &format!("Region: {}", region_name(&disc.region)));
 
         if let Some(ref aacs) = disc.aacs {
-            emit_aacs_block(&out, aacs);
+            emit_aacs_block(&out, aacs, status.as_ref());
         }
     }
 
@@ -656,8 +658,13 @@ fn region_name(region: &DiscRegion) -> String {
     }
 }
 
-/// The `info -v` AACS crypto block: MKB, disc hash, VID, key source + count.
-fn emit_aacs_block(out: &Output, aacs: &libfreemkv::AacsState) {
+/// The `info -v` AACS crypto block: MKB, disc hash, VID, and the resolved set's source and
+/// key count (KU §3.3: "`disc_info.rs:679` reads `status()`"); `None` when it refused.
+fn emit_aacs_block(
+    out: &Output,
+    aacs: &libfreemkv::AacsState,
+    status: Option<&libfreemkv::keys::KeySetStatus>,
+) {
     out.blank(Normal);
     // The crypto block leads with the MKB generation. Bus-encryption
     // isn't surfaced — `Type: Uhd` already signals AACS 2.0.
@@ -669,16 +676,14 @@ fn emit_aacs_block(out: &Output, aacs: &libfreemkv::AacsState) {
     if aacs.volume_id.iter().any(|&b| b != 0) {
         out.raw(Normal, &format!("VID: 0x{}", hex_bytes(&aacs.volume_id)));
     }
-    // Keys: source + count only. Key bytes (VUK, unit keys) never render —
-    // this output is pasted into public bug reports.
-    out.raw(
-        Normal,
-        &format!(
-            "Keys: {} ({} unit keys)",
-            key_origin_label(aacs.key_source),
-            aacs.unit_keys.len()
-        ),
-    );
+    // Keys: source + count only. Key bytes never render — this output is pasted into
+    // public bug reports.
+    let origin = status.and_then(|s| s.origin).unwrap_or("none");
+    let proven = status.map_or(0, |s| s.proven);
+    out.raw(Normal, &format!("Keys: {origin} ({proven} unit keys)"));
+    if let Some(note) = status.and_then(crate::rip_keys::best_effort_note) {
+        out.raw(Normal, &note);
+    }
 }
 
 /// Lower-case hex of a byte slice, no separators (for VID / hash-style fields).
@@ -688,20 +693,6 @@ fn hex_bytes(bytes: &[u8]) -> String {
         let _ = write!(acc, "{b:02x}");
         acc
     })
-}
-
-/// Human label for how AACS keys were resolved. The library holds no
-/// user-facing English (it exposes the typed `KeyOrigin` enum); this CLI-side
-/// map renders it for `disc-info`.
-fn key_origin_label(o: libfreemkv::KeyOrigin) -> &'static str {
-    match o {
-        libfreemkv::KeyOrigin::DeviceKey => "MKB + device key",
-        libfreemkv::KeyOrigin::ProcessingKey => "MKB + processing key",
-        libfreemkv::KeyOrigin::KeyDbDerived => "KEYDB (derived)",
-        libfreemkv::KeyOrigin::KeyDb => "KEYDB",
-        libfreemkv::KeyOrigin::KeyDbUnitKeys => "KEYDB (unit keys)",
-        libfreemkv::KeyOrigin::ExternalUk => "external UK",
-    }
 }
 
 /// Map `LabelPurpose` to its locale string key. `Normal` returns None — no tag.
@@ -1333,23 +1324,6 @@ mod tests {
     }
 
     #[test]
-    fn key_origin_label_names_every_source() {
-        use libfreemkv::KeyOrigin;
-        assert_eq!(key_origin_label(KeyOrigin::DeviceKey), "MKB + device key");
-        assert_eq!(
-            key_origin_label(KeyOrigin::ProcessingKey),
-            "MKB + processing key"
-        );
-        assert_eq!(key_origin_label(KeyOrigin::KeyDbDerived), "KEYDB (derived)");
-        assert_eq!(key_origin_label(KeyOrigin::KeyDb), "KEYDB");
-        assert_eq!(
-            key_origin_label(KeyOrigin::KeyDbUnitKeys),
-            "KEYDB (unit keys)"
-        );
-        assert_eq!(key_origin_label(KeyOrigin::ExternalUk), "external UK");
-    }
-
-    #[test]
     fn aacs_generation_labels_the_carrier_and_falls_back_to_the_minor() {
         let mut disc = synthetic_disc();
         disc.format = DiscFormat::Fmts;
@@ -1440,13 +1414,15 @@ mod tests {
         let aacs = libfreemkv::test_util::aacs_state()
             .mkb_version(Some(77))
             .disc_hash("0xfeedface")
-            .key_source(libfreemkv::KeyOrigin::KeyDb)
-            .vuk(Some([0xEE; 16]))
-            .unit_keys(vec![(3, [0x11; 16]), (7, [0x22; 16])])
             .volume_id([0x9C; 16])
             .build();
+        // KU §3.3: "`disc_info.rs:679` reads `status()`" — the count is the set's, never
+        // the banked keys (KU §11.6: "The key count in `info` … comes from the resolved set").
+        let mut status = libfreemkv::keys::ResolvedKeySet::none().status();
+        status.proven = 1;
+        status.origin = Some("keydb");
         let ((), text) = crate::output::capture(|| {
-            emit_aacs_block(&Output::new(true, false), &aacs);
+            emit_aacs_block(&Output::new(true, false), &aacs, Some(&status));
         });
         let lower = text.to_ascii_lowercase();
         for secret in ["eeeeeeee", "11111111", "22222222"] {
@@ -1456,7 +1432,11 @@ mod tests {
             );
         }
         assert!(!text.contains("VUK") && !text.contains("CPS"), "{text}");
-        assert!(text.contains("(2 unit keys)"), "{text}");
+        assert!(text.contains("Keys: keydb (1 unit keys)"), "{text}");
+        let ((), text) = crate::output::capture(|| {
+            emit_aacs_block(&Output::new(true, false), &aacs, None);
+        });
+        assert!(text.contains("Keys: none (0 unit keys)"), "{text}");
         assert!(text.contains("Disc hash: 0xfeedface"), "{text}");
         assert!(text.contains("MKB v77"), "{text}");
         assert!(text.contains("VID: 0x9c9c"), "{text}");

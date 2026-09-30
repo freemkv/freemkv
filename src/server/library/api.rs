@@ -72,6 +72,9 @@ pub fn handle(
         )
     };
     match (get, post, path.as_str()) {
+        (true, _, "/api/library") if query_param(&url, "download").is_some() => {
+            download(request, &library_json(&lib, &c));
+        }
         (true, _, "/api/library") => json_response(request, 200, &library_json(&lib, &c)),
         (true, _, "/api/library/console") => json_response(request, 200, &console_json(&lib)),
         (true, _, "/api/library/log") => {
@@ -190,6 +193,14 @@ pub fn handle(
                 .sum::<usize>();
             json_response(request, 200, &json!({"ok": true, "removed": n}).to_string());
         }
+        (_, true, "/api/library/queue/stop-all") => {
+            let (running, removed) = lib.stop_all();
+            json_response(
+                request,
+                200,
+                &json!({"ok": true, "stopped": running, "removed": removed}).to_string(),
+            );
+        }
         (_, true, "/api/library/queue/clear-queued") => {
             let n = lib.queue.clear_queued();
             json_response(request, 200, &json!({"ok": true, "removed": n}).to_string());
@@ -197,6 +208,20 @@ pub fn handle(
         (_, true, "/api/library/queue/clear") => {
             let n = lib.queue.clear_finished();
             json_response(request, 200, &json!({"ok": true, "cleared": n}).to_string());
+        }
+        (_, true, "/api/library/audit/pause") | (_, true, "/api/library/audit/resume") => {
+            lib.audits.set_paused(path.ends_with("/pause"));
+            json_response(request, 200, &audit_json(&lib).to_string());
+        }
+        (_, true, "/api/library/audit/stop-all") => {
+            let running = lib.audits.status().running.is_some();
+            let removed = lib.audits.stop_all();
+            lib.touch_index();
+            json_response(
+                request,
+                200,
+                &json!({"ok": true, "stopped": running, "removed": removed}).to_string(),
+            );
         }
         (_, true, "/api/library/queue/pause") | (_, true, "/api/library/queue/resume") => {
             lib.queue.set_paused(path.ends_with("/pause"));
@@ -216,6 +241,28 @@ pub fn handle(
         _ => return Some(request),
     }
     None
+}
+
+// The listing as a file: `freemkv-library-<date>.json`, saved, not shown.
+fn download(request: tiny_http::Request, body: &str) {
+    let disposition = format!(
+        "attachment; filename=\"freemkv-library-{}.json\"",
+        crate::server::util::format_date()
+    );
+    let response = tiny_http::Response::from_string(body)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .expect("static header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Disposition"[..], disposition.as_bytes())
+                .expect("ascii header"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+                .expect("static header"),
+        );
+    let _ = request.respond(response);
 }
 
 fn text_response(request: tiny_http::Request, body: &str) {
@@ -244,6 +291,10 @@ fn queue_json(lib: &Library) -> serde_json::Value {
     })
 }
 
+fn audit_json(lib: &Library) -> serde_json::Value {
+    json!(lib.audits.status())
+}
+
 /// The body of `GET /api/library`. Reads memory only.
 pub fn library_json(lib: &Library, cfg: &Config) -> String {
     let d = dirs(cfg);
@@ -266,6 +317,8 @@ pub fn library_json(lib: &Library, cfg: &Config) -> String {
         "rows": listing.rows,
         "queue": queue_json(lib),
         "live": lib.running(),
+        "audits": audit_json(lib),
+        "deep_audit": lib.deep_enabled(),
     })
     .to_string()
 }
@@ -305,7 +358,7 @@ fn log_tail(lib: &Library, title: &str) -> String {
 /// What an `/events` client has already been sent.
 #[derive(Default)]
 pub struct SseCursor {
-    generation: (u64, u64, u64),
+    generation: (u64, u64, u64, u64, u64),
     seq: u64,
     started: bool,
 }
@@ -320,7 +373,13 @@ pub fn sse_frame(cursor: &mut SseCursor) -> Option<String> {
         cursor.seq = lib.last_seq();
     }
     let (q, live) = lib.generation();
-    let generation = (q, live, lib.index_generation());
+    let generation = (
+        q,
+        live,
+        lib.index_generation(),
+        lib.audits.generation(),
+        lib.audits.progress_generation(),
+    );
     if generation == cursor.generation {
         return None;
     }
@@ -333,6 +392,8 @@ pub fn sse_frame(cursor: &mut SseCursor) -> Option<String> {
     let body = json!({
         "queue_generation": q,
         "index_generation": generation.2,
+        "audit_generation": generation.3,
+        "audits": audit_json(&lib),
         "indexing": lib.indexing(),
         "running": lib.running(),
         "job_title": lib.job_title(),

@@ -27,12 +27,18 @@ mod disc_info;
 mod file_identity;
 mod info;
 mod keydb_fetch;
+#[cfg(test)]
+#[allow(dead_code)]
+mod ku_fixtures;
 // Also declared in `lib.rs`: the CLI and GUI each rendered half of what
 // `MuxOutcome` carried, and the half neither rendered was the byte loss.
 mod lossy;
 mod messaging;
 mod output;
 mod pipe;
+// Also declared in `lib.rs`: the CLI and the GUI route container sources by one table.
+mod rip_keys;
+mod sources;
 mod strings;
 // Also declared in `lib.rs`: `pipe` (here) and `engine` (GUI) both re-scan
 // between picking a title and muxing it, and need ONE shared answer type.
@@ -55,6 +61,13 @@ mod settings;
 #[cfg(all(feature = "gui", target_os = "macos"))]
 mod ui;
 
+#[cfg(feature = "server")]
+fn invoked_as_autorip(args: &[String]) -> bool {
+    args.first()
+        .and_then(|a0| std::path::Path::new(a0).file_stem())
+        .is_some_and(|stem| stem == "autorip")
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -63,6 +76,12 @@ fn main() {
     #[cfg(feature = "server")]
     if args.get(1).map(String::as_str) == Some("server") {
         freemkv::server::run(args[2..].to_vec());
+        return;
+    }
+    // Invoked as `autorip` (the image's 1.7.7 name): the daemon, arguments unchanged.
+    #[cfg(feature = "server")]
+    if invoked_as_autorip(&args) {
+        freemkv::server::run(args[1..].to_vec());
         return;
     }
 
@@ -312,6 +331,9 @@ fn dev_harness() -> bool {
                 // unless asked (FMKV_EJECT set).
                 auto_eject: std::env::var("FMKV_EJECT").is_ok(),
                 keys: engine::KeyConfig::from_settings(&settings::Settings::load()),
+                // No Open ran: the rip resolves its own keys, once.
+                seed: None,
+                vid_from: None,
             },
             st.clone(),
         );
@@ -372,12 +394,7 @@ fn dev_harness() -> bool {
                         r.desc
                     );
                 }
-                match engine::preflight_with_keys(
-                    &p,
-                    "/tmp/out",
-                    &[],
-                    &engine::KeyConfig::from_settings(&settings::Settings::load()),
-                ) {
+                match engine::preflight_with_keys(&p, "/tmp/out", &[], sc.keys.as_ref()) {
                     Ok(v) if v.is_empty() => println!("preflight: READY"),
                     Ok(v) => println!("preflight blocked: {v:?}"),
                     Err(e) => println!("preflight err: {e}"),
@@ -389,4 +406,16 @@ fn dev_harness() -> bool {
     }
 
     false
+}
+
+#[cfg(all(test, feature = "server"))]
+mod autorip_alias_tests {
+    #[test]
+    fn only_the_autorip_name_runs_the_daemon() {
+        let is = |a0: &str| super::invoked_as_autorip(&[a0.to_string()]);
+        assert!(is("/usr/local/bin/autorip"));
+        assert!(is("autorip"));
+        assert!(!is("/usr/local/bin/freemkv"));
+        assert!(!super::invoked_as_autorip(&[]));
+    }
 }

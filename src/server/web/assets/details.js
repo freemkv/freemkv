@@ -32,12 +32,12 @@ export function muxedHtml(r, plain = false) {
 }
 
 const ISSUE_TEXT = {
-  not_mkv: 'Not a Matroska file',
-  unreadable: 'The header could not be read',
+  not_mkv: 'Not an MKV file',
+  unreadable: "The file's header can't be read",
   no_video: 'No video track',
-  no_duration: 'No declared duration',
-  no_cues: 'No seek index (Cues): the runtime is taken from the header',
-  runtime_mismatch: 'The content ends before its declared length (truncated?)',
+  no_duration: "The file doesn't say how long it is",
+  no_cues: 'No index for skipping through the video',
+  runtime_mismatch: 'The video stops before the length the file claims (cut short?)',
 };
 
 export function issueText(i) {
@@ -47,14 +47,43 @@ export function issueText(i) {
   return t;
 }
 
+const DEEP_TEXT = {
+  clean: 'Plays through cleanly',
+  decoder_limitation: "Plays through cleanly (one track uses a feature the checker can't decode)",
+  decode_errors: 'Playing it through found errors',
+  demux_errors: 'Reading it through found errors',
+  bitstream_corruption: 'The video data is damaged',
+  memory_runaway: "The video can't be played through",
+  nonzero_exit: 'The check stopped with an error',
+  timeout: 'The check took too long; it will try again',
+  oom: 'The check was stopped; it will try again',
+  killed: 'The check was stopped; it will try again',
+  media_unavailable: 'The file went away during the check; it will try again',
+};
+
+/** One line for a row's deep audit, or '' when there is none. */
+export function deepText(r) {
+  const d = r.deep;
+  if (!d) return '';
+  if (d.state === 'pending') return 'Deep audit: waiting its turn';
+  if (d.state === 'scanning') return 'Deep audit: playing it through now';
+  const v = d.verdict || {};
+  let t = DEEP_TEXT[v.reason] || String(v.reason || '').replace(/_/g, ' ');
+  if (d.state === 'corrupt' && v.errors) t += ' (' + v.errors + (v.errors === 1 ? ' error' : ' errors') + ')';
+  return 'Deep audit: ' + t;
+}
+
 /** [dotClass, glyph, tooltip, sortRank] for a row's audit. */
 export function auditState(r) {
   if (!r.mkv) return ['dot-idle', '', 'No MKV', 9];
   const a = r.audit;
-  if (!a) return ['dot-warn', '●', 'Waiting for the audit', 3];
-  if (!a.ok) return ['dot-bad', '●', a.issues.map(issueText).join('; '), 5];
-  if (a.issues.length) return ['dot-warn', '●', a.issues.map(issueText).join('; '), 2];
-  return ['dot-ok', '✓', 'Structure checks out: header, tracks, duration and index agree', 0];
+  if (!a) return ['dot-warn', '●', 'Not audited yet', 3];
+  const deep = deepText(r);
+  const tip = (t) => deep ? t + ' · ' + deep : t;
+  if (!a.ok) return ['dot-bad', '●', tip(a.issues.map(issueText).join('; ')), 5];
+  if (r.deep && r.deep.state === 'corrupt') return ['dot-bad', '●', deep, 4];
+  if (a.issues.length) return ['dot-warn', '●', tip(a.issues.map(issueText).join('; ')), 2];
+  return ['dot-ok', '✓', tip('Checks out'), 0];
 }
 
 export function auditHtml(r) {
@@ -76,24 +105,32 @@ export function openDetails(r, ctx = {}) {
   const a = r.audit;
   const [cls] = auditState(r);
   const verdict = !r.mkv ? '<span class="badge badge-muted">no MKV</span>'
-    : !a ? '<span class="badge badge-warn">audit pending</span>'
+    : !a ? '<span class="badge badge-warn">not audited yet</span>'
     : cls === 'dot-bad' ? '<span class="badge badge-bad">issue</span>'
     : cls === 'dot-warn' ? '<span class="badge badge-warn">checks out, with a note</span>'
-    : '<span class="badge badge-ok">✓ structure checks out</span>';
+    : '<span class="badge badge-ok">✓ checks out</span>';
   let body = '<div class="chips" style="margin-bottom:1rem">' + verdict
     + (a && a.duration_secs ? ' <span class="badge badge-muted">' + runtime(a.duration_secs) + '</span>' : '')
     + (r.size_bytes ? ' <span class="badge badge-muted">' + bytes(r.size_bytes) + '</span>' : '')
-    + (r.muxed_with && (r.muxed_with.state === 'older' || r.muxed_with.state === 'other') ? ' <span class="badge badge-warn">muxed with an older writer</span>' : '')
+    + (r.muxed_with && (r.muxed_with.state === 'older' || r.muxed_with.state === 'other') ? ' <span class="badge badge-warn">made by an older version or another program</span>' : '')
     + '</div>';
   if (a && a.issues.length) {
     body += '<h3>Findings</h3>' + a.issues.map(i => '<div class="issue"><span class="dot ' + (i.kind === 'no_cues' ? 'dot-warn' : 'dot-bad') + '"></span>' + esc(issueText(i)) + '</div>').join('');
+  }
+  if (r.deep) {
+    const v = r.deep.verdict;
+    const bad = r.deep.state === 'corrupt';
+    body += '<h3>Deep audit</h3><div class="issue"><span class="dot ' + (bad ? 'dot-bad' : r.deep.state === 'clean' ? 'dot-ok' : 'dot-warn') + '"></span>'
+      + esc(deepText(r).replace(/^Deep audit: /, '')) + (v && v.scanned ? ' <span class="muted small">' + esc(when(v.scanned)) + '</span>' : '') + '</div>';
+    const lines = v ? (v.bad && v.bad.length ? v.bad : v.clean ? [] : v.sample) : [];
+    if (lines.length) body += '<details><summary class="small">What the decoder said</summary><pre class="mono small" style="white-space:pre-wrap;max-height:16rem;overflow:auto">' + esc(lines.join('\n')) + '</pre></details>';
   }
   if (a) {
     body += '<h3>Tracks</h3><table class="det"><thead><tr><th>#</th><th>Type</th><th>Codec</th><th>Language</th></tr></thead><tbody>' + trackRows(a) + '</tbody></table>';
   }
   body += '<h3>Files</h3><dl class="kv">'
     + (r.mkv ? '<dt>MKV</dt><dd class="mono">' + esc(r.mkv) + '</dd>' : '')
-    + (r.mkv ? '<dt>Muxed with</dt><dd>' + esc(r.writing_app || 'no stamp') + '</dd>' : '')
+    + (r.mkv ? '<dt>Made with</dt><dd>' + esc(r.writing_app || 'not recorded') + '</dd>' : '')
     + (r.modified ? '<dt>Modified</dt><dd>' + esc(when(r.modified)) + '</dd>' : '')
     + '<dt>Source ISO</dt><dd class="mono">' + (r.iso ? esc(r.iso) + (r.linked ? ' <span class="badge badge-teal" title="Recorded when this app ripped it">linked</span>' : '') : '<span class="muted">' + esc(noteText(r)) + '</span>') + '</dd>'
     + (r.target && !r.mkv ? '<dt>Remux creates</dt><dd class="mono">' + esc(r.target) + '</dd>' : '')

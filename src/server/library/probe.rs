@@ -113,16 +113,15 @@ struct Stamp {
     writing_app: Option<String>,
 }
 
-/// Which audit ran. Only the fast structural pass exists; a full decode would be
-/// a second depth, provided by an image variant that bundles a decoder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+/// Which audit ran: the fast structural pass (the full decode is [`super::deep`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditDepth {
     Fast,
 }
 
 /// One finding of an audit.
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuditIssue {
     /// No EBML header: not a Matroska file.
@@ -150,7 +149,7 @@ impl AuditIssue {
 }
 
 /// The result of auditing one MKV.
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AuditReport {
     pub depth: AuditDepth,
     pub ok: bool,
@@ -169,7 +168,7 @@ pub struct AuditReport {
 }
 
 /// One audio track as the Library shows it.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TrackFacts {
     pub codec: String,
     pub language: String,
@@ -317,11 +316,10 @@ fn read_stamp(path: &Path) -> std::io::Result<Option<String>> {
     }
 }
 
-/// The cache behind both facts. Filesystem work never happens under its locks.
+/// The writing-app stamps. Filesystem work never happens under its lock.
 #[derive(Default)]
 pub struct ProbeCache {
     stamps: Mutex<HashMap<PathBuf, Stamp>>,
-    audits: Mutex<HashMap<PathBuf, (FileSig, AuditReport)>>,
 }
 
 impl ProbeCache {
@@ -375,19 +373,6 @@ impl ProbeCache {
         true
     }
 
-    /// Drop the cached audit of `path`, so the auditor reads it again.
-    pub fn forget_audit(&self, path: &Path) -> bool {
-        self.lock_audits().remove(path).is_some()
-    }
-
-    /// Drop every cached audit. Returns how many there were.
-    pub fn forget_all_audits(&self) -> usize {
-        let mut a = self.lock_audits();
-        let n = a.len();
-        a.clear();
-        n
-    }
-
     /// Record a known stamp for `path` at `sig` (a remux just wrote it).
     pub fn record_at(&self, path: &Path, sig: FileSig, writing_app: Option<String>) {
         self.lock_stamps()
@@ -404,40 +389,8 @@ impl ProbeCache {
             .insert(path.to_path_buf(), Stamp { sig, writing_app });
     }
 
-    /// The cached audit of `path`, if it still matches the file.
-    pub fn audit(&self, path: &Path, sig: FileSig) -> Option<AuditReport> {
-        self.lock_audits()
-            .get(path)
-            .filter(|(s, _)| *s == sig)
-            .map(|(_, r)| r.clone())
-    }
-
-    /// Audit `path` unless the cached result still matches it. True if it ran.
-    pub fn refresh_audit(&self, path: &Path) -> bool {
-        let Some(sig) = FileSig::stat(path) else {
-            return false;
-        };
-        self.refresh_audit_at(path, sig)
-    }
-
-    /// [`Self::refresh_audit`] for a file already known to be at `sig`.
-    pub fn refresh_audit_at(&self, path: &Path, sig: FileSig) -> bool {
-        if self.audit(path, sig).is_some() {
-            return false;
-        }
-        let Some(report) = audit_fast(path) else {
-            return false;
-        };
-        self.lock_audits().insert(path.to_path_buf(), (sig, report));
-        true
-    }
-
     fn lock_stamps(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Stamp>> {
         self.stamps.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn lock_audits(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, (FileSig, AuditReport)>> {
-        self.audits.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -515,8 +468,6 @@ mod tests {
         assert!(audit_fast(&p).is_none());
         let sig = FileSig::stat(&p).unwrap();
         let cache = ProbeCache::default();
-        assert!(!cache.refresh_audit_at(&p, sig), "nothing cached");
-        assert!(cache.audit(&p, sig).is_none());
         assert!(!cache.refresh_stamp(&p, sig));
         assert_eq!(cache.cached_stamp(&p, sig), None, "retried next pass");
         // A missing file is not a verdict either.
@@ -638,23 +589,5 @@ mod tests {
             audit(torn).issues[..],
             [AuditIssue::Unreadable { .. }]
         ));
-    }
-
-    #[test]
-    fn an_audit_is_redone_only_when_the_file_changes() {
-        let t = tempfile::tempdir().unwrap();
-        let p = t.path().join("a.mkv");
-        std::fs::write(&p, mkv("x", Some(60.0), Some(58), true)).unwrap();
-        let cache = ProbeCache::default();
-        assert!(cache.refresh_audit(&p));
-        assert!(!cache.refresh_audit(&p));
-        std::fs::write(
-            &p,
-            [mkv("x", Some(60.0), Some(5), true), vec![0; 7]].concat(),
-        )
-        .unwrap();
-        assert!(cache.refresh_audit(&p));
-        let sig = FileSig::stat(&p).unwrap();
-        assert!(!cache.audit(&p, sig).unwrap().ok);
     }
 }

@@ -21,6 +21,7 @@ Stream URLs:
   mkv://path.mkv           Matroska file
   m2ts://path.m2ts         BD transport stream file
   mp4://path.mp4           MP4 file
+  mpg://path.mpg           MPEG program stream file
   iso://image.iso          Blu-ray ISO image
   dir://folder/            Decrypted file tree in a folder
   network://host:port      TCP stream
@@ -73,7 +74,14 @@ Flags:
       --raw           Skip decryption (raw encrypted output)
       --multipass    Write/update mapfile for multipass recovery
       --force        Extract into a non-empty dir:// target (overwrite)
-      --share         Submit drive profile (info disc:// only; on a rip, -s means --subtitles)
+      --share         Submit the drive profile and disc structure (info disc://, iso:// or dir://; on a rip, -s means --subtitles)
   -m, --mask          Mask serial numbers (with --share)
+
+Exit codes:
+  0    Success.
+  1    Failed: no usable output, or any other error.
+  2    Usage: bad command or flags (this text was also printed).
+  3    Damaged (disc:// -> iso:// or disc:// -> null:// only): kept and usable, but short some sectors — re-run (--multipass) to try for more.
+  130  A second Ctrl-C forced an immediate exit.
 --- STDERR ---
 Unknown command 'nonsense'. Try 'freemkv help' for a list of commands.

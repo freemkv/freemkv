@@ -520,6 +520,18 @@ fn stream_info_lines(streams: &[libfreemkv::Stream]) -> Vec<String> {
     lines
 }
 
+/// Whether `info` reads `url` as a stream container and lists its streams (G10): every
+/// stream container, mp4:// and mpg:// included.
+fn info_lists_streams(url: &libfreemkv::StreamUrl) -> bool {
+    matches!(
+        url,
+        libfreemkv::StreamUrl::M2ts { .. }
+            | libfreemkv::StreamUrl::Mkv { .. }
+            | libfreemkv::StreamUrl::Mp4 { .. }
+            | libfreemkv::StreamUrl::Mpg { .. }
+    )
+}
+
 fn info_cmd(args: &[String]) {
     if args.is_empty() {
         eprintln!("{}", crate::strings::get("error.info_usage"));
@@ -609,7 +621,7 @@ fn info_cmd(args: &[String]) {
             }
             crate::disc_info::print_disc_titles(&disc, &flags);
         }
-        libfreemkv::StreamUrl::M2ts { .. } | libfreemkv::StreamUrl::Mkv { .. } => {
+        u if info_lists_streams(u) => {
             match libfreemkv::input(url, &libfreemkv::InputOptions::default()) {
                 Ok(stream) => {
                     let meta = stream.info();
@@ -721,6 +733,7 @@ fn usage() {
         "{}",
         crate::strings::get_or("usage.url.mp4", "  mp4://path.mp4           MP4 file")
     );
+    println!("{}", crate::strings::get("usage.url.mpg"));
     println!("{}", crate::strings::get("usage.url.iso"));
     println!(
         "{}",
@@ -983,6 +996,26 @@ mod tests {
     }
 
     use super::{SUBCOMMANDS, collect_urls, stream_info_lines, update_keys_dest};
+
+    // G10 (design §1.1): `info` lists the streams of every stream container, mpg:// and
+    // mp4:// included.
+    #[test]
+    fn info_reads_every_stream_container() {
+        for url in [
+            "mkv:///m/a.mkv",
+            "m2ts:///m/a.m2ts",
+            "mp4:///m/a.mp4",
+            "mpg:///m/a.mpg",
+        ] {
+            assert!(
+                super::info_lists_streams(&libfreemkv::parse_url(url)),
+                "{url}"
+            );
+        }
+        assert!(!super::info_lists_streams(&libfreemkv::parse_url(
+            "json:///m/a.json"
+        )));
+    }
 
     // M1b (mpg-output-design v5 §3): "`info` (`stream_info_lines`) and `json://` list it
     // with the same label." The DVD MPEG-2 extension track shows its sentinel label raw.

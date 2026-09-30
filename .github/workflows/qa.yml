@@ -151,11 +151,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.stamp.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Stamp the next rc
+        id: stamp
         shell: bash
         run: |
           set -euo pipefail
@@ -165,7 +168,25 @@ jobs:
           tag="v$v-rc$(( ${n:-0} + 1 ))"
           git tag "$tag"
           git push origin "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "### Candidate \`$tag\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # The candidate's server image (the rip daemon + web UI), tagged rc-only so it can be
+  # deployed and tested before release; :latest is never touched here. An rc tag cannot
+  # trigger release.yml, so without this a candidate would have no image.
+  rc-image:
+    needs: rc-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build and push the rc image
+        env:
+          TAG: ${{ needs.rc-tag.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/server-image.sh "$TAG" qa
 
   release-tests:
     needs: [plan-media]

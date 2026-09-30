@@ -3,11 +3,12 @@
 //! its own job.
 
 use super::arbiter::Arbiter;
-use super::queue::{Job, JobNote, JobResult};
+use super::queue::{Job, JobNote, JobResult, JobState};
 use super::{Library, LineKind, Running, transcript};
 use crate::server::config::Config;
 use freemkv_engine::{Event, Level, Progress, Sink};
 use std::io::Write as _;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -26,6 +27,9 @@ fn nap(d: Duration) {
 /// The worker loop: waits while a rip holds the slot or the queue is paused.
 pub fn run(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
     tracing::info!("library worker starting");
+    if let Some(dir) = remux_stage_dir() {
+        clean_stale_staging(&dir);
+    }
     while !shutting_down() {
         let Some((job, epoch)) = next_job(lib, arbiter) else {
             nap(Duration::from_secs(1));
@@ -130,16 +134,73 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
         target: job.target.clone(),
         replace: job.replace,
     };
-    let result =
-        freemkv_engine::remux_iso(&request, &crate::server::keysource::key_params(cfg), sink);
+    let keys = crate::server::keysource::key_params(cfg);
+    let result = if let Some(dir) = remux_stage_dir() {
+        std::fs::create_dir_all(&dir).and_then(|()| {
+            freemkv_engine::remux_iso_staged(
+                &request,
+                &keys,
+                sink,
+                &dir.join(format!("{}.mkv.partial", job.id)),
+            )
+        })
+    } else {
+        freemkv_engine::remux_iso(&request, &keys, sink)
+    };
     match result {
         Ok(report) => Ending::Done {
             writing_app: report.writing_app,
         },
+        Err(_) if sink.lib.cancelled(job.id) => Ending::Stopped(JobNote::Cancelled),
         Err(_) if sink.preempted() => Ending::Stopped(JobNote::Preempted),
         Err(_) if shutting_down() => Ending::Stopped(JobNote::Interrupted),
         Err(_) if sink.lib.stall_cancel.load(Ordering::SeqCst) => Ending::Stopped(JobNote::Stalled),
         Err(e) => Ending::Failed(e),
+    }
+}
+
+fn remux_stage_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("FREEMKV_REMUX_STAGING_DIR")
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+// Only this directory and these numeric job files belong to the library worker.
+// A killed container cannot run the engine's normal partial-file guard.
+fn clean_stale_staging(dir: &Path) {
+    let Ok(files) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in files.flatten() {
+        let path = entry.path();
+        let owned = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_suffix(".mkv.partial"))
+            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+        if owned
+            && path.is_file()
+            && let Err(e) = std::fs::remove_file(&path)
+        {
+            tracing::warn!(path = %path.display(), error = %e, "stale remux stage could not be removed");
+        }
+    }
+}
+
+#[cfg(test)]
+mod staged_cleanup_tests {
+    use super::clean_stale_staging;
+
+    #[test]
+    fn startup_removes_only_library_job_partials() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("42.mkv.partial");
+        let unrelated = dir.path().join("disc.mkv.partial");
+        std::fs::write(&stale, b"interrupted").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+        clean_stale_staging(dir.path());
+        assert!(!stale.exists());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep");
     }
 }
 
@@ -212,6 +273,14 @@ pub(crate) fn finish(
             sink.line(
                 LineKind::Err,
                 "Stopped: no progress. The old MKV is unchanged.".into(),
+            );
+        }
+        Ending::Stopped(JobNote::Cancelled) => {
+            lib.queue.drop_job(job.id);
+            let _ = std::fs::remove_file(super::queue::partial_path(&job.target));
+            sink.line(
+                LineKind::Warn,
+                "Stopped. The existing MKV is unchanged.".into(),
             );
         }
         Ending::Stopped(note) => {
@@ -550,7 +619,10 @@ impl Sink for JobSink<'_> {
     }
 
     fn should_cancel(&self) -> bool {
-        self.preempted() || shutting_down() || self.lib.stall_cancel.load(Ordering::SeqCst)
+        self.preempted()
+            || shutting_down()
+            || self.lib.stall_cancel.load(Ordering::SeqCst)
+            || self.lib.cancelled(self.job_id)
     }
 }
 
@@ -634,6 +706,98 @@ pub fn index_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>) {
             }
         }
     }
+}
+
+/// The audit worker: one file at a time from the audit queue, after rips and remuxes
+/// (Rip > Remux > Audit). Each audit is the quick read, then the full decode while deep
+/// audit is on. A decode a rip or remux interrupts goes back to the front of the queue.
+pub fn audit_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
+    let enabled = || cfg.read().unwrap_or_else(|e| e.into_inner()).deep_audit;
+    let busy = || remux_or_rip_busy(lib, arbiter);
+    let mut filled = Instant::now();
+    while !shutting_down() {
+        let was = lib.deep_enabled();
+        lib.set_deep_enabled(enabled());
+        // Turning deep audit on owes every file its decode; refill now, else each minute.
+        if (lib.deep_enabled() && !was) || filled.elapsed() >= Duration::from_secs(60) {
+            filled = Instant::now();
+            if !lib.indexing() {
+                let complete = !lib.snapshot().incomplete;
+                lib.fill_audits(&lib.mkv_files(), complete);
+            }
+        }
+        if busy() {
+            nap(Duration::from_secs(2));
+            continue;
+        }
+        let Some(path) = lib.audits.next() else {
+            nap(Duration::from_secs(2));
+            continue;
+        };
+        let library = super::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner())).library;
+        let stop = || {
+            shutting_down() || !enabled() || busy() || lib.audits.paused() || lib.audits.cancelled()
+        };
+        audit_one(lib, &path, &library, enabled(), &stop);
+        lib.touch_index();
+    }
+}
+
+// A remux running, or queued and not paused, goes before an audit; so does any rip.
+fn remux_or_rip_busy(lib: &Library, arbiter: &Arbiter) -> bool {
+    let q = lib.queue.snapshot();
+    arbiter.rip_active() || q.running().is_some() || (!q.paused && q.count(JobState::Queued) > 0)
+}
+
+// Audit one file: the quick read, then (deep on) the full decode.
+pub(crate) fn audit_one(
+    lib: &Library,
+    path: &Path,
+    library: &Path,
+    deep_on: bool,
+    stop: &dyn Fn() -> bool,
+) {
+    let Some(sig) = super::probe::FileSig::stat(path) else {
+        return;
+    };
+    let title = lib
+        .snapshot()
+        .rows
+        .iter()
+        .find(|r| r.mkv.as_deref() == Some(path))
+        .map(|r| r.title.clone())
+        .unwrap_or_else(|| super::index::mkv_title(library, path));
+    lib.audits.start(path, title);
+    lib.touch_index();
+    let now = crate::server::util::epoch_secs;
+    match super::probe::audit_fast(path) {
+        Some(report) => {
+            let duration = report.duration_secs;
+            lib.audits.record_fast(path, sig, report, now());
+            let ffmpeg = super::deep::ffmpeg();
+            if let Some(ffmpeg) =
+                ffmpeg.filter(|_| deep_on && lib.audits.deep_due_for(path, sig, now()))
+            {
+                tracing::info!(file = %path.display(), "deep audit: decoding");
+                let _ = std::fs::create_dir_all(&lib.log_dir);
+                let err_file = lib.log_dir.join("deep-audit.stderr");
+                let progress =
+                    |stage: &'static str, secs: f64| lib.audits.progress(stage, secs, duration);
+                match super::deep::full_decode(&ffmpeg, path, library, &err_file, stop, &progress) {
+                    Some(v) => lib.audits.record_deep(path, sig, v, now()),
+                    None if !lib.audits.cancelled() => lib.audits.requeue_front(path.to_path_buf()),
+                    None => {}
+                }
+            }
+        }
+        // The storage failed, not the file: try again after the queue.
+        None => {
+            lib.audits.finish();
+            lib.audits.enqueue([path.to_path_buf()]);
+            return;
+        }
+    }
+    lib.audits.finish();
 }
 
 #[cfg(test)]
@@ -964,6 +1128,42 @@ mod tests {
         let f = lib.queue.snapshot().jobs[0].failure.clone().unwrap();
         assert_eq!(f.code, Some(7013));
         assert!(f.message.starts_with("E7013"), "{f:?}");
+    }
+
+    #[test]
+    fn stop_all_leaves_nothing_running_queued_paused_or_partial() {
+        let (_t, lib, dirs) = library_with(&["A", "B", "C"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        lib.queue.set_paused(false);
+        let a = lib.queue.claim_next().unwrap();
+        let partial = super::super::queue::partial_path(&a.target);
+        std::fs::write(&partial, b"half").unwrap();
+        lib.queue.set_paused(true);
+        let arbiter = Arbiter::new();
+        let mut sink = test_sink(&lib, &arbiter);
+        sink.job_id = a.id;
+        assert!(!sink.should_cancel());
+        assert_eq!(lib.stop_all(), (true, 2));
+        assert!(sink.should_cancel(), "the running remux sees the stop");
+        // The engine returns; the worker records the ending.
+        finish(
+            &lib,
+            &a,
+            Ending::Stopped(JobNote::Cancelled),
+            Duration::ZERO,
+            &sink,
+        );
+        let q = lib.queue.snapshot();
+        assert!(
+            q.jobs
+                .iter()
+                .all(|j| !matches!(j.state, JobState::Queued | JobState::Running)),
+            "{q:?}"
+        );
+        assert!(!q.paused);
+        assert!(!partial.exists());
+        assert!(a.target.exists(), "the old MKV is kept");
     }
 
     #[test]

@@ -10,9 +10,13 @@ function ctlHtml(f, v) {
   switch (f.type) {
     case 'bool':
       return '<label class="switch"><input type="checkbox" id="' + id + '" data-key="' + f.key + '"' + (v ? ' checked' : '') + '><span>' + (v ? 'On' : 'Off') + '</span></label>';
-    case 'choice':
+    case 'choice': {
+      // The selected option's one line sits under the control and follows it.
+      const cur = f.options.find(o => o.value === v);
       return '<div class="seg" role="radiogroup" aria-labelledby="l-' + f.key + '">' + f.options.map(o =>
-        '<label><input type="radio" name="' + f.key + '" data-key="' + f.key + '" value="' + esc(o.value) + '"' + (v === o.value ? ' checked' : '') + '><span>' + esc(o.label) + '</span></label>').join('') + '</div>';
+        '<label title="' + esc(o.help || '') + '"><input type="radio" name="' + f.key + '" data-key="' + f.key + '" value="' + esc(o.value) + '" data-help="' + esc(o.help || '') + '"' + (v === o.value ? ' checked' : '') + '><span>' + esc(o.label) + '</span></label>').join('') + '</div>'
+        + '<div class="opt-help" id="oh-' + f.key + '">' + esc(cur && cur.help ? cur.help : '') + '</div>';
+    }
     case 'number':
       return '<input class="txt num" type="number" min="0" max="' + (f.max || '') + '" id="' + id + '" data-key="' + f.key + '" value="' + esc(v == null ? '' : v) + '">';
     case 'secret':
@@ -117,6 +121,10 @@ async function mount(view, ctx) {
       $('#revert', form).disabled = !d;
     }
     form.addEventListener('input', (e) => {
+      if (e.target.matches('.seg input')) {
+        const oh = form.querySelector('#oh-' + e.target.dataset.key);
+        if (oh) oh.textContent = e.target.dataset.help || '';
+      }
       if (e.target.matches('.switch input')) e.target.nextElementSibling.textContent = e.target.checked ? 'On' : 'Off';
       $('#msg', form).classList.remove('bad');
       applyConditions();
@@ -164,6 +172,16 @@ async function mount(view, ctx) {
     });
     applyConditions();
     paintDirty();
+    // Scroll-spy: the nav marks the section at the top of the view.
+    document.documentElement.style.setProperty('--nav-h', document.querySelector('.nav').offsetHeight + 'px');
+    const links = new Map([...view.querySelectorAll('.settings-nav a')].map(a => [a.getAttribute('href').slice(1), a]));
+    const spy = new IntersectionObserver((entries) => {
+      const top = entries.filter(e => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+      if (!top) return;
+      links.forEach((a, id) => a.classList.toggle('on', id === top.target.id));
+    }, { rootMargin: '-' + (document.querySelector('.nav').offsetHeight + 8) + 'px 0px -60% 0px' });
+    form.querySelectorAll(':scope > section.card').forEach(sec => spy.observe(sec));
+    if (ctx) ctx.cleanup.push(() => spy.disconnect());
     if (location.hash) { const t = document.getElementById(location.hash.slice(1)); if (t) t.scrollIntoView(); }
 }
 

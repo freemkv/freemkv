@@ -3,11 +3,13 @@
 //!
 //! [`index`] builds the cross-list, [`probe`] reads the muxed-with stamp and
 //! runs the fast audit, [`queue`] persists the jobs, [`worker`] runs them one
-//! at a time, [`arbiter`] gives rips the mux slot first, and [`api`] serves
-//! `/api/library*`.
+//! at a time, [`arbiter`] gives rips the mux slot first, [`audit`] queues each MKV's
+//! audit ([`deep`] decodes it in full when the setting is on), and [`api`] serves `/api/library*`.
 
 pub mod api;
 pub mod arbiter;
+pub mod audit;
+pub mod deep;
 pub mod index;
 pub mod links;
 pub mod probe;
@@ -160,12 +162,17 @@ pub struct Snapshot {
 pub struct Library {
     pub queue: Queue,
     pub probes: ProbeCache,
+    pub audits: audit::Audits,
+    // The deep_audit setting as the deep loop last read it.
+    deep_on: AtomicBool,
     config_dir: PathBuf,
     log_dir: PathBuf,
     live: Mutex<Live>,
     live_generation: AtomicU64,
     // Set by the watchdog to stop a job that stopped moving.
     stall_cancel: AtomicBool,
+    // The job "Stop all" cancelled (0 = none); the worker's sink polls it.
+    cancel_job: AtomicU64,
     index: RwLock<Arc<Snapshot>>,
     index_generation: AtomicU64,
     // The indexer sleeps on this; `wake` sets it to rescan now.
@@ -208,6 +215,12 @@ pub fn start(cfg: &Arc<RwLock<Config>>) -> std::thread::JoinHandle<()> {
             .name("library-index".into())
             .spawn(move || worker::index_loop(&lib, &cfg));
     }
+    {
+        let (lib, cfg) = (lib.clone(), cfg.clone());
+        let _ = std::thread::Builder::new()
+            .name("library-audit".into())
+            .spawn(move || worker::audit_loop(&lib, &cfg, &arbiter::ARBITER));
+    }
     let cfg = cfg.clone();
     std::thread::Builder::new()
         .name("library-remux".into())
@@ -239,6 +252,12 @@ pub struct RowView {
     pub needs_remux: bool,
     /// `None` until the auditor has reached this file.
     pub audit: Option<AuditReport>,
+    /// The full-decode audit; `None` while the setting is off and no verdict exists.
+    pub deep: Option<audit::DeepView>,
+    /// Waiting in the audit queue.
+    pub audit_queued: bool,
+    /// Being audited now.
+    pub audit_running: bool,
     pub job: Option<Job>,
     pub result: Option<JobResult>,
 }
@@ -255,7 +274,7 @@ pub struct Listing {
     pub scan_ms: u64,
     /// MKVs whose header is still to be read.
     pub probing: usize,
-    /// MKVs still to be audited.
+    /// MKVs queued or being audited.
     pub auditing: usize,
 }
 
@@ -264,11 +283,14 @@ impl Library {
         Self {
             queue: Queue::open(config_dir),
             probes: ProbeCache::default(),
+            audits: audit::Audits::open(config_dir),
+            deep_on: AtomicBool::new(false),
             config_dir: config_dir.to_path_buf(),
             log_dir: log_dir.to_path_buf(),
             live: Mutex::new(Live::default()),
             live_generation: AtomicU64::new(0),
             stall_cancel: AtomicBool::new(false),
+            cancel_job: AtomicU64::new(0),
             index: RwLock::new(Arc::new(Snapshot::default())),
             index_generation: AtomicU64::new(0),
             wake: (Mutex::new(false), Condvar::new()),
@@ -293,6 +315,17 @@ impl Library {
 
     pub(crate) fn touch_index(&self) {
         self.index_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Whether the deep audit is on, as its loop last read the setting.
+    pub fn deep_enabled(&self) -> bool {
+        self.deep_on.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_deep_enabled(&self, on: bool) {
+        if self.deep_on.swap(on, Ordering::SeqCst) != on {
+            self.touch_index();
+        }
     }
 
     /// Whether the indexer is scanning or reading headers right now.
@@ -375,7 +408,26 @@ impl Library {
         });
     }
 
-    /// Scan, then read every header and audit every MKV not yet cached. The
+    /// Queue the audits `files` still needs (new, changed, never audited, or a full decode
+    /// owed while deep audit is on). `complete`: the scan saw every file.
+    pub(crate) fn fill_audits(&self, files: &[(PathBuf, FileSig)], complete: bool) {
+        let now = crate::server::util::epoch_secs();
+        if self.audits.fill(files, self.deep_enabled(), now, complete) > 0 {
+            self.touch_index();
+        }
+    }
+
+    /// The MKVs of the last scan, at the size and mtime it saw.
+    pub(crate) fn mkv_files(&self) -> Vec<(PathBuf, FileSig)> {
+        let snap = self.snapshot();
+        snap.rows
+            .iter()
+            .filter_map(|r| r.mkv.as_ref())
+            .filter_map(|m| Some((m.clone(), *snap.sigs.get(m)?)))
+            .collect()
+    }
+
+    /// Scan, then read every header and queue every MKV's audit that is owed. The
     /// indexer's pass; tests call it to index synchronously. Stops early (false)
     /// when woken, so a settings change never waits behind a long pass.
     pub fn index_now(&self, d: &Dirs) -> bool {
@@ -408,29 +460,24 @@ impl Library {
         }
         self.touch_index();
         if complete {
-            for (path, sig) in &files {
-                if worker::shutting_down() || self.take_wake() {
-                    self.wake_indexer();
-                    complete = false;
-                    break;
-                }
-                tick(self.probes.refresh_audit_at(path, *sig));
-            }
+            self.fill_audits(&files, !snap.incomplete);
         }
         self.busy.store(false, Ordering::SeqCst);
         self.touch_index();
         complete
     }
 
-    /// Forget the audits of `paths` (every file when `None`) and wake the
-    /// indexer to redo them. Returns how many cached audits were dropped.
+    /// Queue the full audit of `paths` again (every MKV when `None`), the deep decode
+    /// included while it is on. Returns how many were queued.
     pub fn reaudit(&self, paths: Option<&[PathBuf]>) -> usize {
         let n = match paths {
-            Some(ps) => ps.iter().filter(|p| self.probes.forget_audit(p)).count(),
-            None => self.probes.forget_all_audits(),
+            Some(ps) => self.audits.reaudit(ps),
+            None => {
+                let all: Vec<PathBuf> = self.mkv_files().into_iter().map(|(p, _)| p).collect();
+                self.audits.reaudit(&all)
+            }
         };
         self.touch_index();
-        self.wake_indexer();
         n
     }
 
@@ -464,8 +511,7 @@ impl Library {
             }
             *guard = Arc::new(next);
         }
-        self.touch_index();
-        self.probes.refresh_audit_at(target, sig);
+        self.audits.enqueue([target.to_path_buf()]);
         self.touch_index();
     }
 
@@ -487,6 +533,9 @@ impl Library {
         let q = self.queue.snapshot();
         let running = probe::running_version();
         let (mut probing, mut auditing) = (0, 0);
+        let deep_on = self.deep_enabled();
+        let queued = self.audits.queued_set();
+        let running_audit = self.audits.status().running.map(|l| l.path);
         let rows = snap
             .rows
             .iter()
@@ -506,8 +555,16 @@ impl Library {
                     .mkv
                     .as_deref()
                     .zip(sig)
-                    .and_then(|(m, s)| self.probes.audit(m, s));
-                auditing += usize::from(r.mkv.is_some() && audit.is_none());
+                    .and_then(|(m, s)| self.audits.report(m, s));
+                let deep = r
+                    .mkv
+                    .as_deref()
+                    .zip(sig)
+                    .filter(|_| audit.is_some())
+                    .and_then(|(m, s)| self.audits.deep_view(m, s, deep_on));
+                let audit_queued = r.mkv.as_ref().is_some_and(|m| queued.contains(m));
+                let audit_running = r.mkv.is_some() && r.mkv == running_audit;
+                auditing += usize::from(audit_queued || audit_running);
                 let needs_remux =
                     r.remuxable() && (r.mkv.is_none() || (probed && muxed_with.out_of_date()));
                 let (job, result) = match &r.target {
@@ -534,6 +591,9 @@ impl Library {
                     probed,
                     needs_remux,
                     audit,
+                    deep,
+                    audit_queued,
+                    audit_running,
                     job,
                     result,
                 }
@@ -575,6 +635,23 @@ impl Library {
             ));
         }
         None
+    }
+
+    /// Stop everything: cancel the running remux (its partial is deleted and
+    /// the old MKV kept) and drop every queued job. Leaves the queue unpaused.
+    /// Returns whether a job was running and how many queued ones went.
+    pub fn stop_all(&self) -> (bool, usize) {
+        let removed = self.queue.clear_queued();
+        let running = self.queue.snapshot().running().map(|j| j.id);
+        if let Some(id) = running {
+            self.cancel_job.store(id, Ordering::SeqCst);
+        }
+        (running.is_some(), removed)
+    }
+
+    /// Whether "Stop all" cancelled job `id`.
+    pub fn cancelled(&self, id: u64) -> bool {
+        id != 0 && self.cancel_job.load(Ordering::SeqCst) == id
     }
 
     /// Delete `.mkv.partial` files under the library's title folders that no

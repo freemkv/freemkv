@@ -35,6 +35,8 @@ pub enum JobNote {
     Interrupted,
     /// It made no progress for too long and was cancelled.
     Stalled,
+    /// Stopped from the UI ("Stop all").
+    Cancelled,
 }
 
 /// One queued remux.
@@ -315,12 +317,20 @@ impl Queue {
     }
 
     /// Drop every queued job; the running one carries on.
+    /// Drop every queued job and un-pause: an empty queue has nothing to
+    /// hold, so it never shows as paused. The running job carries on.
     pub fn clear_queued(&self) -> usize {
         self.mutate(|f| {
             let before = f.jobs.len();
             f.jobs.retain(|j| j.state != JobState::Queued);
+            f.paused = false;
             before - f.jobs.len()
         })
+    }
+
+    /// Remove job `id` outright (a cancelled job leaves no trace in the list).
+    pub fn drop_job(&self, id: u64) {
+        self.mutate(|f| f.jobs.retain(|j| j.id != id));
     }
 
     pub fn set_paused(&self, paused: bool) {

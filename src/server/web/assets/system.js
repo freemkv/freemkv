@@ -1,7 +1,7 @@
-// System: what is running, the drives, the folders and their health, and
+// System: versions, the folders and their space, and
 // the diagnostics (debug logging, logs, the bundle). Keys live in Settings.
 
-import { esc, $, put, api, act, toast, bytes, ago, plural } from './ui.js';
+import { esc, $, put, api, act, toast, bytes, ago } from './ui.js';
 import { openDeviceTerminal } from './ripper.js';
 
 function mountRow(m) {
@@ -23,31 +23,24 @@ export default {
         <section class="card"><h2>About</h2><dl class="kv" id="about"></dl></section>
 <section class="card" id="diag-card"><h2>Diagnostics</h2>
           <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem"><b>Debug logging</b><label class="switch" style="padding:0"><input type="checkbox" id="debug"><span>Off</span></label></div>
-          <p class="small muted" style="margin:.4rem 0 1rem">Verbose logs for bug reports: this app and the rip library. Off by default. With it on, each drive's console gains a Debug view.</p>
+          <p class="small muted" style="margin:.4rem 0 1rem">Extra-detailed logs, for bug reports. Off by default. When on, each drive's console also has a Debug view.</p>
           <div class="actions"><button class="btn btn-ghost btn-sm" id="syslog">System log</button><a class="btn btn-ghost btn-sm" href="/api/debug?n=5000" target="_blank">Event log (JSON lines)</a><a class="btn btn-ghost btn-sm" href="/api/state" target="_blank">Live state (JSON)</a></div>
           <p class="small muted" id="logdir" style="margin:.9rem 0 0"></p></section>
       </div>
       <section class="table-card" style="margin-top:1.25rem"><div class="toolbar"><b>Storage</b><span class="muted small" id="mounts-note"></span></div>
-        <div class="table-scroll"><table class="list"><thead><tr><th>Folder</th><th>State</th><th>Space</th><th class="num">Answer</th></tr></thead><tbody id="mounts"></tbody></table></div></section>
-      <div style="margin-top:1.25rem">
-        <section class="table-card"><div class="toolbar"><b>Drives</b></div>
-          <div class="table-scroll"><table class="list"><thead><tr><th>Drive</th><th>State</th><th>Disc</th><th></th></tr></thead><tbody id="drives"></tbody></table></div></section>
-      </div>`;
+        <div class="table-scroll"><table class="list"><thead><tr><th>Folder</th><th>State</th><th>Space</th><th class="num">Response</th></tr></thead><tbody id="mounts"></tbody></table></div></section>`;
     let sys = null;
     const paint = () => {
       const d = sys;
       if (!d || ctx.stale()) return;
-      put($('#lede', view), 'freemkv <b>' + esc(d.version_label) + '</b> · ' + plural((d.drives || []).length, 'drive') + ' · '
+      put($('#lede', view), 'freemkv <b>' + esc(d.version_label) + '</b> · '
         + ((d.mounts || []).every(m => m.ok) ? 'every folder answering' : '<span style="color:var(--bad)">a folder needs attention</span>'));
       put($('#about', view), '<dt>freemkv</dt><dd class="mono">' + esc(d.version_label) + '</dd>'
         + '<dt>Rip library</dt><dd class="mono">' + esc(d.libfreemkv) + '</dd>'
         + '<dt>Debug logging</dt><dd>' + (d.debug_enabled ? 'on' : 'off') + '</dd>');
       put($('#mounts', view), (d.mounts || []).map(mountRow).join('') || '<tr><td colspan="4" class="muted">Checking the folders…</td></tr>');
       const checked = (d.mounts || []).map(m => m.checked_at).sort()[0];
-      put($('#mounts-note', view), checked ? 'checked ' + ago(checked) + ' · every 30 s, off the request path' : '');
-      put($('#drives', view), (d.drives || []).map(v => '<tr><td class="mono"><b>' + esc(v.device) + '</b></td><td>' + esc(v.status) + (v.disc_present ? '' : ' <span class="muted small">· empty</span>') + '</td>'
-        + '<td>' + esc(v.disc || '') + (v.format ? ' <span class="badge fmt-' + esc(v.format) + '">' + esc(v.format.toUpperCase()) + '</span>' : '') + '</td>'
-        + '<td class="act"><button class="btn btn-ghost btn-sm" data-dev="' + esc(v.device) + '">Log</button></td></tr>').join('') || '<tr><td colspan="4" class="muted">No drives detected.</td></tr>');
+      put($('#mounts-note', view), checked ? 'checked ' + ago(checked) : '');
       const dbg = $('#debug', view);
       if (document.activeElement !== dbg) { dbg.checked = !!d.debug_enabled; dbg.nextElementSibling.textContent = d.debug_enabled ? 'On' : 'Off'; }
       put($('#logdir', view), 'Logs live in <span class="mono">' + esc(d.log_dir) + '</span>. The download bundles every one of them.');
@@ -62,10 +55,6 @@ export default {
       if (r) { toast(r.enabled ? 'Debug logging on' : 'Debug logging off', 'info'); load(); } else e.target.checked = !on;
     });
     $('#syslog', view).addEventListener('click', () => openDeviceTerminal('system', false));
-    $('#drives', view).addEventListener('click', (e) => {
-      const b = e.target.closest('[data-dev]');
-      if (b) openDeviceTerminal(b.dataset.dev, !!(sys && sys.debug_enabled));
-    });
     $('#bundle', view).addEventListener('click', () => toast('Preparing the log bundle…', 'info'));
   },
 };

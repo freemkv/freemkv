@@ -45,7 +45,7 @@ env:
   # so the two cannot disagree about what "in order" means.
   REPOS: >-
     freemkv-unlock libfreemkv freemkv-keysources freemkv-i18n
-    freemkv-engine bdemu freemkv autorip
+    freemkv-engine bdemu freemkv
   # Exclude the orchestration/bot workflows from the green-gate: a repo's own
   # promote/release/runner runs (and their dry-runs) must not gate the NEXT
   # promote — otherwise a failed promote dry-run on a dev SHA blocks promotion of

@@ -47,6 +47,11 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("web/assets/ui.js"),
     ),
     (
+        "chips.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/chips.js"),
+    ),
+    (
         "medialist.js",
         "text/javascript; charset=utf-8",
         include_bytes!("web/assets/medialist.js"),
@@ -109,6 +114,7 @@ const PAGES: &[&str] = &[
     "/index.html",
     "/library",
     "/remux",
+    "/drives",
     "/ripper",
     "/settings",
     "/system",
@@ -1546,6 +1552,26 @@ mod web_tests {
         let library = asset("library.js");
         assert!(!library.contains("href=\"/remux\""));
         assert!(library.contains("remux: false"));
+        assert!(
+            !library.contains("row-more"),
+            "the row itself opens the details"
+        );
+        // Never a browser-native dialog: every confirm and message is the app's modal.
+        for (name, _, body) in super::ASSETS {
+            let text = std::str::from_utf8(body).unwrap_or("");
+            for native in ["alert(", "confirm(", "prompt(", "window.confirm"] {
+                let hits = text
+                    .match_indices(native)
+                    .filter(|(i, _)| {
+                        !text[..*i].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
+                    })
+                    .count();
+                assert_eq!(hits, 0, "{name} calls the browser's {native}");
+            }
+        }
+        // Both lists filter with the one chip component.
+        assert!(library.contains("chipFilter(") && asset("remux.js").contains("chipFilter("));
+        assert!(library.contains("download=1") && asset("remux.js").contains("download=1"));
         assert!(!super::INDEX_HTML.contains("jobchip"));
         assert!(
             !asset("system.js").contains("id=\"keys\""),
@@ -4330,6 +4356,12 @@ mod web_tests {
             assert_eq!(code, 409);
             std::fs::remove_dir(&lib).unwrap();
             std::fs::rename(&away, &lib).unwrap();
+            let (code, body) = roundtrip(&cfg, "GET", "/api/library?download=1", None, &[]);
+            assert_eq!(code, 200);
+            assert!(
+                body.contains("\"rows\""),
+                "the download is the same listing"
+            );
             let (_, body) = roundtrip(&cfg, "POST", "/api/library/queue/pause", None, &[]);
             assert!(body.contains("\"paused\":true"), "{body}");
             let (code, _) = roundtrip(&cfg, "GET", "/api/library/console", None, &[]);
@@ -5192,13 +5224,11 @@ mod web_tests {
             let (code, body) = roundtrip(&cfg, "POST", "/api/settings", Some(&patch), &[]);
             assert_eq!(code, 200, "a valid multi-field patch must succeed: {body}");
             let c = cfg.read().unwrap();
-            assert!(c.auto_eject && c.main_feature && c.capture_without_keys && c.keep_iso);
+            assert!(c.auto_eject && c.capture_without_keys && c.keep_iso);
+            // File-only settings are not set by a save (the form never offers them).
+            assert_eq!(c.main_feature, Config::default().main_feature);
+            assert_eq!(c.min_length_secs, Config::default().min_length_secs);
             assert_eq!(c.max_retries, 10, "max_retries clamps to 10");
-            assert_eq!(
-                c.min_length_secs,
-                30 * 24 * 3600,
-                "min_length_secs clamps to MAX_DURATION_SECS (30 days)"
-            );
             assert_eq!(c.decrypt_threads, 256, "decrypt_threads clamps to 256");
             assert_eq!(
                 c.log_retention_days, 3650,
@@ -6011,7 +6041,7 @@ fn drive_summary() -> Vec<serde_json::Value> {
 // POST /api/system/keyserver-test: ask the keyserver whether it answers.
 fn handle_keyserver_test(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
-    if !crate::server::keysource::uses_online(&c) {
+    if c.keyserver_url.trim().is_empty() {
         return json_response(
             request,
             400,

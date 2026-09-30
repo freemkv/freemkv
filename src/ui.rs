@@ -771,10 +771,14 @@ pub fn lang_is_selected(stored: &str, code: &str) -> bool {
 ///
 /// `disc_source` is "not a container": true for a physical disc AND an ISO file, since both
 /// carry a whole disc to unpack.
-pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>> {
+pub fn output_formats(disc_source: bool, fit: impl Into<Fit>) -> Vec<Vec<&'static str>> {
+    let fit = fit.into();
     let mut titles = vec!["Selected titles → MKV"];
-    if mp4_ok {
+    if fit.mp4 {
         titles.push("Selected titles → MP4");
+    }
+    if fit.mpg {
+        titles.push("Selected titles → MPG");
     }
     titles.push("Selected titles → M2TS");
     titles.push("Selected titles → separate track files");
@@ -797,32 +801,60 @@ pub fn output_formats(disc_source: bool, mp4_ok: bool) -> Vec<Vec<&'static str>>
 // rather than fail at mux time. MUST match the mux gate in `libfreemkv::mux::mp4`.
 const MP4_VIDEO: &[&str] = &["H.264", "HEVC"];
 
+// Video codecs `mpg://` can carry: the 2000 edition of H.222.0 covers MPEG-1/2 only (J24);
+// H.264, HEVC and VC-1 follow with F8. MUST match `libfreemkv::mux::mpg`'s plan.
+const MPG_VIDEO: &[&str] = &["MPEG-2", "MPEG-1"];
+
+/// Which of the codec-gated containers could hold at least one title of the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fit {
+    pub mp4: bool,
+    pub mpg: bool,
+}
+
+impl From<bool> for Fit {
+    /// `true` offers every container (codecs unknown); `false` none of the gated ones.
+    fn from(ok: bool) -> Self {
+        Fit { mp4: ok, mpg: ok }
+    }
+}
+
 /// Resolve a popup's visible text back to the canonical format string.
 ///
 /// Shells hold display text; the core holds the authoritative list. Matching
 /// here means a shell never invents a format, and both shells resolve the same
 /// way instead of each parsing the string.
-pub fn format_by_title(title: &str, disc_source: bool, mp4_ok: bool) -> Option<&'static str> {
-    output_formats(disc_source, mp4_ok)
+pub fn format_by_title(
+    title: &str,
+    disc_source: bool,
+    fit: impl Into<Fit>,
+) -> Option<&'static str> {
+    output_formats(disc_source, fit)
         .into_iter()
         .flatten()
         .find(|f| *f == title)
 }
 
-/// Source formats accepted by the file picker.
-pub const SOURCE_EXTS: &[&str] = &["iso", "ISO", "mkv", "m2ts", "mts", "mp4"];
+pub use crate::sources::container_scheme;
+
+/// Source formats accepted by the file picker: ISO images and every [`crate::sources::CONTAINER_SOURCES`]
+/// extension (plus the upper-case forms discs and pickers show).
+pub const SOURCE_EXTS: &[&str] = &[
+    "iso", "ISO", "mkv", "m2ts", "mts", "mp4", "mpg", "MPG", "mpeg", "MPEG", "vob", "VOB",
+];
 
 /// True for a container source (single title, no disc scan).
 pub fn is_container(path: &str) -> bool {
-    matches!(
-        std::path::Path::new(path)
+    container_scheme(path).is_some()
+}
+
+/// A file a shell may open: an ISO image or a container source.
+pub fn is_openable_file(path: &str) -> bool {
+    is_container(path)
+        || std::path::Path::new(path)
             .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .as_str(),
-        "mkv" | "m2ts" | "mts" | "mp4"
-    )
+            .is_some_and(|e| e.eq_ignore_ascii_case("iso"))
 }
 
 /// Commands that must be unavailable while a rip is in flight. Cancel is
@@ -1266,6 +1298,7 @@ pub fn format_key(canonical: &str) -> Option<&'static str> {
     Some(match canonical {
         "Selected titles → MKV" => "gui.format.mkv",
         "Selected titles → MP4" => "gui.format.mp4",
+        "Selected titles → MPG" => "gui.format.mpg",
         "Selected titles → M2TS" => "gui.format.m2ts",
         "Selected titles → separate track files" => "gui.format.tracks",
         "Selected titles → video tracks only" => "gui.format.video_only",
@@ -1325,11 +1358,16 @@ mod missing_key_fallback_tests {
     }
 }
 
-pub fn format_from_label(label: &str, disc_source: bool, mp4_ok: bool) -> Option<&'static str> {
+pub fn format_from_label(
+    label: &str,
+    disc_source: bool,
+    fit: impl Into<Fit>,
+) -> Option<&'static str> {
     // Canonical (English) fast path first — also covers callers that pass a
     // canonical string directly — then fall back to the localized display.
-    format_by_title(label, disc_source, mp4_ok).or_else(|| {
-        output_formats(disc_source, mp4_ok)
+    let fit = fit.into();
+    format_by_title(label, disc_source, fit).or_else(|| {
+        output_formats(disc_source, fit)
             .into_iter()
             .flatten()
             .find(|canon| format_label(canon) == label)
@@ -1705,7 +1743,7 @@ pub struct App {
     /// Video codec per title, from the scan — used to warn when the chosen
     /// container cannot carry them. Public alongside the rest of the model so
     /// the container gate can be exercised without a real disc: it is the one
-    /// input to `mp4_possible`/`container_mismatch`, and gating those tests
+    /// input to `fit`/`container_mismatch`, and gating those tests
     /// behind a fixture is why they did not run in CI.
     pub video_codecs: Vec<String>,
     /// What each title NUMBER referred to on the scan the tree was built from,
@@ -1727,6 +1765,12 @@ pub struct App {
     /// can name the file that will actually appear. It goes nowhere near a
     /// path without `sanitize_label`, which `title_basename` applies.
     pub disc_label: String,
+    /// The key set Open resolved: the rip's seed (KU §2.5). Memory only.
+    seed: Option<crate::engine::KeySet>,
+    /// Open or the last run refused E7034: the next Start is the insert-the-disc Retry.
+    vid_retry: bool,
+    /// Open's answered key refusal, under the key settings it was given for (B2).
+    open_refusal: Option<(crate::engine::KeyRefusal, crate::engine::KeySnapshot)>,
     /// The launch probe's in-flight scan, if one is running.
     ///
     /// Its OWN slot, deliberately not `run`. `run` means "a rip is in
@@ -1825,6 +1869,9 @@ impl App {
             video_codecs: Vec::new(),
             title_ids: Vec::new(),
             disc_label: String::new(),
+            seed: None,
+            vid_retry: false,
+            open_refusal: None,
             probe: None,
             opening: None,
             pending: None,
@@ -1869,17 +1916,22 @@ impl App {
         }
     }
 
-    /// True when at least one title on this source could go in an MP4. With no
-    /// codec information (an unscanned or container source) this is true — the
-    /// UI must not hide an option on a guess.
-    pub fn mp4_possible(&self) -> bool {
+    /// Which codec-gated containers could hold at least one title: with no codec information
+    /// (an unscanned or container source) every one: the UI must not hide an option on a guess.
+    pub fn fit(&self) -> Fit {
         let known: Vec<&String> = self.video_codecs.iter().filter(|c| !c.is_empty()).collect();
-        known.is_empty() || known.iter().any(|c| MP4_VIDEO.contains(&c.as_str()))
+        let any = |allowed: &[&str]| {
+            known.is_empty() || known.iter().any(|c| allowed.contains(&c.as_str()))
+        };
+        Fit {
+            mp4: any(MP4_VIDEO),
+            mpg: any(MPG_VIDEO),
+        }
     }
 
     /// The output formats this source can actually produce.
     pub fn offered_formats(&self) -> Vec<Vec<&'static str>> {
-        output_formats(!is_container(&self.source), self.mp4_possible())
+        output_formats(!is_container(&self.source), self.fit())
     }
 
     /// The format this rip will ACTUALLY use.
@@ -1899,15 +1951,20 @@ impl App {
     /// Answered from the scan, before any rip: a container that will certainly
     /// fail should say so while the user can still change it.
     pub fn container_mismatch(&self) -> Option<String> {
-        if !self.effective_format().contains("MP4") {
+        let format = self.effective_format();
+        let (container, allowed) = if format.contains("MP4") {
+            ("MP4", MP4_VIDEO)
+        } else if format.contains("MPG") {
+            ("MPG", MPG_VIDEO)
+        } else {
             return None;
-        }
+        };
         let ticked = self.tree.ticked_titles();
         let mut bad: Vec<&str> = ticked
             .iter()
             .filter_map(|i| self.video_codecs.get(*i))
             .map(|c| c.as_str())
-            .filter(|c| !c.is_empty() && !MP4_VIDEO.contains(c))
+            .filter(|c| !c.is_empty() && !allowed.contains(c))
             .collect();
         bad.sort_unstable();
         bad.dedup();
@@ -1915,8 +1972,8 @@ impl App {
             return None;
         }
         Some(crate::strings::fmt(
-            "gui.log.mp4_mismatch",
-            &[("codecs", &bad.join(" or "))],
+            "gui.log.container_mismatch",
+            &[("container", container), ("codecs", &bad.join(" or "))],
         ))
     }
 
@@ -2118,10 +2175,12 @@ impl App {
             .name("open-source".into())
             .spawn(move || {
                 let scanned = scan(&path, &keys);
+                // The preflight reuses Open's key set: no second key request (KU §2.5).
+                let seed = scanned.as_ref().ok().and_then(|sc| sc.keys.as_ref());
                 let preflight = (scanned.is_ok()
                     && !is_container(&path)
                     && !crate::engine::is_disc_source(&path))
-                .then(|| crate::engine::preflight_with_keys(&path, "/tmp", &[], &keys));
+                .then(|| crate::engine::preflight_with_keys(&path, "/tmp", &[], seed));
                 let _ = tx.send(OpenedSource {
                     path,
                     scanned,
@@ -2152,6 +2211,10 @@ impl App {
         self.tree = Tree::default();
         self.source.clear();
         self.disc_label.clear();
+        // The key set lives in memory for this source only (KU §2.1 invariant 5).
+        self.seed = None;
+        self.vid_retry = false;
+        self.open_refusal = None;
         self.page = Page::Empty;
     }
 
@@ -2323,6 +2386,16 @@ impl App {
                 // can carry it to the engine's own (later) scan.
                 self.title_ids = sc.title_ids.clone();
                 self.disc_label = sc.volume_id.clone();
+                // KU §2.5: Open's key set seeds the rip; E7034 arms the insert-the-disc Retry
+                // (KU §4.2), so Start scans a drive instead of asking again without the VID.
+                self.seed = sc.keys.clone();
+                self.vid_retry = sc.needs_disc;
+                let keys =
+                    crate::engine::KeySnapshot::of(&KeyConfig::from_settings(&self.settings));
+                self.open_refusal = sc.refusal.clone().map(|r| (r, keys));
+                if sc.needs_disc {
+                    self.say(LogKind::Notice, &crate::engine::insert_disc_retry());
+                }
                 let min_secs = self
                     .settings
                     .min_title_secs
@@ -2349,12 +2422,7 @@ impl App {
                     self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"));
                 } else {
                     match preflight.unwrap_or_else(|| {
-                        crate::engine::preflight_with_keys(
-                            path,
-                            "/tmp",
-                            &[],
-                            &KeyConfig::from_settings(&self.settings),
-                        )
+                        crate::engine::preflight_with_keys(path, "/tmp", &[], sc.keys.as_ref())
                     }) {
                         Ok(v) if v.is_empty() => {
                             self.say(LogKind::Result, &crate::strings::get("gui.log.ready_rip"))
@@ -2383,6 +2451,15 @@ impl App {
         vec![Effect::Redraw]
     }
 
+    // Open's answered refusal, when asking again could only repeat it (KU §2.1 invariant 4):
+    // the same key settings and keydb, titles within Open's scope, not transport-class.
+    fn refused_again(&self, titles: &[usize]) -> Option<String> {
+        let (refusal, keys) = self.open_refusal.as_ref()?;
+        let now = crate::engine::KeySnapshot::of(&KeyConfig::from_settings(&self.settings));
+        let within = titles.iter().all(|t| refusal.titles.contains(t));
+        (!refusal.transport && *keys == now && within).then(|| refusal.text.clone())
+    }
+
     fn start_run(&mut self) -> Vec<Effect> {
         if self.source.is_empty() {
             self.say(
@@ -2407,6 +2484,10 @@ impl App {
                 LogKind::Notice,
                 &crate::strings::get("gui.log.select_title_first"),
             );
+            return vec![Effect::Redraw];
+        }
+        if let Some(text) = self.refused_again(&titles) {
+            self.say(LogKind::Notice, &text);
             return vec![Effect::Redraw];
         }
         let (audio_pids, sub_pids, explicit_streams) = self.tree.ticked_streams();
@@ -2446,6 +2527,15 @@ impl App {
                 ),
             );
         }
+        // The Retry after E7034 reads the disc's Volume ID from a drive (KU §4.2 Q4).
+        let vid_from = if self.vid_retry && !drive_source {
+            match self.disc_source(true) {
+                Some(drive) => Some(drive),
+                None => return vec![Effect::Redraw],
+            }
+        } else {
+            None
+        };
         let state = Arc::new(RunState::default());
         self.run = Some(state.clone());
         self.reported_bad = 0;
@@ -2499,6 +2589,8 @@ impl App {
                 keep_iso: self.settings.keep_iso,
                 auto_eject: self.settings.auto_eject,
                 keys: KeyConfig::from_settings(&self.settings),
+                seed: self.seed.clone(),
+                vid_from,
             },
             state,
         );
@@ -2634,6 +2726,7 @@ impl App {
             // verdict matters, and `unwrap_or_default()` turned that into
             // `RunOutcome::Completed` plus an empty summary.
             let sum = st.summary_now();
+            self.vid_retry = st.needs_disc.load(std::sync::atomic::Ordering::SeqCst);
             self.say(LogKind::Result, &sum);
             self.result_summary = sum;
             self.result_outcome = st.outcome_now();
@@ -2828,6 +2921,87 @@ pub struct View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // G5 (design §6): one table maps container extensions to schemes; every derived list
+    // agrees with it, and mpg/mpeg/vob read as mpg://.
+    #[test]
+    fn container_sources_drive_every_extension_decision() {
+        for (ext, scheme) in crate::sources::CONTAINER_SOURCES {
+            for e in [ext.to_string(), ext.to_ascii_uppercase()] {
+                let path = format!("/m/movie.{e}");
+                assert_eq!(container_scheme(&path), Some(*scheme), "{path}");
+                assert!(is_container(&path), "{path}");
+            }
+            assert!(SOURCE_EXTS.contains(ext), "{ext} missing from the picker");
+        }
+        assert_eq!(container_scheme("/m/a.vob"), Some("mpg"));
+        assert_eq!(container_scheme("/m/a.MPEG"), Some("mpg"));
+        assert_eq!(container_scheme("/m/a.mts"), Some("m2ts"));
+        assert_eq!(container_scheme("/m/a.iso"), None);
+        assert_eq!(container_scheme("/m/a.txt"), None);
+        let extra: Vec<&&str> = SOURCE_EXTS
+            .iter()
+            .filter(|e| {
+                !e.eq_ignore_ascii_case("iso")
+                    && !crate::sources::CONTAINER_SOURCES
+                        .iter()
+                        .any(|(x, _)| x.eq_ignore_ascii_case(e))
+            })
+            .collect();
+        assert!(
+            extra.is_empty(),
+            "picker extensions outside the table: {extra:?}"
+        );
+    }
+
+    // Case-sensitive pickers only show a DVD's upper-case MPEG files if the list names them.
+    #[test]
+    fn the_picker_lists_upper_case_mpeg_extensions() {
+        for ext in ["MPG", "MPEG", "VOB"] {
+            assert!(SOURCE_EXTS.contains(&ext), "{ext} missing from the picker");
+        }
+    }
+
+    // Design §6: "output_formats(disc_source, mp4_ok, mpg_ok) adds Selected titles → MPG";
+    // J24: MPG carries MPEG-1/2 video only.
+    #[test]
+    fn mpg_is_offered_only_when_a_title_could_go_in_it() {
+        let has = |f: Fit| {
+            output_formats(true, f)
+                .concat()
+                .contains(&"Selected titles → MPG")
+        };
+        assert!(has(Fit {
+            mp4: false,
+            mpg: true
+        }));
+        assert!(!has(Fit {
+            mp4: true,
+            mpg: false
+        }));
+        assert!(has(true.into()), "unknown codecs offer everything");
+        assert!(app_with_titles(&["MPEG-2"]).fit().mpg);
+        assert!(!app_with_titles(&["H.264"]).fit().mpg);
+        assert_eq!(format_key("Selected titles → MPG"), Some("gui.format.mpg"));
+    }
+
+    // gui.log.container_mismatch names the container, for MP4 and MPG alike.
+    #[test]
+    fn the_mismatch_names_whichever_container_was_chosen() {
+        crate::strings::set_locale("en");
+        let mut app = app_with_titles(&["MPEG-2", "H.264"]);
+        app.format = "Selected titles → MPG".into();
+        let m = app.container_mismatch().expect("H.264 cannot go in an MPG");
+        assert!(
+            m.contains("MPG") && m.contains("H.264") && !m.contains("MPEG-2"),
+            "{m}"
+        );
+        app.format = "Selected titles → MP4".into();
+        let m = app
+            .container_mismatch()
+            .expect("MPEG-2 cannot go in an MP4");
+        assert!(m.contains("MP4") && m.contains("MPEG-2"), "{m}");
+    }
 
     // The CLI refuses `--raw` without a disc:// source and an iso:// dest; the GUI ignores it.
     #[test]
@@ -3673,7 +3847,78 @@ mod tests {
             video_codecs: vec!["HEVC".to_string()],
             title_ids: Vec::new(),
             details: Vec::new(),
+            keys: None,
+            needs_disc: false,
+            refusal: None,
         }
+    }
+
+    /// FK11, GUI half (KU §4.2 “GUI (image source or staged ISO) | An "Insert the disc"
+    /// prompt … and Retry”): an Open that needs the disc says so and arms the Retry, so
+    /// the next Start scans a drive instead of asking the key service again without it.
+    #[test]
+    fn an_open_that_needs_the_disc_prompts_and_arms_the_retry() {
+        let mut app = App::new();
+        let mut sc = probe_scan();
+        sc.needs_disc = true;
+        app.apply_scan("/media/capture.iso", Ok(sc), false);
+        assert!(app.vid_retry, "the next Start is the Retry");
+        let said = app
+            .log
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(said.contains(&crate::engine::insert_disc_retry()), "{said}");
+        app.apply_scan("/media/other.iso", Ok(probe_scan()), false);
+        assert!(!app.vid_retry, "a new source starts afresh");
+    }
+
+    /// B2 (KU-F1 review; KU J15, "the key service is never called twice"): Open's
+    /// answered refusal is shown again at Start with no request, unless the key settings
+    /// changed, the keydb was updated, Start wants more than Open resolved, or Open's
+    /// failure was transport-class.
+    #[test]
+    fn an_answered_refusal_at_open_is_shown_again_not_asked_again() {
+        let out = std::env::temp_dir().join(format!("fmkv-b2-{}", std::process::id()));
+        let refused = |transport: bool, titles: Vec<usize>| {
+            let mut app = App::new();
+            app.output_dir = out.display().to_string();
+            let mut sc = probe_scan();
+            // A real Open logs the refusal among its details (`scanned_with_keys`).
+            sc.details = vec!["E7022 no key for this disc".into()];
+            sc.refusal = Some(crate::engine::KeyRefusal {
+                code: 7022,
+                text: "E7022 no key for this disc".into(),
+                titles,
+                transport,
+            });
+            app.apply_scan("/nonexistent/b2.iso", Ok(sc), false);
+            app
+        };
+        let mut app = refused(false, vec![0]);
+        app.start_run();
+        assert!(app.run.is_none(), "no second ask of an answered refusal");
+        let said = app
+            .log
+            .iter()
+            .filter(|l| l.text.contains("no key for this disc"))
+            .count();
+        assert_eq!(said, 2, "Open said it, and Start says it again");
+        app.settings.keyserver_url = "https://keys.test/decode".into();
+        app.start_run();
+        assert!(app.run.is_some(), "a key-settings change asks again");
+
+        let mut app = refused(true, vec![0]);
+        app.start_run();
+        assert!(app.run.is_some(), "a transport-class failure asks again");
+
+        let mut app = refused(false, vec![]);
+        app.start_run();
+        assert!(
+            app.run.is_some(),
+            "Start wants a title Open did not resolve"
+        );
     }
 
     fn app_with_titles(codecs: &[&str]) -> App {
@@ -3911,6 +4156,9 @@ mod tests {
                 title_ids: vec![],
                 rows: vec![],
                 details: vec![],
+                keys: None,
+                needs_disc: false,
+                refusal: None,
             },
             "Main film only",
             0.0,

@@ -65,6 +65,9 @@ fn video_only_disc() -> Scanned {
         title_ids: vec![],
         video_codecs: vec!["H.264".into()],
         details: vec![],
+        keys: None,
+        needs_disc: false,
+        refusal: None,
     }
 }
 
@@ -83,6 +86,9 @@ fn disc(titles: &[(f64, usize)]) -> Scanned {
         title_ids: vec![],
         video_codecs: vec!["H.264".into(); titles.len()],
         details: vec![],
+        keys: None,
+        needs_disc: false,
+        refusal: None,
     }
 }
 
@@ -120,6 +126,9 @@ fn mp2_extension_disc() -> Scanned {
         title_ids: vec![],
         video_codecs: vec!["MPEG-2".into()],
         details: vec![],
+        keys: None,
+        needs_disc: false,
+        refusal: None,
     }
 }
 
@@ -977,6 +986,7 @@ fn the_output_extension_follows_the_chosen_container() {
 const CONTAINER_WORDS: &[(&str, &str)] = &[
     ("Selected titles → MKV", "MKV"),
     ("Selected titles → MP4", "MP4"),
+    ("Selected titles → MPG", "MPG"),
     ("Selected titles → M2TS", "M2TS"),
     ("Selected titles → separate track files", "track"),
     ("Selected titles → video tracks only", "video track"),
@@ -1279,7 +1289,7 @@ fn mp4_is_withdrawn_rather_than_offered_and_refused() {
     // A choice that always fails is worse than no choice.
     let mut app = App::new();
     app.video_codecs = vec!["MPEG-2".into()];
-    assert!(!app.mp4_possible());
+    assert!(!app.fit().mp4);
     app.tree = tree(&two_title_disc(), "All titles", 0.0);
     app.source = "/media/Disc.iso".into();
     app.page = Page::Titles;
@@ -1299,7 +1309,7 @@ fn unknown_codecs_never_withdraw_an_option() {
     // Missing information must not remove a capability — the container source
     // path reports no codecs at all.
     let app = App::new();
-    assert!(app.mp4_possible(), "no codec information blocked MP4");
+    assert!(app.fit().mp4, "no codec information blocked MP4");
 }
 
 #[test]
@@ -1566,6 +1576,8 @@ fn a_failed_run_always_finishes_and_is_reported_as_failed() {
             keep_iso: false,
             auto_eject: false,
             keys: KeyConfig::default(),
+            seed: None,
+            vid_from: None,
         },
         state.clone(),
     );
@@ -1656,7 +1668,7 @@ fn a_format_the_source_cannot_offer_is_never_left_selected() {
     app.source = "/media/mpeg2.iso".into();
     app.video_codecs = vec!["MPEG-2".to_string()];
     app.format = "Selected titles → MP4".into();
-    assert!(!app.mp4_possible(), "fixture must withdraw MP4");
+    assert!(!app.fit().mp4, "fixture must withdraw MP4");
 
     let v = app.view();
     assert!(
@@ -1675,7 +1687,7 @@ fn a_format_the_source_cannot_offer_is_never_left_selected() {
     ok.source = "/media/h264.iso".into();
     ok.video_codecs = vec!["H.264".to_string()];
     ok.format = "Selected titles → MP4".into();
-    assert!(ok.mp4_possible());
+    assert!(ok.fit().mp4);
     assert_eq!(ok.view().format, "Selected titles → MP4");
     assert_eq!(ok.effective_format(), "Selected titles → MP4");
 }
@@ -1711,6 +1723,9 @@ fn tagged_disc(streams: &[(&str, &str, bool)]) -> Scanned {
         title_ids: vec![],
         video_codecs: vec!["H.264".into()],
         details: vec![],
+        keys: None,
+        needs_disc: false,
+        refusal: None,
     }
 }
 

@@ -300,7 +300,7 @@ pub(super) fn damage_severity_for(errors: u32, total_lost_ms: f64) -> String {
 pub static STATE: once_cell::sync::Lazy<Mutex<std::collections::HashMap<String, RipState>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
 
-/// Operator-chosen TMDB title overrides, keyed by device. Set from the Ripper
+/// Operator-chosen TMDB title overrides, keyed by device. Set from the Drives
 /// card's "✎ change" picker BEFORE a manual rip; consumed once by `rip_disc`,
 /// where it takes precedence over the scan's auto-match so the rip files under
 /// the operator's pick (and counts as confident → no review hold).
@@ -308,7 +308,7 @@ pub static TITLE_OVERRIDES: once_cell::sync::Lazy<
     Mutex<std::collections::HashMap<String, crate::server::tmdb::TmdbResult>>,
 > = once_cell::sync::Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
 
-/// Record an operator title override for `device` (from the Ripper card picker).
+/// Record an operator title override for `device` (from the Drives card picker).
 pub fn set_title_override(device: &str, r: crate::server::tmdb::TmdbResult) {
     // Recover-and-proceed on poison (same convention as is_busy/update_state):
     // silently dropping the override would lose the operator's title pick.
