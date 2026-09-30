@@ -92,6 +92,7 @@ jobs:
           freemkv-engine = { path = "../freemkv-engine" }
           freemkv-keysources = { path = "../freemkv-keysources" }
           freemkv-i18n = { path = "../freemkv-i18n" }
+          freemkv-unlock = { path = "../freemkv-unlock" }
 
           [patch."https://github.com/freemkv/freemkv-unlock"]
           freemkv-unlock = { path = "../freemkv-unlock" }
@@ -266,6 +267,7 @@ jobs:
           freemkv-engine = { path = "../freemkv-engine" }
           freemkv-keysources = { path = "../freemkv-keysources" }
           freemkv-i18n = { path = "../freemkv-i18n" }
+          freemkv-unlock = { path = "../freemkv-unlock" }
 
           [patch."https://github.com/freemkv/freemkv-unlock"]
           freemkv-unlock = { path = "../freemkv-unlock" }

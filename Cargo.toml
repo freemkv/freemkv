@@ -180,4 +180,5 @@ tempfile = "3"
 libfreemkv = { git = "https://github.com/freemkv/libfreemkv", tag = "v1.7.7" }
 freemkv-engine = { git = "https://github.com/freemkv/freemkv-engine", tag = "v1.7.7" }
 freemkv-keysources = { git = "https://github.com/freemkv/freemkv-keysources", tag = "v1.7.7" }
+freemkv-unlock = { git = "https://github.com/freemkv/freemkv-unlock", tag = "v1.7.7" }
 freemkv-i18n = { git = "https://github.com/freemkv/freemkv-i18n", tag = "v1.7.7" }

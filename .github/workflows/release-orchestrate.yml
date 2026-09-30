@@ -59,7 +59,7 @@ jobs:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
           SKIP_MEDIA: ${{ inputs.skip_media }}
           PRERELEASE: ${{ inputs.prerelease }}
-          NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|promote|release-orchestrate|Release|ci-runner-launch|ci-runner-sweeper)$'
+          NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|promote|release-orchestrate|Release|ci-runner-sweeper)$'
         run: |
           set -uo pipefail
           if [ "$SKIP_MEDIA" = true ]; then
@@ -268,28 +268,23 @@ jobs:
           #              └── bdemu         └── freemkv (+ keysources)
           #
           #   Committed dep forms (CI-resolvable + locally buildable):
-          #     - binaries (freemkv/bdemu) + keysources carry a committed
-          #       [patch.crates-io] redirecting `libfreemkv`/`freemkv-keysources` to a GIT
-          #       TAG. A gitignored .cargo/config.toml overrides those to local paths for
-          #       dev. release.sh re-pins the committed tags.
-          #     - libfreemkv + bdemu dep freemkv-unlock by a committed `{ path = ... }`
-          #       (it has no crates.io name to [patch.crates-io]). The release SWAPS that
-          #       path→`{ git, tag }` in the TAGGED commit (so the tag is CI-resolvable),
-          #       then a follow-up commit restores the path dep on the branch tip
-          #       (tag_release_with_unlock_swap).
+          #     - every crate deps its siblings by VERSION (`libfreemkv = "1.7"`,
+          #       `freemkv-unlock = { version = "1.7", ... }`) and carries a committed
+          #       [patch.crates-io] redirecting each sibling in its graph to a GIT TAG.
+          #       A gitignored .cargo/config.toml overrides those to local paths for
+          #       dev. The release re-pins the committed tags and bumps the version reqs.
           #
           #   This script:
           #     1. tags freemkv-unlock FIRST (the base — its tag must exist before the
           #        downstream path→git swaps resolve);
-          #     2. tags libfreemkv (swap freemkv-unlock path→git in the tag), then
+          #     2. tags libfreemkv (re-pin its freemkv-unlock git tag), then
           #        keysources (re-pin libfreemkv git tag) — neither touches crates.io;
           #     3. confirms all three lib tags on the remote (a binary's Cargo.lock regen
           #        fetches them);
           #     4. for each binary: re-pins its [patch.crates-io] git tags (+ base version
           #        reqs), regenerates Cargo.lock with the dev .cargo/config.toml DISABLED
           #        (so the lock references the git tag, not a local path), verifies the
-          #        lock, scans the source, commits, pushes, tags. bdemu additionally swaps
-          #        its freemkv-unlock path→git tag in its tagged commit.
+          #        lock, scans the source, commits, pushes, tags.
           #
           # Lockfile invariant (binaries, committed lock):
           #   - exactly ONE libfreemkv entry, source =
@@ -366,10 +361,8 @@ jobs:
           # tagged FIRST, before everything. NEVER published to crates.io (it carries drive
           # firmware); consumed only by git tag. Its Cargo.lock is gitignored.
           FREEMKV_UNLOCK_DIR="$CANONICAL_ROOT/freemkv-unlock"
-          # The dep name libfreemkv + bdemu reference for the unlock layer. Both commit it
-          # as a `{ path = "../freemkv-unlock" }` dep (local cross-repo dev); the release
-          # swaps it to `{ git, tag = "vX.Y.Z" }` in the TAGGED commit so the tag is
-          # CI-resolvable, then restores the path dep on the branch (see swap_unlock_dep_*).
+          # The dep name for the unlock layer: a version dep in libfreemkv + bdemu, git-tag
+          # patched ([patch.crates-io]) in every crate whose graph reaches it.
           UNLOCK_DEP="freemkv-unlock"
           # LIB crates tagged after freemkv-unlock + libfreemkv. keysources depends on
           # libfreemkv (now git-only), so it git-tag-pins it like the binaries do. NONE of
@@ -942,17 +935,17 @@ jobs:
               ok "libfreemkv v$VERSION already tagged on origin — skipping (idempotent resume)"
               return 0
             fi
-            say "step 2: libfreemkv → v$VERSION (OFF crates.io; swaps freemkv-unlock path→git for the tag)"
+            say "step 2: libfreemkv → v$VERSION (OFF crates.io; re-pins freemkv-unlock git tag)"
+            repin_git_patch "$LIBFREEMKV_DIR" "$UNLOCK_DEP" "$VERSION"
+            bump_dep "$LIBFREEMKV_DIR" "$UNLOCK_DEP" "$VERSION"
             bump_cargo_toml_version "$LIBFREEMKV_DIR" "$VERSION"
             bump_macos_plist_version "$LIBFREEMKV_DIR" "$VERSION"
             bump_readme_version "$LIBFREEMKV_DIR" "libfreemkv" "$VERSION"
             date_changelog_heading "$LIBFREEMKV_DIR" "$VERSION"
             # No-op while run_security_gate is disabled (see there).
             run_security_gate "$LIBFREEMKV_DIR" "libfreemkv" source
-            # libfreemkv's Cargo.lock is gitignored → stage_lock=false (no lock to regen).
-            # The helper cuts the tag on a git-pinned freemkv-unlock commit, then restores
-            # the path dep on the branch tip.
-            tag_release_with_unlock_swap "$LIBFREEMKV_DIR" "libfreemkv" "v$VERSION: bump version" false
+            # stage_lock=false: the lock is not regenerated for a lib tag.
+            git_commit_push_tag "$LIBFREEMKV_DIR" "libfreemkv" "v$VERSION: bump version" false
           }
 
           # ────────────── step 2: confirm the lib git TAG is on the remote ──────────
@@ -1163,96 +1156,6 @@ jobs:
             ok "$(basename "$dir"): $dep git patch re-pinned → tag = \"$tag\""
           }
 
-          # swap_unlock_dep_to_git <crate-dir> <version>
-          # Rewrite a committed `freemkv-unlock = { path = "../freemkv-unlock"[, opts] }`
-          # dep to `{ git = "<url>", tag = "vX.Y.Z"[, opts] }`, preserving trailing options
-          # (e.g. `features = ["emulation"]`). libfreemkv + bdemu commit the path form for
-          # local cross-repo dev; the release swaps it so the TAGGED commit resolves
-          # freemkv-unlock from git (a sibling path won't exist in CI / a consumer's git
-          # checkout). No-op if there is no path-form freemkv-unlock dep. Idempotent.
-          swap_unlock_dep_to_git() {
-            local dir="$1" ver="$2"
-            local toml="$dir/Cargo.toml"
-            [ -f "$toml" ] || return 0
-            local url="https://github.com/$GIT_ORG/$UNLOCK_DEP"
-            grep -qE "^[[:space:]]*${UNLOCK_DEP}[[:space:]]*=[[:space:]]*\{[[:space:]]*path[[:space:]]*=" "$toml" || return 0
-            if $DRY_RUN; then
-              printf '  [dry-run] %s: %s path dep → { git = "%s", tag = "v%s"<, opts> }\n' "$(basename "$dir")" "$UNLOCK_DEP" "$url" "$ver"
-              return 0
-            fi
-            # Capture everything after the path value (` }` or `, features = [...] }`) and
-            # re-emit it on the git form. Portable BSD+GNU sed.
-            sed -i.bak -E "s|^([[:space:]]*${UNLOCK_DEP}[[:space:]]*=[[:space:]]*\{)[[:space:]]*path[[:space:]]*=[[:space:]]*\"[^\"]*\"(.*)\$|\1 git = \"${url}\", tag = \"v${ver}\"\2|" "$toml"
-            rm -f "$toml.bak"
-            ok "$(basename "$dir"): $UNLOCK_DEP path dep → git tag v$ver"
-          }
-
-          # swap_unlock_dep_to_path <crate-dir>
-          # Reverse of swap_unlock_dep_to_git: restore `{ git, tag }` back to
-          # `{ path = "../freemkv-unlock"[, opts] }` so the BRANCH keeps the local-dev path
-          # dep after the tag is cut (the git form lives only in the tagged commit).
-          # Preserves trailing options. No-op if already path. Idempotent.
-          swap_unlock_dep_to_path() {
-            local dir="$1"
-            local toml="$dir/Cargo.toml"
-            [ -f "$toml" ] || return 0
-            grep -qE "^[[:space:]]*${UNLOCK_DEP}[[:space:]]*=[[:space:]]*\{[[:space:]]*git[[:space:]]*=" "$toml" || return 0
-            if $DRY_RUN; then
-              printf '  [dry-run] %s: %s git dep → { path = "../%s"<, opts> }\n' "$(basename "$dir")" "$UNLOCK_DEP" "$UNLOCK_DEP"
-              return 0
-            fi
-            # Strip the pinned `git = "...", tag = "..."` fields, re-emit the path form,
-            # preserving any trailing options after the tag value.
-            sed -i.bak -E "s|^([[:space:]]*${UNLOCK_DEP}[[:space:]]*=[[:space:]]*\{)[[:space:]]*git[[:space:]]*=[[:space:]]*\"[^\"]*\",[[:space:]]*tag[[:space:]]*=[[:space:]]*\"[^\"]*\"(.*)\$|\1 path = \"../${UNLOCK_DEP}\"\2|" "$toml"
-            rm -f "$toml.bak"
-            ok "$(basename "$dir"): $UNLOCK_DEP git dep → path (dev)"
-          }
-
-          # tag_release_with_unlock_swap <crate-dir> <name> <msg> <stage_lock>
-          # For libfreemkv + bdemu, which depend on freemkv-unlock by a committed path dep.
-          # Honors the "path committed, release swaps" model with TWO ordinary commits (no
-          # history rewrite): the tagged commit carries the CI-resolvable git+tag form; a
-          # follow-up "restore" commit returns the branch tip to the path dep for dev.
-          #   commit A (tagged): swap path→git tag (+ regen lock if committed), then the
-          #                      shared git_commit_push_tag commits/pushes/tags it.
-          #   commit B (branch tip): swap git→path back (+ regen), commit + push.
-          # Idempotent: if the tag already exists, just ensure the branch tip is the path
-          # form (commit B) and return.
-          tag_release_with_unlock_swap() {
-            local dir="$1" name="$2" msg="$3" stage_lock="${4:-true}"
-            shift 4   # remaining args = dep names to verify in the git-form lock
-
-            # commit A — the tagged, git-pinned release commit. git_commit_push_tag is
-            # idempotent (skips the commit if the tag already exists at this version).
-            swap_unlock_dep_to_git "$dir" "$VERSION"
-            if [ "$stage_lock" = true ] && ! $DRY_RUN; then
-              regenerate_lockfile "$dir"
-              local vdep
-              for vdep in "$@"; do verify_lockfile_invariants "$dir" "$vdep" "$VERSION"; done
-            fi
-            git_commit_push_tag "$dir" "$name" "$msg (freemkv-unlock git-pinned for the tag)" "$stage_lock"
-
-            # commit B — restore the path dep so the branch tip is back to local-dev form.
-            swap_unlock_dep_to_path "$dir"
-            if $DRY_RUN; then
-              printf '  [dry-run] %s: restore %s path dep on branch tip (commit + push $WORK_BRANCH)\n' "$name" "$UNLOCK_DEP"
-              return 0
-            fi
-            if $PRERELEASE; then
-              say "$name: prerelease — skipping branch-tip path-dep restore (qa not pushed)"
-              return 0
-            fi
-            [ "$stage_lock" = true ] && regenerate_lockfile "$dir"
-            git -C "$dir" add Cargo.toml
-            [ "$stage_lock" = true ] && git -C "$dir" add Cargo.lock 2>/dev/null || true
-            if ! git -C "$dir" diff --cached --quiet; then
-              git -C "$dir" commit -m "restore $UNLOCK_DEP path dep for local dev (post-v$VERSION)"
-              git -C "$dir" push origin "$WORK_BRANCH" \
-                || { git -C "$dir" pull --rebase origin "$WORK_BRANCH" && git -C "$dir" push origin "$WORK_BRANCH"; }
-              ok "$name: branch tip restored to $UNLOCK_DEP path dep"
-            fi
-          }
-
           # bump_dep <crate-dir> <dep-name> <new-version>
           # Updates the `<dep> = "..."` line in Cargo.toml to the right specifier for the
           # target release:
@@ -1275,26 +1178,24 @@ jobs:
               *)   target=$(printf '%s' "$newver" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/') ;;  # stable: X.Y
             esac
 
-            # `|| true`: grep exits 1 when the crate doesn't declare <dep> (e.g. bdemu has
-            # no freemkv-keysources dep). Under `set -euo pipefail` that bare non-zero
-            # would kill the release; the empty result is handled as "nothing to bump".
-            local current
-            current=$(grep -m1 "^$dep *=" "$toml" | sed -E "s/^$dep *= *\"([^\"]+)\".*/\1/" || true)
-            [ -n "$current" ] || return 0
-
-            if [ "$current" = "$target" ]; then
-              ok "$(basename "$dir"): $dep dep already at \"$target\""
-              return 0
-            fi
+            # Both forms, on every matching line (deps AND dev-deps):
+            #   dep = "X.Y"    and    dep = { version = "X.Y", ... }
+            local re_str="^($dep *= *\")[^\"]+(\")"
+            local re_tbl="^($dep *= *\\{[^}]*version *= *\")[^\"]+(\")"
+            grep -qE "$re_str|$re_tbl" "$toml" || return 0
 
             if $DRY_RUN; then
-              printf '  [dry-run] bump %s: %s dep "%s" → "%s"\n' "$(basename "$dir")" "$dep" "$current" "$target"
+              printf '  [dry-run] bump %s: %s version req(s) → "%s"\n' "$(basename "$dir")" "$dep" "$target"
               return 0
             fi
 
-            sed -i.bak -E "s|^$dep *= *\"[^\"]+\"|$dep = \"$target\"|" "$toml"
+            sed -i.bak -E -e "s|$re_str|\\1$target\\2|" -e "s|$re_tbl|\\1$target\\2|" "$toml"
+            if cmp -s "$toml" "$toml.bak"; then
+              ok "$(basename "$dir"): $dep version req(s) already \"$target\""
+            else
+              ok "$(basename "$dir"): $dep version req(s) → \"$target\""
+            fi
             rm -f "$toml.bak"
-            ok "$(basename "$dir"): $dep dep \"$current\" → \"$target\""
           }
 
           # ─── git commit + push + tag (idempotent) — shared by lib + binary paths ──
@@ -1491,6 +1392,7 @@ jobs:
             say "step 3.$name: re-pin libfreemkv git tag + bump + tag (OFF crates.io)"
 
             repin_git_patch "$dir" libfreemkv "$VERSION"   # committed [patch.crates-io] git tag
+            repin_git_patch "$dir" "$UNLOCK_DEP" "$VERSION"
             bump_dep "$dir" libfreemkv "$VERSION"          # bare version req, satisfied by the tag
             bump_cargo_toml_version "$dir" "$VERSION"
             bump_macos_plist_version "$dir" "$VERSION"
@@ -1517,6 +1419,7 @@ jobs:
 
             repin_git_patch "$dir" libfreemkv "$VERSION"
             repin_git_patch "$dir" freemkv-keysources "$VERSION"
+            repin_git_patch "$dir" "$UNLOCK_DEP" "$VERSION"
             bump_dep "$dir" libfreemkv "$VERSION"
             bump_dep "$dir" freemkv-keysources "$VERSION"
             bump_cargo_toml_version "$dir" "$VERSION"
@@ -1541,11 +1444,10 @@ jobs:
             fi
             say "step 3.$name: re-pin git tags + bump + regen lock + verify + commit + tag"
 
-            # Re-pin the [patch.crates-io] git tags to this release. (libfreemkv +
-            # keysources are both git-only now; freemkv reaches freemkv-unlock
-            # transitively through libfreemkv's tagged Cargo.toml, so they carry no
-            # freemkv-unlock dep of their own to re-pin.)
+            # Re-pin the [patch.crates-io] git tags to this release (freemkv-unlock too:
+            # libfreemkv's tag deps it by version, so every root patches it).
             repin_git_patch "$dir" libfreemkv "$VERSION"
+            repin_git_patch "$dir" "$UNLOCK_DEP" "$VERSION"
             repin_git_patch "$dir" freemkv-keysources "$VERSION"
             # freemkv-i18n is a git-tag [patch.crates-io] dep of freemkv only;
             # both helpers no-op on bdemu (no i18n dep line), so calling unconditionally
@@ -1560,24 +1462,13 @@ jobs:
             bump_dep "$dir" freemkv-keysources "$VERSION"
             bump_dep "$dir" freemkv-i18n "$VERSION"
             bump_dep "$dir" freemkv-engine "$VERSION"
+            bump_dep "$dir" "$UNLOCK_DEP" "$VERSION"
             bump_cargo_toml_version "$dir" "$VERSION"
             bump_macos_plist_version "$dir" "$VERSION"
             bump_readme_version "$dir" "$name" "$VERSION"
             date_changelog_heading "$dir" "$VERSION"
             date_metainfo_release "$dir" "$VERSION"
 
-            # bdemu directly deps freemkv-unlock by a committed path dep — its tagged
-            # commit must carry the git+tag form (and a lock that references it), then the
-            # branch restores the path dep. tag_release_with_unlock_swap does the swap +
-            # regen + verify + commit/tag + restore. The other binaries have no
-            # freemkv-unlock dep, so they take the plain regen + verify + commit + tag path.
-            if [ "$name" = bdemu ]; then
-              run_security_gate "$dir" "$name" source
-              tag_release_with_unlock_swap "$dir" "$name" \
-                "v$VERSION: bump version (unified release with libfreemkv $VERSION)" true \
-                libfreemkv freemkv-keysources
-              return 0
-            fi
 
             regenerate_lockfile "$dir"
             verify_lockfile_invariants "$dir" libfreemkv "$VERSION"

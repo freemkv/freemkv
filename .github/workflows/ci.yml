@@ -41,9 +41,8 @@ permissions:
 # any `path:` outside $GITHUB_WORKSPACE, and the workspace IS the repo dir.
 # Repos stay separate, tags stay separate, the release cascade is untouched.
 #
-# freemkv-unlock gets a checkout but no patch entry: it is reached as
-# libfreemkv's path dep (../freemkv-unlock), which resolves to the workspace
-# root under this layout.
+# freemkv-unlock is patched like the rest: libfreemkv depends on it by version
+# (git-tag override), so the workspace needs the path redirect too.
 #
 # `--locked` is not used. The committed Cargo.lock resolves the freemkv crates
 # as path packages and carries [[patch.unused]] entries — artifacts of whichever
@@ -124,7 +123,7 @@ jobs:
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -153,7 +152,7 @@ jobs:
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -183,7 +182,7 @@ jobs:
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -213,7 +212,7 @@ jobs:
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -241,7 +240,7 @@ jobs:
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -270,7 +269,7 @@ jobs:
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -296,7 +295,7 @@ jobs:
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - name: Install GTK4 + libadwaita development headers
         run: |
@@ -345,7 +344,7 @@ jobs:
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -379,7 +378,7 @@ jobs:
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -427,17 +426,15 @@ jobs:
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
-        with:
-          command: check advisories bans licenses sources
-          # Audit the app build's UI crates too, not just the default CLI graph.
-          arguments: --all-features
-          manifest-path: freemkv/Cargo.toml
+      - uses: taiki-e/install-action@cargo-deny
+      # Run from the repo dir so the generated .cargo/config.toml path patches apply.
+      - run: cargo deny --all-features check advisories bans licenses sources
+        working-directory: freemkv
 
   # The shared core must stay platform-neutral: this checks the LIBRARY on
   # Linux, so if a `df` call or any OS assumption creeps into ui.rs/engine.rs
@@ -452,7 +449,7 @@ jobs:
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -518,7 +515,7 @@ jobs:
       - uses: freemkv/.github/.github/actions/checkout-siblings@v1
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
-          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n
+          patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           self: freemkv
       - name: Install GTK4 + libadwaita development headers
         run: |
