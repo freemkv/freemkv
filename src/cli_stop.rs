@@ -85,6 +85,7 @@ fn install_handler() {
                 }
                 // SS-21: "TerminateProcess … is used to unconditionally cause a process to
                 // exit", not ExitProcess: "the DLL detach code … results in a deadlock".
+                // SAFETY: the current-process pseudo-handle is always valid; no Rust state is read.
                 CtrlAction::ForceExit(code) => unsafe {
                     TerminateProcess(GetCurrentProcess(), code);
                     1

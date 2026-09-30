@@ -3705,7 +3705,10 @@ mod tests {
             std::thread::sleep(T29 / 2);
             tok.progress.bump();
         }
-        Ok(probe_scan())
+        match tok.halt.is_cancelled() {
+            true => Err("stopped".to_string()),
+            false => Ok(probe_scan()),
+        }
     }
 
     // FT15a (T29): "the probe's `Progress` moves every 0.5 × window for 4 windows → the
