@@ -213,6 +213,8 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::TimedOut { op: "verify" },
         // MPG-F1 (mpg-output-design v5 §8): the mpg:// cascade's one code, E9074.
         Error::MpgNoVideoTrack,
+        // mpg:// end of input left access units unwritten, E9075.
+        Error::MpgUnpacketized,
     ]
 }
 
