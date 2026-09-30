@@ -999,28 +999,9 @@ pub(crate) fn key_summary(
 ///
 /// The library's `Display` is `E<code>` or `E<code>: <data>` (no English by
 /// design), so this parses the leading digit run rather than the whole
-/// string. Returns `0` if the string does not start with `E<digits>`.
-/// libfreemkv has `io_error_code` internally but does not export it — when
-/// it does, delete this and call it instead.
+/// string. Returns `0` if there is no code (or it exceeds `u16`, like the libs').
 pub fn error_code(e: &std::io::Error) -> u16 {
-    let s = e.to_string();
-    let Some(rest) = s.strip_prefix('E') else {
-        return 0;
-    };
-    let digits_end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    let digits = &rest[..digits_end];
-    if digits.is_empty() {
-        return 0;
-    }
-    // The run is ASCII digits only, so a parse failure means the value exceeds
-    // the type — a code above `u16::MAX` still names a real error, so parse wide
-    // then saturate into the u16 rather than collapsing to `0` ("no error").
-    digits
-        .parse::<u32>()
-        .map(|v| v.min(u16::MAX as u32) as u16)
-        .unwrap_or(u16::MAX)
+    fe::error_code(e).unwrap_or(0)
 }
 
 // Map a recovery sweep's terminal flags to the run's result before the ISO
@@ -2541,6 +2522,18 @@ fn staging_not_kept_note(keep_iso: bool, scoped: bool) -> String {
     format!("\n{note}")
 }
 
+// The recovery job, carrying the picked titles so loss is judged over them, not title 0.
+fn recovery_job(source: &str, iso_path: &str, indices: &[usize]) -> fe::Job {
+    fe::Job::new(format!("disc://{source}"), iso_path.to_string())
+        .with_selection(fe::Selection::Titles(indices.to_vec()))
+}
+
+// Remove the staging ISO and its mapfile sidecar.
+fn remove_staging_iso(iso_path: &str, mapfile: &std::path::Path) {
+    let _ = std::fs::remove_file(mapfile);
+    let _ = std::fs::remove_file(iso_path);
+}
+
 // Whether the staging ISO is removed after the title mux. Three conditions, not one: keep_iso
 // alone would delete the image on a cancel or failed mux, destroying the one artefact that lets
 // the user retry.
@@ -2703,7 +2696,7 @@ fn run_disc_scanning(
         // The user picked title NUMBERS against a scan; the re-scanned staged
         // image may list titles differently if damage dropped a playlist, so
         // `scanned_ids` lets the selection re-resolve by identity.
-        let mut job = fe::Job::new(format!("disc://{}", req.source), iso_path.clone());
+        let mut job = recovery_job(&req.source, &iso_path, &indices);
         job.raw = recovery_raw(req.multipass, want_iso, req.raw)?;
         // A decrypting copy reads through the set and refuses up front on anything it
         // lacks (E7026 for Pending forensic keys, KU §5.4); a raw one has no keys at all.
@@ -2766,6 +2759,7 @@ fn run_disc_scanning(
                 let _ = std::fs::remove_file(&iso_path);
                 return Err("Recovery produced no readable data — nothing to mux.".into());
             }
+            let map_path = disc.mapfile_for(std::path::Path::new(&iso_path));
             let mux = mux_staged_titles(req, &iso_path, disc, set, &indices, &label, sink, state);
             // The staged image is only disposable once the titles it was staged
             // for actually landed. `state.cancel` is the flag the Stop button
@@ -2774,7 +2768,7 @@ fn run_disc_scanning(
             // A scoped staging image is not a disc image, so it is never kept (JUDGEMENT).
             let keep = req.keep_iso && staging.is_none();
             if should_delete_staging_iso(keep, mux.is_ok(), cancelled) {
-                let _ = std::fs::remove_file(&iso_path);
+                remove_staging_iso(&iso_path, &map_path);
             }
             if let Err(e) = &mux {
                 return Err(format!("{e} — the recovered image is kept: {iso_path}"));
@@ -3870,10 +3864,34 @@ mod key_summary_tests {
         assert_eq!(c("E8005: /path/to/keydb.cfg"), 8005);
         assert_eq!(c("E6000: 12345 0x02"), 6000);
         assert_eq!(c("E6014: 0x1100"), 6014);
+        // Same range as the libs: u16 boundary kept, wider is no code (not saturated).
+        assert_eq!(c("E65535"), 65535);
+        assert_eq!(c("E65536"), 0);
+        assert_eq!(c("E99999: x"), 0);
         // Not a library code.
         assert_eq!(c("No drive found"), 0);
         assert_eq!(c("E"), 0);
         assert_eq!(c("Eabc"), 0);
+    }
+
+    #[test]
+    fn recovery_job_carries_the_picked_titles() {
+        let j = super::recovery_job("/dev/sr0", "/x/a.iso", &[2, 0]);
+        assert!(matches!(j.selection, freemkv_engine::Selection::Titles(ref t) if t == &[2, 0]));
+    }
+
+    #[test]
+    fn removing_the_staging_iso_removes_its_mapfile() {
+        let dir = std::env::temp_dir().join(format!("fmkv-stg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let iso = dir.join("L.iso");
+        let d = disc(false);
+        let map = d.mapfile_for(&iso);
+        std::fs::write(&iso, b"x").unwrap();
+        std::fs::write(&map, b"m").unwrap();
+        super::remove_staging_iso(iso.to_str().unwrap(), &map);
+        assert!(!iso.exists() && !map.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // All three key_source values must produce distinct key sources.
