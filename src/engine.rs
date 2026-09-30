@@ -724,9 +724,14 @@ fn drive_scan(
     keys: &KeyConfig,
     tok: &OpenToken,
 ) -> Result<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>), String> {
+    // The cold keydb parse is work with no progress signal; T29 must not fire on it.
+    let credentials = {
+        let _busy = tok.progress.busy();
+        session_credentials(keys)
+    };
     let session = fe::open_scan_with(
         disc_target(source),
-        session_credentials(keys),
+        credentials,
         false,
         &tok.halt,
         &tok.progress,
