@@ -1780,9 +1780,6 @@ fn pipe_disc(
         batch_sectors: batch,
         raw,
         selection,
-        // No per-frame send deadline (T27): a slow-but-alive downstream blocks;
-        // Ctrl-C still stops the pump via the process token.
-        ..Default::default()
     };
     let result = libfreemkv::mux_with_keys(
         libfreemkv::MuxSource::Session {
@@ -1909,9 +1906,6 @@ fn pipe(
         batch_sectors: 0, // unused by the URL arm (input() owns batching)
         raw: opts.raw,
         selection: Default::default(),
-        // No per-frame send deadline (T27): a slow-but-alive consumer blocks;
-        // Ctrl-C still stops the pump via the process token.
-        ..Default::default()
     };
     let result = libfreemkv::mux_with_keys(
         MuxSource::Url {
@@ -6551,7 +6545,6 @@ mod formatter_tests {
             batch_sectors: 64,
             raw: false,
             selection: libfreemkv::StreamSelection::default(),
-            ..Default::default()
         };
         let (res, printed) = capture(|| {
             libfreemkv::mux_with_keys(

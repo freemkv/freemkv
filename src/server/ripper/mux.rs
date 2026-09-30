@@ -1306,9 +1306,6 @@ pub(crate) fn mux_live(
         batch_sectors: inputs.batch,
         raw: false,
         selection: Default::default(),
-        // No per-frame send deadline (T27): a slow sink blocks; Stop and the hard
-        // watchdog (HARD_WATCHDOG_STALL_SECS) are the bound.
-        ..Default::default()
     };
 
     crate::server::log::device_log(

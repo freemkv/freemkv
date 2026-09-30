@@ -1808,8 +1808,6 @@ fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
         // stream_selection_for. The Session (live-drive) arm gets its own
         // per-title options from title_session_mux_opts.
         selection: libfreemkv::StreamSelection::default(),
-        // T27 (ST-X1a): no per-frame send deadline; a halt-aware send only (GUI = CLI).
-        ..Default::default()
     }
 }
 
