@@ -80,7 +80,15 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
 
    The credentials expire (one year by default); export new ones before then.
 
-4. Ask for store review of the drive interfaces on the
+4. Requested 2026-09-30:
+   [interfaces](https://forum.snapcraft.io/t/freemkv-optical-drive-write-hardware-observe-dbus-slot/53427)
+   (`optical-write` and `hardware-observe` auto-connection, the `freemkv-dbus`
+   slot) and [alias](https://forum.snapcraft.io/t/freemkv-alias-freemkv-cli/53428)
+   (`freemkv-cli`). `removable-media` auto-connection was not requested: the
+   store rarely grants it outside browsers and media editors or players, and
+   manual connection works without a grant. Original instructions follow.
+
+   Ask for store review of the drive interfaces on the
    [Snapcraft forum](https://forum.snapcraft.io/c/store-requests/19): a
    "store-requests" post asking for **allow-connection and auto-connection**
    of `optical-drive` with `write: true` (the `optical-write` plug) for
