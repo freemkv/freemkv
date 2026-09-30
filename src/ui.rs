@@ -2994,7 +2994,7 @@ pub struct Row {
 }
 
 /// The Result page heading for a verdict, matched on the TYPED outcome.
-fn result_heading(outcome: crate::engine::RunOutcome) -> String {
+pub(crate) fn result_heading(outcome: crate::engine::RunOutcome) -> String {
     match outcome {
         crate::engine::RunOutcome::Cancelled => crate::strings::get("gui.result.cancelled"),
         // Reuses "nothing written" instead of a new key: `freemkv-i18n` is

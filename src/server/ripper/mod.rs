@@ -5404,15 +5404,26 @@ pub fn eject_drive(device_path: &str) {
     if join_rip_thread(dev, Duration::from_secs(60)).is_err() {
         tracing::warn!(device = %dev, "rip thread did not drain within 60s of eject");
     }
-    drop_session(dev);
+    // Stop design §2.5: eject through `finish` on the handle the idle session holds; with
+    // none (or a dead one, e.g. after a USB re-enumeration) open the drive once.
+    let held = take_session(dev).map(|s| s.drive);
     unregister_halt(dev);
     crate::server::log::archive_device_log(dev);
     // Pre-0.25.2 both branches here used `let _ =` and any failure was
     // invisible: the user-facing symptom was "auto_eject is set but the
     // disc stayed put, no log line, no idea why". Surface both.
+    if let Some(d) = held {
+        match libfreemkv::DiscSession::from_drive(d).finish(libfreemkv::Finish::Eject) {
+            Ok(()) => return,
+            Err(e) => {
+                tracing::warn!(device = %dev, error = %e, "eject on the held handle failed; reopening")
+            }
+        }
+    }
     match libfreemkv::Drive::open(std::path::Path::new(device_path)) {
-        Ok(mut session) => {
-            if let Err(e) = session.eject() {
+        Ok(drive) => {
+            let session = libfreemkv::DiscSession::from_drive(drive);
+            if let Err(e) = session.finish(libfreemkv::Finish::Eject) {
                 crate::server::log::device_log(dev, &format!("eject failed: {e}"));
                 tracing::warn!(device = %dev, error = %e, "eject command failed");
             }
@@ -11376,6 +11387,45 @@ mod tests {
         );
 
         forget_device(device);
+    }
+}
+
+#[cfg(test)]
+mod held_eject_tests {
+    use super::{DriveSession, eject_drive, register_halt, store_session, take_session};
+    use libfreemkv::test_util::FakeTransport;
+    use libfreemkv::{Drive, Halt};
+
+    // SS-6 MMC-6 Table 633: LoEj 1, Start 0 = "Eject the disc if permitted".
+    fn is_eject(c: &[u8]) -> bool {
+        c[0] == 0x1B && c[4] & 0x03 == 0x02
+    }
+
+    // FT2 (stop design §2.5): `/api/eject` on a device whose idle session holds the drive
+    // ejects through that handle's `finish`; the device path cannot be opened a second time.
+    #[test]
+    fn eject_drive_uses_the_held_session_handle() {
+        let dev = format!("ft2_eject_{}", std::process::id());
+        let halt = Halt::new();
+        let (t, fake) = FakeTransport::new();
+        let session = DriveSession {
+            drive: Drive::from_transport(Box::new(t)),
+            disc: None,
+            scanned: false,
+            probed: false,
+            tmdb: None,
+            device_path: format!("/nonexistent/{dev}"),
+            key_verdict: None,
+            keys: None,
+            key_error: None,
+        };
+        store_session(&dev, session);
+        register_halt(&dev, halt.clone());
+        eject_drive(&format!("/nonexistent/{dev}"));
+        assert!(halt.is_cancelled());
+        assert_eq!(fake.count(is_eject), 1, "{:02x?}", fake.cdbs());
+        assert_eq!(fake.live_handles(), 0, "the held handle is closed");
+        assert!(take_session(&dev).is_none());
     }
 }
 
