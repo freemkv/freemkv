@@ -16,7 +16,10 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 // ── CLI shell (the gold-standard freemkv CLI, replicated verbatim) ──────────
+// Also declared in `lib.rs`: the CLI and the GUI hold an ISO under one `<final>.lock`.
+mod artifact_lock;
 mod cli_entry;
+mod cli_stop;
 mod disc_capture;
 // Also declared in `lib.rs`: `pipe` (here) and `engine` (GUI) must report the
 // same wording for a copy that recovered less than the whole disc.

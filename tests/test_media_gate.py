@@ -143,7 +143,7 @@ def base_files():
         'freemkv': {path: real(path) for path in (
             'Cargo.toml', 'build.rs', 'res/freemkv.manifest', 'src/main.rs', 'src/lib.rs', 'src/pipe.rs',
             'src/keydb_fetch.rs', 'src/file_identity.rs', 'src/title_identity.rs', 'src/cli_entry.rs',
-            'src/disc_copy_verdict.rs', 'src/sources.rs', 'src/rip_keys.rs',
+            'src/disc_copy_verdict.rs', 'src/sources.rs', 'src/rip_keys.rs', 'src/cli_stop.rs', 'src/artifact_lock.rs',
             '.github/workflows/qa.yml', 'tests/media_gate.py', 'tests/media_checks.py',
             'tests/media-gate-policy.json')} | {
             'Cargo.lock': lock_text(), 'src/ui.rs': 'pub fn ui() {}\n', 'res/freemkv.ico': 'ICO',
@@ -432,7 +432,7 @@ class GuardTests(unittest.TestCase):
                             for e in errors), errors)
         self.assertTrue(any(e.startswith('G3 libfreemkv/build.rs') and '.git/HEAD' in e for e in errors), errors)
         self.assertTrue(any(e.startswith('G3 libfreemkv/build.rs') and '.git/{}' in e for e in errors), errors)
-        self.assertTrue(any(e.startswith('G5 freemkv/src/pipe.rs') and '`libc::`' in e for e in errors), errors)
+        self.assertTrue(any(e.startswith('G5 freemkv/src/cli_stop.rs') and '`libc::`' in e for e in errors), errors)
         self.assertEqual(ws.guards(POLICY), [])
 
 

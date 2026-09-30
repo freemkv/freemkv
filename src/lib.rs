@@ -13,6 +13,8 @@
 /// Portable and Win32/AppKit-free on purpose — the routing is the part that
 /// can be wrong without a window to look at, so it must be testable here.
 pub mod app_entry;
+// The artifact lock the CLI and the GUI take on an ISO (stop design v5 §2.5).
+mod artifact_lock;
 /// What a finished `disc:// -> iso://` copy still has to tell the user about
 /// unrecovered sectors — the ONE renderer both shells use. Declared here as
 /// well as in `main.rs` (same reason as `file_identity` below).

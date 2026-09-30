@@ -2466,3 +2466,7 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
+
+[[patch.unused]]
+name = "freemkv-unlock"
+version = "1.7.7"

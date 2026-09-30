@@ -563,7 +563,7 @@ pub(super) fn sleep_unless_halted(halt: &libfreemkv::Halt, dur: std::time::Durat
         if left.is_zero() {
             return true;
         }
-        std::thread::sleep(left.min(libfreemkv::halt::POLL_INTERVAL));
+        std::thread::sleep(left.min(libfreemkv::halt::WAIT_SLICE));
     }
     false
 }

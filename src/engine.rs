@@ -359,9 +359,26 @@ pub fn scan(path: &str) -> Result<Scanned, String> {
     scan_with_keys(path, &KeyConfig::default())
 }
 
+/// One open's own Stop token and progress (stop design v5 §4.3, "The open token"): a user
+/// Open or the launch probe. The source changing, the window closing or Quit cancels it.
+#[derive(Clone, Default)]
+pub struct OpenToken {
+    pub halt: libfreemkv::Halt,
+    pub progress: libfreemkv::halt::Progress,
+}
+
 /// Scan an image and resolve its main title's keys once (KU §2.5 "GUI open"), so the key
 /// strip reflects a real resolution; the set seeds the rip. Key bytes are never logged.
 pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
+    scan_with_keys_under(path, keys, &OpenToken::default())
+}
+
+/// [`scan_with_keys`] under an open's token: its Stop ends the key lookup mid-flight.
+pub fn scan_with_keys_under(
+    path: &str,
+    keys: &KeyConfig,
+    tok: &OpenToken,
+) -> Result<Scanned, String> {
     // A FOLDER is an image-level source too: "Open Folder" / drag-and-drop.
     let src = fe::ImageSource::from_path(path);
     let (disc, _reader) = fe::scan_image(&src).map_err(|e| format!("E{} scan failed", e.code()))?;
@@ -370,16 +387,25 @@ pub fn scan_with_keys(path: &str, keys: &KeyConfig) -> Result<Scanned, String> {
         scope: libfreemkv::keys::KeyScope::Titles(main.clone()),
         seed: None,
         drive_disc: None,
-        halt: None,
+        halt: Some(tok.halt.clone()),
     };
     let (opened, trace) =
         crate::rip_keys::open_image(&src, crate::rip_keys::sources(&key_params(keys)), o);
-    Ok(scanned_with_keys(
-        &disc,
-        opened.map(|o| o.keys),
-        &trace,
-        main,
-    ))
+    stopped_open(opened.map(|o| o.keys), tok)
+        .map(|keys| scanned_with_keys(&disc, keys, &trace, main))
+}
+
+// Stop design v5 §4.3: a cancelled open ends `Halted` with no scan, so no key strip update.
+fn stopped_open<T>(
+    r: libfreemkv::Result<T>,
+    tok: &OpenToken,
+) -> Result<libfreemkv::Result<T>, String> {
+    match r {
+        Err(e) if tok.halt.is_cancelled() && matches!(e, libfreemkv::Error::Halted) => {
+            Err(format!("E{} {}", e.code(), explain(e.code())))
+        }
+        r => Ok(r),
+    }
 }
 
 /// A scan's display rows, plus its key set or refusal and the walk behind it.
@@ -671,30 +697,46 @@ fn key_factory(keys: &KeyConfig) -> libfreemkv::KeySourceFactory {
 /// Scan a live optical drive (`disc://<device>` or bare `disc://` autodetect) with no key
 /// call, then resolve the main title's keys once (KU §2.5 "GUI open"): the SAME `Scanned`
 /// shape the ISO path returns, seed set included. NEEDS HARDWARE to exercise.
-pub fn scan_disc_with_keys(source: &str, keys: &KeyConfig) -> Result<Scanned, String> {
-    let (disc, mut reader) = drive_scan(source, keys, false)?;
+pub fn scan_disc_with_keys(
+    source: &str,
+    keys: &KeyConfig,
+    tok: &OpenToken,
+) -> Result<Scanned, String> {
+    let (disc, mut reader) = drive_scan(source, keys, tok)?;
     let main = fe::resolve_selection(&disc, &fe::Selection::MainMovie);
     let scope = libfreemkv::keys::KeyScope::Titles(main.clone());
-    let (set, trace) = crate::rip_keys::resolve(
+    let (set, trace) = crate::rip_keys::resolve_observed(
         &disc,
         reader.as_mut(),
         scope,
         &key_factory(keys),
-        None,
-        None,
+        &tok.halt,
+        &tok.progress,
     );
-    Ok(scanned_with_keys(&disc, set, &trace, main))
+    stopped_open(set, tok).map(|set| scanned_with_keys(&disc, set, &trace, main))
 }
 
-/// Open and scan the drive behind `source` with NO key call (`fe::open_scan`): the disc
-/// and its raw reader. The drive is released when the reader drops.
+/// Open and scan the drive behind `source` with NO key call (`fe::open_scan_with`) under
+/// the open's token (stop design v5 §4.3): the disc and its raw reader. The drive is
+/// released when the reader drops.
 fn drive_scan(
     source: &str,
     keys: &KeyConfig,
-    raw_copy: bool,
+    tok: &OpenToken,
 ) -> Result<(libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>), String> {
-    let session = fe::open_scan(disc_target(source), session_credentials(keys), raw_copy)
-        .map_err(|e| drive_error(&e))?;
+    // The cold keydb parse is work with no progress signal; T29 must not fire on it.
+    let credentials = {
+        let _busy = tok.progress.busy();
+        session_credentials(keys)
+    };
+    let session = fe::open_scan_with(
+        disc_target(source),
+        credentials,
+        false,
+        &tok.halt,
+        &tok.progress,
+    )
+    .map_err(|e| drive_error(&e))?;
     staged(session)
 }
 
@@ -1766,7 +1808,8 @@ fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
         // stream_selection_for. The Session (live-drive) arm gets its own
         // per-title options from title_session_mux_opts.
         selection: libfreemkv::StreamSelection::default(),
-        send_deadline: Some(std::time::Duration::from_secs(60)),
+        // T27 (ST-X1a): no per-frame send deadline; a halt-aware send only (GUI = CLI).
+        ..Default::default()
     }
 }
 
@@ -2122,13 +2165,20 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             job.raw = req.raw;
             job.mode = fe::RipMode::Single;
             job.keys = Some(set);
-            let result = fe::recover_to_iso(&disc, reader.as_mut(), &dest, &job, sink)
-                .map_err(|e| format!("image decrypt failed: {e}"))?;
-            if recovery_produced_no_data(result.bytes_good) {
-                let _ = std::fs::remove_file(&dest);
-                return Err("No readable data — no image was written.".into());
-            }
-            return Ok(summarize_image_decrypt(&result, &dest));
+            let lock = hold_iso_lock(&dest, state)?;
+            let copied = fe::recover_to_iso(&disc, reader.as_mut(), &dest, &job, sink);
+            let halted = matches!(&copied, Ok(r) if r.halted);
+            let res = copied
+                .map_err(|e| format!("image decrypt failed: {e}"))
+                .and_then(|result| {
+                    if recovery_produced_no_data(result.bytes_good) {
+                        let _ = std::fs::remove_file(&dest);
+                        return Err("No readable data — no image was written.".into());
+                    }
+                    Ok(summarize_image_decrypt(&result, &dest))
+                });
+            release_iso_lock(lock, &res, halted, &dest, state);
+            return res;
         }
         _ => {}
     }
@@ -2138,6 +2188,40 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
     // scan and key resolution.
     let src_url = format!("{}://{}", image_or_dir_scheme(&req.source), req.source);
     mux_selected_titles(&disc, &src_url, req, &indices, &set, sink, state)
+}
+
+// Take `<iso>.lock` for the whole write under the run's Stop (stop design v5 §2.5); a
+// frozen holder reads as `stop.artifact_lock_failed` (E9073), a Stop as a cancel.
+fn hold_iso_lock(
+    iso: &std::path::Path,
+    state: &Arc<RunState>,
+) -> Result<libfreemkv::io::ArtifactLock, String> {
+    let watch = CancelWatch::new(state);
+    crate::artifact_lock::hold_iso(iso, &watch.halt).map_err(|e| {
+        crate::artifact_lock::lock_failed(&e, iso)
+            .unwrap_or_else(|| format!("E{} {}", e.code(), explain(e.code())))
+    })
+}
+
+// §2.5: "Deleted on success … Kept after Stop, a failure or a crash"; an image this run
+// removed guards nothing, so its sidecar goes too.
+fn release_iso_lock(
+    lock: libfreemkv::io::ArtifactLock,
+    res: &Result<String, String>,
+    halted: bool,
+    iso: &std::path::Path,
+    state: &Arc<RunState>,
+) {
+    let done = (res.is_ok() && !halted) || !iso.exists();
+    if halted && !done {
+        let kept = crate::strings::get_or("stop.progress_kept", "Progress kept");
+        state
+            .lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(kept);
+    }
+    crate::artifact_lock::release(lock, done);
 }
 
 /// Open the rip's image and resolve its keys once (`rip_keys::open_image`), seeded with
@@ -2593,71 +2677,81 @@ fn run_disc_scanning(
             fe::mkv_staging_scope(&disc, reader.as_mut(), &indices, req.keep_iso)
                 .map_err(|e| format!("recovery failed: {e}"))?
         };
-        let result = fe::multipass_rip_staged(
-            &disc,
-            reader.as_mut(),
-            std::path::Path::new(&iso_path),
-            &job,
-            &opts,
-            staging.as_deref(),
-            sink,
-        )
-        .map_err(|e| format!("recovery failed: {e}"))?;
-        drop(reader);
-        // Read phase done: the deliverable (ISO) or the mux source is on disk,
-        // so the drive is no longer needed — eject now, exactly like autorip
-        // (which ejects at read-complete and muxes from the staged ISO).
-        if req.auto_eject {
-            eject_disc(&device, sink);
-        }
-
-        // Recovery verdicts are checked for BOTH output kinds, before the
-        // want_iso split — the recovered image is kept in every case, so an
-        // abort never throws away the read. See `recovery_terminal_result`.
-        if let Some(terminal) =
-            recovery_terminal_result(result.halted, result.aborted_for_loss, want_iso, &iso_path)
-        {
-            return terminal;
-        }
-
-        if want_iso {
-            return iso_recovery_result(&result, &iso_path);
-        }
-
-        // Title output: mux the selected titles from the recovered (encrypted, see
-        // `recovery_raw`) ISO with this rip's set and the drive's scan.
-        if recovery_produced_no_data(result.good_bytes) {
-            let _ = std::fs::remove_file(&iso_path);
-            return Err("Recovery produced no readable data — nothing to mux.".into());
-        }
-        let mux = mux_staged_titles(req, &iso_path, disc, set, &indices, &label, sink, state);
-        // The staged image is only disposable once the titles it was staged
-        // for actually landed. `state.cancel` is the flag the Stop button
-        // sets, read directly rather than inferred from the mux's summary.
-        let cancelled = state.cancel.load(std::sync::atomic::Ordering::SeqCst);
-        // A scoped staging image is not a disc image, so it is never kept (JUDGEMENT).
-        let keep = req.keep_iso && staging.is_none();
-        if should_delete_staging_iso(keep, mux.is_ok(), cancelled) {
-            let _ = std::fs::remove_file(&iso_path);
-        }
-        if let Err(e) = &mux {
-            return Err(format!("{e} — the recovered image is kept: {iso_path}"));
-        }
-        if cancelled {
-            return Ok(format!(
-                "Cancelled — the recovered image is kept: {iso_path}"
-            ));
-        }
-        // The mux above reports its own success text (titles written); it has no way
-        // to know THIS stage's recovery left residual damage under tolerance, so the
-        // note is appended out here instead.
-        return mux.map(|s| {
-            format!(
-                "{s}{}{}",
-                damage_note(&result),
-                staging_not_kept_note(req.keep_iso, staging.is_some())
+        let lock = hold_iso_lock(std::path::Path::new(&iso_path), state)?;
+        let mut halted = false;
+        let res = (|| -> Result<String, String> {
+            let result = fe::multipass_rip_staged(
+                &disc,
+                reader.as_mut(),
+                std::path::Path::new(&iso_path),
+                &job,
+                &opts,
+                staging.as_deref(),
+                sink,
             )
-        });
+            .map_err(|e| format!("recovery failed: {e}"))?;
+            halted = result.halted;
+            drop(reader);
+            // Read phase done: the deliverable (ISO) or the mux source is on disk,
+            // so the drive is no longer needed — eject now, exactly like autorip
+            // (which ejects at read-complete and muxes from the staged ISO).
+            if req.auto_eject {
+                eject_disc(&device, sink);
+            }
+
+            // Recovery verdicts are checked for BOTH output kinds, before the
+            // want_iso split — the recovered image is kept in every case, so an
+            // abort never throws away the read. See `recovery_terminal_result`.
+            if let Some(terminal) = recovery_terminal_result(
+                result.halted,
+                result.aborted_for_loss,
+                want_iso,
+                &iso_path,
+            ) {
+                return terminal;
+            }
+
+            if want_iso {
+                return iso_recovery_result(&result, &iso_path);
+            }
+
+            // Title output: mux the selected titles from the recovered (encrypted, see
+            // `recovery_raw`) ISO with this rip's set and the drive's scan.
+            if recovery_produced_no_data(result.good_bytes) {
+                let _ = std::fs::remove_file(&iso_path);
+                return Err("Recovery produced no readable data — nothing to mux.".into());
+            }
+            let mux = mux_staged_titles(req, &iso_path, disc, set, &indices, &label, sink, state);
+            // The staged image is only disposable once the titles it was staged
+            // for actually landed. `state.cancel` is the flag the Stop button
+            // sets, read directly rather than inferred from the mux's summary.
+            let cancelled = state.cancel.load(std::sync::atomic::Ordering::SeqCst);
+            // A scoped staging image is not a disc image, so it is never kept (JUDGEMENT).
+            let keep = req.keep_iso && staging.is_none();
+            if should_delete_staging_iso(keep, mux.is_ok(), cancelled) {
+                let _ = std::fs::remove_file(&iso_path);
+            }
+            if let Err(e) = &mux {
+                return Err(format!("{e} — the recovered image is kept: {iso_path}"));
+            }
+            if cancelled {
+                return Ok(format!(
+                    "Cancelled — the recovered image is kept: {iso_path}"
+                ));
+            }
+            // The mux above reports its own success text (titles written); it has no way
+            // to know THIS stage's recovery left residual damage under tolerance, so the
+            // note is appended out here instead.
+            mux.map(|s| {
+                format!(
+                    "{s}{}{}",
+                    damage_note(&result),
+                    staging_not_kept_note(req.keep_iso, staging.is_some())
+                )
+            })
+        })();
+        release_iso_lock(lock, &res, halted, std::path::Path::new(&iso_path), state);
+        return res;
     }
 
     if indices.is_empty() {
@@ -3999,7 +4093,7 @@ mod routing_tests {
         );
         let staged = slice(
             "        let result = fe::multipass_rip_staged(",
-            "        .map_err(|e| format!(\"recovery failed: {e}\"))?;\n        drop(reader);",
+            "        .map_err(|e| format!(\"recovery failed: {e}\"))?;\n            halted = result.halted;",
         );
         assert!(
             staged.contains("staging.as_deref()"),
@@ -4213,7 +4307,7 @@ mod routing_tests {
             .expect("the ISO-image arm is still there");
         let end = start
             + src[start..]
-                .find("\n            let result = fe::recover_to_iso(")
+                .find("fe::recover_to_iso(")
                 .expect("the decrypt call still closes the arm's setup");
         let body = &src[start..end];
         assert!(
@@ -4357,7 +4451,6 @@ mod routing_tests {
         assert_eq!(o.raw, base.raw);
         assert_eq!(o.batch_sectors, base.batch_sectors);
         assert_eq!(o.skip_errors, base.skip_errors);
-        assert_eq!(o.send_deadline, base.send_deadline);
     }
 
     // A request with no per-title breakdown (CLI, container path,
@@ -5169,22 +5262,20 @@ mod routing_tests {
         assert!(stream_selection_for(&r, None).is_all());
     }
 
-    /// `mux_opts` carries the raw passthrough, the read batch and the send
-    /// deadline. Defaulted, `--raw` is ignored and the deadline that stops a
-    /// wedged sink hanging the rip disappears.
+    // FT16 (stop design v5 §2.10, T27): "**ST-F1** sets the GUI to no deadline"; "GUI, CLI
+    // and the engine then behave identically: a halt-aware send only, and the user's Stop
+    // is the bound". Per spec; do not change without a spec citation proving otherwise.
     #[test]
-    fn mux_options_carry_raw_the_batch_size_and_the_send_deadline() {
+    fn gui_mux_on_slow_sink_completes() {
         let mut r = req();
         r.raw = true;
         let o = mux_opts(&r);
         assert!(o.raw, "raw passthrough must reach the mux");
         assert_eq!(o.batch_sectors, 64);
-        assert_eq!(o.send_deadline, Some(std::time::Duration::from_secs(60)));
         assert!(!o.skip_errors);
         // Selection is deliberately NOT here — the Url mux arm reads it off
         // InputOptions, and setting it here silently keeps every track.
         assert!(o.selection.is_all());
-
         r.raw = false;
         assert!(!mux_opts(&r).raw);
     }
@@ -5775,6 +5866,157 @@ mod ku_gui_tests {
         let st = Arc::new(RunState::default());
         let out = run_blocking(r, &UiSink(st.clone()), &st);
         (out, st)
+    }
+
+    // FT14 (stop design v5 §4.3, §5.5): a GUI open of an `iso://` source against a
+    // never-answering key service; its token is cancelled → the open "returns `Halted` ≤ 1 s;
+    // no key strip update". Per spec; do not change without a spec citation.
+    #[test]
+    fn gui_open_token_cancels_inflight_key_lookup() {
+        let fx = bd_image(&[Some(K1)], 1);
+        let dir = TempDir::new("ft14");
+        let iso = fx.write(dir.path(), "disc.iso");
+        let calls = Calls::default();
+        let f = factory(&[(Answer::Hang, &[K1])], &calls);
+        let tok = OpenToken::default();
+        let stop = tok.halt.clone();
+        let press = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            stop.cancel();
+            std::time::Instant::now()
+        });
+        let r = with_sources(f, || {
+            scan_with_keys_under(&iso.display().to_string(), &KeyConfig::default(), &tok)
+        });
+        let pressed = press.join().unwrap();
+        assert!(
+            pressed.elapsed() <= std::time::Duration::from_secs(1),
+            "Stop took too long"
+        );
+        assert_eq!(calls.len(), 1, "the key lookup was in flight");
+        let e = r.expect_err("a stopped open yields no scan, so no key strip update");
+        assert!(
+            e.contains(&format!("E{}", libfreemkv::Error::Halted.code())),
+            "{e}"
+        );
+    }
+
+    // Stop design v5 §2.5: "The lock is taken only by the freemkv CLI/GUI and the engine
+    // `_with` entries"; "Deleted on success … Kept after Stop". While another process holds
+    // `<final>.lock` the GUI writes nothing and Stop ends the wait. Per spec.
+    #[test]
+    fn gui_iso_holds_the_artifact_lock() {
+        let fx = bd_image(&[Some(K1)], 1);
+        let dir = TempDir::new("gui-lock");
+        let iso = fx.write(dir.path(), "disc.iso");
+        let out = dir.path().join("out");
+        let mut r = req(&iso, &out, Vec::new());
+        r.format = "ISO image".into();
+        let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
+        with_sources(f, || run(&r).0.expect("the copy"));
+        let written = files_under(&out);
+        let image = written
+            .iter()
+            .find(|p| p.extension() == Some("iso".as_ref()));
+        let image = image.expect("the image").clone();
+        assert!(
+            !written
+                .iter()
+                .any(|p| p.extension() == Some("lock".as_ref())),
+            "deleted on success: {written:?}"
+        );
+
+        std::fs::remove_dir_all(&out).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let never = libfreemkv::Halt::new();
+        let held = libfreemkv::io::ArtifactLock::acquire(&image, &[], &never).unwrap();
+        let st = Arc::new(RunState::default());
+        let stop = st.clone();
+        let press = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            stop.cancel.store(true, Ordering::SeqCst);
+        });
+        let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
+        let res = with_sources(f, || run_blocking(&r, &UiSink(st.clone()), &st));
+        press.join().unwrap();
+        drop(held);
+        assert!(
+            !image.exists(),
+            "nothing written under another holder's lock: {res:?}"
+        );
+    }
+
+    // §2.5: "Kept after Stop … where it guards the resumable artifact"; ST-I2's "progress
+    // kept" (§5.7) says so. A Stop that left no image keeps nothing. Per spec.
+    #[test]
+    fn a_stop_that_keeps_the_image_says_progress_kept() {
+        let dir = TempDir::new("gui-kept");
+        let iso = dir.path().join("Movie.iso");
+        let sidecar = dir.path().join("Movie.iso.lock");
+        let kept = crate::strings::get("stop.progress_kept");
+        let never = libfreemkv::Halt::new();
+        // (image on disk, the copy halted) → (sidecar kept, "progress kept" said). A Stop
+        // pressed after the copy finished halted nothing: the op succeeded (§2.5).
+        for (on_disk, halted, says) in [
+            (true, true, true),
+            (false, true, false),
+            (true, false, false),
+        ] {
+            let st = Arc::new(RunState::default());
+            st.cancel.store(true, Ordering::SeqCst);
+            if on_disk {
+                std::fs::write(&iso, b"partial").unwrap();
+            }
+            let lock = crate::artifact_lock::hold_iso(&iso, &never).unwrap();
+            release_iso_lock(lock, &Ok("done".into()), halted, &iso, &st);
+            let lines = st.lines.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let case = format!("{on_disk}/{halted}: {lines:?}");
+            assert_eq!(lines.contains(&kept), says, "{case}");
+            assert_eq!(sidecar.exists(), says, "{case}");
+            let _ = std::fs::remove_file(&iso);
+            let _ = std::fs::remove_file(&sidecar);
+        }
+    }
+
+    // Stop design v5 §4.3, "The open token": "Both are threaded into the scan … and into the
+    // up-front resolution". FT15e/FT15g (a) need a live drive, so this reads the wiring.
+    #[test]
+    fn the_open_token_reaches_the_drive_scan_and_the_resolve() {
+        let src = include_str!("engine.rs").replace("\r\n", "\n");
+        let body = |name: &str| {
+            let a = src.find(name).expect(name);
+            src[a..a + src[a..].find("\n}\n").unwrap()].to_string()
+        };
+        let scan = body("\nfn drive_scan(");
+        assert!(scan.contains("fe::open_scan_with(") && scan.contains("&tok.halt,"));
+        assert!(scan.contains("&tok.progress,"), "{scan}");
+        // FT15g(a): the cold keydb parse for the drive's host certs holds `busy()`.
+        let creds = scan.find("session_credentials(keys)").expect("credentials");
+        let busy = scan
+            .find("tok.progress.busy()")
+            .expect("busy over the parse");
+        assert!(busy < creds && creds < scan.find("fe::open_scan_with(").unwrap());
+        let open = body("\npub fn scan_disc_with_keys(");
+        assert!(open.contains("drive_scan(source, keys, tok)"), "{open}");
+        assert!(
+            open.contains("crate::rip_keys::resolve_observed("),
+            "{open}"
+        );
+        assert!(open.contains("&tok.progress,"), "{open}");
+    }
+
+    // §2.5: the lock is "created at op start and held for the whole op". The drive's ISO
+    // and staging copy need a live drive, so this reads the wiring; the image arm runs it.
+    #[test]
+    fn gui_drive_iso_holds_the_artifact_lock() {
+        let src = include_str!("engine.rs").replace("\r\n", "\n");
+        let a = src
+            .find("\nfn run_disc_scanning(")
+            .expect("run_disc_scanning");
+        let body = &src[a..a + src[a..].find("\nfn mux_staged_titles(").expect("next fn")];
+        let lock = body.find("hold_iso_lock(").expect("the lock");
+        assert!(lock < body.find("fe::multipass_rip_staged(").expect("the copy"));
+        assert!(body.contains("release_iso_lock(lock, &res, halted,"));
     }
 
     /// FK2 (KU §2.5: "GUI open | `Titles([main])` for status. The result seeds the rip's

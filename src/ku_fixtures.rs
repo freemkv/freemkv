@@ -258,13 +258,32 @@ pub enum Answer {
     Down,
     /// A keydb that answers its first request, then fails to read (E8002, `KeydbInvalid`).
     KeydbThenUnreadable,
+    /// A key service that never answers: the call returns only on the ctx's Stop, as the
+    /// ST-K1 worker does mid-flight (stop design v5 §2.7), or after 10 s.
+    Hang,
+    /// A keydb whose bytes arrive in [`TRICKLE_CHUNKS`] chunks [`TRICKLE_GAP`] apart, each
+    /// bumping `ResolveCtx::progress()` (stop design v5 FT15f), then every held key.
+    Trickle,
+    /// A keydb whose call is a CPU phase (a parse, a CSS crack) moving no byte for
+    /// [`SLOW_CALL`] (stop design v5 FT15g), then every held key.
+    Slow,
 }
+
+/// [`Answer::Trickle`]'s gap between chunks and its chunk count.
+pub const TRICKLE_GAP: std::time::Duration = std::time::Duration::from_millis(200);
+pub const TRICKLE_CHUNKS: u32 = 6;
+/// [`Answer::Slow`]'s call length.
+pub const SLOW_CALL: std::time::Duration = std::time::Duration::from_millis(1200);
 
 impl Answer {
     fn is_online(self) -> bool {
         !matches!(
             self,
-            Answer::Keydb | Answer::KeydbKmNoVid | Answer::KeydbThenUnreadable
+            Answer::Keydb
+                | Answer::KeydbKmNoVid
+                | Answer::KeydbThenUnreadable
+                | Answer::Trickle
+                | Answer::Slow
         )
     }
 }
@@ -294,6 +313,27 @@ impl Fake {
             forensic: false,
             outputs,
         });
+        if self.answer == Answer::Hang {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < until {
+                if let Some(h) = ctx.halt() {
+                    h.check()?;
+                }
+                std::thread::sleep(libfreemkv::halt::WAIT_SLICE);
+            }
+            return Err(libfreemkv::Error::KeyServiceUnavailable);
+        }
+        if self.answer == Answer::Trickle {
+            for _ in 0..TRICKLE_CHUNKS {
+                std::thread::sleep(TRICKLE_GAP);
+                if let Some(p) = ctx.progress() {
+                    p.bump();
+                }
+            }
+        }
+        if self.answer == Answer::Slow {
+            std::thread::sleep(SLOW_CALL);
+        }
         if matches!(self.answer, Answer::Unavailable | Answer::Down) {
             return Err(libfreemkv::Error::KeyServiceUnavailable);
         }
@@ -308,9 +348,13 @@ impl Fake {
             return Err(libfreemkv::Error::KeydbInvalid);
         }
         let keys: Vec<[u8; 16]> = match self.answer {
-            Answer::Keydb | Answer::Unavailable | Answer::Down | Answer::KeydbThenUnreadable => {
-                self.keys.clone()
-            }
+            Answer::Keydb
+            | Answer::Unavailable
+            | Answer::Down
+            | Answer::Hang
+            | Answer::Trickle
+            | Answer::Slow
+            | Answer::KeydbThenUnreadable => self.keys.clone(),
             Answer::KeydbKmNoVid => Vec::new(),
             Answer::OnlineNeedsVid if vid.is_none() => Vec::new(),
             Answer::Online | Answer::OnlineNeedsVid => {
