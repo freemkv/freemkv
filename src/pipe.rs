@@ -1779,11 +1779,10 @@ fn pipe_disc(
         skip_errors: false,
         batch_sectors: batch,
         raw,
-        // Interactive stdout/network sink: no per-frame send deadline. A
-        // slow-but-alive downstream (paused pager, backpressured pipe) must
-        // block, not be reported as interrupted. Ctrl-C still works via the process token.
-        send_deadline: None,
         selection,
+        // No per-frame send deadline (T27): a slow-but-alive downstream blocks;
+        // Ctrl-C still stops the pump via the process token.
+        ..Default::default()
     };
     let result = libfreemkv::mux_with_keys(
         libfreemkv::MuxSource::Session {
@@ -1909,11 +1908,10 @@ fn pipe(
         skip_errors: false,
         batch_sectors: 0, // unused by the URL arm (input() owns batching)
         raw: opts.raw,
-        // No per-frame send deadline on the CLI's stdout / network sinks — a
-        // slow-but-alive consumer must block rather than surface a spurious
-        // interrupt. Ctrl-C still stops the pump via the process token.
-        send_deadline: None,
         selection: Default::default(),
+        // No per-frame send deadline (T27): a slow-but-alive consumer blocks;
+        // Ctrl-C still stops the pump via the process token.
+        ..Default::default()
     };
     let result = libfreemkv::mux_with_keys(
         MuxSource::Url {
@@ -6553,7 +6551,7 @@ mod formatter_tests {
             batch_sectors: 64,
             raw: false,
             selection: libfreemkv::StreamSelection::default(),
-            send_deadline: Some(std::time::Duration::from_secs(60)),
+            ..Default::default()
         };
         let (res, printed) = capture(|| {
             libfreemkv::mux_with_keys(

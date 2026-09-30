@@ -1305,10 +1305,10 @@ pub(crate) fn mux_live(
         skip_errors: src.skip_errors,
         batch_sectors: inputs.batch,
         raw: false,
-        // Bounded 60 s per-frame send (the engine's default too): the live single-pass
-        // path is watchdog-backed too, so preserve the pre-refactor bound.
-        send_deadline: Some(Duration::from_secs(60)),
         selection: Default::default(),
+        // No per-frame send deadline (T27): a slow sink blocks; Stop and the hard
+        // watchdog (HARD_WATCHDOG_STALL_SECS) are the bound.
+        ..Default::default()
     };
 
     crate::server::log::device_log(

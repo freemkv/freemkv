@@ -1808,9 +1808,8 @@ fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
         // stream_selection_for. The Session (live-drive) arm gets its own
         // per-title options from title_session_mux_opts.
         selection: libfreemkv::StreamSelection::default(),
-        // Stop design v5 T27: "retired in freemkv and the engine"; a halt-aware send only,
-        // so progressing flush backpressure never ends a mux, and Stop is the bound (GUI = CLI).
-        send_deadline: None,
+        // T27 (ST-X1a): no per-frame send deadline; a halt-aware send only (GUI = CLI).
+        ..Default::default()
     }
 }
 
@@ -4452,7 +4451,6 @@ mod routing_tests {
         assert_eq!(o.raw, base.raw);
         assert_eq!(o.batch_sectors, base.batch_sectors);
         assert_eq!(o.skip_errors, base.skip_errors);
-        assert_eq!(o.send_deadline, base.send_deadline);
     }
 
     // A request with no per-title breakdown (CLI, container path,
@@ -5274,23 +5272,12 @@ mod routing_tests {
         let o = mux_opts(&r);
         assert!(o.raw, "raw passthrough must reach the mux");
         assert_eq!(o.batch_sectors, 64);
-        assert_eq!(
-            o.send_deadline, None,
-            "no per-frame deadline: a slow sink blocks"
-        );
-        assert_eq!(title_session_mux_opts(&r, 0).send_deadline, None);
         assert!(!o.skip_errors);
         // Selection is deliberately NOT here — the Url mux arm reads it off
         // InputOptions, and setting it here silently keeps every track.
         assert!(o.selection.is_all());
         r.raw = false;
         assert!(!mux_opts(&r).raw);
-        // GUI = CLI: every CLI `MuxOptions` literal names no deadline either (the tests'
-        // `libfreemkv::MuxOptions` literals are not the CLI's).
-        let cli = include_str!("pipe.rs");
-        let literals = cli.matches("= MuxOptions {").count();
-        assert!(literals >= 2, "the CLI's mux options moved");
-        assert_eq!(cli.matches("send_deadline: None,").count(), literals);
     }
 
     /// The three fields whose absence is invisible: the wrong title, a lost
