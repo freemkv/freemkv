@@ -29,14 +29,16 @@ The recipe is [`snap/snapcraft.yaml`](../../snap/snapcraft.yaml). CI is
   - exit 1, a last status of `will need manual review`, then
     `Issues while processing snap:` followed only by `(NEEDS REVIEW) <id>`
     items for the two grants in step 4 (optionally with review-tools' reason
-    and a full stop) and craft-cli's `Full execution log:` /
+    and a full stop), or by that reason alone, at most once per grant (what
+    the store printed for revision 1), then craft-cli's `Full execution log:` /
     `For more information, check out:` lines.
 
   Held is a warning and a run-summary line saying it was NOT released. Any
   other line, exit code, status or finding, or an arm64 build that did not
-  succeed (failed or cancelled), fails the job. The first real upload shows
-  whether the store's wording matches; if not, it fails visibly and
-  `store_checks.py` needs updating.
+  succeed (failed or cancelled), fails the job. Revision 1 (2026-09-30) showed
+  the real wording, and `test_store_checks.py` keeps its log verbatim. If the
+  store's wording changes again, the job fails visibly and `store_checks.py`
+  needs updating.
 - Snapcraft is pinned to the `9.x/stable` track (`SNAPCRAFT_CHANNEL`).
   review-tools only has a `latest` track, so the run records its version in
   the summary and `store_checks.py` fails on an unfamiliar report format.

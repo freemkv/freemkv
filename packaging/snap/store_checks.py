@@ -29,7 +29,7 @@ GRANT_ISSUE = re.compile(
 # _HUMAN_STATUS, or a raw status code), the result, and craft-cli's error
 # trailers. Anything else makes the upload "failed".
 PROGRESS = re.compile(
-    r"Uploading\.\.\."
+    r"Uploading\.\.\.(?: \((?:-+>|<-+)\))?"
     r"|Status: (?:processing|ready to release!|will need manual review"
     r"|error while processing delta|error while processing|[a-z_]+)"
 )
@@ -80,6 +80,12 @@ def is_known_grant_issue(issue):
     return m is not None and m["id"] in STORE_GRANT_IDS
 
 
+def is_bare_grant_reason(issue):
+    """The known reason alone, as the store printed it for revision 1 (snapcraft
+    9.1.3): one line per grant, no tag and no check id."""
+    return issue in (GRANT_REASON, GRANT_REASON + ".")
+
+
 def _preamble_line(line):
     """A startup or progress line, allowed before the result or the issue list."""
     return bool(STARTUP.fullmatch(line) or PROGRESS.fullmatch(line))
@@ -109,7 +115,7 @@ def _released_or_held(lines, channel):
 def _held_by_known_grants(lines):
     """Exit 1: preamble ending in a manual-review status, the header,
     known-grant issues, then craft-cli trailers."""
-    state, issues, preamble = "preamble", 0, []
+    state, issues, bare, preamble = "preamble", 0, 0, []
     for line in lines:
         if not line.strip():
             continue
@@ -124,6 +130,11 @@ def _held_by_known_grants(lines):
                 return "failed"
         elif state == "issues" and line.startswith("- ") and is_known_grant_issue(line[2:]):
             issues += 1
+        # Bare reasons name no grant, so allow no more of them than known grants.
+        elif (state == "issues" and line.startswith("- ") and is_bare_grant_reason(line[2:])
+              and bare < len(KNOWN_GRANTS)):
+            issues += 1
+            bare += 1
         elif issues and TRAILER.fullmatch(line):
             state = "trailer"
         else:

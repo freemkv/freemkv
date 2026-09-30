@@ -102,9 +102,36 @@ class UploadHeld(unittest.TestCase):
             "blank lines": PRE + "\n" + HDR + "\n" + item(PLUG) + "\n" + LOG,
             "CRLF": (PRE + HDR + item(PLUG) + item(SLOT) + LOG).replace("\n", "\r\n"),
             "held status only": "Status: will need manual review\n" + HDR + item(PLUG),
+            "bare reasons": PRE + HDR + f"- {sc.GRANT_REASON}\n" * 2 + LOG,
+            "bare reason, full stop": PRE + HDR + f"- {sc.GRANT_REASON}.\n" + LOG,
+            "bare reason and id": PRE + HDR + item(PLUG) + f"- {sc.GRANT_REASON}\n" + LOG,
         }
         for name, log in cases.items():
             self.assertEqual(sc.classify_upload(1, log, "beta"), "held", name)
+
+
+class RealUploads(unittest.TestCase):
+    # Verbatim from the first store upload (revision 1, 1.7.7, snapcraft 9.1.3).
+    REVISION_1 = (
+        "Starting snapcraft, version 9.1.3\n"
+        "Logging execution to '/home/runner/.local/state/snapcraft/log/snapcraft-20260930-011135.726998.log'\n"
+        "Unsquashing snap file 'freemkv-amd64.snap'.\n"
+        "Uploading... (--->)\n"
+        "Uploading... (<---)\n"
+        + "Status: processing\n" * 9
+        + "Status: will need manual review\n"
+        "Issues while processing snap:\n"
+        "- human review required due to 'deny-connection' constraint (interface attributes)\n"
+        "- human review required due to 'deny-connection' constraint (interface attributes)\n"
+        "Full execution log: '/home/runner/.local/state/snapcraft/log/snapcraft-20260930-011135.726998.log'\n"
+    )
+
+    def test_revision_1_is_held(self):
+        self.assertEqual(sc.classify_upload(1, self.REVISION_1, "stable"), "held")
+
+    def test_spinner_must_be_an_arrow(self):
+        log = self.REVISION_1.replace("Uploading... (--->)", "Uploading... (rejected)")
+        self.assertEqual(sc.classify_upload(1, log, "stable"), "failed")
 
 
 class UploadAdversarial(unittest.TestCase):
@@ -155,6 +182,10 @@ class UploadAdversarial(unittest.TestCase):
         "http docs link": HDR + item(PLUG) + "For more information, check out: http://x\n",
         "error after trailer": HDR + item(PLUG) + LOG + "Error: upload rejected\n",
         "grant after trailer": HDR + item(PLUG) + LOG + item(SLOT),
+        "three bare reasons": HDR + f"- {sc.GRANT_REASON}\n" * 3,
+        "partial bare reason": HDR + "- human review required\n",
+        "bare reason then more": HDR + f"- {sc.GRANT_REASON}; also raw-usb\n",
+        "other bare reason": HDR + "- human review required due to 'deny-installation' constraint\n",
     }
 
     def test_every_adversarial_case_fails(self):
