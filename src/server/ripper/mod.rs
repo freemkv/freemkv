@@ -2136,14 +2136,29 @@ fn end_of_recovery_loss(
     }
 }
 
-/// Loop-top convergence gate for the patch retry loop, guarding the fail-open case the bare
-/// [`patch_pass_decision`] can't see: `Converged` fires on `scope_bad == 0`, but an EMPTY
-/// mapfile (0 sectors ripped) ALSO has zero bad bytes. "Nothing bad recorded" is not
-/// "everything good", so require that we actually read something (`bytes_good > 0`) first. A
-/// genuinely-complete rip (good spans the scope, zero bad) still converges; an empty mapfile
-/// falls through to run the pass rather than falsely reporting "100% recovered".
-fn pre_pass_converged(mux_scope_bad: u64, bytes_good: u64) -> bool {
-    bytes_good > 0 && patch_pass_decision(mux_scope_bad, None) == PatchDecision::Converged
+/// Loop-top convergence gate: an EMPTY mapfile has zero bad bytes too, so require
+/// `bytes_good > 0`; `None` (unmeasured) never converges.
+fn pre_pass_converged(mux_scope_bad: Option<u64>, bytes_good: u64) -> bool {
+    bytes_good > 0
+        && mux_scope_bad
+            .is_some_and(|bad| patch_pass_decision(bad, None) == PatchDecision::Converged)
+}
+
+// The patch loop's muxable-scope bad bytes at the top of a pass.
+fn loop_top_scope_bad(
+    map: std::io::Result<freemkv_engine::Mapfile>,
+    is_iso: bool,
+    title: &libfreemkv::DiscTitle,
+    whole_disc_bad: u64,
+) -> Option<u64> {
+    match map {
+        Ok(map) => Some(scope_bad_bytes(
+            is_iso,
+            &map.ranges_with(&bad_sector_statuses()),
+            title,
+        )),
+        Err(_) => Some(whole_disc_bad),
+    }
 }
 
 // Look at the staging dirs for a Remux-eligible entry matching the sanitized display_name of
@@ -3829,23 +3844,12 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // Skip remaining retry passes once the *muxable* scope is 100%
             // recovered: ISO needs the whole disc clean, MKV/M2TS only the
             // muxed title. `abort_on_lost_secs` is NOT the trigger; it gates the END.
-            let mux_scope_bad =
-                match freemkv_engine::Mapfile::load(std::path::Path::new(&mapfile_path_str)) {
-                    Ok(map) => {
-                        let bad = map.ranges_with(&bad_sector_statuses());
-                        scope_bad_bytes(
-                            output_is_iso_image(&cfg_read.output_format),
-                            &bad,
-                            &title_for_progress,
-                        )
-                    }
-                    Err(_) => {
-                        // Conservative fallback if we can't read the mapfile —
-                        // fall back to the whole-disc check so we don't skip
-                        // a needed pass on a transient read error.
-                        bytes_pending + bytes_unreadable
-                    }
-                };
+            let mux_scope_bad = loop_top_scope_bad(
+                freemkv_engine::Mapfile::load(std::path::Path::new(&mapfile_path_str)),
+                output_is_iso_image(&cfg_read.output_format),
+                &title_for_progress,
+                bytes_pending + bytes_unreadable,
+            );
             // Loop-top convergence gate (`None` recovery ⇒ pre-pass): Converged
             // means the muxable scope is 100% recovered. Guarded by `bytes_good
             // > 0` so an EMPTY mapfile (0 good, 0 bad) isn't mistaken for done.
@@ -6619,11 +6623,11 @@ mod tests {
         disk_space_required_bytes, end_of_recovery_promotion, fmts_gate_decision, fmts_gate_plan,
         format_lib_error, format_pass_error, header_phase_disposition, incomplete_mux_status,
         is_fmts_key_missing_error, is_safe_staging_segment, list_staging_basenames,
-        patch_made_progress, patch_pass_decision, plan_passes, pre_pass_converged,
-        prune_intermediate_iso, register_halt, resumable_dir_blocked, resumable_for_disc,
-        resume_remaining_iso_bytes, scope_bad_bytes, scope_converged, skip_diskcheck_value,
-        staging_dir_matches_disc, staging_disc_owned_by_worker, staging_free_bytes,
-        sweep_transport_retry,
+        loop_top_scope_bad, patch_made_progress, patch_pass_decision, plan_passes,
+        pre_pass_converged, prune_intermediate_iso, register_halt, resumable_dir_blocked,
+        resumable_for_disc, resume_remaining_iso_bytes, scope_bad_bytes, scope_converged,
+        skip_diskcheck_value, staging_dir_matches_disc, staging_disc_owned_by_worker,
+        staging_free_bytes, sweep_transport_retry,
     };
     use crate::server::ripper::session::device_halt;
     use crate::server::ripper::staging;
@@ -7316,18 +7320,52 @@ mod tests {
         // guarded gate must NOT — nothing was read, so run the pass.
         assert_eq!(patch_pass_decision(0, None), PatchDecision::Converged);
         assert!(
-            !pre_pass_converged(0, 0),
+            !pre_pass_converged(Some(0), 0),
             "empty mapfile (0 good, 0 bad) must NOT be treated as converged"
         );
         // Genuinely-complete scope: good spans the scope, zero bad → converged,
         // so redundant passes are still skipped.
         assert!(
-            pre_pass_converged(0, 4096),
+            pre_pass_converged(Some(0), 4096),
             "complete scope (good>0, bad==0) must still converge"
         );
         // Scope still bad → never converged regardless of good coverage.
-        assert!(!pre_pass_converged(2048, 4096));
-        assert!(!pre_pass_converged(2048, 0));
+        assert!(!pre_pass_converged(Some(2048), 4096));
+        assert!(!pre_pass_converged(Some(2048), 0));
+    }
+
+    // FAIL-SAFE: an unreadable mapfile, or loss outside any title extent, is
+    // unmeasured and must run the pass, as the engine's loop does.
+    #[test]
+    fn loop_top_gate_runs_the_pass_when_unmeasured() {
+        let unreadable = || Err(std::io::Error::other("unreadable mapfile"));
+        let title = test_title(0, 10);
+        let scope = loop_top_scope_bad(unreadable(), false, &title, 0);
+        assert_eq!(scope, None, "an unreadable mapfile is unmeasured");
+        assert!(!pre_pass_converged(scope, 4096));
+        assert!(!freemkv_engine::pre_pass_converged(scope, 4096));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("gate.mapfile");
+        let size = 10 * 2048;
+        {
+            let mut map = freemkv_engine::Mapfile::create(&path, size, "test").unwrap();
+            map.record(0, size - 2048, freemkv_engine::SectorStatus::Finished)
+                .unwrap();
+            map.record(size - 2048, 2048, freemkv_engine::SectorStatus::NonTrimmed)
+                .unwrap();
+            map.flush().unwrap();
+        }
+        let mut no_extents = test_title(0, 10);
+        no_extents.extents.clear();
+        let load = || freemkv_engine::Mapfile::load(&path);
+        let scope = loop_top_scope_bad(load(), false, &no_extents, 0);
+        assert_eq!(scope, None, "loss with no title extents is unscopable");
+        assert!(!pre_pass_converged(scope, 4096));
+
+        let scope = loop_top_scope_bad(load(), true, &title, 0);
+        assert_eq!(scope, Some(2048), "ISO scope counts the whole disc");
+        assert!(!pre_pass_converged(scope, 4096));
     }
 
     // PROMOTION DECISION: end-of-recovery promotes NonTrimmed → Unreadable before the abort
