@@ -215,6 +215,21 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::MpgNoVideoTrack,
         // mpg:// end of input left access units unwritten, E9075.
         Error::MpgUnpacketized,
+        // Engine remux/preflight refusals, E9077-E9084.
+        Error::RemuxVerifyFailed {
+            kind: libfreemkv::RemuxVerifyKind::RuntimeMismatch {
+                have_secs: 0.0,
+                want_secs: 1.0,
+            },
+            path: p(),
+        },
+        Error::MuxIncomplete { title: 1 },
+        Error::RemuxStagingInvalid,
+        Error::StagedCopySizeMismatch { have: 0, want: 1 },
+        Error::VerifyWorkerLost,
+        Error::MultipassRequiresRaw,
+        Error::StreamLanguageUnknown { tag: p() },
+        Error::RemuxTargetExists { path: p() },
     ]
 }
 
