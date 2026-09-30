@@ -2970,7 +2970,11 @@ mod staged_image_tests {
         let iso = tmp.0.join("STAGED.iso");
         std::fs::write(&iso, vec![0u8; 8 * 2048]).unwrap();
         let mf = freemkv_engine::mapfile_path_for(&iso);
-        std::fs::write(&mf, "# freemkv-scope: 0x0+0x2000\n0x0 ? 1\n0x0 0x4000 ?\n").unwrap();
+        std::fs::write(
+            &mf,
+            "# freemkv-scope: 0x0+0x2000\n0x0 ? 1\n0x0 0x2000 +\n0x2000 0x2000 ?\n",
+        )
+        .unwrap();
         let disc = libfreemkv::Disc {
             volume_id: "STAGED".into(),
             meta_title: None,
