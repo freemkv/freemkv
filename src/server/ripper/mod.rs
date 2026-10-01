@@ -257,7 +257,7 @@ fn keys_cover(
     scope: &libfreemkv::keys::KeyScope,
 ) -> bool {
     let aacs_titles = disc.aacs.is_some() && *scope != libfreemkv::keys::KeyScope::None;
-    set.is_for(disc) && set.covers(scope) && (set.is_aacs() || !aacs_titles)
+    set.is_for(&disc.media_id()) && set.covers(scope) && (set.is_aacs() || !aacs_titles)
 }
 
 // Whether the rip can decrypt what it produces: no scope needs no key; otherwise the set's
