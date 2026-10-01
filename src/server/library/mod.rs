@@ -1034,4 +1034,120 @@ mod tests {
         let p = lib.log_path("../../etc/passwd");
         assert_eq!(p.parent(), Some(t.path().join("logs").as_path()));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_incomplete_scan_keeps_what_it_could_not_list_unless_it_is_gone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+        let bytes = probe::testmkv::mkv("freemkv 1.0.0", Some(60.0), Some(58), true);
+        for name in ["A", "B", "C"] {
+            let dir = d.library.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{name}.mkv")), &bytes).unwrap();
+        }
+        let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+        lib.index_now(&d);
+        let (b, c) = (d.library.join("B"), d.library.join("C"));
+        let lock = |p: &Path, mode| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        lock(&b, 0o0);
+        if std::fs::read_dir(&b).is_ok() {
+            lock(&b, 0o755);
+            return; // root reads anything
+        }
+        lib.rescan(&d);
+        let snap = lib.snapshot();
+        assert!(snap.incomplete);
+        let b_mkv = b.join("B.mkv");
+        assert!(
+            snap.mkvs.iter().any(|m| m.path == b_mkv),
+            "kept from before"
+        );
+        assert!(snap.sigs.contains_key(&b_mkv), "with its earlier signature");
+        std::fs::remove_dir_all(&c).unwrap();
+        lib.rescan(&d);
+        let snap = lib.snapshot();
+        lock(&b, 0o755);
+        assert!(snap.mkvs.iter().any(|m| m.path == b_mkv));
+        assert!(
+            !snap.mkvs.iter().any(|m| m.path == c.join("C.mkv")),
+            "NotFound is gone"
+        );
+    }
+
+    #[test]
+    fn a_landed_remux_turns_its_iso_only_row_into_a_remux_row_and_queues_its_audit() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        std::fs::create_dir_all(d.library.join("Other")).unwrap();
+        std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+        std::fs::write(d.isos.as_ref().unwrap().join("A (2000).iso"), b"x").unwrap();
+        let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+        lib.index_now(&d);
+        let target = d.library.join("A (2000)/A (2000).mkv");
+        let row = |lib: &Library| {
+            lib.snapshot()
+                .rows
+                .iter()
+                .find(|r| r.target.as_ref() == Some(&target))
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(row(&lib).kind, RowKind::IsoOnly);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(
+            &target,
+            probe::testmkv::mkv("freemkv 1.0.0", Some(60.0), Some(58), true),
+        )
+        .unwrap();
+        lib.note_landed(&target, Some("freemkv 1.0.0".into()));
+        let r = row(&lib);
+        assert_eq!((r.kind, r.mkv.as_ref()), (RowKind::Remux, Some(&target)));
+        let snap = lib.snapshot();
+        assert!(
+            snap.mkvs
+                .iter()
+                .any(|m| m.path == target && m.title == "A (2000)")
+        );
+        assert!(lib.audits.is_queued(&target));
+        let sig = FileSig::stat(&target).unwrap();
+        assert_eq!(
+            lib.probes.cached_stamp(&target, sig),
+            Some(Some("freemkv 1.0.0".into()))
+        );
+    }
+
+    #[test]
+    fn the_title_log_round_trips_and_reads_old_lines() {
+        let line = log_line(LineKind::Warn, "two\nlines\rhere");
+        assert_eq!(line.matches('\n').count(), 0);
+        let text = format!(
+            "{line}\nplain legacy line\n5\tmystery\tbody\n{}",
+            log_line(LineKind::Err, "tab\tinside")
+        );
+        let lines = parse_log(&text);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(
+            (lines[0].kind, lines[0].text.as_str()),
+            (LineKind::Warn, "two lines here")
+        );
+        assert!(lines[0].ts > 0);
+        assert_eq!(
+            (lines[1].kind, lines[1].ts, lines[1].text.as_str()),
+            (LineKind::Out, 0, "plain legacy line")
+        );
+        assert_eq!(
+            (lines[2].kind, lines[2].ts, lines[2].text.as_str()),
+            (LineKind::Out, 5, "body")
+        );
+        assert_eq!(
+            (lines[3].kind, lines[3].text.as_str()),
+            (LineKind::Err, "tab\tinside")
+        );
+        assert_eq!(lines[3].seq, 4);
+    }
 }

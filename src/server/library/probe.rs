@@ -418,17 +418,49 @@ pub(crate) mod testmkv {
         cue_secs: Option<u64>,
         video: bool,
     ) -> Vec<u8> {
+        let mut entry = el(&[0xD7], &[1]);
+        entry.extend(el(&[0x83], &[if video { 1 } else { 2 }]));
+        entry.extend(el(&[0x86], b"V_MPEG4/ISO/AVC"));
+        build(app, duration_secs, cue_secs, &[entry])
+    }
+
+    /// Like [`mkv`], with one track per `(type, codec id, language)`: type 1 video, 2 audio,
+    /// 17 subtitle.
+    pub(crate) fn mkv_tracks(
+        app: &str,
+        duration_secs: Option<f64>,
+        cue_secs: Option<u64>,
+        tracks: &[(u8, &str, &str)],
+    ) -> Vec<u8> {
+        let entries: Vec<Vec<u8>> = tracks
+            .iter()
+            .enumerate()
+            .map(|(i, (kind, codec, lang))| {
+                let mut entry = el(&[0xD7], &[i as u8 + 1]);
+                entry.extend(el(&[0x83], &[*kind]));
+                entry.extend(el(&[0x86], codec.as_bytes()));
+                entry.extend(el(&[0x22, 0xB5, 0x9C], lang.as_bytes()));
+                entry
+            })
+            .collect();
+        build(app, duration_secs, cue_secs, &entries)
+    }
+
+    fn build(
+        app: &str,
+        duration_secs: Option<f64>,
+        cue_secs: Option<u64>,
+        entries: &[Vec<u8>],
+    ) -> Vec<u8> {
         let mut info = el(&[0x2A, 0xD7, 0xB1], &1_000_000u64.to_be_bytes());
         if let Some(d) = duration_secs {
             info.extend(el(&[0x44, 0x89], &(d * 1000.0).to_be_bytes()));
         }
         info.extend(el(&[0x4D, 0x80], app.as_bytes()));
         info.extend(el(&[0x57, 0x41], app.as_bytes()));
-        let mut entry = el(&[0xD7], &[1]);
-        entry.extend(el(&[0x83], &[if video { 1 } else { 2 }]));
-        entry.extend(el(&[0x86], b"V_MPEG4/ISO/AVC"));
+        let tracks: Vec<u8> = entries.iter().flat_map(|e| el(&[0xAE], e)).collect();
         let mut body = el(&[0x15, 0x49, 0xA9, 0x66], &info);
-        body.extend(el(&[0x16, 0x54, 0xAE, 0x6B], &el(&[0xAE], &entry)));
+        body.extend(el(&[0x16, 0x54, 0xAE, 0x6B], &tracks));
         if let Some(t) = cue_secs {
             let point = el(&[0xB3], &(t * 1000).to_be_bytes());
             body.extend(el(&[0x1C, 0x53, 0xBB, 0x6B], &el(&[0xBB], &point)));
@@ -612,5 +644,88 @@ mod tests {
             audit(torn).issues[..],
             [AuditIssue::Unreadable { .. }]
         ));
+    }
+
+    #[test]
+    fn the_runtime_slack_is_the_larger_of_ten_seconds_and_two_percent() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("a.mkv");
+        let ok = |dur: f64, cue: u64| {
+            std::fs::write(&p, mkv("x", Some(dur), Some(cue), true)).unwrap();
+            audit_fast(&p).unwrap().ok
+        };
+        // 2 % of 7200 s is 144 s: 100 short passes, 200 short fails.
+        assert!(ok(7200.0, 7100));
+        assert!(!ok(7200.0, 7000));
+        // A short file gets the 10 s floor.
+        assert!(ok(60.0, 51));
+        assert!(!ok(60.0, 49));
+    }
+
+    #[test]
+    fn the_audit_counts_and_names_every_track_kind() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("a.mkv");
+        let bytes = testmkv::mkv_tracks(
+            "x",
+            Some(60.0),
+            Some(58),
+            &[
+                (1, "V_MPEGH/ISO/HEVC", "und"),
+                (2, "A_TRUEHD", "eng"),
+                (2, "A_AC3", "fra"),
+                (17, "S_HDMV/PGS", "deu"),
+            ],
+        );
+        std::fs::write(&p, bytes).unwrap();
+        let r = audit_fast(&p).unwrap();
+        assert_eq!(
+            (r.video_tracks, r.audio_tracks, r.subtitle_tracks),
+            (1, 2, 1)
+        );
+        assert_eq!(r.video, ["HEVC"]);
+        assert_eq!(
+            r.audio,
+            [
+                TrackFacts {
+                    codec: "TrueHD".into(),
+                    language: "eng".into()
+                },
+                TrackFacts {
+                    codec: "AC-3".into(),
+                    language: "fra".into()
+                }
+            ]
+        );
+        assert_eq!(r.subtitles, ["deu"]);
+    }
+
+    #[test]
+    fn every_codec_id_has_its_name() {
+        for (id, name) in [
+            ("V_MPEGH/ISO/HEVC", "HEVC"),
+            ("V_MPEG4/ISO/AVC", "AVC"),
+            ("V_MPEG2", "MPEG-2"),
+            ("V_MPEG1", "MPEG-1"),
+            ("V_MS/VFW/FOURCC", "VC-1"),
+            ("V_AV1", "AV1"),
+            ("A_TRUEHD", "TrueHD"),
+            ("A_MLP", "TrueHD"),
+            ("A_DTS", "DTS"),
+            ("A_EAC3", "E-AC-3"),
+            ("A_AC3", "AC-3"),
+            ("A_PCM/INT/LIT", "PCM"),
+            ("A_FLAC", "FLAC"),
+            ("A_AAC", "AAC"),
+            ("A_OPUS", "Opus"),
+            ("A_MPEG/L3", "MP3"),
+            ("A_MPEG/L2", "MP2"),
+            ("S_HDMV/PGS", "PGS"),
+            ("S_VOBSUB", "VobSub"),
+            ("S_TEXT/UTF8", "SRT"),
+            ("X_UNKNOWN", "X_UNKNOWN"),
+        ] {
+            assert_eq!(codec_name(id), name, "{id}");
+        }
     }
 }

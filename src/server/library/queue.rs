@@ -596,4 +596,45 @@ mod tests {
             serde_json::from_slice(&std::fs::read(t.path().join(QUEUE_FILE)).unwrap()).unwrap();
         assert_eq!(back.schema, SCHEMA);
     }
+
+    #[test]
+    fn removing_and_dropping_touch_only_what_they_name() {
+        let t = tempfile::tempdir().unwrap();
+        let q = Queue::open(t.path());
+        q.add(vec![
+            job(t.path(), "a"),
+            job(t.path(), "b"),
+            job(t.path(), "c"),
+        ]);
+        let a = q.claim_next().unwrap();
+        assert_eq!(
+            q.remove_queued(&a.target),
+            0,
+            "a running job is not removable"
+        );
+        assert_eq!(q.remove_queued(&job(t.path(), "b").target), 1);
+        q.note_running(a.id, JobNote::Stalled);
+        assert_eq!(q.snapshot().running().unwrap().note, Some(JobNote::Stalled));
+        q.note_running(a.id + 100, JobNote::Cancelled);
+        assert_eq!(q.snapshot().running().unwrap().note, Some(JobNote::Stalled));
+        q.drop_job(a.id + 1);
+        let titles: Vec<_> = q.snapshot().jobs.iter().map(|j| j.title.clone()).collect();
+        assert_eq!(titles, ["a", "c"].map(String::from), "b went, a and c stay");
+        q.drop_job(a.id);
+        assert_eq!(q.snapshot().jobs.len(), 1);
+    }
+
+    #[test]
+    fn clearing_the_queued_jobs_unpauses_and_spares_the_running_one() {
+        let t = tempfile::tempdir().unwrap();
+        let q = Queue::open(t.path());
+        q.add(vec![job(t.path(), "a"), job(t.path(), "b")]);
+        q.claim_next().unwrap();
+        q.set_paused(true);
+        assert_eq!(q.clear_queued(), 1);
+        let f = q.snapshot();
+        assert!(!f.paused);
+        assert_eq!(f.jobs.len(), 1);
+        assert!(f.running().is_some());
+    }
 }

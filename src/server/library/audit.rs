@@ -586,4 +586,91 @@ mod tests {
         a.set_paused(false);
         assert!(a.next().is_some());
     }
+
+    #[test]
+    fn a_complete_fill_drops_vanished_files_and_an_incomplete_one_keeps_them() {
+        let t = tempfile::tempdir().unwrap();
+        let (a_path, a_sig) = file(t.path(), "A.mkv");
+        let (b_path, b_sig) = file(t.path(), "B.mkv");
+        let a = Audits::open(t.path());
+        audited(&a, &a_path, a_sig);
+        audited(&a, &b_path, b_sig);
+        a.enqueue([b_path.clone()]);
+        a.fill(&[(a_path.clone(), a_sig)], false, 1, false);
+        assert!(
+            a.report(&b_path, b_sig).is_some(),
+            "an incomplete scan proves nothing"
+        );
+        assert!(a.is_queued(&b_path));
+        a.fill(&[(a_path.clone(), a_sig)], false, 1, true);
+        assert!(a.report(&b_path, b_sig).is_none());
+        assert!(!a.is_queued(&b_path));
+        assert!(
+            a.report(&a_path, a_sig).is_some(),
+            "present files keep theirs"
+        );
+    }
+
+    #[test]
+    fn a_changed_file_loses_its_deep_verdict_and_is_requeued() {
+        let t = tempfile::tempdir().unwrap();
+        let (p, sig) = file(t.path(), "A.mkv");
+        let a = Audits::open(t.path());
+        audited(&a, &p, sig);
+        a.record_deep(&p, sig, verdict(false), 2);
+        assert_eq!(a.deep_view(&p, sig, true).unwrap().state, "clean");
+        std::fs::write(
+            &p,
+            mkv("freemkv 1.7.7 rewritten", Some(60.0), Some(58), true),
+        )
+        .unwrap();
+        let new = FileSig::stat(&p).unwrap();
+        assert_ne!(new, sig);
+        assert!(
+            a.report(&p, new).is_none(),
+            "the old report is not the new file's"
+        );
+        assert_eq!(a.fill(&[(p.clone(), new)], true, 3, true), 1, "requeued");
+        audited(&a, &p, new);
+        assert_eq!(a.deep_view(&p, new, true).unwrap().state, "pending");
+    }
+
+    #[test]
+    fn a_decode_of_a_file_changed_mid_run_is_not_recorded() {
+        let t = tempfile::tempdir().unwrap();
+        let (p, sig) = file(t.path(), "A.mkv");
+        let a = Audits::open(t.path());
+        audited(&a, &p, sig);
+        std::fs::write(
+            &p,
+            mkv("freemkv 1.7.7 rewritten", Some(60.0), Some(58), true),
+        )
+        .unwrap();
+        a.record_deep(&p, sig, verdict(false), 2);
+        assert_eq!(a.deep_view(&p, sig, true).unwrap().state, "pending");
+    }
+
+    #[test]
+    fn an_interrupted_file_goes_back_first_and_the_backoff_doubles() {
+        let t = tempfile::tempdir().unwrap();
+        let (p, sig) = file(t.path(), "A.mkv");
+        let (q, qs) = file(t.path(), "B.mkv");
+        let a = Audits::open(t.path());
+        a.fill(&[(p.clone(), sig), (q.clone(), qs)], false, 1, true);
+        let first = a.next().unwrap();
+        a.requeue_front(first.clone());
+        assert_eq!(a.next(), Some(first), "front, not back");
+        a.requeue_front(q.clone());
+        a.requeue_front(q.clone());
+        assert_eq!(a.status().queued, 1, "no duplicate in the queue");
+
+        audited(&a, &p, sig);
+        a.record_deep(&p, sig, verdict(true), 1000);
+        a.record_deep(&p, sig, verdict(true), 2000);
+        // Two failed tries: the delay is 1200 s, not 600.
+        assert!(!a.deep_due_for(&p, sig, 2000 + 1199));
+        assert!(a.deep_due_for(&p, sig, 2000 + 1200));
+        // With deep audit off, an inconclusive try shows nothing.
+        assert!(a.deep_view(&p, sig, false).is_none());
+    }
 }

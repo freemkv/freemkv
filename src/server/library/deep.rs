@@ -598,4 +598,92 @@ mod tests {
         );
         assert_eq!(*seen.lock().unwrap(), [2.5]);
     }
+
+    #[test]
+    fn a_nonzero_exit_without_error_lines_is_not_clean() {
+        let v = classify(&run(1, &[]), "decode", 1);
+        assert_eq!(
+            (v.completed, v.clean, v.reason.as_str(), v.errors),
+            (true, false, "nonzero_exit", 1)
+        );
+        let r = Run {
+            signal: Some(libc::SIGTERM),
+            ..Default::default()
+        };
+        let v = classify(&r, "decode", 1);
+        assert_eq!(
+            (v.completed, v.reason.as_str(), v.signal.as_deref()),
+            (false, "killed", Some("SIGTERM"))
+        );
+    }
+
+    // A fake ffmpeg: logs its arguments, prints `stderr_line`, exits `rc`.
+    #[cfg(unix)]
+    fn fake_ffmpeg(dir: &Path, stderr_line: &str, rc: i32) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (bin, log) = (dir.join("ffmpeg"), dir.join("calls.log"));
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\n{}exit {rc}\n",
+            log.display(),
+            if stderr_line.is_empty() {
+                String::new()
+            } else {
+                format!("echo '{stderr_line}' >&2\n")
+            }
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (bin, log)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_decode_demuxes_then_decodes_and_stops_at_the_first_bad_stage() {
+        let t = tempfile::tempdir().unwrap();
+        let mkv = t.path().join("A.mkv");
+        std::fs::write(&mkv, b"x").unwrap();
+        let err = t.path().join("err");
+        let (bin, log) = fake_ffmpeg(t.path(), "", 0);
+        let v = full_decode(&bin, &mkv, t.path(), &err, &|| false, &|_, _| {}).unwrap();
+        assert!(v.clean && v.completed, "{v:?}");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let calls: Vec<&str> = calls.lines().collect();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].contains("-map 0 -c copy"), "{calls:?}");
+        assert!(calls[1].contains("-map 0:v:0 -map 0:a?"), "{calls:?}");
+
+        std::fs::remove_file(&log).unwrap();
+        let (bin, log) = fake_ffmpeg(t.path(), "error while decoding", 1);
+        let v = full_decode(&bin, &mkv, t.path(), &err, &|| false, &|_, _| {}).unwrap();
+        assert_eq!(
+            (v.stage.as_str(), v.reason.as_str()),
+            ("demux", "demux_errors")
+        );
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+
+        assert!(full_decode(&bin, &mkv, t.path(), &err, &|| true, &|_, _| {}).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_while_the_share_is_gone_is_inconclusive_not_corrupt() {
+        let t = tempfile::tempdir().unwrap();
+        let err = t.path().join("err");
+        let (bin, _) = fake_ffmpeg(t.path(), "", 1);
+        let mkv = t.path().join("A.mkv");
+        std::fs::write(&mkv, b"x").unwrap();
+        let v = full_decode(&bin, &mkv, t.path(), &err, &|| false, &|_, _| {}).unwrap();
+        assert_eq!((v.completed, v.reason.as_str()), (true, "nonzero_exit"));
+        std::fs::remove_file(&mkv).unwrap();
+        let v = full_decode(&bin, &mkv, t.path(), &err, &|| false, &|_, _| {}).unwrap();
+        assert_eq!(
+            (v.completed, v.reason.as_str()),
+            (false, "media_unavailable")
+        );
+        assert_eq!(v.errors, 0);
+        std::fs::write(&mkv, b"x").unwrap();
+        let gone = t.path().join("no-library");
+        let v = full_decode(&bin, &mkv, &gone, &err, &|| false, &|_, _| {}).unwrap();
+        assert!(!v.completed);
+    }
 }

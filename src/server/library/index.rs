@@ -572,4 +572,32 @@ mod tests {
         assert_eq!(by_title(&rows, "Heat (1995)").kind, RowKind::Remux);
         assert!(!by_title(&rows, "Heat (1995)").linked);
     }
+
+    #[test]
+    fn an_unreadable_or_missing_folder_is_an_incomplete_listing() {
+        let t = tempfile::tempdir().unwrap();
+        let gone = t.path().join("not-mounted");
+        assert!(list_mkvs(&gone).incomplete);
+        assert!(list_isos(&gone, true).incomplete);
+        assert!(list_mkvs(&gone).files.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_unreadable_subfolder_marks_the_listing_incomplete() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let t = tempfile::tempdir().unwrap();
+        let lib = t.path().join("movies");
+        touch(&lib.join("A/A.mkv"));
+        touch(&lib.join("B/B.mkv"));
+        let b = lib.join("B");
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o0)).unwrap();
+        let m = list_mkvs(&lib);
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if std::fs::read_dir(&b).is_ok() && m.files.len() == 2 {
+            return; // root reads anything
+        }
+        assert!(m.incomplete);
+        assert_eq!(m.files.len(), 1);
+    }
 }

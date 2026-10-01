@@ -92,4 +92,17 @@ mod tests {
             Some(&PathBuf::from("/i/A (2000).iso"))
         );
     }
+
+    #[test]
+    fn a_new_link_joins_the_earlier_ones() {
+        let t = tempfile::tempdir().unwrap();
+        record(t.path(), Path::new("/m/A.mkv"), Path::new("/i/A.iso")).unwrap();
+        record(t.path(), Path::new("/m/B.mkv"), Path::new("/i/B.iso")).unwrap();
+        let links = load(t.path());
+        assert_eq!(links.len(), 2);
+        assert_eq!(
+            links.get(Path::new("/m/A.mkv")),
+            Some(&PathBuf::from("/i/A.iso"))
+        );
+    }
 }
