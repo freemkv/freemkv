@@ -869,8 +869,8 @@ mod tests {
 
     #[test]
     fn an_unused_network_target_does_not_block_a_save() {
-        // A LAN target (refused by validation), built so it isn't a literal.
-        let lan = format!("{}.{}.{}.{}:9000", 10, 0, 0, 5);
+        // A target validation refuses (unspecified address).
+        let lan = "0.0.0.0:9000".to_string();
         let c = Config {
             output_format: "mkv".into(),
             network_target: lan.clone(),
