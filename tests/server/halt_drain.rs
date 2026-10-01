@@ -5,11 +5,10 @@
 //!     rip-thread clone polls (immediate path).
 //!   - handle_stop waits for the rip thread to drain before
 //!     returning (TDD-red: today the join handle is dropped).
-//!   - eject + rip-exit don't double-drop the underlying Drive
-//!     (TDD-red: depends on the eject sync fix).
+//!   - eject halts and drains the rip thread before it drops the session.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use freemkv::server::ripper;
@@ -90,57 +89,39 @@ fn test_stop_and_drain_waits_for_thread_to_finish() {
     );
 }
 
-/// Counts Drop invocations to detect double-drop.
-struct DropCounter {
-    counter: Arc<AtomicUsize>,
-}
-
-impl Drop for DropCounter {
-    fn drop(&mut self) {
-        self.counter.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
 #[test]
-fn test_eject_does_not_double_drop() {
-    // TDD-red: handle_eject can drop the SCSI session via eject_drive while
-    // the rip thread is still mid-call, risking a double drop of Drive. Model
-    // via DropCounter/Arc<Mutex> shared by "eject" and "rip exit" tasks; count must be 1.
-    let counter = Arc::new(AtomicUsize::new(0));
-    let drive_slot: Arc<std::sync::Mutex<Option<DropCounter>>> =
-        Arc::new(std::sync::Mutex::new(Some(DropCounter {
-            counter: counter.clone(),
-        })));
+fn test_eject_halts_and_drains_the_rip_thread_before_dropping_the_session() {
+    // Drives the REAL `ripper::eject_drive`: it must cancel the device's halt and join the
+    // rip thread BEFORE it takes the session, or the rip thread is still inside a drive call
+    // while the Drive is dropped. The fake rip thread takes ~100ms to wind down after Halt.
+    let device = "sg_eject_drain_test";
+    let halt = Halt::new();
+    ripper::register_halt(device, halt.clone());
 
-    let eject_slot = drive_slot.clone();
-    let eject_thread = std::thread::spawn(move || {
-        // Simulated eject: take() the Option, drop it. If the slot
-        // is already empty (rip exit ran first), this is a no-op.
-        let taken = eject_slot.lock().unwrap().take();
-        drop(taken);
-    });
+    let exited = Arc::new(AtomicBool::new(false));
+    let exited_t = exited.clone();
+    let halt_t = halt.clone();
+    let handle = std::thread::Builder::new()
+        .name(format!("fake-rip-{device}"))
+        .spawn(move || {
+            while !halt_t.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            exited_t.store(true, Ordering::SeqCst);
+        })
+        .expect("spawn fake rip thread");
+    ripper::register_rip_thread(device, handle).expect("no prior handle for this device");
+    std::thread::sleep(Duration::from_millis(20));
 
-    let exit_slot = drive_slot.clone();
-    let exit_thread = std::thread::spawn(move || {
-        // Simulated rip exit: same pattern.
-        let taken = exit_slot.lock().unwrap().take();
-        drop(taken);
-    });
+    // No session is held and the path is no drive, so the eject itself is skipped; the
+    // halt-and-drain that precedes it is what this pins.
+    ripper::eject_drive(&format!("/dev/{device}"));
 
-    eject_thread.join().expect("eject join");
-    exit_thread.join().expect("rip exit join");
-
-    // The slot must be empty (one of the two .take()s succeeded).
+    assert!(halt.is_cancelled(), "eject did not halt the rip thread");
     assert!(
-        drive_slot.lock().unwrap().is_none(),
-        "drive slot should be empty after eject + rip exit"
-    );
-    let drops = counter.load(Ordering::SeqCst);
-    assert_eq!(
-        drops, 1,
-        "Drive::drop ran {} times — expected exactly 1. \
-         If >1, eject + rip-exit are racing without a synchronized take().",
-        drops
+        exited.load(Ordering::SeqCst),
+        "eject returned while the rip thread was still running"
     );
 }
 

@@ -165,7 +165,7 @@ fn the_guard_skips_signatures_and_catches_literals() {
              volume_id: [u8; 16],\n    ) -> libfreemkv::disc::{ty} {{"
         ),
         format!("    pub(super) fn aacs(unit_keys: Vec<(u32, [u8; 16])>) -> libfreemkv::{ty} {{"),
-        format!("    pub(super) fn aacs(unit_keys: Vec<(u32, [u8; 16])>) -> libfreemkv::{ty} {{"),
+        format!("    pub(super) fn aacs() -> libfreemkv::{ty} {{"),
         format!("    fn aacs_with_secrets(disc_hash: &str) -> {ty} {{"),
         // Definition and impl headers; another type whose name ends in the type's.
         format!("pub struct {ty} {{"),

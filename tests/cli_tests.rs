@@ -6,7 +6,11 @@
 use std::process::Command;
 
 fn freemkv() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_freemkv"))
+    // The assertions read the English catalogue; the child must not pick up
+    // the host's language.
+    let mut c = Command::new(env!("CARGO_BIN_EXE_freemkv"));
+    c.env("LC_ALL", "en_US.UTF-8").env_remove("LANGUAGE");
+    c
 }
 
 fn combined_output(out: &std::process::Output) -> String {
@@ -328,6 +332,13 @@ fn dir_dest_existing_file_rejected_end_to_end() {
 
 #[test]
 fn quiet_mode_suppresses_output() {
+    // The same run without -q prints the banner on stdout, so the quiet
+    // assertion below can only hold if -q is honoured.
+    let loud = freemkv()
+        .args(["iso:///nonexistent.iso", "mkv://out.mkv"])
+        .output()
+        .expect("failed to run");
+    assert!(String::from_utf8_lossy(&loud.stdout).contains("freemkv"));
     let out = freemkv()
         .args(["iso:///nonexistent.iso", "mkv://out.mkv", "-q"])
         .output()

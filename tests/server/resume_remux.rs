@@ -9,7 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
-use freemkv::server::ripper::resume::{ResumeClass, classify_resume, delete_partial_output};
+use freemkv::server::ripper::resume::{
+    ResumeClass, classify_resume, delete_partial_output, resume_remux,
+};
 use freemkv::server::ripper::staging::{self, RESTART_COUNT_FILE, ResumeAction, StagingResumeHint};
 
 fn tmpdir() -> tempfile::TempDir {
@@ -206,9 +208,9 @@ fn resume_remux_writes_completed_marker_on_success() {
 
 #[test]
 fn resume_remux_preserves_state_on_classifier_rejection() {
-    // The orchestrator must NOT clear .restart_count when the classifier
-    // rejects — guards the 3-strike rule against a future classifier tweak
-    // silently downgrading a legitimate Remux to NotEligible.
+    // The orchestrator must NOT clear .restart_count when the classifier rejects,
+    // so a classifier tweak cannot silently reset the 3-strike rule. Drives the
+    // REAL `resume_remux` with the rejection.
     let td = tmpdir();
     let dir = td.path().join("MyDisc");
     std::fs::create_dir_all(&dir).unwrap();
@@ -227,8 +229,15 @@ fn resume_remux_preserves_state_on_classifier_rejection() {
         classify_resume(&hint, 0),
         ResumeClass::NotEligible
     ));
-    // Counter must NOT have been touched by classify_resume.
-    assert_eq!(staging::restart_count(&dir), 1);
+    let cfg = std::sync::Arc::new(std::sync::RwLock::new(
+        freemkv::server::config::Config::default(),
+    ));
+    resume_remux(&cfg, "sg_resume_rejected", classify_resume(&hint, 0));
+    assert_eq!(
+        staging::restart_count(&dir),
+        1,
+        "a rejected classification must leave the restart counter alone"
+    );
 }
 
 /// Write a mapfile whose sectors are fully settled (bytes_pending == 0) but
@@ -335,17 +344,19 @@ fn cold_resume_of_a_boxset_variant_dir_uses_the_file_basename_not_the_dir_name()
     );
     std::fs::write(dir.join(format!("{display_name}.mkv")), b"remuxed").unwrap();
 
-    let mkvs: Vec<String> = std::fs::read_dir(&dir)
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".mkv"))
         .collect();
+    files.sort();
     assert_eq!(
-        mkvs.len(),
-        1,
-        "cold resume produced {} MKVs in one staging dir ({:?}) — the mover delivers BOTH",
-        mkvs.len(),
-        mkvs
+        files,
+        [
+            "Boxset Movie.iso",
+            "Boxset Movie.iso.mapfile",
+            "Boxset Movie.mkv"
+        ],
+        "cold resume left a different file set in one staging dir — the mover delivers BOTH MKVs"
     );
 }

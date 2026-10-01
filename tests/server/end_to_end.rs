@@ -6,7 +6,7 @@
 //! Route dispatch + device-name validation are NOT tested here: that coverage now lives against
 //! the real `handle_request` in the in-crate `web::web_tests::http` module instead.
 
-use freemkv::server::ripper::{BadRange, RipState};
+use freemkv::server::ripper::{BadRange, Resumable, RipState};
 
 #[test]
 fn test_state_json_serialization_round_trip() {
@@ -51,8 +51,8 @@ fn test_state_json_serialization_round_trip() {
         main_lost_ms: 8.0,
         main_at_risk_ms: 50.0,
         largest_gap_ms: 12.5,
-        loss_aborted: false,
-        last_error: String::new(),
+        loss_aborted: true,
+        last_error: "read error".to_string(),
         output_file: "TEST DISC.mkv".to_string(),
         tmdb_title: "Test Disc".to_string(),
         tmdb_year: 2024,
@@ -66,11 +66,11 @@ fn test_state_json_serialization_round_trip() {
         total_progress_pct: 18,
         total_eta: "1:23:45".to_string(),
         damage_severity: "cosmetic".to_string(),
-        failure_reason: None,
-        started_epoch_secs: 0,
-        key_status: String::new(),
-        resumable: None,
-        claim_gen: 0,
+        failure_reason: Some("loss over threshold".to_string()),
+        started_epoch_secs: 1_700_000_000,
+        key_status: "keys ok".to_string(),
+        resumable: Some(Resumable::Remux),
+        claim_gen: 9,
     };
 
     // Serialize the same way get_state_json does: serde_json::to_value.
@@ -108,6 +108,40 @@ fn test_state_json_serialization_round_trip() {
     assert_eq!(v["tmdb_year"], 2024);
     assert_eq!(v["duration"], "1h 47m");
     assert_eq!(v["codecs"], "H.264 1080p / DTS-HD MA 5.1");
+
+    // The rest of the dashboard's fields, each under its own wire key.
+    assert!((v["lost_video_secs"].as_f64().unwrap() - 0.125).abs() < 1e-9);
+    assert_eq!(v["current_batch"], 16);
+    assert_eq!(v["preferred_batch"], 32);
+    assert_eq!(v["bytes_maybe"], 4096);
+    assert_eq!(v["bytes_lost"], 1024);
+    assert_eq!(v["total_lost_ms"], 12.5);
+    assert_eq!(v["main_lost_ms"], 8.0);
+    assert_eq!(v["main_at_risk_ms"], 50.0);
+    assert_eq!(v["largest_gap_ms"], 12.5);
+    assert_eq!(v["loss_aborted"], true);
+    assert_eq!(v["last_error"], "read error");
+    assert_eq!(v["tmdb_poster"], "https://image.tmdb.org/p/abc.jpg");
+    assert_eq!(v["tmdb_overview"], "An overview.");
+    assert_eq!(v["tmdb_media_type"], "movie");
+    assert_eq!(v["pass_progress_pct"], 42);
+    assert_eq!(v["pass_eta"], "0:14:23");
+    assert_eq!(v["total_progress_pct"], 18);
+    assert_eq!(v["total_eta"], "1:23:45");
+    assert_eq!(v["damage_severity"], "cosmetic");
+    assert_eq!(v["failure_reason"], "loss over threshold");
+    assert_eq!(v["started_epoch_secs"], 1_700_000_000u64);
+    assert_eq!(v["key_status"], "keys ok");
+    assert_eq!(v["resumable"], "remux");
+    // Server-side bookkeeping stays off the wire.
+    for hidden in [
+        "claim_gen",
+        "failure_deferred",
+        "failure_finalize",
+        "failure_space",
+    ] {
+        assert!(v.get(hidden).is_none(), "{hidden} must not be serialized");
+    }
 
     // bad_ranges is an array of objects with the documented fields.
     let bad = v["bad_ranges"]
