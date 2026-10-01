@@ -831,7 +831,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     } else {
         None
     };
-    let set = set.unwrap_or_else(libfreemkv::keys::ResolvedKeySet::none);
+    let set = set.unwrap_or_else(libfreemkv::keys::KeyRing::none);
 
     // A multi-title rip with no specific title named must skip an uncrackable
     // incidental title (menu stub) rather than abort. `-t all` isn't the same
@@ -1654,9 +1654,9 @@ fn scan_rip_drive(source: &str, keys: &KeyConfig) -> Result<DriveScan, libfreemk
 /// Print a key refusal, or the set's HD DVD note; the set on success. E7034 renders its
 /// shared text (USER 2026-09-28: no `--vid-from`; the disc is inserted and the rip re-run).
 fn report_keys(
-    set: libfreemkv::Result<libfreemkv::keys::ResolvedKeySet>,
+    set: libfreemkv::Result<libfreemkv::keys::KeyRing>,
     out: &Output,
-) -> Option<libfreemkv::keys::ResolvedKeySet> {
+) -> Option<libfreemkv::keys::KeyRing> {
     match set {
         Ok(set) => {
             if let Some(note) = crate::rip_keys::best_effort_note(&set.status()) {
@@ -1683,7 +1683,7 @@ fn disc_rip_keys(
     scope: libfreemkv::keys::KeyScope,
     keys: &KeyConfig,
     out: &Output,
-) -> Option<libfreemkv::keys::ResolvedKeySet> {
+) -> Option<libfreemkv::keys::KeyRing> {
     let factory = key_source_factory(keys, out);
     let token = crate::cli_stop::token();
     let r = crate::rip_keys::resolve(disc, reader, scope, &factory, None, Some(token));
@@ -1697,7 +1697,7 @@ fn loose_clip_keys(
     clip: &std::path::Path,
     keys: &KeyConfig,
     out: &Output,
-) -> Result<Option<libfreemkv::keys::ResolvedKeySet>, ()> {
+) -> Result<Option<libfreemkv::keys::KeyRing>, ()> {
     let factory = key_source_factory(keys, out);
     let token = crate::cli_stop::token();
     let (set, trace) = freemkv_engine::resolve_loose_clip(clip, &factory, Some(token));
@@ -1714,7 +1714,7 @@ fn loose_clip_keys(
 
 /// The keys `info` opens a loose clip with: looked up from its disc folder with the default key
 /// sources, as a rip does (1.8.0). `Err` once the refusal is shown.
-pub(crate) fn info_clip_keys(source: &str) -> Result<Option<libfreemkv::keys::ResolvedKeySet>, ()> {
+pub(crate) fn info_clip_keys(source: &str) -> Result<Option<libfreemkv::keys::KeyRing>, ()> {
     match libfreemkv::parse_url(source) {
         libfreemkv::StreamUrl::M2ts { path } => {
             loose_clip_keys(&path, &KeyConfig::default(), &Output::new(false, false))
@@ -1769,7 +1769,7 @@ fn pipe_disc(
     title_idx: usize,
     expected: Option<&TitleIdentity>,
     keys: &KeyConfig,
-    set: &libfreemkv::keys::ResolvedKeySet,
+    set: &libfreemkv::keys::KeyRing,
     raw: bool,
     _multipass: bool,
     streams: &freemkv_engine::StreamChoice,
@@ -1915,7 +1915,7 @@ fn copy_verdict(r: &freemkv_engine::CopyResult) -> CopyVerdict {
 }
 
 fn disc_copy_options<'a>(
-    keys: Option<&libfreemkv::keys::ResolvedKeySet>,
+    keys: Option<&libfreemkv::keys::KeyRing>,
     raw: bool,
     multipass: bool,
     progress: &'a dyn libfreemkv::Events,
@@ -2020,7 +2020,7 @@ fn write_decrypted_image(
     disc: &libfreemkv::Disc,
     reader: Box<dyn libfreemkv::SectorSource>,
     dest: &std::path::Path,
-    set: &libfreemkv::keys::ResolvedKeySet,
+    set: &libfreemkv::keys::KeyRing,
     halt: &libfreemkv::Halt,
 ) -> libfreemkv::error::Result<u64> {
     let mut src = set.whole_disc_reader(disc, reader, Some(halt))?;
@@ -2227,7 +2227,7 @@ fn disc_to_iso(
     // whole disc once, up front, then gates on it (E7026 for Pending forensic keys, §5.4).
     let scope = crate::rip_keys::copy_scope(raw);
     let set = if raw {
-        libfreemkv::keys::ResolvedKeySet::none()
+        libfreemkv::keys::KeyRing::none()
     } else {
         match disc_rip_keys(&disc, &mut drive, scope.clone(), keys, out) {
             Some(set) => set,
@@ -2524,7 +2524,7 @@ fn run_extract(
     reader: &mut dyn libfreemkv::SectorSource,
     dest_path: &std::path::Path,
     force: bool,
-    set: &libfreemkv::keys::ResolvedKeySet,
+    set: &libfreemkv::keys::KeyRing,
     out: &Output,
 ) -> bool {
     out.raw(
@@ -5621,12 +5621,18 @@ mod verdict_tests {
         let fx = bd_image(&[Some(K1)], 1);
         let disc = drive_disc(&fx);
         let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
-        let opts = libfreemkv::keys::ResolveKeysOptions::default();
+        let opts = libfreemkv::keys::AcquireOptions::default();
         let scope = libfreemkv::keys::KeyScope::WholeDisc;
-        let set =
-            libfreemkv::keys::ResolvedKeySet::resolve(&disc, &mut fx.source(), scope, &f, opts)
-                .unwrap()
-                .keys;
+        let set = libfreemkv::keys::KeyRing::acquire_for_disc(
+            &disc,
+            &mut fx.source(),
+            scope,
+            &f,
+            opts,
+            &libfreemkv::Ctx::default(),
+        )
+        .unwrap()
+        .keys;
         for raw in [false, true] {
             let dir = TempDir::new("fk6");
             let iso = dir.path().join("disc.iso");
@@ -6981,22 +6987,29 @@ mod image_copy_tests {
         probe_fail: Option<(u32, u32)>,
         pool: &[[u8; 16]],
         online: &[[u8; 16]],
-    ) -> libfreemkv::error::Result<libfreemkv::keys::ResolvedKeySet> {
+    ) -> libfreemkv::error::Result<libfreemkv::keys::KeyRing> {
         use crate::ku_fixtures::{Answer, Calls, factory};
         let f = factory(
             &[(Answer::Keydb, pool), (Answer::Online, online)],
             &Calls::default(),
         );
-        let opts = libfreemkv::keys::ResolveKeysOptions::default();
+        let opts = libfreemkv::keys::AcquireOptions::default();
         let scope = libfreemkv::keys::KeyScope::WholeDisc;
-        libfreemkv::keys::ResolvedKeySet::resolve(d, &mut mem(fx, probe_fail), scope, &f, opts)
-            .map(|r| r.keys)
+        libfreemkv::keys::KeyRing::acquire_for_disc(
+            d,
+            &mut mem(fx, probe_fail),
+            scope,
+            &f,
+            opts,
+            &libfreemkv::Ctx::default(),
+        )
+        .map(|r| r.keys)
     }
 
     fn copy(
         fx: &Fixture,
         d: &libfreemkv::Disc,
-        set: &libfreemkv::keys::ResolvedKeySet,
+        set: &libfreemkv::keys::KeyRing,
         halt: &libfreemkv::Halt,
     ) -> (std::path::PathBuf, libfreemkv::error::Result<u64>) {
         let dest = fx.dir.join("out.iso");
@@ -7085,7 +7098,7 @@ mod ku_cli_tests {
         crate::output::capture(|| super::run(source, dest, &args(a)))
     }
 
-    /// FK1 (KU §2.1 invariant 1, "exactly one `ResolvedKeySet::resolve`" before "R's first
+    /// FK1 (KU §2.1 invariant 1, "exactly one `KeyRing::resolve`" before "R's first
     /// output byte"): `-t 1,2,3` and `-t all` over a 3-title, 2-group image make exactly
     /// 2 requests, every one before any output exists. FK10: no key or VID on disk.
     #[test]

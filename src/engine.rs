@@ -76,7 +76,7 @@ pub struct Scanned {
     pub title_ids: Vec<TitleIdentity>,
     /// The key set Open resolved for the main title (KU §2.5 "GUI open | `Titles([main])`
     /// for status. The result seeds the rip's `resolve`"): memory only, never written.
-    pub keys: Option<libfreemkv::keys::ResolvedKeySet>,
+    pub keys: Option<libfreemkv::keys::KeyRing>,
     /// Open refused E7034: only the disc's Volume ID can finish the key (KU §4.2).
     pub needs_disc: bool,
     /// Open's answered refusal (not E7034): Start shows it again rather than asking again.
@@ -379,7 +379,7 @@ fn loose_clip_keys(
     keys: &KeyConfig,
     halt: &libfreemkv::Halt,
 ) -> (
-    libfreemkv::Result<Option<libfreemkv::keys::ResolvedKeySet>>,
+    libfreemkv::Result<Option<libfreemkv::keys::KeyRing>>,
     crate::rip_keys::Trace,
 ) {
     if raw || crate::ui::container_scheme(path) != Some("m2ts") {
@@ -449,7 +449,7 @@ fn stopped_open<T>(
 /// A scan's display rows, plus its key set or refusal and the walk behind it.
 fn scanned_with_keys(
     disc: &libfreemkv::Disc,
-    keys: libfreemkv::Result<libfreemkv::keys::ResolvedKeySet>,
+    keys: libfreemkv::Result<libfreemkv::keys::KeyRing>,
     trace: &crate::rip_keys::Trace,
     titles: Vec<usize>,
 ) -> Scanned {
@@ -848,7 +848,7 @@ pub fn preflight_with_keys(
     path: &str,
     dest: &str,
     titles: &[usize],
-    seed: Option<&libfreemkv::keys::ResolvedKeySet>,
+    seed: Option<&libfreemkv::keys::KeyRing>,
 ) -> Result<Vec<String>, String> {
     // Folder OR image: a preflight that cannot open a folder reports a spurious failure
     // for a source the rip itself handles.
@@ -1016,7 +1016,7 @@ impl fe::Sink for UiSink {
 // and the GUI comes from the resolved set"), never from keys banked on the disc.
 pub(crate) fn key_summary(
     disc: &libfreemkv::Disc,
-    set: Option<&libfreemkv::keys::ResolvedKeySet>,
+    set: Option<&libfreemkv::keys::KeyRing>,
 ) -> String {
     if !disc.encrypted {
         return "unencrypted".into();
@@ -1024,7 +1024,7 @@ pub(crate) fn key_summary(
     if disc.css.is_some() {
         return "CSS (DVD)".into();
     }
-    match set.filter(|s| s.is_aacs() && s.is_for(disc)) {
+    match set.filter(|s| s.is_aacs() && s.is_for(&disc.media_id())) {
         Some(s) => match s.status().origin {
             Some(w) => format!("unlocked via {w}"),
             None => "unlocked".into(),
@@ -1312,7 +1312,7 @@ pub fn summarize_extract(res: &libfreemkv::ExtractResult, dest: &std::path::Path
 }
 
 /// A rip's up-front AACS key set (KU §2.1), held in memory only.
-pub type KeySet = libfreemkv::keys::ResolvedKeySet;
+pub type KeySet = libfreemkv::keys::KeyRing;
 
 /// Key configuration taken from the user's settings.
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
@@ -1452,7 +1452,7 @@ pub struct RipRequest {
     pub auto_eject: bool,
     pub keys: KeyConfig,
     /// The key set Open resolved: the rip asks only for what it lacks (KU §2.5).
-    pub seed: Option<libfreemkv::keys::ResolvedKeySet>,
+    pub seed: Option<libfreemkv::keys::KeyRing>,
     /// The insert-the-disc Retry after E7034 (KU §4.2 Q4): the `disc://` drive holding
     /// the image's disc, scanned with no key call for its Volume ID.
     pub vid_from: Option<String>,
@@ -1574,7 +1574,7 @@ fn run_extract_folder(
     disc: &libfreemkv::Disc,
     reader: &mut dyn libfreemkv::SectorSource,
     label: &str,
-    set: &libfreemkv::keys::ResolvedKeySet,
+    set: &libfreemkv::keys::KeyRing,
     sink: &UiSink,
     state: &Arc<RunState>,
 ) -> Result<String, String> {
@@ -1977,7 +1977,7 @@ fn demux_needs_subdirs(title_count: usize) -> bool {
 // a closure) because three fields fail silently if missing: title_index
 // (wrong title muxed), keys (E7022), selection (wrong tracks kept).
 fn title_input_options(
-    set: &libfreemkv::keys::ResolvedKeySet,
+    set: &libfreemkv::keys::KeyRing,
     req: &RipRequest,
     idx: usize,
 ) -> libfreemkv::InputOptions {
@@ -1997,7 +1997,7 @@ fn mux_selected_titles(
     source_url: &str,
     req: &RipRequest,
     indices: &[usize],
-    set: &libfreemkv::keys::ResolvedKeySet,
+    set: &libfreemkv::keys::KeyRing,
     sink: &UiSink,
     state: &Arc<RunState>,
 ) -> Result<String, String> {
@@ -2364,7 +2364,7 @@ fn log_walk(trace: &crate::rip_keys::Trace, sink: &UiSink) {
 }
 
 /// KU §2.6: an HD DVD set applied without proof says so in the run log.
-fn note_best_effort(set: &libfreemkv::keys::ResolvedKeySet, state: &Arc<RunState>) {
+fn note_best_effort(set: &libfreemkv::keys::KeyRing, state: &Arc<RunState>) {
     if let Some(note) = crate::rip_keys::best_effort_note(&set.status()) {
         state
             .lines
@@ -2640,7 +2640,7 @@ fn disc_rip_keys(
     req: &RipRequest,
     sink: &UiSink,
     state: &Arc<RunState>,
-) -> Result<libfreemkv::keys::ResolvedKeySet, String> {
+) -> Result<libfreemkv::keys::KeyRing, String> {
     let watch = CancelWatch::new(state);
     let sources = key_factory(&req.keys);
     let seed = req.seed.as_ref();
@@ -3139,7 +3139,7 @@ fn title_dest(
 fn mux_session_title(
     session: &mut libfreemkv::DiscSession,
     idx: usize,
-    set: &libfreemkv::keys::ResolvedKeySet,
+    set: &libfreemkv::keys::KeyRing,
     dest: &str,
     opts: &libfreemkv::MuxOptions,
     hint: u64,
@@ -3918,7 +3918,7 @@ mod key_summary_tests {
         let mut d = disc(true);
         d.aacs = Some(aacs());
         assert_eq!(key_summary(&d, None), "locked — no key yet");
-        let none = libfreemkv::keys::ResolvedKeySet::none();
+        let none = libfreemkv::keys::KeyRing::none();
         assert_eq!(key_summary(&d, Some(&none)), "locked — no key yet");
     }
 
@@ -5495,7 +5495,10 @@ mod routing_tests {
                 idx + 1
             );
             let keys = input.keys.as_ref().expect("the rip's set must be passed");
-            assert!(keys.is_aacs() && keys.is_for(&fx.disc), "the rip's own set");
+            assert!(
+                keys.is_aacs() && keys.is_for(&fx.disc.media_id()),
+                "the rip's own set"
+            );
             // PER TITLE, not the union: the union encoded the defect where a
             // PID unticked under one title was still written whenever a
             // sibling kept it ticked. `want` is written out, not re-derived.

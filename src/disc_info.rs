@@ -1418,7 +1418,7 @@ mod tests {
             .build();
         // KU §3.3: "`disc_info.rs:679` reads `status()`" — the count is the set's, never
         // the banked keys (KU §11.6: "The key count in `info` … comes from the resolved set").
-        let mut status = libfreemkv::keys::ResolvedKeySet::none().status();
+        let mut status = libfreemkv::keys::KeyRing::none().status();
         status.proven = 1;
         status.origin = Some("keydb");
         let ((), text) = crate::output::capture(|| {

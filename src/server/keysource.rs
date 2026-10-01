@@ -229,9 +229,9 @@ pub fn resolve_drive_keys(
     disc: &libfreemkv::Disc,
     drive: &mut dyn libfreemkv::SectorSource,
     scope: libfreemkv::keys::KeyScope,
-    seed: Option<&libfreemkv::keys::ResolvedKeySet>,
+    seed: Option<&libfreemkv::keys::KeyRing>,
     halt: Option<&libfreemkv::Halt>,
-) -> Result<libfreemkv::keys::ResolvedKeySet, libfreemkv::Error> {
+) -> Result<libfreemkv::keys::KeyRing, libfreemkv::Error> {
     warn_if_no_key_source(cfg);
     let factory = freemkv_engine::key_source_factory(&key_params(cfg));
     resolve_with(disc, drive, scope, &factory, seed, halt)
@@ -243,9 +243,9 @@ fn resolve_with(
     reader: &mut dyn libfreemkv::SectorSource,
     scope: libfreemkv::keys::KeyScope,
     factory: &libfreemkv::KeySourceFactory,
-    seed: Option<&libfreemkv::keys::ResolvedKeySet>,
+    seed: Option<&libfreemkv::keys::KeyRing>,
     halt: Option<&libfreemkv::Halt>,
-) -> Result<libfreemkv::keys::ResolvedKeySet, libfreemkv::Error> {
+) -> Result<libfreemkv::keys::KeyRing, libfreemkv::Error> {
     // Drain an earlier decode verdict so the caller's take sees only this resolve's.
     let _ = take_online_decode_reachability();
     let (set, trace) =
@@ -276,23 +276,21 @@ fn warn_if_no_key_source(cfg: &Config) {
 // A fresh rip's key set, from its `.ripped` hand-off to the mux worker's open of the same
 // ISO (the worker has no drive). Process memory only (J6): a restart forgets it.
 static RIP_KEYS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<PathBuf, libfreemkv::keys::ResolvedKeySet>>,
+    std::sync::Mutex<std::collections::HashMap<PathBuf, libfreemkv::keys::KeyRing>>,
 > = std::sync::LazyLock::new(Default::default);
 
-fn rip_keys_map() -> std::sync::MutexGuard<
-    'static,
-    std::collections::HashMap<PathBuf, libfreemkv::keys::ResolvedKeySet>,
-> {
+fn rip_keys_map()
+-> std::sync::MutexGuard<'static, std::collections::HashMap<PathBuf, libfreemkv::keys::KeyRing>> {
     RIP_KEYS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Keep the rip's key set for the staged `iso` until its mux is done (memory only).
-pub fn hold_rip_keys(iso: &Path, keys: libfreemkv::keys::ResolvedKeySet) {
+pub fn hold_rip_keys(iso: &Path, keys: libfreemkv::keys::KeyRing) {
     rip_keys_map().insert(iso.to_path_buf(), keys);
 }
 
 /// The key set held for `iso`, if this process ripped it.
-pub fn rip_keys_for(iso: &Path) -> Option<libfreemkv::keys::ResolvedKeySet> {
+pub fn rip_keys_for(iso: &Path) -> Option<libfreemkv::keys::KeyRing> {
     rip_keys_map().get(iso).cloned()
 }
 
@@ -306,7 +304,7 @@ pub enum StagedKeys {
     /// The rip's up-front set (from its drive, or the inserted disc's scan): used as-is
     /// where it covers the titles, with no key-service call; the sources are asked only
     /// for what it lacks (e.g. forensic keys it left Pending, asked once from the image).
-    Rip(libfreemkv::keys::ResolvedKeySet),
+    Rip(libfreemkv::keys::KeyRing),
     /// No set in hand (a resume after a restart): the key chain, asked once, up front.
     /// `vid` only from a drive in hand; the mapfile holds none (J6).
     Resolve { vid: Option<[u8; 16]> },
@@ -1176,7 +1174,7 @@ mod tests {
         let cfg = Config::default();
         let missing = Path::new("/nonexistent-autorip-iso-fixture-xyz.iso");
         let disc = || keyless_encrypted_disc_with_aacs();
-        let rip = StagedKeys::Rip(libfreemkv::keys::ResolvedKeySet::none());
+        let rip = StagedKeys::Rip(libfreemkv::keys::KeyRing::none());
         assert!(open_staged_image(&cfg, missing, disc(), &[0], rip, None).is_err());
         let resolve = StagedKeys::Resolve {
             vid: Some([7u8; 16]),
@@ -1893,7 +1891,7 @@ mod ku_e1_tests {
     fn rip_keys_are_held_per_iso_until_forgotten() {
         let iso = Path::new("/staging/ku-e1-held/disc.iso");
         assert!(rip_keys_for(iso).is_none());
-        hold_rip_keys(iso, libfreemkv::keys::ResolvedKeySet::none());
+        hold_rip_keys(iso, libfreemkv::keys::KeyRing::none());
         assert!(rip_keys_for(iso).is_some());
         forget_rip_keys(iso);
         assert!(rip_keys_for(iso).is_none());

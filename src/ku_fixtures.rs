@@ -465,14 +465,15 @@ pub fn resolve(
     scope: libfreemkv::keys::KeyScope,
     specs: &[(Answer, &[[u8; 16]])],
     calls: &Calls,
-) -> libfreemkv::Result<libfreemkv::keys::ResolvedKeySet> {
+) -> libfreemkv::Result<libfreemkv::keys::KeyRing> {
     let f = factory(specs, calls);
-    libfreemkv::keys::ResolvedKeySet::resolve(
+    libfreemkv::keys::KeyRing::acquire_for_disc(
         &fx.disc,
         &mut fx.source(),
         scope,
         &f,
-        libfreemkv::keys::ResolveKeysOptions::default(),
+        libfreemkv::keys::AcquireOptions::default(),
+        &libfreemkv::Ctx::default(),
     )
     .map(|r| r.keys)
 }

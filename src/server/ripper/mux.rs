@@ -1230,7 +1230,7 @@ pub(crate) struct LiveMuxSource {
     /// The rip's up-front key set (KU §2.1): its keys, its FMTS forensic map and the
     /// on-arrival proof. `None` (or a non-AACS set) decrypts no AACS; a DVD cracks its CSS
     /// title key in the stream.
-    pub(crate) keys: Option<libfreemkv::keys::ResolvedKeySet>,
+    pub(crate) keys: Option<libfreemkv::keys::KeyRing>,
     /// Skip-past-read-errors (zero-fill + continue) — wired onto
     /// `DiscStream::skip_errors` (was `on_read_error == "skip"`).
     pub(crate) skip_errors: bool,

@@ -208,7 +208,7 @@ pub(crate) fn output_scheme_for(output_format: &str) -> &'static str {
 }
 
 // The rip's key set, or why its resolve refused (KU §2.1). Memory only.
-type KeyResult = Result<libfreemkv::keys::ResolvedKeySet, libfreemkv::Error>;
+type KeyResult = Result<libfreemkv::keys::KeyRing, libfreemkv::Error>;
 
 // Resolve the rip's key set off the live drive, once (see `keysource::resolve_drive_keys`).
 fn resolve_rip_keys(
@@ -217,7 +217,7 @@ fn resolve_rip_keys(
     drive: &mut libfreemkv::Drive,
     disc: &libfreemkv::Disc,
     scope: &libfreemkv::keys::KeyScope,
-    seed: Option<&libfreemkv::keys::ResolvedKeySet>,
+    seed: Option<&libfreemkv::keys::KeyRing>,
 ) -> KeyResult {
     let halt = device_halt(device);
     crate::server::keysource::resolve_drive_keys(
@@ -253,7 +253,7 @@ fn rip_key_scope(
 // disc's titles also need an AACS set.
 fn keys_cover(
     disc: &libfreemkv::Disc,
-    set: &libfreemkv::keys::ResolvedKeySet,
+    set: &libfreemkv::keys::KeyRing,
     scope: &libfreemkv::keys::KeyScope,
 ) -> bool {
     let aacs_titles = disc.aacs.is_some() && *scope != libfreemkv::keys::KeyScope::None;
@@ -8588,9 +8588,9 @@ mod tests {
     // KU-E1: a raw scope's keyless set never passes for a title rip's: the rip resolves.
     #[test]
     fn a_keyless_set_does_not_cover_a_title_rip() {
-        use libfreemkv::keys::{KeyScope, ResolvedKeySet};
+        use libfreemkv::keys::{KeyRing, KeyScope};
         let disc = crate::ku_fixture::bd_image().disc;
-        let none = ResolvedKeySet::none();
+        let none = KeyRing::none();
         assert!(!super::keys_cover(&disc, &none, &KeyScope::Titles(vec![0])));
         assert!(super::keys_cover(&disc, &none, &KeyScope::None));
     }
