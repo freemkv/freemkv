@@ -74,6 +74,9 @@ pub fn drive_scan(
     Ok(session.take_disc().expect("scan populated the disc"))
 }
 
+// The GUI's (the CLI's copies scope their keys in the engine's `run`); the CLI binary builds
+// this module without the GUI off macOS.
+#[allow(dead_code)]
 /// What a disc→ISO copy decrypts (KU §2.5): the whole disc, or nothing for a raw copy
 /// (“Raw copy (`--raw`, GUI "Keep encrypted", GUI `raw_copy`) | `None`: no key call”).
 pub fn copy_scope(raw: bool) -> KeyScope {

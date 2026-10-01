@@ -749,18 +749,100 @@ fn session_credentials(keys: &KeyConfig) -> Option<libfreemkv::DriveCredentials>
 // GUI's shellexpand of keydb_path and explicit online_only toggle; empty
 // keydb_path/keyserver_url maps to None (no default-location fallback).
 fn key_params(keys: &KeyConfig) -> freemkv_engine::KeyParams {
+    crate::plan_core::key_params(&key_settings(keys)).params()
+}
+
+/// The app's key settings as the front-end-neutral ones: the settings' keydb path (`~`
+/// expanded), its key service and token, and the key-source dropdown.
+pub fn key_settings(keys: &KeyConfig) -> crate::plan_core::KeySettings {
     let keydb_path = (!keys.keydb_path.trim().is_empty())
         .then(|| crate::settings::shellexpand(&keys.keydb_path));
-    // Gated on the dropdown, not just on "is a URL configured": "Local keydb
-    // only" must drop the online source even when a URL is saved.
-    let key_url = (!keys.local_only && !keys.keyserver_url.trim().is_empty())
-        .then(|| keys.keyserver_url.clone());
-    freemkv_engine::KeyParams {
+    // Gated on the dropdown, not just on "is a URL configured": "Local keydb only" must
+    // drop the online source even when a URL is saved.
+    let mode = if keys.local_only {
+        crate::plan_core::KeyMode::LocalOnly
+    } else if keys.online_only {
+        crate::plan_core::KeyMode::OnlineOnly
+    } else {
+        crate::plan_core::KeyMode::Both
+    };
+    crate::plan_core::KeySettings {
+        keydb_path,
+        key_url: Some(keys.keyserver_url.clone()),
+        key_auth: Some(keys.keyserver_token.clone()),
+        mode,
+    }
+}
+
+/// The engine plan for `req` writing `dest` (an output URL): the app's half of the one
+/// plan parser every front end shares.
+pub fn gui_plan(req: &RipRequest, dest: &str) -> freemkv_engine::Plan {
+    let titles = if req.titles.is_empty() {
+        fe::Selection::MainMovie
+    } else {
+        fe::Selection::Titles(req.titles.clone())
+    };
+    crate::plan_core::plan(crate::plan_core::PlanRequest {
+        source: source_url(&req.source),
+        dest: dest.to_string(),
+        titles,
+        streams: fe::StreamChoice::default(),
+        raw: req.raw,
+        multipass: req.multipass,
+        keys: key_settings(&req.keys),
+        force: req.force,
+    })
+}
+
+// The output a request writes, as a URL: its folder for a tree or per-title files, the
+// folder an image lands in for an ISO.
+fn plan_dest(req: &RipRequest) -> String {
+    let scheme = match out_kind(&req.format) {
+        OutKind::DecryptedFolder => "dir",
+        OutKind::IsoImage => "iso",
+        OutKind::Demux(s) | OutKind::File(s) => s,
+    };
+    format!("{scheme}://{}", req.dest_dir)
+}
+
+// The app's source as a URL: a drive is `disc://…`, an image `iso://`, a folder `dir://`.
+fn source_url(source: &str) -> String {
+    if source.starts_with("disc://") {
+        source.to_string()
+    } else {
+        format!("{}://{}", image_or_dir_scheme(source), source)
+    }
+}
+
+/// The app's line for the plan it runs, in the run log. Exhaustive on purpose (anti-drift
+/// §2): a field added to the engine's `Plan` fails to compile here until the app handles it.
+pub fn plan_line(p: &freemkv_engine::Plan) -> String {
+    let freemkv_engine::Plan {
+        source,
+        dest,
+        titles,
+        streams,
+        raw,
+        multipass,
+        keys,
+        force,
+    } = p;
+    let freemkv_engine::KeyParamsData {
         keydb_path,
         key_url,
-        key_auth: Some(keys.keyserver_token.clone()),
-        online_only: keys.online_only,
-    }
+        key_auth,
+        online_only,
+        cert_keydb,
+    } = keys;
+    format!(
+        "plan: {source} -> {dest} titles={titles:?} streams_all={} raw={raw} multipass={multipass} \
+         force={force} keydb={} online={} auth={} online_only={online_only} certs={}",
+        streams.is_all(),
+        keydb_path.is_some(),
+        key_url.is_some(),
+        key_auth.is_some(),
+        cert_keydb.is_some(),
+    )
 }
 
 /// The key sources a rip asks, from the user's settings (the same ones the ISO path uses).
@@ -1503,6 +1585,14 @@ fn start_rip_with(
     std::thread::spawn(move || {
         let _done = SignalDone(state.clone());
         let sink = UiSink(state.clone());
+        // The plan this run carries out, in the run log (the one plan parser every front
+        // end shares).
+        let plan = gui_plan(&req, &plan_dest(&req));
+        state
+            .lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(plan_line(&plan));
         let res = run(&req, &sink, &state);
         let cancelled = state.cancel.load(Ordering::Relaxed);
         if let (Err(e), false) = (&res, cancelled) {

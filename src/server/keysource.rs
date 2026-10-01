@@ -185,14 +185,21 @@ pub fn drive_scan_opts_for_keydb(keydb: &Path) -> libfreemkv::ScanOptions {
 /// The key source the user picked in settings, and only that one: `key_source = "online"`
 /// asks the online key service; otherwise the local keydb.
 pub fn key_params(cfg: &Config) -> freemkv_engine::KeyParams {
-    let url = cfg.keyserver_url.trim();
-    let online = cfg.key_source == "online";
-    freemkv_engine::KeyParams {
+    crate::plan_core::key_params(&key_settings(cfg)).params()
+}
+
+/// The server's key settings as the front-end-neutral ones: `key_source = "online"` asks
+/// only the key service, anything else only the local keydb.
+pub fn key_settings(cfg: &Config) -> crate::plan_core::KeySettings {
+    crate::plan_core::KeySettings {
         keydb_path: Some(keydb_path(cfg).to_string_lossy().into_owned()),
-        key_url: (online && !url.is_empty()).then(|| url.to_string()),
-        key_auth: (online && !cfg.keyserver_secret.is_empty())
-            .then(|| cfg.keyserver_secret.clone()),
-        online_only: online,
+        key_url: Some(cfg.keyserver_url.trim().to_string()),
+        key_auth: Some(cfg.keyserver_secret.clone()),
+        mode: if cfg.key_source == "online" {
+            crate::plan_core::KeyMode::OnlineOnly
+        } else {
+            crate::plan_core::KeyMode::LocalOnly
+        },
     }
 }
 

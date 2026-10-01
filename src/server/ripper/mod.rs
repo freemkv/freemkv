@@ -252,6 +252,54 @@ fn rip_key_scope(
     libfreemkv::keys::KeyScope::Titles(titles)
 }
 
+/// The engine plan for a server rip of the drive at `device_path` writing `dest` (an
+/// output URL): the server's half of the one plan parser every front end shares. The
+/// server rips the main feature, decrypts (it has no raw option), and recovers over passes
+/// when `max_retries` asks for them.
+pub fn server_plan(cfg: &Config, device_path: &str, dest: &str) -> freemkv_engine::Plan {
+    crate::plan_core::plan(crate::plan_core::PlanRequest {
+        source: format!("disc://{device_path}"),
+        dest: dest.to_string(),
+        titles: freemkv_engine::Selection::MainMovie,
+        streams: freemkv_engine::StreamChoice::default(),
+        raw: false,
+        multipass: uses_multipass(cfg.max_retries),
+        keys: crate::server::keysource::key_settings(cfg),
+        force: false,
+    })
+}
+
+/// The server's log line for the plan a rip runs. Exhaustive on purpose (anti-drift §2): a
+/// field added to the engine's `Plan` fails to compile here until the server handles it.
+pub fn plan_line(p: &freemkv_engine::Plan) -> String {
+    let freemkv_engine::Plan {
+        source,
+        dest,
+        titles,
+        streams,
+        raw,
+        multipass,
+        keys,
+        force,
+    } = p;
+    let freemkv_engine::KeyParamsData {
+        keydb_path,
+        key_url,
+        key_auth,
+        online_only,
+        cert_keydb,
+    } = keys;
+    format!(
+        "plan: {source} -> {dest} titles={titles:?} streams_all={} raw={raw} multipass={multipass} \
+         force={force} keydb={} online={} auth={} online_only={online_only} certs={}",
+        streams.is_all(),
+        keydb_path.is_some(),
+        key_url.is_some(),
+        key_auth.is_some(),
+        cert_keydb.is_some(),
+    )
+}
+
 // Whether the rip's set covers `scope` for `disc`, forensic keys aside (a multipass rip asks
 // for Pending ones once, from its image). `covers` holds for any non-AACS set, so an AACS
 // disc's titles also need an AACS set.
@@ -2996,6 +3044,16 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     };
 
     crate::server::log::device_log(device, &format!("Ripping {} to {}", display_name, filename));
+    // The plan this rip carries out (the one plan parser every front end shares).
+    let plan_dest = if output_is_iso_image(&output_format) {
+        format!("iso://{iso_path_str}")
+    } else {
+        dest_url.clone()
+    };
+    crate::server::log::device_log(
+        device,
+        &plan_line(&server_plan(&cfg_read, device_path, &plan_dest)),
+    );
 
     update_state(
         device,

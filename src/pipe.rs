@@ -681,37 +681,11 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         out.raw(Normal, &msg);
         return 1;
     }
-    // Disc → ISO or Disc → null: use Disc::copy() (not a stream). Its own exit
-    // code (0 / DISC_COPY_DAMAGED_EXIT / 1) passes straight through.
-    if matches!(parsed_source, libfreemkv::StreamUrl::Disc { .. })
-        && matches!(
-            parsed_dest,
-            libfreemkv::StreamUrl::Iso { .. } | libfreemkv::StreamUrl::Null
-        )
-    {
-        return disc_to_iso(source, dest, &keys, raw, multipass, &out);
-    }
-
-    // Any OTHER image source → iso://: the generic image sink. `iso:// → iso://`
-    // decrypts an existing image; `dir://` joins this arm when it becomes a
-    // source. Not the recovery path — see `image_to_iso`.
-    if matches!(parsed_dest, libfreemkv::StreamUrl::Iso { .. }) && parsed_source.is_disc_source() {
-        return if image_to_iso(source, dest, &keys, crate::cli_stop::token(), &out) {
-            0
-        } else {
-            1
-        };
-    }
-
-    // Disc / ISO → dir://: decrypted file-tree extraction, not a stream.
-    // Placed before the generic mux path. Byte-stream sources, `--raw`, and
-    // `--multipass` are already rejected above, so the source here is a disc.
-    if matches!(parsed_dest, libfreemkv::StreamUrl::Dir { .. }) {
-        return if dir_to_extract(source, dest, &keys, &parsed_source, force, &out) {
-            0
-        } else {
-            1
-        };
+    // A whole-disc output (an image, a read test, a file tree) is one engine plan: the
+    // engine opens the source, acquires the keys, reads and lands the output.
+    let plan = cli_plan(source, dest, &keys, (raw, multipass, force));
+    if !matches!(plan.output(), freemkv_engine::Output::Titles) {
+        return whole_disc(&plan, crate::cli_stop::token(), &out);
     }
 
     // Everything else: figure out titles, pipe each one
@@ -1541,24 +1515,21 @@ fn build_key_sources_quiet(keys: &KeyConfig) -> Vec<Box<dyn freemkv_keysources::
 }
 
 fn key_params(keys: &KeyConfig) -> freemkv_engine::KeyParams {
-    // Local keydb is added whenever the user didn't ask for online-only. (An
-    // explicit --keydb, or no key flags at all, both want the keydb.)
-    let online_only = keys.key_url.is_some() && keys.keydb_path.is_none();
-    let keydb_path = if online_only {
-        None
-    } else {
-        Some(
-            resolved_keydb_path(&keys.keydb_path)
-                .to_string_lossy()
-                .into_owned(),
-        )
-    };
-    freemkv_engine::KeyParams {
-        keydb_path,
+    crate::plan_core::key_params(&key_settings(keys)).params()
+}
+
+/// The CLI's key flags as the front-end-neutral settings: `--key-url` with no `--keydb`
+/// asks only the key service; otherwise the keydb (the explicit one, or the default
+/// path) and then the service. The default keydb path also supplies the drive
+/// handshake's host certificates.
+pub(crate) fn key_settings(keys: &KeyConfig) -> crate::plan_core::KeySettings {
+    let flags = crate::plan_core::CliKeys {
+        keydb: keys.keydb_path.clone(),
         key_url: keys.key_url.clone(),
         key_auth: keys.key_auth.clone(),
-        online_only,
-    }
+    };
+    let default = resolved_keydb_path(&keys.keydb_path);
+    crate::plan_core::cli_key_settings(&flags, &default.to_string_lossy())
 }
 
 /// Print the SSRF-rejected-`--key-url` warning (once) if the configured key URL
@@ -1912,28 +1883,6 @@ fn copy_verdict(r: &freemkv_engine::CopyResult) -> CopyVerdict {
     }
 }
 
-fn disc_copy_options<'a>(
-    keys: Option<&libfreemkv::keys::KeyRing>,
-    raw: bool,
-    multipass: bool,
-    progress: &'a dyn libfreemkv::Events,
-    halt: &libfreemkv::Halt,
-) -> freemkv_engine::CopyOptions<'a> {
-    // KU §2.1 invariant 5: "No key byte and no raw VID is written to any file" (FK6). The
-    // rip's up-front set rides in memory; the engine writes only `disc` + `vidfp` lines.
-    // Needless once KU-X1 drops the legacy key fields; needed until it lands.
-    #[allow(clippy::needless_update)]
-    freemkv_engine::CopyOptions {
-        decrypt: !raw,
-        multipass,
-        // Stop design v5 §4.3: "The global token goes everywhere", `disc_copy_options` too.
-        halt: Some(halt.as_arc().clone()),
-        progress: Some(progress),
-        keys: keys.cloned(),
-        ..Default::default()
-    }
-}
-
 /// Print the interrupt notice and return the error string both pipe paths use
 /// when a SIGINT lands mid-mux. The message names the output as incomplete so
 /// the user knows not to trust it.
@@ -2009,34 +1958,6 @@ fn source_path_of(source: &str) -> Option<std::path::PathBuf> {
 /// grew a narrower copy of it that a hardlink walks straight through.
 use crate::file_identity::same_file;
 
-/// Decrypt a whole image into `dest` through the rip's set: its whole-disc reader is the one
-/// the engine's disc → ISO sweep uses, so the GUI, CLI and image paths never diverge. Every
-/// key was settled before this (KU §2.1), so a refusal leaves no file behind.
-fn write_decrypted_image(
-    disc: &libfreemkv::Disc,
-    reader: Box<dyn libfreemkv::SectorSource>,
-    dest: &std::path::Path,
-    set: &libfreemkv::keys::KeyRing,
-    halt: &libfreemkv::Halt,
-) -> libfreemkv::error::Result<u64> {
-    let mut src = set.whole_disc_reader(disc, reader, Some(halt))?;
-    let ctx = libfreemkv::Ctx::new(halt.clone());
-    libfreemkv::write_image(&mut src, dest, disc.capacity_sectors, &ctx)
-}
-
-/// An image staged for an MKV rip holds only its titles, so it is never a whole-disc
-/// source (`iso://` copy, `dir://` extract): print E6022 and say so. Same engine check
-/// as the GUI's.
-fn refuse_staged_image(image: &std::path::Path, out: &Output) -> bool {
-    match freemkv_engine::ensure_whole_image(image) {
-        Ok(()) => false,
-        Err(e) => {
-            out.raw(Normal, &render_error(&e));
-            true
-        }
-    }
-}
-
 /// A staged image's never-read sectors are zeros: refuse (E6022) any job whose title
 /// extents its scope does not hold. `None` jobs mux title 0. Same engine check as the GUI's.
 fn refuse_unstaged_titles(
@@ -2055,124 +1976,6 @@ fn refuse_unstaged_titles(
     }
 }
 
-fn image_to_iso(
-    source: &str,
-    dest: &str,
-    keys: &KeyConfig,
-    halt: &libfreemkv::Halt,
-    out: &Output,
-) -> bool {
-    let iso_path = match libfreemkv::parse_url(dest) {
-        libfreemkv::StreamUrl::Iso { path } => path,
-        _ => return false,
-    };
-    if source_path_of(source).is_some_and(|src| refuse_staged_image(&src, out)) {
-        return false;
-    }
-    if scan_iso(source).is_none() {
-        out.raw(
-            Normal,
-            &strings::fmt("error.iso_unreadable", &[("path", source)]),
-        );
-        return false;
-    }
-
-    // Never write over the source: `write_image` opens the dest with
-    // `File::create` before the first read, truncating a still-open input
-    // (e.g. an in-place decrypt paste). The GUI has had this guard since round 1.
-    if same_file(
-        source_path_of(source).as_deref(),
-        std::path::Path::new(&iso_path),
-    ) {
-        out.raw(Normal, &strings::get("error.dest_is_source"));
-        return false;
-    }
-
-    // An `iso://` destination is a DECRYPTED image: every key of the whole disc is resolved
-    // once, before `dest` exists (KU §2.5 `WholeDisc`). `halt` is the process Ctrl-C token.
-    let scope = libfreemkv::keys::KeyScope::WholeDisc;
-    let Some(opened) = open_rip_image(source, scope, keys, halt, out) else {
-        return false;
-    };
-    let total_sectors = opened.disc.capacity_sectors;
-    let Some(lock) = hold_iso_lock(std::path::Path::new(&iso_path), halt, out) else {
-        return false;
-    };
-    let start = std::time::Instant::now();
-    let result = write_decrypted_image(
-        &opened.disc,
-        opened.reader,
-        std::path::Path::new(&iso_path),
-        &opened.keys,
-        halt,
-    );
-
-    let ok = match result {
-        Ok(0) => {
-            // Wrote ZERO bytes: nothing was recovered, so the ISO on disk is
-            // unusable. Don't print "Complete" over it — fail like the disc→ISO
-            // path's NoData guard so a scripted caller's `$?` sees the failure.
-            let mb_bad =
-                (total_sectors as u64 * libfreemkv::consts::SECTOR_BYTES_U64) as f64 / 1_048_576.0;
-            out.raw(
-                Normal,
-                &strings::fmt("rip.no_data", &[("unreadable", &format!("{mb_bad:.1}"))]),
-            );
-            false
-        }
-        Ok(bytes) => {
-            let elapsed = start.elapsed().as_secs_f64();
-            let mb = bytes as f64 / (1024.0 * 1024.0);
-            let speed = if elapsed > 0.0 { mb / elapsed } else { 0.0 };
-            out.raw(
-                Normal,
-                &strings::fmt(
-                    "rip.complete",
-                    &[
-                        ("size", &format!("{:.1}", mb / 1024.0)),
-                        ("unit", "GB"),
-                        ("time", &format!("{elapsed:.0}")),
-                        ("speed", &format!("{speed:.0}")),
-                    ],
-                ),
-            );
-            true
-        }
-        Err(libfreemkv::Error::Halted) => {
-            // Don't print "Complete" over a partial image, and return failure so
-            // a scripted caller's `$?` sees the interruption.
-            out.raw(Normal, &strings::get("rip.interrupted"));
-            false
-        }
-        Err(e) => {
-            out.raw(Normal, &render_error(&e));
-            false
-        }
-    };
-    crate::artifact_lock::release(lock, ok);
-    ok
-}
-
-/// Take `<iso>.lock` for the whole write (stop design v5 §2.5), or say why not: a Ctrl-C
-/// while waiting is an interrupt, a frozen holder is `stop.artifact_lock_failed` (E9073).
-fn hold_iso_lock(
-    iso: &std::path::Path,
-    halt: &libfreemkv::Halt,
-    out: &Output,
-) -> Option<libfreemkv::io::ArtifactLock> {
-    let e = match crate::artifact_lock::hold_iso(iso, halt) {
-        Ok(lock) => return Some(lock),
-        Err(e) => e,
-    };
-    let text = match (&e, crate::artifact_lock::lock_failed(&e, iso)) {
-        (libfreemkv::Error::Halted, _) => strings::get("rip.interrupted"),
-        (_, Some(text)) => text,
-        _ => render_error(&e),
-    };
-    out.raw(Normal, &text);
-    None
-}
-
 /// What an interrupted disc→ISO copy prints. §2.5: the image and its lock are "Kept after
 /// Stop … where it guards the resumable artifact", so a rerun resumes.
 fn interrupted_text(iso: &std::path::Path) -> String {
@@ -2186,190 +1989,272 @@ fn interrupted_text(iso: &std::path::Path) -> String {
     }
 }
 
-/// The process exit code: 0 on a complete copy, `DISC_COPY_DAMAGED_EXIT` on a copy that is
-/// kept and usable but short some sectors, 1 on any other failure (no drive, scan error,
-/// `Disc::copy` error). The caller propagates this straight to `main`'s exit code.
-fn disc_to_iso(
+// ── Whole-disc outputs (iso://, null://, dir://): one engine plan ───────────
+
+/// The engine plan for this invocation. Every front end builds the same [`fe::Plan`]
+/// from its own inputs and hands it to `freemkv_engine::run` (the engine owns the open, the
+/// keys, the read policy and the landing).
+pub(crate) fn cli_plan(
     source: &str,
     dest: &str,
     keys: &KeyConfig,
-    raw: bool,
-    multipass: bool,
-    out: &Output,
-) -> i32 {
-    let parsed_dest = libfreemkv::parse_url(dest);
-    // A raw copy scans on past an unreadable AACS key file (libfreemkv records E7031).
-    let credentials = drive_credentials(keys.keydb_path());
-    let mut session = match open_drive_scan(device_target(source), credentials, raw) {
-        Ok(s) => s,
-        Err(e) => {
-            out.raw(Normal, &render_drive_open_error(&e));
-            return 1;
-        }
-    };
-    out.raw(
-        Normal,
-        &strings::fmt("rip.drive", &[("device", session.device_path())]),
-    );
-    let disc = session.take_disc().expect("scan populated the disc");
-    let mut drive = match session.into_drive() {
-        Ok(d) => d,
-        Err(e) => {
-            out.raw(Normal, &render_error(&e));
-            return 1;
-        }
-    };
-    // KU §2.5: a raw copy makes no key call at all (FK7); a decrypting copy resolves the
-    // whole disc once, up front, then gates on it (E7026 for Pending forensic keys, §5.4).
-    let scope = crate::rip_keys::copy_scope(raw);
-    let set = if raw {
-        libfreemkv::keys::KeyRing::none()
-    } else {
-        match disc_rip_keys(&disc, &mut drive, scope.clone(), keys, out) {
-            Some(set) => set,
-            None => return 1,
-        }
-    };
-    if let Err(e) = crate::rip_keys::gate(&disc, raw, Some(&set), &scope) {
-        out.raw(Normal, &render_error(&e));
-        return 1;
-    }
+    flags: (bool, bool, bool),
+) -> freemkv_engine::Plan {
+    crate::plan_core::plan(crate::plan_core::cli_request(
+        source,
+        dest,
+        flags,
+        key_settings(keys),
+    ))
+}
 
-    let disc_name = sanitize_name(disc.meta_title.as_deref().unwrap_or(&disc.volume_id));
-    let (iso_path, is_null) = match &parsed_dest {
-        libfreemkv::StreamUrl::Iso { path } => (path.clone(), false),
-        // The platform's null device (`NUL` on Windows): the copy runs, nothing is kept.
-        libfreemkv::StreamUrl::Null => (libfreemkv::io::null_device().to_path_buf(), true),
-        _ => unreachable!(),
-    };
-
-    let total_bytes = disc.capacity_sectors as u64 * libfreemkv::consts::SECTOR_BYTES_U64;
-    out.raw(
-        Normal,
-        &strings::fmt(
-            "rip.disc_label",
-            &[
-                ("name", &disc_name),
-                (
-                    "size",
-                    &format!("{:.1}", total_bytes as f64 / 1_073_741_824.0),
-                ),
-            ],
-        ),
-    );
-    if !is_null {
-        out.raw(
-            Normal,
-            &strings::fmt("rip.output", &[("path", &iso_path.display().to_string())]),
-        );
-    }
-    out.blank(Normal);
-
-    let start = std::time::Instant::now();
-    // Speed + ETA come from the ENGINE's one derivation (no local math). The CLI
-    // only throttles the display and formats the numbers.
-    struct CliProgress<'a> {
-        out: &'a Output,
-        last_update: Mutex<std::time::Instant>,
-        speed_est: Mutex<freemkv_engine::SpeedEstimator>,
-    }
-    impl libfreemkv::Events for CliProgress<'_> {
-        fn event(&self, e: &libfreemkv::Event<'_>) {
-            let libfreemkv::Event::Pass(p) = e else {
-                return;
-            };
-            if !self.out.is_quiet() {
-                let now = std::time::Instant::now();
-                let mut last = self.last_update.lock().unwrap_or_else(|e| e.into_inner());
-                if now.duration_since(*last).as_secs_f64() >= 0.5 {
-                    *last = now;
-                    let (speed_bps, eta_secs) = self
-                        .speed_est
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .sample(p.work_done, p.work_total);
-                    print_disc_progress(p, speed_bps, eta_secs);
-                }
-            }
-            // The copy stops at this report on the first Ctrl-C (so `unlock_tray()` runs
-            // below, not `_exit(130)`), through the token the copy observes.
-            if !copy_should_continue(INTERRUPTED.load(Ordering::SeqCst)) {
-                crate::cli_stop::token().cancel();
-            }
-        }
-    }
-    let progress = CliProgress {
-        out,
-        last_update: Mutex::new(start),
-        speed_est: Mutex::new(freemkv_engine::SpeedEstimator::new()),
-    };
-
-    let lock = match is_null {
-        true => None,
-        false => match hold_iso_lock(&iso_path, crate::cli_stop::token(), out) {
-            Some(lock) => Some(lock),
-            None => {
-                drive.unlock_tray();
-                return 1;
-            }
-        },
-    };
-    let copy_opts = disc_copy_options(
-        (!raw).then_some(&set),
+// The CLI's rendering of the plan it runs (`--log-level 2`). Exhaustive on purpose (anti-drift
+// §2): a field added to the engine's `Plan` fails to compile here until the CLI handles it.
+fn plan_line(p: &freemkv_engine::Plan) -> String {
+    let freemkv_engine::Plan {
+        source,
+        dest,
+        titles,
+        streams,
         raw,
         multipass,
-        &progress,
-        crate::cli_stop::token(),
-    );
-    let copied = freemkv_engine::copy(&disc, &mut drive, &iso_path, &copy_opts);
-    let done = matches!(&copied, Ok(r) if matches!(copy_verdict(r), CopyVerdict::Complete | CopyVerdict::Lossy));
-    let exit_code = match copied {
-        Ok(r) if copy_verdict(&r) == CopyVerdict::Interrupted => {
-            // Ctrl-C halted the copy. Don't print "Complete" over a partial
-            // ISO — report interrupted/failure so exit is non-zero. Mapfile
-            // is preserved, so a later run can resume.
-            if !out.is_quiet() {
-                eprint!("\r\x1b[K");
+        keys,
+        force,
+    } = p;
+    let freemkv_engine::KeyParamsData {
+        keydb_path,
+        key_url,
+        key_auth,
+        online_only,
+        cert_keydb,
+    } = keys;
+    format!(
+        "plan: {source} -> {dest} titles={titles:?} streams_all={} raw={raw} multipass={multipass} \
+         force={force} keydb={} online={} auth={} online_only={online_only} certs={}",
+        streams.is_all(),
+        keydb_path.is_some(),
+        key_url.is_some(),
+        key_auth.is_some(),
+        cert_keydb.is_some(),
+    )
+}
+
+// Renders a whole-disc run: the drive, the key walk, the disc label and output, the pass
+// progress line. `halt` (the process Ctrl-C token) stops it.
+struct WholeDiscSink<'a> {
+    out: &'a Output,
+    halt: &'a libfreemkv::Halt,
+    output: freemkv_engine::Output,
+    opened: std::sync::atomic::AtomicBool,
+    label: Mutex<Option<(String, u64)>>,
+    last: Mutex<(
+        Option<std::time::Instant>,
+        Option<libfreemkv::progress::PassProgress>,
+    )>,
+    drew: std::sync::atomic::AtomicBool,
+}
+
+impl freemkv_engine::Sink for WholeDiscSink<'_> {
+    fn should_cancel(&self) -> bool {
+        self.halt.is_cancelled() || !copy_should_continue(INTERRUPTED.load(Ordering::SeqCst))
+    }
+
+    fn event(&self, e: &freemkv_engine::Event<'_>) {
+        use freemkv_engine::Event as E;
+        match e {
+            E::SourceOpened { device, disc } => {
+                self.opened.store(true, Ordering::SeqCst);
+                if let Some(device) = device {
+                    self.out
+                        .raw(Normal, &strings::fmt("rip.drive", &[("device", device)]));
+                }
+                let name = sanitize_name(disc.meta_title.as_deref().unwrap_or(&disc.volume_id));
+                let bytes = disc.capacity_sectors as u64 * libfreemkv::consts::SECTOR_BYTES_U64;
+                *self.label.lock().unwrap_or_else(|e| e.into_inner()) = Some((name, bytes));
             }
-            out.raw(Normal, &interrupted_text(&iso_path));
+            E::Keys { trace, ring } => {
+                emit_resolution_trace(self.out, trace);
+                if let Some(note) =
+                    ring.and_then(|r| crate::rip_keys::best_effort_note(&r.status()))
+                {
+                    self.out.raw(Normal, &note);
+                }
+            }
+            E::Phase { name: "copy" } => self.copy_header(),
+            E::Phase { name: "extract" } => {
+                if let freemkv_engine::Output::Tree { path } = &self.output {
+                    self.out.raw(
+                        Normal,
+                        &strings::fmt("dir.extracting", &[("path", &path.display().to_string())]),
+                    );
+                    self.out.blank(Normal);
+                }
+            }
+            E::Pass(p) => {
+                self.last.lock().unwrap_or_else(|e| e.into_inner()).1 = Some((*p).clone());
+            }
+            _ => {}
+        }
+    }
+
+    fn progress(&self, p: &freemkv_engine::Progress) {
+        if self.out.is_quiet() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if last
+            .0
+            .is_some_and(|t| now.duration_since(t).as_secs_f64() < 0.5)
+        {
+            return;
+        }
+        if let Some(pass) = last.1.clone() {
+            last.0 = Some(now);
+            self.drew.store(true, Ordering::SeqCst);
+            print_disc_progress(&pass, p.speed_bps, p.eta_secs);
+        }
+    }
+}
+
+impl WholeDiscSink<'_> {
+    // The disc label, its size and the output, before the copy's first read.
+    fn copy_header(&self) {
+        let label = self.label.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some((name, bytes)) = label {
+            self.out.raw(
+                Normal,
+                &strings::fmt(
+                    "rip.disc_label",
+                    &[
+                        ("name", &name),
+                        ("size", &format!("{:.1}", bytes as f64 / 1_073_741_824.0)),
+                    ],
+                ),
+            );
+        }
+        if let freemkv_engine::Output::Image { path, null: false } = &self.output {
+            self.out.raw(
+                Normal,
+                &strings::fmt("rip.output", &[("path", &path.display().to_string())]),
+            );
+        }
+        self.out.blank(Normal);
+    }
+}
+
+/// Run a whole-disc `plan` (an image, a read test or a file tree) and render it. The exit
+/// code: 0 on a complete copy, `DISC_COPY_DAMAGED_EXIT` on an image that is kept and usable
+/// but short some sectors, 1 on any other failure.
+pub(crate) fn whole_disc(
+    plan: &freemkv_engine::Plan,
+    halt: &libfreemkv::Halt,
+    out: &Output,
+) -> i32 {
+    let output = plan.output();
+    // Never write over the source: the copy creates its destination before the first read.
+    if let freemkv_engine::Output::Image { path, null: false } = &output
+        && same_file(source_path_of(&plan.source).as_deref(), path)
+    {
+        out.raw(Normal, &strings::get("error.dest_is_source"));
+        return 1;
+    }
+    out.raw(crate::output::Level::Verbose, &plan_line(plan));
+    let sink = WholeDiscSink {
+        out,
+        halt,
+        output: output.clone(),
+        opened: std::sync::atomic::AtomicBool::new(false),
+        label: Mutex::new(None),
+        last: Mutex::new((None, None)),
+        drew: std::sync::atomic::AtomicBool::new(false),
+    };
+    let start = std::time::Instant::now();
+    let sources = crate::rip_keys::sources(&plan.keys.params());
+    let r = freemkv_engine::run_with(plan, sources, &sink);
+    if sink.drew.load(Ordering::SeqCst) && !out.is_quiet() {
+        eprint!("\r\x1b[K");
+    }
+    let target = match &output {
+        freemkv_engine::Output::Image { path, .. } | freemkv_engine::Output::Tree { path } => {
+            path.clone()
+        }
+        freemkv_engine::Output::Titles => std::path::PathBuf::new(),
+    };
+    match r {
+        Ok(freemkv_engine::Report::Image { copy, disc, path }) => {
+            let null = matches!(output, freemkv_engine::Output::Image { null: true, .. });
+            render_copy(&copy, &disc, &path, null, start, out)
+        }
+        Ok(freemkv_engine::Report::Tree { extract }) => match render_extract(&extract, out) {
+            true => 0,
+            false => 1,
+        },
+        Err(libfreemkv::Error::Halted) => {
+            out.raw(Normal, &interrupted_text(&target));
             1
         }
-        Ok(r) if copy_verdict(&r) == CopyVerdict::NoData => {
-            // The copy completed but recovered ZERO readable bytes: the ISO on
-            // disk is unusable (but kept). Don't print "Complete" — a scripted
-            // caller checking $? must see non-zero, like the mux paths' NoStreams guard.
-            if !out.is_quiet() {
-                eprint!("\r\x1b[K");
-            }
+        Err(e) => {
+            let text = match crate::artifact_lock::lock_failed(&e, &target) {
+                Some(text) => text,
+                None if !sink.opened.load(Ordering::SeqCst)
+                    && matches!(
+                        libfreemkv::parse_url(&plan.source),
+                        libfreemkv::StreamUrl::Disc { .. }
+                    ) =>
+                {
+                    render_drive_open_error(&e)
+                }
+                None => render_error(&e),
+            };
+            out.raw(Normal, &text);
+            1
+        }
+    }
+}
+
+// A finished image copy's verdict, as the CLI has always printed it.
+fn render_copy(
+    r: &freemkv_engine::CopyResult,
+    disc: &libfreemkv::Disc,
+    iso_path: &std::path::Path,
+    is_null: bool,
+    start: std::time::Instant,
+    out: &Output,
+) -> i32 {
+    let _ = is_null;
+    match copy_verdict(r) {
+        // Ctrl-C halted the copy. Don't print "Complete" over a partial ISO — report
+        // interrupted/failure so exit is non-zero. The mapfile is preserved for a resume.
+        CopyVerdict::Interrupted => {
+            out.raw(Normal, &interrupted_text(iso_path));
+            1
+        }
+        // The copy completed but recovered ZERO readable bytes: the ISO on disk is
+        // unusable (but kept). A scripted caller checking $? must see non-zero.
+        CopyVerdict::NoData => {
             out.raw(
                 Normal,
                 &crate::disc_copy_verdict::iso_no_data_error(r.bytes_unreadable),
             );
             1
         }
-        Ok(r) => {
-            if !out.is_quiet() {
-                eprint!("\r\x1b[K");
-            }
-            let verdict = copy_verdict(&r);
+        verdict => {
             let elapsed = start.elapsed().as_secs_f64();
             let mb = r.bytes_total as f64 / (1024.0 * 1024.0);
             let speed = if elapsed > 0.0 { mb / elapsed } else { 0.0 };
-            // Report the LOSS whenever there is any, printed BEFORE so
-            // "Complete" is last. `Lossy` is still a SUCCESS — the image is
-            // kept and usable — this warning names what's missing.
+            // Report the LOSS whenever there is any, printed BEFORE so "Complete" is last.
+            // `Lossy` is still a SUCCESS — the image is kept and usable.
             if verdict == CopyVerdict::Lossy {
                 let gb_good = r.bytes_good as f64 / 1_073_741_824.0;
                 let mb_bad = r.bytes_unreadable as f64 / 1_048_576.0;
                 let mb_pending = r.bytes_pending as f64 / 1_048_576.0;
-                let mapfile_path = disc.mapfile_for(&iso_path);
+                let mapfile_path = disc.mapfile_for(iso_path);
                 let main_title = disc.titles.first();
                 let main_title_bad = main_title
                     .map(|t| freemkv_engine::bytes_bad_in_title_from_mapfile(&mapfile_path, t))
                     .unwrap_or(0);
-                // Report damage as a main-title duration only: the old figure
-                // multiplied a whole-disc ratio by `disc_dur` (first title's
-                // runtime), wrong once bonus content grows the disc past it.
+                // Damage as a main-title duration only.
                 let main_lost_secs = main_title
                     .map(|t| (t.size_bytes, t.duration_secs))
                     .filter(|&(sz, dur)| main_title_bad > 0 && sz > 0 && dur > 0.0)
@@ -2393,8 +2278,7 @@ fn disc_to_iso(
                         &strings::fmt("rip.damage_lost_movie", &[("time", &main_str)]),
                     );
                 }
-                // Always shown, even if this run WAS `--multipass`: it only
-                // retries once per invocation, so residual damage is never hidden.
+                // Always shown, even after `--multipass`: residual damage is never hidden.
                 out.raw(
                     Normal,
                     &crate::disc_copy_verdict::retry_with_multipass_hint(),
@@ -2412,98 +2296,9 @@ fn disc_to_iso(
                     ],
                 ),
             );
-            // `Lossy` gets its own DISTINCT exit code: still kept and usable,
-            // and the warning above already said what is missing.
+            // `Lossy` gets its own DISTINCT exit code: kept and usable, loss already named.
             disc_copy_exit_code(verdict)
         }
-        Err(e) => {
-            out.raw(Normal, &render_error(&e));
-            1
-        }
-    };
-
-    drive.unlock_tray();
-    if let Some(lock) = lock {
-        crate::artifact_lock::release(lock, done);
-    }
-    exit_code
-}
-
-// ── dir:// decrypted file-tree extraction ───────────────────────────────────
-
-fn dir_to_extract(
-    source: &str,
-    dest: &str,
-    keys: &KeyConfig,
-    parsed_source: &libfreemkv::StreamUrl,
-    force: bool,
-    out: &Output,
-) -> bool {
-    let dest_path = match libfreemkv::parse_url(dest) {
-        libfreemkv::StreamUrl::Dir { path } => path,
-        _ => return false,
-    };
-    // A decrypted folder is the whole disc (KU §2.5 `WholeDisc`): one resolve up front,
-    // then the extract reads every file through that set.
-    let scope = libfreemkv::keys::KeyScope::WholeDisc;
-    match parsed_source {
-        libfreemkv::StreamUrl::Disc { .. } => {
-            let (disc, mut reader, device) = match scan_rip_drive(source, keys) {
-                Ok(scan) => scan,
-                Err(e) => {
-                    out.raw(Normal, &render_drive_open_error(&e));
-                    return false;
-                }
-            };
-            out.raw(Normal, &strings::fmt("rip.drive", &[("device", &device)]));
-            let Some(set) = disc_rip_keys(&disc, reader.as_mut(), scope.clone(), keys, out) else {
-                return false;
-            };
-            if let Err(e) = crate::rip_keys::gate(&disc, false, Some(&set), &scope) {
-                out.raw(Normal, &render_error(&e));
-                return false;
-            }
-            run_extract(&disc, reader.as_mut(), &dest_path, force, &set, out)
-        }
-        // Iso AND Dir: an image-level source opens through the one image door.
-        libfreemkv::StreamUrl::Iso { path } | libfreemkv::StreamUrl::Dir { path } => {
-            let is_iso = matches!(parsed_source, libfreemkv::StreamUrl::Iso { .. });
-            if is_iso && refuse_staged_image(std::path::Path::new(path), out) {
-                return false;
-            }
-            let Some(opened) = image_rip_keys(source, scope.clone(), keys, out) else {
-                return false;
-            };
-            if let Err(e) = crate::rip_keys::gate(&opened.disc, false, Some(&opened.keys), &scope) {
-                out.raw(Normal, &render_error(&e));
-                return false;
-            }
-            let mut reader = opened.reader;
-            run_extract(
-                &opened.disc,
-                reader.as_mut(),
-                &dest_path,
-                force,
-                &opened.keys,
-                out,
-            )
-        }
-        _ => {
-            // Unreachable: preflight rejects non-disc sources for dir://.
-            out.raw(
-                Normal,
-                &strings::fmt("error.dir_source_unsupported", &[("source", source)]),
-            );
-            false
-        }
-    }
-}
-
-struct HaltSink<'a>(&'a libfreemkv::Halt);
-
-impl freemkv_engine::Sink for HaltSink<'_> {
-    fn should_cancel(&self) -> bool {
-        self.0.is_cancelled()
     }
 }
 
@@ -2511,88 +2306,55 @@ fn extract_succeeded(halted: bool, complete: bool) -> bool {
     !halted && complete
 }
 
-/// Run `Disc::extract_tree` (via `freemkv_engine::extract_tree`) and render
-/// the result. Shared by the disc:// and iso:// `dir://` paths.
-fn run_extract(
-    disc: &libfreemkv::Disc,
-    reader: &mut dyn libfreemkv::SectorSource,
-    dest_path: &std::path::Path,
-    force: bool,
-    set: &libfreemkv::keys::KeyRing,
-    out: &Output,
-) -> bool {
-    out.raw(
-        Normal,
-        &strings::fmt(
-            "dir.extracting",
-            &[("path", &dest_path.display().to_string())],
-        ),
-    );
-    out.blank(Normal);
-
-    // The process Ctrl-C token, polled by the producer, stops a long extract promptly,
-    // leaving the in-flight file as `.partial`.
-    let sink = HaltSink(crate::cli_stop::token());
-    let outcome =
-        freemkv_engine::extract_tree_with(disc, reader, dest_path, force, Some(set), &sink);
-
-    match outcome {
-        Ok(res) => {
-            // Per-file loss lines (only the lossy ones, to keep output terse).
-            for f in &res.files {
-                let lost = f.bytes_unreadable;
-                if lost > 0 {
-                    out.raw(
-                        Normal,
-                        &strings::fmt(
-                            "dir.file_lossy",
-                            &[
-                                ("file", &f.path.display().to_string()),
-                                ("lost", &format!("{:.2}", lost as f64 / 1_048_576.0)),
-                            ],
-                        ),
-                    );
-                }
-            }
-            if res.halted {
-                out.raw(Normal, &strings::get("rip.interrupted"));
-                return extract_succeeded(res.halted, res.complete);
-            }
-            let good_mb = res.bytes_good as f64 / 1_048_576.0;
-            if res.complete {
-                out.raw(
-                    Normal,
-                    &strings::fmt(
-                        "dir.complete",
-                        &[
-                            ("files", &res.files.len().to_string()),
-                            ("size", &format!("{good_mb:.1}")),
-                        ],
-                    ),
-                );
-                extract_succeeded(res.halted, res.complete)
-            } else {
-                let lost_mb = res.bytes_lost() as f64 / 1_048_576.0;
-                out.raw(
-                    Normal,
-                    &strings::fmt(
-                        "dir.lossy",
-                        &[
-                            ("files", &res.files.len().to_string()),
-                            ("lost", &format!("{lost_mb:.2}")),
-                        ],
-                    ),
-                );
-                // A lossy extraction returns failure (non-zero exit) so scripts
-                // can detect "extracted but holed" and re-run via iso multipass.
-                extract_succeeded(res.halted, res.complete)
-            }
-        }
-        Err(e) => {
-            out.raw(Normal, &render_error(&e));
-            false
+// A finished extraction: per-file loss, then the summary. `false` for a stopped or holed
+// tree, so a script can re-run via an iso:// multipass.
+fn render_extract(res: &libfreemkv::ExtractResult, out: &Output) -> bool {
+    // Per-file loss lines (only the lossy ones, to keep output terse).
+    for f in &res.files {
+        let lost = f.bytes_unreadable;
+        if lost > 0 {
+            out.raw(
+                Normal,
+                &strings::fmt(
+                    "dir.file_lossy",
+                    &[
+                        ("file", &f.path.display().to_string()),
+                        ("lost", &format!("{:.2}", lost as f64 / 1_048_576.0)),
+                    ],
+                ),
+            );
         }
     }
+    if res.halted {
+        out.raw(Normal, &strings::get("rip.interrupted"));
+        return extract_succeeded(res.halted, res.complete);
+    }
+    if res.complete {
+        let good_mb = res.bytes_good as f64 / 1_048_576.0;
+        out.raw(
+            Normal,
+            &strings::fmt(
+                "dir.complete",
+                &[
+                    ("files", &res.files.len().to_string()),
+                    ("size", &format!("{good_mb:.1}")),
+                ],
+            ),
+        );
+    } else {
+        let lost_mb = res.bytes_lost() as f64 / 1_048_576.0;
+        out.raw(
+            Normal,
+            &strings::fmt(
+                "dir.lossy",
+                &[
+                    ("files", &res.files.len().to_string()),
+                    ("lost", &format!("{lost_mb:.2}")),
+                ],
+            ),
+        );
+    }
+    extract_succeeded(res.halted, res.complete)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -2969,7 +2731,7 @@ fn audio_purpose_key(p: libfreemkv::LabelPurpose) -> Option<&'static str> {
 
 #[cfg(test)]
 mod staged_image_tests {
-    use super::{Output, refuse_staged_image, refuse_unstaged_titles};
+    use super::{Output, refuse_unstaged_titles};
 
     // A per-test scratch dir under the system temp dir, removed on drop.
     struct TmpDir(std::path::PathBuf);
@@ -2987,24 +2749,6 @@ mod staged_image_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
-    }
-
-    // An image staged for an MKV rip is refused as a whole-disc source; others are not.
-    #[test]
-    fn a_staged_image_is_refused_as_a_whole_disc_source() {
-        let tmp = TmpDir::new();
-        let iso = tmp.0.join("STAGED.iso");
-        std::fs::write(&iso, vec![0u8; 2048]).unwrap();
-        let mf = freemkv_engine::mapfile_path_for(&iso);
-        std::fs::write(&mf, "# freemkv-scope: 0x0+0x800\n0x0 ? 1\n0x0 0x800 ?\n").unwrap();
-        let out = Output::new(false, true);
-        assert!(refuse_staged_image(&iso, &out), "E6022");
-        std::fs::write(&mf, "0x0 ? 1\n0x0 0x800 +\n").unwrap();
-        assert!(!refuse_staged_image(&iso, &out), "a whole image");
-        assert!(
-            !refuse_staged_image(&tmp.0.join("none.iso"), &out),
-            "no mapfile"
-        );
     }
 
     fn title(start_lba: u32, sector_count: u32) -> libfreemkv::DiscTitle {
@@ -3066,25 +2810,15 @@ mod staged_image_tests {
         );
     }
 
-    // Both CLI whole-disc sinks from an image check it before scanning or writing.
+    // A staged image's title mux checks its scope before writing (a whole-disc output from
+    // it is refused by the engine's `run`, E6022).
     #[test]
-    fn iso_and_dir_outputs_from_an_image_check_it_first() {
+    fn an_image_title_mux_checks_the_staged_scope_first() {
         let src = include_str!("pipe.rs").replace("\r\n", "\n");
         let body = |from: &str, to: &str| {
             let a = src.find(from).expect(from);
             src[a..a + src[a..].find(to).expect(to)].to_string()
         };
-        let iso = body("\nfn image_to_iso(", "scan_iso(source)");
-        assert!(
-            iso.contains("refuse_staged_image(&src, out)"),
-            "iso:// -> iso://"
-        );
-        let dir = body("\nfn dir_to_extract(", "image_rip_keys(");
-        assert!(
-            dir.contains("refuse_staged_image(std::path::Path::new(path), out)")
-                && !dir.contains("scan_iso"),
-            "dir://"
-        );
         let mux = body("    let iso_disc = if is_disc", "    // Pipe each title");
         assert!(
             mux.contains("refuse_unstaged_titles(&src, disc, &jobs, &out)"),
@@ -5322,8 +5056,7 @@ mod tests {
 mod verdict_tests {
     use super::{
         CopyVerdict, DISC_COPY_DAMAGED_EXIT, PipeFail, check_selection_coverage, copy_verdict,
-        disc_copy_exit_code, disc_copy_options, extract_succeeded, finalize_mux, is_feature_title,
-        title_policy,
+        disc_copy_exit_code, extract_succeeded, finalize_mux, is_feature_title, title_policy,
     };
     use crate::output::Output;
 
@@ -5547,12 +5280,9 @@ mod verdict_tests {
         // print the retry hint, or unretried pending bytes go unmentioned.
         let src = include_str!("pipe.rs").replace("\r\n", "\n");
         let start = src
-            .find("            let verdict = copy_verdict(&r);")
-            .expect("the success arm still grades its result");
-        let end = start
-            + src[start..]
-                .find("\n        Err(e) => {")
-                .expect("the error arm still ends the success arm");
+            .find("\nfn render_copy(")
+            .expect("a finished copy is graded in one place");
+        let end = start + src[start..].find("\n}\n").expect("render_copy ends");
         let arm = &src[start..end];
         assert!(
             !arm.contains("if multipass {"),
@@ -5568,77 +5298,28 @@ mod verdict_tests {
         );
     }
 
-    #[test]
-    fn the_disc_copy_options_honour_raw_multipass_and_progress() {
-        let nop = |_: &libfreemkv::Event<'_>| {};
-
-        let default_flags = disc_copy_options(None, false, false, &nop, &libfreemkv::Halt::new());
-        assert!(
-            default_flags.decrypt,
-            "a plain disc->iso rip must DECRYPT; ciphertext is only ever --raw"
-        );
-        assert!(!default_flags.multipass);
-        assert!(
-            default_flags.progress.is_some(),
-            "a sweep must report progress"
-        );
-
-        let raw = disc_copy_options(None, true, true, &nop, &libfreemkv::Halt::new());
-        assert!(!raw.decrypt, "--raw is ciphertext passthrough");
-        assert!(
-            raw.multipass,
-            "--multipass must reach the copy or recovery never runs"
-        );
-        assert!(raw.progress.is_some());
-    }
-
-    // FT1 (stop design v5 §4.3): "The global token goes everywhere. That includes
-    // `disc_copy_options` (`pipe.rs:1978`, **`halt: None` at :1996**)".
-    #[test]
-    fn disc_copy_options_carries_global_token() {
-        let nop = |_: &libfreemkv::Event<'_>| {};
-        let token = libfreemkv::Halt::new();
-        let o = disc_copy_options(None, false, false, &nop, &token);
-        let carried = o.halt.as_ref().expect("the copy takes the process token");
-        assert!(
-            std::sync::Arc::ptr_eq(carried, token.as_arc()),
-            "the same token"
-        );
-    }
-
     /// FK6 (inverts the `1aa14e0` test): KU §2.1 invariant 5, "Memory only. No key byte and
-    /// no raw VID is written to any file". A disc→ISO copy hands the mapfile neither.
+    /// no raw VID is written to any file". A whole-disc copy hands the mapfile neither.
     #[test]
-    fn disc_copy_options_persist_no_keys() {
+    fn a_whole_disc_copy_persists_no_keys() {
         use crate::ku_fixtures::*;
-        let nop = |_: &libfreemkv::Event<'_>| {};
         let fx = bd_image(&[Some(K1)], 1);
-        let disc = drive_disc(&fx);
-        let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
-        let opts = libfreemkv::keys::AcquireOptions::default();
-        let scope = libfreemkv::keys::KeyScope::WholeDisc;
-        let set = libfreemkv::keys::KeyRing::acquire_for_disc(
-            &disc,
-            &mut fx.source(),
-            scope,
-            &f,
-            opts,
-            &libfreemkv::Ctx::default(),
-        )
-        .unwrap()
-        .keys;
         for raw in [false, true] {
             let dir = TempDir::new("fk6");
+            let src = fx.write(dir.path(), "src.iso");
             let iso = dir.path().join("disc.iso");
-            let o = disc_copy_options(
-                (!raw).then_some(&set),
-                raw,
-                false,
-                &nop,
-                &libfreemkv::Halt::new(),
+            let plan = super::cli_plan(
+                &format!("iso://{}", src.display()),
+                &format!("iso://{}", iso.display()),
+                &super::KeyConfig::default(),
+                (raw, false, false),
             );
-            let r = freemkv_engine::copy(&disc, &mut fx.source(), &iso, &o).unwrap();
-            assert!(r.bytes_good > 0, "the copy ran");
+            let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
+            let out = Output::new(false, true);
+            let code = crate::rip_keys::with_sources(f, || {
+                super::whole_disc(&plan, &libfreemkv::Halt::new(), &out)
+            });
+            assert_eq!(code, 0, "the copy ran");
             let map = std::fs::read_to_string(freemkv_engine::mapfile_path_for(&iso)).unwrap();
             assert!(
                 !map.contains("freemkv-uk") && !map.contains("freemkv-vid:"),
@@ -5923,34 +5604,6 @@ mod dest_is_source_tests {
         assert!(!same_file(Some(&a), &dest));
         // And a source with no filesystem path at all (disc://) is never it.
         assert!(!same_file(None, &dest));
-    }
-
-    #[test]
-    fn the_image_decrypt_path_actually_calls_the_guard() {
-        let src = include_str!("pipe.rs").replace("\r\n", "\n");
-        let start = src
-            .find("\nfn image_to_iso(")
-            .expect("image_to_iso definition present");
-        let end = start
-            + src[start..]
-                .find("\n    let result = write_decrypted_image(")
-                .expect("the copy call still ends the setup section");
-        let body = &src[start..end];
-        // Two independent tokens, not one call expression: `cargo fmt` splits
-        // arguments across lines, so a joined-text pin would fail on
-        // formatting changes alone — a guard that cries wolf gets deleted.
-        assert!(
-            body.contains("same_file(") && body.contains("source_path_of(source)"),
-            "image_to_iso must refuse a destination that IS the source before \
-             write_image truncates it"
-        );
-        let copy = &src[src
-            .find("\nfn write_decrypted_image(")
-            .expect("write_decrypted_image definition present")..];
-        assert!(
-            copy.contains("set.whole_disc_reader("),
-            "the image copy must read through the rip's set's shared whole-disc reader"
-        );
     }
 
     /// Both `iso://` and `dir://` carry a path the guard has to see; anything
@@ -6772,310 +6425,6 @@ mod formatter_tests {
 }
 
 #[cfg(test)]
-mod image_copy_tests {
-    //! `image_to_iso`'s copy step over a real UDF tree: the same shared reader and
-    //! rules as the engine's disc → ISO sweep.
-    use super::write_decrypted_image;
-    use libfreemkv::error::Error;
-
-    const SECTOR: usize = 2048;
-    const K0: [u8; 16] = [0x11; 16];
-    const K1: [u8; 16] = [0x22; 16];
-    const K2: [u8; 16] = [0x33; 16];
-    const STRANGER: [u8; 16] = [0x77; 16];
-
-    /// The plaintext of every encrypted fixture unit: a TS sync byte at offset 4 of each
-    /// 192-byte packet, and CPI 11₂ on packet 0, flagged before `encrypt_unit`. Decryption
-    /// may clear that CPI (KU §5.4), so outputs are compared CPI-masked: [`cpi_masked_eq`].
-    fn clear_unit() -> Vec<u8> {
-        let mut u = vec![0u8; 6144];
-        for off in (4..6144).step_by(192) {
-            u[off] = 0x47;
-        }
-        u[0] |= 0xC0;
-        u
-    }
-
-    /// `got == fx.expected` except the CPI bits of each stream-file source packet.
-    /// Per spec; do not change without a spec citation proving otherwise.
-    fn cpi_masked_eq(fx: &Fixture, got: &[u8]) -> bool {
-        // KS-6 AACS BD §3.10.2 Table 3-34: "TP_extra_header { Copy_permission_indicator 2
-        // uimsbf Arrival_time_stamp 30 uimsbf }": mask only the 2 CPI bits (byte0 & 0x3F).
-        let mask = |img: &[u8]| {
-            let mut img = img.to_vec();
-            for &(start, n) in &fx.files {
-                let (at, end) = (start as usize * SECTOR, (start + n) as usize * SECTOR);
-                for off in (at..end.min(img.len())).step_by(192) {
-                    img[off] &= 0x3F;
-                }
-            }
-            img
-        };
-        got.len() == fx.expected.len() && mask(got) == mask(&fx.expected)
-    }
-
-    /// The mask hides only the CPI bits of stream-file packets: a cleared CPI still
-    /// matches, but an ATS bit, a payload byte or a flag outside the files does not.
-    /// Per spec; do not change without a spec citation proving otherwise.
-    #[test]
-    fn the_cpi_mask_ignores_only_the_cpi_bits_of_stream_packets() {
-        let fx = fixture("cpimask", [K0, K1]);
-        let pkt = fx.files[1].0 as usize * SECTOR + 5 * 192;
-        // KS-5 AACS BD §3.10.2: "… or shall be set to 00₂ if the data is not encrypted".
-        let mut cleared = fx.expected.clone();
-        cleared[fx.files[0].0 as usize * SECTOR] &= 0x3F;
-        cleared[pkt] |= 0xC0;
-        assert!(
-            cpi_masked_eq(&fx, &cleared),
-            "CPI-only differences are masked"
-        );
-        for (at, bit) in [(pkt, 0x20), (pkt + 1, 0x01), (pkt + 4, 0x01), (0, 0xC0)] {
-            let mut other = fx.expected.clone();
-            other[at] ^= bit;
-            assert!(
-                !cpi_masked_eq(&fx, &other),
-                "byte {at} bit {bit:#x} must count"
-            );
-        }
-        assert!(
-            !cpi_masked_eq(&fx, &fx.expected[..SECTOR]),
-            "length must count"
-        );
-    }
-
-    /// A UDF image with two 30-sector stream files; `keys[i]` encrypts file `i`.
-    struct Fixture {
-        source: Vec<u8>,
-        expected: Vec<u8>,
-        files: Vec<(u32, u32)>,
-        dir: std::path::PathBuf,
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    fn fixture(name: &str, keys: [[u8; 16]; 2]) -> Fixture {
-        let dir = std::env::temp_dir().join(format!("fmkv-imgcopy-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let root = dir.join("tree");
-        let paths = ["BDMV/STREAM/00001.m2ts", "BDMV/STREAM/00002.m2ts"];
-        for p in paths {
-            let path = root.join(p);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, vec![0u8; 30 * SECTOR]).unwrap();
-        }
-        let mut img = libfreemkv::DirImage::open(&root).unwrap();
-        let fs = libfreemkv::read_filesystem(&mut img).unwrap();
-        let files: Vec<(u32, u32)> = paths
-            .iter()
-            .map(|p| fs.file_extents(&mut img, &format!("/{p}")).unwrap()[0])
-            .collect();
-        let cap = libfreemkv::SectorSource::capacity_sectors(&img);
-        let mut source = vec![0u8; cap as usize * SECTOR];
-        for lba in 0..cap {
-            let at = lba as usize * SECTOR;
-            libfreemkv::SectorSource::read_sectors(
-                &mut img,
-                lba,
-                1,
-                &mut source[at..at + SECTOR],
-                false,
-            )
-            .unwrap();
-        }
-        let mut expected = source.clone();
-        for (&(start, n), key) in files.iter().zip(keys) {
-            for u in 0..n / 3 {
-                let at = (start + u * 3) as usize * SECTOR;
-                let mut enc = clear_unit();
-                expected[at..at + 6144].copy_from_slice(&enc);
-                assert!(libfreemkv::aacs::content::encrypt_unit(&mut enc, &key));
-                source[at..at + 6144].copy_from_slice(&enc);
-            }
-        }
-        Fixture {
-            source,
-            expected,
-            files,
-            dir,
-        }
-    }
-
-    /// An AACS 1.0 BD declaring `declared` CPS units; the kept title plays file 0.
-    fn disc(fx: &Fixture, declared: u16) -> libfreemkv::Disc {
-        let mut uk_ro = vec![0u8; 96 + 48 * declared as usize];
-        uk_ro[..4].copy_from_slice(&48u32.to_be_bytes());
-        uk_ro[48..50].copy_from_slice(&declared.to_be_bytes());
-        let cap = (fx.source.len() / SECTOR) as u32;
-        let mut title = libfreemkv::DiscTitle::empty();
-        title.content_format = libfreemkv::ContentFormat::BdTs;
-        title.extents = vec![libfreemkv::Extent {
-            start_lba: fx.files[0].0,
-            sector_count: fx.files[0].1,
-        }];
-        libfreemkv::Disc {
-            volume_id: "IMGCOPY".into(),
-            meta_title: None,
-            format: libfreemkv::DiscFormat::BluRay,
-            capacity_sectors: cap,
-            capacity_bytes: cap as u64 * SECTOR as u64,
-            layers: 1,
-            titles: vec![title],
-            region: libfreemkv::disc::DiscRegion::Free,
-            aacs: Some(libfreemkv::test_util::aacs_state().uk_ro(uk_ro).build()),
-            css: None,
-            encrypted: true,
-            aacs_error: None,
-            css_error: None,
-            content_format: libfreemkv::ContentFormat::BdTs,
-        }
-    }
-
-    /// Serves the image; one-unit reads inside `probe_fail` fail (damaged probes).
-    struct Mem {
-        image: Vec<u8>,
-        probe_fail: Option<(u32, u32)>,
-    }
-
-    impl libfreemkv::SectorSource for Mem {
-        fn capacity_sectors(&self) -> u32 {
-            (self.image.len() / SECTOR) as u32
-        }
-        fn read_sectors(
-            &mut self,
-            lba: u32,
-            count: u16,
-            buf: &mut [u8],
-            _: bool,
-        ) -> libfreemkv::error::Result<usize> {
-            if count == 3 && self.probe_fail.is_some_and(|(s, e)| (s..e).contains(&lba)) {
-                return Err(Error::DiscRead {
-                    sector: lba as u64,
-                    status: None,
-                    sense: None,
-                });
-            }
-            let (at, n) = (lba as usize * SECTOR, count as usize * SECTOR);
-            buf[..n].copy_from_slice(&self.image[at..at + n]);
-            Ok(n)
-        }
-    }
-
-    fn mem(fx: &Fixture, probe_fail: Option<(u32, u32)>) -> Mem {
-        Mem {
-            image: fx.source.clone(),
-            probe_fail,
-        }
-    }
-
-    /// The rip's up-front set over the whole image (KU §2.5), from a keydb holding `pool`
-    /// and an online service holding `online`.
-    fn keys(
-        fx: &Fixture,
-        d: &libfreemkv::Disc,
-        probe_fail: Option<(u32, u32)>,
-        pool: &[[u8; 16]],
-        online: &[[u8; 16]],
-    ) -> libfreemkv::error::Result<libfreemkv::keys::KeyRing> {
-        use crate::ku_fixtures::{Answer, Calls, factory};
-        let f = factory(
-            &[(Answer::Keydb, pool), (Answer::Online, online)],
-            &Calls::default(),
-        );
-        let opts = libfreemkv::keys::AcquireOptions::default();
-        let scope = libfreemkv::keys::KeyScope::WholeDisc;
-        libfreemkv::keys::KeyRing::acquire_for_disc(
-            d,
-            &mut mem(fx, probe_fail),
-            scope,
-            &f,
-            opts,
-            &libfreemkv::Ctx::default(),
-        )
-        .map(|r| r.keys)
-    }
-
-    fn copy(
-        fx: &Fixture,
-        d: &libfreemkv::Disc,
-        set: &libfreemkv::keys::KeyRing,
-        halt: &libfreemkv::Halt,
-    ) -> (std::path::PathBuf, libfreemkv::error::Result<u64>) {
-        let dest = fx.dir.join("out.iso");
-        let r = write_decrypted_image(d, Box::new(mem(fx, None)), &dest, set, halt);
-        (dest, r)
-    }
-
-    /// 10d85b2: a file no source key opens no longer refuses the copy (E7032); its units
-    /// are blanked, never ciphertext, and the destination is written.
-    #[test]
-    fn an_image_copy_blanks_a_file_no_key_opens() {
-        let fx = fixture("refuse", [K0, STRANGER]);
-        let d = disc(&fx, 2);
-        let set = keys(&fx, &d, None, &[K0, K1], &[]).expect("damage, not E7032");
-        let (dest, r) = copy(&fx, &d, &set, &libfreemkv::Halt::new());
-        r.expect("the unopenable file is blanked, not refused");
-        let (o, n) = fx.files[1];
-        let out = std::fs::read(&dest).unwrap();
-        let (a, b) = (o as usize * SECTOR, (o + n) as usize * SECTOR);
-        assert!(out[a..b].iter().all(|&x| x == 0));
-    }
-
-    /// Wired to the DECLARED CPS count (KS-14): an unprobeable file of a one-unit disc is
-    /// proven on arrival with its one key; on a two-unit disc a file no held key opens
-    /// is blanked on arrival (10d85b2), never garbage.
-    #[test]
-    fn the_image_copy_proves_an_unprobeable_file_on_arrival() {
-        use libfreemkv::spec::keys::KS_14_UNIT_KEY_BLOCK;
-        assert!(KS_14_UNIT_KEY_BLOCK.text.contains("Num_of_CPS_Unit"));
-        let fx = fixture("declared", [K0, K0]);
-        let (o, n) = fx.files[1];
-        let d = disc(&fx, 1);
-        let set = keys(&fx, &d, Some((o, o + n)), &[K0], &[]).expect("one declared key");
-        let (dest, r) = copy(&fx, &d, &set, &libfreemkv::Halt::new());
-        r.expect("the one held key opens the file on arrival");
-        assert!(cpi_masked_eq(&fx, &std::fs::read(&dest).unwrap()));
-
-        let fx = fixture("stranger", [K0, STRANGER]);
-        let d = disc(&fx, 2);
-        let set = keys(&fx, &d, Some((o, o + n)), &[K0], &[]).expect("lazy, not missing");
-        let (dest, r) = copy(&fx, &d, &set, &libfreemkv::Halt::new());
-        r.expect("a file no held key opens is blanked on arrival");
-        let out = std::fs::read(&dest).unwrap();
-        let (a, b) = (o as usize * SECTOR, (o + n) as usize * SECTOR);
-        assert!(out[a..b].iter().all(|&x| x == 0));
-    }
-
-    /// A Ctrl-C that already landed ends the copy before the destination exists.
-    #[test]
-    fn a_stop_before_writing_creates_no_output() {
-        let fx = fixture("halt", [K0, K1]);
-        let d = disc(&fx, 2);
-        let set = keys(&fx, &d, None, &[K0, K1], &[]).unwrap();
-        let halt = libfreemkv::Halt::new();
-        halt.cancel();
-        let (dest, r) = copy(&fx, &d, &set, &halt);
-        assert!(matches!(r, Err(Error::Halted)), "{:?}", r.err());
-        assert!(!dest.exists(), "a stop must precede creating the ISO");
-    }
-
-    /// Same key sources as the engine, asked up front: a key the keydb lacks comes from
-    /// the online service before the copy starts, never mid-copy.
-    #[test]
-    fn the_image_copy_asks_the_key_source_for_a_missing_key() {
-        let fx = fixture("fetch", [K0, K1]);
-        let d = disc(&fx, 3);
-        let set = keys(&fx, &d, None, &[K0, K2], &[K1]).expect("the online key");
-        let (dest, r) = copy(&fx, &d, &set, &libfreemkv::Halt::new());
-        r.unwrap_or_else(|e| panic!("the fetched key must decrypt the file, got {e}"));
-        assert!(cpi_masked_eq(&fx, &std::fs::read(&dest).unwrap()));
-    }
-}
-
-#[cfg(test)]
 mod ku_cli_tests {
     //! The CLI half of KU-F1 over a real image file (keys-upfront design §7.3): one resolve
     //! per rip, before any output; E7034 before any output; nothing key-shaped on disk.
@@ -7170,40 +6519,6 @@ mod ku_cli_tests {
         }
     }
 
-    /// FK7 (KU §2.5: "Raw copy (`--raw`, …) | `None`: no key call"): the disc→ISO copy
-    /// scans with `open_drive_scan(.., raw)` and resolves only on its decrypting arm (a live
-    /// drive is needed to run it, so this reads the wiring; `rip_keys` proves the rest).
-    #[test]
-    fn raw_disc_copy_makes_no_key_request() {
-        let src = include_str!("pipe.rs").replace("\r\n", "\n");
-        let a = src.find("\nfn disc_to_iso(").expect("disc_to_iso");
-        let body = &src[a..a + src[a..].find("\nfn dir_to_extract(").expect("next fn")];
-        assert!(body.contains("open_drive_scan(device_target(source), credentials, raw)"));
-        let keyed = body.find("disc_rip_keys(").expect("the decrypting resolve");
-        assert!(
-            body[..keyed].contains("let set = if raw {"),
-            "resolve only when decrypting"
-        );
-    }
-
-    /// §4.3 item 1: every CLI op takes the process token, the drive scan included, and
-    /// a Ctrl-C during the scan reads as an interrupt, not an error.
-    #[test]
-    fn every_cli_drive_scan_takes_the_process_token() {
-        let src = include_str!("pipe.rs").replace("\r\n", "\n");
-        let prod = &src[..src.find("\n#[cfg(test)]\nmod tests").expect("tests module")];
-        let untokened = ["freemkv_engine::", "open_scan("].concat();
-        assert!(
-            !prod.contains(&untokened),
-            "a CLI drive scan ignores the first Ctrl-C"
-        );
-        let a = prod.find("\nfn open_drive_scan(").expect("open_drive_scan");
-        let helper = &prod[a..a + prod[a..].find("\n}\n").expect("fn end")];
-        assert!(helper.contains("open_scan_with(") && helper.contains("crate::cli_stop::token()"));
-        let halted = crate::pipe::render_drive_open_error(&libfreemkv::Error::Halted);
-        assert_eq!(halted, crate::strings::get("rip.interrupted"));
-    }
-
     static FT10_CTRL_C: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     // FT10 (stop design v5 §4.3 item 2): "A key call in flight stops on the first Ctrl-C";
@@ -7228,9 +6543,13 @@ mod ku_cli_tests {
             std::time::Instant::now()
         });
         let out = crate::output::Output::new(false, true);
-        let ok = with_sources(f, || {
-            super::image_to_iso(&src, &dest, &super::KeyConfig::default(), &token, &out)
-        });
+        let plan = super::cli_plan(
+            &src,
+            &dest,
+            &super::KeyConfig::default(),
+            (false, false, false),
+        );
+        let ok = with_sources(f, || super::whole_disc(&plan, &token, &out)) == 0;
         let pressed = press.join().unwrap();
         assert!(!ok, "a stopped copy is not a success");
         assert!(
@@ -7240,18 +6559,6 @@ mod ku_cli_tests {
         assert_eq!(calls.len(), 1, "the key call was in flight");
         assert!(!plain.exists(), "no ISO");
         assert_eq!(files_under(dir.path()), vec![iso], "no partial");
-    }
-
-    // §2.5: the lock is "created at op start and held for the whole op". The disc→ISO copy
-    // needs a live drive to run, so this reads the wiring; `image_to_iso` runs the rest.
-    #[test]
-    fn disc_to_iso_holds_the_artifact_lock() {
-        let src = include_str!("pipe.rs").replace("\r\n", "\n");
-        let a = src.find("\nfn disc_to_iso(").expect("disc_to_iso");
-        let body = &src[a..a + src[a..].find("\nfn dir_to_extract(").expect("next fn")];
-        let lock = body.find("hold_iso_lock(&iso_path").expect("the lock");
-        assert!(lock < body.find("freemkv_engine::copy(").expect("the copy"));
-        assert!(body.contains("crate::artifact_lock::release(lock, done)"));
     }
 
     // §2.5: "Kept after Stop … where it guards the resumable artifact"; ST-I2's "progress
@@ -7279,7 +6586,7 @@ mod ku_cli_tests {
     // `_with` entries"; "Deleted on success … Kept after Stop". While another process holds
     // `<final>.lock` the CLI writes nothing and a Ctrl-C ends the wait. Per spec.
     #[test]
-    fn image_to_iso_holds_the_artifact_lock() {
+    fn a_whole_disc_copy_holds_the_artifact_lock() {
         let fx = bd_image(&[Some(K1)], 1);
         let dir = TempDir::new("cli-lock");
         let iso = fx.write(dir.path(), "disc.iso");
@@ -7292,9 +6599,13 @@ mod ku_cli_tests {
         let out = crate::output::Output::new(false, true);
         let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
         let never = libfreemkv::Halt::new();
-        let ok = with_sources(f, || {
-            super::image_to_iso(&src, &dest, &super::KeyConfig::default(), &never, &out)
-        });
+        let plan = super::cli_plan(
+            &src,
+            &dest,
+            &super::KeyConfig::default(),
+            (false, false, false),
+        );
+        let ok = with_sources(f, || super::whole_disc(&plan, &never, &out)) == 0;
         assert!(ok && plain.exists(), "the copy ran");
         assert!(!sidecar.exists(), "deleted on success");
 
@@ -7307,11 +6618,9 @@ mod ku_cli_tests {
         });
         let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
         let loud = crate::output::Output::new(false, false);
-        let (ok, text) = crate::output::capture(|| {
-            with_sources(f, || {
-                super::image_to_iso(&src, &dest, &super::KeyConfig::default(), &token, &loud)
-            })
-        });
+        let (code, text) =
+            crate::output::capture(|| with_sources(f, || super::whole_disc(&plan, &token, &loud)));
+        let ok = code == 0;
         press.join().unwrap();
         drop(held);
         assert!(!ok, "a copy that never got the lock is not a success");
