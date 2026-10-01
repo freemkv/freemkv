@@ -6,8 +6,8 @@
 #   2. shutdown -h now  (an EXIT trap, so any failure also reaches it) +
 #                       InstanceInitiatedShutdownBehavior=terminate on the
 #                       launch template, so the instance DELETES itself.
-# A third, the scheduled sweeper, catches a box that never runs this script
-# or hangs in it.
+# A third, the 4h self-destruct below, stops a hang; qa.yml's end-of-run
+# teardown (if: always()) catches a box that never runs this script.
 # NOTE: no `x` (no `set -x`). The decrypted registration token is expanded on
 # the `config.sh --token $REG` command line (and in the `$REG` guard below), and
 # an execution trace would echo it straight into the tee'd log. `-euo pipefail`

@@ -50,7 +50,7 @@ secrets. So the launching job (qa.yml `launch`) stashes the token in
 (`runner-token-param`, non-secret). The user-data reads the name from IMDS, then
 `aws ssm get-parameter --with-decryption`, then `aws ssm delete-parameter` so the
 token does not outlive the boot. If the box dies first, the token expires in
-60 min and the sweeper terminates it.
+60 min.
 
 IAM this needs (AWS-side, not in this repo):
 
@@ -63,14 +63,15 @@ Only the parameter *name* travels through IMDS tags, so
 
 ## Teardown
 
-Three independent mechanisms, because each fails alone:
+Independent mechanisms, because each fails alone:
 
 1. `--ephemeral` — GitHub de-registers the runner after exactly one job.
 2. `shutdown` + `InstanceInitiatedShutdownBehavior=terminate` — the instance
    deletes itself, and the EBS volume goes with it.
-3. `ci-runner-sweeper.yml` — hourly, from OUTSIDE, kills anything tagged
-   `freemkv-ci=runner` older than 5h. The only one that survives user-data
-   dying before it arms the other two.
+3. In-instance 4h self-destruct (`sleep 14400; shutdown`) — stops a hung box.
+4. qa.yml's `launch` job ends with an `if: always()` Tear down step that
+   terminates every instance tagged `launched-by=<run id>`, on success, failure
+   or cancel. There is no scheduled sweeper.
 
 Both platforms were observed completing the full cycle: register, take one job,
 `Removed .runner`, shut down, instance terminated.

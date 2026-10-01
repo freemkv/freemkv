@@ -59,7 +59,7 @@ jobs:
           GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
           SKIP_MEDIA: ${{ inputs.skip_media }}
           PRERELEASE: ${{ inputs.prerelease }}
-          NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|promote|release-orchestrate|Release|ci-runner-sweeper)$'
+          NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|promote|release-orchestrate|Release)$'
         run: |
           set -uo pipefail
           if [ "$SKIP_MEDIA" = true ]; then

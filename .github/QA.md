@@ -164,12 +164,13 @@ The job checks both secrets are set BEFORE fetching 121 GiB, because otherwise
 the run gets six minutes in, rips the DVD fine (CSS needs no key) and only then
 reports a key error that reads like a media defect.
 
-**Teardown — three independent mechanisms**, because each can fail alone:
+**Teardown — independent mechanisms**, because each can fail alone:
 `--ephemeral` de-registers the runner after one job; `shutdown` against
 `InstanceInitiatedShutdownBehavior=terminate` deletes the instance and its
-volume; and `ci-runner-sweeper.yml` terminates anything tagged `freemkv-ci`
-older than 5 h from OUTSIDE the instance — the only one that survives
-user-data dying before it arms the other two.
+volume; the in-instance 4 h self-destruct stops a hung box; and the `launch`
+job's `if: always()` Tear down step at the end of qa.yml terminates every
+instance tagged `launched-by=<run id>` (success, failure or cancel). There is no
+scheduled sweeper.
 
 **Cost control is `needs:`, not decoration.** Nothing touches real media until
 lint, the unit suites, the cross-lint, the Windows build and the synthetic CLI
