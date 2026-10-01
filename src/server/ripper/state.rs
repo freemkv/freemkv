@@ -1,9 +1,6 @@
 //! Per-device rip state, the global STATE map, and the per-frame
 //! `update_state` building blocks (PassContext / PassProgressState /
 //! push_pass_state / set_pass_progress / build_bad_ranges).
-//!
-//! Lifted verbatim from the monolithic `ripper.rs` as part of the 0.18
-//! prep split — no semantic changes.
 
 use crate::server::util::{BYTES_PER_GIB, BYTES_PER_MIB, MILLIS_PER_SEC, SECTOR_BYTES};
 use std::sync::Mutex;
@@ -35,7 +32,7 @@ pub enum Resumable {
     Sweep,
 }
 
-// TODO(1.2.0): replace the stringly-typed `status` with DeviceStage and
+// TODO: replace the stringly-typed `status` with DeviceStage and
 // PipelineStage enums. Deferred: web.rs buildSteps hard-depends on these
 // exact status strings, so the cutover must land with the frontend rework.
 /// State broadcast for web UI.
@@ -176,7 +173,6 @@ pub struct RipState {
     /// sector count) and `total_lost_ms` (cumulative playback time lost).
     /// UI renders a colored badge: clean (green) / cosmetic (yellow) /
     /// moderate (orange) / serious (red).
-    #[serde(default)]
     pub damage_severity: String,
 
     /// Operator-readable failure reason for `status == "failed"`.
@@ -187,7 +183,7 @@ pub struct RipState {
     /// across renders for the operator-decision view. Optional /
     /// `skip_serializing_if = "Option::is_none"` so older dashboards
     /// that don't know the field don't see a stray `null`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
 
     /// v0.25.7: epoch-seconds timestamp of when the current rip
@@ -197,7 +193,6 @@ pub struct RipState {
     /// `now - started_epoch_secs` so the display advances every tick
     /// without server pressure. Preserved across `update_state` calls
     /// for the same rip; cleared when status returns to `idle`.
-    #[serde(default)]
     pub started_epoch_secs: u64,
     /// Key readiness determined at scan time, for the dashboard tile:
     /// "Ready to rip", "Missing keys — `<reason>`", or "" (unknown).
@@ -479,8 +474,9 @@ pub fn try_claim_active(device: &str) -> Option<u64> {
 ///
 /// Refuses the claim if EITHER the status is scanning/ripping OR the rip thread is still alive.
 pub fn try_claim_active_checked(device: &str, known: bool) -> Option<u64> {
-    // Liveness first, and OUTSIDE the STATE lock (see the doc above for both
-    // the why and the ordering argument).
+    // Liveness first, outside the STATE lock: a worker starts only after a claim
+    // sets `scanning`, so one started after this check fails the status check
+    // below, and one that exits after it only makes this refusal conservative.
     if super::session::rip_thread_running(device) {
         tracing::warn!(
             device = %device,
@@ -490,10 +486,7 @@ pub fn try_claim_active_checked(device: &str, known: bool) -> Option<u64> {
         return None;
     }
     let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if s.get(device)
-        .map(|r| r.status == "scanning" || r.status == "ripping")
-        .unwrap_or(false)
-    {
+    if s.get(device).is_some_and(row_is_busy) {
         return None;
     }
     if !known && !s.contains_key(device) {
@@ -515,9 +508,8 @@ pub fn try_claim_active_checked(device: &str, known: bool) -> Option<u64> {
 }
 
 /// Shared context for the progress callbacks of a multi-pass rip. Built once
-/// before pass 1, cheaply Arc-cloned per pass so each closure captures the
-/// same immutable values without reallocating every callback.
-#[derive(Clone)]
+/// before pass 1 and borrowed by every pass's progress sink, so the callbacks
+/// share the same immutable values without reallocating.
 pub(super) struct PassContext {
     pub(super) device: String,
     pub(super) display_name: String,
@@ -670,6 +662,21 @@ pub(super) struct PassProgressState {
 /// explodes and whipsaws; clamping it keeps the display honest and stable.
 pub(super) const ETA_CAP_SECS: u64 = 6 * 3600;
 
+// An ETA for display: `s`, `m:ss` or `h:mm:ss`, or a steady ">Nh" above
+// [`ETA_CAP_SECS`] (a dead-media near-zero rate makes `remaining / rate` whipsaw).
+fn capped_eta(secs: u64) -> String {
+    if secs > ETA_CAP_SECS {
+        return format!(">{}h", ETA_CAP_SECS / 3600);
+    }
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    } else {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    }
+}
+
 impl PassProgressState {
     pub(super) fn new() -> Self {
         let now = std::time::Instant::now();
@@ -778,39 +785,17 @@ pub(super) fn push_pass_state(
         // display_speed during ETA_WARMUP_SECS while the average is noisy.
         let eta_speed = s.speed.eta_speed_mbs(now, display_speed);
         s.last_update = now;
-        let format_secs = |secs: u64| -> String {
-            if secs < 60 {
-                format!("{}s", secs)
-            } else if secs < 3600 {
-                format!("{}:{:02}", secs / 60, secs % 60)
-            } else if secs < 360_000 {
-                format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
-            } else {
-                // Very long ETA (>100 h, e.g. a 489 MB bad set grinding at
-                // ~12 KB/s). Show days+hours so the field is never blank —
-                // the operator still wants "≈ 8d" over an empty gap.
-                format!("{}d{}h", secs / 86_400, (secs % 86_400) / 3600)
-            }
-        };
         // Floor is 0.1 KB/s, not the old 10 KB/s, which blanked the ETA right
-        // at the patch rate (~12 KB/s). Cap avoids a dead-media near-zero rate
-        // making `remaining / rate` explode and whipsaw; shows ">Nh" instead.
-        let eta_str = |secs: u64| -> String {
-            if secs > ETA_CAP_SECS {
-                format!(">{}h", ETA_CAP_SECS / 3600)
-            } else {
-                format_secs(secs)
-            }
-        };
+        // at the patch rate (~12 KB/s).
         let pass_eta = if eta_speed > 0.0001 && last_work_total > last_pos {
             let rem_mb = (last_work_total - last_pos) as f64 / BYTES_PER_MIB;
-            eta_str((rem_mb / eta_speed) as u64)
+            capped_eta((rem_mb / eta_speed) as u64)
         } else {
             String::new()
         };
         let total_eta = if eta_speed > 0.0001 && total_work_estimated > total_done {
             let rem_mb = (total_work_estimated - total_done) as f64 / BYTES_PER_MIB;
-            eta_str((rem_mb / eta_speed) as u64)
+            capped_eta((rem_mb / eta_speed) as u64)
         } else {
             String::new()
         };
@@ -1386,6 +1371,9 @@ mod tests {
             s.total_progress_pct = 48;
             s.total_eta = "1:30:00".to_string();
             s.pass_progress_pct = 100;
+            s.pass_eta = "0:05".to_string();
+            s.eta = "0:05".to_string();
+            s.speed_mbs = 12.5;
             s.errors = 12;
             s.total_lost_ms = 500.0;
         });
@@ -1417,6 +1405,14 @@ mod tests {
         // pass-specific fields are updated to the new pass.
         assert_eq!(snap.pass, 2, "pass not updated");
         assert_eq!(snap.total_passes, 7, "total_passes not updated");
+        // Per-pass fields restart at the pass boundary.
+        assert_eq!(snap.pass_progress_pct, 0, "pass bar must restart at 0%");
+        assert_eq!(snap.pass_eta, "", "pass_eta must reset");
+        assert_eq!(snap.eta, "", "eta must reset");
+        assert_eq!(snap.speed_mbs, 0.0, "speed must reset");
+        // 40 GiB good of a 50 GiB disc.
+        assert_eq!(snap.progress_pct, 80);
+        assert!((snap.progress_gb - 40.0).abs() < 0.001);
         // damage fields must also survive (were written by push_pass_state).
         assert_eq!(
             snap.errors, 12,
@@ -2002,7 +1998,7 @@ mod tests {
             work_total: 2_000_000,
             bytes_good_total: 500_000,
             bytes_unreadable_total: 20_480, // 10 sectors * 2048
-            bytes_pending_total: 4_096,
+            bytes_pending_total: 8_192,
             bytes_retryable_total: 4_096,
             bytes_total_disc: ctx.bytes_total_disc,
             disc_duration_secs: None,
@@ -2086,10 +2082,18 @@ mod tests {
             snap.errors, 10,
             "errors field dropped to Default (bytes_lost / SECTOR_BYTES)"
         );
+        // bps 2048 bytes/s, 20_480 bytes lost -> exactly 10 s.
         assert!(
-            snap.total_lost_ms > 0.0,
-            "total_lost_ms field dropped to Default"
+            (snap.total_lost_ms - 10_000.0).abs() < 0.001,
+            "total_lost_ms = bytes_lost * 1000 / bps, got {}",
+            snap.total_lost_ms
         );
+        assert!(
+            (snap.lost_video_secs - 10.0).abs() < 0.001,
+            "lost_video_secs = total_lost_ms / 1000, got {}",
+            snap.lost_video_secs
+        );
+        assert_eq!(snap.main_lost_ms, 0.0, "main_lost_ms is the done card's");
         assert_eq!(
             snap.preferred_batch, 32,
             "preferred_batch field dropped to Default"
@@ -2131,6 +2135,150 @@ mod tests {
         assert_eq!(
             snap.codecs, "HEVC/DTS-HD",
             "codecs field dropped to Default"
+        );
+    }
+
+    #[test]
+    fn update_state_keeps_started_epoch_across_active_pushes_only() {
+        let dev = format!("test-started-epoch-{}", std::process::id());
+        let push = |status: &str| {
+            update_state(
+                &dev,
+                RipState {
+                    device: dev.clone(),
+                    status: status.to_string(),
+                    ..Default::default()
+                },
+            )
+        };
+        let started = || STATE.lock().unwrap().get(&dev).unwrap().started_epoch_secs;
+
+        push("idle");
+        assert_eq!(started(), 0, "an idle device has no start time");
+        push("scanning");
+        assert!(started() > 12_345, "idle -> active stamps the start");
+        update_state_with(&dev, |s| s.started_epoch_secs = 12_345);
+        push("ripping");
+        assert_eq!(started(), 12_345, "an active push keeps the start");
+        push("done");
+        assert_eq!(started(), 0, "a terminal push clears the start");
+        push("ripping");
+        assert!(started() > 12_345, "a new rip stamps afresh");
+        STATE.lock().unwrap().remove(&dev);
+    }
+
+    fn pass_progress(work_done: u64, unreadable: u64) -> libfreemkv::progress::PassProgress {
+        libfreemkv::progress::PassProgress {
+            kind: libfreemkv::progress::PassKind::Sweep,
+            work_done,
+            work_total: 1000,
+            bytes_good_total: 0,
+            bytes_unreadable_total: unreadable,
+            bytes_pending_total: 0,
+            bytes_retryable_total: 0,
+            bytes_total_disc: 1000,
+            disc_duration_secs: None,
+            bytes_bad_in_main_title: 0,
+            main_title_duration_secs: None,
+            main_title_size_bytes: None,
+            located: libfreemkv::progress::LocatedProgress {
+                ranges: vec![],
+                num_ranges: 0,
+                truncated: 0,
+                main_at_risk_ms: 0.0,
+                largest_gap_ms: 0.0,
+            },
+        }
+    }
+
+    /// Total bar = done / (disc + max_retries x frozen unreadable + mux), with
+    /// retry passes counting the disc and each prior retry pass as done.
+    #[test]
+    fn push_pass_state_total_progress_uses_frozen_denominator() {
+        let dev = format!("test-pps-total-{}", std::process::id());
+        let mut ctx = minimal_pass_ctx(&dev);
+        ctx.bytes_total_disc = 1000;
+        ctx.max_retries = 2;
+        let total_pct = || STATE.lock().unwrap().get(&dev).unwrap().total_progress_pct;
+        let at = |state: &Mutex<PassProgressState>, done: u64| {
+            let mut s = state.lock().unwrap();
+            s.last_work_done = done;
+            s.last_work_total = 1000;
+        };
+
+        // Pass 1: work 1000 + 2 x 100 + 1000 mux = 2200; 600 done -> 27%.
+        let pass1 = Mutex::new(PassProgressState::new());
+        at(&pass1, 600);
+        push_pass_state(&ctx, &pass_progress(600, 100), 2048.0, 1, 4, &pass1);
+        assert_eq!(total_pct(), 27);
+        // Unreadable grows mid-pass; the denominator stays frozen at 100.
+        push_pass_state(&ctx, &pass_progress(600, 500), 2048.0, 1, 4, &pass1);
+        assert_eq!(total_pct(), 27, "denominator must stay frozen mid-pass");
+
+        // Pass 3 (second retry): 1000 + 1 x 100 + 50 = 1150 of 2200 -> 52%.
+        let pass3 = Mutex::new(PassProgressState::new());
+        at(&pass3, 50);
+        push_pass_state(&ctx, &pass_progress(50, 100), 2048.0, 3, 4, &pass3);
+        assert_eq!(total_pct(), 52);
+        STATE.lock().unwrap().remove(&dev);
+    }
+
+    #[test]
+    fn capped_eta_formats_and_caps() {
+        assert_eq!(capped_eta(59), "59s");
+        assert_eq!(capped_eta(61), "1:01");
+        assert_eq!(capped_eta(3661), "1:01:01");
+        assert_eq!(capped_eta(ETA_CAP_SECS), "6:00:00");
+        assert_eq!(capped_eta(ETA_CAP_SECS + 1), ">6h");
+        assert_eq!(capped_eta(u64::MAX), ">6h");
+    }
+
+    #[test]
+    fn build_bad_ranges_locates_chapter_time_and_sector_count() {
+        let (_p, mut mf) = tmp_map("chapters", 10_000 * 2048);
+        // 4 sectors at LBA 1600 (600 sectors into the title), and 2 sectors
+        // at LBA 5000, outside every extent.
+        mf.record(1600 * 2048, 4 * 2048, SectorStatus::Unreadable)
+            .unwrap();
+        mf.record(5000 * 2048, 2 * 2048, SectorStatus::Unreadable)
+            .unwrap();
+        let title = libfreemkv::DiscTitle {
+            extents: vec![libfreemkv::Extent {
+                start_lba: 1000,
+                sector_count: 1000,
+            }],
+            duration_secs: 20.0,
+            size_bytes: 1000 * 2048,
+            chapters: vec![
+                libfreemkv::disc::Chapter {
+                    time_secs: 0.0,
+                    name: "1".into(),
+                },
+                libfreemkv::disc::Chapter {
+                    time_secs: 10.0,
+                    name: "2".into(),
+                },
+            ],
+            ..minimal_title()
+        };
+        let (ranges, count, ..) = build_bad_ranges(&mf, &title, 2048.0);
+        assert_eq!(count, 2);
+        let inside = ranges.iter().find(|r| r.lba == 1600).unwrap();
+        assert_eq!(inside.count, 4);
+        assert_eq!(
+            inside.chapter,
+            Some(2),
+            "600/1000 of 20 s is 12 s: chapter 2"
+        );
+        assert!((inside.time_offset_secs.unwrap() - 12.0).abs() < 0.001);
+        let outside = ranges.iter().find(|r| r.lba == 5000).unwrap();
+        assert_eq!(outside.count, 2);
+        assert_eq!((outside.chapter, outside.time_offset_secs), (None, None));
+
+        let (ranges, ..) = build_bad_ranges(&mf, &title, 0.0);
+        assert!(
+            ranges.iter().all(|r| r.duration_ms == 0.0),
+            "no bitrate means no duration, not inf"
         );
     }
 }
