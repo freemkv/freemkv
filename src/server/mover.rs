@@ -206,7 +206,9 @@ enum MoveOutcome {
     /// source of truth) and retries next tick.
     PostCopyInvalid,
     /// Destination already exists as a DIFFERENT file (present, non-empty, and a
-    /// different size than src). A wrong title match can resolve two distinct
+    /// different size than src, or the same size with different content). The
+    /// different-size case is refused by `check_and_move`'s guard; `move_file`
+    /// itself refuses only the same-size case and replaces a different-size dest. A wrong title match can resolve two distinct
     /// discs to the same `Title (Year)/Title (Year).ext` path; overwriting would
     /// destroy a good prior rip. We refuse the move, leave the new file in
     /// staging, and surface a collision error for the operator to resolve.
@@ -979,12 +981,12 @@ fn check_and_move(cfg: &Config) {
         let mut dest_ok = true;
         for (_, dest) in &planned_moves {
             if let Some(parent) = Path::new(dest).parent()
-                && std::fs::create_dir_all(parent).is_err()
+                && let Err(e) = std::fs::create_dir_all(parent)
             {
                 record_error(
                     &dir_str,
                     &format!(
-                        "cannot create destination directory {}",
+                        "cannot create destination directory {}: {e}",
                         absolute_for_log(&parent.to_string_lossy())
                     ),
                     "check write permissions on the output / movie / tv directory",
@@ -1179,9 +1181,6 @@ fn check_and_move(cfg: &Config) {
             .iter()
             .any(|o| matches!(o, MoveOutcome::Moved | MoveOutcome::MovedDirty));
 
-        // Surface size-mismatch distinctly so the operator knows the dest is
-        // the broken side (src is intact). Checked before `any_failed` so a
-        // mixed batch surfaces the more diagnostic reason.
         if any_collision {
             record_error(
                 &dir_str,
@@ -1191,11 +1190,14 @@ fn check_and_move(cfg: &Config) {
             continue;
         }
 
+        // Surface size-mismatch distinctly so the operator knows the dest is
+        // the broken side (src is intact). Checked before `any_failed` so a
+        // mixed batch surfaces the more diagnostic reason.
         if any_size_mismatch {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination size does not match source",
-                "check the destination filesystem for ENOSPC / short writes; remove the partial dst file and the mover will retry",
+                "check the destination filesystem for ENOSPC / short writes; the mover removes a broken copy it made and retries next tick (if a dst file remains, remove it)",
             );
             continue;
         }
@@ -1204,7 +1206,7 @@ fn check_and_move(cfg: &Config) {
             record_error(
                 &dir_str,
                 "post-cp validation failed: destination is structurally invalid or unreadable",
-                "the copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); remove the dst file and the mover will retry — see device_system.log for the specific check",
+                "the copy is the correct size but failed a format/readability check (truncated header/tail, bad TS sync, or unreadable dst); the mover removes a broken copy it made and retries next tick (if a dst file remains, remove it) — see device_system.log for the specific check",
             );
             continue;
         }
@@ -1225,6 +1227,16 @@ fn check_and_move(cfg: &Config) {
             &cfg.autorip_dir,
             planned_moves.iter().map(|(_, d)| d.as_str()),
         );
+
+        // Webhook: only fire on cycles where we actually moved bits, and before
+        // the teardown gates — a later tick sees only Skipped files and can't.
+        if any_actively_moved {
+            crate::server::webhook::send_move(
+                cfg,
+                &display_name,
+                webhook_output_path(&planned_moves),
+            );
+        }
 
         // Every file this pass could SEE is accounted for, not every file that IS there: a
         // listing error drops an entry the destructive remove_dir_all teardown would then
@@ -1259,20 +1271,24 @@ fn check_and_move(cfg: &Config) {
             );
         }
 
-        // Webhook: only fire on cycles where we actually moved bits.
-        // Skipped-only ticks are no-ops and must not re-notify.
-        if any_actively_moved {
-            let dest_path = planned_moves.last().map(|(_, d)| d.as_str()).unwrap_or("");
-            crate::server::webhook::send_move(cfg, &display_name, dest_path);
-        }
-
         // MOVE_STATE is cleared by `_move_state`'s Drop as this iteration
-        // ends — including via the four `continue`s above.
+        // ends — including via every `continue` above.
     }
 
     prune_move_errors(staging_root, &seen_dirs);
     // Same unbounded-growth prune for the stranded-dir one-time-warn dedup set.
     prune_stranded_warned(&seen_dirs);
+}
+
+// The move webhook's `output_path`: the media file, not the ISO archive, and the
+// first by name (a TV rip's first episode) so the listing order can't change it.
+fn webhook_output_path(planned_moves: &[(std::path::PathBuf, String)]) -> &str {
+    let dests = || planned_moves.iter().map(|(_, d)| d.as_str());
+    dests()
+        .filter(|d| !is_iso_file(d))
+        .min()
+        .or_else(|| dests().min())
+        .unwrap_or("")
 }
 
 // The deliverable files in one staging dir, and whether the listing was COMPLETE (false on any
@@ -1723,8 +1739,8 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
     let dest_meta = fresh_metadata(dest);
 
     // Pre-flight: dest already matches, stopping the infinite re-copy loop when src can't
-    // unlink. The caller gates this with same_head_and_tail, but equal LENGTH alone doesn't
-    // prove equal CONTENT; re-confirm here so a future caller can't clobber a different file.
+    // unlink. Equal LENGTH alone doesn't prove equal CONTENT, so a same-size different file is
+    // refused here too; a different-size dest is replaced (the caller's guard refuses it).
     if let (Ok(s), Ok(d)) = (&src_meta, &dest_meta)
         && s.is_file()
         && d.is_file()
@@ -1807,6 +1823,13 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
                         "Post-cp validation failed for {}: {}",
                         dest_str, e
                     ));
+                    // A broken copy this attempt made must not stay at the library
+                    // name: the next tick's disc-variant search would file around it.
+                    if dest_absent_before && let Err(rm) = std::fs::remove_file(&dest_str) {
+                        crate::server::log::syslog(&format!(
+                            "Could not remove the broken copy {dest_str}: {rm}"
+                        ));
+                    }
                     // Map failure KIND to outcome for an accurate operator
                     // hint: only a length disagreement is SizeMismatch;
                     // structural/readability failures get PostCopyInvalid.
@@ -1853,7 +1876,7 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
                         dest_str
                     ));
                 }
-                crate::server::log::syslog(&format!("fs::copy failed for {}: {}", dest_str, e));
+                crate::server::log::syslog(&format!("Copy failed for {}: {}", dest_str, e));
                 return MoveOutcome::Failed;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -1863,7 +1886,7 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
                 if dest_absent_before {
                     let _ = std::fs::remove_file(&dest_str);
                 }
-                crate::server::log::syslog(&format!("fs::copy thread panicked for {}", dest_str));
+                crate::server::log::syslog(&format!("Copy thread panicked for {}", dest_str));
                 return MoveOutcome::Failed;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -1906,9 +1929,6 @@ fn move_file(src: &Path, dest: &Path, on_progress: &dyn Fn(u8, f64, f64, f64)) -
         }
     }
 }
-
-// `sanitize_dir_name` moved to `crate::server::util::sanitize_path_display` in 0.13.0.
-// Single source of truth shared with the staging path in `ripper`.
 
 #[cfg(test)]
 mod tests {
@@ -3155,13 +3175,18 @@ mod tests {
 
     #[test]
     fn record_error_dedups_same_reason_without_logging_again() {
-        // Same path + same reason twice → second insert is a no-op
-        // logger-wise (the syslog call is gated on reason change).
-        // We assert state by checking the map snapshot.
+        // Same path + same reason twice → the second logs nothing (the log
+        // call is gated on reason change); a new reason logs again.
         let _g = errors_guard();
         let path = "/tmp/fakemover-dedup-test";
-        record_error(path, "stuck", "do thing");
-        record_error(path, "stuck", "do thing");
+        clear_error(path);
+        let logs = std::cell::Cell::new(0);
+        record_error_with(path, "stuck", "do thing", |_| logs.set(logs.get() + 1));
+        record_error_with(path, "stuck", "do thing", |_| logs.set(logs.get() + 1));
+        assert_eq!(logs.get(), 1, "an unchanged reason must not log again");
+        record_error_with(path, "other", "do thing", |_| logs.set(logs.get() + 1));
+        record_error_with(path, "stuck", "do thing", |_| logs.set(logs.get() + 1));
+        assert_eq!(logs.get(), 3, "a changed reason logs");
         let m = MOVE_ERRORS.lock().unwrap();
         let entry = m.get(path).expect("error recorded");
         assert_eq!(entry.reason, "stuck");
@@ -3337,6 +3362,14 @@ mod tests {
         // Owner execute-only (0o100): search bit lets read_to_string open
         // the known-path .done, but read bit cleared makes read_dir EACCES.
         std::fs::set_permissions(&disc_dir, std::fs::Permissions::from_mode(0o100)).unwrap();
+        if std::fs::read_dir(&disc_dir).is_ok() {
+            std::fs::set_permissions(&disc_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!(
+                "SKIP check_and_move_records_error_when_inner_read_dir_fails: \
+                 running with read-through privileges"
+            );
+            return;
+        }
 
         check_and_move(&cfg);
 
@@ -3789,6 +3822,33 @@ mod tests {
         let n = copy_counting_cancellable(&src, &dst, &written, &|| false).unwrap();
         assert_eq!(n, 5 * 1024 * 1024);
         assert_eq!(std::fs::read(&dst).unwrap(), data);
+    }
+
+    // A shutdown raised mid-copy is seen at the next chunk boundary, not at the end.
+    #[test]
+    fn copy_counting_sees_a_shutdown_raised_mid_copy() {
+        use std::sync::atomic::AtomicU64;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("midabort-src.bin");
+        let dst = tmp.path().join("midabort-final.bin");
+        std::fs::write(&src, vec![0x3Du8; 9 * 1024 * 1024]).unwrap();
+        let written = AtomicU64::new(0);
+        let checks = std::cell::Cell::new(0);
+        // Low for the first chunk, raised from the second check on.
+        let cancel = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 1
+        };
+
+        let err = copy_counting_cancellable(&src, &dst, &written, &cancel)
+            .expect_err("a shutdown raised mid-copy must abort it");
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(
+            written.load(std::sync::atomic::Ordering::Relaxed),
+            4 * 1024 * 1024,
+            "exactly one chunk is written before the abort is seen"
+        );
+        assert!(!dst.exists());
     }
 
     // ---- post-copy integrity + collision hardening tests ----
@@ -4547,6 +4607,12 @@ mod tests {
             "the incomplete-listing guard must come BEFORE remove_dir_all — \
              after it, the file the pass never saw is already deleted"
         );
+        let body = &src[guard..teardown];
+        let body = &body[..body.find("\n        }\n").expect("guard block closes")];
+        assert!(
+            body.contains("continue;"),
+            "the incomplete-listing guard must skip the teardown, not just log"
+        );
     }
 
     // MOVE_ERRORS rows for a staging dir the operator removed by hand must be pruned — the only
@@ -4617,6 +4683,10 @@ mod tests {
         MovedAndCleaned,
         /// Staging dir left in place, nothing moved to the library.
         LeftAlone,
+        /// Output landed in the library but staging was kept.
+        MovedNotCleaned,
+        /// Staging torn down with nothing in the library.
+        CleanedNotMoved,
     }
 
     // Build a single staging disc dir, run the real check_and_move, and report whether the MKV
@@ -4659,10 +4729,11 @@ mod tests {
             // but marker_json sets year 2024 → "Disc (2024)/Disc (2024).mkv".
             || movie_dir.join("Disc (2024)/Disc (2024).mkv").exists();
         let cleaned = !disc.exists();
-        if moved && cleaned {
-            MoverVerdict::MovedAndCleaned
-        } else {
-            MoverVerdict::LeftAlone
+        match (moved, cleaned) {
+            (true, true) => MoverVerdict::MovedAndCleaned,
+            (false, false) => MoverVerdict::LeftAlone,
+            (true, false) => MoverVerdict::MovedNotCleaned,
+            (false, true) => MoverVerdict::CleanedNotMoved,
         }
     }
 
@@ -4999,17 +5070,20 @@ mod tests {
         let ro = tmp.path().join("ro-root");
         std::fs::create_dir(&ro).unwrap();
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).unwrap();
+        // Root runs as uid 0 in some CI sandboxes and can write through 0o500.
+        let writable_anyway = std::fs::File::create(ro.join("root-check")).is_ok();
         let res = validate_destination_root(&ro.to_string_lossy());
         // Restore perms so TempDir cleanup works regardless of the outcome.
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o700)).ok();
-        // Root runs as uid 0 in some CI sandboxes and can write through 0o500;
-        // only assert the failure when the probe genuinely couldn't write.
-        if let Err(reason) = res {
-            assert!(
-                reason.contains("not writable"),
-                "read-only root must fail with a writability reason, got: {reason}"
-            );
+        if writable_anyway {
+            eprintln!("SKIP validate_destination_root_rejects_read_only: running as root");
+            return;
         }
+        let reason = res.expect_err("a read-only root must be rejected");
+        assert!(
+            reason.contains("not writable"),
+            "read-only root must fail with a writability reason, got: {reason}"
+        );
     }
 
     /// `destination_root` selects the SAME root `build_destination` routes
@@ -5103,5 +5177,84 @@ mod tests {
             1,
             "an identical movie/output root must be reported once, got {problems:?}"
         );
+    }
+
+    #[test]
+    fn webhook_output_path_is_the_media_file_whatever_the_order() {
+        let p = |d: &str| (std::path::PathBuf::from("/s/x"), d.to_string());
+        let mkv_iso = [p("/m/T (2000)/T (2000).mkv"), p("/i/T (2000).iso")];
+        let iso_mkv = [p("/i/T (2000).iso"), p("/m/T (2000)/T (2000).mkv")];
+        assert_eq!(webhook_output_path(&mkv_iso), "/m/T (2000)/T (2000).mkv");
+        assert_eq!(webhook_output_path(&iso_mkv), "/m/T (2000)/T (2000).mkv");
+        let eps = [p("/tv/S/S S01E02.mkv"), p("/tv/S/S S01E01.mkv")];
+        assert_eq!(webhook_output_path(&eps), "/tv/S/S S01E01.mkv");
+        assert_eq!(webhook_output_path(&[p("/i/T.iso")]), "/i/T.iso");
+        assert_eq!(webhook_output_path(&[]), "");
+    }
+
+    #[test]
+    fn check_and_move_card_carries_the_create_dir_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let movie_dir = tmp.path().join("output/Movies");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&movie_dir).unwrap();
+        let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+        // A FILE where the title folder must go.
+        std::fs::write(movie_dir.join("Blocked (2024)"), b"x").unwrap();
+
+        let disc_dir = staging.join("Blocked");
+        std::fs::create_dir_all(&disc_dir).unwrap();
+        std::fs::write(disc_dir.join(".done"), marker_json("Blocked")).unwrap();
+        write_minimal_mkv(&disc_dir.join("Blocked.mkv"), &[0xAA; 1024]);
+
+        let dir_str = disc_dir.to_string_lossy().to_string();
+        let _g = errors_guard();
+        clear_error(&dir_str);
+        check_and_move(&cfg);
+        let recorded = error_snapshot(&dir_str);
+        clear_error(&dir_str);
+
+        let reason = recorded.expect("a card must be recorded").reason;
+        let without_cause = format!(
+            "cannot create destination directory {}",
+            movie_dir.join("Blocked (2024)").display()
+        );
+        assert!(
+            reason.len() > without_cause.len() + 2
+                && reason.starts_with(&format!("{without_cause}: ")),
+            "the card must carry the OS error, got: {reason}"
+        );
+        assert!(disc_dir.join("Blocked.mkv").exists(), "staging preserved");
+    }
+
+    // A copy that fails post-copy validation must not leave its broken file at
+    // the library name (the next tick's variant search would file around it).
+    #[cfg(unix)]
+    #[test]
+    fn move_file_removes_its_own_copy_that_fails_validation() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("badcopy");
+        let src_dir = dir.join("staging");
+        let dest_dir = dir.join("library");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let src = src_dir.join("bad.mkv");
+        let dest = dest_dir.join("bad.mkv");
+        std::fs::write(&src, b"not an EBML file at all").unwrap();
+        // Read-only staging dir: rename(2) can't unlink src, so the copy path runs.
+        std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let renames_anyway = std::fs::File::create(src_dir.join("root-check")).is_ok();
+        let outcome = (!renames_anyway).then(|| move_file(&src, &dest, &noop_progress));
+        std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Some(outcome) = outcome else {
+            eprintln!("SKIP move_file_removes_its_own_copy_that_fails_validation: running as root");
+            return;
+        };
+
+        assert_eq!(outcome, MoveOutcome::PostCopyInvalid);
+        assert!(!dest.exists(), "the broken copy must be removed");
+        assert!(src.exists(), "the source is the source of truth");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
