@@ -45,7 +45,7 @@ pub enum RegisterError {
 /// handle back so it can be reaped instead of leaked.
 ///
 /// Called (via [`spawn_rip_thread`]) from the poll-loop and web spawn
-/// sites, and from `tests/halt_drain.rs`.
+/// sites, and from `tests/server/halt_drain.rs`.
 pub fn register_rip_thread(device: &str, handle: JoinHandle<()>) -> Result<(), RegisterError> {
     // Recover from poison instead of dropping the handle: a dropped
     // JoinHandle can never be reaped, breaking drain-before-wipe (v0.13.6
@@ -163,7 +163,7 @@ where
 #[allow(clippy::result_unit_err)]
 pub fn join_rip_thread(device: &str, timeout: Duration) -> Result<(), ()> {
     let deadline = std::time::Instant::now() + timeout;
-    loop {
+    let handle = loop {
         // One short lock per poll. `Observed` is computed under the lock and
         // the guard is dropped before we sleep, join, or return.
         enum Observed {
@@ -171,18 +171,23 @@ pub fn join_rip_thread(device: &str, timeout: Duration) -> Result<(), ()> {
             Absent,
             /// The registered handle is THIS thread (see the self-join note).
             SelfJoin,
-            Finished,
+            /// Removed under the same lock that saw it finished, so a worker
+            /// registered after it is never the one taken.
+            Finished(JoinHandle<()>),
             Running,
         }
         let observed = {
             // Recover from poison: a poisoned map means a worker panicked,
             // exactly when the stop path must still drain before staging is
             // touched. Same convention as everywhere else in this module.
-            let t = RIP_THREADS.lock().unwrap_or_else(|e| e.into_inner());
+            let mut t = RIP_THREADS.lock().unwrap_or_else(|e| e.into_inner());
             match t.get(device) {
                 None => Observed::Absent,
                 Some(h) if h.thread().id() == std::thread::current().id() => Observed::SelfJoin,
-                Some(h) if h.is_finished() => Observed::Finished,
+                Some(h) if h.is_finished() => match t.remove(device) {
+                    Some(h) => Observed::Finished(h),
+                    None => Observed::Absent,
+                },
                 Some(_) => Observed::Running,
             }
         };
@@ -192,7 +197,7 @@ pub fn join_rip_thread(device: &str, timeout: Duration) -> Result<(), ()> {
             // from rip_disc's own auto-eject tail). is_finished() can never
             // become true here, so return now and leave the handle registered.
             Observed::SelfJoin => return Ok(()),
-            Observed::Finished => break,
+            Observed::Finished(h) => break h,
             Observed::Running => {
                 if std::time::Instant::now() >= deadline {
                     return Err(());
@@ -200,13 +205,9 @@ pub fn join_rip_thread(device: &str, timeout: Duration) -> Result<(), ()> {
                 std::thread::sleep(Duration::from_millis(25));
             }
         }
-    }
-    // Finished: remove and reap. A concurrent joiner may have got there first,
-    // in which case the entry is gone and there is nothing left to do.
+    };
     // `is_finished() == true` guarantees `join()` returns without blocking.
-    if let Some(handle) = take_rip_thread(device)
-        && let Err(e) = handle.join()
-    {
+    if let Err(e) = handle.join() {
         // join() returns Err(payload) if the thread panicked. The thread DID
         // finish (so we return Ok), but surface the panic so stop / eject /
         // shutdown don't treat a panicked rip as a clean exit.
@@ -741,11 +742,22 @@ mod rediscover_tests {
         vids: &[(&str, &str)],
         keep_waiting: bool,
     ) -> (Option<String>, HashMap<String, usize>) {
+        rediscover_from("/dev/sg4", Some("VID"), script, vids, keep_waiting)
+    }
+
+    // `rediscover` from `path`, expecting the disc `expected` (None: no identity cached).
+    fn rediscover_from(
+        path: &str,
+        expected: Option<&str>,
+        script: &[(&str, &[DiscPresence])],
+        vids: &[(&str, &str)],
+        keep_waiting: bool,
+    ) -> (Option<String>, HashMap<String, usize>) {
         let mut probes: HashMap<String, usize> = HashMap::new();
         let found = rediscover_drive_with(
             "sg4",
-            "/dev/sg4",
-            Some("VID"),
+            path,
+            expected,
             |p| {
                 let n = probes.entry(p.to_string()).or_default();
                 *n += 1;
@@ -802,10 +814,42 @@ mod rediscover_tests {
             found, None,
             "a never-settling neighbour must not be accepted"
         );
-        assert!(
-            (2..=super::SETTLE_RETRIES as usize + 1).contains(&probes["/dev/sg3"]),
-            "bounded re-probing; got {}",
-            probes["/dev/sg3"]
+        assert_eq!(
+            probes["/dev/sg3"],
+            super::SETTLE_RETRIES as usize + 1,
+            "the first probe plus SETTLE_RETRIES re-probes"
+        );
+    }
+
+    // A shifted neighbour is accepted only when it carries the expected disc: a different
+    // or unreadable Volume ID is passed over.
+    #[test]
+    fn a_neighbour_with_another_or_unreadable_disc_is_rejected() {
+        let (found, _) = rediscover(&[("/dev/sg3", &[Present])], &[("/dev/sg3", "OTHER")], true);
+        assert_eq!(found, None, "an unrelated disc must not be latched");
+        let (found, _) = rediscover(&[("/dev/sg3", &[Present])], &[], true);
+        assert_eq!(found, None, "an unconfirmed identity must not be latched");
+    }
+
+    // With no identity cached a present neighbour is the legacy unverified fallback.
+    #[test]
+    fn with_no_identity_cached_a_present_neighbour_is_accepted() {
+        let (found, _) = rediscover_from("/dev/sg4", None, &[("/dev/sg3", &[Present])], &[], true);
+        assert_eq!(found.as_deref(), Some("/dev/sg3"));
+    }
+
+    // Only /dev/sgN is rediscovered, and never below sg0.
+    #[test]
+    fn rediscovery_needs_an_sg_path_and_never_probes_below_sg0() {
+        let (found, probes) = rediscover_from("/dev/sr0", Some("VID"), &[], &[], true);
+        assert_eq!(found, None);
+        assert!(probes.is_empty(), "a non-sgN path probes nothing");
+        let (_, probes) = rediscover_from("/dev/sg1", Some("VID"), &[], &[], true);
+        let mut probed: Vec<&str> = probes.keys().map(String::as_str).collect();
+        probed.sort_unstable();
+        assert_eq!(
+            probed,
+            ["/dev/sg0", "/dev/sg1", "/dev/sg2", "/dev/sg3", "/dev/sg4"]
         );
     }
 
