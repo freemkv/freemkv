@@ -5,8 +5,8 @@
 //! `run` below. The console image (`freemkv.com`, the CLI) starts that sibling
 //! on `freemkv gui` and only falls back to `run` in-process when none is found.
 //!
-//! This lives in the **lib**, not in a bin, so both binaries can call it, and is `cfg(target_os
-//! = "windows")` so it compiles to nothing elsewhere.
+//! This lives in the **lib**, not in a bin, so both binaries can call it, and is
+//! `cfg(all(feature = "gui", target_os = "windows"))` so it compiles to nothing elsewhere.
 
 /// Open the Windows desktop shell. Does not return until the window closes.
 pub fn run() {

@@ -897,8 +897,9 @@ mod tests {
         // this green while the actual page grew past the window. Instead parse
         // the `// ── Name ──` sections and field/lang/note/check rows from windows.rs.
         let shell = include_str!("windows.rs");
-        let section = |name: &str| -> (usize, usize, usize) {
-            let head = format!("// ── {name} ──");
+        // Every call that moves the y cursor, per kind: (rows, notes, checks, buttons, gaps).
+        let section = |name: &str| -> (usize, usize, usize, usize, usize) {
+            let head = format!("// ── {name}");
             let from = shell
                 .find(&head)
                 .unwrap_or_else(|| panic!("no {name} section in windows.rs"));
@@ -906,9 +907,20 @@ mod tests {
             let to = rest.find("// ── ").unwrap_or(rest.len());
             let body = &rest[..to];
             (
-                body.matches("r.field(").count() + body.matches("r.lang(").count(),
+                [
+                    "r.field(",
+                    "r.field_secure(",
+                    "r.lang(",
+                    "r.combo(",
+                    "r.path(",
+                ]
+                .iter()
+                .map(|c| body.matches(c).count())
+                .sum(),
                 body.matches("r.note(").count(),
                 body.matches("r.check(").count(),
+                body.matches("r.button(").count(),
+                body.matches("r.gap()").count(),
             )
         };
 
@@ -920,8 +932,8 @@ mod tests {
             // first row can be drawn.
             let page = s.px(PREFS_H) - s.px(66) - s.px(28);
 
-            for name in ["Selection", "Recovery"] {
-                let (fields, notes, checks) = section(name);
+            for name in ["Output", "Selection", "Recovery", "Keys", "Advanced"] {
+                let (fields, notes, checks, buttons, gaps) = section(name);
                 assert!(
                     fields + notes + checks > 0,
                     "{name} section parsed as empty — the marker or the row \
@@ -932,11 +944,13 @@ mod tests {
                     + fields as i32 * f.row_step
                     + notes as i32 * f.note_step
                     + checks as i32 * f.check_step
-                    + f.gap;
+                    + buttons as i32 * f.button_step
+                    + gaps as i32 * f.gap;
                 assert!(
                     needed <= page,
                     "{name} page needs {needed}px of {page}px at {dpi} dpi \
-                     ({fields} fields, {notes} notes, {checks} checks)"
+                     ({fields} rows, {notes} notes, {checks} checks, {buttons} buttons, \
+                     {gaps} gaps)"
                 );
             }
         }
