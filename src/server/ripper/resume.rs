@@ -16,9 +16,6 @@ use crate::server::config::Config;
 
 use super::staging::{self, ResumeAction, StagingResumeHint};
 
-// Fallback title bitrate (bytes/sec) for converting bad-byte counts to lost title-seconds when
-// the real per-title bitrate is unknown. Shared by classify_resume and resume_remux.
-
 // No live drive at resume time (we mux from a staged ISO), so this probes a non-optical,
 // non-existent node on purpose.
 const DEFAULT_BATCH_PROBE_PATH: &str = "/dev/null";
@@ -175,7 +172,7 @@ pub fn classify_resume(hint: &StagingResumeHint, _abort_on_lost_secs: u64) -> Re
         return ResumeClass::NotEligible;
     }
 
-    // No loss pre-filter here: resume_remux applies the engine's title-scoped loss verdict.
+    // No loss pre-filter: resume_remux applies the engine's title-scoped loss verdict.
 
     // The ISO's OWN stem, not the staging dir's name. `rip_disc` builds every
     // file inside a staging dir from `sanitize_path_compact(display_name)`
@@ -964,9 +961,6 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             &cfg_read.output_format,
             cfg_read.abort_on_lost_secs,
         );
-        // BYTE-AWARE gate, identical to the fresh-rip path (`loss_aborts` in
-        // mod.rs): with `abort_on_lost_secs == 0`, "0 means ZERO" is byte-exact, so
-        // silently deliver it — the two completion routes must not diverge.
         // The engine's one loss verdict, the same the fresh rip gets.
         let verdict =
             freemkv_engine::loss_verdict(output_is_iso, &[&title], &bad_ranges, effective_abort);

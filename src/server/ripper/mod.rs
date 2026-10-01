@@ -9271,10 +9271,6 @@ mod tests {
         assert!(!iso_output_needs_multipass("mkv", 0));
     }
 
-    // ===================================================================
-    // End-of-recovery loss measurement (the abort gate's input)
-    // ===================================================================
-
     // Disc-identity guards for the unattended auto-insert path: these pin the
     // STATE/Config wrappers it calls. `→ false` re-rips a finished disc and
     // O_TRUNCs the staged ISO still being read; `→ true` wedges every disc as done.
