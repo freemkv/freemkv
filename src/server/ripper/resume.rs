@@ -743,6 +743,8 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         return;
     };
 
+    let _keys_release = ReleaseKeysWhenSettled(&iso_path);
+
     // Archive the prior session's per-device log so the live log shows only this
     // resumed-mux operation (as scan_disc / fresh-rip do); otherwise it interleaves
     // with the prior scan's log, making errors hard to correlate.
@@ -1871,6 +1873,24 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
     if super::should_auto_eject(cfg_read.auto_eject, device) {
         let device_path = format!("/dev/{}", device);
         super::eject_drive(&device_path);
+    }
+}
+
+// On drop, forgets the rip's held key set once this resume left the dir settled (delivered,
+// quarantined `.failed`, or held `.aborted-loss`): no later drive-less mux of it will come.
+// A Stop or a retryable failure keeps them for the worker's next attempt.
+struct ReleaseKeysWhenSettled<'a>(&'a Path);
+
+impl Drop for ReleaseKeysWhenSettled<'_> {
+    fn drop(&mut self) {
+        let settled = self
+            .0
+            .parent()
+            .and_then(staging::snapshot_staging_disc)
+            .is_some_and(|s| s.completed || s.has_failed || s.has_aborted_loss);
+        if settled {
+            crate::server::keysource::forget_rip_keys(self.0);
+        }
     }
 }
 
@@ -4401,6 +4421,43 @@ mod vid_needs_disc_tests {
             "{:?}",
             iso.failure_reason
         );
+    }
+
+    // A resume that settles the dir without delivering (here an ISO output with a hole,
+    // held `.aborted-loss`) forgets the rip's held keys too; a retryable one keeps them.
+    #[test]
+    fn a_settled_failed_resume_forgets_the_held_rip_keys() {
+        let hold = |staging: &std::path::Path| {
+            crate::server::keysource::hold_rip_keys(
+                &staging.join("KU_Disc.iso"),
+                libfreemkv::keys::KeyRing::none(),
+            );
+        };
+        let (staging, outcome, _t, ..) = resume_ripped(Keys::UnitKey, |staging, _, cfg| {
+            hold(staging);
+            let path = freemkv_engine::mapfile_path_for(&staging.join("KU_Disc.iso"));
+            let mut map = freemkv_engine::Mapfile::load(&path).unwrap();
+            map.record(0, 2048, freemkv_engine::SectorStatus::Unreadable)
+                .unwrap();
+            map.flush().unwrap();
+            cfg.output_format = "iso".into();
+        });
+        assert!(!outcome.success);
+        let iso = staging.join("KU_Disc.iso");
+        assert!(
+            crate::server::keysource::rip_keys_for(&iso).is_none(),
+            "the keys of a loss-aborted rip must not outlive it"
+        );
+
+        // Retryable (no key source holds a key): the set stays for the next attempt.
+        let (staging, outcome, _t, ..) = resume_ripped(Keys::None, |staging, _, _| {
+            std::fs::write(staging.join("KU_Disc.iso"), b"").unwrap();
+            hold(staging);
+        });
+        let iso = staging.join("KU_Disc.iso");
+        assert!(!outcome.success);
+        assert!(crate::server::keysource::rip_keys_for(&iso).is_some());
+        crate::server::keysource::forget_rip_keys(&iso);
     }
 
     // With the unit key in the keydb the worker resume delivers, and the real hand-off leaves
