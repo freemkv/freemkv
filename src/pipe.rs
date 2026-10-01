@@ -67,6 +67,38 @@ impl PipeFail {
     }
 }
 
+// Renders the engine's per-title loop decisions: a skipped stub and a title that stopped
+// the rip.
+struct CliTitleLoopSink<'a> {
+    out: &'a Output,
+}
+
+impl freemkv_engine::Sink for CliTitleLoopSink<'_> {
+    fn event(&self, e: &freemkv_engine::Event<'_>) {
+        match e {
+            freemkv_engine::Event::TitleSkipped { idx, empty } => {
+                let key = if *empty {
+                    "rip.title_skipped_empty"
+                } else {
+                    "rip.title_skipped"
+                };
+                self.out.raw(
+                    Normal,
+                    &strings::fmt(key, &[("num", &(idx + 1).to_string())]),
+                );
+            }
+            freemkv_engine::Event::TitleFailed { error, .. } => {
+                self.out.raw(Normal, &render_error(error));
+            }
+            _ => {}
+        }
+    }
+
+    fn should_cancel(&self) -> bool {
+        crate::cli_stop::token().is_cancelled()
+    }
+}
+
 struct CliMuxEvents {
     out: Output,
     dest: String,
@@ -766,9 +798,6 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         return 1;
     }
 
-    // Pipe each title
-    let mut ok = true;
-
     // KU §2.1 invariant 1: every key this rip reads with, from ONE resolve over its titles,
     // before its first output byte. A stream source (no AACS) has none.
     let rip_titles: Vec<usize> = jobs.iter().map(|(t, _)| t.unwrap_or(0)).collect();
@@ -811,148 +840,95 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
     // as naming titles, so `!all_titles` keeps a stub from aborting it.
     let (multi_title, explicit_selection) = title_policy(jobs.len(), &title_nums, all_titles);
 
-    for (title_idx, dest_url) in &jobs {
-        // The MAIN FEATURE is title index 0 (the disc's primary title — first in
-        // every title list throughout the codebase). A failure there is always a
-        // hard error, even in an all-titles rip: the user wants the movie.
-        let is_feature = is_feature_title(*title_idx);
-        // Print title info if we have it
-        if let (Some(idx), Some(t)) = (title_idx, &titles) {
-            if !title_in_range(*idx, t.len()) {
-                eprintln!(
-                    "{}",
-                    strings::fmt(
-                        "rip.warning_title_range",
-                        &[
-                            ("num", &(idx + 1).to_string()),
-                            ("count", &t.len().to_string()),
-                        ]
-                    )
-                );
-                // An explicitly-requested out-of-range title is a hard failure,
-                // not a warning-and-carry-on, or the CLI would exit 0 despite
-                // ripping nothing for the requested title.
-                ok = false;
-                continue;
-            }
-            let title = &t[*idx];
-            out.raw(
-                Normal,
-                &strings::fmt(
-                    "rip.title_info",
-                    &[
-                        ("num", &(idx + 1).to_string()),
-                        ("duration", &title.duration_display()),
-                        ("size", &format!("{:.1}", title.size_gb())),
-                    ],
-                ),
-            );
-        }
-
-        let result = if is_disc {
-            // Disc source: use open_drive() directly — one session, no double init.
-            pipe_disc(
-                source,
-                dest_url,
-                title_idx.unwrap_or(0),
-                job_identity(&disc_identities, *title_idx),
-                &keys,
-                &set,
-                raw,
-                multipass,
-                &streams,
-                multi_title,
-                &out,
-            )
-        } else {
-            // Non-disc (ISO): translate the -a/-s language policy into PIDs
-            // against THIS scanned title. A typo'd language tag fails the
-            // whole rip, since it would fail every title identically.
-            let selection = match (&titles, title_idx) {
-                (Some(t), Some(idx)) if stream_sel_active => match streams.resolve(&t[*idx]) {
-                    Ok(sel) => {
-                        // A requested language that's simply absent from this
-                        // title: error (single) or warn+keep-video (batch).
-                        if let Err(msg) =
-                            check_selection_coverage(&streams, &t[*idx], idx + 1, multi_title, &out)
-                        {
-                            out.raw(Normal, &msg);
-                            ok = false;
-                            break;
+    // The engine owns the per-title loop and its skip / stop policy; the CLI muxes one
+    // title and renders what the loop decides.
+    let indices: Vec<usize> = jobs.iter().map(|(t, _)| t.unwrap_or(0)).collect();
+    let loop_sink = CliTitleLoopSink { out: &out };
+    let outcome =
+        freemkv_engine::run_titles_with(&indices, explicit_selection, &loop_sink, |idx| {
+            let Some((title_idx, dest_url)) = jobs.iter().find(|(t, _)| t.unwrap_or(0) == idx)
+            else {
+                return Ok(());
+            };
+            let r = (|| -> Result<(), PipeFail> {
+                if let (Some(idx), Some(t)) = (title_idx, &titles) {
+                    if !title_in_range(*idx, t.len()) {
+                        return Err(PipeFail::fatal(strings::fmt(
+                            "rip.warning_title_range",
+                            &[
+                                ("num", &(idx + 1).to_string()),
+                                ("count", &t.len().to_string()),
+                            ],
+                        )));
+                    }
+                    let title = &t[*idx];
+                    out.raw(
+                        Normal,
+                        &strings::fmt(
+                            "rip.title_info",
+                            &[
+                                ("num", &(idx + 1).to_string()),
+                                ("duration", &title.duration_display()),
+                                ("size", &format!("{:.1}", title.size_gb())),
+                            ],
+                        ),
+                    );
+                }
+                if is_disc {
+                    // Disc source: use open_drive() directly — one session, no double init.
+                    return pipe_disc(
+                        source,
+                        dest_url,
+                        title_idx.unwrap_or(0),
+                        job_identity(&disc_identities, *title_idx),
+                        &keys,
+                        &set,
+                        raw,
+                        multipass,
+                        &streams,
+                        multi_title,
+                        &out,
+                    );
+                }
+                // Non-disc (ISO): translate the -a/-s language policy into PIDs against THIS
+                // scanned title. A typo'd language tag fails the whole rip.
+                let selection = match (&titles, title_idx) {
+                    (Some(t), Some(idx)) if stream_sel_active => match streams.resolve(&t[*idx]) {
+                        Ok(sel) => {
+                            check_selection_coverage(
+                                &streams,
+                                &t[*idx],
+                                idx + 1,
+                                multi_title,
+                                &out,
+                            )
+                            .map_err(PipeFail::fatal)?;
+                            sel
                         }
-                        sel
-                    }
-                    Err(e) => {
-                        out.raw(Normal, &render_stream_sel_error(&e, &t[*idx]));
-                        ok = false;
-                        break;
-                    }
-                },
-                _ => libfreemkv::StreamSelection::default(),
-            };
-            // Every title reads through the rip's one set: no lookup after it (KU §2.1).
-            // The update is needless only once libfreemkv drops the legacy key fields (KU-X2).
-            #[allow(clippy::needless_update)]
-            let opts = libfreemkv::InputOptions {
-                title_index: *title_idx,
-                raw,
-                selection,
-                keys: Some(set.clone()),
-                ..Default::default()
-            };
-            pipe(source, dest_url, &opts, &keys, &out)
-        };
-
-        if let Err(e) = result {
-            // The skip / stop / fail decision is the ENGINE's single policy
-            // (freemkv_engine::decide_title), shared with autorip + the desktop
-            // UI. The CLI keeps only the presentation of each outcome.
-            match freemkv_engine::decide_title(
-                &e.result,
-                is_feature,
-                multi_title,
-                explicit_selection,
-            ) {
-                freemkv_engine::TitleAction::Skip => {
-                    // An incidental extra title in an all-titles rip is a stub
-                    // (E7023 uncrackable, or E6008 empty). Skip with a clear
-                    // notice and keep muxing the rest so the command can exit 0.
-                    let num = title_idx.map(|i| i + 1).unwrap_or(0);
-                    let key = match parse_error_code(&e.display) {
-                        Some(("E6008", _)) => "rip.title_skipped_empty",
-                        _ => "rip.title_skipped",
-                    };
-                    out.raw(Normal, &strings::fmt(key, &[("num", &num.to_string())]));
-                }
-                freemkv_engine::TitleAction::StopHalt => {
-                    // Ctrl-C is a FULL STOP: surface the interrupt and break the
-                    // whole loop — do NOT continue cancelling each later title.
-                    out.raw(Normal, &render_error(&e.display));
-                    ok = false;
-                    break;
-                }
-                freemkv_engine::TitleAction::StopNoKey => {
-                    // The disc as a whole has no key — every remaining title
-                    // fails identically. Fail fast: print once and stop, instead
-                    // of iterating all N titles re-printing the same error.
-                    out.raw(Normal, &render_error(&e.display));
-                    ok = false;
-                    break;
-                }
-                freemkv_engine::TitleAction::StopFatal => {
-                    // The title the user actually wants failed hard. Print and
-                    // fail, but keep looping in case a later wanted title differs.
-                    out.raw(Normal, &render_error(&e.display));
-                    ok = false;
-                }
-                // `Continue` is the `Ok(())` arm above; a decided-Continue on an
-                // Err cannot happen (Ok/Halted/NoKey/Stub/Failed are exhaustive).
-                freemkv_engine::TitleAction::Continue => {}
-            }
-        }
-        out.blank(Normal);
-    }
-
+                        Err(e) => {
+                            return Err(PipeFail::fatal(render_stream_sel_error(&e, &t[*idx])));
+                        }
+                    },
+                    _ => libfreemkv::StreamSelection::default(),
+                };
+                // Every title reads through the rip's one set: no lookup after it (KU §2.1).
+                #[allow(clippy::needless_update)]
+                let opts = libfreemkv::InputOptions {
+                    title_index: *title_idx,
+                    raw,
+                    selection,
+                    keys: Some(set.clone()),
+                    ..Default::default()
+                };
+                pipe(source, dest_url, &opts, &keys, &out)
+            })();
+            out.blank(Normal);
+            r.map_err(|e| freemkv_engine::TitleError {
+                result: e.result,
+                error: std::io::Error::other(e.display),
+            })
+        });
+    let ok = matches!(outcome, freemkv_engine::RipOutcome::Ok { .. });
     if ok { 0 } else { 1 }
 }
 
@@ -2752,10 +2728,6 @@ fn normalize_title_nums(title_nums: &mut Vec<usize>, all_titles: bool) {
 
 fn title_policy(job_count: usize, title_nums: &[usize], all_titles: bool) -> (bool, bool) {
     (job_count > 1, !title_nums.is_empty() && !all_titles)
-}
-
-fn is_feature_title(title_idx: Option<usize>) -> bool {
-    title_idx.unwrap_or(0) == 0
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -5107,7 +5079,7 @@ mod tests {
 mod verdict_tests {
     use super::{
         CopyVerdict, DISC_COPY_DAMAGED_EXIT, PipeFail, check_selection_coverage, copy_verdict,
-        disc_copy_exit_code, extract_succeeded, finalize_mux, is_feature_title, title_policy,
+        disc_copy_exit_code, extract_succeeded, finalize_mux, title_policy,
     };
     use crate::output::Output;
 
@@ -5404,12 +5376,7 @@ mod verdict_tests {
         assert!(!multi, "one job is not a multi-title rip");
         assert!(explicit, "a named -t is an explicit selection");
         assert!(matches!(
-            decide_title(
-                &TitleResult::Failed,
-                is_feature_title(Some(1)),
-                multi,
-                explicit
-            ),
+            decide_title(&TitleResult::Failed, false, multi, explicit),
             TitleAction::StopFatal
         ));
 
@@ -5430,17 +5397,6 @@ mod verdict_tests {
         assert!(multi && explicit);
         // No jobs, no flags: neither.
         assert_eq!(title_policy(0, &[], false), (false, false));
-    }
-
-    /// The main feature is title index 0. A failure there is a hard error even
-    /// in an all-titles rip; inverted, the movie itself becomes skippable and
-    /// the run summarises as success.
-    #[test]
-    fn only_title_index_zero_is_the_main_feature() {
-        assert!(is_feature_title(Some(0)));
-        assert!(is_feature_title(None), "an unindexed job is the feature");
-        assert!(!is_feature_title(Some(1)));
-        assert!(!is_feature_title(Some(11)));
     }
 
     fn audio(pid: u16, lang: &str) -> libfreemkv::Stream {
