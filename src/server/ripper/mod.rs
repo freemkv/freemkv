@@ -8024,12 +8024,12 @@ mod tests {
     }
 
     #[test]
-    fn nan_loss_aborts() {
-        // A NaN loss is unquantifiable and must fail safe (abort), not
-        // pass as a silent success. `NaN > x` is false, so a plain
-        // comparison would wrongly proceed to mark the rip complete.
-        assert!(freemkv_engine::should_abort_for_loss(f64::NAN, 0.0));
-        assert!(freemkv_engine::should_abort_for_loss(f64::NAN, 30_000.0));
+    fn nan_loss_aborts_only_a_perfect_rip() {
+        // An unquantifiable (NaN) loss aborts the byte-exact threshold-0 gate; the
+        // seconds gate never stops a rip for a loss it cannot measure.
+        assert!(freemkv_engine::loss_aborts(0, f64::NAN, 0));
+        assert!(!freemkv_engine::should_abort_for_loss(f64::NAN, 0.0));
+        assert!(!freemkv_engine::should_abort_for_loss(f64::NAN, 30_000.0));
     }
 
     // ── final done-card uses in-title loss (telemetry audit Fix 3) ── The `status=done` update
@@ -8864,22 +8864,21 @@ mod tests {
         );
     }
 
-    // A tolerance-configured rip must NOT accept loss it could not measure: an unmeasurable
-    // time reads as NaN, fail-safe to abort.
+    // An unmeasurable (NaN) loss with real lost bytes aborts a perfect rip on the bytes; a
+    // tolerance-configured rip consults seconds only, and a NaN never aborts there.
     #[test]
-    fn unquantifiable_loss_aborts_under_any_threshold() {
+    fn unquantifiable_loss_aborts_only_at_threshold_zero() {
         use freemkv_engine::loss_aborts;
         // Zero bitrate → ms is NaN. Real lost bytes, perfect-rip threshold.
         assert!(
             loss_aborts(4096, f64::NAN, 0),
             "lost bytes with an unmeasurable duration must abort at threshold 0"
         );
-        // Same unmeasurable loss under a generous seconds tolerance: the
-        // seconds branch ignores bytes, so NaN is the only thing standing
-        // between this and silently shipping a title with holes.
+        // Same unmeasurable loss under a seconds tolerance: bytes are not consulted
+        // and a NaN never aborts.
         assert!(
-            loss_aborts(4096, f64::NAN, 3600),
-            "unmeasurable loss must abort even under a 1-hour tolerance"
+            !loss_aborts(4096, f64::NAN, 3600),
+            "the seconds gate never aborts on an unmeasurable loss"
         );
         // Sanity: a genuinely clean rip still proceeds on both branches.
         assert!(
@@ -8973,7 +8972,7 @@ mod tests {
     }
 
     #[test]
-    fn accept_loss_override_threshold_proceeds_but_nan_still_aborts() {
+    fn accept_loss_override_threshold_proceeds_even_for_a_nan_loss() {
         use freemkv_engine::loss_aborts;
         // The `.accept-loss` override raises the effective threshold to u64::MAX.
         // A real, large in-title loss must then PROCEED (deliver despite damage)…
@@ -8981,12 +8980,11 @@ mod tests {
             !loss_aborts(1_000_000_000, 2_370.0, u64::MAX),
             "operator override (u64::MAX threshold) must deliver despite 2.37s in-movie loss"
         );
-        // …but an UNQUANTIFIABLE (NaN) loss must STILL fail safe to abort even
-        // under the override — accepting a known amount is the operator's call,
-        // a NaN amount is not a quantity anyone agreed to.
+        // …and so must an unquantifiable (NaN) one: the override is a positive
+        // threshold, and the seconds gate never aborts on a NaN.
         assert!(
-            loss_aborts(0, f64::NAN, u64::MAX),
-            "NaN loss must abort even under the accept-loss override"
+            !loss_aborts(0, f64::NAN, u64::MAX),
+            "a NaN loss does not abort under the accept-loss override"
         );
     }
 
@@ -9057,9 +9055,8 @@ mod tests {
             "...including at zero tolerance"
         );
 
-        // NaN must not read as "under threshold": every NaN comparison is
-        // false, so the gate declines to abort — pin that so it can't
-        // silently become a wrong pass.
+        // A NaN demux loss is not mux-contributed loss (NaN comparisons are false), so the
+        // gate does not fire; the mux reports 0.0, never NaN, for a zero-bitrate title.
         assert!(!mux_loss_aborts(true, false, f64::NAN, f64::NAN, 0));
     }
 
@@ -9095,8 +9092,8 @@ mod tests {
             "exactly 1000ms at a 1s threshold proceeds (strictly greater-than aborts)"
         );
         assert!(
-            loss_aborts(0, f64::NAN, 30),
-            "NaN loss fails safe to abort on the seconds path too"
+            !loss_aborts(0, f64::NAN, 30),
+            "a NaN loss never aborts on the seconds path"
         );
     }
 
