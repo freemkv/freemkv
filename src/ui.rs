@@ -1,12 +1,12 @@
 //! Platform-neutral UI model.
 //!
 //! Everything a shell needs to *decide* lives here; a shell only *draws*.
-//! No widget type, no `cfg`, no AppKit/Win32 — this file compiles and is
-//! tested on any platform, which is what stops a bug fixed on one shell from
-//! surviving on the other.
+//! No widget type, no AppKit/Win32 — this file compiles and is tested on any
+//! platform (its only `cfg`s are test seams), which is what stops a bug fixed
+//! on one shell from surviving on the other.
 //!
 //! The rule: if a change to this file would need mirroring in `mac.rs` or
-//! `win.rs`, the split is wrong.
+//! `windows.rs`, the split is wrong.
 
 use crate::engine::{Scanned, TitleStreams};
 use std::cell::RefCell;
@@ -406,6 +406,17 @@ impl Tree {
         }
         let on = matches!(self.check_state(i), Check::Off | Check::Mixed);
         self.set_checked(i, on);
+        // A track ticked under an unticked title would show as selected while its title,
+        // which is what is ripped, stays out. Ticking the track picks the title up.
+        if on
+            && self.arena[i].children.is_empty()
+            && let Some(parent) = self
+                .arena
+                .iter()
+                .position(|n| n.children.contains(&i) && n.type_s == "Title")
+        {
+            *self.arena[parent].checked.borrow_mut() = true;
+        }
     }
 
     /// Tick a row and cascade to its streams.
@@ -857,8 +868,6 @@ pub fn is_openable_file(path: &str) -> bool {
             .is_some_and(|e| e.eq_ignore_ascii_case("iso"))
 }
 
-/// Commands that must be unavailable while a rip is in flight. Cancel is
-/// deliberately absent — it must always be reachable.
 /// The View ▸ log menu item's label, which follows STATE rather than naming
 /// one fixed action: "Show log" only while the log is hidden, "Hide log" while
 /// it is on screen. It is one toggle, so a label that always said "Show log"
@@ -1145,6 +1154,8 @@ pub fn menu_layout(log_hidden: bool) -> Vec<MenuGroup> {
     ]
 }
 
+/// Commands that must be unavailable while a rip is in flight. Cancel is
+/// deliberately absent — it must always be reachable.
 pub fn blocked_while_running(cmd: Cmd) -> bool {
     !matches!(
         cmd,
@@ -1338,8 +1349,6 @@ pub fn format_label(canonical: &str) -> String {
     }
 }
 
-// Inverse of format_label: resolve a LOCALIZED popup label back to the canonical format string,
-// since format_by_title only matches English.
 #[cfg(test)]
 mod missing_key_fallback_tests {
     // A key this crate knows but the pinned i18n tag does not ship must render as readable
@@ -1350,6 +1359,7 @@ mod missing_key_fallback_tests {
         // exact condition the guard keys on.
         let unknown = "gui.format.__not_in_any_catalog__";
         assert_eq!(crate::strings::get(unknown), unknown);
+        assert_eq!(crate::strings::get_or(unknown, "MKV"), "MKV");
     }
 
     /// Every offered format renders as something a human can read: never empty,
@@ -1369,6 +1379,8 @@ mod missing_key_fallback_tests {
     }
 }
 
+/// Inverse of [`format_label`]: resolve a LOCALIZED popup label back to the canonical format
+/// string, since `format_by_title` only matches English.
 pub fn format_from_label(
     label: &str,
     disc_source: bool,
@@ -1808,6 +1820,10 @@ pub struct App {
     ejecting: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
     /// The SCSI eject the worker runs — a seam so tests never touch a drive.
     eject_fn: fn(&str) -> Result<String, String>,
+    /// A Check for updates in flight: its worker's one-line verdict, collected on the tick.
+    update_check: Option<std::sync::mpsc::Receiver<String>>,
+    /// The network check the worker runs — a seam so tests never reach GitHub.
+    update_fn: fn(&str) -> String,
     /// Highest unreadable-sector count already announced, so the notice is
     /// not repeated on every 100 ms tick.
     reported_bad: u64,
@@ -1904,15 +1920,62 @@ struct OpenedSource {
     preflight: Option<Result<Vec<String>, String>>,
 }
 
+/// An explicit Open Disc, given the drives found: the log line and the URL to scan (`None` =
+/// no drive, stop). One or several drives is the rule the Linux shell shares, since it
+/// enumerates off the UI thread and cannot call [`App::disc_source`].
+pub(crate) fn disc_open_plan(
+    drives: &[crate::engine::OpticalDrive],
+) -> (LogKind, String, Option<String>) {
+    use crate::strings::{fmt_or, get_or, sanitize_display};
+    match drives {
+        [] => (
+            LogKind::Notice,
+            get_or(
+                "gui.log.no_drive",
+                "No optical drive found. Connect a Blu-ray/DVD drive with a disc.",
+            ),
+            None,
+        ),
+        // One drive → that device; several → autodetect the one with media. The label is
+        // the drive's own vendor/model string (hardware-supplied), so it is sanitized.
+        [d] => (
+            LogKind::Detail,
+            fmt_or(
+                "gui.log.opening_drive",
+                "Opening {label} ({device})",
+                &[
+                    ("label", &sanitize_display(&d.label)),
+                    ("device", &d.device),
+                ],
+            ),
+            Some(format!("disc://{}", d.device)),
+        ),
+        _ => {
+            let list = drives
+                .iter()
+                .map(|d| format!("{} ({})", sanitize_display(&d.label), d.device))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let n = drives.len().to_string();
+            (
+                LogKind::Detail,
+                fmt_or(
+                    "gui.log.drives_found",
+                    "{n} drives found: {list} — using the one with a disc",
+                    &[("n", &n), ("list", &list)],
+                ),
+                Some(PROBE_SOURCE.to_string()),
+            )
+        }
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         let settings = Settings::load();
         let output_dir = settings.dest_dir.clone();
-        let format = if settings.container.is_empty() {
-            "Selected titles → MKV".to_string()
-        } else {
-            settings.container.clone()
-        };
+        // `Settings::load` normalizes the container to one the picker offers.
+        let format = settings.container.clone();
         let mut app = App {
             tree: Tree::default(),
             settings,
@@ -1946,6 +2009,8 @@ impl App {
             probe_scan: SCANNERS.1,
             ejecting: None,
             eject_fn: crate::engine::eject_source,
+            update_check: None,
+            update_fn: crate::settings::check_for_update,
             reported_bad: 0,
         };
         app.say(
@@ -2105,9 +2170,23 @@ impl App {
                     LogKind::Result,
                     &crate::strings::get("gui.log.checking_updates"),
                 );
-                let msg = crate::settings::check_for_update(env!("CARGO_PKG_VERSION"));
-                self.say(LogKind::Result, &msg);
-                vec![Effect::Redraw]
+                if self.update_check.is_some() {
+                    return vec![Effect::Redraw];
+                }
+                // The check blocks on the network, so it runs off the UI thread.
+                let check = self.update_fn;
+                let (tx, rx) = std::sync::mpsc::channel();
+                let spawned = std::thread::Builder::new()
+                    .name("update-check".into())
+                    .spawn(move || {
+                        let _ = tx.send(check(env!("CARGO_PKG_VERSION")));
+                    });
+                if let Err(e) = spawned {
+                    self.say(LogKind::Notice, &e.to_string());
+                    return vec![Effect::Redraw];
+                }
+                self.update_check = Some(rx);
+                vec![Effect::Redraw, Effect::StartTicking]
             }
             Cmd::SetFormat(f) => {
                 self.format = f.to_string();
@@ -2132,64 +2211,17 @@ impl App {
         if !announce_missing {
             return Some(PROBE_SOURCE.to_string());
         }
-        let drives = crate::engine::list_optical_drives();
-        if drives.is_empty() {
-            self.say(
-                LogKind::Notice,
-                &crate::strings::get_or(
-                    "gui.log.no_drive",
-                    "No optical drive found. Connect a Blu-ray/DVD drive with a disc.",
-                ),
-            );
-            return None;
-        }
-        // One drive → that device; several → autodetect the one with media,
-        // and log what was found so the user knows which drives are present.
-        if drives.len() == 1 {
-            // `announce_missing` is necessarily true here: the probe path
-            // (`!announce_missing`) returned at the top of this function, so an
-            // inner re-test could never be false — it was dead.
-            self.say(
-                LogKind::Detail,
-                &crate::strings::fmt_or(
-                    "gui.log.opening_drive",
-                    "Opening {label} ({device})",
-                    // The label is the drive's own vendor/model string,
-                    // i.e. bytes the hardware supplies — sanitized like
-                    // every other externally-sourced string in this pane.
-                    &[
-                        ("label", &crate::strings::sanitize_display(&drives[0].label)),
-                        ("device", &drives[0].device),
-                    ],
-                ),
-            );
-            Some(format!("disc://{}", drives[0].device))
-        } else {
-            let list = drives
-                .iter()
-                .map(|d| {
-                    format!(
-                        "{} ({})",
-                        crate::strings::sanitize_display(&d.label),
-                        d.device
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.say(
-                LogKind::Detail,
-                &crate::strings::fmt_or(
-                    "gui.log.drives_found",
-                    "{n} drives found: {list} — using the one with a disc",
-                    &[("n", &drives.len().to_string()), ("list", &list)],
-                ),
-            );
-            Some(PROBE_SOURCE.to_string())
-        }
+        let (kind, line, url) = disc_open_plan(&crate::engine::list_optical_drives());
+        self.say(kind, &line);
+        url
     }
 
     /// Open a source: scan it, rebuild the tree, report honestly on failure.
     pub fn open(&mut self, path: &str) -> Vec<Effect> {
+        // The shells' drop handlers call this directly, past `dispatch`'s gate.
+        if self.running() {
+            return vec![];
+        }
         if self.ejecting.is_some() {
             return vec![Effect::Redraw];
         }
@@ -2307,6 +2339,11 @@ impl App {
         self.stop_opens();
         self.probe = None;
         self.pending = None;
+        self.clear_source();
+    }
+
+    // Forget the open source's model without touching an open or probe that may be in flight.
+    fn clear_source(&mut self) {
         self.tree = Tree::default();
         self.source.clear();
         self.disc_label.clear();
@@ -2344,6 +2381,20 @@ impl App {
         }
         self.ejecting = Some((self.source.clone(), rx));
         vec![Effect::Redraw, Effect::StartTicking]
+    }
+
+    // Log a finished update check's verdict.
+    fn poll_update(&mut self) -> Vec<Effect> {
+        let msg = match self.update_check.as_ref().map(|rx| rx.try_recv()) {
+            None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
+            Some(Ok(m)) => m,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                "Update check failed: worker stopped before returning a result".into()
+            }
+        };
+        self.update_check = None;
+        self.say(LogKind::Result, &msg);
+        vec![Effect::Redraw]
     }
 
     // Apply a finished eject: the tree now describes a disc that is gone.
@@ -2540,7 +2591,8 @@ impl App {
                 if !quiet {
                     self.say(LogKind::Notice, &e);
                 }
-                self.page = Page::Empty;
+                // The page shows no source, so none may remain to Start or Eject.
+                self.clear_source();
             }
         }
         vec![Effect::Redraw]
@@ -2567,6 +2619,34 @@ impl App {
             self.say(
                 LogKind::Notice,
                 &crate::strings::get("gui.log.choose_folder_first"),
+            );
+            return vec![Effect::Redraw];
+        }
+        // A number the engine would read as 0 ("single pass", "abort on any loss") is not
+        // what the user typed; say so instead of starting a rip under a different rule.
+        let bad = [
+            (
+                "Max passes",
+                &self.settings.max_passes,
+                self.settings.max_passes.trim().parse::<u32>().is_ok(),
+            ),
+            (
+                "Abort if more than N s lost",
+                &self.settings.abort_lost_secs,
+                self.settings.abort_lost_secs.trim().parse::<u64>().is_ok(),
+            ),
+        ]
+        .into_iter()
+        .find(|(_, value, ok)| !value.trim().is_empty() && !ok)
+        .map(|(name, value, _)| (name, value.escape_debug().to_string()));
+        if let Some((name, value)) = bad {
+            self.say(
+                LogKind::Notice,
+                &crate::strings::fmt_or(
+                    "gui.log.bad_number_setting",
+                    "“{name}” must be a whole number, not “{value}”. Fix it in Settings, then start again.",
+                    &[("name", name), ("value", &value)],
+                ),
             );
             return vec![Effect::Redraw];
         }
@@ -2758,6 +2838,7 @@ impl App {
     pub fn tick(&mut self) -> Vec<Effect> {
         let mut probe_fx = self.poll_probe();
         probe_fx.extend(self.poll_eject());
+        probe_fx.extend(self.poll_update());
         if let Some(rx) = &self.opening {
             match rx.try_recv() {
                 Ok(opened) => {
@@ -2787,7 +2868,11 @@ impl App {
             // Keep the timer alive while the probe is still out; stopping it
             // here would strand the result with nothing left to collect it.
             let mut fx = probe_fx;
-            if self.probe.is_none() && !self.opening() && self.ejecting.is_none() {
+            if self.probe.is_none()
+                && !self.opening()
+                && self.ejecting.is_none()
+                && self.update_check.is_none()
+            {
                 fx.push(Effect::StopTicking);
             } else if fx.is_empty() {
                 fx.push(Effect::Redraw);
@@ -2834,7 +2919,10 @@ impl App {
             self.result_outcome = st.outcome_now();
             self.run = None;
             self.page = Page::Result;
-            let mut fx = vec![Effect::Redraw, Effect::StopTicking];
+            let mut fx = vec![Effect::Redraw];
+            if self.update_check.is_none() {
+                fx.push(Effect::StopTicking);
+            }
             if self.settings.notify_when_rip_finished {
                 let completed = self.result_outcome == crate::engine::RunOutcome::Completed;
                 fx.push(Effect::NotifyRipFinished {
@@ -3166,7 +3254,7 @@ mod tests {
                 .expect("the start_rip call still closes the request");
         let body = &src[start..end];
         assert!(
-            body.contains("title_ids:"),
+            body.contains("\n                title_ids: self.title_ids.clone(),"),
             "the request must carry the scanned identities alongside the ticked \
              title numbers"
         );
@@ -4287,6 +4375,88 @@ mod tests {
             app.run.is_some(),
             "Start wants a title Open did not resolve"
         );
+    }
+
+    fn slow_update(_current: &str) -> String {
+        for _ in 0..500 {
+            if UPDATE_GATE.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        "stub verdict".into()
+    }
+
+    static UPDATE_GATE: AtomicBool = AtomicBool::new(false);
+
+    // The update check blocks on the network: the UI thread must hand it off and return.
+    #[test]
+    fn check_for_updates_does_not_block_the_ui_thread() {
+        let mut app = App::new();
+        app.update_fn = slow_update;
+        let fx = app.dispatch(Cmd::CheckUpdates);
+        assert!(fx.contains(&Effect::StartTicking), "{fx:?}");
+        assert!(
+            !app.log.iter().any(|l| l.text.contains("stub verdict")),
+            "dispatch waited for the check"
+        );
+        UPDATE_GATE.store(true, Ordering::SeqCst);
+        for _ in 0..500 {
+            app.tick();
+            if app.log.iter().any(|l| l.text.contains("stub verdict")) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("the verdict never reached the log");
+    }
+
+    // The macOS drop filter: folders and containers open, and so does an `.iso` in any case.
+    #[test]
+    fn is_openable_file_takes_containers_and_iso_in_any_case() {
+        assert!(is_openable_file("/m/Movie.iso"));
+        assert!(is_openable_file("/m/Movie.ISO"));
+        assert!(is_openable_file("/m/Movie.mkv"));
+        assert!(!is_openable_file("/m/Movie.txt"));
+        assert!(!is_openable_file("/m/Movie"));
+    }
+
+    // A typo in a number field must not start the rip under the engine's reading of 0
+    // ("abort on any loss"), against what the user meant.
+    #[test]
+    fn an_unparsable_loss_limit_refuses_to_start() {
+        let mut app = app_with_titles(&["H.264"]);
+        app.source = "/m/a.iso".into();
+        app.output_dir = "/out".into();
+        app.settings.abort_lost_secs = "60s".into();
+        app.dispatch(Cmd::Run);
+        assert!(app.run.is_none(), "the rip started anyway");
+        assert!(app.log.iter().any(|l| l.text.contains("60s")));
+    }
+
+    // A file dropped on the window mid-rip must not replace the model the rip is running under.
+    #[test]
+    fn open_is_refused_while_a_rip_runs() {
+        let mut app = App::new();
+        app.source = "/m/a.iso".into();
+        app.page = Page::Progress;
+        app.run = Some(Arc::default());
+        assert!(app.open("/m/b.iso").is_empty());
+        assert_eq!(app.source, "/m/a.iso");
+        assert_eq!(app.page, Page::Progress);
+    }
+
+    // A failed open shows the empty page, so there must be no source left to Start.
+    #[test]
+    fn a_failed_open_leaves_no_source_to_start() {
+        let mut app = App::new();
+        app.source = "/m/a.iso".into();
+        app.tree = Tree::from_scan(&probe_scan(), "All titles", 0.0, &LangPrefs::default());
+        app.apply_scan("/m/bad.iso", Err("unreadable".into()), false);
+        assert_eq!(app.page, Page::Empty);
+        assert!(app.source.is_empty());
+        assert!(app.tree.arena.is_empty());
+        assert!(!app.view().can_run);
     }
 
     fn app_with_titles(codecs: &[&str]) -> App {

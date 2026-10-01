@@ -1646,6 +1646,29 @@ fn clicking_a_partly_ticked_title_selects_all_of_it() {
     assert_eq!(t.check_state(title), Check::On);
 }
 
+// A track ticked under an unticked title must not be a tick that is silently never ripped.
+#[test]
+fn ticking_a_track_under_an_unticked_title_brings_the_title_in() {
+    let t = tree(&two_title_disc(), "Main film only", 0.0);
+    let extra = nth(&t, "Title", 1);
+    assert_eq!(
+        t.check_state(extra),
+        Check::Off,
+        "fixture: extra is unticked"
+    );
+    let audio = t.arena[extra]
+        .children
+        .iter()
+        .copied()
+        .find(|&c| t.arena[c].type_s == "Audio")
+        .expect("the extra has an audio track");
+    t.toggle(audio);
+    assert!(
+        t.ticked_titles().contains(&t.arena[extra].title_idx),
+        "the ticked track's title must be ripped"
+    );
+}
+
 // Opening a source that cannot offer the current format must move the MODEL,
 // not just the dropdown: the Win32 shell used to reconcile only its dropdown,
 // so the user read "MKV" while the engine still got MP4 (fails at mux, E9048).

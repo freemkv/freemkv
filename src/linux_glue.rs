@@ -105,12 +105,7 @@ pub fn accel_string(a: &Accel) -> String {
 /// Whether a dropped path is something the app can open: a directory (an
 /// extracted disc tree opens as `dir://`) or a file with a source extension.
 pub fn is_openable_source(path: &std::path::Path) -> bool {
-    path.is_dir()
-        || path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-            crate::ui::SOURCE_EXTS
-                .iter()
-                .any(|x| x.eq_ignore_ascii_case(e))
-        })
+    path.is_dir() || path.to_str().is_some_and(crate::ui::is_openable_file)
 }
 
 /// The format dropdown's rows: the core's groups flattened in order, as the
@@ -168,48 +163,9 @@ pub fn rows_sig(rows: &[Row]) -> u64 {
 
 /// An explicit Open Disc, given the drives a worker enumerated off the UI
 /// thread: the log line and the URL to scan (`None` = no drive, stop). The
-/// same rule and wording as the core's `App::disc_source(true)`.
+/// core's own plan, so this shell cannot choose differently from `App::disc_source(true)`.
 pub fn disc_open_plan(drives: &[crate::engine::OpticalDrive]) -> (LogKind, String, Option<String>) {
-    use crate::strings::{fmt_or, get_or, sanitize_display};
-    match drives {
-        [] => (
-            LogKind::Notice,
-            get_or(
-                "gui.log.no_drive",
-                "No optical drive found. Connect a Blu-ray/DVD drive with a disc.",
-            ),
-            None,
-        ),
-        [d] => (
-            LogKind::Detail,
-            fmt_or(
-                "gui.log.opening_drive",
-                "Opening {label} ({device})",
-                &[
-                    ("label", &sanitize_display(&d.label)),
-                    ("device", &d.device),
-                ],
-            ),
-            Some(format!("disc://{}", d.device)),
-        ),
-        _ => {
-            let list = drives
-                .iter()
-                .map(|d| format!("{} ({})", sanitize_display(&d.label), d.device))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let n = drives.len().to_string();
-            (
-                LogKind::Detail,
-                fmt_or(
-                    "gui.log.drives_found",
-                    "{n} drives found: {list} — using the one with a disc",
-                    &[("n", &n), ("list", &list)],
-                ),
-                Some("disc://".to_string()),
-            )
-        }
-    }
+    crate::ui::disc_open_plan(drives)
 }
 
 /// A keydb worker's outcome as a log line: a failure in the Notice style,
@@ -513,6 +469,7 @@ mod tests {
         let (_, line, url) = disc_open_plan(&[drive("/dev/sr0"), drive("/dev/sr1")]);
         assert_eq!(url.as_deref(), Some("disc://"));
         assert!(line.contains("/dev/sr1"), "{line}");
+        assert!(!line.contains('\u{202e}'), "{line}");
     }
 
     #[test]
@@ -535,6 +492,8 @@ mod tests {
         // A clear or a front-trim bumps `log_first`: the screen is stale.
         assert_eq!(log_delta(&m(0, 5), &m(5, 0)), LogDelta::Rewrite);
         assert_eq!(log_delta(&m(0, 5000), &m(1000, 4001)), LogDelta::Rewrite);
+        // Fewer lines under the same first: nothing to append from.
+        assert_eq!(log_delta(&m(0, 5), &m(0, 3)), LogDelta::Rewrite);
     }
 
     #[test]

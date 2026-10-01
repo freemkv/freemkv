@@ -498,7 +498,12 @@ impl Prefs {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::settings::update_keydb(&url, &path)
             }))
-            .unwrap_or_else(|_| Err("keydb update failed — internal error".to_string()));
+            .unwrap_or_else(|_| {
+                Err(crate::strings::get_or(
+                    "gui.log.keydb_worker_failed",
+                    "keydb update failed — internal error",
+                ))
+            });
             let line = glue::keydb_update_line(r);
             inbox.lock().unwrap_or_else(|e| e.into_inner()).push(line);
         });

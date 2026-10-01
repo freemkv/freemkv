@@ -207,14 +207,33 @@ impl Shell {
         }
         let me = self.clone();
         glib::spawn_future_local(async move {
-            let drives = gio::spawn_blocking(crate::engine::list_optical_drives)
-                .await
-                .unwrap_or_default();
+            let drives = gio::spawn_blocking(crate::engine::list_optical_drives).await;
             me.finding_drives.set(false);
+            // A panicked enumeration is a failure to report, not an empty drive list.
+            let Ok(drives) = drives else {
+                me.say(
+                    LogKind::Notice,
+                    &crate::strings::get_or(
+                        "gui.log.drive_scan_failed",
+                        "Could not list the optical drives (internal error).",
+                    ),
+                );
+                return;
+            };
             let (kind, line, url) = glue::disc_open_plan(&drives);
-            me.apply(|a| {
-                a.say(kind, &line);
-                url.map_or_else(Vec::new, |u| a.open_async(&u))
+            me.apply(|a| match url {
+                None => {
+                    a.say(kind, &line);
+                    vec![]
+                }
+                // State may have changed during the walk: announce the open only if it began.
+                Some(u) => {
+                    let fx = a.open_async(&u);
+                    if !fx.is_empty() {
+                        a.say(kind, &line);
+                    }
+                    fx
+                }
             });
         });
     }
