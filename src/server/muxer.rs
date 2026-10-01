@@ -111,10 +111,9 @@ pub fn read_marker(staging_dir: &Path) -> std::io::Result<RippedMarker> {
     Ok(marker)
 }
 
-/// Formerly removed the `.ripped` file on mux success. The lifecycle transition
-/// (`Ripped` → `Done`/`Review` → `Completed`) now supersedes it in `state.json`,
-/// so this only strips any lingering legacy `.ripped` file. Kept (and infallible
-/// `Ok`) so existing call sites are unchanged.
+/// Strip any lingering legacy `.ripped` file on mux success (the lifecycle
+/// transition `Ripped` → `Done`/`Review` → `Completed` lives in `state.json`).
+/// An absent file is `Ok`; any other remove error is returned.
 pub fn delete_marker(staging_dir: &Path) -> std::io::Result<()> {
     let path = staging_dir.join(RIPPED_MARKER_NAME);
     match std::fs::remove_file(&path) {
@@ -157,20 +156,20 @@ pub(crate) fn record_error(path: &str, reason: &str, hint: &str) {
 // `record_error`, but `announce = false` suppresses the syslog line (a repeat the
 // dispatch-time clear would otherwise re-announce every tick).
 fn record_error_announced(path: &str, reason: &str, hint: &str, announce: bool) {
-    // Operator dismissed this path — honor it (don't re-surface a card the
-    // operator cleared). Lifted on a fresh dispatch / prune (see MUX_DISMISSED).
-    if MUX_DISMISSED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains(path)
-    {
-        return;
-    }
     // Capture whether this is a new reason under the lock, then DROP the
     // guard before the syslog write (syslog does blocking NFS I/O) so it
     // doesn't block other record_error/clear_error calls or the System page.
     let same_reason = {
         let mut m = MUX_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+        // Operator dismissed this path: honor it. Checked under MUX_ERRORS (the
+        // clear_mux_error lock order) so a concurrent dismissal can't be lost.
+        if MUX_DISMISSED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(path)
+        {
+            return;
+        }
         let same_reason = m.get(path).map(|e| e.reason == reason).unwrap_or(false);
         m.insert(
             path.to_string(),
@@ -449,6 +448,23 @@ pub(crate) fn persist_terminal_mux_quarantine(path_str: &str, dir: &Path, reason
     landed
 }
 
+// Raise the card for a failed worker mux. A TERMINAL failure (structural finalize error, e.g.
+// E6008) also transitions state → Failed so `mux_dispatch_verdict` stops re-Dispatching; when
+// that write doesn't land, its own card (why the dir keeps retrying) is the one kept.
+fn record_mux_failure(
+    path_str: &str,
+    dir: &Path,
+    reason: &str,
+    hint: &str,
+    terminal: bool,
+    announce: bool,
+) {
+    if terminal && !persist_terminal_mux_quarantine(path_str, dir, reason) {
+        return;
+    }
+    record_error_announced(path_str, reason, hint, announce);
+}
+
 // Find all staging dirs with a `.ripped` marker and dispatch each through
 // the resume-mux path. Serialized — only one mux runs at a time in this
 // worker thread; concurrent muxes are explicitly out of scope.
@@ -606,12 +622,13 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
             // fallback). Never reverts a real "done" tile or a reused device.
             let origin = &marker.origin_device;
             if !origin.is_empty() {
-                let origin_status = crate::server::ripper::STATE
+                let origin_tile = crate::server::ripper::STATE
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .get(origin.as_str())
-                    .map(|rs| rs.status.clone());
-                if should_revert_origin_to_done(origin, origin_status.as_deref()) {
+                    .map(|rs| (rs.status.clone(), rs.disc_name.clone()));
+                let origin_tile = origin_tile.as_ref().map(|(s, n)| (s.as_str(), n.as_str()));
+                if should_revert_origin_to_done(origin, origin_tile, &marker.display_name) {
                     crate::server::ripper::update_state(
                         origin,
                         origin_done_state(origin, &marker, &outcome),
@@ -646,18 +663,13 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
                     "the mux failed to finalize/write the output — staging is preserved; check the _mux device log for the failure detail and re-run the mux".to_string(),
                 )
             };
-            if mux_failure_is_terminal(MuxFailureClass {
+            let terminal = mux_failure_is_terminal(MuxFailureClass {
                 aborted_loss: aborted_loss.is_some(),
                 has_worker_reason: outcome.failure_reason.is_some(),
                 is_finalize: outcome.failure_finalize,
-            }) {
-                // TERMINAL mux failure (structural finalize error, e.g. E6008):
-                // transition state → Failed so `mux_dispatch_verdict` stops
-                // re-Dispatching forever; a resumable read error stays re-muxable.
-                persist_terminal_mux_quarantine(&path_str, &dir, &reason);
-            }
+            });
             let repeat = outcome.failure_space && prior_space_refusal;
-            record_error_announced(&path_str, &reason, &hint, !repeat);
+            record_mux_failure(&path_str, &dir, &reason, &hint, terminal, !repeat);
         }
     }
 }
@@ -723,10 +735,14 @@ fn worker_failure_hint(retryable: bool, space: bool) -> &'static str {
     }
 }
 
-// Should the mux worker drive the origin device to "done"? Only if it's still "ripping" (the
-// inline-mux fallback path) and not a synthetic `_`-prefixed origin.
-pub(crate) fn should_revert_origin_to_done(origin: &str, status: Option<&str>) -> bool {
-    !origin.is_empty() && !origin.starts_with('_') && status == Some("ripping")
+// Should the mux worker drive the origin device to "done"? Only if its tile (status, disc_name)
+// is still "ripping" this disc (the inline-mux fallback path) and not a synthetic `_` origin.
+pub(crate) fn should_revert_origin_to_done(
+    origin: &str,
+    tile: Option<(&str, &str)>,
+    disc_name: &str,
+) -> bool {
+    !origin.is_empty() && !origin.starts_with('_') && tile == Some(("ripping", disc_name))
 }
 
 /// Scan the staging dir for pending mux jobs. Returns display names
@@ -772,6 +788,9 @@ pub fn pending_queue(staging_dir: &Path) -> Vec<String> {
         let Some(snap) = crate::server::ripper::staging::snapshot_staging_disc(&dir) else {
             continue;
         };
+        // Skip `.completed`/`.failed` (terminal), `.done`/`.review` (mutual
+        // exclusion — already in the Move queue), `.muxing` (live in the `_mux`
+        // tile), and `.aborted-loss` (resumable, shown via its own error card).
         if !snap.has_ripped
             || snap.needs_disc
             || snap.has_muxing
@@ -783,9 +802,6 @@ pub fn pending_queue(staging_dir: &Path) -> Vec<String> {
         {
             continue;
         }
-        // Skip `.completed`/`.failed` (terminal), `.done`/`.review` (mutual
-        // exclusion — already in the Move queue), `.muxing` (live in the `_mux`
-        // tile), and `.aborted-loss` (resumable, shown via its own error card).
         if let Ok(m) = read_marker(&dir) {
             out.push(format!("{} (queued)", m.display_name));
         } else {
@@ -946,6 +962,10 @@ mod tests {
     #[test]
     fn unreadable_state_json_is_held_once_not_redispatched() {
         let _guard = crate::server::log::env_guard();
+        // check_and_mux prunes every MUX_ERRORS key: serialize with the other card tests.
+        let _g = crate::server::mover::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().unwrap();
         // SAFETY: env access in tests, serialized by env_guard.
         unsafe {
@@ -1127,6 +1147,24 @@ mod tests {
         // into STATE and writes it into the `.done`/`.review` marker so the
         // mover routes a resumed TV rip to the TV library, not movies.
         assert_eq!(back.tmdb_media_type, "tv");
+        // Every field survives (non-default values so a dropped field shows).
+        let full = RippedMarker {
+            rip_errors: 7,
+            rip_lost_video_secs: 1.5,
+            sweep_errors: 3,
+            sweep_total_lost_ms: 120.0,
+            sweep_main_lost_ms: 80.0,
+            sweep_num_bad_ranges: 2,
+            sweep_largest_gap_ms: 60.0,
+            title_confident: true,
+            ..sample_marker()
+        };
+        write_marker(tmp.path(), &full).unwrap();
+        let back = read_marker(tmp.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&back).unwrap(),
+            serde_json::to_value(&full).unwrap()
+        );
     }
 
     // Backward-compat: a pre-rc.4 marker lacks `tmdb_media_type`; it must
@@ -1334,13 +1372,14 @@ mod tests {
                 ..Default::default()
             },
         );
-        let status = crate::server::ripper::STATE
+        let tile = crate::server::ripper::STATE
             .lock()
             .unwrap()
             .get(device)
-            .map(|rs| rs.status.clone());
+            .map(|rs| (rs.status.clone(), rs.disc_name.clone()));
+        let tile = tile.as_ref().map(|(s, n)| (s.as_str(), n.as_str()));
         assert!(
-            !should_revert_origin_to_done(device, status.as_deref()),
+            !should_revert_origin_to_done(device, tile, "Border Town"),
             "a device already 'done' at hand-off must not be reverted by the mux worker"
         );
         // Cleanup so the synthetic entry doesn't leak into other tests.
@@ -1363,13 +1402,14 @@ mod tests {
                 ..Default::default()
             },
         );
-        let status = crate::server::ripper::STATE
+        let tile = crate::server::ripper::STATE
             .lock()
             .unwrap()
             .get(device)
-            .map(|rs| rs.status.clone());
+            .map(|rs| (rs.status.clone(), rs.disc_name.clone()));
+        let tile = tile.as_ref().map(|(s, n)| (s.as_str(), n.as_str()));
         assert!(
-            should_revert_origin_to_done(device, status.as_deref()),
+            should_revert_origin_to_done(device, tile, "Border Town"),
             "a still-'ripping' origin device (inline-mux fallback) MUST be reverted to done"
         );
         crate::server::ripper::STATE.lock().unwrap().remove(device);
@@ -1381,24 +1421,28 @@ mod tests {
     #[test]
     fn revert_origin_predicate_edge_cases() {
         assert!(
-            !should_revert_origin_to_done("", Some("ripping")),
+            !should_revert_origin_to_done("", Some(("ripping", "A")), "A"),
             "empty origin must not revert"
         );
         assert!(
-            !should_revert_origin_to_done("_mux", Some("ripping")),
+            !should_revert_origin_to_done("_mux", Some(("ripping", "A")), "A"),
             "a synthetic origin must not revert"
         );
         assert!(
-            !should_revert_origin_to_done("sg0", None),
+            !should_revert_origin_to_done("sg0", None, "A"),
             "a vanished device entry (None status) must not revert"
         );
         assert!(
-            !should_revert_origin_to_done("sg0", Some("done")),
+            !should_revert_origin_to_done("sg0", Some(("done", "A")), "A"),
             "an already-done device must not revert"
         );
         assert!(
-            should_revert_origin_to_done("sg0", Some("ripping")),
+            should_revert_origin_to_done("sg0", Some(("ripping", "A")), "A"),
             "a real, still-ripping device must revert"
+        );
+        assert!(
+            !should_revert_origin_to_done("sg0", Some(("ripping", "B")), "A"),
+            "a device now ripping a different disc must not get this disc's done tile"
         );
     }
 
@@ -1470,45 +1514,36 @@ mod tests {
         assert_eq!(rs.output_file, "Border Town.mkv");
     }
 
-    // Regression: done-card damage telemetry must not be zeroed. A marker
-    // with non-zero sweep damage fields must produce a RipState that
-    // carries those values through update_state (which derives damage_severity).
+    // Regression: done-card damage telemetry must not be zeroed. The worker's done card
+    // (`origin_done_state`) for a damaged rip must carry its loss through update_state,
+    // which derives damage_severity from it.
     #[test]
     fn done_card_carries_sweep_damage_telemetry() {
         let device = "_test_done_damage_telemetry";
         let mut marker = sample_marker();
-        marker.sweep_errors = 42;
-        marker.sweep_total_lost_ms = 3500.0;
-        marker.sweep_main_lost_ms = 2000.0;
         marker.sweep_num_bad_ranges = 3;
         marker.sweep_largest_gap_ms = 1200.0;
+        let outcome = crate::server::ripper::resume::MuxHandoffOutcome {
+            success: true,
+            errors: 42,
+            total_lost_ms: 3500.0,
+            main_lost_ms: 2000.0,
+            ..Default::default()
+        };
 
-        crate::server::ripper::update_state(
-            device,
-            crate::server::ripper::RipState {
-                device: device.to_string(),
-                status: "done".to_string(),
-                disc_present: true,
-                disc_name: marker.display_name.clone(),
-                disc_format: marker.disc_format.clone(),
-                progress_pct: 100,
-                errors: marker.sweep_errors,
-                total_lost_ms: marker.sweep_total_lost_ms,
-                main_lost_ms: marker.sweep_main_lost_ms,
-                num_bad_ranges: marker.sweep_num_bad_ranges,
-                largest_gap_ms: marker.sweep_largest_gap_ms,
-                ..Default::default()
-            },
-        );
-
-        let s = crate::server::ripper::STATE.lock().unwrap();
-        let rs = s.get(device).expect("device state must exist");
+        crate::server::ripper::update_state(device, origin_done_state(device, &marker, &outcome));
+        let rs = crate::server::ripper::STATE
+            .lock()
+            .unwrap()
+            .remove(device)
+            .expect("device state must exist");
         assert_eq!(rs.status, "done");
         assert_eq!(rs.errors, 42, "errors must carry through to done state");
         assert!(
             rs.total_lost_ms > 0.0,
             "total_lost_ms must be non-zero on damaged done card"
         );
+        assert_eq!(rs.num_bad_ranges, 3);
         assert!(
             !rs.damage_severity.is_empty(),
             "damage_severity must be set for a damaged done card (got empty — update_state must derive it from errors/total_lost_ms)"
@@ -1898,8 +1933,18 @@ mod tests {
             .map(|i| start + i)
             .expect("muxer.rs should dispatch to remux_from_ripped_marker");
         let region = &src[start..end];
+        // The stamp is live code in the Dispatch arm, not another arm or a comment.
+        let arm = &region[region
+            .find("MuxVerdict::Dispatch => {")
+            .expect("the worker must match the Dispatch verdict")..];
+        let arm = &arm[..arm[1..].find("MuxVerdict::").map_or(arm.len(), |i| i + 1)];
+        assert!(
+            arm.lines()
+                .any(|l| l.trim() == "crate::server::ripper::staging::write_muxing_marker(&dir);"),
+            "the Dispatch arm must stamp the .muxing lock"
+        );
         let stamp = region
-            .find("write_muxing_marker")
+            .find("write_muxing_marker(&dir);")
             .expect("the worker must stamp the .muxing lock");
         let read = region
             .find("read_marker(&dir)")
@@ -1963,6 +2008,36 @@ mod tests {
             "a dropped terminal write must raise a LOUD operator card (not silently re-dispatch)"
         );
         clear_error(&bad_path);
+    }
+
+    // A terminal failure whose quarantine write didn't land keeps the quarantine card (the dir
+    // will keep re-dispatching), not the generic finalize hint.
+    #[test]
+    fn unpersisted_terminal_quarantine_keeps_its_card() {
+        let _g = crate::server::mover::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("Unwritable");
+        std::fs::create_dir_all(dir.join(crate::server::ripper::staging::STATE_FILE)).unwrap();
+        let path = dir.to_string_lossy().to_string();
+        clear_error(&path);
+        record_mux_failure(
+            &path,
+            &dir,
+            "E6008 no muxable frames",
+            "generic",
+            true,
+            true,
+        );
+        let hint = MUX_ERRORS
+            .lock()
+            .unwrap()
+            .get(&path)
+            .map(|e| e.hint.clone());
+        clear_error(&path);
+        let hint = hint.expect("a card must be raised");
+        assert_ne!(hint, "generic", "the quarantine card was overwritten");
     }
 
     // TRANSITION: ripped → completed. After `.completed` is written, a
