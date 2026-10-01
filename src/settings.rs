@@ -328,14 +328,17 @@ impl Settings {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return (Settings::default(), LoadOutcome::Missing);
             }
-            // A file that exists but cannot be READ (permissions, a directory
-            // in its place) is a problem — but there is nothing to preserve
-            // and a rename would likely fail the same way, so leave it be.
+            // A file that cannot be READ (permissions, a directory in its place) has
+            // nothing to preserve and a rename would likely fail too; but one that is not
+            // UTF-8 (an ANSI or UTF-16 hand edit) was read, so it is moved aside.
             Err(e) => {
+                let preserved = (e.kind() == std::io::ErrorKind::InvalidData)
+                    .then(|| preserve_unreadable(path))
+                    .flatten();
                 let outcome = LoadOutcome::Unreadable {
                     path: path.to_path_buf(),
                     error: format!("{e}"),
-                    preserved: None,
+                    preserved,
                 };
                 outcome.warn();
                 return (Settings::default(), outcome);
@@ -367,35 +370,20 @@ impl Settings {
     // always have a value to select/match on.
     fn normalize(&mut self) {
         let d = Settings::default();
-        let snap = |cur: &mut String, opts: &[&str], def: &str| {
-            if !opts.contains(&cur.as_str()) {
+        // The canonical values come from the same table the dropdowns are built from, so
+        // an added option can never be snapped back to the default on the next launch.
+        let snap = |cur: &mut String, key: &str, def: &str| {
+            if !crate::ui::enum_options(key)
+                .iter()
+                .any(|(canon, _)| *canon == cur.as_str())
+            {
                 *cur = def.to_string();
             }
         };
-        snap(
-            &mut self.selection,
-            &["Main film only", "All titles", "Longest title"],
-            &d.selection,
-        );
-        snap(
-            &mut self.rip_mode,
-            &["Multi-pass", "Single pass"],
-            &d.rip_mode,
-        );
-        snap(
-            &mut self.key_source,
-            &[
-                "Local keydb only",
-                "Online key service only",
-                "keydb, then online",
-            ],
-            &d.key_source,
-        );
-        snap(
-            &mut self.log_level,
-            &["Quiet", "Normal", "Verbose", "Debug"],
-            &d.log_level,
-        );
+        snap(&mut self.selection, "selection", &d.selection);
+        snap(&mut self.rip_mode, "rip_mode", &d.rip_mode);
+        snap(&mut self.key_source, "key_source", &d.key_source);
+        snap(&mut self.log_level, "log_level", &d.log_level);
         // The output container must be one of the canonical format strings the
         // dropdown offers, else it renders blank and the engine can't map it.
         let known = crate::ui::output_formats(true, true).concat();
@@ -405,9 +393,10 @@ impl Settings {
         // Language persists as a locale code (or "auto"); fold any legacy
         // endonym / unknown value to a clean code.
         self.language = crate::ui::locale_code(&self.language).to_string();
-        // A destination that isn't an absolute path (empty, or a stale "..."
-        // placeholder) can't be written to — fall back to the default folder.
-        // Test is per-OS: `starts_with('/')` wrongly reset every Windows path.
+        // A destination that isn't absolute (empty, or a stale "..." placeholder) can't be
+        // written to — fall back to the default folder; `~/` is expanded first, as for
+        // `keydb_path`. The test is per-OS: `starts_with('/')` reset every Windows path.
+        self.dest_dir = shellexpand(&self.dest_dir);
         if !crate::platform::is_absolute(&self.dest_dir) {
             self.dest_dir = d.dest_dir.clone();
         }
@@ -556,6 +545,21 @@ fn update_config(t: UpdateTimeouts) -> ureq::config::Config {
         .build()
 }
 
+/// Whether `latest` is a later release than `current`. Compares the dotted numeric core
+/// (a `-pre` or `+build` suffix is ignored); a version that does not parse that way
+/// counts as different, so an odd tag is still surfaced rather than hidden.
+fn is_newer(latest: &str, current: &str) -> bool {
+    fn core(v: &str) -> Option<Vec<u64>> {
+        let v = v.trim().trim_start_matches('v');
+        let v = v.split(['-', '+']).next()?;
+        v.split('.').map(|n| n.parse().ok()).collect()
+    }
+    match (core(latest), core(current)) {
+        (Some(l), Some(c)) => l > c,
+        _ => latest != current,
+    }
+}
+
 fn check_for_update_at(url: &str, current: &str, t: UpdateTimeouts) -> String {
     let resp = crate::keydb_fetch::idle_agent(update_config(t), t.idle)
         .get(url)
@@ -588,7 +592,7 @@ fn check_for_update_at(url: &str, current: &str, t: UpdateTimeouts) -> String {
     };
 
     match tag {
-        Some(latest) if latest == current => {
+        Some(latest) if !is_newer(&latest, current) => {
             format!("You are running the latest version ({current}).")
         }
         Some(latest) => {
@@ -601,7 +605,8 @@ fn check_for_update_at(url: &str, current: &str, t: UpdateTimeouts) -> String {
 #[cfg(test)]
 mod normalize_tests {
     use super::{
-        LoadOutcome, Settings, default_keydb_path, dirs_movies, settings_path, support_dir,
+        LoadOutcome, Settings, default_keydb_path, dirs_movies, settings_path, shellexpand,
+        support_dir,
     };
 
     /// A scratch directory of this test's own, so nothing here touches the
@@ -666,6 +671,24 @@ mod normalize_tests {
             other => panic!("expected Unreadable, got {other:?}"),
         }
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A file that is not valid UTF-8 is still the user's settings: it must be moved aside,
+    // not left for the next `save()` to overwrite with defaults.
+    #[test]
+    fn a_non_utf8_settings_file_is_preserved_not_overwritten() {
+        let dir = scratch("nonutf8");
+        let path = dir.join("gui-settings.json");
+        std::fs::write(&path, b"{\"dest_dir\":\"C:\\Users\\Jos\xe9\"}").unwrap();
+        let (_, outcome) = Settings::load_from(&path);
+        match outcome {
+            LoadOutcome::Unreadable { preserved, .. } => {
+                assert!(preserved.is_some(), "the file must be moved aside");
+                assert!(!path.exists());
+            }
+            other => panic!("expected Unreadable, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -814,6 +837,18 @@ mod normalize_tests {
         assert_eq!(s.dest_dir, custom, "an absolute folder must be preserved");
     }
 
+    // `~/rips/out` is a path the user meant, not a placeholder to throw away.
+    #[test]
+    fn a_tilde_destination_is_expanded_not_reset() {
+        let mut s = Settings {
+            dest_dir: "~/rips/out".into(),
+            ..Settings::default()
+        };
+        s.normalize();
+        assert_eq!(s.dest_dir, shellexpand("~/rips/out"));
+        assert!(s.dest_dir.ends_with("out") && !s.dest_dir.starts_with('~'));
+    }
+
     /// A blank keydb location is never left blank: the default is a real path
     /// in the support directory, and an empty one means the Keys tab points at
     /// nothing while still reporting a configured local source.
@@ -836,10 +871,6 @@ mod normalize_tests {
         assert_eq!(kept.keydb_path, "~/keys/keydb.cfg");
     }
 
-    // The four `settings::*` path wrappers forward to `platform::*` but are
-    // separate functions from what `platform.rs`'s own tests exercise, so
-    // each could regress to `Default::default()` (e.g. `settings_path()` == "").
-
     /// An upgraded settings file must not silently lose the notification:
     /// the absent field comes from `Settings::default()`, not bool's `false`.
     #[test]
@@ -858,6 +889,9 @@ mod normalize_tests {
         assert!(!s.notify_when_rip_finished);
     }
 
+    // The four `settings::*` path wrappers forward to `platform::*` but are
+    // separate functions from what `platform.rs`'s own tests exercise, so
+    // each could regress to `Default::default()` (e.g. `settings_path()` == "").
     #[test]
     fn the_derived_paths_are_absolute_and_distinct() {
         let support = support_dir();
@@ -1025,6 +1059,8 @@ mod update_check_tests {
     fn update_check_bounds_the_dns_lookup() {
         let t = super::update_config(super::UPDATE_TIMEOUTS).timeouts();
         assert_eq!(t.resolve, Some(Duration::from_secs(10)));
+        assert_eq!(t.connect, Some(Duration::from_secs(10)));
+        assert_eq!(t.recv_response, Some(Duration::from_secs(10)));
         assert_eq!(t.recv_body, None, "no total");
     }
 
@@ -1049,6 +1085,25 @@ mod update_check_tests {
         let msg = check_for_update_at(&url, "1.0.0", scaled(idle));
         let _ = server.join();
         assert!(msg.starts_with("Update available: 9.9.9"), "{msg}");
+    }
+
+    // A build ahead of the newest published release must not be told to "update" to it.
+    #[test]
+    fn update_check_does_not_advertise_a_downgrade() {
+        const BODY: &[u8] = br#"{"tag_name":"v1.7.5"}"#;
+        let (url, server) =
+            release_stub(b"HTTP/1.1 200 OK\r\nContent-Length: 21\r\n\r\n", |sock| {
+                use std::io::Write as _;
+                let _ = sock.write_all(BODY);
+            });
+        let msg = check_for_update_at(&url, "1.8.0", scaled(Duration::from_secs(5)));
+        let _ = server.join();
+        assert!(msg.starts_with("You are running the latest"), "{msg}");
+        assert!(super::is_newer("1.10.0", "1.9.9"), "numeric, not lexical");
+        assert!(
+            !super::is_newer("1.8.0", "1.8.0-rc1"),
+            "pre-release suffix ignored"
+        );
     }
 
     // FT9b (T25): "(b) → 'could not check' at idle" (§5.0: "within window + 1 s").

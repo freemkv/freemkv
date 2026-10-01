@@ -250,6 +250,24 @@ mod tests {
         assert!(table.contains(&(MenuAction::Cmd(Cmd::SelectAll), ctrl(u16::from(b'A'), true))));
     }
 
+    // The EDIT controls run Copy and Select All on their own keys; a table entry would take
+    // those keys from them.
+    #[test]
+    fn the_table_leaves_the_text_keys_to_the_focused_control() {
+        let menus = menus();
+        assert!(
+            hinted(&menus)
+                .iter()
+                .any(|(a, _)| *a == MenuAction::StandardCopy),
+            "fixture: the menu shows Copy"
+        );
+        for (action, _) in accel_table(&menus) {
+            assert!(!native_edit_action(&action), "{action:?} is in the table");
+        }
+        assert!(native_edit_action(&MenuAction::StandardSelectAllText));
+        assert!(!native_edit_action(&MenuAction::Cmd(Cmd::SelectAll)));
+    }
+
     #[test]
     fn win_key_maps_letters_punctuation_and_function_keys() {
         assert_eq!(win_key(&Accel::primary("o")).map(|k| k.vk), Some(0x4F));
