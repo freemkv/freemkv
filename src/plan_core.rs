@@ -1,10 +1,10 @@
-//! The front ends' one way to an engine [`Plan`] (pipeline design §2.5; anti-drift measures
+//! The front ends' one way to an engine `Plan` (pipeline design §2.5; anti-drift measures
 //! 1–3). The CLI's flags, the desktop app's settings and the server's config each become a
-//! [`PlanRequest`]; [`plan`] is the one parser that turns it into the engine's `Plan`, so a
+//! `PlanRequest`; `plan` is the one parser that turns it into the engine's `Plan`, so a
 //! rule (which key sources a request asks, what "raw" means) is written once.
 //!
 //! Every front end also renders the plan it runs through its own exhaustive destructure of
-//! [`Plan`] (no `..`): a field added to the engine's `Plan` fails to compile until the CLI,
+//! `Plan` (no `..`): a field added to the engine's `Plan` fails to compile until the CLI,
 //! the app and the server each handle it.
 
 use freemkv_engine::{KeyParamsData, Plan, Selection, StreamChoice};

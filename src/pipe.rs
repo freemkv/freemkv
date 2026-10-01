@@ -1991,7 +1991,7 @@ fn interrupted_text(iso: &std::path::Path) -> String {
 
 // ── Whole-disc outputs (iso://, null://, dir://): one engine plan ───────────
 
-/// The engine plan for this invocation. Every front end builds the same [`fe::Plan`]
+/// The engine plan for this invocation. Every front end builds the same [`freemkv_engine::Plan`]
 /// from its own inputs and hands it to `freemkv_engine::run` (the engine owns the open, the
 /// keys, the read policy and the landing).
 pub(crate) fn cli_plan(
