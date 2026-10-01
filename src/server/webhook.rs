@@ -13,21 +13,36 @@ pub enum WebhookEvent {
     Move,
 }
 
-/// Notify that a file was moved to its final destination.
-pub fn send_move(cfg: &Config, title: &str, dest_path: &str) {
-    let payload = serde_json::json!({
-        "event": "move_complete",
+impl WebhookEvent {
+    // The `"event"` string receivers see for this stage.
+    fn name(self) -> &'static str {
+        match self {
+            WebhookEvent::Rip => "rip_complete",
+            WebhookEvent::Mux => "mux_complete",
+            WebhookEvent::Move => "move_complete",
+        }
+    }
+}
+
+fn move_payload(title: &str, dest_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "event": WebhookEvent::Move.name(),
         "title": title,
         "output_path": dest_path,
-    });
-    fire(cfg, &payload, WebhookEvent::Move);
+    })
+}
+
+/// Notify that a file was moved to its final destination.
+pub fn send_move(cfg: &Config, title: &str, dest_path: &str) {
+    fire(cfg, &move_payload(title, dest_path), WebhookEvent::Move);
 }
 
 /// Payload for a `rip_complete` webhook notification. String fields are
 /// pre-formatted for display; numeric fields are rounded by [`send_rich`]
 /// before serialization.
 pub struct RipEvent<'a> {
-    /// Event name (e.g. `"rip_complete"`).
+    /// Informational: [`send_rich`] names the event from its [`WebhookEvent`], so the
+    /// payload's `"event"` always matches the hooks it was delivered to.
     pub event: &'a str,
     /// Resolved movie/show title.
     pub title: &'a str,
@@ -58,10 +73,14 @@ pub struct RipEvent<'a> {
 /// Rich payload with full metadata — used for the `rip_complete` (drive-free)
 /// and `mux_complete` (mkv-produced) stages. The caller passes the matching
 /// [`WebhookEvent`] so `fire` filters to the hooks that opted in to that stage;
-/// `ev.event` sets the `"event"` field receivers see.
+/// `event` also sets the `"event"` field receivers see.
 pub fn send_rich(cfg: &Config, event: WebhookEvent, ev: &RipEvent) {
-    let payload = serde_json::json!({
-        "event": ev.event,
+    fire(cfg, &rich_payload(event, ev), event);
+}
+
+fn rich_payload(event: WebhookEvent, ev: &RipEvent) -> serde_json::Value {
+    serde_json::json!({
+        "event": event.name(),
         "title": ev.title,
         "year": ev.year,
         "format": ev.format,
@@ -75,8 +94,7 @@ pub fn send_rich(cfg: &Config, event: WebhookEvent, ev: &RipEvent) {
         "errors": ev.errors,
         "lost_video_secs": (ev.lost_video_secs * crate::server::util::MILLIS_PER_SEC).round()
             / crate::server::util::MILLIS_PER_SEC,
-    });
-    fire(cfg, &payload, event);
+    })
 }
 
 // Return only the `scheme://host[:port]` portion of `url`, dropping any userinfo, path, query,
@@ -492,51 +510,147 @@ mod tests {
         assert_eq!(webhook_url_origin(url), "https://example.com");
     }
 
-    /// Verify that the error summary produced for a Status error contains
-    /// neither the full URL nor any embedded token — only the HTTP status code.
-    #[test]
-    fn fire_error_summary_status_no_url_leak() {
-        // Simulate the Err(e) arm's output for a Status error. Can't call
-        // fire() directly (needs a Config + spawns + real HTTP), so this
-        // replicates the summary logic inline, pinning the logged shape.
-        let url = "https://discord.com/api/webhooks/123456/SECRET_TOKEN";
-        // We can't construct a `ureq::Error::Status` without a live connection, so
-        // we test the origin-stripping half (already well-tested above) and the
-        // summary format string that fire() would produce.
-        let origin = webhook_url_origin(url);
-        // The log line produced by fire() is: "Webhook failed {origin}: {summary}"
-        // — neither contains the token path.
-        let log_line = format!("Webhook failed {origin}: HTTP 403");
-        assert!(
-            !log_line.contains("SECRET_TOKEN"),
-            "token leaked into log: {log_line}"
-        );
-        assert!(
-            !log_line.contains("/api/webhooks/"),
-            "path leaked into log: {log_line}"
-        );
-        assert!(log_line.contains("HTTP 403"));
-        assert!(log_line.contains("https://discord.com"));
+    /// Run `deliver` against `url` and return the system-log lines it wrote that mention `mark`.
+    fn deliver_log(url: &str, mark: &str) -> Vec<String> {
+        let _guard = crate::server::log::env_guard();
+        let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-scratch")
+            .join(format!("webhook-log-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("logs")).unwrap();
+        // SAFETY: serialized by the guard above.
+        unsafe {
+            std::env::set_var("AUTORIP_DIR", &d);
+        }
+        let _ = super::deliver(url, r#"{"event":"x"}"#);
+        let lines = crate::server::log::get_device_log("system", 500);
+        let _ = std::fs::remove_dir_all(&d);
+        lines.into_iter().filter(|l| l.contains(mark)).collect()
     }
 
-    /// Same shape test for the Transport arm.
+    /// The failure lines `deliver` logs carry the origin and status, never the secret path.
     #[test]
-    fn fire_error_summary_transport_no_url_leak() {
-        let url = "https://hooks.example.com?token=SUPERSECRET";
-        let origin = webhook_url_origin(url);
-        // Simulate what t.kind().to_string() produces — the actual string is
-        // provider-defined, but it must never contain the URL.
-        let kind_str = "connection failed"; // representative value
-        let log_line = format!("Webhook failed {origin}: {kind_str}");
-        assert!(
-            !log_line.contains("SUPERSECRET"),
-            "token leaked into log: {log_line}"
+    fn deliver_failure_logs_never_leak_the_url_token() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+        let lines = deliver_log(
+            &format!("http://{addr}/hook/STATUS_SECRET_TOKEN"),
+            "Webhook",
+        );
+        let line = lines
+            .iter()
+            .find(|l| l.contains("HTTP 403"))
+            .unwrap_or_else(|| panic!("no 403 line in {lines:?}"));
+        assert!(line.contains(&format!("http://{addr}")));
+        assert!(!lines.iter().any(|l| l.contains("STATUS_SECRET_TOKEN")));
+
+        // Transport failure: nothing listens on the port any more.
+        let dead = {
+            let l = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            l.local_addr().unwrap()
+        };
+        let lines = deliver_log(
+            &format!("http://{dead}/hook?token=TRANSPORT_SECRET"),
+            "Webhook failed",
         );
         assert!(
-            !log_line.contains("token="),
-            "query param leaked: {log_line}"
+            lines.iter().any(|l| l.contains(&format!("http://{dead}"))),
+            "{lines:?}"
         );
-        assert!(log_line.contains("hooks.example.com"));
+        assert!(!lines.iter().any(|l| l.contains("TRANSPORT_SECRET")));
+    }
+
+    /// Every field of the rich payload, with its rounding; the event name follows the stage.
+    #[test]
+    fn rich_payload_carries_every_field_and_names_the_stage() {
+        let ev = RipEvent {
+            event: "rip_complete",
+            title: "Some Movie",
+            year: 2024,
+            format: "UHD",
+            poster_url: "https://img/p.jpg",
+            duration: "2h 14m",
+            codecs: "HEVC",
+            size_gb: 33.333,
+            speed_mbs: 12.345,
+            elapsed_secs: 1800.6,
+            output_path: "/out/Some Movie.mkv",
+            errors: 7,
+            lost_video_secs: 1.23456,
+        };
+        let v = rich_payload(WebhookEvent::Mux, &ev);
+        assert_eq!(
+            v["event"], "mux_complete",
+            "the stage, not the caller's string"
+        );
+        assert_eq!(v["title"], "Some Movie");
+        assert_eq!(v["year"], 2024);
+        assert_eq!(v["format"], "UHD");
+        assert_eq!(v["poster_url"], "https://img/p.jpg");
+        assert_eq!(v["duration"], "2h 14m");
+        assert_eq!(v["codecs"], "HEVC");
+        assert_eq!(v["output_path"], "/out/Some Movie.mkv");
+        assert_eq!(v["errors"], 7);
+        assert_eq!(v["lost_video_secs"], 1.235, "rounded to milliseconds");
+        assert_eq!(
+            rich_payload(WebhookEvent::Rip, &ev)["event"],
+            "rip_complete"
+        );
+    }
+
+    /// `send_move` reaches hooks opted in to the move stage (and only those), with the
+    /// `move_complete` payload.
+    #[test]
+    fn send_move_delivers_to_move_hooks() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut byte = [0u8; 1];
+            while !buf.ends_with(b"\r\n\r\n") {
+                match sock.read(&mut byte) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => buf.push(byte[0]),
+                }
+            }
+            let head = String::from_utf8_lossy(&buf).to_lowercase();
+            let len: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length: "))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            let mut body = vec![0u8; len];
+            let _ = sock.read_exact(&mut body);
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            let _ = tx.send(String::from_utf8_lossy(&body).to_string());
+        });
+        let cfg = Config {
+            webhook_urls: vec![WebhookEntry {
+                url: format!("http://{addr}/hook"),
+                post_rip: false,
+                post_mux: false,
+                post_move: true,
+            }],
+            ..Default::default()
+        };
+        super::send_move(&cfg, "Some Movie", "/lib/Some Movie.mkv");
+        let body = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("send_move never reached the move-only hook");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["event"], "move_complete");
+        assert_eq!(v["title"], "Some Movie");
+        assert_eq!(v["output_path"], "/lib/Some Movie.mkv");
     }
 
     // Tests above use long hostnames, under which a past `scheme_end + 3`

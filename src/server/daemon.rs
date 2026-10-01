@@ -25,7 +25,7 @@ pub fn run(argv: Vec<String>) {
             println!(
                 "freemkv server {} — automated optical-disc rip service\n\n\
                  Usage:\n  \
-                   freemkv server                  Run the daemon (bare — config under ~/.config/autorip)\n  \
+                   freemkv server                  Run the daemon (bare — config under $AUTORIP_DIR, else /config, else ./config beside the binary)\n  \
                    freemkv server serve            Same as no-arg: run the daemon without container bootstrap\n  \
                    freemkv server --bootstrap      Initialize container env (NFS mount), then run the daemon\n  \
                    freemkv server --healthcheck    Probe http://127.0.0.1:$PORT/api/state (exit 0/1)\n  \
@@ -132,7 +132,7 @@ pub fn run(argv: Vec<String>) {
     // The local KEYDB only matters for the `local` key source. In `online`
     // mode keys come from the key service and a local keydb would only shadow
     // it (libfreemkv default-search), so skip the download entirely.
-    let online_keys = cfg.read().unwrap_or_else(|e| e.into_inner()).key_source == "online";
+    let online_keys = keysource::uses_online(&cfg.read().unwrap_or_else(|e| e.into_inner()));
 
     // Ensure KEYDB exists — download on first boot if URL is configured
     if online_keys {
@@ -225,7 +225,7 @@ pub fn run(argv: Vec<String>) {
                 // fresh (and refreshing one would only shadow the service).
                 let (online, url) = {
                     let c = cfg2.read().unwrap_or_else(|e| e.into_inner());
-                    (c.key_source == "online", c.keydb_url.clone())
+                    (keysource::uses_online(&c), c.keydb_url.clone())
                 };
                 if online || url.is_empty() {
                     continue;
@@ -277,25 +277,15 @@ pub fn run(argv: Vec<String>) {
         move || {
             tracing::info!("log prune thread starting (24h interval)");
             'outer: loop {
-                // Wait first; on a fresh container the logs dir has only
-                // a few minutes of data and pruning is a no-op anyway.
+                // Prune first, then wait: a daemon restarted more often than daily
+                // would otherwise never reach a tick.
+                log_prune_tick(&cfg);
                 for _ in 0..(24 * 3600) {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     if SHUTDOWN.load(Ordering::Relaxed) {
                         break 'outer;
                     }
                 }
-                let (log_dir, retention_days) = {
-                    let c = cfg.read().unwrap_or_else(|e| e.into_inner());
-                    (c.log_dir(), c.log_retention_days)
-                };
-                // Re-check the live system log too — the mtime-based prune
-                // above can't reclaim a file still being written.
-                log::rotate_system_log_if_large();
-                if log_dir.is_empty() {
-                    continue;
-                }
-                prune_old_logs(&log_dir, retention_days);
             }
             tracing::info!("log prune thread stopping");
         }
@@ -361,16 +351,20 @@ extern "C" fn handle_signal(_sig: libc::c_int) {
     SHUTDOWN.store(true, Ordering::Release);
 }
 
+// The port the server binds for this `PORT` value (same rule as `config::load`), so the probe
+// hits the port the daemon actually listens on.
+fn healthcheck_port(raw: Option<&str>) -> u16 {
+    raw.and_then(crate::server::config::parse_port_env)
+        .unwrap_or_else(crate::server::config::default_port)
+}
+
 // Probe the local HTTP API and exit 0 (healthy) or 1 (unhealthy).
 fn run_healthcheck() -> i32 {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
 
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8080);
+    let port = healthcheck_port(std::env::var("PORT").ok().as_deref());
     let addr: SocketAddr = match format!("127.0.0.1:{port}").parse() {
         Ok(a) => a,
         Err(_) => return 1,
@@ -414,9 +408,6 @@ fn run_healthcheck() -> i32 {
 // scripts). Linux-only; container-init concerns.
 #[cfg(unix)]
 fn run_bootstrap() {
-    use std::io::Write;
-    use std::os::unix::fs::symlink;
-
     let autorip_dir = std::env::var("AUTORIP_DIR").unwrap_or_else(|_| "/config".to_string());
     // RIP_USER is interpolated raw into /etc/passwd, /etc/group and the KEYDB
     // symlink path; a newline or colon could corrupt the account database.
@@ -463,37 +454,18 @@ fn run_bootstrap() {
     {
         eprintln!("bootstrap: mkdir {}: {e}", parent.display());
     }
-    let _ = std::fs::remove_file(&freemkv_cfg);
-    let _ = std::fs::remove_dir_all(&freemkv_cfg);
-    if let Err(e) = symlink(format!("{autorip_dir}/freemkv"), &freemkv_cfg) {
+    if let Err(e) = link_keydb_dir(
+        std::path::Path::new(&format!("{autorip_dir}/freemkv")),
+        std::path::Path::new(&freemkv_cfg),
+    ) {
         eprintln!("bootstrap: symlink {freemkv_cfg}: {e}");
     }
 
     // Snapshot env for the udev-triggered rip-on-insert path. udev-trigger.sh
     // sources this file, so a raw newline in a value (e.g. a bad TMDB_API_KEY)
     // could inject a line. Single-quote each value, escaping embedded quotes.
-    if let Ok(mut f) = std::fs::File::create("/etc/autorip.env") {
-        for (k, v) in std::env::vars() {
-            if matches!(
-                k.as_str(),
-                "TMDB_API_KEY"
-                    | "STAGING_DIR"
-                    | "OUTPUT_DIR"
-                    | "MOVIE_DIR"
-                    | "TV_DIR"
-                    | "MIN_LENGTH"
-                    | "MAIN_FEATURE"
-                    | "AUTO_EJECT"
-                    | "ON_INSERT"
-                    | "ABORT_ON_ERROR"
-                    | "AUTORIP_DIR"
-                    | "PORT"
-                    | "KEYDB_PATH"
-                    | "AUTORIP_LOG_LEVEL"
-            ) {
-                let _ = writeln!(f, "{k}={}", shell_single_quote(&v));
-            }
-        }
+    if let Err(e) = write_env_snapshot(std::path::Path::new("/etc/autorip.env"), std::env::vars()) {
+        eprintln!("bootstrap: write /etc/autorip.env: {e}");
     }
 
     // udev rule (the kernel's udev daemon runs on the host; container
@@ -554,6 +526,60 @@ fn run_bootstrap() {
             eprintln!("bootstrap: {mountpoint} already mounted, skipping");
         }
     }
+}
+
+// Point `link` at `target`, replacing a stale symlink or file. A real directory at `link`
+// (e.g. a legacy keydb volume) is never deleted: an empty one is replaced, a populated one is
+// left alone and reported.
+#[cfg(unix)]
+fn link_keydb_dir(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(link) {
+        if meta.is_dir() {
+            std::fs::remove_dir(link)?;
+        } else {
+            std::fs::remove_file(link)?;
+        }
+    }
+    std::os::unix::fs::symlink(target, link)
+}
+
+// Write the udev-trigger env snapshot to `path`, mode 0600 (it carries `TMDB_API_KEY`).
+#[cfg(unix)]
+fn write_env_snapshot(
+    path: &std::path::Path,
+    vars: impl Iterator<Item = (String, String)>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    for (k, v) in vars {
+        if matches!(
+            k.as_str(),
+            "TMDB_API_KEY"
+                | "STAGING_DIR"
+                | "OUTPUT_DIR"
+                | "MOVIE_DIR"
+                | "TV_DIR"
+                | "MIN_LENGTH"
+                | "MAIN_FEATURE"
+                | "AUTO_EJECT"
+                | "ON_INSERT"
+                | "ABORT_ON_ERROR"
+                | "AUTORIP_DIR"
+                | "PORT"
+                | "KEYDB_PATH"
+                | "AUTORIP_LOG_LEVEL"
+        ) {
+            writeln!(f, "{k}={}", shell_single_quote(&v))?;
+        }
+    }
+    // `mode` applies only on creation; tighten a pre-existing 0644 file too.
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
 }
 
 // Wrap a value in single quotes for safe inclusion in a POSIX-shell
@@ -701,6 +727,19 @@ fn is_mountpoint(path: &str) -> bool {
         .any(|mp| normalize_mount_path(mp) == want)
 }
 
+// One log-maintenance pass: the mtime-based prune, then a re-check of the live system log
+// (which that prune can't reclaim while it is still being written).
+fn log_prune_tick(cfg: &std::sync::RwLock<crate::server::config::Config>) {
+    let (log_dir, retention_days) = {
+        let c = cfg.read().unwrap_or_else(|e| e.into_inner());
+        (c.log_dir(), c.log_retention_days)
+    };
+    if !log_dir.is_empty() {
+        prune_old_logs(&log_dir, retention_days);
+    }
+    log::rotate_system_log_if_large();
+}
+
 // Delete `.log` files under `log_dir` older than `retention_days`. Replaces
 // the v0.25.5 cron-based cleanup (no cron daemon needed). Single-shot; the
 // caller drives the daily cadence.
@@ -790,24 +829,34 @@ fn prune_dir_recursive(
 mod tests {
     use super::*;
 
-    // FIX: on a long-uptime daemon the system log only shrank at boot, so it
-    // grew unbounded between restarts. Pins that the log-prune tick (24h,
-    // same thread as `prune_old_logs`) also re-checks the rotation size.
+    // On a long-uptime daemon the system log only shrank at boot; the prune tick must
+    // also rotate an oversized one.
     #[test]
-    fn log_prune_thread_rechecks_system_log_rotation() {
-        let src = crate::server::util::source_lf(include_str!("daemon.rs"));
-        let start = src
-            .find("Log prune thread")
-            .expect("daemon.rs should have the log prune thread");
-        let end = src[start..]
-            .find("Main loop: poll drives")
-            .map(|i| start + i)
-            .expect("daemon.rs should have the main poll loop after the prune thread");
+    fn log_prune_tick_rotates_an_oversized_system_log() {
+        let _guard = crate::server::log::env_guard();
+        let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-scratch")
+            .join(format!("daemon-tick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("logs")).unwrap();
+        // SAFETY: serialized by the guard above.
+        unsafe {
+            std::env::set_var("AUTORIP_DIR", &d);
+        }
+        let live = d.join("logs/device_system.log");
+        std::fs::write(&live, vec![b'x'; 6 * 1024 * 1024]).unwrap();
+        let cfg = std::sync::RwLock::new(crate::server::config::Config {
+            autorip_dir: d.to_string_lossy().into_owned(),
+            ..Default::default()
+        });
+        log_prune_tick(&cfg);
+        let left = std::fs::metadata(&live).map(|m| m.len()).unwrap_or(0);
         assert!(
-            src[start..end].contains("rotate_system_log_if_large()"),
-            "the log-prune tick must re-check the system log's rotation size, \
-             not only at startup"
+            left < 1024 * 1024,
+            "oversized system log must be rotated out"
         );
+        assert!(d.join("logs/rips").is_dir());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     // Log retention has to see ROLLED files: `tracing-appender`'s daily
@@ -839,6 +888,73 @@ mod tests {
             "/l/autorip.jsonl.2026-05-01"
         )));
         assert!(!is_prunable_log_name(Path::new("/l/notes.txt")));
+    }
+
+    #[test]
+    fn healthcheck_probes_the_port_the_server_binds() {
+        assert_eq!(healthcheck_port(None), 8080);
+        assert_eq!(healthcheck_port(Some("9000")), 9000);
+        assert_eq!(healthcheck_port(Some(" 9000 ")), 9000);
+        assert_eq!(healthcheck_port(Some("0")), 8080);
+        assert_eq!(healthcheck_port(Some("")), 8080);
+        assert_eq!(healthcheck_port(Some("junk")), 8080);
+    }
+
+    #[cfg(unix)]
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-scratch")
+            .join(format!("daemon-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_snapshot_is_private_and_failures_surface() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("env");
+        let f = d.join("autorip.env");
+        std::fs::write(&f, "old").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let vars = vec![
+            ("TMDB_API_KEY".to_string(), "k'ey".to_string()),
+            ("HOME".to_string(), "/nope".to_string()),
+        ];
+        write_env_snapshot(&f, vars.into_iter()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "TMDB_API_KEY='k'\\''ey'\n"
+        );
+        assert!(write_env_snapshot(&d.join("missing/x.env"), std::iter::empty()).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keydb_link_never_deletes_a_populated_directory() {
+        let d = scratch("link");
+        let target = d.join("cfg/freemkv");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = d.join("home/.config/freemkv");
+        std::fs::create_dir_all(&link).unwrap();
+        std::fs::write(link.join("keydb.cfg"), "keys").unwrap();
+        assert!(link_keydb_dir(&target, &link).is_err());
+        assert_eq!(
+            std::fs::read_to_string(link.join("keydb.cfg")).unwrap(),
+            "keys"
+        );
+        // Empty dir and stale symlink are replaced.
+        std::fs::remove_file(link.join("keydb.cfg")).unwrap();
+        link_keydb_dir(&target, &link).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        link_keydb_dir(&target, &link).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -18,10 +18,14 @@ static LOGS: once_cell::sync::Lazy<Mutex<HashMap<String, Ring>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 static NEXT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn log_dir() -> String {
-    // Same resolution as config: AUTORIP_DIR, else writable /config (Docker),
-    // else ~/.config/autorip (bare run) — so logs land somewhere writable
-    // without a container mount.
+// Serializes the ring push + file append of `device_log` against the file rename + ring
+// removal of `archive_device_log`, so a line never lands half in the old session and half in
+// the new one. Taken before `LOGS`.
+static FILE_IO: Mutex<()> = Mutex::new(());
+
+// The autorip base dir (logs live under `<base>/logs`). Same resolution as config, so logs
+// land somewhere writable without a container mount.
+fn autorip_dir() -> String {
     crate::server::config::default_autorip_dir()
 }
 
@@ -42,7 +46,11 @@ fn sanitize_device(device: &str) -> String {
 }
 
 fn device_log_path(device: &str) -> String {
-    format!("{}/logs/device_{}.log", log_dir(), sanitize_device(device))
+    format!(
+        "{}/logs/device_{}.log",
+        autorip_dir(),
+        sanitize_device(device)
+    )
 }
 
 // Strip terminal control/escape bytes from log content, so a crafted disc
@@ -69,6 +77,8 @@ pub fn device_log(device: &str, msg: &str) {
     let msg = msg.as_str();
     let ts = crate::server::util::format_iso_datetime();
     let line = format!("[{}] {}", ts, msg);
+
+    let _io = FILE_IO.lock().unwrap_or_else(|e| e.into_inner());
 
     // In-memory ring (last RING_CAP lines/device, O(1) VecDeque eviction).
     // `new_session` = first line since the ring was empty; the file gets a
@@ -112,6 +122,8 @@ pub fn device_log(device: &str, msg: &str) {
         }
     }
 
+    drop(_io);
+
     // Structured event into the central log stream. `device` enables
     // `jq 'select(.fields.device == "sg4")'`; `build` stamps the binary on
     // every event so the central log is self-identifying across redeploys.
@@ -141,6 +153,19 @@ pub fn get_device_log_since(device: &str, since: u64) -> (u64, Vec<(u64, String)
     (newest, lines)
 }
 
+// `{rips_dir}/{device}_{ts}.log`, or the first free `…_{ts}_{n}.log` when that name is taken
+// (two archives in one second), so a rename never replaces an earlier archive.
+fn unique_archive_path(rips_dir: &str, device: &str, ts: &str) -> String {
+    let first = format!("{rips_dir}/{device}_{ts}.log");
+    if !std::path::Path::new(&first).exists() {
+        return first;
+    }
+    (2u32..)
+        .map(|n| format!("{rips_dir}/{device}_{ts}_{n}.log"))
+        .find(|p| !std::path::Path::new(p).exists())
+        .expect("an unbounded counter finds a free name")
+}
+
 /// Move the device's current live log to `logs/rips/{device}_{iso_ts}.log`
 /// and clear the in-memory buffer. Called at the start of a new scan and on
 /// eject so each rip attempt gets its own self-contained archive — no more
@@ -149,6 +174,7 @@ pub fn get_device_log_since(device: &str, since: u64) -> (u64, Vec<(u64, String)
 /// No-op if the current log is empty or missing. Archive failures are
 /// logged to stderr but never propagated — logging must never break a rip.
 pub fn archive_device_log(device: &str) {
+    let _io = FILE_IO.lock().unwrap_or_else(|e| e.into_inner());
     let current = device_log_path(device);
     let should_archive = std::fs::metadata(&current)
         .map(|m| m.len() > 0)
@@ -160,7 +186,7 @@ pub fn archive_device_log(device: &str) {
     let mut archived_ok = !should_archive;
 
     if should_archive {
-        let rips_dir = format!("{}/logs/rips", log_dir());
+        let rips_dir = format!("{}/logs/rips", autorip_dir());
         if let Err(e) = std::fs::create_dir_all(&rips_dir) {
             tracing::warn!(
                 device = %device,
@@ -169,11 +195,10 @@ pub fn archive_device_log(device: &str) {
                 "log archive: cannot create rips dir"
             );
         } else {
-            let archive = format!(
-                "{}/{}_{}.log",
-                rips_dir,
-                sanitize_device(device),
-                crate::server::util::format_iso_datetime_filename(),
+            let archive = unique_archive_path(
+                &rips_dir,
+                &sanitize_device(device),
+                &crate::server::util::format_iso_datetime_filename(),
             );
             match std::fs::rename(&current, &archive) {
                 Ok(()) => archived_ok = true,
@@ -386,6 +411,57 @@ mod tests {
 
         let content = std::fs::read_to_string(archived[0].path()).unwrap();
         assert!(content.contains("pre-archive"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn archive_name_never_replaces_an_earlier_archive() {
+        let d = tmpdir("archive_unique");
+        let rips = d.to_string_lossy().into_owned();
+        let first = unique_archive_path(&rips, "sg4", "T");
+        assert!(first.ends_with("/sg4_T.log"));
+        std::fs::write(&first, b"a").unwrap();
+        let second = unique_archive_path(&rips, "sg4", "T");
+        assert_ne!(second, first);
+        std::fs::write(&second, b"b").unwrap();
+        let third = unique_archive_path(&rips, "sg4", "T");
+        assert!(third != first && third != second);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn archive_device_log_skips_a_zero_byte_log() {
+        let _guard = crate::server::log::env_guard();
+        let d = tmpdir("archive_zero");
+        unsafe {
+            std::env::set_var("AUTORIP_DIR", &d);
+        }
+        let dev = format!("test_zero_{}", std::process::id());
+        std::fs::write(device_log_path(&dev), b"").unwrap();
+        archive_device_log(&dev);
+        let rips_dir = d.join("logs").join("rips");
+        let archived = std::fs::read_dir(&rips_dir)
+            .map(|r| r.filter_map(|e| e.ok()).count())
+            .unwrap_or(0);
+        assert_eq!(archived, 0, "an empty log is not archived");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn device_log_cleans_control_bytes_from_every_sink() {
+        let _guard = crate::server::log::env_guard();
+        let d = tmpdir("ctl_sinks");
+        unsafe {
+            std::env::set_var("AUTORIP_DIR", &d);
+        }
+        let dev = format!("test_ctl_{}", std::process::id());
+        device_log(&dev, "label \u{1b}[2J evil");
+        let file = std::fs::read_to_string(device_log_path(&dev)).unwrap();
+        let ring = get_device_log(&dev, 10).join("\n");
+        for (sink, text) in [("file", file), ("ring", ring)] {
+            assert!(!text.contains('\u{1b}'), "{sink} kept the escape: {text:?}");
+            assert!(text.contains("label ?[2J evil"), "{sink}: {text:?}");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

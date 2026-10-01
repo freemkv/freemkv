@@ -70,6 +70,13 @@ pub fn folders(cfg: &Config) -> Vec<(&'static str, PathBuf, bool)> {
     out
 }
 
+// Blocks to bytes; a filesystem that reports an "unlimited" count saturates instead of wrapping
+// (or panicking an overflow-checked build inside the check thread).
+#[cfg(unix)]
+fn scaled(blocks: u64, frag: u64) -> u64 {
+    blocks.saturating_mul(frag)
+}
+
 fn statvfs(p: &Path) -> Option<(u64, u64)> {
     #[cfg(unix)]
     {
@@ -81,7 +88,10 @@ fn statvfs(p: &Path) -> Option<(u64, u64)> {
             return None;
         }
         let frag = s.f_frsize as u64;
-        Some((s.f_bavail as u64 * frag, s.f_blocks as u64 * frag))
+        Some((
+            scaled(s.f_bavail as u64, frag),
+            scaled(s.f_blocks as u64, frag),
+        ))
     }
     #[cfg(not(unix))]
     {
@@ -209,12 +219,31 @@ pub fn folder_ok(path: &Path) -> Option<bool> {
         .map(|m| m.ok)
 }
 
+// Run `check` for every folder at once, so folders on one dead mount cost one timeout between
+// them, not one each. Results keep the input order.
+fn check_each<F>(folders: Vec<(&'static str, PathBuf, bool)>, check: F) -> Vec<Mount>
+where
+    F: Fn(&'static str, PathBuf, bool) -> Mount + Sync,
+{
+    std::thread::scope(|scope| {
+        let running: Vec<_> = folders
+            .into_iter()
+            .map(|(role, path, w)| {
+                let check = &check;
+                let again = path.clone();
+                (role, again, scope.spawn(move || check(role, path, w)))
+            })
+            .collect();
+        running
+            .into_iter()
+            .map(|(role, path, h)| h.join().unwrap_or_else(|_| not_responding(role, &path)))
+            .collect()
+    })
+}
+
 /// Check every folder once and publish the result.
 pub fn refresh(cfg: &Config) {
-    let results: Vec<Mount> = folders(cfg)
-        .into_iter()
-        .map(|(role, path, w)| check_bounded(role, path, w))
-        .collect();
+    let results = check_each(folders(cfg), check_bounded);
     *LAST.lock().unwrap_or_else(|e| e.into_inner()) = results;
 }
 
@@ -256,6 +285,28 @@ mod tests {
         assert_eq!(gone.problem.as_deref(), Some("missing"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_folder_is_reported_not_writable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let t = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(t.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let m = check("Output", t.path(), true);
+        let ro = std::fs::set_permissions(t.path(), std::fs::Permissions::from_mode(0o755));
+        ro.unwrap();
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root passes access(W_OK) on a 0555 dir
+        }
+        assert!(!m.ok, "{m:?}");
+        assert_eq!(m.writable, Some(false));
+        assert_eq!(m.problem.as_deref(), Some("not writable"));
+        // A folder only read from is fine.
+        std::fs::set_permissions(t.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let r = check("Source ISOs", t.path(), false);
+        std::fs::set_permissions(t.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(r.ok, "{r:?}");
+    }
+
     #[test]
     fn a_stuck_check_is_never_doubled() {
         let t = tempfile::tempdir().unwrap();
@@ -277,6 +328,36 @@ mod tests {
         let fine = check_bounded("Library", t.path().to_path_buf(), false);
         assert!(fine.ok);
         assert!(!IN_FLIGHT.lock().unwrap().contains(&t.path().to_path_buf()));
+    }
+
+    #[test]
+    fn folders_are_checked_concurrently_in_order() {
+        let folders: Vec<_> = (0..5)
+            .map(|i| ("Output", PathBuf::from(format!("/dead/{i}")), false))
+            .collect();
+        let started = Instant::now();
+        let out = check_each(folders, |role, path, _| {
+            std::thread::sleep(Duration::from_millis(300));
+            Mount {
+                ok: true,
+                ..not_responding(role, &path)
+            }
+        });
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "5 x 300ms checks ran one after another: {:?}",
+            started.elapsed()
+        );
+        let paths: Vec<_> = out.iter().map(|m| m.path.clone()).collect();
+        assert_eq!(paths[0], Path::new("/dead/0"));
+        assert_eq!(paths[4], Path::new("/dead/4"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unlimited_block_count_saturates() {
+        assert_eq!(scaled(u64::MAX, 4096), u64::MAX);
+        assert_eq!(scaled(10, 4096), 40_960);
     }
 
     #[test]

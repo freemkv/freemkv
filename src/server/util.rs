@@ -39,15 +39,22 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-/// Format epoch seconds as YYYY-MM-DD.
+/// Format the current UTC date as YYYY-MM-DD.
 pub fn format_date() -> String {
-    let (y, m, d) = civil_from_days((epoch_secs() / 86400) as i64);
+    date_at(epoch_secs())
+}
+
+fn date_at(secs: u64) -> String {
+    let (y, m, d) = civil_from_days((secs / 86400) as i64);
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
 /// Format current UTC time as ISO-8601 (YYYY-MM-DDTHH:MM:SSZ).
 pub fn format_iso_datetime() -> String {
-    let secs = epoch_secs();
+    iso_datetime_at(epoch_secs())
+}
+
+fn iso_datetime_at(secs: u64) -> String {
     let (y, mo, d) = civil_from_days((secs / 86400) as i64);
     let day = (secs % 86400) as u32;
     let h = day / 3600;
@@ -68,9 +75,15 @@ pub fn format_iso_datetime_filename() -> String {
 // filesystem-trivial, non-traversing segment callers always receive.
 const SAFE_FALLBACK: &str = "untitled";
 
+// Longest path segment the sanitizers return. Filesystems cap a name at 255 bytes; the
+// callers append `_N`, `.iso`/`.mkv` and marker suffixes, so a disc-supplied 300-character
+// title must not reach the limit. Sanitized segments are ASCII, so chars are bytes.
+const MAX_SEGMENT_LEN: usize = 200;
+
 fn ensure_safe_segment(s: String) -> String {
     // Strip leading dots (hidden-file / "." / ".." defense).
     let stripped = s.trim_start_matches('.');
+    let stripped = &stripped[..stripped.len().min(MAX_SEGMENT_LEN)];
     // Reject empty or all-dots results (e.g. "", ".", "..", "...").
     if stripped.is_empty() || stripped.chars().all(|c| c == '.') {
         return SAFE_FALLBACK.to_string();
@@ -219,6 +232,48 @@ mod tests {
         let s = format_iso_datetime_filename();
         assert!(!s.contains(':'));
         assert!(s.ends_with('Z'));
+    }
+
+    #[test]
+    fn timestamps_format_a_known_instant() {
+        // 2024-03-01T13:45:09Z
+        let secs = 19783 * 86400 + 13 * 3600 + 45 * 60 + 9;
+        assert_eq!(iso_datetime_at(secs), "2024-03-01T13:45:09Z");
+        assert_eq!(date_at(secs), "2024-03-01");
+        assert_eq!(iso_datetime_at(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso_datetime_at(86399), "1970-01-01T23:59:59Z");
+        assert_eq!(iso_datetime_at(86400), "1970-01-02T00:00:00Z");
+    }
+
+    #[test]
+    fn disc_variant_takes_the_first_free_number_and_caps() {
+        assert_eq!(disc_variant(|_| true), Some(1));
+        assert_eq!(disc_variant(|n| n >= 3), Some(3));
+        assert_eq!(
+            disc_variant(|n| n == MAX_DISC_VARIANTS),
+            Some(MAX_DISC_VARIANTS)
+        );
+        assert_eq!(disc_variant(|_| false), None);
+        let mut asked = 0;
+        let _ = disc_variant(|_| {
+            asked += 1;
+            false
+        });
+        assert_eq!(asked, MAX_DISC_VARIANTS);
+    }
+
+    #[test]
+    fn disc_variant_name_keeps_the_bare_title_for_the_first_disc() {
+        assert_eq!(disc_variant_name("Title", 1), "Title");
+        assert_eq!(disc_variant_name("Title", 2), "Title_2");
+        assert_eq!(disc_variant_name("Title", 64), "Title_64");
+    }
+
+    #[test]
+    fn overlong_titles_are_capped_to_a_creatable_segment() {
+        let long = "a".repeat(300);
+        assert_eq!(sanitize_path_compact(&long).len(), MAX_SEGMENT_LEN);
+        assert_eq!(sanitize_path_display(&long).len(), MAX_SEGMENT_LEN);
     }
 
     #[test]
