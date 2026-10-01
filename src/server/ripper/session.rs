@@ -45,7 +45,7 @@ pub enum RegisterError {
 /// handle back so it can be reaped instead of leaked.
 ///
 /// Called (via [`spawn_rip_thread`]) from the poll-loop and web spawn
-/// sites, and from `tests/halt_drain.rs`.
+/// sites, and from `tests/server/halt_drain.rs`.
 pub fn register_rip_thread(device: &str, handle: JoinHandle<()>) -> Result<(), RegisterError> {
     // Recover from poison instead of dropping the handle: a dropped
     // JoinHandle can never be reaped, breaking drain-before-wipe (v0.13.6

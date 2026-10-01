@@ -26,6 +26,40 @@ use super::state::{RipState, update_state};
 /// to retry or quarantine via `.failed`.
 pub const HARD_WATCHDOG_STALL_SECS: u64 = 1200;
 
+/// Soft-stall threshold: past this the tile shows "stalled" and the device log notes it.
+const SOFT_WATCHDOG_STALL_SECS: u64 = 30;
+
+// The watchdog's stall clock: seconds since the last observed activity (a new frame stamp
+// or more bytes), on the monotonic clock, so a wall-clock step is never read as a stall.
+struct StallClock {
+    stamp: u64,
+    bytes: u64,
+    since: std::time::Instant,
+}
+
+impl StallClock {
+    fn new(stamp: u64, bytes: u64, now: std::time::Instant) -> Self {
+        StallClock {
+            stamp,
+            bytes,
+            since: now,
+        }
+    }
+
+    fn observe(&mut self, stamp: u64, bytes: u64, now: std::time::Instant) -> u64 {
+        if stamp != self.stamp || bytes != self.bytes {
+            *self = StallClock::new(stamp, bytes, now);
+        }
+        now.saturating_duration_since(self.since).as_secs()
+    }
+}
+
+// Whether the watchdog may mark the tile stalled: never over a terminal status (a Stop's
+// "idle", or a finished rip), which wins over a late watchdog tick.
+fn watchdog_may_mark_stalled(status: &str) -> bool {
+    !matches!(status, "idle" | "done" | "complete" | "failed" | "error")
+}
+
 /// Deadline for the hard watchdog's pre-exit `.restart_count` bump.
 pub const WATCHDOG_BUMP_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -50,7 +84,11 @@ pub fn watchdog_bump_restart_count(device: &str, staging_disc_dir: &std::path::P
         "autorip-watchdog-counter-bump",
         WATCHDOG_BUMP_DEADLINE,
         move || {
-            let _ = crate::server::ripper::staging::increment_restart_count(&bump_dir);
+            if let Err(e) = crate::server::ripper::staging::increment_restart_count(&bump_dir) {
+                // Unpersisted, RESTART_LIMIT can't engage for this dir: say so before exit.
+                eprintln!("watchdog: .restart_count bump failed for {bump_dir:?}: {e}");
+                tracing::error!(target: "mux", staging = %bump_dir.display(), error = %e, "watchdog: restart-count bump failed");
+            }
         },
     );
     if !done {
@@ -186,7 +224,7 @@ pub(crate) struct MuxOutcome {
     /// the output is open leave a partial MKV in staging and a
     /// "stopped" history record describing it.
     pub(crate) output_opened: bool,
-    /// Set when `MuxSink::close()` failed to finalise the MKV (most
+    /// Set when the output's finish failed to finalise the MKV (most
     /// commonly: the Cues seek-back at EBML close raised an I/O error,
     /// leaving an unseekable / structurally-invalid output). Carries
     /// the formatted error so the orchestrator can put it in the
@@ -206,7 +244,7 @@ pub(crate) struct MuxOutcome {
 }
 
 /// Per-frame UI state that the consumer needs to fill in the
-/// `update_state` payload. Cloned once into the `MuxSink` and reused
+/// `update_state` payload. Built once per mux and reused
 /// every frame — none of these fields change during mux.
 struct UiState {
     device: String,
@@ -221,7 +259,6 @@ struct UiState {
     filename: String,
     batch: u16,
     total_bytes: u64,
-    title_bytes_per_sec: f64,
     total_passes: u8,
     /// Disc capacity, used by `total_pct_byte_weight` to size the
     /// total-progress denominator.
@@ -259,16 +296,10 @@ struct SharedAtomics {
     /// inside `apply` to surface the skip-event count. Atomic so we don't
     /// need to put the input stream behind a mutex.
     input_errors: Arc<AtomicU32>,
-    /// Snapshot of `input.lost_bytes` after the most recent `read()` —
-    /// the actual bytes zero-filled past read errors. Used (not
-    /// `input_errors`) to compute `lost_video_secs`: an AACS skip event
-    /// covers a whole 6144-byte unit, so `errors * 2048` understates loss
-    /// by the alignment factor. Produced/consumed like `input_errors`.
-    input_lost_bytes: Arc<AtomicU64>,
 }
 
-// Build + push the per-frame mux `update_state` payload; shared by the live `MuxSink` and the
-// image-mux `EngineMuxSink` so both render an identical `RipState`.
+// Build + push the per-frame mux `update_state` payload; shared by the live `AutoripMuxEvents`
+// and the image-mux `EngineMuxSink` so both render an identical `RipState`.
 #[allow(clippy::too_many_arguments)]
 fn push_mux_state(
     ui: &UiState,
@@ -282,7 +313,7 @@ fn push_mux_state(
 ) {
     if crate::server::web::debug_enabled() {
         eprintln!(
-            "[DEBUG] MuxSink::push_state: pct={}, bytes_done={:.2}GB, speed={}MB/s",
+            "[DEBUG] push_mux_state: pct={}, bytes_done={:.2}GB, speed={}MB/s",
             pct,
             bytes_done as f64 / BYTES_PER_GIB,
             speed
@@ -424,14 +455,21 @@ fn spawn_mux_watchdog(
     std::thread::spawn(move || {
         let mut was_stalled = false;
         let mut last_log_secs: u64 = 0;
+        let mut clock = StallClock::new(
+            last_frame.load(Ordering::Relaxed),
+            wbytes.load(Ordering::Relaxed),
+            std::time::Instant::now(),
+        );
         while active.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_secs(15));
             if !active.load(Ordering::Relaxed) {
                 break;
             }
-            let now = crate::server::util::epoch_secs();
-            let last = last_frame.load(Ordering::Relaxed);
-            let stall_secs = now.saturating_sub(last);
+            let stall_secs = clock.observe(
+                last_frame.load(Ordering::Relaxed),
+                wbytes.load(Ordering::Relaxed),
+                std::time::Instant::now(),
+            );
 
             // Hard escalation: the thread is stuck in an un-returning syscall
             // (hung NFS, wedged decrypt, frozen ioctl), so graceful cleanup is
@@ -465,7 +503,7 @@ fn spawn_mux_watchdog(
                 std::process::exit(1);
             }
 
-            if stall_secs >= 30 {
+            if stall_secs >= SOFT_WATCHDOG_STALL_SECS {
                 // Compute bytes/gb/pct/stall_str once and reuse for
                 // both the log line and the UI update — a single
                 // `wbytes` read so the two can't disagree.
@@ -497,12 +535,9 @@ fn spawn_mux_watchdog(
                     );
                 }
                 super::state::update_state_with(&wd_device, |s| {
-                    // Don't clobber terminal state: the 15 s wake tick can fire
-                    // after `handle_stop` set "idle" or a rip finished as
-                    // "done"/"complete"/"failed"/"error" — that status wins.
-                    match s.status.as_str() {
-                        "idle" | "done" | "complete" | "failed" | "error" => return,
-                        _ => {}
+                    // The 15 s wake tick can fire after `handle_stop` or the rip's end.
+                    if !watchdog_may_mark_stalled(&s.status) {
+                        return;
                     }
                     s.device = wd_device.clone();
                     s.status = "ripping".to_string();
@@ -642,7 +677,6 @@ impl EngineMuxSink {
             .store(crate::server::util::epoch_secs(), Ordering::Relaxed);
     }
 
-    // The title's result. None means the engine stopped before starting it: a halt.
     // The title's result, else the loop's `outcome`: a refusal before any title (a key
     // refusal before `TitleStart`) must not read as a Stop.
     fn take_result(
@@ -741,9 +775,9 @@ struct AutoripMuxEvents {
     ui: UiState,
     atomics: SharedAtomics,
     progress: Mutex<freemkv_engine::SpeedEstimator>,
-    /// 1 s `update_state` throttle (was `MuxSink::last_update`).
+    /// 1 s `update_state` throttle.
     last_update: Mutex<Instant>,
-    /// 60 s device-log throttle (was `MuxSink::last_log`).
+    /// 60 s device-log throttle.
     last_log: Mutex<Instant>,
     /// True once `output()` opened. Feeds `output_opened` in the mapping.
     opened: AtomicBool,
@@ -788,7 +822,7 @@ impl AutoripMuxEvents {
     }
 
     fn on_write_progress(&self, bytes_written: u64) {
-        // Writer-side per-frame — mirrors `MuxSink::apply`. Feed the watchdog's
+        // Writer-side per-frame. Feed the watchdog's
         // activity timestamp AND its good-byte counter (both read by
         // `spawn_mux_watchdog`), then push throttled UI state.
         self.atomics
@@ -813,7 +847,7 @@ impl AutoripMuxEvents {
 
         // Progress uses the ISO *read* position (read-ahead) when available,
         // falling back to the *write* position only until the first BytesRead
-        // event fires — identical to `MuxSink::apply`.
+        // event fires.
         let lbr = self.atomics.latest_bytes_read.load(Ordering::Relaxed);
         let bytes_done = if lbr > 0 { lbr } else { bytes_written };
         let pct = if let Some(p) = (bytes_done * 100).checked_div(self.ui.total_bytes) {
@@ -847,15 +881,9 @@ impl AutoripMuxEvents {
         log_mux_tick(&self.ui.device, &self.last_log, now, &tick);
 
         let skip_errors = self.atomics.input_errors.load(Ordering::Relaxed);
-        // Live lost-video-secs from bytes zero-filled so far; the file highway's
-        // `input_lost_bytes` usually stays 0 mid-run, so this only refines the
-        // mid-mux UI — the authoritative total comes from `MuxOutcome.lost_bytes`.
-        let lost_bytes = self.atomics.input_lost_bytes.load(Ordering::Relaxed);
-        let lost_video_secs = if self.ui.title_bytes_per_sec > 0.0 {
-            lost_bytes as f64 / self.ui.title_bytes_per_sec
-        } else {
-            0.0
-        };
+        // The reader events carry no per-unit loss mid-run: the mux-time loss is
+        // `MuxOutcome.lost_bytes` at the end (`map_iso_mux_outcome`).
+        let lost_video_secs = 0.0;
         push_mux_state(
             &self.ui,
             &self.atomics,
@@ -917,7 +945,6 @@ fn ui_state_from_inputs(inputs: &MuxInputs<'_>, total_bytes: u64) -> UiState {
         filename: inputs.filename.clone(),
         batch: inputs.batch,
         total_bytes,
-        title_bytes_per_sec: inputs.title_bytes_per_sec,
         total_passes: inputs.total_passes,
         bytes_total_disc: inputs.bytes_total_disc,
         max_retries: inputs.max_retries,
@@ -1125,8 +1152,8 @@ fn outcome_error(outcome: &freemkv_engine::RipOutcome) -> std::io::Error {
 }
 
 // Run the ISO/multipass (and resume) mux through the engine's `mux_image_titles`; live
-// single-pass sibling is `mux_live`. `Err` only for the two call-site classifications
-// (halt, FMTS deferral); everything else maps into `MuxOutcome`.
+// single-pass sibling is `mux_live`. `Err` only for what the call site classifies itself
+// (a halt, or a key refusal: E7034, FMTS deferral, keyless); the rest maps into `MuxOutcome`.
 pub(crate) fn mux_iso(
     inputs: MuxInputs<'_>,
     src: IsoMuxSource<'_>,
@@ -1179,7 +1206,6 @@ pub(crate) fn mux_iso(
         wd_last_frame: atomics_in.wd_last_frame.clone(),
         wd_bytes: wd_bytes.clone(),
         input_errors: atomics_in.input_errors.clone(),
-        input_lost_bytes: Arc::new(AtomicU64::new(0)),
     };
     let start = Instant::now();
     let sink = EngineMuxSink::new(
@@ -1255,7 +1281,7 @@ pub(crate) fn mux_live(
     }
     let _mux_phase_guard = MuxPhaseGuard(std::time::Instant::now());
 
-    // ── Watchdog (identical spawn to `mux_iso` / `run_mux`) ──────────────────
+    // ── Watchdog (identical spawn to `mux_iso`) ──────────────────────────────
     let wd_active = Arc::new(AtomicBool::new(true));
     let _wd_guard = WatchdogGuard(wd_active.clone());
     let wd_bytes = atomics_in.wd_bytes.clone();
@@ -1289,10 +1315,6 @@ pub(crate) fn mux_live(
         wd_last_frame: atomics_in.wd_last_frame.clone(),
         wd_bytes: wd_bytes.clone(),
         input_errors: atomics_in.input_errors.clone(),
-        // Live loss during the run isn't carried per-unit by the reader events;
-        // the AUTHORITATIVE lost total is taken from `MuxOutcome.lost_bytes` at
-        // the end (see `map_iso_mux_outcome`).
-        input_lost_bytes: Arc::new(AtomicU64::new(0)),
     };
     let start = Instant::now();
     let events = Arc::new(AutoripMuxEvents {
@@ -1360,6 +1382,35 @@ pub(crate) fn mux_live(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The stall clock counts monotonic time since the last activity: a wall-clock step in
+    // the frame stamp is activity (never a stall), and only a frozen stamp + byte count stalls.
+    #[test]
+    fn the_stall_clock_is_monotonic_and_reset_by_activity() {
+        let t0 = std::time::Instant::now();
+        let at = |s: u64| t0 + std::time::Duration::from_secs(s);
+        let mut c = StallClock::new(1_000, 0, t0);
+        assert_eq!(c.observe(1_000, 0, at(15)), 15);
+        // The host clock stepped forward 30 minutes between two frames.
+        assert_eq!(c.observe(1_000 + 1_800, 4096, at(30)), 0);
+        assert_eq!(c.observe(1_000 + 1_800, 4096, at(45)), 15);
+        // Bytes alone are activity too.
+        assert_eq!(c.observe(1_000 + 1_800, 8192, at(60)), 0);
+        assert_eq!(
+            c.observe(1_000 + 1_800, 8192, at(60 + HARD_WATCHDOG_STALL_SECS)),
+            HARD_WATCHDOG_STALL_SECS
+        );
+    }
+
+    // The soft stall shows at 30 s, and never over a terminal tile.
+    #[test]
+    fn the_soft_stall_threshold_and_terminal_statuses() {
+        assert_eq!(SOFT_WATCHDOG_STALL_SECS, 30);
+        for status in ["idle", "done", "complete", "failed", "error"] {
+            assert!(!watchdog_may_mark_stalled(status), "{status}");
+        }
+        assert!(watchdog_may_mark_stalled("ripping"));
+    }
 
     // The hard escalation must bump through the bounded production helper
     // (tests/watchdog.rs covers its timeout) before `exit(1)`, never inline.
@@ -1534,69 +1585,6 @@ mod tests {
         assert_eq!(total_pct_byte_weight(DISC, 5, 1_000_000_000, 200), 100);
     }
 
-    // ── sweep_damage snapshot carry-forward (telemetry audit Fix 1) ── Verify
-    // `SweepDamageSnapshot` fields survive the `UiState` round-trip into
-    // `push_state`'s `RipState`, by replicating its selection logic.
-    #[test]
-    fn sweep_damage_snapshot_non_zero_overrides_default() {
-        // Simulate the logic inside push_state for errors and lost_video_secs.
-        let snapshot_errors: u32 = 42;
-        let snapshot_total_lost_ms: f64 = 3700.0;
-        let live_errors: u32 = 0; // typical during ISO mux — no demux skips
-        let live_lost_secs: f64 = 0.0;
-
-        // Replicate the selection logic from push_state.
-        let final_errors = if snapshot_errors > 0 {
-            snapshot_errors
-        } else {
-            live_errors
-        };
-        let final_lost_secs = if snapshot_total_lost_ms > 0.0 {
-            snapshot_total_lost_ms / MILLIS_PER_SEC
-        } else {
-            live_lost_secs
-        };
-
-        assert_eq!(
-            final_errors, 42,
-            "non-zero sweep snapshot errors must survive into push_state"
-        );
-        assert!(
-            (final_lost_secs - 3.7).abs() < 0.001,
-            "non-zero sweep snapshot total_lost_ms must survive as lost_video_secs"
-        );
-    }
-
-    /// When the sweep was clean (zero errors, zero lost ms), the live mux
-    /// counters should be used — not the zero snapshot values.
-    #[test]
-    fn sweep_damage_snapshot_zero_passes_through_live_counters() {
-        let snapshot_errors: u32 = 0;
-        let snapshot_total_lost_ms: f64 = 0.0;
-        let live_errors: u32 = 5;
-        let live_lost_secs: f64 = 0.25;
-
-        let final_errors = if snapshot_errors > 0 {
-            snapshot_errors
-        } else {
-            live_errors
-        };
-        let final_lost_secs = if snapshot_total_lost_ms > 0.0 {
-            snapshot_total_lost_ms / MILLIS_PER_SEC
-        } else {
-            live_lost_secs
-        };
-
-        assert_eq!(
-            final_errors, 5,
-            "zero-snapshot must fall through to live errors"
-        );
-        assert!(
-            (final_lost_secs - 0.25).abs() < 0.001,
-            "zero-snapshot must fall through to live lost_video_secs"
-        );
-    }
-
     // ── resume progress starts at >0 (telemetry audit Fix 2) ── When
     // max_retries > 0, a resumed rip (mux_pct=0) opens above 0% since the
     // helper credits the already-completed sweep.
@@ -1640,7 +1628,6 @@ mod tests {
             wd_last_frame: wd_last_frame.clone(),
             wd_bytes: wd_bytes.clone(),
             input_errors: Arc::new(AtomicU32::new(0)),
-            input_lost_bytes: Arc::new(AtomicU64::new(0)),
         };
         (atomics, wd_bytes, wd_last_frame, latest_bytes_read)
     }
@@ -1659,7 +1646,6 @@ mod tests {
             filename: String::new(),
             batch: 0,
             total_bytes: 1_000_000,
-            title_bytes_per_sec: 0.0,
             total_passes: 0,
             bytes_total_disc: 0,
             max_retries: 0,
@@ -1691,6 +1677,75 @@ mod tests {
             "a live mux tick must report disc_present=true"
         );
         super::super::STATE.lock().unwrap().remove(device);
+    }
+
+    // `push_mux_state` carries the sweep's damage through the mux (ISO reads add none), and a
+    // clean sweep passes the live counters through.
+    #[test]
+    fn push_mux_state_carries_sweep_damage_else_live_counters() {
+        let device = "push_mux_state_damage_test_device";
+        let (atomics, ..) = test_shared_atomics();
+        let mut ui = test_ui_state();
+        ui.device = device.to_string();
+        ui.bytes_total_disc = 1_000;
+        ui.max_retries = 3;
+        ui.sweep_damage = SweepDamageSnapshot {
+            errors: 42,
+            total_lost_ms: 3_700.0,
+            main_lost_ms: 2_000.0,
+            num_bad_ranges: 2,
+            largest_gap_ms: 900.0,
+            ..Default::default()
+        };
+        push_mux_state(&ui, &atomics, 0, 5.0, String::new(), 0, 0.25, 5);
+        let rs = super::super::STATE.lock().unwrap().remove(device).unwrap();
+        assert_eq!(rs.errors, 42);
+        assert!((rs.lost_video_secs - 3.7).abs() < 1e-9);
+        assert_eq!((rs.total_lost_ms, rs.main_lost_ms), (3_700.0, 2_000.0));
+        assert_eq!((rs.num_bad_ranges, rs.largest_gap_ms), (2, 900.0));
+        assert_eq!(
+            rs.total_progress_pct,
+            total_pct_byte_weight(1_000, 3, 0, 0),
+            "the mux opens at the sweep's credited share"
+        );
+
+        ui.sweep_damage = SweepDamageSnapshot::default();
+        push_mux_state(&ui, &atomics, 0, 5.0, String::new(), 0, 0.25, 5);
+        let rs = super::super::STATE.lock().unwrap().remove(device).unwrap();
+        assert_eq!(rs.errors, 5);
+        assert!((rs.lost_video_secs - 0.25).abs() < 1e-9);
+    }
+
+    // Past the 1 s throttle, a write tick pushes progress from the ISO read-ahead position
+    // when one is known (the write position lags it).
+    #[test]
+    fn a_write_tick_past_the_throttle_reports_read_ahead_progress() {
+        use libfreemkv::Events as _;
+        let device = "write_tick_progress_test_device";
+        let (atomics, _wd, _lf, latest_bytes_read) = test_shared_atomics();
+        let mut ui = test_ui_state();
+        ui.device = device.to_string();
+        let long_ago = Instant::now() - std::time::Duration::from_secs(2);
+        let events = AutoripMuxEvents {
+            ui,
+            atomics,
+            progress: Mutex::new(freemkv_engine::SpeedEstimator::new()),
+            last_update: Mutex::new(long_ago),
+            last_log: Mutex::new(Instant::now()),
+            opened: AtomicBool::new(false),
+        };
+        latest_bytes_read.store(600_000, Ordering::Relaxed);
+        events.event(&libfreemkv::Event::BytesWritten {
+            bytes: 500_000,
+            total: 1_000_000,
+        });
+        let rs = super::super::STATE.lock().unwrap().remove(device).unwrap();
+        assert_eq!(rs.status, "ripping");
+        assert_eq!(
+            rs.progress_pct, 60,
+            "read-ahead position, not the write's 50%"
+        );
+        assert!((rs.progress_gb - 600_000.0 / BYTES_PER_GIB).abs() < 1e-12);
     }
 
     // THE watchdog preservation check: `on_write_progress` must feed `wd_bytes`/`wd_last_frame`
@@ -1806,8 +1861,10 @@ mod tests {
         use libfreemkv::Events as _;
         let (atomics, ..) = test_shared_atomics();
         let rip_current_batch = atomics.rip_current_batch.clone();
+        let mut ui = test_ui_state();
+        ui.device = "batch_change_log_test_device".to_string();
         let events = AutoripMuxEvents {
-            ui: test_ui_state(),
+            ui,
             atomics,
             progress: Mutex::new(freemkv_engine::SpeedEstimator::new()),
             last_update: Mutex::new(Instant::now()),
@@ -1824,12 +1881,21 @@ mod tests {
             64,
             "on_batch_size_changed must store the new batch into rip_current_batch"
         );
-        // Both variants must render (and log) without panicking.
         events.event(&libfreemkv::Event::BatchSizeChanged {
             new_size: 128,
             reason: libfreemkv::BatchSizeReason::Probed,
         });
         assert_eq!(rip_current_batch.load(Ordering::Relaxed), 128);
+        let log = crate::server::log::get_device_log("batch_change_log_test_device", 10);
+        assert!(
+            log.iter().any(|l| l.ends_with("Batch size → 64 (shrunk)")),
+            "{log:?}"
+        );
+        assert!(
+            log.iter()
+                .any(|l| l.ends_with("Batch size → 128 (probed up)")),
+            "{log:?}"
+        );
     }
 
     // `map_iso_mux_outcome` preserves the pre-migration Err classification:
@@ -1919,6 +1985,49 @@ mod tests {
             .expect("mapped");
         assert!(!hdr.output_opened);
         assert!(hdr.finalize_error.is_some());
+
+        // After the output opened, a coded read fault truncates a resumable rip (read_error,
+        // never the finalize quarantine); an IO / invalid-MKV error is a finalize failure.
+        let read_fault: std::io::Error = libfreemkv::Error::DecryptFailed.into();
+        let mid = map_iso_mux_outcome(Err(read_fault), true, "sr-test", 0.0, start, 700, 3)
+            .expect("mapped");
+        assert!(mid.output_opened && !mid.completed);
+        assert!(mid.read_error.is_some() && mid.finalize_error.is_none());
+        assert_eq!((mid.bytes_done, mid.errors), (700, 3));
+        for e in [
+            libfreemkv::Error::MkvInvalid.into(),
+            std::io::Error::other(libfreemkv::Error::IoError {
+                source: std::io::Error::other("disk full"),
+            }),
+        ] {
+            let fin =
+                map_iso_mux_outcome(Err(e), true, "sr-test", 0.0, start, 700, 0).expect("mapped");
+            assert!(fin.output_opened && !fin.completed);
+            assert!(fin.finalize_error.is_some() && fin.read_error.is_none());
+        }
+
+        // The loss and error counts of a completed run: lost bytes over the title's rate.
+        let lossy = map_iso_mux_outcome(
+            Ok(libfreemkv::MuxOutcome {
+                halted: false,
+                completed: true,
+                output_opened: true,
+                bytes_written: 1234,
+                errors: 4,
+                lost_bytes: 3_000_000,
+                streams: 2,
+                undelivered_streams: Vec::new(),
+            }),
+            true,
+            "sr-test",
+            1_000_000.0,
+            start,
+            0,
+            0,
+        )
+        .expect("mapped");
+        assert_eq!(lossy.errors, 4);
+        assert!((lossy.lost_video_secs - 3.0).abs() < 1e-9);
     }
 
     // `map_iso_mux_outcome` must not drop `undelivered_streams` on the floor even when
