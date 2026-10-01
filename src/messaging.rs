@@ -4,7 +4,7 @@
 /// channel (file sink); `Error` is the terminal failure render.
 ///
 /// `Warn`/`Info` are not constructed in the CLI binary today — only the
-/// terminal `Error` render path is (`pipe::render_error`, `main::fatal`). They
+/// terminal `Error` render path is (`pipe::render_error`, `cli_entry::fatal`). They
 /// exist so the level vocabulary is CLOSED: the contract test and the docs
 /// Codes page generator read the full set, and a future "this code is a
 /// warning" decision has a typed home. Hence the targeted dead-code allow.

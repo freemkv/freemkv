@@ -163,6 +163,15 @@ fn trim_oversized_log(path: &std::path::Path, cap: u64) {
     }
 }
 
+// Open the GUI log for append. `None` when it can't be opened (`rolling::never` would panic).
+fn open_gui_log(dir: &std::path::Path) -> Option<tracing_appender::rolling::RollingFileAppender> {
+    tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::NEVER)
+        .filename_prefix(GUI_LOG_NAME)
+        .build(dir)
+        .ok()
+}
+
 /// Diagnostic-log guard for the GUI (keeps the non-blocking writer alive).
 static GUI_LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuard> =
     std::sync::OnceLock::new();
@@ -188,7 +197,9 @@ pub fn init_gui_logging(log_level: &str) {
         return;
     }
     trim_oversized_log(&dir.join(GUI_LOG_NAME), GUI_LOG_CAP_BYTES);
-    let file_appender = tracing_appender::rolling::never(&dir, GUI_LOG_NAME);
+    let Some(file_appender) = open_gui_log(&dir) else {
+        return;
+    };
     let (nb, guard) = tracing_appender::non_blocking(file_appender);
     let _ = GUI_LOG_GUARD.set(guard);
     let filter = EnvFilter::new(format!("error,freemkv={level},libfreemkv={level}"));
@@ -207,6 +218,15 @@ mod tests {
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
+
+    // `rolling::never` panicked on an unopenable log; the app must start without one.
+    #[test]
+    fn an_unopenable_gui_log_yields_none_instead_of_panicking() {
+        let dir = std::env::temp_dir().join(format!("freemkv-guilog-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(super::GUI_LOG_NAME)).unwrap();
+        assert!(super::open_gui_log(&dir).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     // The GUI's diagnostic log must not grow without end; `rolling::never` never rotates on its
     // own.
