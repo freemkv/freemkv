@@ -197,8 +197,9 @@ fn header_value<'a>(request: &'a tiny_http::Request, name: &str) -> Option<&'a s
 /// Pull the host\[:port\] authority out of a URL or a bare Host header value.
 fn authority_of(s: &str) -> Option<String> {
     // Strip scheme (origin headers look like `http://host:port`); Host
-    // headers are already bare. Then strip any path/query tail.
-    let after_scheme = s.split("://").last().unwrap_or(s);
+    // headers are already bare. Then strip any path/query tail. The scheme is
+    // the FIRST `://`: a Referer's path or query may embed another URL.
+    let after_scheme = s.split_once("://").map_or(s, |(_, rest)| rest);
     let host = after_scheme
         .split(['/', '?', '#'])
         .next()
@@ -386,7 +387,7 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         if !is_valid_device_name(&device) {
             return json_response(request, 400, r#"{"error":"invalid device name"}"#);
         }
-        handle_device_log(request, cfg, &device);
+        handle_device_log(request, &device);
     } else if is_post && url == "/api/debug" {
         handle_debug_toggle(request);
     } else if is_get && (url == "/api/debug" || url.starts_with("/api/debug?")) {
@@ -433,7 +434,7 @@ fn handle_request(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         if !is_valid_device_name(&device) {
             return json_response(request, 400, r#"{"error":"invalid device name"}"#);
         }
-        handle_stop(request, cfg, &device);
+        handle_stop(request, &device);
     } else if is_get && url == "/api/review" {
         let staging = cfg
             .read()
@@ -548,20 +549,18 @@ fn handle_title_override(request: tiny_http::Request, device: &str) {
             year,
             poster_url: poster.clone(),
             overview: overview.clone(),
-            media_type,
+            media_type: media_type.clone(),
             tmdb_id,
         },
     );
-    // Reflect on the live card right away.
+    // Reflect on the live card right away, exactly as the engine will use the
+    // override: the previous match's poster/overview/type do not carry over.
     ripper::update_state_with(device, |s| {
         s.tmdb_title = title.clone();
         s.tmdb_year = year;
-        if !poster.is_empty() {
-            s.tmdb_poster = poster.clone();
-        }
-        if !overview.is_empty() {
-            s.tmdb_overview = overview.clone();
-        }
+        s.tmdb_poster = poster.clone();
+        s.tmdb_overview = overview.clone();
+        s.tmdb_media_type = media_type.clone();
     });
     json_response(request, 200, r#"{"ok":true}"#);
 }
@@ -625,6 +624,20 @@ fn handle_tmdb_search(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, ur
     if q.is_empty() || q.len() > 200 {
         return json_response(request, 400, r#"{"error":"invalid query"}"#);
     }
+    // Without a key every search is empty; say so rather than answering as if
+    // TMDB had no matches.
+    let key = cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .tmdb_api_key
+        .clone();
+    if key.is_empty() {
+        return json_response(
+            request,
+            400,
+            r#"{"error":"no TMDB API key set; add one in Settings"}"#,
+        );
+    }
     // Global cooldown: an unauthenticated LAN client could otherwise flood
     // TMDB through this proxy. Gate on the time since the last forwarded
     // search; reply 429 if a request arrived too recently.
@@ -642,11 +655,6 @@ fn handle_tmdb_search(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, ur
         }
         *last = Some(now);
     }
-    let key = cfg
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .tmdb_api_key
-        .clone();
     let results = crate::server::tmdb::search(q, &key, 8);
     json_response(
         request,
@@ -963,14 +971,18 @@ pub(crate) fn resolve_with_timeout(host: &str, port: u16) -> Result<Vec<SocketAd
     // so the thread always exits cleanly even if the receiver has already
     // timed out and gone away.
     let (tx, rx) = mpsc::sync_channel::<Result<Vec<SocketAddr>, std::io::Error>>(1);
-    std::thread::spawn(move || {
+    // A refused thread (pid/thread exhaustion) is a resolve failure, not a
+    // panic; the closure, and the guard in it, drop on the Err.
+    if let Err(e) = std::thread::Builder::new().spawn(move || {
         let _g = guard;
         let res = (host.as_str(), port)
             .to_socket_addrs()
             .map(|it| it.collect::<Vec<SocketAddr>>());
         // Receiver may be gone after the timeout — ignore the send error.
         let _ = tx.send(res);
-    });
+    }) {
+        return Err(format!("{RESOLVE_FAILED_PREFIX}{e}"));
+    }
     match rx.recv_timeout(DNS_TIMEOUT) {
         Ok(Ok(addrs)) => Ok(addrs),
         Ok(Err(e)) => Err(format!("{RESOLVE_FAILED_PREFIX}{e}")),
@@ -2962,12 +2974,12 @@ mod web_tests {
         // crafted to embed the sentinel in a path segment.
         let sentinel = SECRET_SENTINEL;
         let tricky = format!("https://evil.com/{}@attacker.com/path", sentinel);
-        // ends_with check: this does not end with the sentinel, so it is NOT
-        // filtered (it would be validated / rejected by validate_fetch_url).
-        assert!(!tricky.ends_with(sentinel));
-        // The masked form DOES end with the sentinel and IS filtered.
+        // It is NOT masked, so it is not filtered (it would be validated /
+        // rejected by validate_fetch_url).
+        assert!(!is_masked_webhook(&tricky));
+        // The masked form IS filtered.
         let masked = format!("https://discord.com/{}", sentinel);
-        assert!(masked.ends_with(sentinel));
+        assert!(is_masked_webhook(&masked));
     }
 
     // A genuine URL that merely EMBEDS the sentinel is not masked, so the
@@ -3128,25 +3140,6 @@ mod web_tests {
     }
 
     #[test]
-    fn port_range_validation_rejects_out_of_range() {
-        // handle_settings_post validates the parsed port BEFORE taking the
-        // Config write guard, so a bad value (e.g. 70000, truncating to 4464
-        // as u16) can't leave a partial in-memory mutation behind.
-        let ok = |v: u64| (1..=65535).contains(&v);
-        assert!(!ok(0), "0 is not a valid bind port");
-        assert!(
-            !ok(70000),
-            "70000 must be rejected (would truncate to 4464)"
-        );
-        assert!(!ok(65536), "65536 overflows u16");
-        assert!(ok(1));
-        assert!(ok(8080));
-        assert!(ok(65535));
-    }
-
-    // ── Cross-origin (CSRF defense-in-depth) ───────────────────────────
-
-    #[test]
     fn cross_origin_post_rejected_when_origin_host_differs() {
         // A browser on the LAN forging a POST carries an Origin header
         // whose host won't match our Host header → reject.
@@ -3179,6 +3172,103 @@ mod web_tests {
         ));
         // No Host header to compare against → can't prove cross-origin, allow.
         assert!(!is_cross_origin(Some("http://evil.example.com"), None));
+    }
+
+    #[test]
+    fn a_url_inside_the_referer_path_or_query_is_not_the_authority() {
+        // Same-origin Referer whose query embeds another URL is allowed.
+        assert!(!is_cross_origin(
+            Some("http://nas:8080/library?next=http://example.com/x"),
+            Some("nas:8080")
+        ));
+        // And a foreign Referer embedding our Host in its query is still rejected.
+        assert!(is_cross_origin(
+            Some("http://evil.example/p?x=http://nas:8080/"),
+            Some("nas:8080")
+        ));
+    }
+
+    #[test]
+    fn keydb_too_large_body_states_the_enforced_cap() {
+        let body = keydb_too_large_body();
+        assert!(body.contains("100 MiB"), "{body}");
+        assert!(serde_json::from_str::<serde_json::Value>(&body).is_ok());
+    }
+
+    #[test]
+    fn log_bundle_names_files_it_could_not_carry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut files = vec![("a.log".to_string(), tmp.path().join("a.log"))];
+        std::fs::write(tmp.path().join("a.log"), "hello").unwrap();
+        files.push(("gone.log".to_string(), tmp.path().join("gone.log")));
+        let bytes = build_log_bundle(files).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut notes = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name(BUNDLE_NOTES).unwrap(), &mut notes).unwrap();
+        assert!(notes.contains("gone.log"), "{notes}");
+        assert!(!notes.contains("a.log"), "{notes}");
+        assert!(zip.by_name("a.log").is_ok());
+    }
+
+    #[test]
+    fn log_bundle_is_capped_in_file_count_and_says_so() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut files = Vec::new();
+        for i in 0..BUNDLE_MAX_FILES + 2 {
+            let p = tmp.path().join(format!("f{i:03}.log"));
+            std::fs::write(&p, "x").unwrap();
+            files.push((format!("f{i:03}.log"), p));
+        }
+        let bytes = build_log_bundle(files).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(
+            zip.len(),
+            BUNDLE_MAX_FILES + 1,
+            "files plus the notes entry"
+        );
+        let mut notes = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name(BUNDLE_NOTES).unwrap(), &mut notes).unwrap();
+        assert!(
+            notes.contains(&format!("f{:03}.log", BUNDLE_MAX_FILES)),
+            "{notes}"
+        );
+    }
+
+    #[test]
+    fn drives_sort_in_numeric_device_order() {
+        let mut v = vec!["sg10", "sg2", "sg0", "sr1", "sg11"];
+        v.sort_by_key(|n| natural_key(n));
+        assert_eq!(v, ["sg0", "sg2", "sg10", "sg11", "sr1"]);
+    }
+
+    #[test]
+    fn a_failed_save_does_not_revert_a_newer_good_save() {
+        let before = Config::default();
+        let failed = Config {
+            auto_eject: !before.auto_eject,
+            ..Config::default()
+        };
+        let applied = serde_json::to_value(&failed).ok();
+        // A newer save C landed after the failed save B installed its values.
+        let newer = Config {
+            auto_eject: failed.auto_eject,
+            keep_iso: !failed.keep_iso,
+            ..Config::default()
+        };
+        let cfg = Arc::new(RwLock::new(newer.clone()));
+        roll_back_settings(&cfg, applied.as_ref(), &before);
+        assert_eq!(cfg.read().unwrap().keep_iso, newer.keep_iso);
+        // Still B's values: the rollback applies.
+        *cfg.write().unwrap() = failed.clone();
+        roll_back_settings(&cfg, applied.as_ref(), &before);
+        assert_eq!(cfg.read().unwrap().auto_eject, before.auto_eject);
+    }
+
+    #[test]
+    fn last_lines_keeps_file_order() {
+        assert_eq!(last_lines("a\nb\nc\nd", 2), "c\nd");
+        assert_eq!(last_lines("a\nb", 5), "a\nb");
+        assert_eq!(last_lines("", 5), "");
     }
 
     #[test]
@@ -4282,6 +4372,123 @@ mod web_tests {
         }
 
         #[test]
+        fn tmdb_search_without_a_key_is_an_error_not_an_empty_result() {
+            let cfg = Arc::new(RwLock::new(Config {
+                tmdb_api_key: String::new(),
+                ..Config::default()
+            }));
+            let (code, body) = roundtrip(&cfg, "GET", "/api/tmdb/search?q=Dune", None, &[]);
+            assert_eq!(code, 400, "{body}");
+            assert!(body.contains("TMDB API key"), "{body}");
+        }
+
+        #[test]
+        fn stop_route_on_a_known_idle_device_answers_ok_and_publishes_idle() {
+            let cfg = Arc::new(RwLock::new(Config::default()));
+            let device = "sgstopknown5";
+            ripper::update_state(
+                device,
+                ripper::RipState {
+                    device: device.to_string(),
+                    status: "ripping".to_string(),
+                    disc_present: true,
+                    last_error: "old".to_string(),
+                    ..Default::default()
+                },
+            );
+            let (code, body) = roundtrip(&cfg, "POST", &format!("/api/stop/{device}"), None, &[]);
+            assert_eq!(code, 200, "{body}");
+            assert!(body.contains(r#""ok":true"#), "{body}");
+            {
+                let s = ripper::STATE.lock().unwrap();
+                assert_eq!(s[device].status, "idle");
+                assert!(s[device].last_error.is_empty());
+                assert!(s[device].disc_present, "the disc is still in the drive");
+            }
+            ripper::STATE.lock().unwrap().remove(device);
+        }
+
+        #[test]
+        fn debug_toggle_defaults_off_for_a_malformed_body() {
+            let cfg = Arc::new(RwLock::new(Config::default()));
+            for body in ["", "not json", r#"{"enabled":"yes"}"#, r#"{}"#] {
+                let (code, resp) = roundtrip(&cfg, "POST", "/api/debug", Some(body), &[]);
+                assert_eq!(code, 200, "{resp}");
+                assert!(resp.contains(r#""enabled":false"#), "{body:?} -> {resp}");
+                assert!(!debug_enabled(), "{body:?} must not enable debug logging");
+            }
+            let (_, resp) = roundtrip(&cfg, "POST", "/api/debug", Some(r#"{"enabled":true}"#), &[]);
+            assert!(resp.contains(r#""enabled":true"#), "{resp}");
+            roundtrip(
+                &cfg,
+                "POST",
+                "/api/debug",
+                Some(r#"{"enabled":false}"#),
+                &[],
+            );
+            assert!(!debug_enabled());
+        }
+
+        #[test]
+        fn update_keydb_maps_each_failure_to_its_status() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cfg = cfg_in_tempdir(tmp.path());
+            let (code, _) = roundtrip(&cfg, "POST", "/api/update-keydb", None, &[]);
+            assert_eq!(code, 400, "no URL configured");
+
+            cfg.write().unwrap().keydb_url = "ftp://example.com/k".to_string();
+            let (code, body) = roundtrip(&cfg, "POST", "/api/update-keydb", None, &[]);
+            assert_eq!(code, 400, "{body}");
+            assert!(body.contains("KEYDB URL rejected"), "{body}");
+
+            // A reachable server answering 404 is an upstream failure.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let upstream = std::thread::spawn(move || {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            });
+            cfg.write().unwrap().keydb_url = format!("http://127.0.0.1:{port}/k");
+            let (code, body) = roundtrip(&cfg, "POST", "/api/update-keydb", None, &[]);
+            upstream.join().unwrap();
+            assert_eq!(code, 502, "{body}");
+            assert!(body.contains("HTTP 404"), "{body}");
+        }
+
+        #[test]
+        fn an_evicted_event_stream_ends_while_its_client_stays_connected() {
+            let cfg = Arc::new(RwLock::new(Config::default()));
+            let server = Server::http("127.0.0.1:0").expect("bind loopback server");
+            let addr = server.server_addr().to_ip().expect("ip addr");
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let request = server.recv().expect("recv request");
+                handle_sse(request, &cfg);
+                let _ = done_tx.send(());
+            });
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .write_all(b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+                .unwrap();
+            let _ = read_first_sse_frame(&mut stream);
+            // Newer streams push the oldest (this one) out.
+            let newer: Vec<_> = (0..MAX_SSE_CLIENTS).map(|_| sse_admit()).collect();
+            let ended = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+            for (id, _) in newer {
+                sse_leave(id);
+            }
+            assert!(ended.is_ok(), "an evicted stream must stop on its own");
+            drop(stream);
+        }
+
+        #[test]
         fn stop_route_rejects_invalid_device_name() {
             let cfg = Arc::new(RwLock::new(Config::default()));
             let (code, _) = roundtrip(&cfg, "POST", "/api/stop/x", None, &[]);
@@ -4721,6 +4928,50 @@ mod web_tests {
         }
 
         #[test]
+        fn accept_loss_that_cannot_be_saved_is_refused_not_acknowledged() {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cfg = cfg_in_tempdir(tmp.path());
+            let device = "sgacceptloss2";
+            let disc_name = "UnwritableDisc";
+            let staging_dir = {
+                let c = cfg.read().unwrap();
+                c.staging_device_dir(&crate::server::util::sanitize_path_compact(disc_name))
+            };
+            let dir = std::path::Path::new(&staging_dir);
+            std::fs::create_dir_all(dir).unwrap();
+            ripper::update_state(
+                device,
+                ripper::RipState {
+                    device: device.to_string(),
+                    status: "idle".to_string(),
+                    disc_name: disc_name.to_string(),
+                    ..Default::default()
+                },
+            );
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let bypass = std::fs::write(dir.join(".probe"), b"").is_ok();
+            let (code, body) = roundtrip(
+                &cfg,
+                "POST",
+                &format!("/api/accept-loss/{device}"),
+                None,
+                &[],
+            );
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if bypass {
+                eprintln!("skipped: running with permission bypass (root)");
+                return;
+            }
+            assert_eq!(code, 500, "{body}");
+            assert_eq!(
+                ripper::STATE.lock().unwrap()[device].status,
+                "idle",
+                "the refused Accept must release the claim"
+            );
+        }
+
+        #[test]
         fn accept_loss_transition_reopens_aborted_dir() {
             // A full-HTTP *successful* handle_accept_loss races its own spawned
             // rip worker against this test's read of state.json, so instead this
@@ -4845,6 +5096,51 @@ mod web_tests {
         }
 
         #[test]
+        fn title_override_card_shows_what_the_engine_will_use() {
+            let cfg = Arc::new(RwLock::new(Config::default()));
+            let device = "sgtitleovrcard4";
+            ripper::update_state(
+                device,
+                ripper::RipState {
+                    device: device.to_string(),
+                    tmdb_title: "Film A".to_string(),
+                    tmdb_poster: "https://image.tmdb.org/t/p/w185/a.jpg".to_string(),
+                    tmdb_overview: "About A".to_string(),
+                    tmdb_media_type: "movie".to_string(),
+                    ..Default::default()
+                },
+            );
+            let (code, _) = roundtrip(
+                &cfg,
+                "POST",
+                &format!("/api/title/{device}"),
+                Some(r#"{"title":"Show B","media_type":"tv","tmdb_id":0}"#),
+                &[],
+            );
+            assert_eq!(code, 200);
+            {
+                let s = crate::server::ripper::STATE.lock().unwrap();
+                let rs = &s[device];
+                assert_eq!(rs.tmdb_title, "Show B");
+                assert_eq!(rs.tmdb_poster, "", "A's poster must not stay on B's card");
+                assert_eq!(rs.tmdb_overview, "");
+                assert_eq!(rs.tmdb_media_type, "tv");
+            }
+            // A second override omitting media_type keeps the first one's tv.
+            let (code, _) = roundtrip(
+                &cfg,
+                "POST",
+                &format!("/api/title/{device}"),
+                Some(r#"{"title":"Show C","tmdb_id":0}"#),
+                &[],
+            );
+            assert_eq!(code, 200);
+            let stored = ripper::take_title_override(device).unwrap();
+            assert_eq!(stored.media_type, "tv");
+            crate::server::ripper::STATE.lock().unwrap().remove(device);
+        }
+
+        #[test]
         fn title_override_omitted_media_type_defaults_movie_when_unknown() {
             let cfg = Arc::new(RwLock::new(Config::default()));
             let device = "sgtitleovrnodetect2";
@@ -4950,6 +5246,23 @@ mod web_tests {
         }
 
         #[test]
+        fn settings_post_rejects_the_ports_just_outside_the_valid_range() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let cfg = cfg_in_tempdir(tmp.path());
+            for port in [0, 65536] {
+                let (code, body) = roundtrip(
+                    &cfg,
+                    "POST",
+                    "/api/settings",
+                    Some(&format!(r#"{{"port": {port}}}"#)),
+                    &[],
+                );
+                assert_eq!(code, 400, "port {port}: {body}");
+                assert!(body.contains("port must be 1..=65535"));
+            }
+        }
+
+        #[test]
         fn settings_post_rejects_relative_output_dir() {
             let tmp = tempfile::TempDir::new().unwrap();
             let cfg = cfg_in_tempdir(tmp.path());
@@ -5002,8 +5315,9 @@ mod web_tests {
             let cfg = cfg_in_tempdir(tmp.path());
             let abs_out = tmp.path().join("out");
             let patch = serde_json::json!({
-                "auto_eject": true,
-                "main_feature": true,
+                // Both default to true: patching false tells "applied" from "ignored".
+                "auto_eject": false,
+                "main_feature": false,
                 "capture_without_keys": true,
                 "keep_iso": true,
                 // Over the ceilings — each must clamp, not persist raw.
@@ -5020,8 +5334,9 @@ mod web_tests {
             let (code, body) = roundtrip(&cfg, "POST", "/api/settings", Some(&patch), &[]);
             assert_eq!(code, 200, "a valid multi-field patch must succeed: {body}");
             let c = cfg.read().unwrap();
-            assert!(c.auto_eject && c.capture_without_keys && c.keep_iso);
+            assert!(!c.auto_eject && c.capture_without_keys && c.keep_iso);
             // File-only settings are not set by a save (the form never offers them).
+            assert!(Config::default().main_feature);
             assert_eq!(c.main_feature, Config::default().main_feature);
             assert_eq!(c.min_length_secs, Config::default().min_length_secs);
             assert_eq!(c.max_retries, 10, "max_retries clamps to 10");
@@ -5682,8 +5997,14 @@ fn build_queue_views(staging_dir: &str) -> (Vec<String>, Vec<String>, usize, usi
         .clone();
     // Move queue: staging dirs handed off to the mover (`state == Done`),
     // minus the one actively being moved (shown as live bars, not a queue row).
-    let mut move_queue: Vec<String> = std::fs::read_dir(staging_dir)
-        .ok()
+    let staging_entries = std::fs::read_dir(staging_dir)
+        .inspect_err(|e| {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(dir = %staging_dir, error = %e, "staging dir unreadable; queues show empty");
+            }
+        })
+        .ok();
+    let mut move_queue: Vec<String> = staging_entries
         .map(|entries| {
             entries
                 .filter_map(|e| e.ok())
@@ -5715,6 +6036,13 @@ fn build_queue_views(staging_dir: &str) -> (Vec<String>, Vec<String>, usize, usi
     (mux_queue, move_queue, mux_full_count, move_full_count)
 }
 
+// The last `n` lines of `text`, oldest first.
+fn last_lines(text: &str, n: usize) -> String {
+    let mut lines: Vec<&str> = text.lines().rev().take(n).collect();
+    lines.reverse();
+    lines.join("\n")
+}
+
 fn handle_system_info(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     // Degrade gracefully on a poisoned lock like every other handler; copy
     // the two paths out and DROP the read guard before the I/O below, or a
@@ -5736,7 +6064,8 @@ fn handle_system_info(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     // Move + Mux queue lists come from the SAME shared builder the live
     // /api/state SSE payload uses, so the System page and live dashboard
     // can never disagree, and the "+N more" math shares one scan snapshot.
-    let (mux_queue, move_queue, mux_full_count, move_full_count) = build_queue_views(&staging_dir);
+    let (mux_queue, move_queue, mux_full_count, move_full_count) =
+        build_queue_views_cached(&staging_dir);
 
     // Mover errors: stuck staging dirs the user needs to act on.
     let move_errors: Vec<crate::server::mover::MoverError> = crate::server::mover::MOVE_ERRORS
@@ -5755,16 +6084,17 @@ fn handle_system_info(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         .cloned()
         .collect();
 
-    // System log: last 50 lines. Tail from the end with a bounded read
-    // rather than slurping the whole file — device_system.log is never
-    // rotated and the System page polls this endpoint every few seconds.
-    let syslog = tail_file(&syslog_path, SYSLOG_TAIL_BYTES)
-        .unwrap_or_default()
-        .lines()
-        .rev()
-        .take(50)
-        .collect::<Vec<_>>()
-        .join("\n");
+    // System log: last 50 lines, in file order. Tail from the end with a
+    // bounded read rather than slurping the whole file — device_system.log is
+    // never rotated and the System page polls this endpoint every few seconds.
+    let syslog = match tail_file(&syslog_path, SYSLOG_TAIL_BYTES) {
+        Ok(text) => last_lines(&text, 50),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::warn!(path = %syslog_path, error = %e, "system log unreadable");
+            format!("(system log unreadable: {})", e.kind())
+        }
+    };
 
     let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
     let body = serde_json::json!({
@@ -5830,8 +6160,18 @@ fn drive_summary() -> Vec<serde_json::Value> {
             })
         })
         .collect();
-    devs.sort_by(|a, b| a["device"].as_str().cmp(&b["device"].as_str()));
+    devs.sort_by(|a, b| {
+        natural_key(a["device"].as_str().unwrap_or(""))
+            .cmp(&natural_key(b["device"].as_str().unwrap_or("")))
+    });
     devs
+}
+
+// Sort key putting `sg2` before `sg10`: the name with its trailing number split off.
+fn natural_key(name: &str) -> (&str, u64, &str) {
+    let digits = name.bytes().rev().take_while(u8::is_ascii_digit).count();
+    let (head, num) = name.split_at(name.len() - digits);
+    (head, num.parse().unwrap_or(0), name)
 }
 
 // POST /api/system/keyserver-test: ask the keyserver whether it answers.
@@ -5857,9 +6197,53 @@ fn handle_keyserver_test(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>)
 // Cap per file in the log bundle, so a runaway log cannot exhaust memory.
 const BUNDLE_FILE_CAP: u64 = 8 * 1024 * 1024;
 
+// Most files one bundle carries, so a log dir full of rotated files cannot
+// grow the in-memory zip without bound; the rest are named in the notes entry.
+const BUNDLE_MAX_FILES: usize = 64;
+
+// Zip entry listing every file the bundle could not carry in full.
+const BUNDLE_NOTES: &str = "bundle-notes.txt";
+
+// Zip the tail of each file. A file that cannot be read or written, or that
+// is past BUNDLE_MAX_FILES, is named in BUNDLE_NOTES so the bundle never
+// looks complete when it is not.
+fn build_log_bundle(files: Vec<(String, std::path::PathBuf)>) -> zip::result::ZipResult<Vec<u8>> {
+    use std::io::Write as _;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let mut notes = String::new();
+    for (i, (name, path)) in files.into_iter().enumerate() {
+        if i >= BUNDLE_MAX_FILES {
+            notes.push_str(&format!(
+                "{name}: omitted (bundle holds {BUNDLE_MAX_FILES} files)\n"
+            ));
+            continue;
+        }
+        let text = match tail_file(&path.to_string_lossy(), BUNDLE_FILE_CAP) {
+            Ok(t) => t,
+            Err(e) => {
+                notes.push_str(&format!("{name}: unreadable ({})\n", e.kind()));
+                continue;
+            }
+        };
+        let written = zip
+            .start_file(name.as_str(), opts)
+            .map_err(|e| e.to_string())
+            .and_then(|()| zip.write_all(text.as_bytes()).map_err(|e| e.to_string()));
+        if let Err(e) = written {
+            notes.push_str(&format!("{name}: not written ({e})\n"));
+        }
+    }
+    if !notes.is_empty() {
+        zip.start_file(BUNDLE_NOTES, opts)?;
+        zip.write_all(notes.as_bytes())?;
+    }
+    Ok(zip.finish()?.into_inner())
+}
+
 // GET /api/logs/download: every log as one zip, each file capped to its tail.
 fn handle_logs_download(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
-    use std::io::Write as _;
     let log_dir = cfg.read().unwrap_or_else(|e| e.into_inner()).log_dir();
     let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
     let mut dirs = vec![(String::new(), std::path::PathBuf::from(&log_dir))];
@@ -5883,18 +6267,7 @@ fn handle_logs_download(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
         files.push(("events.jsonl".into(), json_log));
     }
     files.sort();
-    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let opts = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-    for (name, path) in files {
-        let Ok(text) = tail_file(&path.to_string_lossy(), BUNDLE_FILE_CAP) else {
-            continue;
-        };
-        if zip.start_file(name, opts).is_ok() {
-            let _ = zip.write_all(text.as_bytes());
-        }
-    }
-    let Ok(cursor) = zip.finish() else {
+    let Ok(bytes) = build_log_bundle(files) else {
         return json_response(
             request,
             500,
@@ -5905,14 +6278,14 @@ fn handle_logs_download(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) 
         "attachment; filename=\"freemkv-logs-{}.zip\"",
         crate::server::util::format_iso_datetime_filename()
     );
-    let response = Response::from_data(cursor.into_inner())
+    let response = Response::from_data(bytes)
         .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/zip"[..]).unwrap())
         .with_header(Header::from_bytes(&b"Content-Disposition"[..], fname.as_bytes()).unwrap())
         .with_header(Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap());
     let _ = request.respond(response);
 }
 
-fn handle_device_log(request: tiny_http::Request, _cfg: &Arc<RwLock<Config>>, device: &str) {
+fn handle_device_log(request: tiny_http::Request, device: &str) {
     // Single source of truth for device-name validation. Dispatch already
     // gates on is_valid_device_name; re-checking here closes any latent
     // bypass if the handler is ever called directly.
@@ -5997,12 +6370,20 @@ fn handle_debug_log(request: tiny_http::Request, url: &str) {
     let path = crate::server::observe::json_log_path();
     let content = match tail_file(&path, DEBUG_TAIL_BYTES) {
         Ok(s) => s,
-        Err(e) => {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // The non-rolling jsonl file may not exist on a fresh boot
             // before the first event flushes. Return empty rather than 404
             // — UI can poll without alerting.
             tracing::debug!(path = %path, error = %e, "debug: jsonl missing");
             return text_response(request, "");
+        }
+        Err(e) => {
+            tracing::warn!(path = %path, error = %e, "debug: jsonl unreadable");
+            return json_response(
+                request,
+                500,
+                r#"{"ok":false,"error":"could not read the debug log"}"#,
+            );
         }
     };
 
@@ -6018,31 +6399,33 @@ fn handle_debug_log(request: tiny_http::Request, url: &str) {
 
     // Filter first, then keep the last `n`: a device's lines must not be
     // crowded out of the window by other devices' lines.
-    let lines: Vec<&str> = content.lines().collect();
-    let mut out: Vec<String> = Vec::new();
-    for line in &lines {
-        if let Some(ref l) = level {
-            let allowed = levels_at_or_above(l);
-            // tracing-subscriber JSON format puts the level in `"level":"INFO"`.
-            if !allowed
-                .iter()
-                .any(|lv| line.contains(&format!("\"level\":\"{}\"", lv)))
-            {
-                continue;
-            }
+    // tracing-subscriber JSON format puts the level in `"level":"INFO"`.
+    let level_needles: Option<Vec<String>> = level.as_deref().map(|l| {
+        levels_at_or_above(l)
+            .iter()
+            .map(|lv| format!("\"level\":\"{lv}\""))
+            .collect()
+    });
+    // Match `"device":"sg4"` exactly to avoid `sg40` matching `sg4`.
+    let device_needle = device.as_deref().map(|d| format!("\"device\":\"{d}\""));
+    let mut out: Vec<&str> = Vec::new();
+    for line in content.lines() {
+        if let Some(ref needles) = level_needles
+            && !needles.iter().any(|nd| line.contains(nd.as_str()))
+        {
+            continue;
         }
-        if let Some(ref d) = device {
-            // Match `"device":"sg4"` exactly to avoid `sg40` matching `sg4`.
-            if !line.contains(&format!("\"device\":\"{}\"", d)) {
-                continue;
-            }
+        if let Some(ref nd) = device_needle
+            && !line.contains(nd.as_str())
+        {
+            continue;
         }
         if let Some(ref needle) = q
             && !line.contains(needle)
         {
             continue;
         }
-        out.push((*line).to_string());
+        out.push(line);
     }
     out.drain(..out.len().saturating_sub(n));
     text_response(request, &out.join("\n"));
@@ -6074,12 +6457,18 @@ fn parse_query(url: &str) -> std::collections::HashMap<String, String> {
         }
         &s[..end]
     }
+    // The cap applies to the DECODED field (an encoded multibyte char is 9
+    // raw bytes); the raw field is bounded at 3x so decoding stays cheap.
+    let decode = |raw: &str| {
+        clamp(
+            &percent_decode(clamp(raw, 3 * MAX_FIELD_LEN)),
+            MAX_FIELD_LEN,
+        )
+        .to_string()
+    };
     for pair in q.split('&').take(MAX_PAIRS) {
         if let Some((k, v)) = pair.split_once('=') {
-            map.insert(
-                percent_decode(clamp(k, MAX_FIELD_LEN)),
-                percent_decode(clamp(v, MAX_FIELD_LEN)),
-            );
+            map.insert(decode(k), decode(v));
         }
     }
     map
@@ -6105,6 +6494,16 @@ mod parse_query_tests {
             Some("a".repeat(255).as_str()),
             "must truncate to the last full character before the cutoff, not split 'é'"
         );
+    }
+
+    #[test]
+    fn an_encoded_value_under_the_decoded_cap_is_not_cut() {
+        // 30 CJK chars: 90 decoded bytes but 270 encoded bytes.
+        let title = "\u{4e2d}".repeat(30);
+        let enc: String = title.bytes().map(|b| format!("%{b:02X}")).collect();
+        assert!(enc.len() > 256);
+        let map = parse_query(&format!("/x?q={enc}"));
+        assert_eq!(map.get("q").map(String::as_str), Some(title.as_str()));
     }
 
     #[test]
@@ -6637,6 +7036,20 @@ fn handle_accept_loss(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, de
     // state to the re-muxable hand-off state, so resume re-mux proceeds
     // instead of being refused as failed.
     ripper::staging::write_accept_loss_marker(dir);
+    // The write is best-effort and only logs; a rip spawned without the armed
+    // override would refuse the same loss again, so refuse the Accept instead.
+    if !ripper::staging::accept_loss_requested(dir) {
+        ripper::rollback_failed_spawn(device, claim_gen);
+        crate::server::log::device_log(
+            device,
+            "Accept-damage failed: the override could not be saved to the staging dir.",
+        );
+        return json_response(
+            request,
+            500,
+            r#"{"ok":false,"error":"could not save the accept-damage override (check staging permissions)"}"#,
+        );
+    }
     ripper::staging::mutate_state_if_present(dir, ripper::staging::apply_accept_loss_reopen);
     // Legacy pre-migration dirs: strip the marker files the same way.
     let _ = std::fs::remove_file(dir.join(ripper::staging::FAILED_MARKER));
@@ -6699,7 +7112,45 @@ fn parse_resume_param(query: &str) -> ResumeMode {
 
 #[cfg(test)]
 mod stop_report_tests {
-    use super::stop_report;
+    use super::{apply_stop_to_state, stop_report};
+    use crate::server::ripper::{RipState, STATE};
+
+    // A claim made while Stop drains is a new rip: Stop must not wipe it to idle.
+    #[test]
+    fn a_stop_does_not_wipe_a_claim_made_while_it_drained() {
+        let dev = "stopgen_reclaimed";
+        STATE.lock().unwrap().insert(
+            dev.into(),
+            RipState {
+                device: dev.into(),
+                status: "scanning".into(),
+                claim_gen: 5,
+                ..Default::default()
+            },
+        );
+        assert!(apply_stop_to_state(dev, Some(4), &stop_report(true)));
+        {
+            let s = STATE.lock().unwrap();
+            assert_eq!(s[dev].status, "scanning");
+            assert_eq!(s[dev].claim_gen, 5);
+        }
+        assert!(apply_stop_to_state(dev, Some(5), &stop_report(true)));
+        assert_eq!(STATE.lock().unwrap()[dev].status, "idle");
+        // A timed-out drain publishes the error row, not idle.
+        assert!(apply_stop_to_state(dev, Some(5), &stop_report(false)));
+        {
+            let s = STATE.lock().unwrap();
+            assert_eq!(s[dev].status, "error");
+            assert!(!s[dev].last_error.is_empty());
+            assert_eq!(s[dev].claim_gen, 5, "the claim identity survives a Stop");
+        }
+        assert!(!apply_stop_to_state(
+            "stopgen_absent",
+            None,
+            &stop_report(true)
+        ));
+        STATE.lock().unwrap().remove(dev);
+    }
 
     // Catches the mutation making a timed-out Stop report the clean-stop
     // answer (idle + ok:true): a failure rendered as success. handle_stop
@@ -6924,6 +7375,14 @@ pub(crate) fn read_capped_keydb_body<R: std::io::Read>(
     Ok(buf)
 }
 
+// 413 body for an oversized plain-text keydb; the limit shown is the enforced cap.
+fn keydb_too_large_body() -> String {
+    format!(
+        r#"{{"ok":false,"error":"KEYDB too large (>{} MiB plain-text); use a gzip/zip URL"}}"#,
+        KEYDB_MAX_BYTES / (1024 * 1024)
+    )
+}
+
 fn handle_update_keydb(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
     // Serialize: only one keydb download may be in flight at a time. Each one
     // buffers the whole file into memory, so concurrent unauthenticated calls
@@ -6994,11 +7453,7 @@ fn handle_update_keydb(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
                 return;
             }
             Err(KeydbReadError::TooLarge) => {
-                json_response(
-                    request,
-                    413,
-                    r#"{"ok":false,"error":"KEYDB too large (>100 MB plain-text); use a gzip/zip URL"}"#,
-                );
+                json_response(request, 413, &keydb_too_large_body());
                 return;
             }
         },
@@ -7088,11 +7543,20 @@ fn handle_eject(request: tiny_http::Request, device: &str) {
     json_response(request, 200, r#"{"ok":true}"#);
 }
 
-fn handle_stop(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &str) {
-    // Stop signals threads to abort, drains the rip thread, drops the SCSI
-    // session, and collapses state to idle. Stop preserves partial staging
-    // state for resume (pre-0.21.10 wiped it, once nuking an 85 GB ISO).
-    let _ = cfg;
+fn handle_stop(request: tiny_http::Request, device: &str) {
+    // Stop halts and drains the rip thread and collapses the row to idle,
+    // preserving partial staging for resume. A claim made after `entry_gen`
+    // (insert dispatch or a Rip POST during the drain) is a new rip: left alone.
+    let entry_gen = ripper::STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(device)
+        .map(|rs| rs.claim_gen);
+    // Armed before the drain, which can take up to 60s, so the poll loop does
+    // not re-dispatch the drive the operator is stopping; refreshed after it.
+    if entry_gen.is_some() {
+        ripper::set_stop_cooldown(device);
+    }
 
     // Cancel the halt and drain (ripper::stop_and_drain). A timed-out drain
     // is not a stop — the worker still owns the drive — so report what
@@ -7113,33 +7577,43 @@ fn handle_stop(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>, device: &
         );
     }
 
-    // Recover-and-proceed on poison (house convention): a poisoned STATE must
-    // not turn a Stop into a silent 404.
-    let mut state = ripper::STATE.lock().unwrap_or_else(|e| e.into_inner());
     let report = stop_report(drained);
-    let existed = state
-        .get_mut(device)
-        .map(|rs| {
-            // Full reset: keep device id + disc_present, drop everything else.
-            let disc_still_in = rs.disc_present;
-            *rs = ripper::RipState {
-                device: device.to_string(),
-                status: report.status.to_string(),
-                disc_present: disc_still_in,
-                last_error: report.last_error.to_string(),
-                ..Default::default()
-            };
-            true
-        })
-        .unwrap_or(false);
-    drop(state);
-
-    if !existed {
+    if !apply_stop_to_state(device, entry_gen, &report) {
         json_response(request, 404, r#"{"ok":false,"error":"drive not found"}"#);
         return;
     }
     ripper::set_stop_cooldown(device);
     json_response(request, 200, report.body);
+}
+
+// Publish a Stop's outcome on the device's row. Returns whether the device
+// exists. A row re-claimed since `entry_gen` is left untouched: wiping it would
+// show idle while the new rip runs.
+fn apply_stop_to_state(device: &str, entry_gen: Option<u64>, report: &StopReport) -> bool {
+    // Recover-and-proceed on poison (house convention): a poisoned STATE must
+    // not turn a Stop into a silent 404.
+    let mut state = ripper::STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(rs) = state.get_mut(device) else {
+        return false;
+    };
+    if entry_gen.is_some_and(|g| rs.claim_gen != g) {
+        tracing::warn!(
+            device = %device,
+            "stop: the device was re-claimed while draining; leaving the new rip's state"
+        );
+        return true;
+    }
+    // Full reset: keep device id + disc_present, drop everything else.
+    let disc_still_in = rs.disc_present;
+    *rs = ripper::RipState {
+        device: device.to_string(),
+        status: report.status.to_string(),
+        disc_present: disc_still_in,
+        last_error: report.last_error.to_string(),
+        claim_gen: rs.claim_gen,
+        ..Default::default()
+    };
+    true
 }
 
 // What a Stop reports, as a function of whether the rip thread ACTUALLY
