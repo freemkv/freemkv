@@ -579,11 +579,9 @@ fn row_parents_never_drops_a_row() {
     for rows in [vec![orphan(2)], vec![orphan(1)], vec![orphan(2), orphan(1)]] {
         let parents = row_parents(&rows);
         assert_eq!(parents.len(), rows.len(), "row_parents lost a row");
+        // No row here has a title above it, so every one is a top-level row.
         for (i, p) in parents.iter().enumerate() {
-            assert!(
-                p.is_none() || p.unwrap() < i,
-                "row {i} claims a parent that comes after it"
-            );
+            assert_eq!(*p, None, "orphan row {i} was hung under another row");
         }
     }
 }
@@ -1439,6 +1437,21 @@ fn a_video_only_selection_is_recognised_but_no_choice_at_all_is_not() {
     assert!(!is_video_only_selection(true, &[4352], &[4608]));
 }
 
+/// Stop the detached rip worker a `Cmd::Run` started and wait for it to end, so it
+/// cannot outlive the test and touch the output folder.
+fn stop_worker(app: &mut App) {
+    app.dispatch(Cmd::Cancel);
+    let Some(run) = app.run.clone() else { return };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !run.finished.load(std::sync::atomic::Ordering::Acquire) {
+        assert!(
+            std::time::Instant::now() < until,
+            "the rip worker never ended"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// A rip that ticks no audio and no subtitle track starts, but SAYS so first.
 /// The notice is the whole point: the guard is not a refusal, so without the
 /// log line an accidental silent movie is discovered after the rip.
@@ -1464,11 +1477,16 @@ fn a_video_only_rip_warns_before_it_starts() {
 
     app.dispatch(Cmd::Run);
     let notice = freemkv::strings::get("gui.log.video_only_warning");
+    assert_ne!(
+        notice, "gui.log.video_only_warning",
+        "the key is missing from the catalogue"
+    );
     assert!(
         app.log.iter().any(|l| l.text == notice),
         "no video-only notice in the log: {:?}",
         app.log.iter().map(|l| &l.text).collect::<Vec<_>>()
     );
+    stop_worker(&mut app);
 }
 
 /// `--raw` with a non-ISO output is dropped, and the user is told. Silently
@@ -1491,11 +1509,16 @@ fn raw_on_a_non_iso_output_says_it_was_ignored() {
 
     app.dispatch(Cmd::Run);
     let notice = freemkv::strings::get("gui.log.raw_iso_only");
+    assert_ne!(
+        notice, "gui.log.raw_iso_only",
+        "the key is missing from the catalogue"
+    );
     assert!(
         app.log.iter().any(|l| l.text == notice),
         "no raw-is-iso-only notice in the log: {:?}",
         app.log.iter().map(|l| &l.text).collect::<Vec<_>>()
     );
+    stop_worker(&mut app);
 }
 
 // The result heading must come from the TYPED verdict, never from the summary
@@ -1844,6 +1867,32 @@ fn a_language_the_disc_lacks_falls_back_to_keeping_that_whole_class() {
     let (mut ta, _, _) = typo.ticked_streams();
     ta.sort_unstable();
     assert_eq!(ta, vec![spid(0), spid(1)]);
+}
+
+/// The subtitle class falls back the same way audio does: a preference the disc cannot
+/// satisfy, or cannot even resolve, keeps every non-forced subtitle. Forced subtitles are
+/// the exception and keep none (see `preferred_pids`).
+#[test]
+fn a_subtitle_language_the_disc_lacks_keeps_the_whole_subtitle_class() {
+    let sc = tagged_disc(&[
+        ("Audio", "deu", false),
+        ("Subtitles", "jpn", false),
+        ("Subtitles", "kor", false),
+        ("Subtitles", "jpn", true),
+    ]);
+    for subtitles in ["German", "Klingonish"] {
+        let prefs = LangPrefs::parse("German", subtitles, "German");
+        let t = tree_prefs(&sc, "Main film only", &prefs);
+        let (audio, mut subs, _) = t.ticked_streams();
+        subs.sort_unstable();
+        assert_eq!(audio, vec![spid(0)], "{subtitles}: audio matched");
+        assert_eq!(
+            subs,
+            vec![spid(1), spid(2)],
+            "{subtitles}: no preferred subtitle on the disc: keep every normal subtitle, \
+             and no forced one (none is German)"
+        );
+    }
 }
 
 /// No preference set is EXACTLY today's behaviour: every stream of a checked

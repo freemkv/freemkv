@@ -35,6 +35,17 @@ fn coverage(line: &str) -> Option<Result<(), String>> {
     None
 }
 
+// The bullet lines of a section: `- ` or `* `, at any indent.
+fn bullets(section: &str) -> Vec<&str> {
+    section
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            t.starts_with("- ") || t.starts_with("* ")
+        })
+        .collect()
+}
+
 #[test]
 fn every_unreleased_line_states_its_front_end_coverage() {
     let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/CHANGELOG.md"))
@@ -43,8 +54,10 @@ fn every_unreleased_line_states_its_front_end_coverage() {
     let start = text.find("## Unreleased").expect("an Unreleased section");
     let body = &text[start + "## Unreleased".len()..];
     let end = body.find("\n## ").unwrap_or(body.len());
+    let lines = bullets(&body[..end]);
+    assert!(!lines.is_empty(), "the Unreleased section has no bullets");
     let mut problems = Vec::new();
-    for line in body[..end].lines().filter(|l| l.starts_with("- ")) {
+    for line in lines {
         match coverage(line) {
             Some(Ok(())) => {}
             Some(Err(why)) => problems.push(format!("{why}: {line}")),
@@ -63,4 +76,10 @@ fn the_coverage_tag_reads_as_documented() {
     assert!(matches!(coverage("- x (CLI, app)"), Some(Err(_))));
     assert!(matches!(coverage("- x (CLI only:)"), Some(Err(_))));
     assert_eq!(coverage("- x (see #52) and nothing else"), None);
+}
+
+#[test]
+fn star_and_indented_bullets_are_checked_too() {
+    let section = "- a\n* b\n  - c\n    * d\nplain\n";
+    assert_eq!(bullets(section), ["- a", "* b", "  - c", "    * d"]);
 }

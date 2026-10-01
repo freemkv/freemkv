@@ -49,14 +49,6 @@ fn rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-// The production half of a source file: everything before its first test module.
-fn production(src: &str) -> &str {
-    match src.find("\n#[cfg(test)]\nmod ") {
-        Some(i) => &src[..i],
-        None => src,
-    }
-}
-
 // `src` with every comment and string literal blanked, so only code is matched.
 fn code_only(src: &str) -> String {
     let b = src.as_bytes();
@@ -88,6 +80,103 @@ fn code_only(src: &str) -> String {
         }
     }
     out
+}
+
+// `code` with every `#[cfg(test)]` module blanked (any visibility, any further attributes,
+// wherever it sits in the file), so only production code is left. `code` is `code_only`
+// output, so braces inside strings and comments cannot unbalance the match.
+fn without_test_modules(code: &str) -> String {
+    let mut out = code.to_string();
+    let mut from = 0;
+    while let Some(at) = out[from..].find("#[cfg(test)]").map(|i| i + from) {
+        let mut rest = out[at + "#[cfg(test)]".len()..].trim_start();
+        while rest.starts_with("#[") {
+            rest = rest[rest.find(']').map_or(rest.len(), |i| i + 1)..].trim_start();
+        }
+        let head = rest
+            .strip_prefix("pub")
+            .map(|r| match r.trim_start().strip_prefix('(') {
+                Some(v) => v.split_once(')').map_or("", |(_, t)| t),
+                None => r,
+            })
+            .unwrap_or(rest)
+            .trim_start();
+        from = at + 1;
+        if !head.starts_with("mod ") {
+            continue;
+        }
+        let start = out.len() - rest.len();
+        let body = &out[start..];
+        let end = match (body.find('{'), body.find(';')) {
+            (Some(o), Some(sc)) if sc < o => sc + 1,
+            (Some(o), _) => {
+                let mut depth = 0usize;
+                let mut end = body.len();
+                for (i, c) in body[o..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = o + i + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                end
+            }
+            (None, Some(sc)) => sc + 1,
+            (None, None) => body.len(),
+        };
+        out.replace_range(at..start + end, &" ".repeat(start + end - at));
+    }
+    out
+}
+
+// Engine-owned entry points a front end must not import by name (a bare call would dodge the
+// qualified `FORBIDDEN` patterns), and the only alias the engine crate may be imported under.
+const IMPORTED_FNS: &[&str] = &[
+    "mux_with_keys",
+    "mux_url",
+    "input",
+    "write_image",
+    "copy",
+    "sweep",
+    "patch",
+];
+const ENGINE_ALIAS: &str = "fe";
+
+// Problems in the `use libfreemkv…;` / `use freemkv_engine…;` statements of `code`: an engine-owned
+// function imported by name, or either crate renamed to something other than `ENGINE_ALIAS`.
+fn bad_imports(code: &str) -> Vec<String> {
+    let mut bad = Vec::new();
+    for stmt in code.split("use ").skip(1) {
+        let Some(stmt) = stmt.split(';').next() else {
+            continue;
+        };
+        let stmt = stmt.trim();
+        let Some(path) = ["libfreemkv", "freemkv_engine"]
+            .iter()
+            .find_map(|c| stmt.strip_prefix(c).map(|r| (*c, r)))
+        else {
+            continue;
+        };
+        if let Some(alias) = path.1.trim().strip_prefix("as ")
+            && alias.trim() != ENGINE_ALIAS
+        {
+            bad.push(format!("`{}` renamed to `{}`", path.0, alias.trim()));
+        }
+        for tok in path
+            .1
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|t| IMPORTED_FNS.contains(t))
+        {
+            bad.push(format!("`{tok}` imported by name from `{}`", path.0));
+        }
+    }
+    bad
 }
 
 // The byte length of a raw string literal (`r"…"`, `r#"…"#`) starting `s`, if one does.
@@ -127,11 +216,45 @@ fn code_only_blanks_comments_and_strings() {
 }
 
 #[test]
+fn a_test_module_anywhere_hides_only_itself() {
+    let src = "fn a() { Drive::open(1); }\n#[cfg(test)]\npub(crate) mod t { fn x() { Drive::open(2); \
+               let _ = \"}\"; } }\n#[cfg(test)]\n#[allow(dead_code)]\nmod u { fn y() { Drive::open(3); } }\n\
+               fn b() { Drive::open(4); }\n#[cfg(test)]\nmod v;\nfn c() { Drive::open(5); }";
+    let code = without_test_modules(&code_only(src));
+    assert_eq!(code.matches("Drive::open(").count(), 3, "{code}");
+    for kept in ["open(1)", "open(4)", "open(5)"] {
+        assert!(code.contains(kept), "{kept} was blanked: {code}");
+    }
+}
+
+#[test]
+fn a_bare_or_renamed_engine_import_is_caught() {
+    for bad in [
+        "use libfreemkv::mux_url;",
+        "use libfreemkv::{input, Disc};",
+        "use freemkv_engine::{Plan, copy};",
+        "use libfreemkv as lf;",
+        "use freemkv_engine as eng;",
+    ] {
+        assert!(!bad_imports(bad).is_empty(), "{bad} was not flagged");
+    }
+    for ok in [
+        "use freemkv_engine as fe;",
+        "use libfreemkv::{Disc, Error, Halt};",
+        "use libfreemkv::keys::{KeyRing, KeyScope};",
+        "use freemkv_engine::{Event as E, Plan};",
+    ] {
+        assert!(bad_imports(ok).is_empty(), "{ok} was flagged");
+    }
+}
+
+#[test]
 fn front_ends_reach_engine_owned_work_only_through_the_engine() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     rs_files(&root.join("src"), &mut files);
     let mut found: BTreeMap<(String, &str), usize> = BTreeMap::new();
+    let mut problems = Vec::new();
     for f in &files {
         let rel = f
             .strip_prefix(root)
@@ -142,8 +265,14 @@ fn front_ends_reach_engine_owned_work_only_through_the_engine() {
             continue;
         }
         let src = std::fs::read_to_string(f).unwrap().replace("\r\n", "\n");
+        let code = without_test_modules(&code_only(&src));
+        for bad in bad_imports(&code) {
+            problems.push(format!(
+                "{rel}: {bad} — go through freemkv_engine::run(Plan)"
+            ));
+        }
         for pat in FORBIDDEN {
-            let n = code_only(production(&src)).matches(pat).count();
+            let n = code.matches(pat).count();
             if n > 0 {
                 found.insert((rel.clone(), pat), n);
             }
@@ -153,7 +282,6 @@ fn front_ends_reach_engine_owned_work_only_through_the_engine() {
         .iter()
         .map(|&(f, p, n)| ((f.to_string(), p), n))
         .collect();
-    let mut problems = Vec::new();
     for (k, &n) in &found {
         match baseline.get(k) {
             None => problems.push(format!(
