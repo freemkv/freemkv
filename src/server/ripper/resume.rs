@@ -172,8 +172,6 @@ pub fn classify_resume(hint: &StagingResumeHint, _abort_on_lost_secs: u64) -> Re
         return ResumeClass::NotEligible;
     }
 
-    // No loss pre-filter: resume_remux applies the engine's title-scoped loss verdict.
-
     // The ISO's OWN stem, not the staging dir's name. `rip_disc` builds every
     // file inside a staging dir from `sanitize_path_compact(display_name)`
     // point delete_partial_output at a dotfile; bail loudly instead.
