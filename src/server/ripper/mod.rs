@@ -230,15 +230,19 @@ fn resolve_rip_keys(
     )
 }
 
-// What a rip of `disc` decrypts (KU §2.5): nothing for an ISO output (the swept image is
-// delivered raw), else title 0 (the rip's feature) and every episode a TV plan fans out to.
+// What a rip of `disc` decrypts (KU §2.5): the whole disc for an ISO output (delivered
+// decrypted, as the CLI and GUI deliver one), else title 0 (the rip's feature) and every
+// episode a TV plan fans out to.
 fn rip_key_scope(
     disc: &libfreemkv::Disc,
     cfg: &Config,
     media_type: &str,
     disc_name: &str,
 ) -> libfreemkv::keys::KeyScope {
-    if output_is_iso_image(&cfg.output_format) || disc.titles.is_empty() {
+    if output_is_iso_image(&cfg.output_format) {
+        return libfreemkv::keys::KeyScope::WholeDisc;
+    }
+    if disc.titles.is_empty() {
         return libfreemkv::keys::KeyScope::None;
     }
     let mut titles = fanout_episode_indices(&disc.titles, cfg, media_type, disc_name);
@@ -3217,6 +3221,8 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         }
     }
 
+    // An ISO deliverable is decrypted in place by the passes, like the CLI's and GUI's.
+    let iso_decrypts = output_is_iso_image(&cfg_read.output_format);
     let mux_source = if uses_multipass(cfg_read.max_retries) {
         let iso_path = std::path::Path::new(&iso_path_str);
         let bytes_total_disc = (session.drive.read_capacity().unwrap_or(0) as u64) * 2048;
@@ -3362,13 +3368,15 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // a bridge crash left it. `resume_sweep` (user clicked Resume)
             // makes even the FIRST attempt resume, skipping already-swept data.
             let sweep_opts = freemkv_engine::SweepOptions {
-                decrypt: false,
+                // An ISO output is delivered decrypted; an image staged for a title mux
+                // stays raw (the mux decrypts its titles).
+                decrypt: iso_decrypts,
                 resume: resume_sweep || attempt > 1,
                 batch_sectors: None,
                 skip_on_error: true,
                 progress: Some(&pass1_progress),
                 halt: Some(pass1_halt.clone()),
-                // A raw capture decrypts nothing; the set only stamps the identity.
+                // The rip's set: an ISO output decrypts through it; a raw staging capture only stamps the identity.
                 keys: rip_keys.as_ref().ok().cloned(),
             };
 
@@ -3904,7 +3912,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // 0.18 round 3: Pass 2..N calls freemkv_engine::patch directly; these
             // PatchOptions mirror what the old patch_internal constructed.
             let patch_opts = freemkv_engine::PatchOptions {
-                decrypt: false,
+                decrypt: iso_decrypts,
                 // Enter each bad range BATCHED, not single-sector: it's mostly
                 // good skip-ahead overshoot with a small damaged core, so a batch
                 // reads the overshoot in bulk and bisects down to the real bad sector.

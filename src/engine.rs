@@ -2460,29 +2460,14 @@ fn recovery_plan(kind: OutKind, multipass: bool) -> DiscPlan {
     }
 }
 
-// The `raw` flag a recovery job must carry, or the reason it cannot run. multipass_rip refuses
-// raw=false for a real sweep; staged title-mux images are RAW, decrypted on the ordinary iso://
-// re-open.
+// The `raw` flag a recovery job carries: the user's, except that an image staged for a title
+// mux stays RAW on disk (decrypted on the ordinary iso:// re-open into the container). A
+// multipass recovery to an ISO decrypts unless the user kept it raw (EO6).
 fn recovery_raw(multipass: bool, want_iso: bool, user_raw: bool) -> Result<bool, String> {
-    if !multipass {
-        // Single-pass: an ordinary decrypting copy, and `raw` means what the
-        // user set it to.
-        return Ok(user_raw);
-    }
-    if !want_iso {
-        // Staging image for a mux. Encrypted on disk, decrypted on the way
-        // into the container.
+    if multipass && !want_iso {
         return Ok(true);
     }
-    if user_raw {
-        return Ok(true);
-    }
-    Err(
-        "A multi-pass recovery reads the whole disc, so the image it writes is \
-         encrypted. For a decrypted ISO, set Rip mode to 'Single pass'; to keep \
-         the multi-pass recovery, tick 'Keep encrypted (raw)'."
-            .into(),
-    )
+    Ok(user_raw)
 }
 
 /// What a title NUMBER actually referred to, so a selection survives a
@@ -4168,12 +4153,7 @@ mod routing_tests {
             .expect("the default settings must produce a runnable recovery");
         assert!(
             raw,
-            "a multipass recovery must be raw — the engine refuses it otherwise,              and the refusal is what every default live-drive rip hit"
-        );
-        // The engine's own gate, applied to what we just produced.
-        assert!(
-            !(fe::plan_passes(5).multipass && !raw),
-            "this is the exact condition multipass_rip returns              multipass_requires_raw for"
+            "a multipass image staged for a title mux stays raw on disk; the mux decrypts"
         );
     }
 
@@ -4947,18 +4927,13 @@ mod routing_tests {
         assert_eq!(recovery_raw(false, true, true), Ok(true));
     }
 
-    /// Whole disc → ISO, multipass, raw off: the user asked for a decrypted
-    /// image and a multipass recovery cannot produce one. Refused up front,
-    /// in words the user can act on, rather than after the drive is staged.
+    /// Whole disc → ISO, multipass, raw off: a decrypted image, recovered over passes.
     #[test]
-    fn a_decrypted_iso_from_a_multipass_recovery_is_refused_before_the_drive() {
-        let e = recovery_raw(true, true, false).expect_err("this cannot be honoured");
-        assert!(
-            e.contains("Single pass") && e.contains("raw"),
-            "the refusal must name both ways out, got: {e}"
-        );
-        // And the same request with raw ticked is allowed.
+    fn a_multipass_recovery_to_an_iso_decrypts_unless_raw() {
+        assert_eq!(recovery_raw(true, true, false), Ok(false));
         assert_eq!(recovery_raw(true, true, true), Ok(true));
+        // A staged image for a title mux stays raw on disk.
+        assert_eq!(recovery_raw(true, false, false), Ok(true));
     }
 
     // A GUI ISO or folder output from an image staged for an MKV rip is refused before

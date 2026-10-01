@@ -2238,10 +2238,8 @@ fn disc_to_iso(
     let disc_name = sanitize_name(disc.meta_title.as_deref().unwrap_or(&disc.volume_id));
     let (iso_path, is_null) = match &parsed_dest {
         libfreemkv::StreamUrl::Iso { path } => (path.clone(), false),
-        libfreemkv::StreamUrl::Null => {
-            let p = std::path::PathBuf::from("/dev/null");
-            (p, true)
-        }
+        // The platform's null device (`NUL` on Windows): the copy runs, nothing is kept.
+        libfreemkv::StreamUrl::Null => (libfreemkv::io::null_device().to_path_buf(), true),
         _ => unreachable!(),
     };
 
