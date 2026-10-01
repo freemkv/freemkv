@@ -5683,6 +5683,7 @@ mod routing_tests {
             pending_bytes: 0,
             good_bytes: 50_000_000_000,
             main_lost_ms: 0.0,
+            lost_bytes: 0,
             severity: fe::DamageSeverity::Clean,
             passes: 1,
             aborted_for_loss: false,
@@ -5709,6 +5710,7 @@ mod routing_tests {
             pending_bytes: 2 * 1_048_576,
             good_bytes: 40_000_000_000,
             main_lost_ms: 0.0,
+            lost_bytes: 0,
             severity: fe::DamageSeverity::Cosmetic,
             passes: 2,
             ..clean_result()
@@ -5728,6 +5730,7 @@ mod routing_tests {
             unreadable_bytes: 1_048_576,
             pending_bytes: 0,
             main_lost_ms: 4_500.0,
+            lost_bytes: 0,
             severity: fe::DamageSeverity::Cosmetic,
             ..clean_result()
         };
@@ -5747,6 +5750,7 @@ mod routing_tests {
             unreadable_bytes: 1_048_576,
             pending_bytes: 0,
             main_lost_ms: f64::NAN,
+            lost_bytes: 0,
             severity: fe::DamageSeverity::Moderate,
             ..clean_result()
         };

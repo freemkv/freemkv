@@ -2126,68 +2126,6 @@ fn resumable_dir_blocked(snap: &staging::StagingSnapshot) -> bool {
         || snap.completed
 }
 
-// End-of-recovery loss figure in milliseconds, or NaN when untrustworthy (`promotion_intact ==
-// false`, or real loss with no bitrate to convert it with). Pure and unit-testable.
-pub(crate) fn end_of_recovery_lost_ms(
-    promotion_intact: bool,
-    title_bytes_per_sec: f64,
-    lost_bytes: u64,
-) -> f64 {
-    if !promotion_intact {
-        return f64::NAN;
-    }
-    if title_bytes_per_sec > 0.0 && title_bytes_per_sec.is_finite() {
-        lost_bytes as f64 / title_bytes_per_sec * 1000.0
-    } else if lost_bytes == 0 {
-        0.0
-    } else {
-        // Real loss, no bitrate to convert it with.
-        f64::NAN
-    }
-}
-
-/// Confirmed end-of-recovery loss, in both units the abort gate needs.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct EndOfRecoveryLoss {
-    /// Unreadable bytes under the deliverable's scope. The perfect-rip
-    /// (`abort_on_lost_secs = 0`) gate keys on THIS, not on the bitrate-derived
-    /// ms, so a missing or nonsense bitrate cannot hide unreadable loss.
-    lost_bytes: u64,
-    /// The same loss as milliseconds of the muxed title, or NaN when it cannot
-    /// be quantified (see `end_of_recovery_lost_ms`).
-    lost_ms: f64,
-}
-
-// Measure the loss the end-of-recovery abort gate decides on, reading the ALREADY-PROMOTED
-// mapfile (Unreadable here means confirmed-lost). Zero only when genuinely nothing to report.
-fn end_of_recovery_loss(
-    map: &freemkv_engine::Mapfile,
-    promotion_intact: bool,
-    output_is_iso: bool,
-    title: &libfreemkv::DiscTitle,
-    title_bytes_per_sec: f64,
-) -> EndOfRecoveryLoss {
-    let none = EndOfRecoveryLoss {
-        lost_bytes: 0,
-        lost_ms: 0.0,
-    };
-    if map.stats().bytes_unreadable == 0 {
-        return none;
-    }
-    let bad_ranges = map.ranges_with(&[freemkv_engine::SectorStatus::Unreadable]);
-    if bad_ranges.is_empty() {
-        return none;
-    }
-    // Raw byte count under the muxed-title scope: the perfect-rip gate keys
-    // on bytes. Without a bitrate, converting to time yields NaN (fails safe
-    // to abort) rather than a 0.0 a seconds tolerance would silently accept.
-    let lost_bytes = abort_lost_bytes(output_is_iso, title, &bad_ranges);
-    EndOfRecoveryLoss {
-        lost_bytes,
-        lost_ms: end_of_recovery_lost_ms(promotion_intact, title_bytes_per_sec, lost_bytes),
-    }
-}
-
 // Look at the staging dirs for a Remux-eligible entry matching the sanitized display_name of
 // the currently-scanned disc; returns the `ResumeClass::Remux` payload if found, else None.
 fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<resume::ResumeClass> {
@@ -2231,16 +2169,6 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
             // disk-full). Refuse and re-sweep fresh rather than resume onto it.
             if std::fs::metadata(&iso_path).is_ok_and(|m| m.len() < stats.bytes_total) {
                 continue;
-            }
-            // Pre-filter: at ==0, whole-disc bytes are the wrong predicate
-            // (defer to resume_remux's per-title check); at >0, use them as
-            // a coarse early-reject to skip scan_image on heavy damage.
-            if cfg_read.abort_on_lost_secs > 0 {
-                let lost_secs =
-                    stats.bytes_unreadable as f64 / resume::FALLBACK_BITRATE_BYTES_PER_SEC;
-                if lost_secs > cfg_read.abort_on_lost_secs as f64 {
-                    continue;
-                }
             }
             // FILE basename (ISO stem), never `basename` — that's the dir
             // name carrying the `_2` boxset suffix the files never take.
@@ -3068,17 +2996,8 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         },
     );
 
-    // Per-title bitrate for lost-video-time math. Falls back to 66 Mbps
-    // (sustained BD) if the scanner didn't populate size_bytes/duration.
-    let title_bytes_per_sec: f64 = {
-        let b = title.size_bytes as f64;
-        let d = title.duration_secs;
-        if b > 0.0 && d > 0.0 {
-            b / d
-        } else {
-            resume::FALLBACK_BITRATE_BYTES_PER_SEC
-        }
-    };
+    // Per-title bitrate for lost-video-time display: the engine's one conversion.
+    let title_bytes_per_sec: f64 = freemkv_engine::title_bytes_per_sec(&title);
 
     // Shared state read by event callbacks and the rip loop (copies atomics
     // into RipState every ~1s). The watchdog timestamp updates on ANY sector
@@ -3504,12 +3423,9 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         }
 
         let mut main_lost_ms_for_history = 0.0f64;
-        let mut main_lost_bytes_for_history = 0u64;
         if uses_multipass(cfg_read.max_retries) {
-            if let Some((lost_bytes, lost_ms)) = pass_sink.loss() {
-                main_lost_bytes_for_history = lost_bytes;
-                main_lost_ms_for_history = lost_ms;
-            }
+            // The engine's one loss verdict.
+            main_lost_ms_for_history = result.main_lost_ms;
             // Mirror into the outer binding so the final done/stopped state update (after
             // run_mux) can use the same in-title value without re-reading the mapfile.
             main_lost_ms_for_history_outer = main_lost_ms_for_history;
@@ -3518,11 +3434,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // tolerance is ignored (forced to 0). MKV/M2TS use the configured value.
             let effective_abort =
                 effective_abort_secs(&cfg_read.output_format, cfg_read.abort_on_lost_secs);
-            if loss_aborts(
-                main_lost_bytes_for_history,
-                main_lost_ms_for_history,
-                effective_abort,
-            ) {
+            if result.aborted_for_loss {
                 crate::server::log::device_log(
                     device,
                     &format!(
@@ -4780,36 +4692,6 @@ fn mux_progress_denominator(
     }
 }
 
-// Unreadable byte count the abort gate scopes to: whole-disc for ISO, in-title only for MKV.
-// RAW source the `abort_on_lost_secs == 0` ("perfect") gate keys on — no bitrate/float.
-pub(super) fn abort_lost_bytes(
-    output_is_iso: bool,
-    title: &libfreemkv::DiscTitle,
-    bad_ranges: &[(u64, u64)],
-) -> u64 {
-    freemkv_engine::abort_lost_bytes(output_is_iso, title, bad_ranges)
-}
-
-// Milliseconds of loss that the post-retry abort check should weigh: whole-disc for a raw ISO,
-// in-title only for an MKV/m2ts mux.
-pub(super) fn abort_lost_ms(
-    output_is_iso: bool,
-    title: &libfreemkv::DiscTitle,
-    bad_ranges: &[(u64, u64)],
-    title_bytes_per_sec: f64,
-) -> f64 {
-    freemkv_engine::abort_lost_ms(output_is_iso, title, bad_ranges, title_bytes_per_sec)
-}
-
-// The flawless-rip loss gate: `abort_on_lost_secs == 0` means ZERO — abort on ANY lost byte; `>
-// 0` keeps a time-based tolerance. A NaN `lost_ms` always aborts (fail-safe).
-fn loss_aborts(lost_bytes: u64, lost_ms: f64, abort_on_lost_secs: u64) -> bool {
-    // Forward rather than re-implement: this was a full local copy of the
-    // engine's body, hand-synced across crates, until the feeding code drifted
-    // and autorip/engine returned opposite verdicts on the same damaged disc.
-    freemkv_engine::loss_aborts(lost_bytes, lost_ms, abort_on_lost_secs)
-}
-
 // Whether mux-time (decrypt/codec) loss must quarantine the rip. SOLE enforcement point for
 // mux-time loss (pre-mux gate only reads the mapfile Unreadable set).
 fn mux_loss_aborts(
@@ -5864,42 +5746,6 @@ mod tests {
     //! Tests for orchestrator-level helpers that live in this file.
     //! State-only helpers and their tests live in `state.rs`.
 
-    // An incomplete damage record must abort, not deliver: a failed record()/flush() leaves
-    // loss invisible to the abort gate.
-    #[test]
-    fn an_incomplete_damage_record_aborts_regardless_of_tolerance() {
-        let bitrate = 8_250_000.0_f64;
-        let lost = 40 * 1024 * 1024u64; // 40 MB still bad
-
-        // Intact promotion, measurable loss -> a real figure the gate can judge.
-        let ok = super::end_of_recovery_lost_ms(true, bitrate, lost);
-        assert!(
-            ok.is_finite() && ok > 0.0,
-            "expected a real figure, got {ok}"
-        );
-        assert!(
-            !freemkv_engine::loss_aborts(lost, ok, 3600),
-            "measured loss well under an hour's tolerance should proceed"
-        );
-
-        // Promotion failed -> unquantifiable, whatever the bitrate says.
-        let broken = super::end_of_recovery_lost_ms(false, bitrate, lost);
-        assert!(broken.is_nan(), "expected NaN, got {broken}");
-        assert!(
-            freemkv_engine::loss_aborts(lost, broken, 3600),
-            "an incomplete damage record must abort even at a 1h tolerance"
-        );
-        assert!(
-            freemkv_engine::loss_aborts(0, broken, u64::MAX),
-            "and even at the accept-loss override"
-        );
-
-        // No bitrate but real loss is also unquantifiable...
-        assert!(super::end_of_recovery_lost_ms(true, 0.0, lost).is_nan());
-        // ...while genuinely no loss stays zero, so a clean rip never aborts.
-        assert_eq!(super::end_of_recovery_lost_ms(true, 0.0, 0), 0.0);
-    }
-
     use super::{
         FmtsGate, FmtsGatePlan, HaltGuard, PatchDecision, SweepReadAction, SweepingGuard,
         aacs_failure_message, bad_sector_statuses, disk_space_preflight_message,
@@ -6470,7 +6316,7 @@ mod tests {
         // 50 scattered 1 MB gaps inside the title = 50 MB total.
         // At 1 MB/s that is 50 s == 50_000 ms.
         let bad: Vec<(u64, u64)> = (0..50).map(|i| (i * 1_500_000u64, 1_000_000u64)).collect();
-        let lost = super::abort_lost_ms(false, &title, &bad, bps);
+        let lost = freemkv_engine::abort_lost_ms(false, &title, &bad, bps);
         // Old fold-max would have reported ~1000 ms (one gap); sum is 50x.
         assert!(
             (lost - 50_000.0).abs() < 1.0,
@@ -6479,7 +6325,7 @@ mod tests {
 
         // ISO output is whole-disc: same bad ranges sum regardless of
         // title scoping.
-        let lost_iso = super::abort_lost_ms(true, &title, &bad, bps);
+        let lost_iso = freemkv_engine::abort_lost_ms(true, &title, &bad, bps);
         assert!((lost_iso - 50_000.0).abs() < 1.0, "iso whole-disc sum");
     }
 
@@ -6690,7 +6536,7 @@ mod tests {
         // The range is now terminal Unreadable: the abort gate reads it as lost.
         let unreadable = map.ranges_with(&[freemkv_engine::SectorStatus::Unreadable]);
         assert_eq!(unreadable, vec![(bad_pos, bad_size)]);
-        let lost_bytes = super::abort_lost_bytes(false, &title, &unreadable);
+        let lost_bytes = freemkv_engine::abort_lost_bytes(false, &title, &unreadable);
         assert_eq!(
             lost_bytes, bad_size,
             "promoted-Unreadable bytes are counted as in-title loss by the abort gate"
@@ -8047,7 +7893,7 @@ mod tests {
         let title = title_lba(1000, 1000, bps);
         // 50 sectors bad starting at byte 0 (well before the title).
         let bad = vec![(0u64, 50 * 2048)];
-        let lost = super::abort_lost_ms(false, &title, &bad, bps);
+        let lost = freemkv_engine::abort_lost_ms(false, &title, &bad, bps);
         assert_eq!(lost, 0.0, "out-of-title loss must not count for MKV mux");
     }
 
@@ -8058,7 +7904,7 @@ mod tests {
         let bps = 8_250_000.0;
         let title = title_lba(1000, 1000, bps);
         let bad = vec![(0u64, 50 * 2048)];
-        let lost = super::abort_lost_ms(true, &title, &bad, bps);
+        let lost = freemkv_engine::abort_lost_ms(true, &title, &bad, bps);
         assert!(lost > 0.0, "ISO output counts whole-disc loss");
     }
 
@@ -8069,7 +7915,7 @@ mod tests {
         let title = title_lba(1000, 1000, bps);
         // 10 bad sectors starting at sector 1500 (inside the title).
         let bad = vec![(1500u64 * 2048, 10 * 2048)];
-        let lost = super::abort_lost_ms(false, &title, &bad, bps);
+        let lost = freemkv_engine::abort_lost_ms(false, &title, &bad, bps);
         assert!(lost > 0.0, "in-title loss must count for MKV mux");
     }
 
@@ -8081,7 +7927,7 @@ mod tests {
         let bps = 8_250_000.0;
         let title = title_lba(1000, 1000, bps);
         let bad = vec![(0u64, 50 * 2048)]; // out-of-title only
-        let in_title_lost_ms = super::abort_lost_ms(false, &title, &bad, bps);
+        let in_title_lost_ms = freemkv_engine::abort_lost_ms(false, &title, &bad, bps);
         assert_eq!(in_title_lost_ms, 0.0);
         let abort_threshold_ms = 0.0; // abort_on_lost_secs = 0
         assert!(
@@ -8203,7 +8049,7 @@ mod tests {
 
         // In-title-scoped calculation (the correct path via abort_lost_ms):
         // out-of-title damage does NOT count for MKV output.
-        let in_title_lost_ms = super::abort_lost_ms(false, &title, &bad, bps);
+        let in_title_lost_ms = freemkv_engine::abort_lost_ms(false, &title, &bad, bps);
         assert_eq!(
             in_title_lost_ms, 0.0,
             "in-title loss must be 0 when all bad sectors are outside title extents"
@@ -8230,7 +8076,7 @@ mod tests {
         let title = title_lba(1000, 1000, bps);
         // 10 sectors at LBA 1500 — inside the title.
         let bad = vec![(1500u64 * 2048, 10 * 2048)];
-        let in_title_lost_ms = super::abort_lost_ms(false, &title, &bad, bps);
+        let in_title_lost_ms = freemkv_engine::abort_lost_ms(false, &title, &bad, bps);
         assert!(in_title_lost_ms > 0.0, "in-title loss should be non-zero");
         let final_lost_secs = in_title_lost_ms / MILLIS_PER_SEC;
         // 10 sectors * 2048 bytes / 8_250_000 bps ≈ 0.00248s
@@ -9022,7 +8868,7 @@ mod tests {
     // time reads as NaN, fail-safe to abort.
     #[test]
     fn unquantifiable_loss_aborts_under_any_threshold() {
-        use super::loss_aborts;
+        use freemkv_engine::loss_aborts;
         // Zero bitrate → ms is NaN. Real lost bytes, perfect-rip threshold.
         assert!(
             loss_aborts(4096, f64::NAN, 0),
@@ -9103,7 +8949,8 @@ mod tests {
 
     #[test]
     fn iso_aborts_on_any_loss_despite_configured_tolerance() {
-        use super::{effective_abort_secs, loss_aborts};
+        use super::effective_abort_secs;
+        use freemkv_engine::loss_aborts;
         // Bug scenario: a 30s tolerance configured for MKV, then output switched
         // to ISO. The raw config would WRONGLY tolerate a small whole-disc loss…
         let configured = 30u64;
@@ -9127,7 +8974,7 @@ mod tests {
 
     #[test]
     fn accept_loss_override_threshold_proceeds_but_nan_still_aborts() {
-        use super::loss_aborts;
+        use freemkv_engine::loss_aborts;
         // The `.accept-loss` override raises the effective threshold to u64::MAX.
         // A real, large in-title loss must then PROCEED (deliver despite damage)…
         assert!(
@@ -9218,7 +9065,7 @@ mod tests {
 
     #[test]
     fn loss_aborts_zero_threshold_is_byte_exact() {
-        use super::loss_aborts;
+        use freemkv_engine::loss_aborts;
         // abort_on_lost_secs == 0 → ZERO: any lost byte aborts, regardless of
         // the (bitrate-derived) seconds estimate; exactly zero bytes proceeds.
         assert!(
@@ -9427,163 +9274,6 @@ mod tests {
     // ===================================================================
     // End-of-recovery loss measurement (the abort gate's input)
     // ===================================================================
-
-    /// Build a mapfile whose whole image is Finished except the `bad`
-    /// (pos, size) ranges, recorded Unreadable — the state the end-of-recovery
-    /// promotion leaves behind.
-    fn mapfile_with_unreadable(
-        path: &std::path::Path,
-        disc_size: u64,
-        bad: &[(u64, u64)],
-    ) -> freemkv_engine::Mapfile {
-        use freemkv_engine::{Mapfile, SectorStatus};
-        let mut map = Mapfile::create(path, disc_size, "test").expect("create mapfile");
-        map.record(0, disc_size, SectorStatus::Finished)
-            .expect("record Finished");
-        for (pos, size) in bad {
-            map.record(*pos, *size, SectorStatus::Unreadable)
-                .expect("record Unreadable");
-        }
-        map
-    }
-
-    // The measurement the abort gate decides on: reporting zero for
-    // confirmed in-title damage is the shipped-broken-once failure.
-    #[test]
-    fn end_of_recovery_loss_counts_confirmed_in_title_damage() {
-        use super::end_of_recovery_loss;
-        let tmp = tempfile::tempdir().unwrap();
-        // Title occupies sectors 1000..2000; 10 unreadable sectors at 1500.
-        let disc_size = 4000 * 2048;
-        let bad = [(1500 * 2048u64, 10 * 2048u64)];
-        let map = mapfile_with_unreadable(&tmp.path().join("t.mapfile"), disc_size, &bad);
-        let title = title_lba(1000, 1000, 0.0);
-        let bps = 2048.0 * 10.0; // 10 sectors per second → 1000 ms lost.
-
-        let loss = end_of_recovery_loss(&map, true, false, &title, bps);
-        assert_eq!(
-            loss.lost_bytes,
-            10 * 2048,
-            "every confirmed-unreadable in-title byte must reach the abort gate"
-        );
-        assert!(
-            (loss.lost_ms - 1000.0).abs() < 1.0,
-            "10 sectors at 10 sectors/sec is one second of the movie, got {}",
-            loss.lost_ms
-        );
-        // And the gate actually fires on it at the perfect-rip threshold.
-        assert!(
-            super::loss_aborts(loss.lost_bytes, loss.lost_ms, 0),
-            "confirmed in-title loss must abort a threshold-0 rip"
-        );
-    }
-
-    // A clean image reports nothing (symmetric direction): if non-zero,
-    // every flawless rip at threshold 0 would be wrongly quarantined.
-    #[test]
-    fn end_of_recovery_loss_is_zero_for_a_clean_image() {
-        use super::end_of_recovery_loss;
-        let tmp = tempfile::tempdir().unwrap();
-        let map = mapfile_with_unreadable(&tmp.path().join("t.mapfile"), 4000 * 2048, &[]);
-        let title = title_lba(1000, 1000, 0.0);
-
-        let loss = end_of_recovery_loss(&map, true, false, &title, 20480.0);
-        assert_eq!(loss.lost_bytes, 0, "a clean image has lost no bytes");
-        assert_eq!(loss.lost_ms, 0.0, "a clean image has lost no time");
-        assert!(
-            !super::loss_aborts(loss.lost_bytes, loss.lost_ms, 0),
-            "a flawless rip must pass even the perfect-rip threshold"
-        );
-    }
-
-    // Out-of-title damage must NOT abort an MKV rip, but the same
-    // damage counts for ISO output (whole image is the deliverable).
-    #[test]
-    fn end_of_recovery_loss_scopes_to_the_deliverable() {
-        use super::end_of_recovery_loss;
-        let tmp = tempfile::tempdir().unwrap();
-        let disc_size = 4000 * 2048;
-        // Bad sectors at the very start of the disc, far outside the title.
-        let bad = [(0u64, 10 * 2048u64)];
-        let map = mapfile_with_unreadable(&tmp.path().join("t.mapfile"), disc_size, &bad);
-        let title = title_lba(1000, 1000, 0.0);
-        let bps = 20480.0;
-
-        let mkv = end_of_recovery_loss(&map, true, false, &title, bps);
-        assert_eq!(
-            mkv.lost_bytes, 0,
-            "a scratched menu outside the title must not abort an MKV rip"
-        );
-        assert_eq!(mkv.lost_ms, 0.0);
-
-        let iso = end_of_recovery_loss(&map, true, true, &title, bps);
-        assert_eq!(
-            iso.lost_bytes,
-            10 * 2048,
-            "for ISO output the whole disc is the deliverable, so the same damage counts"
-        );
-        assert!(iso.lost_ms > 0.0);
-    }
-
-    // A failed promotion means the damage record is incomplete, so the figure must come back
-    // NaN — but a clean rip (nothing to promote) stays clean. Ordering is deliberate.
-    #[test]
-    fn end_of_recovery_loss_distrusts_a_broken_promotion_only_when_damage_exists() {
-        use super::end_of_recovery_loss;
-        let tmp = tempfile::tempdir().unwrap();
-        let disc_size = 4000 * 2048;
-        let title = title_lba(1000, 1000, 0.0);
-
-        let damaged = mapfile_with_unreadable(
-            &tmp.path().join("damaged.mapfile"),
-            disc_size,
-            &[(1500 * 2048, 10 * 2048)],
-        );
-        let loss = end_of_recovery_loss(&damaged, false, false, &title, 20480.0);
-        assert!(
-            loss.lost_ms.is_nan(),
-            "an incomplete damage record must be unquantifiable, not a believable number"
-        );
-        assert!(
-            super::loss_aborts(loss.lost_bytes, loss.lost_ms, u64::MAX),
-            "NaN must abort even under the operator's accept-loss override"
-        );
-
-        let clean = mapfile_with_unreadable(&tmp.path().join("clean.mapfile"), disc_size, &[]);
-        let clean_loss = end_of_recovery_loss(&clean, false, false, &title, 20480.0);
-        assert_eq!(
-            clean_loss.lost_ms, 0.0,
-            "nothing to promote means nothing was lost — a clean rip is still delivered"
-        );
-    }
-
-    /// A zero/unknown bitrate makes the SECONDS figure unquantifiable, but the
-    /// BYTE figure is still known — and the perfect-rip gate keys on bytes
-    /// exactly so a nonsense bitrate can't hide unreadable loss ("0 means ZERO").
-    #[test]
-    fn end_of_recovery_loss_reports_bytes_even_without_a_bitrate() {
-        use super::end_of_recovery_loss;
-        let tmp = tempfile::tempdir().unwrap();
-        let disc_size = 4000 * 2048;
-        let bad = [(1500 * 2048u64, 10 * 2048u64)];
-        let map = mapfile_with_unreadable(&tmp.path().join("t.mapfile"), disc_size, &bad);
-        let title = title_lba(1000, 1000, 0.0);
-
-        let loss = end_of_recovery_loss(&map, true, false, &title, 0.0);
-        assert_eq!(
-            loss.lost_bytes,
-            10 * 2048,
-            "unreadable in-title bytes are known even when the bitrate isn't"
-        );
-        assert!(
-            loss.lost_ms.is_nan(),
-            "real loss with no bitrate to convert it is unquantifiable, not zero"
-        );
-        assert!(
-            super::loss_aborts(loss.lost_bytes, loss.lost_ms, 0),
-            "a zero bitrate must not hide unreadable loss from the perfect-rip gate"
-        );
-    }
 
     // Disc-identity guards for the unattended auto-insert path: these pin the
     // STATE/Config wrappers it calls. `→ false` re-rips a finished disc and

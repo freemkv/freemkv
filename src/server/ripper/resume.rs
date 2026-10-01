@@ -18,7 +18,6 @@ use super::staging::{self, ResumeAction, StagingResumeHint};
 
 // Fallback title bitrate (bytes/sec) for converting bad-byte counts to lost title-seconds when
 // the real per-title bitrate is unknown. Shared by classify_resume and resume_remux.
-pub(crate) const FALLBACK_BITRATE_BYTES_PER_SEC: f64 = 8_250_000.0;
 
 // No live drive at resume time (we mux from a staged ISO), so this probes a non-optical,
 // non-existent node on purpose.
@@ -77,7 +76,7 @@ pub enum ResumeClass {
 /// `Remux` requires: hint is `ResumePreserved`/`ResumeAbortedLoss` with `has_iso &&
 /// has_mapfile`, mapfile loads with `bytes_pending == 0`, and any bad bytes overlapping the
 /// muxable title fit within `abort_on_lost_secs`.
-pub fn classify_resume(hint: &StagingResumeHint, abort_on_lost_secs: u64) -> ResumeClass {
+pub fn classify_resume(hint: &StagingResumeHint, _abort_on_lost_secs: u64) -> ResumeClass {
     match &hint.action {
         ResumeAction::AlreadyCompleted => return ResumeClass::AlreadyCompleted,
         ResumeAction::AlreadyFailed { reason } => {
@@ -176,16 +175,7 @@ pub fn classify_resume(hint: &StagingResumeHint, abort_on_lost_secs: u64) -> Res
         return ResumeClass::NotEligible;
     }
 
-    // No live coverage check here on purpose. Bad-bytes pre-filter: at ==0, whole-disc bytes
-    // would over-block damage outside the title, so ALLOW and defer to the title-scoped
-    // re-check.
-    if abort_on_lost_secs > 0 {
-        let bad_bytes = stats.bytes_unreadable;
-        let lost_secs = bad_bytes as f64 / FALLBACK_BITRATE_BYTES_PER_SEC;
-        if lost_secs > abort_on_lost_secs as f64 {
-            return ResumeClass::NotEligible;
-        }
-    }
+    // No loss pre-filter here: resume_remux applies the engine's title-scoped loss verdict.
 
     // The ISO's OWN stem, not the staging dir's name. `rip_disc` builds every
     // file inside a staging dir from `sanitize_path_compact(display_name)`
@@ -923,15 +913,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
             return;
         }
     };
-    let title_bytes_per_sec: f64 = {
-        let b = title.size_bytes as f64;
-        let d = title.duration_secs;
-        if b > 0.0 && d > 0.0 {
-            b / d
-        } else {
-            FALLBACK_BITRATE_BYTES_PER_SEC
-        }
-    };
+    let title_bytes_per_sec: f64 = freemkv_engine::title_bytes_per_sec(&title);
     // Compute disc_format + duration up front so the abort/early-return
     // paths below can surface them in the UI state (they were previously
     // only available after the mux-build block).
@@ -973,10 +955,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         // (`abort_lost_ms` in mod.rs): for `output_format == "iso"` every
         // ABORT — the two paths must reach the same verdict.
         let output_is_iso = super::output_is_iso_image(&cfg_read.output_format);
-        let lost_bytes = super::abort_lost_bytes(output_is_iso, &title, &bad_ranges);
-        let lost_secs =
-            super::abort_lost_ms(output_is_iso, &title, &bad_ranges, title_bytes_per_sec)
-                / crate::server::util::MILLIS_PER_SEC;
+        let _ = title_bytes_per_sec;
         // ISO output is whole-disc and must be byte-complete: the per-title
         // tolerance is ignored (forced to 0), matching the fresh-rip gate.
         // `.accept-loss` raises the threshold to unlimited for the override.
@@ -988,11 +967,15 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         // BYTE-AWARE gate, identical to the fresh-rip path (`loss_aborts` in
         // mod.rs): with `abort_on_lost_secs == 0`, "0 means ZERO" is byte-exact, so
         // silently deliver it — the two completion routes must not diverge.
-        if super::loss_aborts(
-            lost_bytes,
-            lost_secs * crate::server::util::MILLIS_PER_SEC,
-            effective_abort,
-        ) {
+        // The engine's one loss verdict, the same the fresh rip gets.
+        let verdict =
+            freemkv_engine::loss_verdict(output_is_iso, &[&title], &bad_ranges, effective_abort);
+        let lost_secs = if verdict.lost_ms.is_finite() {
+            verdict.lost_ms / crate::server::util::MILLIS_PER_SEC
+        } else {
+            0.0
+        };
+        if verdict.aborts {
             // "disc loss" for raw ISO (whole-disc scope), "title loss" for a
             // muxed MKV/M2TS (in-title scope) — matching how `lost_secs` was
             // computed just above.
@@ -1658,15 +1641,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                 ));
                 continue;
             };
-            let ep_bps: f64 = {
-                let b = ep_title.size_bytes as f64;
-                let d = ep_title.duration_secs;
-                if b > 0.0 && d > 0.0 {
-                    b / d
-                } else {
-                    FALLBACK_BITRATE_BYTES_PER_SEC
-                }
-            };
+            let ep_bps: f64 = freemkv_engine::title_bytes_per_sec(&ep_title);
             let ep_dest_url = format!(
                 "{}://{}",
                 super::output_scheme_for(&output_format),
@@ -2517,7 +2492,7 @@ mod resume_abort_scope_tests {
         let title = title_lba(1000, 1000);
         let bad = vec![(0u64, 50 * 2048)];
         let lost_secs =
-            crate::server::ripper::abort_lost_ms(/* output_is_iso */ true, &title, &bad, bps)
+            freemkv_engine::abort_lost_ms(/* output_is_iso */ true, &title, &bad, bps)
                 / crate::server::util::MILLIS_PER_SEC;
         assert!(
             lost_secs > 0.0,
@@ -2533,7 +2508,7 @@ mod resume_abort_scope_tests {
         let title = title_lba(1000, 1000);
         let bad = vec![(0u64, 50 * 2048)];
         let lost_secs =
-            crate::server::ripper::abort_lost_ms(/* output_is_iso */ false, &title, &bad, bps)
+            freemkv_engine::abort_lost_ms(/* output_is_iso */ false, &title, &bad, bps)
                 / crate::server::util::MILLIS_PER_SEC;
         assert_eq!(
             lost_secs, 0.0,

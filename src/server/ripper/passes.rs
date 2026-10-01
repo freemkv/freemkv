@@ -9,7 +9,7 @@ use super::session::{self, DriveSession, drop_session, rediscover_drive};
 use super::state::{
     self, PassContext, PassProgressState, push_pass_state, set_pass_progress, update_state_with,
 };
-use super::{end_of_recovery_loss, log_init_recovery_failure, open_drive_with_backoff};
+use super::{log_init_recovery_failure, open_drive_with_backoff};
 use crate::server::util::{BYTES_PER_GIB, BYTES_PER_MIB, MILLIS_PER_SEC};
 use freemkv_engine::RecoveryEvent;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -445,8 +445,6 @@ pub(super) struct ServerPassSink<'a> {
     pub(super) user_halt: Arc<AtomicBool>,
     pass: AtomicU8,
     state: Mutex<PassProgressState>,
-    // `(lost_bytes, lost_ms)` under the deliverable's scope, measured at the promotion.
-    loss: Mutex<Option<(u64, f64)>>,
 }
 
 impl<'a> ServerPassSink<'a> {
@@ -470,14 +468,7 @@ impl<'a> ServerPassSink<'a> {
             user_halt,
             pass: AtomicU8::new(1),
             state: Mutex::new(PassProgressState::new()),
-            loss: Mutex::new(None),
         }
-    }
-
-    /// The confirmed loss `(lost_bytes, lost_ms)` the promotion measured (`ms` NaN when it
-    /// cannot be quantified); `None` when no promotion ran.
-    pub(super) fn loss(&self) -> Option<(u64, f64)> {
-        *self.loss.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn device(&self) -> &str {
@@ -637,8 +628,7 @@ impl<'a> ServerPassSink<'a> {
             }
             RecoveryEvent::Promoted { map, intact } => self.promoted(map, intact),
             RecoveryEvent::LossUnmeasured { .. } => {
-                // Fail-safe: the mapfile couldn't load, so the loss can't be measured; NaN
-                // makes `loss_aborts` fire instead of delivering a lossy rip as perfect.
+                // The engine's verdict aborts: the loss can't be measured without the mapfile.
                 crate::server::log::device_log(
                     device,
                     "Recovery mapfile could not be loaded to verify loss — forcing abort (cannot confirm a clean rip)",
@@ -648,15 +638,14 @@ impl<'a> ServerPassSink<'a> {
                     mapfile = %self.mapfile.display(),
                     "end_of_recovery_promote: mapfile load failed at abort-decision point; forcing abort (loss unquantifiable)"
                 );
-                *self.loss.lock().unwrap_or_else(|e| e.into_inner()) = Some((0, f64::NAN));
             }
             _ => {}
         }
     }
 
-    // The promoted mapfile (NonTrimmed → Unreadable after the final retry pass): measure
-    // the loss the gate decides on, and re-derive the damage fields for the UI before the
-    // marker snapshot reads them.
+    // The promoted mapfile (NonTrimmed → Unreadable after the final retry pass): re-derive the
+    // damage fields for the UI before the marker snapshot reads them. The loss verdict is the
+    // engine's.
     fn promoted(&self, map: &freemkv_engine::Mapfile, intact: bool) {
         let device = self.device();
         tracing::info!(
@@ -671,9 +660,6 @@ impl<'a> ServerPassSink<'a> {
                  incomplete — treating loss as unquantifiable"
             );
         }
-        let loss = end_of_recovery_loss(map, intact, self.is_iso, self.title, self.bps);
-        *self.loss.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((loss.lost_bytes, loss.lost_ms));
         let (
             promoted_bad_ranges,
             promoted_num_bad,
