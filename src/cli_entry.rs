@@ -622,7 +622,14 @@ fn info_cmd(args: &[String]) {
             crate::disc_info::print_disc_titles(&disc, &flags);
         }
         u if info_lists_streams(u) => {
-            match libfreemkv::input(url, &libfreemkv::InputOptions::default()) {
+            let Ok(keys) = crate::pipe::info_clip_keys(url) else {
+                std::process::exit(1);
+            };
+            let opts = libfreemkv::InputOptions {
+                keys,
+                ..Default::default()
+            };
+            match libfreemkv::input(url, &opts) {
                 Ok(stream) => {
                     let meta = stream.info();
                     // LOCALIZED like the `disc://` arm above — these were the last

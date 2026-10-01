@@ -1700,7 +1700,7 @@ pub enum LogKind {
 // rather than a method because the worker holds no `App`.
 fn scan_source(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
     if is_container(path) {
-        crate::engine::scan_stream(path)
+        crate::engine::scan_stream_under(path, keys, tok)
     } else if crate::engine::is_disc_source(path) {
         crate::engine::scan_disc_with_keys(path, keys, tok)
     } else {

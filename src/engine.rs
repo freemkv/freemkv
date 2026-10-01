@@ -264,11 +264,25 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
 /// Scan a stream source (`.mkv`, `.mp4`, `.m2ts`) — a single title, but its
 /// tracks are real and worth showing. `Stream::info()` carries the parsed
 /// `DiscTitle`.
+// The library's integration tests and the dev harness call this; the binary's GUI does not.
+#[allow(dead_code)]
 pub fn scan_stream(path: &str) -> Result<Scanned, String> {
+    scan_stream_under(path, &KeyConfig::default(), &OpenToken::default())
+}
+
+/// [`scan_stream`] with the open's key settings and token: a loose `.m2ts` clip's keys are
+/// looked up from its disc folder.
+pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
     let scheme = crate::ui::container_scheme(path)
         .ok_or_else(|| format!("not a container source: {path}"))?;
     let url = format!("{scheme}://{path}");
-    let opts = libfreemkv::InputOptions::default();
+    let (found, trace) = loose_clip_keys(path, false, keys, &tok.halt);
+    let found =
+        stopped_open(found, tok)?.map_err(|e| format!("E{} {}", e.code(), explain(e.code())))?;
+    let opts = libfreemkv::InputOptions {
+        keys: found.clone(),
+        ..Default::default()
+    };
     let stream = libfreemkv::input(&url, &opts).map_err(|e| format!("{e}"))?;
     let t = stream.info();
 
@@ -320,18 +334,24 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
     });
     rows.extend(stream_rows(t, 0));
 
-    let details = vec![
+    let mut details = vec![
         format!("File: {name}"),
         format!("Duration: {}", fmt_dur(t.duration_secs)),
         format!("Streams: {}", t.streams.len()),
     ];
+    details.extend(crate::rip_keys::render_trace(&trace));
+    let key_summary = match found.as_ref().map(|s| s.status().origin) {
+        Some(Some(w)) => format!("unlocked via {w}"),
+        Some(None) => "unlocked".into(),
+        None => "unencrypted".into(),
+    };
     Ok(Scanned {
         label: name,
         // A container source has no volume id; `run_stream` names its output
         // from the file's own stem instead.
         volume_id: String::new(),
         title_count: 1,
-        key_summary: "unencrypted".into(),
+        key_summary,
         video_codecs: vec![
             t.video_streams()
                 .next()
@@ -348,6 +368,23 @@ pub fn scan_stream(path: &str) -> Result<Scanned, String> {
         needs_disc: false,
         refusal: None,
     })
+}
+
+/// A loose `.m2ts` clip's keys, looked up only from its disc folder (1.8.0, as the CLI's
+/// `loose_clip_keys`): never user-supplied. Other sources and raw reads look nothing up.
+fn loose_clip_keys(
+    path: &str,
+    raw: bool,
+    keys: &KeyConfig,
+    halt: &libfreemkv::Halt,
+) -> (
+    libfreemkv::Result<Option<libfreemkv::keys::ResolvedKeySet>>,
+    crate::rip_keys::Trace,
+) {
+    if raw || crate::ui::container_scheme(path) != Some("m2ts") {
+        return (Ok(None), crate::rip_keys::Trace::new());
+    }
+    fe::resolve_loose_clip(std::path::Path::new(path), &key_factory(keys), Some(halt))
 }
 
 /// Scan a source (ISO path today) and flatten it into display rows.
@@ -1888,15 +1925,19 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
                 .to_string(),
         );
     }
-    let o = fe::mux_title(
-        &src_url,
-        &dest_url,
-        libfreemkv::InputOptions::default(),
-        &mux_opts(req),
-        hint,
-        sink,
-    )
-    .map_err(|e| format!("convert failed: {e}"))?;
+    // Keys before any output: a clip none are found for refuses E7022 in the mux's open.
+    let watch = CancelWatch::new(state);
+    let (found, trace) = loose_clip_keys(&req.source, req.raw, &req.keys, &watch.halt);
+    drop(watch);
+    log_walk(&trace, sink);
+    let found = found.map_err(|e| key_refusal(&e, std::path::Path::new(&req.source), state))?;
+    let input = libfreemkv::InputOptions {
+        raw: req.raw,
+        keys: found,
+        ..Default::default()
+    };
+    let o = fe::mux_title(&src_url, &dest_url, input, &mux_opts(req), hint, sink)
+        .map_err(|e| format!("convert failed: {e}"))?;
     if !o.completed {
         // Recovering, like every other `lines` lock in this file. A worker
         // that panicked earlier poisons `lines`, so `unwrap()` here would turn
@@ -5027,6 +5068,48 @@ mod routing_tests {
             !lines.iter().any(|l| l.contains("left out")),
             "no note for an output that never opened, got: {lines:?}"
         );
+    }
+
+    /// 1.8.0: Open and Start look a loose clip's keys up from its disc folder, as the CLI
+    /// does; the same clip outside any disc folder refuses E7022 before any output.
+    #[test]
+    fn a_loose_clip_reads_with_its_disc_folder_keys() {
+        use crate::ku_fixture as kf;
+        crate::strings::set_locale("en");
+        let dir = std::env::temp_dir().join(format!("fmkv-loose-gui-{}", std::process::id()));
+        let fx = kf::bd_image();
+        let clip = kf::write_folder(&fx, &dir.join("disc"));
+        let lone = dir.join("lone.m2ts");
+        std::fs::copy(&clip, &lone).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rip = |src: &std::path::Path, out: &str| {
+            let mut r = req();
+            r.source = src.to_string_lossy().into_owned();
+            r.dest_dir = dir.join(out).to_string_lossy().into_owned();
+            let state = Arc::new(RunState::default());
+            let res = run_stream(&r, &UiSink(state.clone()), &state);
+            let written = std::fs::read_dir(dir.join(out)).map_or(0, |d| d.count());
+            (res, written)
+        };
+        let (open, open_lone, ok, refused) =
+            crate::rip_keys::with_sources(kf::holding(&calls, kf::K1), || {
+                let (k, t) = (KeyConfig::default(), super::OpenToken::default());
+                let open = super::scan_stream_under(&clip.to_string_lossy(), &k, &t);
+                let open_lone = super::scan_stream_under(&lone.to_string_lossy(), &k, &t);
+                (open, open_lone, rip(&clip, "a"), rip(&lone, "b"))
+            });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            open.map(|s| s.key_summary),
+            Ok("unlocked via online".into())
+        );
+        assert!(open_lone.is_err_and(|e| e.contains("7022")));
+        assert!(
+            ok.0.is_ok() && ok.1 == 1,
+            "the clip muxes with its folder's keys: {ok:?}"
+        );
+        assert!(refused.0.is_err_and(|e| e.contains("7022")) && refused.1 == 0);
+        assert!(calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
     }
 
     fn req() -> RipRequest {

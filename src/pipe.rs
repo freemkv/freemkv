@@ -1700,6 +1700,17 @@ fn loose_clip_keys(
     }
 }
 
+/// The keys `info` opens a loose clip with: looked up from its disc folder with the default key
+/// sources, as a rip does (1.8.0). `Err` once the refusal is shown.
+pub(crate) fn info_clip_keys(source: &str) -> Result<Option<libfreemkv::keys::ResolvedKeySet>, ()> {
+    match libfreemkv::parse_url(source) {
+        libfreemkv::StreamUrl::M2ts { path } => {
+            loose_clip_keys(&path, &KeyConfig::default(), &Output::new(false, false))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Open an image rip's source and resolve its keys once (KU §3.2); `halt` stops the
 /// resolve. `None` once the refusal is shown.
 fn open_rip_image(
