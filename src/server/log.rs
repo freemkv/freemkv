@@ -430,6 +430,42 @@ mod tests {
     }
 
     #[test]
+    fn archive_device_log_skips_a_zero_byte_log() {
+        let _guard = crate::server::log::env_guard();
+        let d = tmpdir("archive_zero");
+        unsafe {
+            std::env::set_var("AUTORIP_DIR", &d);
+        }
+        let dev = format!("test_zero_{}", std::process::id());
+        std::fs::write(device_log_path(&dev), b"").unwrap();
+        archive_device_log(&dev);
+        let rips_dir = d.join("logs").join("rips");
+        let archived = std::fs::read_dir(&rips_dir)
+            .map(|r| r.filter_map(|e| e.ok()).count())
+            .unwrap_or(0);
+        assert_eq!(archived, 0, "an empty log is not archived");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn device_log_cleans_control_bytes_from_every_sink() {
+        let _guard = crate::server::log::env_guard();
+        let d = tmpdir("ctl_sinks");
+        unsafe {
+            std::env::set_var("AUTORIP_DIR", &d);
+        }
+        let dev = format!("test_ctl_{}", std::process::id());
+        device_log(&dev, "label \u{1b}[2J evil");
+        let file = std::fs::read_to_string(device_log_path(&dev)).unwrap();
+        let ring = get_device_log(&dev, 10).join("\n");
+        for (sink, text) in [("file", file), ("ring", ring)] {
+            assert!(!text.contains('\u{1b}'), "{sink} kept the escape: {text:?}");
+            assert!(text.contains("label ?[2J evil"), "{sink}: {text:?}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn archive_device_log_no_op_when_empty() {
         let _guard = crate::server::log::env_guard();
         let d = tmpdir("archive_empty");

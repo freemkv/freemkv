@@ -279,16 +279,7 @@ pub fn run(argv: Vec<String>) {
             'outer: loop {
                 // Prune first, then wait: a daemon restarted more often than daily
                 // would otherwise never reach a tick.
-                let (log_dir, retention_days) = {
-                    let c = cfg.read().unwrap_or_else(|e| e.into_inner());
-                    (c.log_dir(), c.log_retention_days)
-                };
-                if !log_dir.is_empty() {
-                    prune_old_logs(&log_dir, retention_days);
-                }
-                // Re-check the live system log too — the mtime-based prune
-                // above can't reclaim a file still being written.
-                log::rotate_system_log_if_large();
+                log_prune_tick(&cfg);
                 for _ in 0..(24 * 3600) {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     if SHUTDOWN.load(Ordering::Relaxed) {
@@ -736,6 +727,19 @@ fn is_mountpoint(path: &str) -> bool {
         .any(|mp| normalize_mount_path(mp) == want)
 }
 
+// One log-maintenance pass: the mtime-based prune, then a re-check of the live system log
+// (which that prune can't reclaim while it is still being written).
+fn log_prune_tick(cfg: &std::sync::RwLock<crate::server::config::Config>) {
+    let (log_dir, retention_days) = {
+        let c = cfg.read().unwrap_or_else(|e| e.into_inner());
+        (c.log_dir(), c.log_retention_days)
+    };
+    if !log_dir.is_empty() {
+        prune_old_logs(&log_dir, retention_days);
+    }
+    log::rotate_system_log_if_large();
+}
+
 // Delete `.log` files under `log_dir` older than `retention_days`. Replaces
 // the v0.25.5 cron-based cleanup (no cron daemon needed). Single-shot; the
 // caller drives the daily cadence.
@@ -825,24 +829,34 @@ fn prune_dir_recursive(
 mod tests {
     use super::*;
 
-    // FIX: on a long-uptime daemon the system log only shrank at boot, so it
-    // grew unbounded between restarts. Pins that the log-prune tick (24h,
-    // same thread as `prune_old_logs`) also re-checks the rotation size.
+    // On a long-uptime daemon the system log only shrank at boot; the prune tick must
+    // also rotate an oversized one.
     #[test]
-    fn log_prune_thread_rechecks_system_log_rotation() {
-        let src = crate::server::util::source_lf(include_str!("daemon.rs"));
-        let start = src
-            .find("Log prune thread")
-            .expect("daemon.rs should have the log prune thread");
-        let end = src[start..]
-            .find("Main loop: poll drives")
-            .map(|i| start + i)
-            .expect("daemon.rs should have the main poll loop after the prune thread");
+    fn log_prune_tick_rotates_an_oversized_system_log() {
+        let _guard = crate::server::log::env_guard();
+        let d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-scratch")
+            .join(format!("daemon-tick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("logs")).unwrap();
+        // SAFETY: serialized by the guard above.
+        unsafe {
+            std::env::set_var("AUTORIP_DIR", &d);
+        }
+        let live = d.join("logs/device_system.log");
+        std::fs::write(&live, vec![b'x'; 6 * 1024 * 1024]).unwrap();
+        let cfg = std::sync::RwLock::new(crate::server::config::Config {
+            autorip_dir: d.to_string_lossy().into_owned(),
+            ..Default::default()
+        });
+        log_prune_tick(&cfg);
+        let left = std::fs::metadata(&live).map(|m| m.len()).unwrap_or(0);
         assert!(
-            src[start..end].contains("rotate_system_log_if_large()"),
-            "the log-prune tick must re-check the system log's rotation size, \
-             not only at startup"
+            left < 1024 * 1024,
+            "oversized system log must be rotated out"
         );
+        assert!(d.join("logs/rips").is_dir());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     // Log retention has to see ROLLED files: `tracing-appender`'s daily

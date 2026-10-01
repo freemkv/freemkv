@@ -285,6 +285,28 @@ mod tests {
         assert_eq!(gone.problem.as_deref(), Some("missing"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_folder_is_reported_not_writable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let t = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(t.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let m = check("Output", t.path(), true);
+        let ro = std::fs::set_permissions(t.path(), std::fs::Permissions::from_mode(0o755));
+        ro.unwrap();
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root passes access(W_OK) on a 0555 dir
+        }
+        assert!(!m.ok, "{m:?}");
+        assert_eq!(m.writable, Some(false));
+        assert_eq!(m.problem.as_deref(), Some("not writable"));
+        // A folder only read from is fine.
+        std::fs::set_permissions(t.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let r = check("Source ISOs", t.path(), false);
+        std::fs::set_permissions(t.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(r.ok, "{r:?}");
+    }
+
     #[test]
     fn a_stuck_check_is_never_doubled() {
         let t = tempfile::tempdir().unwrap();

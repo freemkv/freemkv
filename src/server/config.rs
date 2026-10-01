@@ -882,6 +882,22 @@ mod tests {
         // This save is EXPECTED to fail (ENOENT) — the point of the test.
         assert!(save(&changed).is_err(), "save into a missing dir must Err");
 
+        // The same-path failure: a read-only directory refuses the temp file, so the prior
+        // file at THIS path must survive byte for byte.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut same = good.clone();
+            same.tmdb_api_key = "SHOULD_NOT_LAND".into();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let r = save(&same);
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if unsafe { libc::geteuid() } != 0 {
+                assert!(r.is_err(), "a read-only dir must refuse the save");
+                assert_eq!(std::fs::read_to_string(&good_path).unwrap(), before);
+            }
+        }
+
         // The good file is byte-for-byte intact.
         let after = std::fs::read_to_string(&good_path).unwrap();
         assert_eq!(before, after, "prior settings.json must be untouched");
@@ -905,9 +921,9 @@ mod tests {
         )
         .unwrap();
         let cfg = load_saved(cfg_in(&d));
-        assert!(cfg.max_rip_duration_secs <= 30 * 24 * 3600);
-        assert!(cfg.min_pass_budget_secs <= 30 * 24 * 3600);
-        assert!(cfg.log_retention_days <= 3650);
+        assert_eq!(cfg.max_rip_duration_secs, 30 * 24 * 3600);
+        assert_eq!(cfg.min_pass_budget_secs, 30 * 24 * 3600);
+        assert_eq!(cfg.log_retention_days, 3650);
         let _ = std::fs::remove_dir_all(&d);
     }
 
