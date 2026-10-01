@@ -6987,23 +6987,24 @@ mod image_copy_tests {
         (dest, r)
     }
 
-    /// KU §2.1 invariant 6, "Refuse first": a file no source keys refuses before the
-    /// destination exists (E7032), with no partial "decrypted" ISO.
+    /// 10d85b2: a file no source key opens no longer refuses the copy (E7032); its units
+    /// are blanked, never ciphertext, and the destination is written.
     #[test]
-    fn a_refused_image_copy_creates_no_output() {
+    fn an_image_copy_blanks_a_file_no_key_opens() {
         let fx = fixture("refuse", [K0, STRANGER]);
-        let r = keys(&fx, &disc(&fx, 2), None, &[K0, K1], &[]);
-        assert!(
-            matches!(r, Err(Error::WholeDiscKeyMissing)),
-            "{:?}",
-            r.err()
-        );
-        assert!(!fx.dir.join("out.iso").exists());
+        let d = disc(&fx, 2);
+        let set = keys(&fx, &d, None, &[K0, K1], &[]).expect("damage, not E7032");
+        let (dest, r) = copy(&fx, &d, &set, &libfreemkv::Halt::new());
+        r.expect("the unopenable file is blanked, not refused");
+        let (o, n) = fx.files[1];
+        let out = std::fs::read(&dest).unwrap();
+        let (a, b) = (o as usize * SECTOR, (o + n) as usize * SECTOR);
+        assert!(out[a..b].iter().all(|&x| x == 0));
     }
 
     /// Wired to the DECLARED CPS count (KS-14): an unprobeable file of a one-unit disc is
     /// proven on arrival with its one key; on a two-unit disc a file no held key opens
-    /// stops the copy loudly (E7032, KU §2.4), never garbage.
+    /// is blanked on arrival (10d85b2), never garbage.
     #[test]
     fn the_image_copy_proves_an_unprobeable_file_on_arrival() {
         use libfreemkv::spec::keys::KS_14_UNIT_KEY_BLOCK;
@@ -7019,12 +7020,11 @@ mod image_copy_tests {
         let fx = fixture("stranger", [K0, STRANGER]);
         let d = disc(&fx, 2);
         let set = keys(&fx, &d, Some((o, o + n)), &[K0], &[]).expect("lazy, not missing");
-        let (_, r) = copy(&fx, &d, &set, &libfreemkv::Halt::new());
-        assert!(
-            matches!(r, Err(Error::WholeDiscKeyMissing)),
-            "{:?}",
-            r.err()
-        );
+        let (dest, r) = copy(&fx, &d, &set, &libfreemkv::Halt::new());
+        r.expect("a file no held key opens is blanked on arrival");
+        let out = std::fs::read(&dest).unwrap();
+        let (a, b) = (o as usize * SECTOR, (o + n) as usize * SECTOR);
+        assert!(out[a..b].iter().all(|&x| x == 0));
     }
 
     /// A Ctrl-C that already landed ends the copy before the destination exists.

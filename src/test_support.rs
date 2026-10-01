@@ -230,6 +230,8 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::MultipassRequiresRaw,
         Error::StreamLanguageUnknown { tag: p() },
         Error::RemuxTargetExists { path: p() },
+        // A mux batch of zero sectors, E9085.
+        Error::MuxBatchSectorsZero,
     ]
 }
 
