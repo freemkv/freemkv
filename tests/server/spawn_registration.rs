@@ -6,8 +6,6 @@
 //!      `JoinHandle` is retrievable via `take_rip_thread(dev)`.
 //!   3. Joining the handle does not hang — the worker exits cleanly.
 
-use std::time::{Duration, Instant};
-
 use freemkv::server::ripper;
 
 #[test]
@@ -18,21 +16,18 @@ fn spawn_rip_thread_registers_handle() {
     // same process (the static map is process-global).
     let _ = ripper::take_rip_thread(device);
 
-    let spawn_started = Instant::now();
-    ripper::spawn_rip_thread(device, "rip", || {
-        std::thread::sleep(Duration::from_millis(100));
+    // The worker is parked on a latch until released, so it is still running
+    // when the registration is checked, however slow the host is.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    ripper::spawn_rip_thread(device, "rip", move || {
+        let _ = release_rx.recv();
     })
     .expect("spawn_rip_thread should succeed");
 
-    // The 100 ms worker is still sleeping; the handle must be in
-    // RIP_THREADS now. take() returning None here means registration
-    // didn't happen — the v0.13.6 bug this guards against.
+    // The handle must be in RIP_THREADS now. take() returning None here means
+    // registration didn't happen — the v0.13.6 bug this guards against.
     let handle = ripper::take_rip_thread(device);
-    assert!(
-        spawn_started.elapsed() < Duration::from_millis(80),
-        "test setup took too long; the worker may have already exited \
-         and been reaped, invalidating the registration check"
-    );
+    drop(release_tx);
     assert!(
         handle.is_some(),
         "spawn_rip_thread must register the JoinHandle in RIP_THREADS \
