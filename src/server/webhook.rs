@@ -128,11 +128,14 @@ static INFLIGHT: AtomicUsize = AtomicUsize::new(0);
 // Attempt to claim one slot of a bounded concurrency counter. Returns `true` and increments
 // `counter` if below `max`, else leaves it untouched and returns `false`.
 pub(crate) fn try_acquire_slot(counter: &AtomicUsize, max: usize) -> bool {
-    counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-            (n < max).then_some(n + 1)
-        })
-        .is_ok()
+    let mut n = counter.load(Ordering::Acquire);
+    while n < max {
+        match counter.compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(now) => n = now,
+        }
+    }
+    false
 }
 
 /// Release one slot claimed by [`try_acquire_slot`]. The single decrement
