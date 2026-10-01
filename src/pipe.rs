@@ -808,6 +808,14 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
             Some(opened) => Some(opened.keys),
             None => return 1,
         }
+    } else if let (false, libfreemkv::StreamUrl::M2ts { path }) =
+        (raw, libfreemkv::parse_url(source))
+    {
+        // A loose clip's keys come only from its disc folder, walked up to (1.8.0).
+        match loose_clip_keys(&path, &keys, &out) {
+            Ok(set) => set,
+            Err(()) => return 1,
+        }
     } else {
         None
     };
@@ -1669,6 +1677,27 @@ fn disc_rip_keys(
     let r = crate::rip_keys::resolve(disc, reader, scope, &factory, None, Some(token));
     emit_resolution_trace(out, &r.1);
     report_keys(r.0, out)
+}
+
+/// A loose clip's keys, resolved once from its disc folder; `Ok(None)` when it has none.
+/// `Err` once the refusal is shown.
+fn loose_clip_keys(
+    clip: &std::path::Path,
+    keys: &KeyConfig,
+    out: &Output,
+) -> Result<Option<libfreemkv::keys::ResolvedKeySet>, ()> {
+    let factory = key_source_factory(keys, out);
+    let token = crate::cli_stop::token();
+    let (set, trace) = freemkv_engine::resolve_loose_clip(clip, &factory, Some(token));
+    emit_resolution_trace(out, &trace);
+    match set {
+        Ok(None) => Ok(None),
+        Ok(Some(set)) => report_keys(Ok(set), out).map(Some).ok_or(()),
+        Err(e) => {
+            report_keys(Err(e), out);
+            Err(())
+        }
+    }
 }
 
 /// Open an image rip's source and resolve its keys once (KU §3.2); `halt` stops the
