@@ -32,11 +32,13 @@ RUN if [ -n "$SIBLING_REF" ]; then \
       mkdir -p /siblings .cargo \
       && for r in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do \
            git clone -q --depth 1 --branch "$SIBLING_REF" "https://github.com/freemkv/$r" "/siblings/$r"; done \
-      && printf '[patch.crates-io]\n%s\n%s\n%s\n%s\n' \
+      && printf '[patch.crates-io]\n%s\n%s\n%s\n%s\n%s\n[patch."https://github.com/freemkv/freemkv-unlock"]\n%s\n' \
            'libfreemkv = { path = "/siblings/libfreemkv" }' \
            'freemkv-engine = { path = "/siblings/freemkv-engine" }' \
            'freemkv-keysources = { path = "/siblings/freemkv-keysources" }' \
-           'freemkv-i18n = { path = "/siblings/freemkv-i18n" }' > .cargo/config.toml \
+           'freemkv-i18n = { path = "/siblings/freemkv-i18n" }' \
+           'freemkv-unlock = { path = "/siblings/freemkv-unlock" }' \
+           'freemkv-unlock = { path = "/siblings/freemkv-unlock" }' > .cargo/config.toml \
       && cargo build --release --features server --bin freemkv; \
     else \
       cargo build --locked --release --features server --bin freemkv; \
