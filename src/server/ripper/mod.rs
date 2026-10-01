@@ -5,7 +5,8 @@
 //! orchestration — `drive_poll_loop`, `scan_disc`, `rip_disc`,
 //! `eject_drive` — stays here. The `mux` sub-module holds the active
 //! parallel mux "highway" (consumer/producer split + watchdog); the
-//! multipass sweep loop still lives inline in `rip_disc`.
+//! multipass recovery runs in the engine (`freemkv_engine::run_with`), driven
+//! through `passes::ServerPassHost`.
 
 pub(crate) mod mux;
 mod passes;
@@ -71,6 +72,8 @@ impl ScanWatchdog {
         std::thread::spawn(move || {
             let start = std::time::Instant::now();
             let mut warned = false;
+            // A due deadline, not `elapsed % 15`: sleep overshoot can skip an exact multiple.
+            let mut next_warn = 15;
             while active_w.load(Ordering::Relaxed) {
                 // Poll in short slices so the guard drop is observed
                 // promptly, but only WARN on 15s boundaries.
@@ -79,7 +82,8 @@ impl ScanWatchdog {
                     break;
                 }
                 let elapsed = start.elapsed().as_secs();
-                if elapsed >= 15 && elapsed.is_multiple_of(15) {
+                if elapsed >= next_warn {
+                    next_warn = (elapsed / 15 + 1) * 15;
                     let last_phase = match phase_w.load(Ordering::Relaxed) {
                         0 => "scan",
                         _ => "resolve_keys",
@@ -2145,7 +2149,7 @@ fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<re
         if staging_dir_matches_disc(&basename, &sanitized) {
             // User-initiated resume goes straight to the remux-eligibility
             // check, still refusing OWNED (.ripped/.muxing), HELD (.review),
-            // or TERMINAL (.failed) dirs — see resumable_dir_blocked below.
+            // or TERMINAL (.failed) dirs — see resumable_dir_blocked above.
             let snap = staging::snapshot_staging_disc(&path)?;
             // Owned/held/terminal dirs are not drive-resumable — see
             // `resumable_dir_blocked` for the per-marker reasoning (H1/M3).
@@ -2257,8 +2261,8 @@ fn wipe_staging_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) {
     }
 }
 
-// Detect whether `display_name`'s disc has resumable staging state and of what kind:
-// `bytes_pending == 0` → Remux, `> 0` → Sweep. Pure (no STATE, no side effects).
+// Detect whether `display_name`'s disc has resumable staging state and of what kind: Remux
+// only when the mapfile is 100% Finished (no pending, no unreadable bytes), else Sweep.
 fn resumable_for_disc(cfg: &Config, display_name: &str, disc_label: &str) -> Option<Resumable> {
     if display_name.is_empty() {
         return None;
@@ -3016,63 +3020,14 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // window, else the first click would cancel a token nobody reads again.
     // Check+insert+carry happens under one HALTS-lock acquisition (TOCTOU).
     swap_halt_carrying_cancel(device, halt_token.clone());
-    // Local alias: pre-existing call sites use `halt` as the legacy
-    // `Arc<AtomicBool>`; deprecated bridge dropped with sweep() in round 3.
+    // The drive's raw halt flag, read directly by the Stop checks below.
     let halt = drive_halt_arc;
 
-    // Snapshot cfg fields upfront and drop the read lock immediately —
-    // pre-fix, holding the guard for the whole rip body queued a
-    // writer-priority RwLock writer and blocked /api/* for 60+ minutes.
-    let (rip_budget_secs, transport_recovery_delay_secs) = {
-        // Recover if the RwLock is poisoned rather than unwrapping and
-        // killing the rip thread — every other cfg read in this file
-        // degrades gracefully; this was the lone `.unwrap()`.
-        let c = cfg.read().unwrap_or_else(|e| e.into_inner());
-        (c.max_rip_duration_secs, c.transport_recovery_delay_secs)
-    };
-    // Cancellable via `rip_complete`: without it the watcher sleeps blindly
-    // for rip_budget_secs and fires a false "budget exceeded" warning long
-    // after the rip already succeeded (observed 2026-05-11).
-    let halt_rip_watcher = halt.clone();
-    let device_rip_watcher = device.to_string();
-    let rip_complete = Arc::new(AtomicBool::new(false));
-    let rip_complete_watcher = rip_complete.clone();
-    let _rip_watcher_guard = std::thread::spawn(move || {
-        tracing::info!(
-            device = %device_rip_watcher,
-            rip_budget_secs,
-            "Rip-level wallclock watcher started"
-        );
-        let start = std::time::Instant::now();
-        let budget = std::time::Duration::from_secs(rip_budget_secs);
-        while start.elapsed() < budget {
-            // Coarse poll — 5s granularity is fine for a multi-hour
-            // budget. Smaller intervals would just burn wakeups.
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            if rip_complete_watcher.load(std::sync::atomic::Ordering::Relaxed) {
-                // Rip ended on its own. Exit silently — no warning,
-                // no halt flag mutation. The rip succeeded (or was
-                // halted by some other path that already set state).
-                return;
-            }
-            if halt_rip_watcher.load(std::sync::atomic::Ordering::Relaxed) {
-                // External halt (user, transport failure, etc.).
-                // Same exit: don't double-warn.
-                return;
-            }
-        }
-        // Arbitrary whole-rip time cap REMOVED (2026-06-04): a rip stops on
-        // failure/pass exhaustion, never wall-clock, since libfreemkv's own
-        // stall watchdogs catch a stuck pass. The watcher just exits now.
-    });
-    // Signals rip_complete on scope exit; the watcher polls it and exits.
-    struct RipCompleteGuard(Arc<AtomicBool>);
-    impl Drop for RipCompleteGuard {
-        fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-    let _rip_complete_guard = RipCompleteGuard(rip_complete);
+    // Re-read under a poison-recovering lock, like every other cfg read in this file.
+    let transport_recovery_delay_secs = cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .transport_recovery_delay_secs;
 
     // The user-stop halt — the existing flag; the passes observe it through the engine.
     let user_halt = halt.clone();
@@ -4677,7 +4632,7 @@ fn mux_progress_denominator(
     total_bytes: u64,
     title: &libfreemkv::DiscTitle,
 ) -> u64 {
-    if max_retries != 0 {
+    if uses_multipass(max_retries) {
         return total_bytes;
     }
     let extent_bytes: u64 = title
@@ -4932,47 +4887,14 @@ fn iso_output_needs_multipass(output_format: &str, max_retries: u8) -> bool {
     output_is_iso_image(output_format) && !uses_multipass(max_retries)
 }
 
-// Multipass recovery-loop STRATEGY DECISIONS now live in `freemkv-engine`
-// (`multipass.rs`), relocated so autorip and the future GUI share one impl.
-// `scope_converged` is reached only by this module's tests, hence the allow.
-#[allow(unused_imports)]
+// Multipass recovery-loop STRATEGY DECISIONS live in `freemkv-engine` (`multipass.rs`),
+// shared with the CLI and GUI; the rest are reached only by this module's tests.
+use freemkv_engine::plan_passes;
+#[cfg(test)]
 use freemkv_engine::{
-    PatchDecision, bad_sector_statuses, end_of_recovery_promotion, measured_scope_bad,
-    patch_made_progress, patch_pass_decision, plan_passes, pre_pass_converged, scope_bad_bytes,
-    scope_converged,
+    PatchDecision, bad_sector_statuses, end_of_recovery_promotion, patch_made_progress,
+    patch_pass_decision, pre_pass_converged, scope_bad_bytes, scope_converged,
 };
-
-// Pass-1 transport-failure gating decision-MIRROR, not a wired gate; `#[cfg(test)]` only.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SweepReadAction {
-    /// User halt observed — cancel the rip (preserve staging).
-    Cancel,
-    /// Non-transport error — fail the rip.
-    Fail,
-    /// Transport crash — drop + re-open the drive and retry (resume from mapfile).
-    RecoverAndRetry,
-    /// Transport crash but attempts exhausted — give up.
-    Exhausted,
-}
-
-#[cfg(test)]
-fn sweep_transport_retry(
-    is_transport: bool,
-    halted: bool,
-    attempt: u32,
-    max_attempts: u32,
-) -> SweepReadAction {
-    if halted {
-        SweepReadAction::Cancel
-    } else if !is_transport {
-        SweepReadAction::Fail
-    } else if attempt >= max_attempts {
-        SweepReadAction::Exhausted
-    } else {
-        SweepReadAction::RecoverAndRetry
-    }
-}
 
 // Prune the disc-sized intermediate ISO and mapfile sidecar on a successful multipass
 // completion, unless `keep_iso` is set. Shared by both completion routes.
@@ -5747,16 +5669,15 @@ mod tests {
     //! State-only helpers and their tests live in `state.rs`.
 
     use super::{
-        FmtsGate, FmtsGatePlan, HaltGuard, PatchDecision, SweepReadAction, SweepingGuard,
-        aacs_failure_message, bad_sector_statuses, disk_space_preflight_message,
-        disk_space_required_bytes, end_of_recovery_promotion, fmts_gate_decision, fmts_gate_plan,
-        format_lib_error, format_pass_error, header_phase_disposition, incomplete_mux_status,
+        FmtsGate, FmtsGatePlan, HaltGuard, PatchDecision, SweepingGuard, aacs_failure_message,
+        bad_sector_statuses, disk_space_preflight_message, disk_space_required_bytes,
+        end_of_recovery_promotion, fmts_gate_decision, fmts_gate_plan, format_lib_error,
+        format_pass_error, header_phase_disposition, incomplete_mux_status,
         is_fmts_key_missing_error, is_safe_staging_segment, list_staging_basenames,
         patch_made_progress, patch_pass_decision, plan_passes, pre_pass_converged,
         prune_intermediate_iso, register_halt, resumable_dir_blocked, resumable_for_disc,
         resume_remaining_iso_bytes, scope_bad_bytes, scope_converged, skip_diskcheck_value,
         staging_dir_matches_disc, staging_disc_owned_by_worker, staging_free_bytes,
-        sweep_transport_retry,
     };
     use crate::server::ripper::session::device_halt;
     use crate::server::ripper::staging;
@@ -6543,49 +6464,6 @@ mod tests {
         );
     }
 
-    // PASS-1-ONLY TRANSPORT-RETRY GATING: halt cancels regardless; non-transport fails;
-    // transport retries until MAX_PASS1_ATTEMPTS.
-    #[test]
-    fn char_pass1_transport_retry_gating() {
-        const MAX: u32 = 10; // MAX_PASS1_ATTEMPTS in rip_disc
-
-        // Halt wins over everything — even a fresh transport failure.
-        assert_eq!(
-            sweep_transport_retry(true, true, 1, MAX),
-            SweepReadAction::Cancel
-        );
-        assert_eq!(
-            sweep_transport_retry(false, true, 1, MAX),
-            SweepReadAction::Cancel
-        );
-
-        // Non-transport error (no halt) fails the rip — no reopen/retry.
-        assert_eq!(
-            sweep_transport_retry(false, false, 1, MAX),
-            SweepReadAction::Fail
-        );
-
-        // Transport crash with attempts remaining → reopen + retry.
-        assert_eq!(
-            sweep_transport_retry(true, false, 1, MAX),
-            SweepReadAction::RecoverAndRetry
-        );
-        assert_eq!(
-            sweep_transport_retry(true, false, MAX - 1, MAX),
-            SweepReadAction::RecoverAndRetry
-        );
-
-        // Transport crash but attempts exhausted → give up.
-        assert_eq!(
-            sweep_transport_retry(true, false, MAX, MAX),
-            SweepReadAction::Exhausted
-        );
-        assert_eq!(
-            sweep_transport_retry(true, false, MAX + 5, MAX),
-            SweepReadAction::Exhausted
-        );
-    }
-
     // PASS-1-ONLY (negative side): patch passes have no transport-retry concept — any patch
     // error breaks the loop.
     #[test]
@@ -6862,10 +6740,14 @@ mod tests {
 
     #[test]
     fn format_lib_error_never_leaks_bare_code_for_unmapped_variant() {
-        // An unmapped variant must hit the generic arm, not dump a code.
-        let s = format_lib_error("Disc scan", &Error::ProfileParse);
-        assert!(s.starts_with("Disc scan failed:"), "msg: {s}");
-        assert!(!s.contains("E2002"), "msg leaks code: {s}");
+        // An unmapped variant (EmptyImage has no arm) must hit the generic arm,
+        // not dump a code or a Debug rendering.
+        let s = format_lib_error("Disc scan", &Error::EmptyImage);
+        assert_eq!(
+            s,
+            "Disc scan failed: an unexpected error occurred. Enable debug logging via \
+             /api/debug for details."
+        );
     }
 
     // ── aacs_failure_message dispatch ──────────────────────────────
@@ -9140,21 +9022,28 @@ mod tests {
         );
     }
 
-    // Confident → hand to the mover; not confident → hold in staging.
-    // Both completion paths select through this one mapping.
+    // Confident → hand to the mover; not confident → hold in staging. Both completion paths
+    // hand off through `staging::mark_handoff` and name it with `staging::handoff_label`.
     #[test]
     fn handoff_marker_is_done_only_for_a_confident_title() {
-        use super::handoff_marker_name;
+        use crate::server::ripper::staging::{
+            StagingState, handoff_label, mark_handoff, read_state,
+        };
         assert_eq!(
-            handoff_marker_name(true),
+            handoff_label(true),
             ".done",
             "a confident title is handed to the mover"
         );
         assert_eq!(
-            handoff_marker_name(false),
+            handoff_label(false),
             ".review",
             "an uncertain title is HELD in staging for the operator, never auto-filed"
         );
+        for (confident, want) in [(true, StagingState::Done), (false, StagingState::Review)] {
+            let tmp = tempfile::tempdir().unwrap();
+            mark_handoff(tmp.path(), confident, |_| {}).expect("hand-off");
+            assert_eq!(read_state(tmp.path()).expect("state").state, want);
+        }
     }
 
     // Encrypted-disc keyless retry gate: the outage retry REPLACES the
