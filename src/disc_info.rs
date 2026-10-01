@@ -167,7 +167,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
         },
         ..Default::default()
     };
-    let mut session = libfreemkv::DiscSession::open(target, keyspec).unwrap_or_else(|e| {
+    let mut session = freemkv_engine::drive::open_session(target, keyspec).unwrap_or_else(|e| {
         match &e {
             // Autodetect with no drive surfaces as an empty-path DeviceNotFound;
             // keep the dedicated "no drive" message. Any other open failure (or a

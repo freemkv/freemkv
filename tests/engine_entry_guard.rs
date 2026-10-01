@@ -3,9 +3,9 @@
 //! work — opening a drive, acquiring keys, copying, recovering, muxing, extracting. That work
 //! goes through `freemkv_engine::run(Plan)`.
 //!
-//! The direct calls that predate the measure are listed in `BASELINE` with their counts. The
-//! list may only shrink: a new direct call fails here, and so does a baseline entry the code
-//! no longer needs (remove it, so the count cannot creep back).
+//! Calls are matched in code only: a comment or a string (a log line naming `Drive::open`)
+//! is not a call. `BASELINE` is empty — every front end reaches this work through the engine
+//! — and may only stay so: a new direct call fails here.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -28,23 +28,8 @@ const FORBIDDEN: &[&str] = &[
     "Drive::open(",
 ];
 
-/// Front-end files allowed a direct call today, and how many. May only shrink.
-const BASELINE: &[(&str, &str, usize)] = &[
-    ("src/cli_entry.rs", "libfreemkv::input(", 1),
-    ("src/disc_info.rs", "DiscSession::open", 1),
-    ("src/engine.rs", "libfreemkv::mux_with_keys(", 1),
-    ("src/engine.rs", "libfreemkv::input(", 1),
-    ("src/engine.rs", "Drive::open(", 2),
-    ("src/info.rs", "Drive::open(", 1),
-    ("src/pipe.rs", "libfreemkv::mux_with_keys(", 1),
-    ("src/pipe.rs", "libfreemkv::mux_url(", 1),
-    ("src/server/ripper/mod.rs", "freemkv_engine::sweep(", 1),
-    ("src/server/ripper/mod.rs", "freemkv_engine::patch(", 1),
-    ("src/server/ripper/mod.rs", "DiscSession::open", 2),
-    ("src/server/ripper/mod.rs", "Drive::open(", 5),
-    ("src/server/ripper/mux.rs", "libfreemkv::mux_with_keys(", 1),
-    ("src/server/ripper/session.rs", "Drive::open(", 1),
-];
+/// Front-end files allowed a direct call, and how many. Empty, and may only stay so.
+const BASELINE: &[(&str, &str, usize)] = &[];
 
 // Test-only files: fixtures may build what they test against.
 const TEST_ONLY: &[&str] = &[
@@ -72,6 +57,75 @@ fn production(src: &str) -> &str {
     }
 }
 
+// `src` with every comment and string literal blanked, so only code is matched.
+fn code_only(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < b.len() {
+        let rest = &src[i..];
+        if rest.starts_with("//") {
+            i += rest.find('\n').unwrap_or(rest.len());
+        } else if rest.starts_with("/*") {
+            i += rest.find("*/").map_or(rest.len(), |e| e + 2);
+        } else if let Some(n) = raw_string_len(rest) {
+            i += n;
+            out.push(' ');
+        } else if b[i] == b'"' {
+            let mut j = i + 1;
+            while j < b.len() && b[j] != b'"' {
+                j += if b[j] == b'\\' { 2 } else { 1 };
+            }
+            i = j + 1;
+            out.push(' ');
+        } else if let Some(n) = char_literal_len(rest) {
+            i += n;
+            out.push(' ');
+        } else {
+            let c = rest.chars().next().expect("in bounds");
+            out.push(c);
+            i += c.len_utf8();
+        }
+    }
+    out
+}
+
+// The byte length of a raw string literal (`r"…"`, `r#"…"#`) starting `s`, if one does.
+fn raw_string_len(s: &str) -> Option<usize> {
+    let after_r = s.strip_prefix('r')?;
+    let hashes = after_r.len() - after_r.trim_start_matches('#').len();
+    let body = after_r[hashes..].strip_prefix('"')?;
+    let close = format!("\"{}", "#".repeat(hashes));
+    Some(1 + hashes + 1 + body.find(&close)? + close.len())
+}
+
+// The byte length of a char literal (`'x'`, `'\n'`, `'"'`) starting `s`; a lifetime is not one.
+fn char_literal_len(s: &str) -> Option<usize> {
+    let body = s.strip_prefix('\'')?;
+    let mut chars = body.char_indices();
+    let (_, c) = chars.next()?;
+    let end = if c == '\\' {
+        body[1..].find('\'')? + 1
+    } else {
+        let (at, next) = chars.next()?;
+        if next != '\'' {
+            return None;
+        }
+        at
+    };
+    Some(1 + end + 1)
+}
+
+#[test]
+fn code_only_blanks_comments_and_strings() {
+    let src = "a(); // Drive::open(\nlet s = \"Drive::open(\"; let c = '\"'; b('x');\n\
+               /* DiscSession::open */ let r = r#\"Drive::open(\"#; fn f<'a>() {}";
+    let code = code_only(src);
+    assert!(!code.contains("Drive::open("), "{code}");
+    assert!(!code.contains("DiscSession::open"), "{code}");
+    assert!(code.contains("a();") && code.contains("b( );") && code.contains("fn f<'a>()"));
+}
+
 #[test]
 fn front_ends_reach_engine_owned_work_only_through_the_engine() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -89,7 +143,7 @@ fn front_ends_reach_engine_owned_work_only_through_the_engine() {
         }
         let src = std::fs::read_to_string(f).unwrap().replace("\r\n", "\n");
         for pat in FORBIDDEN {
-            let n = production(&src).matches(pat).count();
+            let n = code_only(production(&src)).matches(pat).count();
             if n > 0 {
                 found.insert((rel.clone(), pat), n);
             }

@@ -625,14 +625,8 @@ fn info_cmd(args: &[String]) {
             let Ok(keys) = crate::pipe::info_clip_keys(url) else {
                 std::process::exit(1);
             };
-            let opts = libfreemkv::InputOptions {
-                keys,
-                ..Default::default()
-            };
-            let ctx = libfreemkv::Ctx::default();
-            match libfreemkv::input(url, &opts, &ctx) {
-                Ok(stream) => {
-                    let meta = stream.info();
+            match freemkv_engine::stream_info(url, keys, &libfreemkv::Halt::new()) {
+                Ok(meta) => {
                     // LOCALIZED like the `disc://` arm above — these were the last
                     // hard-coded English labels in `info`. Reuses `disc.*` keys (the
                     // info-output LABEL set, not disc-only) instead of minting `info.*`.

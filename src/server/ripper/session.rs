@@ -715,7 +715,7 @@ fn probe_volume_id(path: &str) -> Option<String> {
     // TODO(step1-followup): NOT migrated to DiscSession, which treats
     // wait_ready/init failures as advisory instead of fail-fast-to-None —
     // folding it in would change rediscovery's short-circuit semantics.
-    let mut drive = libfreemkv::Drive::open(std::path::Path::new(path)).ok()?;
+    let mut drive = freemkv_engine::drive::open(std::path::Path::new(path)).ok()?;
     drive.wait_ready().ok()?;
     drive.init().ok()?;
     let id = libfreemkv::Disc::identify(&mut drive).ok()?;

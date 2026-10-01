@@ -1305,30 +1305,43 @@ pub(crate) fn mux_live(
     });
 
     // Single-pass never previews ciphertext (`raw = false`) — matches the
-    // pre-migration `DiscStream::new(.., false, ..)`.
-    let opts = libfreemkv::MuxOptions {
-        skip_errors: src.skip_errors,
-        batch_sectors: inputs.batch,
+    // pre-migration `DiscStream::new(.., false, ..)`. The engine muxes the held drive's
+    // title under the device's Halt, every library event reaching the UI bridge.
+    let plan = freemkv_engine::Plan {
+        source: format!("disc://{}", inputs.device),
+        dest: inputs.dest_url.clone(),
+        titles: freemkv_engine::Selection::Titles(vec![0]),
         raw: false,
-        selection: Default::default(),
-        title_index: 0,
+        ..freemkv_engine::Plan::default()
+    };
+    let with = freemkv_engine::RunWith {
+        keys: src.keys,
+        held: Some(freemkv_engine::Held::Title {
+            reader: src.reader,
+            title: Box::new(src.title),
+        }),
+        title: freemkv_engine::TitleOptions {
+            selection: Some(Default::default()),
+            skip_errors: src.skip_errors,
+            batch_sectors: inputs.batch,
+        },
+        halt: Some(halt_token.clone()),
+        events: Some(events.clone()),
+        ..freemkv_engine::RunWith::default()
     };
 
     crate::server::log::device_log(
         inputs.device,
         &format!("Opening output: {}", inputs.dest_url),
     );
-    let source = libfreemkv::Source::from_reader(src.reader, src.title);
-
-    let result = libfreemkv::mux_with_keys(
-        source,
-        src.keys.as_ref(),
-        &inputs.dest_url,
-        &opts,
-        &libfreemkv::Ctx::new(halt_token.clone())
-            .with_events(events.clone())
-            .with_diag(libfreemkv::Diag::from_env()),
-    );
+    let result = match freemkv_engine::run_with(&plan, with, &freemkv_engine::NoopSink) {
+        Ok(freemkv_engine::Report::Title { outcome }) => Ok(outcome),
+        Ok(_) => Err(libfreemkv::Error::StreamUrlInvalid {
+            url: plan.dest.clone(),
+        }
+        .into()),
+        Err(e) => Err(e.into()),
+    };
 
     let opened = events.opened.load(Ordering::Relaxed);
     let partial_bytes = wd_bytes.load(Ordering::Relaxed);

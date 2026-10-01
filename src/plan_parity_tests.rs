@@ -166,7 +166,11 @@ fn parity_plan_image_copy() {
         );
         assert_eq!(c, a, "{tag}");
         let f = factory(&[(Answer::Keydb, pool)], &Calls::default());
-        match freemkv_engine::run_with(&c, f, &freemkv_engine::NoopSink) {
+        let with = freemkv_engine::RunWith {
+            sources: Some(f),
+            ..freemkv_engine::RunWith::default()
+        };
+        match freemkv_engine::run_with(&c, with, &freemkv_engine::NoopSink) {
             Ok(freemkv_engine::Report::Image { copy, .. }) => {
                 g.kv(
                     &format!("{tag} copy"),

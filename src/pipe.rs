@@ -10,7 +10,6 @@ use crate::cli_entry::is_url_token;
 use crate::disc_info::sanitize;
 use crate::output::{Level::Normal, Output};
 use crate::strings;
-use libfreemkv::MuxOptions;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -901,7 +900,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
                 keys: Some(set.clone()),
                 ..Default::default()
             };
-            pipe(source, dest_url, &opts, &out)
+            pipe(source, dest_url, &opts, &keys, &out)
         };
 
         if let Err(e) = result {
@@ -1793,33 +1792,68 @@ fn pipe_disc(
     // "opening…" line started above.
     out.raw(Normal, &strings::get("rip.ok"));
 
-    // Stage the drive as the session's boxed reader, then run the shared driver with the
-    // rip's set: it builds the stream, pumps headers, opens the sink and pumps frames.
-    session.stage_drive_as_reader();
+    // The engine muxes the title off the held drive through the rip's set: it stages the
+    // drive, builds the stream, pumps headers, opens the sink and pumps frames.
     let metadata_sink = is_metadata_sink(dest);
     let events = Arc::new(CliMuxEvents::new(*out, dest.to_string(), metadata_sink));
-    let opts = MuxOptions {
-        skip_errors: false,
-        batch_sectors: batch,
-        raw,
-        selection,
-        title_index: title_idx,
+    let plan = title_plan(source, dest, title_idx, raw, keys, streams);
+    let with = freemkv_engine::RunWith {
+        keys: Some(set.clone()),
+        held: Some(freemkv_engine::Held::Session(&mut session)),
+        title: freemkv_engine::TitleOptions {
+            selection: Some(selection),
+            skip_errors: false,
+            batch_sectors: batch,
+        },
+        ..cli_title_run(events.clone())
     };
-    let result = libfreemkv::mux_with_keys(
-        libfreemkv::Source::from_session(&mut session),
-        Some(set),
-        dest,
-        &opts,
-        &cli_ctx(events.clone()),
-    );
-    finalize_mux(result, out, &events)
+    finalize_mux(run_title(&plan, with), out, &events)
 }
 
-// The CLI's run context: the process Ctrl-C token, its renderer, env diagnostics.
-fn cli_ctx(events: Arc<CliMuxEvents>) -> libfreemkv::Ctx {
-    libfreemkv::Ctx::new(crate::cli_stop::token().clone())
-        .with_events(events)
-        .with_diag(libfreemkv::Diag::from_env())
+// A CLI title run's context: the process Ctrl-C token as its halt and the CLI's renderer
+// as its event listener.
+fn cli_title_run(events: Arc<CliMuxEvents>) -> freemkv_engine::RunWith<'static> {
+    freemkv_engine::RunWith {
+        halt: Some(crate::cli_stop::token().clone()),
+        events: Some(events),
+        ..freemkv_engine::RunWith::default()
+    }
+}
+
+// The engine plan for one title of `source` into `dest`.
+fn title_plan(
+    source: &str,
+    dest: &str,
+    title_idx: usize,
+    raw: bool,
+    keys: &KeyConfig,
+    streams: &freemkv_engine::StreamChoice,
+) -> freemkv_engine::Plan {
+    crate::plan_core::plan(crate::plan_core::PlanRequest {
+        source: source.to_string(),
+        dest: dest.to_string(),
+        titles: freemkv_engine::Selection::Titles(vec![title_idx]),
+        streams: streams.clone(),
+        raw,
+        multipass: false,
+        keys: key_settings(keys),
+        force: false,
+    })
+}
+
+// Run a title plan; the mux's outcome, or the error it failed with as the library reports it.
+fn run_title(
+    plan: &freemkv_engine::Plan,
+    with: freemkv_engine::RunWith<'_>,
+) -> std::io::Result<libfreemkv::MuxOutcome> {
+    match freemkv_engine::run_with(plan, with, &freemkv_engine::NoopSink) {
+        Ok(freemkv_engine::Report::Title { outcome }) => Ok(outcome),
+        Ok(_) => Err(libfreemkv::Error::StreamUrlInvalid {
+            url: plan.dest.clone(),
+        }
+        .into()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn is_metadata_sink(dest: &str) -> bool {
@@ -1896,31 +1930,37 @@ fn pipe(
     source: &str,
     dest: &str,
     opts: &libfreemkv::InputOptions,
+    keys: &KeyConfig,
     out: &Output,
 ) -> Result<(), PipeFail> {
-    // Source open, header pump/gate, sink open, metadata short-circuit, frame
-    // pump, and NoStreams guard all live inside `mux_with_keys` now. The CLI
-    // keeps only presentation, via `CliMuxEvents` (stream-info, progress bar).
+    // Source open, header pump/gate, sink open, metadata short-circuit, frame pump and
+    // NoStreams guard all live in the engine's title run. The CLI keeps only presentation,
+    // via `CliMuxEvents` (stream-info, progress bar).
     out.raw_inline(Normal, &strings::fmt("rip.opening", &[("device", source)]));
     out.raw(Normal, &strings::get("rip.ok"));
 
     let metadata_sink = is_metadata_sink(dest);
     let events = Arc::new(CliMuxEvents::new(*out, dest.to_string(), metadata_sink));
-    let mux_opts = MuxOptions {
-        skip_errors: false,
-        batch_sectors: 0, // unused by a URL source (its image highway owns batching)
-        raw: opts.raw,
-        selection: opts.selection.clone(),
-        title_index: opts.title_index.unwrap_or(0),
-    };
-    let result = libfreemkv::mux_url(
+    let streams = freemkv_engine::StreamChoice::default();
+    let plan = title_plan(
         source,
-        opts.keys.as_ref(),
         dest,
-        &mux_opts,
-        &cli_ctx(events.clone()),
+        opts.title_index.unwrap_or(0),
+        opts.raw,
+        keys,
+        &streams,
     );
-    finalize_mux(result, out, &events)
+    let with = freemkv_engine::RunWith {
+        keys: opts.keys.clone(),
+        title: freemkv_engine::TitleOptions {
+            selection: Some(opts.selection.clone()),
+            skip_errors: false,
+            // Unused by a URL source (its image highway owns batching).
+            batch_sectors: 0,
+        },
+        ..cli_title_run(events.clone())
+    };
+    finalize_mux(run_title(&plan, with), out, &events)
 }
 
 // ── Disc → ISO (raw sector copy, not a stream) ────────────────────────────
@@ -2171,7 +2211,11 @@ pub(crate) fn whole_disc(
     };
     let start = std::time::Instant::now();
     let sources = crate::rip_keys::sources(&plan.keys.params());
-    let r = freemkv_engine::run_with(plan, sources, &sink);
+    let with = freemkv_engine::RunWith {
+        sources: Some(sources),
+        ..freemkv_engine::RunWith::default()
+    };
+    let r = freemkv_engine::run_with(plan, with, &sink);
     if sink.drew.load(Ordering::SeqCst) && !out.is_quiet() {
         eprint!("\r\x1b[K");
     }
@@ -2182,14 +2226,18 @@ pub(crate) fn whole_disc(
         freemkv_engine::Output::Titles => std::path::PathBuf::new(),
     };
     match r {
-        Ok(freemkv_engine::Report::Image { copy, disc, path }) => {
+        Ok(freemkv_engine::Report::Image {
+            copy, disc, path, ..
+        }) => {
             let null = matches!(output, freemkv_engine::Output::Image { null: true, .. });
-            render_copy(&copy, &disc, &path, null, start, out)
+            render_copy(&copy, disc.as_deref(), &path, null, start, out)
         }
         Ok(freemkv_engine::Report::Tree { extract }) => match render_extract(&extract, out) {
             true => 0,
             false => 1,
         },
+        // A whole-disc plan never reports a title.
+        Ok(freemkv_engine::Report::Title { .. }) => 1,
         Err(libfreemkv::Error::Halted) => {
             out.raw(Normal, &interrupted_text(&target));
             1
@@ -2216,7 +2264,7 @@ pub(crate) fn whole_disc(
 // A finished image copy's verdict, as the CLI has always printed it.
 fn render_copy(
     r: &freemkv_engine::CopyResult,
-    disc: &libfreemkv::Disc,
+    disc: Option<&libfreemkv::Disc>,
     iso_path: &std::path::Path,
     is_null: bool,
     start: std::time::Instant,
@@ -2249,8 +2297,11 @@ fn render_copy(
                 let gb_good = r.bytes_good as f64 / 1_073_741_824.0;
                 let mb_bad = r.bytes_unreadable as f64 / 1_048_576.0;
                 let mb_pending = r.bytes_pending as f64 / 1_048_576.0;
-                let mapfile_path = disc.mapfile_for(iso_path);
-                let main_title = disc.titles.first();
+                let mapfile_path = disc.map_or_else(
+                    || freemkv_engine::mapfile_path_for(iso_path),
+                    |d| d.mapfile_for(iso_path),
+                );
+                let main_title = disc.and_then(|d| d.titles.first());
                 let main_title_bad = main_title
                     .map(|t| freemkv_engine::bytes_bad_in_title_from_mapfile(&mapfile_path, t))
                     .unwrap_or(0);

@@ -5,6 +5,7 @@
 ### Changed
 
 - **An ISO is decrypted unless you ask for raw, on every front end** (CLI, app, server). A multi-pass recovery to an ISO now decrypts as it reads (the app no longer refuses it or asks for 'Keep encrypted (raw)'), and the server's ISO output is delivered decrypted instead of raw, like the CLI's and app's. The server has no raw option, so its ISOs are always decrypted; it acquires the whole disc's keys before the rip and refuses a disc it cannot fully key, as the CLI does.
+- **A stopped multi-pass ISO recovery resumes where it stopped** (app only: the server already resumed its rips and the CLI's `--multipass` resumes one pass per run): a decrypting multi-pass rip to an ISO started its sweep over from the beginning after a Stop, and its retry passes could not read encrypted sectors. It now resumes the image and retries with the rip's keys.
 - **Output title names follow one rule** (CLI, app, server): a title ripped from a disc, an ISO, a folder or a staged image is named by the disc's title (else its volume label) in the container's title field and in `fvi://` provenance; image and server rips used the playlist file name (e.g. `00800.mpls`).
 - **TrueHD 7.1 and Atmos tracks are labelled correctly on every rip** (CLI, app, server): live and staged-image rips labelled them 5.1 at 48 kHz from the playlist; they now read the track's own header, as `iso://` rips did.
 - **A DVD ripped from a drive to a folder is descrambled** (CLI, app only: the server has no folder output): its title VOBs were written still CSS-scrambled.
@@ -30,6 +31,7 @@
 ### Server (replaces autorip)
 
 - **Keys come from the source picked in settings.** AACS Key Source = online asks only the online key service; local uses only the local KEYDB. An autorip `settings.json` loads unchanged, and a stored `http://` Keyserver URL is warned about at startup. (server only: the server's key-source setting)
+- The multi-pass recovery (sweep, retry passes, end-of-recovery promotion) runs the engine's passes, the same implementation as the app's and the CLI's; the server keeps its own drive recovery (re-open after a USB bridge crash, a spin-cycle before each retry pass), its device-log lines and its loss gate. (server only: the server's pass loop moved into the engine)
 - A staged disc image (a multi-pass rip, a resumed rip, a deferred mux) is muxed through the same image path as the CLI and the app. A mux that fails removes its partial MKV from staging; the ISO and mapfile stay for the retry. (server only: brings the server onto the CLI's and app's image path)
 
 ## [1.7.7] — 2026-09-26

@@ -8,6 +8,7 @@
 //! multipass sweep loop still lives inline in `rip_disc`.
 
 pub(crate) mod mux;
+mod passes;
 pub mod resume;
 mod session;
 pub mod staging;
@@ -35,7 +36,7 @@ pub use state::{
 // file. Sub-module-private helpers (`pub(super)`) are reachable from
 // here because we are the parent of `state` / `session` / `staging`.
 
-use crate::server::util::{BYTES_PER_GIB, BYTES_PER_MIB, MILLIS_PER_SEC};
+use crate::server::util::{BYTES_PER_GIB, MILLIS_PER_SEC};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -690,11 +691,10 @@ fn keyless_not_ripping_error(msg: &str) -> String {
 }
 
 use session::{
-    DriveSession, drop_session, rediscover_drive, rip_thread_running, session_is_scanned,
-    store_session, take_session,
+    DriveSession, drop_session, rip_thread_running, session_is_scanned, store_session, take_session,
 };
 use staging::staging_free_bytes;
-use state::{PassContext, PassProgressState, is_in_cooldown, push_pass_state, set_pass_progress};
+use state::{PassContext, PassProgressState, is_in_cooldown, push_pass_state};
 
 // ─── Poll loop ─────────────────────────────────────────────────────────────
 
@@ -1308,11 +1308,11 @@ pub fn scan_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str) {
     crate::server::log::archive_device_log(device);
     crate::server::log::device_log(device, "Opening drive...");
 
-    // Drive open + SCSI bring-up now runs inside DiscSession::open; the owned
+    // Drive open + SCSI bring-up runs inside the engine's session open; the owned
     // drive comes back out after the scan (into_drive), so the rest of
     // scan_disc is untouched.
     crate::server::log::device_log(device, "Initializing...");
-    let mut session = match libfreemkv::DiscSession::open(
+    let mut session = match freemkv_engine::drive::open_session(
         libfreemkv::DeviceTarget::Path(std::path::PathBuf::from(device_path)),
         libfreemkv::KeySpec::default(),
     ) {
@@ -2188,17 +2188,6 @@ fn end_of_recovery_loss(
     }
 }
 
-// The patch loop's muxable-scope bad bytes at the top of a pass; `None` (an
-// unreadable mapfile, or unscopable loss) never converges, as in the engine.
-fn loop_top_scope_bad(
-    map: std::io::Result<freemkv_engine::Mapfile>,
-    is_iso: bool,
-    title: &libfreemkv::DiscTitle,
-) -> Option<u64> {
-    let map = map.ok()?;
-    measured_scope_bad(is_iso, &map.ranges_with(&bad_sector_statuses()), title)
-}
-
 // Look at the staging dirs for a Remux-eligible entry matching the sanitized display_name of
 // the currently-scanned disc; returns the `ResumeClass::Remux` payload if found, else None.
 fn find_resumable_for_disc(cfg: &Arc<RwLock<Config>>, device: &str) -> Option<resume::ResumeClass> {
@@ -2593,7 +2582,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 drop_session(device);
             }
             crate::server::log::device_log(device, "Opening drive...");
-            let mut drive = match libfreemkv::Drive::open(std::path::Path::new(device_path)) {
+            let mut drive = match freemkv_engine::drive::open(std::path::Path::new(device_path)) {
                 Ok(d) => d,
                 Err(e) => {
                     let msg = format_lib_error("Cannot open drive", &e);
@@ -2799,7 +2788,8 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
     // The main movie, picked by the engine exactly as the CLI and GUI pick it.
     let main = freemkv_engine::resolve_selection(&disc, &freemkv_engine::Selection::MainMovie);
-    let title = disc.titles[main.first().copied().unwrap_or(0)].clone();
+    let main_idx = main.first().copied().unwrap_or(0);
+    let title = disc.titles[main_idx].clone();
     let duration = crate::server::util::format_duration_hm(title.duration_secs);
     let codecs = format_codecs(&title);
 
@@ -3165,42 +3155,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     }
     let _rip_complete_guard = RipCompleteGuard(rip_complete);
 
-    // Per-pass wall-clock cap was removed 2026-06-04 — a pass is bounded by
-    // its own work + libfreemkv's stall watchdogs, not a clock.
-    struct WallclockGuard(Arc<AtomicBool>);
-    impl Drop for WallclockGuard {
-        fn drop(&mut self) {
-            self.0.store(false, Ordering::Relaxed);
-        }
-    }
-    // Forwards a user stop (`user_halt`) into the per-pass `pass_halt` flag;
-    // no longer a "watcher" since the wall-clock cap was removed, just a
-    // halt bridge. Returns a guard that stops the thread on drop.
-    fn spawn_pass_watcher(
-        pass_halt: Arc<AtomicBool>,
-        user_halt: Arc<AtomicBool>,
-    ) -> WallclockGuard {
-        let active = Arc::new(AtomicBool::new(true));
-        let active_for_watcher = active.clone();
-        std::thread::spawn(move || {
-            while active_for_watcher.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                if !active_for_watcher.load(Ordering::Relaxed) {
-                    return;
-                }
-                if user_halt.load(Ordering::Relaxed) {
-                    pass_halt.store(true, Ordering::Relaxed);
-                    return;
-                }
-                if pass_halt.load(Ordering::Relaxed) {
-                    return;
-                }
-            }
-        });
-        WallclockGuard(active)
-    }
-    // The user-stop halt — the existing flag. Pass-specific halts forward
-    // from this via spawn_pass_watcher. Renamed locally for clarity.
+    // The user-stop halt — the existing flag; the passes observe it through the engine.
     let user_halt = halt.clone();
 
     // Multi-pass (max_retries > 0) goes through an ISO intermediate before
@@ -3369,386 +3324,103 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         let title_for_progress = title.clone();
         let bps_progress = title_bytes_per_sec;
 
-        // Pass 1: disc → ISO (fast sweep, skip-forward on failure).
-        let pass_label = format!("Pass 1/{total_passes}: disc → ISO");
-        crate::server::log::device_log(device, &pass_label);
-        set_pass_progress(
+        // The engine's recovery over the held drive (shared with the CLI and app); `passes`
+        // re-opens the drive and spin-cycles it. An ISO output decrypts; a staged image stays
+        // raw for the mux, the rip's set stamping its identity.
+        let mapfile_path = std::path::PathBuf::from(&mapfile_path_str);
+        let pass_sink = passes::ServerPassSink::new(
             &pass_ctx,
-            1,
+            &title_for_progress,
+            bps_progress,
             total_passes,
-            0, // bytes_good
-            0, // bytes_maybe
-            0, // bytes_lost
+            output_is_iso_image(&cfg_read.output_format),
+            &mapfile_path,
+            user_halt.clone(),
         );
-
-        // Runs every read block (~64 KB); throttled to once every 1.5s so
-        // it doesn't pound the mutex/filesystem. Tracks last-sample for ETA.
-        let pass1_state = std::sync::Mutex::new(PassProgressState::new());
-        let pass1_ctx = &pass_ctx;
-        let pass1_progress = |e: &libfreemkv::Event<'_>| {
-            let libfreemkv::Event::Pass(p) = e else {
-                return;
-            };
-            // Stash work_done for push_pass_state to compute pass progress.
-            {
-                let mut s = pass1_state.lock().unwrap_or_else(|e| e.into_inner());
-                s.last_work_done = p.work_done;
-                s.last_work_total = p.work_total;
-                // 250 ms UI push cadence (see the patch closure below for rationale).
-                if s.last_update.elapsed().as_millis() < 250 {
-                    return;
-                }
-            }
-            push_pass_state(pass1_ctx, p, bps_progress, 1, total_passes, &pass1_state);
+        let mut host = passes::ServerPassHost {
+            device,
+            device_path,
+            session: &mut session,
+            halt: halt.clone(),
+            user_halt: user_halt.clone(),
+            delay_secs: transport_recovery_delay_secs,
+            resume: resume_sweep,
+            attempt: 0,
+            gave_up: false,
+            halted: false,
         };
-
-        // Pass 1 with transport-failure recovery: the Initio USB-SATA bridge
-        // crashes on damaged sectors, causing a USB re-enumeration (sg device
-        // renumbers). Retry with resume=true on the new device path.
-        let pass1_halt = Arc::new(AtomicBool::new(false));
-        let _pass1_guard = spawn_pass_watcher(pass1_halt.clone(), user_halt.clone());
-
-        const MAX_PASS1_ATTEMPTS: u32 = 10;
-        let mut attempt = 0;
-        let mut result = None;
-        // Kept so the `result = None` fallthrough can translate the SCSI
-        // cause via format_pass_error, not a bare internal identifier.
-        let mut last_sweep_err: Option<libfreemkv::Error> = None;
-
-        'pass1: loop {
-            attempt += 1;
-            if attempt > MAX_PASS1_ATTEMPTS {
-                crate::server::log::device_log(device, "Pass 1: max attempts reached");
-                break;
+        let plan = freemkv_engine::Plan {
+            source: format!("disc://{device_path}"),
+            dest: format!("iso://{iso_path_str}"),
+            titles: freemkv_engine::Selection::Titles(vec![main_idx]),
+            raw: !iso_decrypts,
+            multipass: true,
+            ..freemkv_engine::Plan::default()
+        };
+        let with = freemkv_engine::RunWith {
+            keys: rip_keys.as_ref().ok().cloned(),
+            held: Some(freemkv_engine::Held::Host {
+                disc: &disc,
+                host: &mut host,
+            }),
+            passes: Some(freemkv_engine::MultipassOpts {
+                max_passes: u32::from(cfg_read.max_retries),
+                abort_on_lost_secs: cfg_read.abort_on_lost_secs,
+                is_iso_output: output_is_iso_image(&cfg_read.output_format),
+            }),
+            // The staged ISO carries no artifact lock: staging markers govern it.
+            locked: true,
+            halt: Some(halt_token.clone()),
+            ..freemkv_engine::RunWith::default()
+        };
+        let recovered = freemkv_engine::run_with(&plan, with, &pass_sink);
+        let (attempt, gave_up, halted_in_recovery) = (host.attempt, host.gave_up, host.halted);
+        let result = match recovered {
+            Ok(freemkv_engine::Report::Image {
+                recovery: Some(r), ..
+            }) => r,
+            Ok(_) => {
+                tracing::error!(device = %device, "recovery returned no pass verdict");
+                unregister_halt(device);
+                return;
             }
-
-            // resume=true on retry attempts so mapfile state continues where
-            // a bridge crash left it. `resume_sweep` (user clicked Resume)
-            // makes even the FIRST attempt resume, skipping already-swept data.
-            let sweep_opts = freemkv_engine::SweepOptions {
-                // An ISO output is delivered decrypted; an image staged for a title mux
-                // stays raw (the mux decrypts its titles).
-                decrypt: iso_decrypts,
-                resume: resume_sweep || attempt > 1,
-                batch_sectors: None,
-                skip_on_error: true,
-                progress: Some(&pass1_progress),
-                halt: Some(pass1_halt.clone()),
-                // The rip's set: an ISO output decrypts through it; a raw staging capture only stamps the identity.
-                keys: rip_keys.as_ref().ok().cloned(),
-            };
-
-            match freemkv_engine::sweep(&disc, &mut session.drive, iso_path, &sweep_opts) {
-                Ok(r) => {
-                    result = Some(r);
-                    break 'pass1;
-                }
-                Err(e) => {
-                    if halt.load(Ordering::Relaxed) {
-                        crate::server::log::device_log(
-                            device,
-                            &format!("Pass 1 cancelled (halt): {e}"),
-                        );
-                        // `_halt_guard` unregisters this device's Halt token on
-                        // drop (i.e. on this `return`); no explicit call needed.
-                        return;
-                    }
-
-                    let is_transport = e.is_scsi_transport_failure();
-
-                    if !is_transport {
-                        crate::server::log::device_log(device, &format!("Pass 1 failed: {e}"));
-                        let user_msg = format_pass_error("Pass 1", &e);
-                        update_state(
-                            device,
-                            RipState {
-                                device: device.to_string(),
-                                status: "error".to_string(),
-                                disc_present: true,
-                                last_error: user_msg,
-                                disc_name: display_name.clone(),
-                                disc_format: disc_format.clone(),
-                                tmdb_title: tmdb_title.clone(),
-                                tmdb_year,
-                                tmdb_poster: tmdb_poster.clone(),
-                                tmdb_overview: tmdb_overview.clone(),
-                                duration: duration.clone(),
-                                codecs: codecs.clone(),
-                                ..Default::default()
-                            },
-                        );
-                        unregister_halt(device);
-                        return;
-                    }
-
-                    // Transport failure — bridge crashed. Remember the cause
-                    // so exhaustion fallthrough can translate it via
-                    // format_pass_error, not leak an internal identifier.
-                    last_sweep_err = Some(e);
-
-                    // Drop stale drive, wait for USB re-enumeration, re-open
-                    // on new path.
-                    crate::server::log::device_log(
-                        device,
-                        &format!(
-                            "Pass 1 attempt {attempt}: transport failure (bridge crash), waiting for USB re-enumeration"
-                        ),
-                    );
-                    drop_session(device);
-
-                    // Wait for USB re-enumeration (delay snapshotted at the top of
-                    // `rip_disc`), then re-discover the drive at its original path or a
-                    // shifted sg number. A Stop ends either wait.
-                    let recovery_halt = libfreemkv::Halt::from_arc(halt.clone());
-                    let new_path = if session::sleep_unless_halted(
-                        &recovery_halt,
-                        std::time::Duration::from_secs(transport_recovery_delay_secs),
-                    ) {
-                        rediscover_drive(device, device_path, &recovery_halt)
-                    } else {
-                        None
-                    };
-                    if recovery_halt.is_cancelled() {
-                        crate::server::log::device_log(
-                            device,
-                            "Pass 1 cancelled (halt) during transport-failure recovery",
-                        );
-                        return;
-                    }
-                    match (new_path.as_deref(), &device_path) {
-                        (Some(p), _) if p != device_path => {
-                            crate::server::log::device_log(
-                                device,
-                                &format!(
-                                    "Pass 1 attempt {attempt}: drive rediscovered at {p} (original={}), attempting re-open",
-                                    device_path
-                                ),
-                            );
-
-                            // Retry Drive::open with exponential backoff (firmware may not be ready yet).
-                            let mut drive = match open_drive_with_backoff(
-                                device,
-                                attempt,
-                                p,
-                                transport_recovery_delay_secs,
-                            ) {
-                                Some(d) => d,
-                                None => break 'pass1,
-                            };
-
-                            if let Err(e) = drive.wait_ready() {
-                                crate::server::log::device_log(
-                                    device,
-                                    &format!(
-                                        "Pass 1 attempt {attempt}: Drive::wait_ready({}) failed strategy=transport_failure_recovery error={} — recovery path exhausted",
-                                        p,
-                                        e.code()
-                                    ),
-                                );
-
-                                let failure_category = if e.code() == 4000 {
-                                    "SCSI_ERROR"
-                                } else {
-                                    &format!("ERROR_CODE_{}", e.code())
-                                };
-
-                                crate::server::log::device_log(
-                                    device,
-                                    &format!(
-                                        "STRATEGY_FAILURE: transport_failure_recovery FAILED at Drive::wait_ready category={} error_code={}",
-                                        failure_category,
-                                        e.code()
-                                    ),
-                                );
-
-                                break 'pass1;
-                            }
-
-                            if let Err(e) = drive.init() {
-                                crate::server::log::device_log(
-                                    device,
-                                    &format!(
-                                        "Pass 1 attempt {attempt}: Drive::init({}) failed strategy=transport_failure_recovery error={} sense_key={:?} ASC={:?} — recovery path exhausted",
-                                        p,
-                                        e.code(),
-                                        e.scsi_sense().map(|s| s.sense_key),
-                                        e.scsi_sense().map(|s| s.asc)
-                                    ),
-                                );
-
-                                log_init_recovery_failure(device, &e);
-
-                                break 'pass1;
-                            }
-
-                            // Engage disc-type read mode before any read
-                            // (idempotent); mirrors scan_disc and the other
-                            // open paths, which all call probe_disc() after init().
-                            if let Err(e) = drive.probe_disc() {
-                                tracing::warn!(device = %device, error = %e, "drive probe_disc failed (continuing)");
-                            }
-
-                            session.drive = drive;
-                            session.device_path = p.to_string();
-
-                            crate::server::log::device_log(
-                                device,
-                                &format!(
-                                    "PASS 1/{}: transport_failure_recovery SUCCESS — resuming from mapfile at {}",
-                                    attempt + 1,
-                                    p
-                                ),
-                            );
-                        }
-
-                        (Some(p), _) if p == device_path => {
-                            crate::server::log::device_log(
-                                device,
-                                &format!(
-                                    "Pass 1 attempt {attempt}: drive still at original path {}, attempting re-open",
-                                    p
-                                ),
-                            );
-
-                            // Retry Drive::open with exponential backoff (firmware
-                            // may not be ready yet) — same as the new-path arm, since
-                            // a same-sg re-enumeration leaves firmware just as cold.
-                            let mut drive = match open_drive_with_backoff(
-                                device,
-                                attempt,
-                                p,
-                                transport_recovery_delay_secs,
-                            ) {
-                                Some(d) => d,
-                                None => break 'pass1,
-                            };
-
-                            if let Err(e) = drive.wait_ready() {
-                                crate::server::log::device_log(
-                                    device,
-                                    &format!(
-                                        "Pass 1 attempt {attempt}: Drive::wait_ready({}) failed strategy=transport_failure_recovery error={} — recovery path exhausted",
-                                        p,
-                                        e.code()
-                                    ),
-                                );
-
-                                let failure_category = if e.code() == 4000 {
-                                    "SCSI_ERROR"
-                                } else {
-                                    &format!("ERROR_CODE_{}", e.code())
-                                };
-
-                                crate::server::log::device_log(
-                                    device,
-                                    &format!(
-                                        "STRATEGY_FAILURE: transport_failure_recovery FAILED at Drive::wait_ready category={} error_code={}",
-                                        failure_category,
-                                        e.code()
-                                    ),
-                                );
-
-                                break 'pass1;
-                            }
-
-                            if let Err(e) = drive.init() {
-                                crate::server::log::device_log(
-                                    device,
-                                    &format!(
-                                        "Pass 1 attempt {attempt}: Drive::init({}) failed strategy=transport_failure_recovery error={} sense_key={:?} ASC={:?} — recovery path exhausted",
-                                        p,
-                                        e.code(),
-                                        e.scsi_sense().map(|s| s.sense_key),
-                                        e.scsi_sense().map(|s| s.asc)
-                                    ),
-                                );
-
-                                // Same wedged-firmware diagnostic as the
-                                // new-path arm: same-sg re-enumeration too
-                                // means the firmware needs a power-cycle.
-                                log_init_recovery_failure(device, &e);
-
-                                break 'pass1;
-                            }
-
-                            // Engage disc-type read mode before any read
-                            // (idempotent); mirrors scan_disc and the other
-                            // open paths, which all call probe_disc() after init().
-                            if let Err(e) = drive.probe_disc() {
-                                tracing::warn!(device = %device, error = %e, "drive probe_disc failed (continuing)");
-                            }
-
-                            session.drive = drive;
-                            session.device_path = p.to_string();
-
-                            crate::server::log::device_log(
-                                device,
-                                &format!(
-                                    "PASS 1/{}: transport_failure_recovery SUCCESS — resuming from mapfile at {}",
-                                    attempt + 1,
-                                    p
-                                ),
-                            );
-                        }
-
-                        (None, _) => {
-                            crate::server::log::device_log(
-                                device,
-                                "Pass 1: could not re-discover drive after transport failure strategy=usb_re_enumeration FAILED",
-                            );
-
-                            // Log detailed breakdown of what was tried
-                            let sg_num = device_path
-                                .rsplit('/')
-                                .next()
-                                .and_then(|s| {
-                                    s.strip_prefix("sg").and_then(|n| n.parse::<i32>().ok())
-                                })
-                                .unwrap_or(-1);
-
-                            crate::server::log::device_log(
-                                device,
-                                &format!(
-                                    "usb_re_enumeration strategy tried probe paths: sg{} (original), sg{}, sg{}, sg{}, sg{}, sg{}, sg{}",
-                                    sg_num,
-                                    sg_num - 1,
-                                    sg_num + 1,
-                                    sg_num - 2,
-                                    sg_num + 2,
-                                    sg_num - 3,
-                                    sg_num + 3
-                                ),
-                            );
-
-                            crate::server::log::device_log(
-                                device,
-                                "STRATEGY_FAILURE: usb_re_enumeration FAILED — no valid drive path found after USB re-enumeration",
-                            );
-
-                            break 'pass1;
-                        }
-
-                        // Fallback for any other case (shouldn't happen but compiler requires exhaustiveness)
-                        _ => {
-                            crate::server::log::device_log(
-                                device,
-                                "STRATEGY_FAILURE: usb_re_enumeration FAILED — unexpected match state",
-                            );
-
-                            break 'pass1;
-                        }
-                    }
-                }
+            // A Stop during a transport recovery was already logged.
+            Err(_) if halted_in_recovery => return,
+            Err(e) if halt.load(Ordering::Relaxed) => {
+                crate::server::log::device_log(device, &format!("Pass 1 cancelled (halt): {e}"));
+                // `_halt_guard` unregisters this device's Halt token on drop (i.e. on this
+                // `return`); no explicit call needed.
+                return;
             }
-        }
-
-        let result = match result {
-            Some(r) => r,
-            None => {
+            Err(e) if !gave_up => {
+                crate::server::log::device_log(device, &format!("Pass 1 failed: {e}"));
+                let user_msg = format_pass_error("Pass 1", &e);
+                update_state(
+                    device,
+                    RipState {
+                        device: device.to_string(),
+                        status: "error".to_string(),
+                        disc_present: true,
+                        last_error: user_msg,
+                        disc_name: display_name.clone(),
+                        disc_format: disc_format.clone(),
+                        tmdb_title: tmdb_title.clone(),
+                        tmdb_year,
+                        tmdb_poster: tmdb_poster.clone(),
+                        tmdb_overview: tmdb_overview.clone(),
+                        duration: duration.clone(),
+                        codecs: codecs.clone(),
+                        ..Default::default()
+                    },
+                );
+                unregister_halt(device);
+                return;
+            }
+            Err(e) => {
                 // All attempts exhausted or unrecoverable.
 
                 // Determine which recovery strategy failed and why
-                let failure_reason = if attempt >= MAX_PASS1_ATTEMPTS {
+                let failure_reason = if attempt >= passes::MAX_PASS1_ATTEMPTS {
                     "transport_failure_recovery_exhausted".to_string()
                 } else {
                     "unrecoverable_error".to_string()
@@ -3761,8 +3433,8 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                         // `attempt` is already 1-based (incremented at the top
                         // of the loop), so print it directly — `attempt + 1`
                         // overcounted, yielding e.g. "12/10" at exhaustion.
-                        attempt.min(MAX_PASS1_ATTEMPTS),
-                        MAX_PASS1_ATTEMPTS,
+                        attempt.min(passes::MAX_PASS1_ATTEMPTS),
+                        passes::MAX_PASS1_ATTEMPTS,
                         failure_reason
                     ),
                 );
@@ -3770,10 +3442,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 // format_pass_error turns sense data into an actionable
                 // message (e.g. "power-cycle the drive"); fall back to plain
                 // text only if no error was captured.
-                let user_msg = match &last_sweep_err {
-                    Some(e) => format_pass_error("Pass 1", e),
-                    None => "Pass 1 failed — see logs for detailed error breakdown".to_string(),
-                };
+                let user_msg = format_pass_error("Pass 1", &e);
 
                 update_state(
                     device,
@@ -3800,7 +3469,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                         device,
                         &format!(
                             "RECOVERY_GUIDANCE: Transport failure recovery exhausted after {} attempts. Check logs for specific error category (SCSI_ERROR, DEVICE_ERROR). If ILLEGAL REQUEST errors present, drive firmware wedged — eject disc and power-cycle USB drive before retrying.",
-                            MAX_PASS1_ATTEMPTS
+                            passes::MAX_PASS1_ATTEMPTS
                         ),
                     );
 
@@ -3821,341 +3490,11 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                 return;
             }
         };
-        // Drop the Pass 1 watcher so its thread exits before Pass 2 spawns its own.
-        drop(_pass1_guard);
-        crate::server::log::device_log(
-            device,
-            &format!(
-                "Pass 1 done: {:.2} GB good, {:.2} MB unreadable, {:.2} MB pending",
-                result.bytes_good as f64 / BYTES_PER_GIB,
-                result.bytes_unreadable as f64 / BYTES_PER_MIB,
-                result.bytes_pending as f64 / BYTES_PER_MIB,
-            ),
-        );
+        let bytes_unreadable = result.unreadable_bytes;
 
-        // Track cross-pass state from CopyResult.
-        let mut bytes_good = result.bytes_good;
-        let mut bytes_unreadable = result.bytes_unreadable;
-        let mut bytes_pending = result.bytes_pending;
-
-        // Retry passes: freemkv_engine::patch re-reads only the bad ranges,
-        // sector-by-sector, with full drive-level recovery.
-
-        let max_retries = cfg_read.max_retries;
-        // The patch-pass count comes from the pass plan (== max_retries); this
-        // ties the retry-loop bound to the same pure plan `total_passes` uses.
-        let patch_passes = plan_passes(cfg_read.max_retries).patch_passes;
-
-        crate::server::log::device_log(
-            device,
-            &format!(
-                "PASS 2-{}: retry loop starting max_retries={} bytes_pending={}",
-                max_retries, max_retries, bytes_pending
-            ),
-        );
-        for retry_n in 1..=patch_passes {
-            // If user hit stop, bail.
-            if user_halt.load(Ordering::Relaxed) {
-                crate::server::log::device_log(
-                    device,
-                    &format!("PASS {} STOPPED: user halt before retry pass", retry_n + 1),
-                );
-                break;
-            }
-
-            // Skip remaining retry passes once the *muxable* scope is 100%
-            // recovered: ISO needs the whole disc clean, MKV/M2TS only the
-            // muxed title. `abort_on_lost_secs` is NOT the trigger; it gates the END.
-            let map = freemkv_engine::Mapfile::load(std::path::Path::new(&mapfile_path_str));
-            if let Err(e) = &map {
-                crate::server::log::device_log(
-                    device,
-                    &format!(
-                        "PASS {}: could not read the mapfile ({e}); running it",
-                        retry_n + 1
-                    ),
-                );
-            }
-            let mux_scope_bad = loop_top_scope_bad(
-                map,
-                output_is_iso_image(&cfg_read.output_format),
-                &title_for_progress,
-            );
-            // Loop-top convergence gate (`None` recovery ⇒ pre-pass): Converged
-            // means the muxable scope is 100% recovered. Guarded by `bytes_good
-            // > 0` so an EMPTY mapfile (0 good, 0 bad) isn't mistaken for done.
-            if pre_pass_converged(mux_scope_bad, bytes_good) {
-                let scope_label = if output_is_iso_image(&cfg_read.output_format) {
-                    "whole disc"
-                } else {
-                    "muxed title"
-                };
-                crate::server::log::device_log(
-                    device,
-                    &format!(
-                        "PASS {} SKIPPED: {} is 100% recovered in mapfile — proceeding to mux",
-                        retry_n + 1,
-                        scope_label
-                    ),
-                );
-                break;
-            }
-
-            let pass = retry_n + 1;
-
-            // Flip the UI to the new pass BEFORE the settle, so the tile shows
-            // "pass N · retrying · 0%" immediately instead of carrying the prior
-            // pass's stale 99% through the 30 s drive settle below.
-            set_pass_progress(
-                &pass_ctx,
-                pass,
-                total_passes,
-                bytes_good,
-                bytes_pending,    // MAYBE bucket — Pass 2-N may still recover
-                bytes_unreadable, // LOST bucket — terminal
-            );
-
-            // Per-pass progress state — created BEFORE the settle so the disc
-            // map can be painted immediately.
-            let patch_state = std::sync::Mutex::new(PassProgressState::new());
-            let patch_ctx = &pass_ctx;
-            let patch_title = &title_for_progress;
-            let patch_map = std::path::Path::new(&mapfile_path_str);
-
-            // Paint the map at pass start, BEFORE the settle. Otherwise the bar
-            // sits all-green for 30s until the patch loop's first emission —
-            // most visible on resume, with no prior sweep push to carry the ranges.
-            if let Some(snap) = freemkv_engine::progress_snapshot_from_mapfile(
-                patch_map,
-                Some(patch_title),
-                libfreemkv::progress::PassKind::Trim { reverse: true },
-                patch_ctx.bytes_total_disc,
-            ) {
-                push_pass_state(
-                    patch_ctx,
-                    &snap,
-                    bps_progress,
-                    pass,
-                    total_passes,
-                    &patch_state,
-                );
-            }
-
-            crate::server::log::device_log(
-                device,
-                &format!(
-                    "PASS {}/{total_passes}: retrying bad ranges (bpt=1) bytes_pending={}",
-                    pass, bytes_pending
-                ),
-            );
-            let patch_progress = |e: &libfreemkv::Event<'_>| {
-                let libfreemkv::Event::Pass(p) = e else {
-                    return;
-                };
-                {
-                    let mut s = patch_state.lock().unwrap_or_else(|e| e.into_inner());
-                    s.last_work_done = p.work_done;
-                    s.last_work_total = p.work_total;
-                    // 250ms UI push cadence matches libfreemkv's snapshot republish;
-                    // the per-push mapfile reload is cheap for the usual handful of ranges.
-                    if s.last_update.elapsed().as_millis() < 250 {
-                        return;
-                    }
-                }
-                push_pass_state(patch_ctx, p, bps_progress, pass, total_passes, &patch_state);
-            };
-            let pass_halt = Arc::new(AtomicBool::new(false));
-            let _pass_guard = spawn_pass_watcher(pass_halt.clone(), user_halt.clone());
-
-            // 0.18 round 3: Pass 2..N calls freemkv_engine::patch directly; these
-            // PatchOptions mirror what the old patch_internal constructed.
-            let patch_opts = freemkv_engine::PatchOptions {
-                decrypt: iso_decrypts,
-                // Enter each bad range BATCHED, not single-sector: it's mostly
-                // good skip-ahead overshoot with a small damaged core, so a batch
-                // reads the overshoot in bulk and bisects down to the real bad sector.
-                block_sectors: Some(32),
-                full_recovery: true,
-                reverse: true,
-                wedged_threshold: 50,
-                progress: Some(&patch_progress),
-                halt: Some(pass_halt.clone()),
-                // A raw capture decrypts nothing; the set checks the mapfile's identity.
-                keys: rip_keys.as_ref().ok().cloned(),
-            };
-            // Un-wedge the drive in SOFTWARE before each retry pass: grinding a
-            // bad cluster leaves it in a HARDWARE_ERROR wedge needing a power-cycle.
-            // spin_cycle() does that WITHOUT ejecting (slot-loading drive).
-            if let Err(e) = session.drive.spin_cycle() {
-                // spin_cycle's SCSI command failed (dead bus / file-backed resume).
-                // Fall back to a short passive idle for SOME recovery time — a
-                // bridge transport fault self-recovers in ~15s of idle.
-                crate::server::log::device_log(
-                    device,
-                    &format!(
-                        "drive spin-cycle before pass {pass} failed ({e}); settling 15 s instead"
-                    ),
-                );
-                // Short idle in 1 s slices so a user halt stays responsive.
-                for _ in 0..15 {
-                    if user_halt.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
-            } else {
-                crate::server::log::device_log(
-                    device,
-                    &format!("drive spin-cycled (soft un-wedge, no eject) before pass {pass}"),
-                );
-            }
-            let cr = match freemkv_engine::patch(&disc, &mut session.drive, iso_path, &patch_opts) {
-                Ok(r) => r,
-                Err(e) => {
-                    // Categorize the failure for debugging
-                    let error_category = if e.code() == 4000 {
-                        "SCSI_ERROR"
-                    } else if e.code() >= 6000 && e.code() < 7000 {
-                        "DISC_READ_ERROR"
-                    } else if e.code() >= 1000 && e.code() < 2000 {
-                        "DEVICE_ERROR"
-                    } else {
-                        &format!("ERROR_CODE_{}", e.code())
-                    };
-
-                    let sense_info = e.scsi_sense().map(|s| {
-                        format!(
-                            "sense_key={:02x} ASC={:02x} ASCQ={:02x}",
-                            s.sense_key, s.asc, s.ascq
-                        )
-                    });
-
-                    if user_halt.load(Ordering::Relaxed) {
-                        crate::server::log::device_log(
-                            device,
-                            &format!(
-                                "PASS {} CANCELLED: user halt category={} error_code={}",
-                                pass,
-                                error_category,
-                                e.code()
-                            ),
-                        );
-
-                        if let Some(info) = sense_info {
-                            crate::server::log::device_log(device, &info);
-                        }
-                    } else {
-                        crate::server::log::device_log(
-                            device,
-                            &format!(
-                                "PASS {} FAILED: strategy=patch_recovery category={} error_code={} {}",
-                                pass,
-                                error_category,
-                                e.code(),
-                                sense_info.unwrap_or_default()
-                            ),
-                        );
-
-                        // Log which recovery phase failed
-                        crate::server::log::device_log(
-                            device,
-                            &format!(
-                                "STRATEGY_FAILURE: patch_recovery FAILED at disc.patch() with category={} (sense_key={:?}, ASC={:?})",
-                                error_category,
-                                e.scsi_sense().map(|s| s.sense_key),
-                                e.scsi_sense().map(|s| s.asc)
-                            ),
-                        );
-
-                        // Provide actionable guidance based on error type
-                        if e.code() == 4000 && e.is_scsi_transport_failure() {
-                            crate::server::log::device_log(
-                                device,
-                                "ACTION_REQUIRED: Transport failure detected — USB bridge crashed. Eject disc and power-cycle drive before retrying.",
-                            );
-                        } else if e.code() >= 6000
-                            && e.scsi_sense()
-                                .map(|s| s.is_hardware_error())
-                                .unwrap_or(false)
-                        {
-                            crate::server::log::device_log(
-                                device,
-                                "ACTION_REQUIRED: Drive hardware error detected — drive may be failing. Consider replacing optical drive.",
-                            );
-                        } else if e.code() == 4000
-                            && e.scsi_sense().map(|s| s.asc == 0x20).unwrap_or(false)
-                        {
-                            crate::server::log::device_log(
-                                device,
-                                "ACTION_REQUIRED: ILLEGAL REQUEST (ASC=0x20) — drive firmware wedged. Power-cycle USB drive to clear state.",
-                            );
-                        }
-                    }
-
-                    break;
-                }
-            };
-            bytes_good = cr.bytes_good;
-            bytes_unreadable = cr.bytes_unreadable;
-            bytes_pending = cr.bytes_pending;
-            // PatchOutcome renames recovered_this_pass → bytes_recovered_this_pass.
-            let recovered = cr.bytes_recovered_this_pass;
-            let exit_str = if cr.halted {
-                " (halt)"
-            } else if cr.wedged_exit {
-                " (DRIVE WEDGED: fast-fail sense — retries aborted, needs spin-cycle/power-cycle)"
-            } else {
-                ""
-            };
-            // Report all three buckets — recovered this pass, still-pending, and
-            // given-up unreadable. The old line showed only `unreadable` (0 until
-            // post-loop promotion), so a failed pass read as "told you nothing".
-            crate::server::log::device_log(
-                device,
-                &format!(
-                    "Pass {pass} done: recovered {:.2} MB this pass; {:.2} MB still bad, {:.2} MB unreadable{exit_str}",
-                    recovered as f64 / BYTES_PER_MIB,
-                    bytes_pending as f64 / BYTES_PER_MIB,
-                    bytes_unreadable as f64 / BYTES_PER_MIB,
-                ),
-            );
-            // Drop this pass's watcher before next iteration.
-            drop(_pass_guard);
-            // Stop early if the user hit stop during the patch (the
-            // watcher forwards user_halt into pass_halt).
-            if user_halt.load(Ordering::Relaxed) {
-                break;
-            }
-            // If THIS pass made no progress, no future pass with the same
-            // drive state will help. Give up retries early so we still
-            // mux on what we have.
-            if !patch_made_progress(recovered) {
-                crate::server::log::device_log(
-                    device,
-                    &format!(
-                        "PASS {} STOPPED: strategy=patch_recovery exhausted — no progress (recovered={} MB) after all retry attempts",
-                        pass,
-                        recovered as f64 / BYTES_PER_MIB
-                    ),
-                );
-
-                crate::server::log::device_log(
-                    device,
-                    "STRATEGY_FAILURE: patch_recovery exhausted — drive cannot recover more data from bad sectors with current settings",
-                );
-
-                crate::server::log::device_log(
-                    device,
-                    "RECOVERY_GUIDANCE: Consider increasing max_retries or abort_on_lost_secs if tolerating some data loss is acceptable.",
-                );
-
-                break;
-            }
-        }
-
-        // End-of-recovery promotion (multi-pass only) happens below; a user STOP skips it so
-        // un-retried ranges stay resumable.
-        if user_halt.load(Ordering::Relaxed) {
+        // End-of-recovery promotion (multi-pass only) ran in the engine; a user STOP skips it
+        // so un-retried ranges stay resumable.
+        if result.halted || user_halt.load(Ordering::Relaxed) {
             crate::server::log::device_log(
                 device,
                 "Rip stopped by user — preserving partial sweep for resume.",
@@ -4167,125 +3506,13 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         let mut main_lost_ms_for_history = 0.0f64;
         let mut main_lost_bytes_for_history = 0u64;
         if uses_multipass(cfg_read.max_retries) {
-            let mapfile_path = std::path::Path::new(&mapfile_path_str);
-            if let Ok(mut map) = freemkv_engine::Mapfile::load(mapfile_path) {
-                use freemkv_engine::SectorStatus;
-                // Promote still-NonTrimmed bytes to Unreadable — "maybe" states
-                // that survived every patch pass are now confirmed lost. The
-                // abort gate reads Unreadable only, so unpromoted is invisible loss.
-                let (promote_from, promote_to) = end_of_recovery_promotion();
-                let nontrimmed_ranges = map.ranges_with(promote_from);
-                let total_promoted: u64 = nontrimmed_ranges.iter().map(|(_, sz)| *sz).sum();
-                let n_ranges = nontrimmed_ranges.len();
-                // A range that fails to promote is loss the gate below cannot
-                // see — logging and carrying on would deliver a lossy rip as good.
-                let mut promotion_intact = true;
-                for (pos, size) in nontrimmed_ranges {
-                    if let Err(e) = map.record(pos, size, promote_to) {
-                        promotion_intact = false;
-                        tracing::error!(
-                            device = %device,
-                            error = %e,
-                            "end_of_recovery_promote: failed to mark range Unreadable"
-                        );
-                    }
-                }
-                tracing::info!(
-                    device = %device,
-                    ranges_promoted = n_ranges,
-                    bytes_promoted = total_promoted,
-                    "end_of_recovery_promote: NonTrimmed -> Unreadable after final retry pass"
-                );
-                // Flush the promoted state so downstream consumers (muxer,
-                // resume) see the terminal Unreadable marks; don't drop errors.
-                if let Err(e) = map.flush() {
-                    // Downstream (mux, resume) re-reads the mapfile from DISK,
-                    // so an unflushed promotion means they see the pre-promotion
-                    // state and report the delivered rip as undamaged.
-                    promotion_intact = false;
-                    tracing::error!(
-                        device = %device,
-                        error = %e,
-                        "end_of_recovery_promote: failed to flush promoted mapfile"
-                    );
-                }
-                // Refresh bytes_unreadable from the promoted in-memory map
-                // (not from disk — re-loading here would race the flush and
-                // could return the pre-promotion state on slow storage).
-                bytes_unreadable = map.stats().bytes_unreadable;
-
-                // Abort check uses the already-promoted in-memory map, not a
-                // re-load, which used to return pre-promotion state if the flush
-                // above hadn't hit disk yet.
-                if !promotion_intact {
-                    tracing::error!(
-                        device = %device,
-                        "end_of_recovery_promote: damage record is \
-                         incomplete — treating loss as unquantifiable"
-                    );
-                }
-                // The measurement the abort gate decides on, from the
-                // already-promoted in-memory map.
-                let loss = end_of_recovery_loss(
-                    &map,
-                    promotion_intact,
-                    output_is_iso_image(&cfg_read.output_format),
-                    &title_for_progress,
-                    title_bytes_per_sec,
-                );
-                main_lost_bytes_for_history = loss.lost_bytes;
-                main_lost_ms_for_history = loss.lost_ms;
-                // Mirror into the outer binding so the final done/stopped state
-                // update (after run_mux) can use the same in-title value without
-                // re-reading the mapfile.
-                main_lost_ms_for_history_outer = main_lost_ms_for_history;
-                // Re-derive damage fields from the promoted map and push to STATE
-                // before `map` drops: the marker_damage snapshot below reads STATE,
-                // and skipping this would under-report a damaged rip's stale figures.
-                {
-                    let (
-                        promoted_bad_ranges,
-                        promoted_num_bad,
-                        promoted_truncated,
-                        promoted_total_lost_ms,
-                        promoted_largest_gap_ms,
-                    ) = state::build_bad_ranges(&map, &title_for_progress, bps_progress);
-                    let promoted_main_title_bad = map.ranges_with(&[SectorStatus::Unreadable]);
-                    let promoted_main_bad_bytes = libfreemkv::disc::bytes_bad_in_title(
-                        &title_for_progress,
-                        &promoted_main_title_bad,
-                    );
-                    let promoted_main_lost_ms = if bps_progress > 0.0 {
-                        promoted_main_bad_bytes as f64 * MILLIS_PER_SEC / bps_progress
-                    } else {
-                        0.0
-                    };
-                    let promoted_errors = (map.stats().bytes_unreadable / 2048) as u32;
-                    update_state_with(device, |s| {
-                        s.errors = promoted_errors;
-                        s.total_lost_ms = promoted_total_lost_ms;
-                        s.main_lost_ms = promoted_main_lost_ms;
-                        s.bad_ranges = promoted_bad_ranges;
-                        s.num_bad_ranges = promoted_num_bad;
-                        s.bad_ranges_truncated = promoted_truncated;
-                        s.largest_gap_ms = promoted_largest_gap_ms;
-                    });
-                }
-            } else {
-                // Fail-safe: the mapfile couldn't load, so we can't measure loss.
-                // The 0 initializers would let the gate conclude "no loss" and
-                // deliver a lossy rip as perfect — mark NaN so `loss_aborts` fires.
-                crate::server::log::device_log(
-                    device,
-                    "Recovery mapfile could not be loaded to verify loss — forcing abort (cannot confirm a clean rip)",
-                );
-                tracing::error!(
-                    device = %device,
-                    mapfile = %mapfile_path_str,
-                    "end_of_recovery_promote: mapfile load failed at abort-decision point; forcing abort (loss unquantifiable)"
-                );
-                main_lost_ms_for_history = f64::NAN;
+            if let Some((lost_bytes, lost_ms)) = pass_sink.loss() {
+                main_lost_bytes_for_history = lost_bytes;
+                main_lost_ms_for_history = lost_ms;
             }
+            // Mirror into the outer binding so the final done/stopped state update (after
+            // run_mux) can use the same in-title value without re-reading the mapfile.
+            main_lost_ms_for_history_outer = main_lost_ms_for_history;
 
             // ISO output is whole-disc and must be byte-complete: the per-title
             // tolerance is ignored (forced to 0). MKV/M2TS use the configured value.
@@ -5469,7 +4696,7 @@ pub fn eject_drive(device_path: &str) {
             }
         }
     }
-    match libfreemkv::Drive::open(std::path::Path::new(device_path)) {
+    match freemkv_engine::drive::open(std::path::Path::new(device_path)) {
         Ok(drive) => {
             let session = libfreemkv::DiscSession::from_drive(drive);
             if let Err(e) = session.finish(libfreemkv::Finish::Eject) {
@@ -6541,7 +5768,7 @@ fn open_drive_with_backoff(
     transport_recovery_delay_secs: u64,
 ) -> Option<libfreemkv::Drive> {
     for retry in 0..3 {
-        match libfreemkv::Drive::open(std::path::Path::new(path)) {
+        match freemkv_engine::drive::open(std::path::Path::new(path)) {
             Ok(d) => return Some(d),
             Err(e) if retry < 2 => {
                 let backoff_secs = transport_recovery_delay_secs * (1u64 << retry);
@@ -6679,11 +5906,11 @@ mod tests {
         disk_space_required_bytes, end_of_recovery_promotion, fmts_gate_decision, fmts_gate_plan,
         format_lib_error, format_pass_error, header_phase_disposition, incomplete_mux_status,
         is_fmts_key_missing_error, is_safe_staging_segment, list_staging_basenames,
-        loop_top_scope_bad, patch_made_progress, patch_pass_decision, plan_passes,
-        pre_pass_converged, prune_intermediate_iso, register_halt, resumable_dir_blocked,
-        resumable_for_disc, resume_remaining_iso_bytes, scope_bad_bytes, scope_converged,
-        skip_diskcheck_value, staging_dir_matches_disc, staging_disc_owned_by_worker,
-        staging_free_bytes, sweep_transport_retry,
+        patch_made_progress, patch_pass_decision, plan_passes, pre_pass_converged,
+        prune_intermediate_iso, register_halt, resumable_dir_blocked, resumable_for_disc,
+        resume_remaining_iso_bytes, scope_bad_bytes, scope_converged, skip_diskcheck_value,
+        staging_dir_matches_disc, staging_disc_owned_by_worker, staging_free_bytes,
+        sweep_transport_retry,
     };
     use crate::server::ripper::session::device_halt;
     use crate::server::ripper::staging;
@@ -7388,39 +6615,6 @@ mod tests {
         // Scope still bad → never converged regardless of good coverage.
         assert!(!pre_pass_converged(Some(2048), 4096));
         assert!(!pre_pass_converged(Some(2048), 0));
-    }
-
-    // FAIL-SAFE: an unreadable mapfile, or loss outside any title extent, is
-    // unmeasured and must run the pass, as the engine's loop does.
-    #[test]
-    fn loop_top_gate_runs_the_pass_when_unmeasured() {
-        let unreadable = || Err(std::io::Error::other("unreadable mapfile"));
-        let title = test_title(0, 10);
-        let scope = loop_top_scope_bad(unreadable(), false, &title);
-        assert_eq!(scope, None, "an unreadable mapfile is unmeasured");
-        assert!(!pre_pass_converged(scope, 4096));
-
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("gate.mapfile");
-        let size = 10 * 2048;
-        {
-            let mut map = freemkv_engine::Mapfile::create(&path, size, "test").unwrap();
-            map.record(0, size - 2048, freemkv_engine::SectorStatus::Finished)
-                .unwrap();
-            map.record(size - 2048, 2048, freemkv_engine::SectorStatus::NonTrimmed)
-                .unwrap();
-            map.flush().unwrap();
-        }
-        let mut no_extents = test_title(0, 10);
-        no_extents.extents.clear();
-        let load = || freemkv_engine::Mapfile::load(&path);
-        let scope = loop_top_scope_bad(load(), false, &no_extents);
-        assert_eq!(scope, None, "loss with no title extents is unscopable");
-        assert!(!pre_pass_converged(scope, 4096));
-
-        let scope = loop_top_scope_bad(load(), true, &title);
-        assert_eq!(scope, Some(2048), "ISO scope counts the whole disc");
-        assert!(!pre_pass_converged(scope, 4096));
     }
 
     // PROMOTION DECISION: end-of-recovery promotes NonTrimmed → Unreadable before the abort
