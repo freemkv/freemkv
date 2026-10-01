@@ -2,8 +2,8 @@
 //!
 //! libfreemkv does no key lookup — its `KeySource`s resolve a disc's terminal
 //! Unit Keys, driving the library's boil-down crypto. The sources are the
-//! engine's local-first chain ([`key_params`]): the keydb, then the online
-//! key service when one is configured.
+//! engine's key parameters ([`key_params`]): the one the operator picked in
+//! settings — the local keydb, or the online key service — and only that one.
 //!
 //! A live drive scans KEYLESS, then resolves the rip's key set once ([`resolve_drive_keys`]);
 //! a staged image opens through the engine ([`open_staged_image`]).
@@ -147,7 +147,7 @@ pub fn save_keydb(
 /// Only in online mode: a local-mode rip never consults the URL. Pure — no DNS —
 /// so it is safe on the startup path.
 pub fn keyserver_url_startup_warning(cfg: &Config) -> Option<String> {
-    if cfg.key_source != "online" {
+    if !uses_online(cfg) {
         return None;
     }
     let url = cfg.keyserver_url.trim();
@@ -195,7 +195,7 @@ pub fn key_settings(cfg: &Config) -> crate::plan_core::KeySettings {
         keydb_path: Some(keydb_path(cfg).to_string_lossy().into_owned()),
         key_url: Some(cfg.keyserver_url.trim().to_string()),
         key_auth: Some(cfg.keyserver_secret.clone()),
-        mode: if cfg.key_source == "online" {
+        mode: if uses_online(cfg) {
             crate::plan_core::KeyMode::OnlineOnly
         } else {
             crate::plan_core::KeyMode::LocalOnly
