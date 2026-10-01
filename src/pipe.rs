@@ -6831,8 +6831,12 @@ mod ku_cli_tests {
             format!("iso://{}", plain.display()),
         );
         let token = crate::cli_stop::watching(&FT10_CTRL_C);
-        let press = std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(300));
+        let seen = calls.clone();
+        let press = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while seen.len() == 0 && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             FT10_CTRL_C.store(true, std::sync::atomic::Ordering::Release);
             std::time::Instant::now()
         });
