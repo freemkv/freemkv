@@ -3,7 +3,6 @@
 
 use crate::output::{Level::Normal, Output};
 use crate::strings;
-use libfreemkv::Drive;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 
@@ -189,7 +188,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
     };
 
     let mut session = match device {
-        Some(p) => Drive::open(Path::new(p)).unwrap_or_else(|e| {
+        Some(p) => freemkv_engine::drive::open(Path::new(p)).unwrap_or_else(|e| {
             eprintln!(
                 "{}",
                 strings::fmt(

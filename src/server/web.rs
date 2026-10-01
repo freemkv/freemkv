@@ -1408,14 +1408,16 @@ struct ConnGuard(&'static AtomicUsize);
 
 impl ConnGuard {
     fn try_acquire(counter: &'static AtomicUsize, max: usize) -> Option<ConnGuard> {
-        // fetch_update gives us a CAS loop that only increments while
-        // under the cap, so the count can never exceed `max`.
-        let ok = counter
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                if n < max { Some(n + 1) } else { None }
-            })
-            .is_ok();
-        if ok { Some(ConnGuard(counter)) } else { None }
+        // A CAS loop that only increments while under the cap, so the count can never
+        // exceed `max`.
+        let mut n = counter.load(Ordering::SeqCst);
+        while n < max {
+            match counter.compare_exchange_weak(n, n + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Some(ConnGuard(counter)),
+                Err(now) => n = now,
+            }
+        }
+        None
     }
 }
 

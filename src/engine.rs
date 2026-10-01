@@ -279,13 +279,8 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
     let (found, trace) = loose_clip_keys(path, false, keys, &tok.halt);
     let found =
         stopped_open(found, tok)?.map_err(|e| format!("E{} {}", e.code(), explain(e.code())))?;
-    let opts = libfreemkv::InputOptions {
-        keys: found.clone(),
-        ..Default::default()
-    };
-    let ctx = libfreemkv::Ctx::new(tok.halt.clone());
-    let stream = libfreemkv::input(&url, &opts, &ctx).map_err(|e| format!("{e}"))?;
-    let t = stream.info();
+    let info = fe::stream_info(&url, found.clone(), &tok.halt).map_err(|e| format!("{e}"))?;
+    let t = &info;
 
     let name = std::path::Path::new(path)
         .file_name()
@@ -704,7 +699,7 @@ fn held_source(
 // once more; the eject itself still ends through `finish`.
 fn eject_device(device: &str, sink: &UiSink) {
     use freemkv_engine::Sink as _;
-    match libfreemkv::Drive::open(std::path::Path::new(device)) {
+    match fe::drive::open(std::path::Path::new(device)) {
         Ok(drive) => eject_disc(libfreemkv::DiscSession::from_drive(drive), sink),
         Err(e) => sink.log(
             fe::Level::Warn,
@@ -718,7 +713,7 @@ fn eject_device(device: &str, sink: &UiSink) {
 /// holding media. `Ok` carries the device that was ejected.
 pub fn eject_source(source: &str) -> Result<String, String> {
     eject_source_with(source, |dev| match dev {
-        Some(p) => libfreemkv::Drive::open(std::path::Path::new(p)).map_err(|e| format!("{e}")),
+        Some(p) => fe::drive::open(std::path::Path::new(p)).map_err(|e| format!("{e}")),
         None => libfreemkv::find_drive()
             .ok_or_else(|| "No drive with a disc found — nothing to eject.".to_string()),
     })
@@ -1680,7 +1675,24 @@ fn run_extract_folder(
             "extracting decrypted file tree → {}",
             dest.display()
         ));
-    match fe::extract_tree_with(disc, reader, &dest, req.force, Some(set), sink) {
+    let plan = fe::Plan {
+        raw: false,
+        multipass: false,
+        ..gui_plan(req, &format!("dir://{}", dest.display()))
+    };
+    let with = fe::RunWith {
+        keys: Some(set.clone()),
+        held: Some(fe::Held::Disc { disc, reader }),
+        ..fe::RunWith::default()
+    };
+    let extracted = match fe::run_with(&plan, with, sink) {
+        Ok(fe::Report::Tree { extract }) => Ok(extract),
+        Ok(_) => Err(libfreemkv::Error::StreamUrlInvalid {
+            url: plan.dest.clone(),
+        }),
+        Err(e) => Err(e),
+    };
+    match extracted {
         Ok(res) => {
             for f in &res.files {
                 if f.bytes_unreadable > 0 {
@@ -1936,9 +1948,8 @@ pub fn title_basename(template: &str, label: &str, n: usize) -> String {
     sanitize_label(&name)
 }
 
-// The stream filter for one title (or the whole request with no title). Selection lives on
-// InputOptions, not MuxOptions — MuxOptions.selection is read only by the Session/live-drive
-// arm.
+// The stream filter for one title (or the whole request with no title), handed to the title's
+// run (`title_options`).
 fn stream_selection_for(req: &RipRequest, title: Option<usize>) -> libfreemkv::StreamSelection {
     if !req.explicit_streams {
         return libfreemkv::StreamSelection::default();
@@ -1958,21 +1969,9 @@ fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
         skip_errors: false,
         batch_sectors: 64,
         raw: req.raw,
-        // Selection lives on InputOptions for the Url mux path — see
-        // stream_selection_for. The Session (live-drive) arm gets its own
-        // per-title options from title_session_mux_opts.
+        // Each title's selection reaches its run through `title_options`.
         selection: libfreemkv::StreamSelection::default(),
         title_index: 0,
-    }
-}
-
-// Mux options for ONE title of a live-drive rip. The Session arm reads
-// selection from MuxOptions (not InputOptions like the Url/ISO arm), so each
-// title needs its own — a once-shared union leaked unticked tracks back in.
-fn title_session_mux_opts(req: &RipRequest, idx: usize) -> libfreemkv::MuxOptions {
-    libfreemkv::MuxOptions {
-        selection: stream_selection_for(req, Some(idx)),
-        ..mux_opts(req)
     }
 }
 
@@ -1986,7 +1985,6 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
         .and_then(|n| n.to_str())
         .unwrap_or("output")
         .to_string();
-    let hint = std::fs::metadata(&req.source).map(|m| m.len()).unwrap_or(0);
     let src_url = format!("{}://{}", source_scheme(&req.source), req.source);
 
     // A container is a single title. Route to the chosen sink; the whole-disc
@@ -2023,20 +2021,18 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
     drop(watch);
     log_walk(&trace, sink);
     let found = found.map_err(|e| key_refusal(&e, std::path::Path::new(&req.source), state))?;
-    let input = libfreemkv::InputOptions {
-        raw: req.raw,
+    let plan = title_plan(req, &src_url, &dest_url, 0, req.raw);
+    let with = fe::RunWith {
         keys: found,
-        ..Default::default()
+        // Track selection is not applied to container sources yet (the note above).
+        title: fe::TitleOptions {
+            selection: Some(libfreemkv::StreamSelection::default()),
+            ..title_options(req, None)
+        },
+        ..fe::RunWith::default()
     };
-    let o = stopped_before_output(fe::mux_title(
-        &src_url,
-        &dest_url,
-        input,
-        &mux_opts(req),
-        hint,
-        sink,
-    ))
-    .map_err(|e| format!("convert failed: {e}"))?;
+    let o = stopped_before_output(run_title(&plan, with, sink))
+        .map_err(|e| format!("convert failed: {e}"))?;
     if !o.completed {
         // Recovering, like every other `lines` lock in this file. A worker
         // that panicked earlier poisons `lines`, so `unwrap()` here would turn
@@ -2064,19 +2060,17 @@ fn demux_needs_subdirs(title_count: usize) -> bool {
     title_count > 1
 }
 
-// The per-title mux input for `idx`. Named function (not a struct literal in
-// a closure) because three fields fail silently if missing: title_index
-// (wrong title muxed), keys (E7022), selection (wrong tracks kept).
-fn title_input_options(
+// What the image path hands title `idx`'s run. Named (not a struct literal in a closure)
+// because two fields fail silently if missing: keys (E7022) and selection (wrong tracks).
+fn image_title_run(
     set: &libfreemkv::keys::KeyRing,
     req: &RipRequest,
     idx: usize,
-) -> libfreemkv::InputOptions {
-    libfreemkv::InputOptions {
-        title_index: Some(idx),
+) -> fe::RunWith<'static> {
+    fe::RunWith {
         keys: Some(set.clone()),
-        selection: stream_selection_for(req, Some(idx)),
-        ..Default::default()
+        title: title_options(req, Some(idx)),
+        ..fe::RunWith::default()
     }
 }
 
@@ -2113,12 +2107,11 @@ fn mux_selected_titles(
         // metadata / index sinks, or a demux directory (its own per-track
         // naming) for separate track files.
         let (dest_url, target) = title_dest(req, kind, &label, idx, multi);
-        let hint = disc.titles.get(idx).map(|t| t.size_bytes).unwrap_or(0);
-        let input = title_input_options(set, req, idx);
-        let mux = mux_opts(req);
-        let muxed = stopped_before_output(fe::mux_title(
-            source_url, &dest_url, input, &mux, hint, sink,
-        ));
+        // Every title reads through the rip's one set (no lookup); an image title is never
+        // raw here.
+        let plan = title_plan(req, source_url, &dest_url, idx, false);
+        let with = image_title_run(set, req, idx);
+        let muxed = stopped_before_output(run_title(&plan, with, sink));
         match muxed {
             Ok(o) => {
                 if !o.completed {
@@ -2322,18 +2315,31 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(format!("decrypting image → {}", dest.display()));
-            // `image_or_dir_scheme`, not `source_scheme` — matches the sibling
-            // arm below, even though `recover_to_iso` only reads
-            // `job.mode`/`job.raw` today and the URL is currently inert.
-            let mut job = fe::Job::new(
-                format!("{}://{}", image_or_dir_scheme(&req.source), req.source),
-                dest.display().to_string(),
-            );
-            job.raw = req.raw;
-            job.mode = fe::RipMode::Single;
-            job.keys = Some(set);
+            // One plain pass over the opened image, read through the rip's set; the app
+            // holds the image's lock.
+            let plan = fe::Plan {
+                source: format!("{}://{}", image_or_dir_scheme(&req.source), req.source),
+                raw: req.raw,
+                multipass: false,
+                ..gui_plan(req, &format!("iso://{}", dest.display()))
+            };
             let lock = hold_iso_lock(&dest, state)?;
-            let copied = fe::recover_to_iso(&disc, reader.as_mut(), &dest, &job, sink);
+            let with = fe::RunWith {
+                keys: Some(set),
+                held: Some(fe::Held::Disc {
+                    disc: &disc,
+                    reader: reader.as_mut(),
+                }),
+                locked: true,
+                ..fe::RunWith::default()
+            };
+            let copied = match fe::run_with(&plan, with, sink) {
+                Ok(fe::Report::Image { copy, .. }) => Ok(copy),
+                Ok(_) => Err(libfreemkv::Error::StreamUrlInvalid {
+                    url: plan.dest.clone(),
+                }),
+                Err(e) => Err(e),
+            };
             let halted = matches!(&copied, Ok(r) if r.halted);
             let res = copied
                 .map_err(|e| format!("image decrypt failed: {e}"))
@@ -2849,15 +2855,35 @@ fn run_disc_scanning(
         let lock = hold_iso_lock(std::path::Path::new(&iso_path), state)?;
         let mut halted = false;
         let res = (|| -> Result<String, String> {
-            let result = fe::multipass_rip_staged(
-                &disc,
-                held_source(&mut session)?,
-                std::path::Path::new(&iso_path),
-                &job,
-                &opts,
-                staging.as_deref(),
-                sink,
-            )
+            // The engine's recovery over the held drive, into the image the app holds the
+            // lock on: the sweep, the patch passes, the promotion and the loss gate.
+            let plan = fe::Plan {
+                source: source_url(&req.source),
+                titles: job.selection.clone(),
+                raw: job.raw,
+                multipass: true,
+                ..gui_plan(req, &format!("iso://{iso_path}"))
+            };
+            let with = fe::RunWith {
+                keys: job.keys.clone(),
+                held: Some(fe::Held::Disc {
+                    disc: &disc,
+                    reader: held_source(&mut session)?,
+                }),
+                passes: Some(opts),
+                scope: staging.as_deref(),
+                locked: true,
+                ..fe::RunWith::default()
+            };
+            let result = match fe::run_with(&plan, with, sink) {
+                Ok(fe::Report::Image {
+                    recovery: Some(r), ..
+                }) => Ok(r),
+                Ok(_) => Err(libfreemkv::Error::StreamUrlInvalid {
+                    url: plan.dest.clone(),
+                }),
+                Err(e) => Err(e),
+            }
             .map_err(|e| format!("recovery failed: {e}"))?;
             halted = result.halted;
             // Read phase done: the deliverable (ISO) or the mux source is on disk,
@@ -2925,9 +2951,6 @@ fn run_disc_scanning(
         return Err("Nothing selected to rip.".into());
     }
     let multi = demux_needs_subdirs(indices.len());
-    // Byte-size hints per title, banked before the scan's drive is released —
-    // each title's mux reopens its own session, mirroring the CLI.
-    let hints: Vec<u64> = disc.titles.iter().map(|t| t.size_bytes).collect();
     // What each selected NUMBER refers to on THIS scan, banked before the
     // drive is released. Each title below re-scans, so the index alone doesn't
     // prove the mux is about to read the title picked. See `verify_title_identity`.
@@ -2941,7 +2964,6 @@ fn run_disc_scanning(
     let partial = std::cell::Cell::new(0usize);
     let outcome = fe::run_titles(&indices, !req.titles.is_empty(), sink, |idx| {
         let (dest_url, target) = title_dest(req, kind, &label, idx, multi);
-        let hint = hints.get(idx).copied().unwrap_or(0);
 
         // KU §3.3: each title reopens the drive with `open_scan` (no key call) and reads
         // through the rip's one set, after `is_for`. A fresh session per title matches the
@@ -2999,14 +3021,7 @@ fn run_disc_scanning(
                 return Err(e.into());
             }
         }
-        session.stage_drive_as_reader();
-
-        // Session arm reads selection from MuxOptions (unlike the Url arm),
-        // built HERE per title — one union built before the loop wrote tracks
-        // unticked under this title whenever a sibling title shared the PID.
-        let opts = title_session_mux_opts(req, idx);
-
-        match mux_session_title(&mut session, idx, &set, &dest_url, &opts, hint, sink) {
+        match mux_session_title(req, &mut session, idx, &set, &dest_url, sink) {
             Ok(o) => {
                 if !o.completed {
                     // Cancelled or truncated: a partial file is on disk — keep
@@ -3209,31 +3224,62 @@ fn title_dest(
     }
 }
 
-/// Mux title `idx` live off a reopened drive through the rip's set (`mux_with_keys`,
-/// `MuxSource::Session`), bridged onto the Sink by [`with_session_bridge`]. The engine has
-/// no keyed `mux_title_session` yet (JUDGEMENT: bridged here until it does).
+/// Mux title `idx` live off a reopened drive through the rip's set: an engine title run over
+/// the held session, its progress, output opening and Stop through the Sink.
 fn mux_session_title(
+    req: &RipRequest,
     session: &mut libfreemkv::DiscSession,
     idx: usize,
     set: &libfreemkv::keys::KeyRing,
     dest: &str,
-    opts: &libfreemkv::MuxOptions,
-    hint: u64,
     sink: &UiSink,
 ) -> std::io::Result<libfreemkv::MuxOutcome> {
-    use fe::Sink as _;
-    sink.log(
-        fe::Level::Info,
-        &format!("mux: disc title {} -> {dest} (~{hint} bytes)", idx + 1),
-    );
-    stopped_before_output(with_session_bridge(sink, dest, |ctx| {
-        let source = libfreemkv::Source::from_session(session);
-        let opts = libfreemkv::MuxOptions {
-            title_index: idx,
-            ..opts.clone()
-        };
-        libfreemkv::mux_with_keys(source, Some(set), dest, &opts, ctx)
-    }))
+    let plan = title_plan(req, &source_url(&req.source), dest, idx, req.raw);
+    let with = fe::RunWith {
+        keys: Some(set.clone()),
+        held: Some(fe::Held::Session(session)),
+        // The live arm keeps this title's own ticks: one union built before the loop wrote
+        // tracks unticked under this title whenever a sibling title shared the PID.
+        title: title_options(req, Some(idx)),
+        ..fe::RunWith::default()
+    };
+    stopped_before_output(run_title(&plan, with, sink))
+}
+
+// The app's plan for title `idx` of `source` (a URL) into `dest`.
+fn title_plan(req: &RipRequest, source: &str, dest: &str, idx: usize, raw: bool) -> fe::Plan {
+    fe::Plan {
+        source: source.to_string(),
+        titles: fe::Selection::Titles(vec![idx]),
+        raw,
+        multipass: false,
+        ..gui_plan(req, dest)
+    }
+}
+
+// A title run's options for title `idx`: its ticked streams, read errors fatal, 64-sector reads.
+fn title_options(req: &RipRequest, idx: Option<usize>) -> fe::TitleOptions {
+    fe::TitleOptions {
+        selection: Some(stream_selection_for(req, idx)),
+        skip_errors: false,
+        batch_sectors: 64,
+    }
+}
+
+// Run a title plan; the mux's outcome, or the error it failed with as the library reports it.
+fn run_title(
+    plan: &fe::Plan,
+    with: fe::RunWith<'_>,
+    sink: &UiSink,
+) -> std::io::Result<libfreemkv::MuxOutcome> {
+    match fe::run_with(plan, with, sink) {
+        Ok(fe::Report::Title { outcome }) => Ok(outcome),
+        Ok(_) => Err(libfreemkv::Error::StreamUrlInvalid {
+            url: plan.dest.clone(),
+        }
+        .into()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 // A Stop that ended a mux before its output opened is a stop, not a kept partial file.
@@ -3244,87 +3290,6 @@ fn stopped_before_output(
         Ok(o) if o.halted && !o.output_opened => Err(libfreemkv::Error::Halted.into()),
         r => r,
     }
-}
-
-/// The engine's mux watcher, for a mux the GUI starts itself: the output opening (the
-/// excluded-tracks note, `Event::OutputOpened`) ahead of any progress, progress sampled
-/// once per tick, and the Stop button as the run context's halt.
-fn with_session_bridge<T>(sink: &UiSink, dest: &str, f: impl FnOnce(&libfreemkv::Ctx) -> T) -> T {
-    use fe::Sink as _;
-    #[derive(Default)]
-    struct Bridge {
-        latest: Mutex<Option<(u64, u64)>>,
-        opened: Mutex<Vec<libfreemkv::DiscTitle>>,
-    }
-    impl libfreemkv::Events for Bridge {
-        fn event(&self, e: &libfreemkv::Event<'_>) {
-            match *e {
-                libfreemkv::Event::BytesWritten { bytes, total } => {
-                    *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some((bytes, total));
-                }
-                libfreemkv::Event::OutputOpened { title } => self
-                    .opened
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(title.clone()),
-                _ => {}
-            }
-        }
-    }
-    // Stores `true` on drop, so an unwinding mux still ends the watcher.
-    struct Done<'a>(&'a AtomicBool);
-    impl Drop for Done<'_> {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-    let events = Arc::new(Bridge::default());
-    let opened = || {
-        let titles = std::mem::take(&mut *events.opened.lock().unwrap_or_else(|e| e.into_inner()));
-        for title in &titles {
-            sink.event(&fe::Event::OutputOpened { dest, title });
-        }
-    };
-    let watch = CancelWatch::new(&sink.0);
-    let done = AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut speed = fe::SpeedEstimator::new();
-            loop {
-                // The opening first: it precedes every write-progress tick (the engine's order).
-                opened();
-                // One sample per tick, from the latest total: per-event samples measure
-                // microseconds against a batch and read as absurd speeds (the engine's rule).
-                let last = events
-                    .latest
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
-                if let Some((bytes_done, bytes_total)) = last {
-                    let (speed_bps, eta_secs) = speed.sample(bytes_done, bytes_total);
-                    sink.progress(&fe::Progress {
-                        pass: std::borrow::Cow::Borrowed("mux"),
-                        bytes_done,
-                        bytes_total,
-                        sectors_bad: 0,
-                        speed_bps,
-                        eta_secs,
-                    });
-                }
-                if done.load(Ordering::Acquire) {
-                    // A mux that returned before this poll: its opening is not lost.
-                    opened();
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        });
-        let _done = Done(&done);
-        let ctx = libfreemkv::Ctx::new(watch.halt.clone())
-            .with_events(events.clone())
-            .with_diag(libfreemkv::Diag::from_env());
-        f(&ctx)
-    })
 }
 
 // The engine→front-end outcome contract: run_titles emits NoKey/Failed in
@@ -4215,12 +4180,12 @@ mod disc_details_tests {
 mod routing_tests {
     use super::{
         DiscPlan, KeyConfig, OutKind, RipRequest, RunState, TitleIdentity, UiSink, damage_note,
-        demux_needs_subdirs, disc_device, disc_raw_copy, fe, image_or_dir_scheme, is_disc_source,
-        is_stream_source, iso_recovery_result, mux_opts, out_kind, recovery_plan,
+        demux_needs_subdirs, disc_device, disc_raw_copy, fe, image_or_dir_scheme, image_title_run,
+        is_disc_source, is_stream_source, iso_recovery_result, mux_opts, out_kind, recovery_plan,
         recovery_produced_no_data, recovery_raw, run_disc_scanning, run_stream,
         should_delete_staging_iso, source_scheme, staging_not_kept_note, stream_selection_for,
-        title_input_options, title_session_mux_opts, verify_selection_identity,
-        verify_title_identity, whole_image_gate,
+        title_options, title_plan, verify_selection_identity, verify_title_identity,
+        whole_image_gate,
     };
     use std::sync::Arc;
 
@@ -4267,7 +4232,7 @@ mod routing_tests {
         //    the shipped defaults fail before reading a sector.
         let recover = slice(
             "        let mut job = recovery_job(&req.source, &iso_path, &indices);",
-            "        let result = fe::multipass_rip_staged(",
+            "            let result = match fe::run_with(&plan, with, sink) {",
         );
         assert!(
             recover.contains("recovery_raw(req.multipass, want_iso, req.raw)"),
@@ -4299,8 +4264,8 @@ mod routing_tests {
             "the MKV staging must be scoped through mkv_staging_scope"
         );
         let staged = slice(
-            "        let result = fe::multipass_rip_staged(",
-            "        .map_err(|e| format!(\"recovery failed: {e}\"))?;\n            halted = result.halted;",
+            "            // The engine's recovery over the held drive, into the image the app holds",
+            "            .map_err(|e| format!(\"recovery failed: {e}\"))?;\n            halted = result.halted;",
         );
         assert!(
             staged.contains("staging.as_deref()"),
@@ -4347,11 +4312,11 @@ mod routing_tests {
         );
 
         // 4. Nothing else sees WHICH title index the loop hands
-        //    `title_session_mux_opts`. 5. Nothing else sees that the
+        //    `mux_session_title`. 5. Nothing else sees that the
         //    per-title loop calls `verify_title_identity`.
         let rescan = slice(
             "        // This is a DIFFERENT scan from the one the selection was made against.",
-            "        session.stage_drive_as_reader();",
+            "        match mux_session_title(",
         );
         assert!(
             rescan.contains("verify_title_identity(picked_ids.get(idx), &rescanned, idx)"),
@@ -4388,12 +4353,9 @@ mod routing_tests {
             "a failed per-title drive bring-up must say why in the log pane"
         );
 
-        let session_mux = slice(
-            "        // Session arm reads selection from MuxOptions",
-            "        match mux_session_title(",
-        );
+        let session_mux = slice("\nfn mux_session_title(", "\nfn title_plan(");
         assert!(
-            session_mux.contains("title_session_mux_opts(req, idx)"),
+            session_mux.contains("title_options(req, Some(idx))"),
             "the live-drive loop must build its MuxOptions for THIS title; a \
              selection built once before the loop is the union, and writes \
              tracks the user unticked under this title"
@@ -4514,7 +4476,7 @@ mod routing_tests {
             .expect("the ISO-image arm is still there");
         let end = start
             + src[start..]
-                .find("fe::recover_to_iso(")
+                .find("let lock = hold_iso_lock(&dest, state)?;")
                 .expect("the decrypt call still closes the arm's setup");
         let body = &src[start..end];
         assert!(
@@ -4568,7 +4530,7 @@ mod routing_tests {
 
         // 3. The ISO/image per-title loop.
         let iso_loop = slice(
-            "        let muxed = stopped_before_output(fe::mux_title(",
+            "        let muxed = stopped_before_output(run_title(&plan, with, sink));",
             "            Err(e) => {",
         );
         assert!(
@@ -4578,7 +4540,7 @@ mod routing_tests {
 
         // 4. The live-drive per-title loop.
         let disc_loop = slice(
-            "        match mux_session_title(&mut session, idx, &set, &dest_url, &opts, hint, sink) {",
+            "        match mux_session_title(req, &mut session, idx, &set, &dest_url, sink) {",
             "            Err(e) => {",
         );
         assert!(
@@ -4637,7 +4599,7 @@ mod routing_tests {
             // …and unticked the commentary (0x1101) under title 1.
             (1, vec![0x1100], vec![0x1200]),
         ]);
-        let audio_of = |idx: usize| match title_session_mux_opts(&r, idx).selection.audio {
+        let audio_of = |idx: usize| match title_options(&r, Some(idx)).selection.unwrap().audio {
             libfreemkv::PidFilter::Only(v) => v,
             _ => panic!("an explicit selection must be a PidFilter::Only"),
         };
@@ -4654,8 +4616,7 @@ mod routing_tests {
         );
         // And the rest of the drive-path options are untouched by this.
         let base = mux_opts(&r);
-        let o = title_session_mux_opts(&r, 1);
-        assert_eq!(o.raw, base.raw);
+        let o = title_options(&r, Some(1));
         assert_eq!(o.batch_sectors, base.batch_sectors);
         assert_eq!(o.skip_errors, base.skip_errors);
     }
@@ -4803,7 +4764,7 @@ mod routing_tests {
         );
         // The live-drive path must agree — it reads its selection from
         // MuxOptions, not InputOptions.
-        match title_session_mux_opts(&r, 1).selection.audio {
+        match title_options(&r, Some(1)).selection.unwrap().audio {
             libfreemkv::PidFilter::Only(v) => {
                 assert!(v.is_empty(), "the drive path kept tracks title 1 cleared")
             }
@@ -5086,49 +5047,6 @@ mod routing_tests {
                 title: &title,
             },
         );
-        let lines = state
-            .lines
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("left out") && l.contains("MP4")),
-            "the excluded note reaches the run log, got: {lines:?}"
-        );
-    }
-
-    // B3 (KU-F1 review): the keyed live-drive mux bridge forwards the output opening too, so
-    // a GUI disc:// rip prints the excluded note, ahead of any progress, as the engine does.
-    #[test]
-    fn the_keyed_live_drive_mux_prints_the_note_from_the_output_opening() {
-        crate::strings::set_locale("en");
-        let truehd = libfreemkv::Stream::Audio(libfreemkv::AudioStream {
-            pid: 0x1100,
-            codec: libfreemkv::Codec::TrueHd,
-            channels: libfreemkv::AudioChannels::Surround51,
-            language: "eng".into(),
-            sample_rate: libfreemkv::SampleRate::S48,
-            secondary: false,
-            purpose: libfreemkv::LabelPurpose::Normal,
-            label: String::new(),
-        });
-        let title = libfreemkv::DiscTitle {
-            streams: vec![truehd],
-            codec_privates: vec![None],
-            ..libfreemkv::DiscTitle::empty()
-        };
-        let state = Arc::new(RunState::default());
-        let sink = UiSink(state.clone());
-        super::with_session_bridge(&sink, "mp4:///out/x.mp4", |ctx| {
-            ctx.events
-                .event(&libfreemkv::Event::OutputOpened { title: &title });
-            ctx.events.event(&libfreemkv::Event::BytesWritten {
-                bytes: 10,
-                total: 100,
-            });
-        });
         let lines = state
             .lines
             .lock()
@@ -5554,13 +5472,14 @@ mod routing_tests {
         ]);
 
         for idx in [0usize, 3] {
-            let input = title_input_options(&set, &r, idx);
+            let plan = title_plan(&r, "iso:///i.iso", "mkv:///o.mkv", idx, false);
             assert_eq!(
-                input.title_index,
-                Some(idx),
-                "a missing title_index muxes title 0 under title {}'s name",
+                plan.titles,
+                fe::Selection::Titles(vec![idx]),
+                "a missing title index muxes title 0 under title {}'s name",
                 idx + 1
             );
+            let input = image_title_run(&set, &r, idx);
             let keys = input.keys.as_ref().expect("the rip's set must be passed");
             assert!(
                 keys.is_aacs() && keys.is_for(&fx.disc.media_id()),
@@ -5574,7 +5493,7 @@ mod routing_tests {
             } else {
                 vec![4353]
             };
-            match &input.selection.audio {
+            match &input.title.selection.as_ref().expect("explicit").audio {
                 libfreemkv::PidFilter::Only(got) => assert_eq!(
                     *got,
                     want,
@@ -5764,6 +5683,7 @@ mod routing_tests {
             pending_bytes: 0,
             good_bytes: 50_000_000_000,
             main_lost_ms: 0.0,
+            lost_bytes: 0,
             severity: fe::DamageSeverity::Clean,
             passes: 1,
             aborted_for_loss: false,
@@ -5790,6 +5710,7 @@ mod routing_tests {
             pending_bytes: 2 * 1_048_576,
             good_bytes: 40_000_000_000,
             main_lost_ms: 0.0,
+            lost_bytes: 0,
             severity: fe::DamageSeverity::Cosmetic,
             passes: 2,
             ..clean_result()
@@ -5809,6 +5730,7 @@ mod routing_tests {
             unreadable_bytes: 1_048_576,
             pending_bytes: 0,
             main_lost_ms: 4_500.0,
+            lost_bytes: 0,
             severity: fe::DamageSeverity::Cosmetic,
             ..clean_result()
         };
@@ -5828,6 +5750,7 @@ mod routing_tests {
             unreadable_bytes: 1_048_576,
             pending_bytes: 0,
             main_lost_ms: f64::NAN,
+            lost_bytes: 0,
             severity: fe::DamageSeverity::Moderate,
             ..clean_result()
         };
@@ -6329,7 +6252,11 @@ mod ku_gui_tests {
             .expect("run_disc_scanning");
         let body = &src[a..a + src[a..].find("\nfn mux_staged_titles(").expect("next fn")];
         let lock = body.find("hold_iso_lock(").expect("the lock");
-        assert!(lock < body.find("fe::multipass_rip_staged(").expect("the copy"));
+        assert!(
+            lock < body
+                .find("fe::run_with(&plan, with, sink)")
+                .expect("the copy")
+        );
         assert!(body.contains("release_iso_lock(lock, &res, halted,"));
     }
 
