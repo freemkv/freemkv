@@ -134,7 +134,7 @@ fn a_raw_image_copy_is_one_plan_from_the_cli_and_the_app() {
 }
 
 // One plan, run: the engine's report for the CLI's and the app's image plan, goldened
-// (the decrypted image's bytes, the copy verdict, and the no-key refusal code).
+// (the decrypted image's bytes, the copy verdict, and the wrong-key and no-key refusal codes).
 #[test]
 fn parity_plan_image_copy() {
     use crate::ku_fixtures::*;
@@ -143,7 +143,11 @@ fn parity_plan_image_copy() {
     let fx = bd_image(&[Some(K1)], 1);
     let dir = TempDir::new("plan-parity");
     let src = fx.write(dir.path(), "src.iso");
-    for (tag, pool) in [("keyed", &[K1][..]), ("no-key", &[K2][..])] {
+    for (tag, pool) in [
+        ("keyed", &[K1][..]),
+        ("wrong-key", &[K2][..]),
+        ("no-key", &[][..]),
+    ] {
         let out = dir.path().join(format!("{tag}.iso"));
         let dest = format!("iso://{}", out.display());
         let c = cli(

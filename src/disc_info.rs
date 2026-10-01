@@ -114,7 +114,7 @@ pub(crate) fn parse_info_flags(args: &[String]) -> InfoParse {
 /// for every `info` route.
 pub(crate) fn reject_unknown_option(opt: &str) -> ! {
     eprintln!("{}", strings::fmt("app.unknown_option", &[("opt", opt)]));
-    std::process::exit(1);
+    crate::cli_entry::exit(1);
 }
 
 pub(crate) fn run(device: Option<&str>, args: &[String]) {
@@ -177,7 +177,7 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
             }
             _ => eprintln!("{}", crate::pipe::fmt_err(&e)),
         }
-        std::process::exit(1);
+        crate::cli_entry::exit(1);
     });
 
     // Reads PGS streams to detect forced subtitles from content, matching a rip's
@@ -195,17 +195,29 @@ pub(crate) fn run(device: Option<&str>, args: &[String]) {
                 &[("detail", &crate::pipe::fmt_err(&e))]
             )
         );
-        std::process::exit(1);
+        crate::cli_entry::exit(1);
     }
     // Decompose the session into the owned disc + drive the rest of this command
     // already worked with, so downstream rendering is untouched.
-    let disc = session.take_disc().expect("scan populated the disc");
+    let Some(disc) = session.take_disc() else {
+        eprintln!(
+            "{}",
+            strings::fmt(
+                "error.scan_failed",
+                &[(
+                    "detail",
+                    &crate::pipe::fmt_err(&libfreemkv::Error::NoStreams)
+                )]
+            )
+        );
+        crate::cli_entry::exit(1);
+    };
     // into_drive is fallible: stage_drive_as_reader moves the drive out, so an
     // empty slot is reachable through ordinary API use. Match the local style
     // the session open above uses.
     let mut drive = session.into_drive().unwrap_or_else(|e| {
         eprintln!("{}", crate::pipe::fmt_err(&e));
-        std::process::exit(1);
+        crate::cli_entry::exit(1);
     });
 
     // Disc title
@@ -659,7 +671,7 @@ fn region_name(region: &DiscRegion) -> String {
 }
 
 /// The `info -v` AACS crypto block: MKB, disc hash, VID, and the resolved set's source and
-/// key count (KU §3.3: "`disc_info.rs:679` reads `status()`"); `None` when it refused.
+/// key count (KU §3.3: `info` reads the set's `status()`); `None` when it refused.
 fn emit_aacs_block(
     out: &Output,
     aacs: &libfreemkv::AacsState,
@@ -1415,8 +1427,10 @@ mod tests {
             .mkb_version(Some(77))
             .disc_hash("0xfeedface")
             .volume_id([0x9C; 16])
+            .uk_ro(vec![0xEE; 16])
+            .mkb(vec![0x11; 16])
             .build();
-        // KU §3.3: "`disc_info.rs:679` reads `status()`" — the count is the set's, never
+        // KU §3.3: `info` reads the set's `status()` — the count is the set's, never
         // the banked keys (KU §11.6: "The key count in `info` … comes from the resolved set").
         let mut status = libfreemkv::keys::KeyRing::none().status();
         status.proven = 1;
@@ -1425,7 +1439,7 @@ mod tests {
             emit_aacs_block(&Output::new(true, false), &aacs, Some(&status));
         });
         let lower = text.to_ascii_lowercase();
-        for secret in ["eeeeeeee", "11111111", "22222222"] {
+        for secret in ["eeeeeeee", "11111111"] {
             assert!(
                 !lower.contains(secret),
                 "key bytes {secret} leaked:\n{text}"
@@ -1433,6 +1447,12 @@ mod tests {
         }
         assert!(!text.contains("VUK") && !text.contains("CPS"), "{text}");
         assert!(text.contains("Keys: keydb (1 unit keys)"), "{text}");
+        // An HD DVD set keyed without proof says so.
+        status.best_effort = true;
+        let ((), text) = crate::output::capture(|| {
+            emit_aacs_block(&Output::new(true, false), &aacs, Some(&status));
+        });
+        assert!(text.contains("unverified"), "{text}");
         let ((), text) = crate::output::capture(|| {
             emit_aacs_block(&Output::new(true, false), &aacs, None);
         });
