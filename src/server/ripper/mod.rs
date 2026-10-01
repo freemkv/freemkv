@@ -4917,8 +4917,16 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // `fill_extents`' adaptive batch-retry only fires on the inline reader.
             let live_src = mux::LiveMuxSource {
                 reader,
-                title,
-                format,
+                title: libfreemkv::ScannedTitle {
+                    title,
+                    format,
+                    disc_name: Some(
+                        disc.meta_title
+                            .clone()
+                            .unwrap_or_else(|| disc.volume_id.clone()),
+                    ),
+                    volume_id: disc.volume_id.clone(),
+                },
                 keys: rip_keys.as_ref().ok().cloned(),
                 skip_errors: skip_read_errors(&cfg_read.on_read_error),
             };

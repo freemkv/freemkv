@@ -1872,6 +1872,7 @@ fn mux_opts(req: &RipRequest) -> libfreemkv::MuxOptions {
         // stream_selection_for. The Session (live-drive) arm gets its own
         // per-title options from title_session_mux_opts.
         selection: libfreemkv::StreamSelection::default(),
+        title_index: 0,
     }
 }
 
@@ -3151,11 +3152,12 @@ fn mux_session_title(
         &format!("mux: disc title {} -> {dest} (~{hint} bytes)", idx + 1),
     );
     stopped_before_output(with_session_bridge(sink, dest, |ctx| {
-        let source = libfreemkv::MuxSource::Session {
-            session,
+        let source = libfreemkv::Source::from_session(session);
+        let opts = libfreemkv::MuxOptions {
             title_index: idx,
+            ..opts.clone()
         };
-        libfreemkv::mux_with_keys(source, Some(set), dest, opts, ctx)
+        libfreemkv::mux_with_keys(source, Some(set), dest, &opts, ctx)
     }))
 }
 

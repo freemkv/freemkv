@@ -10,7 +10,7 @@ use crate::cli_entry::is_url_token;
 use crate::disc_info::sanitize;
 use crate::output::{Level::Normal, Output};
 use crate::strings;
-use libfreemkv::{MuxOptions, MuxSource};
+use libfreemkv::MuxOptions;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -1832,12 +1832,10 @@ fn pipe_disc(
         batch_sectors: batch,
         raw,
         selection,
+        title_index: title_idx,
     };
     let result = libfreemkv::mux_with_keys(
-        libfreemkv::MuxSource::Session {
-            session: &mut session,
-            title_index: title_idx,
-        },
+        libfreemkv::Source::from_session(&mut session),
         Some(set),
         dest,
         &opts,
@@ -1961,16 +1959,14 @@ fn pipe(
     let events = Arc::new(CliMuxEvents::new(*out, dest.to_string(), metadata_sink));
     let mux_opts = MuxOptions {
         skip_errors: false,
-        batch_sectors: 0, // unused by the URL arm (input() owns batching)
+        batch_sectors: 0, // unused by a URL source (its image highway owns batching)
         raw: opts.raw,
-        selection: Default::default(),
+        selection: opts.selection.clone(),
+        title_index: opts.title_index.unwrap_or(0),
     };
-    let result = libfreemkv::mux_with_keys(
-        MuxSource::Url {
-            url: source,
-            opts: opts.clone(),
-        },
-        None,
+    let result = libfreemkv::mux_url(
+        source,
+        opts.keys.as_ref(),
         dest,
         &mux_opts,
         &cli_ctx(events.clone()),
@@ -6613,13 +6609,11 @@ mod formatter_tests {
             batch_sectors: 64,
             raw: false,
             selection: libfreemkv::StreamSelection::default(),
+            title_index: 0,
         };
         let (res, printed) = capture(|| {
-            libfreemkv::mux_with_keys(
-                libfreemkv::MuxSource::Url {
-                    url: &url,
-                    opts: libfreemkv::InputOptions::default(),
-                },
+            libfreemkv::mux_url(
+                &url,
                 None,
                 &dest,
                 &opts,

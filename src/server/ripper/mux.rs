@@ -1223,10 +1223,8 @@ pub(crate) struct LiveMuxSource {
     /// moves it into `DiscStream::new` (whose reader param is exactly
     /// `Box<dyn SectorSource>`) — the inline reader, never the highway wrapper.
     pub(crate) reader: Box<dyn libfreemkv::SectorSource>,
-    /// The scanned title to mux off the live drive.
-    pub(crate) title: libfreemkv::DiscTitle,
-    /// Container format (TS vs PS demux selection).
-    pub(crate) format: libfreemkv::ContentFormat,
+    /// The scanned title to mux off the live drive, named by its disc.
+    pub(crate) title: libfreemkv::ScannedTitle,
     /// The rip's up-front key set (KU §2.1): its keys, its FMTS forensic map and the
     /// on-arrival proof. `None` (or a non-AACS set) decrypts no AACS; a DVD cracks its CSS
     /// title key in the stream.
@@ -1278,7 +1276,7 @@ pub(crate) fn mux_live(
     let total_bytes = if inputs.total_bytes > 0 {
         inputs.total_bytes
     } else {
-        src.title.size_bytes
+        src.title.title.size_bytes
     };
 
     // The events bridge shares the orchestrator's watchdog/UI atomics;
@@ -1313,17 +1311,14 @@ pub(crate) fn mux_live(
         batch_sectors: inputs.batch,
         raw: false,
         selection: Default::default(),
+        title_index: 0,
     };
 
     crate::server::log::device_log(
         inputs.device,
         &format!("Opening output: {}", inputs.dest_url),
     );
-    let source = libfreemkv::MuxSource::Live {
-        reader: src.reader,
-        title: src.title,
-        format: src.format,
-    };
+    let source = libfreemkv::Source::from_reader(src.reader, src.title);
 
     let result = libfreemkv::mux_with_keys(
         source,
