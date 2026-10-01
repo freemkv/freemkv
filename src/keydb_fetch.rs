@@ -46,9 +46,20 @@ pub fn fetch(url: &str) -> Result<Vec<u8>> {
         tracing::warn!(host = %host_of(url), reason = %r, "keydb URL refused before connecting");
         r.into_error(url)
     })?;
-    let agent = hardened_agent(pinned);
+    get_body(&hardened_agent(pinned), url, MAX_BODY_BYTES)
+}
+
+// One GET through `agent`: the body, or the error it maps to. The agent follows no redirect, so
+// a 3xx comes back as a response and is refused here with the other non-2xx statuses.
+fn get_body(agent: &ureq::Agent, url: &str, cap: u64) -> Result<Vec<u8>> {
     let resp = agent.get(url).call().map_err(|e| map_ureq_err(url, &e))?;
-    read_capped(resp.into_body().into_reader(), MAX_BODY_BYTES).map_err(|e| cap_error(&e, url))
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(Error::KeydbHttp {
+            status: status.as_u16(),
+        });
+    }
+    read_capped(resp.into_body().into_reader(), cap).map_err(|e| cap_error(&e, url))
 }
 
 // Which keydb error a capped read's failure is: an over-large body is E8002 (content), a dead
@@ -106,7 +117,7 @@ impl std::fmt::Display for Refusal {
 }
 
 impl Refusal {
-    // E8006 is "...isn't allowed ({detail})" (L130), which already reads as a
+    // E8006 is "...isn't allowed ({detail})", which already reads as a
     // policy refusal for a bare IP. `{detail}` must stay locale-neutral — do
     // not inject English words here; the raw address is the whole payload.
     fn into_error(self, url: &str) -> Error {
@@ -135,17 +146,29 @@ fn map_ureq_err(url: &str, e: &ureq::Error) -> Error {
 
 /// Best-effort host extraction for error messages. Falls back to the whole URL.
 fn host_of(url: &str) -> String {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    authority.to_string()
+    let rest = split_http_scheme(url).map_or(url, |(_, rest)| rest);
+    authority_of(rest).to_string()
 }
 
-// Build a ureq agent that follows zero redirects and pins DNS resolution
-// to `pinned` (addresses already validated by [`resolve_and_guard`]).
+// The `http`/`https` scheme of `url` (matched case-insensitively, RFC 3986 §3.1) and the rest
+// after `://`; the scheme comes back lowercase.
+fn split_http_scheme(url: &str) -> Option<(&'static str, &str)> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme.eq_ignore_ascii_case("https") {
+        Some(("https", rest))
+    } else if scheme.eq_ignore_ascii_case("http") {
+        Some(("http", rest))
+    } else {
+        None
+    }
+}
+
+// `host[:port]` of the text after `://`, without any userinfo, path, query or fragment.
+fn authority_of(rest: &str) -> &str {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    authority.rsplit('@').next().unwrap_or(authority)
+}
+
 // `ResolvedSocketAddrs` is a fixed 16-slot array; keep only the first 16.
 const MAX_PINNED_ADDRS: usize = 16;
 
@@ -272,6 +295,8 @@ impl<In: ureq::unversioned::transport::Transport> ureq::unversioned::transport::
     }
 }
 
+// A ureq agent that follows zero redirects and pins DNS resolution to `pinned` (addresses
+// already validated by [`resolve_and_guard`]).
 fn hardened_agent(pinned: Vec<SocketAddr>) -> ureq::Agent {
     hardened_agent_with_timeouts(pinned, CONNECT_TIMEOUT, READ_TIMEOUT, STALL_TIMEOUT)
 }
@@ -310,18 +335,15 @@ fn hardened_agent_with_timeouts(
 /// Resolve `url`'s host and refuse unreachable addresses (LAN is allowed). Returns the pinned socket addresses on success, or why it refused.
 fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, Refusal> {
     let no_route = |why: &str| Refusal::Unreachable(why.to_string());
-    let (rest, default_port) = if let Some(r) = url.strip_prefix("https://") {
-        (r, 443u16)
-    } else if let Some(r) = url.strip_prefix("http://") {
-        (r, 80u16)
+    let (rest, default_port) = if let Some((scheme, r)) = split_http_scheme(url) {
+        (r, if scheme == "https" { 443u16 } else { 80u16 })
     } else {
         return Err(match url.split_once("://") {
             Some((scheme, _)) if !scheme.is_empty() => Refusal::Scheme(scheme.to_string()),
             _ => no_route("URL must start with http:// or https://"),
         });
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let authority = authority_of(rest);
     if authority.is_empty() {
         return Err(no_route("URL has no host"));
     }
@@ -516,6 +538,52 @@ mod tests {
         );
     }
 
+    fn stub_agent(pinned: SocketAddr) -> ureq::Agent {
+        hardened_agent_with_timeouts(
+            vec![pinned],
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        )
+    }
+
+    // A non-2xx answer is the HTTP-status error, a redirect included: the agent follows none,
+    // so a mirror's 301 is reported rather than saved as keydb content.
+    #[test]
+    fn a_non_success_status_is_a_keydb_http_error() {
+        for (head, want) in [
+            (
+                &b"HTTP/1.1 301 Moved Permanently\r\nLocation: http://keydb-mirror.test/new\r\nContent-Length: 0\r\n\r\n"[..],
+                301u16,
+            ),
+            (&b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"[..], 404),
+            (&b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"[..], 503),
+        ] {
+            let head: &'static [u8] = Box::leak(head.to_vec().into_boxed_slice());
+            let (pinned, server) = keydb_stub(head, |_| {});
+            let got = get_body(&stub_agent(pinned), "http://keydb-mirror.test/keydb.zip", 1024);
+            let _ = server.join();
+            assert!(
+                matches!(got, Err(Error::KeydbHttp { status }) if status == want),
+                "{want}: {got:?}"
+            );
+        }
+    }
+
+    // `get_body` hands the cap to the body read: over it is E8002, at it is the body.
+    #[test]
+    fn get_body_enforces_its_cap() {
+        let ok = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nkeys";
+        let (pinned, server) = keydb_stub(ok, |_| {});
+        let got = get_body(&stub_agent(pinned), "http://keydb-mirror.test/k", 4);
+        let _ = server.join();
+        assert_eq!(got.expect("a body at the cap"), b"keys");
+        let (pinned, server) = keydb_stub(ok, |_| {});
+        let got = get_body(&stub_agent(pinned), "http://keydb-mirror.test/k", 3);
+        let _ = server.join();
+        assert!(matches!(got, Err(Error::KeydbInvalid)), "{got:?}");
+    }
+
     // The body-size cap — the decompression-bomb defence.
     #[test]
     fn read_capped_admits_up_to_the_cap_and_rejects_past_it() {
@@ -611,6 +679,19 @@ mod tests {
         ] {
             assert!(resolve_and_guard(url).is_err(), "{url} must be refused");
         }
+    }
+
+    // URL schemes are case-insensitive (RFC 3986 §3.1); an upper-case one is not "unsupported".
+    #[test]
+    fn an_upper_case_scheme_is_accepted() {
+        let ok = resolve_and_guard("HTTPS://1.1.1.1/keydb.zip").expect("HTTPS is https");
+        assert_eq!(ok[0].port(), 443);
+        let ok = resolve_and_guard("Http://1.1.1.1/keydb.zip").expect("Http is http");
+        assert_eq!(ok[0].port(), 80);
+        assert_eq!(
+            host_of("HTTPS://user@example.org:8443/x"),
+            "example.org:8443"
+        );
     }
 
     #[test]
