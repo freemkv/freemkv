@@ -175,7 +175,7 @@ pub struct Library {
     pub queue: Queue,
     pub probes: ProbeCache,
     pub audits: audit::Audits,
-    // The deep_audit setting as the deep loop last read it.
+    // The deep_audit setting as the quick-lane loop last read it.
     deep_on: AtomicBool,
     config_dir: PathBuf,
     log_dir: PathBuf,
@@ -220,7 +220,7 @@ pub fn wake() {
     }
 }
 
-/// Start the remux worker and the background indexer.
+/// Start the remux worker, the background indexer and both audit lanes.
 pub fn start(cfg: &Arc<RwLock<Config>>) -> std::thread::JoinHandle<()> {
     let lib = instance(&cfg.read().unwrap_or_else(|e| e.into_inner()));
     {
@@ -234,6 +234,12 @@ pub fn start(cfg: &Arc<RwLock<Config>>) -> std::thread::JoinHandle<()> {
         let _ = std::thread::Builder::new()
             .name("library-audit".into())
             .spawn(move || worker::audit_loop(&lib, &cfg, &arbiter::ARBITER));
+    }
+    {
+        let (lib, cfg) = (lib.clone(), cfg.clone());
+        let _ = std::thread::Builder::new()
+            .name("library-deep-audit".into())
+            .spawn(move || worker::deep_audit_loop(&lib, &cfg, &arbiter::ARBITER));
     }
     let cfg = cfg.clone();
     std::thread::Builder::new()
@@ -332,7 +338,11 @@ impl Library {
         self.deep_on.load(Ordering::SeqCst)
     }
 
+    /// Turning deep audit off empties the deep lane; turning it on is followed by a refill.
     pub(crate) fn set_deep_enabled(&self, on: bool) {
+        if !on {
+            self.audits.clear_deep();
+        }
         if self.deep_on.swap(on, Ordering::SeqCst) != on {
             self.touch_index();
         }
@@ -585,7 +595,7 @@ impl Library {
         let (mut probing, mut auditing) = (0, 0);
         let deep_on = self.deep_enabled();
         let queued = self.audits.queued_set();
-        let running_audit = self.audits.status().running.map(|l| l.path);
+        let running_audits = self.audits.running_set();
         let rows = snap
             .rows
             .iter()
@@ -613,7 +623,7 @@ impl Library {
                     .filter(|_| audit.is_some())
                     .and_then(|(m, s)| self.audits.deep_view(m, s, deep_on));
                 let audit_queued = r.mkv.as_ref().is_some_and(|m| queued.contains(m));
-                let audit_running = r.mkv.is_some() && r.mkv == running_audit;
+                let audit_running = r.mkv.as_ref().is_some_and(|m| running_audits.contains(m));
                 auditing += usize::from(audit_queued || audit_running);
                 let needs_remux =
                     r.remuxable() && (r.mkv.is_none() || (probed && muxed_with.out_of_date()));

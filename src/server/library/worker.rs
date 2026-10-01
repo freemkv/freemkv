@@ -714,12 +714,10 @@ pub fn index_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>) {
     }
 }
 
-/// The audit worker: one file at a time from the audit queue, after rips and remuxes
-/// (Rip > Remux > Audit). Each audit is the quick read, then the full decode while deep
-/// audit is on. A decode a rip or remux interrupts goes back to the front of the queue.
+/// The quick lane: one quick audit at a time, after rips and remuxes (Rip > Remux > Audit),
+/// whatever the deep audit setting. It also tracks that setting and refills both lanes.
 pub fn audit_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
     let enabled = || cfg.read().unwrap_or_else(|e| e.into_inner()).deep_audit;
-    let busy = || remux_or_rip_busy(lib, arbiter);
     let mut filled = Instant::now();
     while !shutting_down() {
         let was = lib.deep_enabled();
@@ -729,21 +727,52 @@ pub fn audit_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbit
             filled = Instant::now();
             lib.refill_audits();
         }
-        if busy() {
+        let library = super::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner())).library;
+        if !quick_turn(lib, &library, remux_or_rip_busy(lib, arbiter)) {
+            nap(Duration::from_secs(2));
+        }
+    }
+}
+
+/// The deep lane: one full decode at a time while deep audit is on, after rips and remuxes.
+/// A rip, a remux, a pause or a stop interrupts it; the quick lane never does.
+pub(crate) fn deep_audit_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
+    let enabled = || cfg.read().unwrap_or_else(|e| e.into_inner()).deep_audit;
+    let busy = || remux_or_rip_busy(lib, arbiter);
+    while !shutting_down() {
+        let ffmpeg = super::deep::ffmpeg();
+        if !enabled() || busy() || ffmpeg.is_none() {
             nap(Duration::from_secs(2));
             continue;
         }
-        let Some(path) = lib.audits.next() else {
+        let Some(path) = lib.audits.next_deep() else {
             nap(Duration::from_secs(2));
             continue;
         };
         let library = super::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner())).library;
         let stop = || {
-            shutting_down() || !enabled() || busy() || lib.audits.paused() || lib.audits.cancelled()
+            shutting_down()
+                || !enabled()
+                || busy()
+                || lib.audits.paused()
+                || lib.audits.cancelled_deep()
         };
-        audit_one(lib, &path, &library, enabled(), &stop);
+        deep_one(lib, &path, &library, &stop, ffmpeg);
         lib.touch_index();
     }
+}
+
+// Run the next quick audit unless a rip or remux has the disks; true if one ran.
+fn quick_turn(lib: &Library, library: &Path, busy: bool) -> bool {
+    if busy {
+        return false;
+    }
+    let Some(path) = lib.audits.next() else {
+        return false;
+    };
+    quick_one(lib, &path, library, lib.deep_enabled());
+    lib.touch_index();
+    true
 }
 
 // A remux running, or queued and not paused, goes before an audit; so does any rip.
@@ -751,37 +780,23 @@ fn remux_or_rip_busy(lib: &Library, arbiter: &Arbiter) -> bool {
     arbiter.rip_active() || lib.queue.has_work()
 }
 
-// Audit one file: the quick read, then (deep on) the full decode.
-pub(crate) fn audit_one(
-    lib: &Library,
-    path: &Path,
-    library: &Path,
-    deep_on: bool,
-    stop: &dyn Fn() -> bool,
-) {
-    audit_with(lib, path, library, deep_on, stop, super::deep::ffmpeg());
-}
-
-fn audit_with(
-    lib: &Library,
-    path: &Path,
-    library: &Path,
-    deep_on: bool,
-    stop: &dyn Fn() -> bool,
-    ffmpeg: Option<std::path::PathBuf>,
-) {
-    let Some(sig) = super::probe::FileSig::stat(path) else {
-        lib.audits.finish();
-        return;
-    };
-    let title = lib
-        .snapshot()
+fn title_of(lib: &Library, path: &Path, library: &Path) -> String {
+    lib.snapshot()
         .rows
         .iter()
         .find(|r| r.mkv.as_deref() == Some(path))
         .map(|r| r.title.clone())
-        .unwrap_or_else(|| super::index::mkv_title(library, path));
-    lib.audits.start(path, title);
+        .unwrap_or_else(|| super::index::mkv_title(library, path))
+}
+
+// The quick read of one file; with deep audit on, a file it leaves owing a decode joins
+// the deep lane.
+pub(crate) fn quick_one(lib: &Library, path: &Path, library: &Path, deep_on: bool) {
+    let Some(sig) = super::probe::FileSig::stat(path) else {
+        lib.audits.finish();
+        return;
+    };
+    lib.audits.start(path, title_of(lib, path, library));
     lib.touch_index();
     // A "Stop all" that came after the file was taken but before it started.
     if lib.audits.cancelled() {
@@ -791,24 +806,51 @@ fn audit_with(
     let now = crate::server::util::epoch_secs;
     // On a storage failure (no report) the next refill queues the file again, a minute on.
     if let Some(report) = super::probe::audit_fast(path) {
-        let duration = report.duration_secs;
         lib.audits.record_fast(path, sig, report, now());
-        if let Some(ffmpeg) =
-            ffmpeg.filter(|_| deep_on && lib.audits.deep_due_for(path, sig, now()))
-        {
-            tracing::info!(file = %path.display(), "deep audit: decoding");
-            let _ = std::fs::create_dir_all(&lib.log_dir);
-            let err_file = lib.log_dir.join("deep-audit.stderr");
-            let progress =
-                |stage: &'static str, secs: f64| lib.audits.progress(stage, secs, duration);
-            match super::deep::full_decode(&ffmpeg, path, library, &err_file, stop, &progress) {
-                Some(v) => lib.audits.record_deep(path, sig, v, now()),
-                None if !lib.audits.cancelled() => lib.audits.requeue_front(path.to_path_buf()),
-                None => {}
-            }
+        if deep_on && lib.audits.deep_due_for(path, sig, now()) {
+            lib.audits.enqueue_deep(path);
         }
     }
     lib.audits.finish();
+}
+
+// The full decode of one file whose quick audit stands. An interrupted decode goes back
+// to the front of the deep lane; a stopped one does not.
+fn deep_one(
+    lib: &Library,
+    path: &Path,
+    library: &Path,
+    stop: &dyn Fn() -> bool,
+    ffmpeg: Option<std::path::PathBuf>,
+) {
+    let now = crate::server::util::epoch_secs;
+    let sig = super::probe::FileSig::stat(path);
+    let (Some(ffmpeg), Some(sig)) = (ffmpeg, sig) else {
+        lib.audits.finish_deep();
+        return;
+    };
+    // A file changed or re-audited since it was queued waits for its quick read.
+    if !lib.audits.deep_due_for(path, sig, now()) {
+        lib.audits.finish_deep();
+        return;
+    }
+    lib.audits.start_deep(path, title_of(lib, path, library));
+    lib.touch_index();
+    if lib.audits.cancelled_deep() {
+        lib.audits.finish_deep();
+        return;
+    }
+    let duration = lib.audits.report(path, sig).and_then(|r| r.duration_secs);
+    tracing::info!(file = %path.display(), "deep audit: decoding");
+    let _ = std::fs::create_dir_all(&lib.log_dir);
+    let err_file = lib.log_dir.join("deep-audit.stderr");
+    let progress = |stage: &'static str, secs: f64| lib.audits.progress(stage, secs, duration);
+    match super::deep::full_decode(&ffmpeg, path, library, &err_file, stop, &progress) {
+        Some(v) => lib.audits.record_deep(path, sig, v, now()),
+        None if !lib.audits.cancelled_deep() => lib.audits.requeue_front(path.to_path_buf()),
+        None => {}
+    }
+    lib.audits.finish_deep();
 }
 
 #[cfg(test)]
@@ -1203,7 +1245,7 @@ mod tests {
         lib.audits.enqueue([path.clone()]);
         assert_eq!(lib.audits.next().as_ref(), Some(&path));
         lib.audits.stop_all();
-        audit_one(&lib, &path, &dirs.library, false, &|| false);
+        quick_one(&lib, &path, &dirs.library, false);
         let sig = super::super::probe::FileSig::stat(&path).unwrap();
         assert!(lib.audits.report(&path, sig).is_none());
         assert!(lib.audits.status().running.is_none());
@@ -1217,7 +1259,7 @@ mod tests {
         std::fs::create_dir_all(&odd).unwrap();
         lib.audits.enqueue([odd.clone()]);
         let path = lib.audits.next().unwrap();
-        audit_one(&lib, &path, &dirs.library, false, &|| false);
+        quick_one(&lib, &path, &dirs.library, false);
         assert!(!lib.audits.is_queued(&odd), "left for the next refill");
         assert!(lib.audits.status().running.is_none());
     }
@@ -1396,12 +1438,18 @@ mod tests {
         let (t, lib, dirs) = library_with(&["A", "B"]);
         let (a, b) = (dirs.library.join("A/A.mkv"), dirs.library.join("B/B.mkv"));
         let sig = super::super::probe::FileSig::stat(&a).unwrap();
-        lib.audits.enqueue([b.clone()]);
+        quick_one(&lib, &a, &dirs.library, true);
+        assert_eq!(
+            lib.audits.next_deep().as_ref(),
+            Some(&a),
+            "the quick read owes a decode"
+        );
+        lib.audits.enqueue_deep(&b);
         // `exec` so the kill reaches the sleep itself.
         let slow = fake_ffmpeg(t.path(), "exec sleep 30");
-        audit_with(&lib, &a, &dirs.library, true, &|| true, Some(slow));
+        deep_one(&lib, &a, &dirs.library, &|| true, Some(slow));
         assert_eq!(
-            lib.audits.next().as_ref(),
+            lib.audits.next_deep().as_ref(),
             Some(&a),
             "the interrupted file is first"
         );
@@ -1413,11 +1461,88 @@ mod tests {
             lib.audits.deep_view(&a, sig, true).unwrap().state,
             "pending"
         );
-        lib.audits.finish();
-
         let quick = fake_ffmpeg(t.path(), "exit 0");
-        audit_with(&lib, &a, &dirs.library, true, &|| false, Some(quick));
+        deep_one(&lib, &a, &dirs.library, &|| false, Some(quick));
         assert_eq!(lib.audits.deep_view(&a, sig, true).unwrap().state, "clean");
         assert!(lib.audits.status().running.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quick_audits_finish_while_a_decode_runs() {
+        let (t, lib, dirs) = library_with(&["A", "B", "C"]);
+        lib.index_now(&dirs);
+        lib.set_deep_enabled(true);
+        let a = dirs.library.join("A/A.mkv");
+        let sig = |p: &Path| super::super::probe::FileSig::stat(p).unwrap();
+        quick_one(&lib, &a, &dirs.library, true);
+        assert_eq!(lib.audits.next_deep().as_ref(), Some(&a));
+        let slow = fake_ffmpeg(t.path(), "exec sleep 30");
+        let done = AtomicBool::new(false);
+        let stopped_early = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                deep_one(
+                    &lib,
+                    &a,
+                    &dirs.library,
+                    &|| done.load(Ordering::SeqCst),
+                    Some(slow),
+                );
+                stopped_early.store(!done.load(Ordering::SeqCst), Ordering::SeqCst);
+            });
+            while lib.audits.status().running.as_ref().map(|l| &l.path) != Some(&a) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            lib.refill_audits();
+            while quick_turn(&lib, &dirs.library, false) {}
+            for t in ["B", "C"] {
+                let p = dirs.library.join(format!("{t}/{t}.mkv"));
+                assert!(
+                    lib.audits.report(&p, sig(&p)).is_some(),
+                    "{t} audited meanwhile"
+                );
+            }
+            let live = lib.audits.status().running.unwrap();
+            assert_eq!(live.path, a, "the strip still shows the decode");
+            let l = lib.listing(&dirs);
+            assert!(row(&l, "A").audit_running);
+            assert!(row(&l, "B").audit_queued, "B now owes its own decode");
+            done.store(true, Ordering::SeqCst);
+        });
+        assert!(
+            !stopped_early.load(Ordering::SeqCst),
+            "the quick lane never stopped the decode"
+        );
+        assert_eq!(
+            lib.audits.next_deep().as_ref(),
+            Some(&a),
+            "the stopped decode waits"
+        );
+    }
+
+    #[test]
+    fn quick_audits_run_with_deep_audit_off() {
+        let (_t, lib, dirs) = library_with(&["A", "B"]);
+        lib.index_now(&dirs);
+        lib.set_deep_enabled(false);
+        lib.refill_audits();
+        while quick_turn(&lib, &dirs.library, false) {}
+        for t in ["A", "B"] {
+            let p = dirs.library.join(format!("{t}/{t}.mkv"));
+            let s = super::super::probe::FileSig::stat(&p).unwrap();
+            assert!(lib.audits.report(&p, s).is_some());
+            assert!(lib.audits.deep_view(&p, s, false).is_none());
+        }
+        assert_eq!(
+            lib.audits.status().queued,
+            0,
+            "no decode is queued while off"
+        );
+        lib.audits.enqueue([dirs.library.join("A/A.mkv")]);
+        assert!(
+            !quick_turn(&lib, &dirs.library, true),
+            "a rip or remux goes first"
+        );
     }
 }
