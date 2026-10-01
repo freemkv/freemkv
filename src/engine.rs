@@ -6281,8 +6281,12 @@ mod ku_gui_tests {
         let f = factory(&[(Answer::Hang, &[K1])], &calls);
         let tok = OpenToken::default();
         let stop = tok.halt.clone();
+        let seen = calls.clone();
         let press = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while seen.len() == 0 && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             stop.cancel();
             std::time::Instant::now()
         });
