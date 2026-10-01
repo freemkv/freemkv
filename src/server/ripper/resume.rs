@@ -1620,7 +1620,11 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
         );
     }
     if is_fanout && !is_network {
-        for extra in plan_outputs.iter().skip(1) {
+        // The engine's episode loop: a failed episode is dropped (its partial file deleted)
+        // and the rest still deliver; a Stop ends it.
+        let episodes: Vec<usize> = (1..plan_outputs.len()).collect();
+        freemkv_engine::run_episodes(&episodes, &freemkv_engine::NoopSink, |i| {
+            let extra = &plan_outputs[i];
             let ep_output_path = format!("{staging_str}/{}", extra.filename);
             // Best-effort delete of any partial/undurable output for this episode,
             // so a failed episode is never left on disk for the mover to file.
@@ -1639,7 +1643,7 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                     "title index {} not present on the disc",
                     extra.title_index
                 ));
-                continue;
+                return Err(std::io::Error::other("title not on the disc").into());
             };
             let ep_bps: f64 = freemkv_engine::title_bytes_per_sec(&ep_title);
             let ep_dest_url = format!(
@@ -1698,14 +1702,22 @@ pub fn resume_remux(cfg: &Arc<RwLock<Config>>, device: &str, classification: Res
                                 extra.filename
                             ),
                         );
+                        Ok(())
                     } else {
                         drop_partial("output not durable (fsync failed)");
+                        Err(std::io::Error::other("output not durable").into())
                     }
                 }
-                Ok(_) => drop_partial("did not complete muxing"),
-                Err(e) => drop_partial(&format!("mux failed ({e})")),
+                Ok(_) => {
+                    drop_partial("did not complete muxing");
+                    Err(std::io::Error::other("did not complete muxing").into())
+                }
+                Err(e) => {
+                    drop_partial(&format!("mux failed ({e})"));
+                    Err(e.into())
+                }
             }
-        }
+        });
     }
 
     let marker_name = staging::handoff_label(title_confident);
