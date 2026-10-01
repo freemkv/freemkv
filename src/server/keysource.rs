@@ -15,7 +15,7 @@ use libfreemkv::aacs::trace::ResolutionTrace;
 
 use crate::server::config::Config;
 
-// The keyserver URL gate is `freemkv_keysources::validate_keyserver_url` (https-only + SSRF):
+// The keyserver URL gate is `freemkv_keysources::validate_keyserver_url` (https-only + address rule):
 // settings save, `build_sources` and the probe all call it so they agree. web.rs keeps its own
 // guard for other operator URLs; the probe uses it only to pin DNS.
 
@@ -442,7 +442,7 @@ pub enum ServiceReachability {
     /// far as automatic retry goes — report the status rather than guess.
     Unexpected(u16),
     /// The configured key-service URL could not be used at all (empty, wrong
-    /// scheme, or blocked by the SSRF guard), so the service was never asked.
+    /// scheme, or an unreachable address), so the service was never asked.
     /// A standing misconfiguration, not an outage — terminal.
     NotAsked,
 }
@@ -726,35 +726,34 @@ mod tests {
     use libfreemkv::read_encrypted_units;
 
     #[test]
-    fn ssrf_guard_blocks_metadata_and_internal_hosts() {
-        // Cloud metadata endpoint — the canonical SSRF target. https:// so the
-        // ADDRESS check fires, not the scheme check.
-        let err =
-            freemkv_keysources::validate_keyserver_url("https://169.254.169.254/latest/meta-data")
-                .unwrap_err();
-        assert!(
-            err.contains("SSRF guard"),
-            "rejected for the address: {err}"
-        );
-        // Loopback and RFC1918.
-        assert!(freemkv_keysources::validate_keyserver_url("https://127.0.0.1:8443/keys").is_err());
-        // RFC1918 ranges (10/8, 192.168/16, 172.16/12). Built from octets so the
-        // literal dotted-quads don't trip the public leak-guard — these are
-        // generic examples, not infrastructure.
-        for oct in [[10u8, 0, 0, 1], [192, 168, 1, 5], [172, 20, 4, 4]] {
-            let url = format!("https://{}.{}.{}.{}/keys", oct[0], oct[1], oct[2], oct[3]);
+    fn keyserver_guard_allows_lan_and_rejects_invalid_hosts() {
+        // Home app: loopback, link-local (incl. metadata) and RFC1918 key services are valid.
+        // Built from octets so the dotted-quad doesn't trip the public leak-guard.
+        let lan = format!("https://{}.{}.{}.{}/keys", 192, 168, 1, 5);
+        for url in [
+            "https://169.254.169.254/latest/meta-data",
+            "https://127.0.0.1:8443/keys",
+            "https://[::1]:443/k",
+            "https://[fe80::1]/k",
+            "https://[::ffff:127.0.0.1]/k",
+            lan.as_str(),
+        ] {
             assert!(
-                freemkv_keysources::validate_keyserver_url(&url).is_err(),
-                "RFC1918 {url} must be rejected"
+                freemkv_keysources::validate_keyserver_url(url).is_ok(),
+                "{url} must be accepted"
             );
         }
-        // IPv6 loopback / link-local (bracketed).
-        assert!(freemkv_keysources::validate_keyserver_url("https://[::1]:443/k").is_err());
-        assert!(freemkv_keysources::validate_keyserver_url("https://[fe80::1]/k").is_err());
-        // IPv4-mapped IPv6 loopback.
-        assert!(
-            freemkv_keysources::validate_keyserver_url("https://[::ffff:127.0.0.1]/k").is_err()
-        );
+        // Unreachable addresses are refused.
+        for url in [
+            "https://0.0.0.0/keys",
+            "https://224.0.0.1/keys",
+            "https://[ff02::1]/k",
+        ] {
+            assert!(
+                freemkv_keysources::validate_keyserver_url(url).is_err(),
+                "{url} must be refused"
+            );
+        }
         // Non-http scheme rejected.
         assert!(freemkv_keysources::validate_keyserver_url("ftp://example.com/keys").is_err());
         // No host.
@@ -1118,10 +1117,10 @@ mod tests {
 
     // An SSRF-blocked URL never becomes a source, leaving online mode with none.
     #[test]
-    fn build_sources_drops_online_source_on_ssrf_blocked_url() {
+    fn build_sources_drops_online_source_on_invalid_address_url() {
         let cfg = Config {
             key_source: "online".into(),
-            keyserver_url: "https://169.254.169.254/keys".into(),
+            keyserver_url: "https://0.0.0.0/keys".into(),
             ..Config::default()
         };
         assert!(build_sources(&cfg).is_empty());
@@ -1392,8 +1391,8 @@ mod tests {
             "https:///keys",
             "https://8.8.8.8:notaport/keys",
             "https://[::1/keys",
-            "https://127.0.0.1/keys",
-            "https://169.254.169.254/latest/meta-data",
+            "https://0.0.0.0/keys",
+            "https://240.0.0.1/latest/meta-data",
         ] {
             let err = freemkv_keysources::validate_keyserver_url(url)
                 .expect_err("keysources must reject this URL outright");
@@ -1667,13 +1666,13 @@ mod tests {
         assert!(!probe_online_reachability(&empty).is_transient());
 
         let blocked = Config {
-            keyserver_url: "https://127.0.0.1:9/keys".into(),
+            keyserver_url: "https://0.0.0.0:9/keys".into(),
             ..Default::default()
         };
         assert_eq!(
             probe_online_reachability(&blocked),
             ServiceReachability::NotAsked,
-            "an SSRF-blocked loopback URL is a permanent config verdict, not an outage"
+            "an invalid-address URL is a permanent config verdict, not an outage"
         );
     }
 

@@ -77,9 +77,9 @@ pub enum PathRule {
 /// Which outbound check a URL setting gets on save.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UrlRule {
-    /// Fetched by the daemon (keydb download): http(s) and the SSRF guard.
+    /// Fetched by the daemon (keydb download): http(s) and a reachable address (LAN allowed).
     Fetch,
-    /// The key service: the keysources crate's https + SSRF rule.
+    /// The key service: the keysources crate's https + address rule.
     Keyserver,
 }
 
@@ -95,7 +95,7 @@ pub enum Kind {
     Secret,
     /// Shown with its path masked (tokens live there); a masked value is ignored.
     Url(UrlRule),
-    /// A bare `host:port` the rip streams to, behind the SSRF guard.
+    /// A bare `host:port` the rip streams to, behind libfreemkv's address rule.
     Target,
     Bool,
     /// Clamped to `max` on load and on save.

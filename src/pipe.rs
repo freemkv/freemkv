@@ -4210,30 +4210,28 @@ mod tests {
     }
 
     #[test]
-    fn build_key_sources_drops_ssrf_rejected_url() {
-        // url-only, metadata endpoint → rejected → zero sources.
+    fn build_key_sources_drops_rejected_url_but_keeps_lan() {
+        // url-only, unreachable address → rejected → zero sources.
         let s = build_key_sources_quiet(&KeyConfig {
             keydb_path: None,
-            key_url: Some("http://169.254.169.254/latest/meta-data".into()),
+            key_url: Some("https://0.0.0.0:8443/keys".into()),
             key_auth: None,
         });
-        assert!(
-            s.is_empty(),
-            "SSRF-rejected url-only must add no online source"
-        );
+        assert!(s.is_empty(), "invalid-address url must be rejected");
 
-        // url-only, loopback → rejected → zero sources.
+        // url-only, LAN/loopback https → a valid home key service.
         let s = build_key_sources_quiet(&KeyConfig {
             keydb_path: None,
             key_url: Some("https://127.0.0.1:8443/keys".into()),
             key_auth: None,
         });
-        assert!(s.is_empty(), "loopback url must be rejected");
+        assert_eq!(s.len(), 1, "loopback url must be accepted");
+        assert_eq!(s[0].label(), "online");
 
-        // keydb + rejected url → only the keydb survives.
+        // keydb + cleartext http url → only the keydb survives.
         let s = build_key_sources_quiet(&KeyConfig {
             keydb_path: Some("keydb.cfg".into()),
-            key_url: Some(format!("http://{}.{}.{}.{}/keys", 10, 0, 0, 5)),
+            key_url: Some("http://8.8.8.8/keys".into()),
             key_auth: None,
         });
         assert_eq!(s.len(), 1, "rejected url dropped; keydb remains");
