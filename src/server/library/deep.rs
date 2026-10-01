@@ -19,6 +19,8 @@ const TIMEOUT: Duration = Duration::from_secs(3 * 3600);
 const RETRY_BASE_SECS: u64 = 600;
 const RETRY_CAP_SECS: u64 = 6 * 3600;
 const STDERR_TAIL_BYTES: u64 = 2_000_000;
+// ffmpeg is stopped and the file judged once its stderr passes this.
+const STDERR_CAP_BYTES: u64 = 256 << 20;
 
 /// One ffmpeg run's outcome, judged. Carried whole to the details dialog.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -116,6 +118,8 @@ pub struct Run {
     pub lines: Vec<String>,
     pub peak_rss_mib: u64,
     pub runaway: bool,
+    /// Its stderr outgrew the cap: a desync flood no clean file produces.
+    pub overflow: bool,
     pub timed_out: bool,
     pub cancelled: bool,
     pub flood: u64,
@@ -134,13 +138,14 @@ pub fn classify(run: &Run, stage: &str, now: u64) -> Verdict {
     let signal = run.signal.map(signal_name);
     let (completed, clean, reason) = if run.runaway {
         (true, false, "memory_runaway")
+    } else if run.overflow {
+        (true, false, "stderr_overflow")
     } else if run.timed_out {
         (false, false, "timeout")
     } else if run.signal.is_some() {
         let oom = run.signal == Some(libc::SIGKILL);
         (false, false, if oom { "oom" } else { "killed" })
-    } else {
-        let rc = run.rc.unwrap_or(-1);
+    } else if let Some(rc) = run.rc {
         let clean = bad.is_empty() && !flood_corrupt && (rc == 0 || limited);
         let reason = if !bad.is_empty() {
             if stage == "demux" {
@@ -158,6 +163,9 @@ pub fn classify(run: &Run, stage: &str, now: u64) -> Verdict {
             "clean"
         };
         (true, clean, reason)
+    } else {
+        // No exit status: ffmpeg never ran, or could not be waited on. Says nothing of the file.
+        (false, false, "not_run")
     };
     let errors = if !bad.is_empty() {
         bad.len() as u64
@@ -224,9 +232,18 @@ pub fn run_monitored(
     stop: &dyn Fn() -> bool,
     on_secs: &(dyn Fn(f64) + Sync),
 ) -> Run {
+    run_capped(argv, err_file, STDERR_CAP_BYTES, stop, on_secs)
+}
+
+fn run_capped(
+    argv: &[&str],
+    err_file: &Path,
+    stderr_cap: u64,
+    stop: &dyn Fn() -> bool,
+    on_secs: &(dyn Fn(f64) + Sync),
+) -> Run {
     let mut run = Run::default();
     let Ok(err) = std::fs::File::create(err_file) else {
-        run.rc = Some(-1);
         run.lines = vec![format!("cannot create {}", err_file.display())];
         return run;
     };
@@ -251,7 +268,6 @@ pub fn run_monitored(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            run.rc = Some(-1);
             run.lines = vec![format!("cannot run {}: {e}", argv[0])];
             return run;
         }
@@ -271,7 +287,7 @@ pub fn run_monitored(
                 }
             });
         }
-        watch(&mut child, &mut run, started, stop);
+        watch(&mut child, &mut run, started, (err_file, stderr_cap), stop);
     });
     read_stderr(err_file, &mut run);
     let _ = std::fs::remove_file(err_file);
@@ -283,18 +299,25 @@ fn watch(
     child: &mut std::process::Child,
     run: &mut Run,
     started: Instant,
+    (err_file, stderr_cap): (&Path, u64),
     stop: &dyn Fn() -> bool,
 ) {
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
             Ok(None) => {}
-            Err(_) => break None,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
         }
         let rss = rss_mib(child.id());
         run.peak_rss_mib = run.peak_rss_mib.max(rss);
         if rss > RSS_CAP_MIB {
             run.runaway = true;
+        } else if std::fs::metadata(err_file).is_ok_and(|m| m.len() > stderr_cap) {
+            run.overflow = true;
         } else if started.elapsed() > TIMEOUT {
             run.timed_out = true;
         } else if stop() {
@@ -314,7 +337,7 @@ fn watch(
             run.signal = s.signal();
         }
     }
-    if run.runaway || run.timed_out || run.cancelled {
+    if run.runaway || run.overflow || run.timed_out || run.cancelled {
         run.signal = None;
     }
 }
@@ -500,6 +523,51 @@ mod tests {
         assert!(retry_due(1, 0, 600));
         assert!(!retry_due(2, 0, 1199));
         assert!(retry_due(30, 0, RETRY_CAP_SECS));
+    }
+
+    #[test]
+    fn a_run_that_never_started_is_inconclusive_not_corrupt() {
+        let v = classify(&Run::default(), "decode", 1);
+        assert_eq!(
+            (v.completed, v.clean, v.reason.as_str()),
+            (false, false, "not_run")
+        );
+        assert_eq!(v.errors, 0);
+        let t = tempfile::tempdir().unwrap();
+        let r = run_monitored(
+            &["/nonexistent/ffmpeg"],
+            &t.path().join("err"),
+            &|| false,
+            &|_| {},
+        );
+        assert!(!classify(&r, "decode", 1).completed);
+        let r = run_monitored(
+            &["true"],
+            &t.path().join("no-such-dir/err"),
+            &|| false,
+            &|_| {},
+        );
+        assert!(!classify(&r, "decode", 1).completed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stderr_flood_is_cut_off_and_judged() {
+        let t = tempfile::tempdir().unwrap();
+        let r = run_capped(
+            &[
+                "sh",
+                "-c",
+                "i=0; while [ $i -lt 20000 ]; do echo 'error while decoding' >&2; i=$((i+1)); done; exec sleep 30",
+            ],
+            &t.path().join("err"),
+            1 << 16,
+            &|| false,
+            &|_| {},
+        );
+        assert!(r.overflow && !r.cancelled);
+        let v = classify(&r, "decode", 1);
+        assert!(v.completed && !v.clean);
     }
 
     #[cfg(unix)]
