@@ -3,7 +3,7 @@
 //! its own job.
 
 use super::arbiter::Arbiter;
-use super::queue::{Job, JobNote, JobResult, JobState};
+use super::queue::{Job, JobNote, JobResult};
 use super::{Library, LineKind, Running, transcript};
 use crate::server::config::Config;
 use freemkv_engine::{Event, Level, Progress, Sink};
@@ -110,7 +110,7 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
         done.store(true, Ordering::SeqCst);
         ending
     });
-    sink.close_open_line(matches!(ending, Ending::Done { .. }));
+    sink.close_open_line();
     finish(lib, &job, ending, started.elapsed(), &sink);
     lib.set_running(|r| *r = None);
 }
@@ -327,7 +327,13 @@ fn error_text(e: &std::io::Error) -> String {
     if text == key {
         return raw;
     }
-    let text = crate::strings::fmt(&key, &[("detail", data), ("hash", data)]);
+    // E6000's status/sense hex tail is diagnostic noise; the CLI shows only the sector.
+    let detail = if code == 6000 {
+        data.split_whitespace().next().unwrap_or(data)
+    } else {
+        data
+    };
+    let text = crate::strings::fmt(&key, &[("detail", detail), ("hash", data)]);
     let level = format!("{}: ", error_word());
     format!("E{code} {}", text.strip_prefix(&level).unwrap_or(&text))
 }
@@ -486,7 +492,7 @@ impl JobSink<'_> {
 
     // End the job's transcript the way a terminal leaves it: an unfinished
     // "Opening ..." line, and the last progress line, stay on screen.
-    fn close_open_line(&self, _ok: bool) {
+    fn close_open_line(&self) {
         let (opened, progress) = {
             let mut t = self.term();
             (t.opened, std::mem::take(&mut t.progress))
@@ -745,8 +751,7 @@ pub fn audit_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbit
 
 // A remux running, or queued and not paused, goes before an audit; so does any rip.
 fn remux_or_rip_busy(lib: &Library, arbiter: &Arbiter) -> bool {
-    let q = lib.queue.snapshot();
-    arbiter.rip_active() || q.running().is_some() || (!q.paused && q.count(JobState::Queued) > 0)
+    arbiter.rip_active() || lib.queue.has_work()
 }
 
 // Audit one file: the quick read, then (deep on) the full decode.
@@ -757,7 +762,19 @@ pub(crate) fn audit_one(
     deep_on: bool,
     stop: &dyn Fn() -> bool,
 ) {
+    audit_with(lib, path, library, deep_on, stop, super::deep::ffmpeg());
+}
+
+fn audit_with(
+    lib: &Library,
+    path: &Path,
+    library: &Path,
+    deep_on: bool,
+    stop: &dyn Fn() -> bool,
+    ffmpeg: Option<std::path::PathBuf>,
+) {
     let Some(sig) = super::probe::FileSig::stat(path) else {
+        lib.audits.finish();
         return;
     };
     let title = lib
@@ -769,32 +786,29 @@ pub(crate) fn audit_one(
         .unwrap_or_else(|| super::index::mkv_title(library, path));
     lib.audits.start(path, title);
     lib.touch_index();
+    // A "Stop all" that came after the file was taken but before it started.
+    if lib.audits.cancelled() {
+        lib.audits.finish();
+        return;
+    }
     let now = crate::server::util::epoch_secs;
-    match super::probe::audit_fast(path) {
-        Some(report) => {
-            let duration = report.duration_secs;
-            lib.audits.record_fast(path, sig, report, now());
-            let ffmpeg = super::deep::ffmpeg();
-            if let Some(ffmpeg) =
-                ffmpeg.filter(|_| deep_on && lib.audits.deep_due_for(path, sig, now()))
-            {
-                tracing::info!(file = %path.display(), "deep audit: decoding");
-                let _ = std::fs::create_dir_all(&lib.log_dir);
-                let err_file = lib.log_dir.join("deep-audit.stderr");
-                let progress =
-                    |stage: &'static str, secs: f64| lib.audits.progress(stage, secs, duration);
-                match super::deep::full_decode(&ffmpeg, path, library, &err_file, stop, &progress) {
-                    Some(v) => lib.audits.record_deep(path, sig, v, now()),
-                    None if !lib.audits.cancelled() => lib.audits.requeue_front(path.to_path_buf()),
-                    None => {}
-                }
+    // On a storage failure (no report) the next refill queues the file again, a minute on.
+    if let Some(report) = super::probe::audit_fast(path) {
+        let duration = report.duration_secs;
+        lib.audits.record_fast(path, sig, report, now());
+        if let Some(ffmpeg) =
+            ffmpeg.filter(|_| deep_on && lib.audits.deep_due_for(path, sig, now()))
+        {
+            tracing::info!(file = %path.display(), "deep audit: decoding");
+            let _ = std::fs::create_dir_all(&lib.log_dir);
+            let err_file = lib.log_dir.join("deep-audit.stderr");
+            let progress =
+                |stage: &'static str, secs: f64| lib.audits.progress(stage, secs, duration);
+            match super::deep::full_decode(&ffmpeg, path, library, &err_file, stop, &progress) {
+                Some(v) => lib.audits.record_deep(path, sig, v, now()),
+                None if !lib.audits.cancelled() => lib.audits.requeue_front(path.to_path_buf()),
+                None => {}
             }
-        }
-        // The storage failed, not the file: try again after the queue.
-        None => {
-            lib.audits.finish();
-            lib.audits.enqueue([path.to_path_buf()]);
-            return;
         }
     }
     lib.audits.finish();
@@ -1178,6 +1192,40 @@ mod tests {
     }
 
     #[test]
+    fn a_disc_read_failure_shows_the_sector_not_the_sense_bytes() {
+        let e = std::io::Error::other("E6000: 7476928 0x02/0x03/0x11/0x00");
+        let text = error_text(&e);
+        assert!(text.contains("7476928"), "{text}");
+        assert!(!text.contains("0x02"), "{text}");
+    }
+
+    #[test]
+    fn a_stop_after_the_file_was_taken_skips_its_audit() {
+        let (_t, lib, dirs) = library_with(&["A"]);
+        let path = dirs.library.join("A/A.mkv");
+        lib.audits.enqueue([path.clone()]);
+        assert_eq!(lib.audits.next().as_ref(), Some(&path));
+        lib.audits.stop_all();
+        audit_one(&lib, &path, &dirs.library, false, &|| false);
+        let sig = super::super::probe::FileSig::stat(&path).unwrap();
+        assert!(lib.audits.report(&path, sig).is_none());
+        assert!(lib.audits.status().running.is_none());
+    }
+
+    #[test]
+    fn a_file_the_storage_cannot_read_is_not_requeued_at_once() {
+        let (_t, lib, dirs) = library_with(&[]);
+        // A directory stats fine but cannot be read as a file.
+        let odd = dirs.library.join("odd.mkv");
+        std::fs::create_dir_all(&odd).unwrap();
+        lib.audits.enqueue([odd.clone()]);
+        let path = lib.audits.next().unwrap();
+        audit_one(&lib, &path, &dirs.library, false, &|| false);
+        assert!(!lib.audits.is_queued(&odd), "left for the next refill");
+        assert!(lib.audits.status().running.is_none());
+    }
+
+    #[test]
     fn the_watchdog_only_ever_cancels_its_own_remux() {
         assert_eq!(stall_action(10, false, false), StallAction::None);
         assert_eq!(
@@ -1199,5 +1247,180 @@ mod tests {
             !body.contains(concat!("process", "::exit")),
             "a remux never exits the daemon"
         );
+    }
+
+    fn job_for(dir: &Path, id: u64) -> Job {
+        Job {
+            id,
+            title: "A".into(),
+            iso: dir.join("missing.iso"),
+            target: dir.join("A/A.mkv"),
+            replace: true,
+            state: JobState::Running,
+            queued_at: 0,
+            started_at: None,
+            finished_at: None,
+            note: None,
+            failure: None,
+        }
+    }
+
+    #[test]
+    fn a_stalled_or_stopped_remux_is_told_to_cancel_and_ends_as_what_stopped_it() {
+        let t = tempfile::tempdir().unwrap();
+        let (_l, lib, _d) = library_with(&[]);
+        let arbiter = Arbiter::new();
+        let sink = test_sink(&lib, &arbiter);
+        let cfg = Config::default();
+        let job = job_for(t.path(), 7);
+        assert!(!sink.should_cancel());
+        let ending = remux(&job, &cfg, &sink);
+        assert!(matches!(ending, Ending::Failed(_)), "{ending:?}");
+
+        lib.stall_cancel.store(true, Ordering::SeqCst);
+        assert!(
+            sink.should_cancel(),
+            "the watchdog's flag reaches the engine"
+        );
+        let ending = remux(&job, &cfg, &sink);
+        assert!(
+            matches!(ending, Ending::Stopped(JobNote::Stalled)),
+            "{ending:?}"
+        );
+
+        lib.cancel_job.store(7, Ordering::SeqCst);
+        let ending = remux(&job, &cfg, &sink);
+        assert!(
+            matches!(ending, Ending::Stopped(JobNote::Cancelled)),
+            "{ending:?}"
+        );
+
+        lib.cancel_job.store(0, Ordering::SeqCst);
+        lib.stall_cancel.store(false, Ordering::SeqCst);
+        let slot = arbiter.rip();
+        let ending = remux(&job, &cfg, &sink);
+        drop(slot);
+        assert!(
+            matches!(ending, Ending::Stopped(JobNote::Preempted)),
+            "{ending:?}"
+        );
+    }
+
+    #[test]
+    fn the_watchdog_raises_the_stall_flag_for_a_silent_remux() {
+        let (_t, lib, _d) = library_with(&[]);
+        let arbiter = Arbiter::new();
+        let sink = test_sink(&lib, &arbiter); // last activity: the epoch
+        let done = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| watchdog(&lib, 7, &sink, &done));
+            std::thread::sleep(Duration::from_millis(900));
+            done.store(true, Ordering::SeqCst);
+        });
+        assert!(lib.stall_cancel.load(Ordering::SeqCst));
+        assert!(
+            lib.console_since(0)
+                .iter()
+                .any(|l| l.text.contains("cancelling this remux"))
+        );
+    }
+
+    #[test]
+    fn a_stalled_job_fails_and_an_interrupted_one_goes_back_in_the_queue() {
+        let (_t, lib, dirs) = library_with(&["A", "B"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        let lines = Lines(Mutex::new(Vec::new()));
+        let a = lib.queue.claim_next().unwrap();
+        finish(
+            &lib,
+            &a,
+            Ending::Stopped(JobNote::Stalled),
+            Duration::ZERO,
+            &lines,
+        );
+        let q = lib.queue.snapshot();
+        let done = q.jobs.iter().find(|j| j.id == a.id).unwrap();
+        assert_eq!(done.state, JobState::Failed);
+        assert_eq!(done.failure.as_ref().unwrap().message, "stalled");
+        assert!(lines.0.lock().unwrap()[0].contains("no progress"));
+
+        let b = lib.queue.claim_next().unwrap();
+        finish(
+            &lib,
+            &b,
+            Ending::Stopped(JobNote::Interrupted),
+            Duration::ZERO,
+            &lines,
+        );
+        let q = lib.queue.snapshot();
+        let back = q.jobs.iter().find(|j| j.id == b.id).unwrap();
+        assert_eq!(
+            (back.state, back.note),
+            (JobState::Queued, Some(JobNote::Interrupted))
+        );
+        assert!(!q.results.contains_key(&*b.target.to_string_lossy()));
+    }
+
+    #[test]
+    fn audits_yield_to_rips_and_to_unpaused_remuxes() {
+        let (_t, lib, _d) = library_with(&[]);
+        let arbiter = Arbiter::new();
+        assert!(!remux_or_rip_busy(&lib, &arbiter));
+        let slot = arbiter.rip();
+        assert!(remux_or_rip_busy(&lib, &arbiter));
+        drop(slot);
+        lib.queue.add(vec![NewJob {
+            title: "A".into(),
+            iso: "/i/A.iso".into(),
+            target: "/m/A/A.mkv".into(),
+            replace: true,
+        }]);
+        assert!(remux_or_rip_busy(&lib, &arbiter));
+        lib.queue.set_paused(true);
+        assert!(
+            !remux_or_rip_busy(&lib, &arbiter),
+            "a paused queue yields the disks"
+        );
+    }
+
+    #[cfg(unix)]
+    fn fake_ffmpeg(dir: &Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let bin = dir.join("ffmpeg");
+        std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_decode_that_is_interrupted_goes_back_first_and_a_finished_one_is_recorded() {
+        let (t, lib, dirs) = library_with(&["A", "B"]);
+        let (a, b) = (dirs.library.join("A/A.mkv"), dirs.library.join("B/B.mkv"));
+        let sig = super::super::probe::FileSig::stat(&a).unwrap();
+        lib.audits.enqueue([b.clone()]);
+        // `exec` so the kill reaches the sleep itself.
+        let slow = fake_ffmpeg(t.path(), "exec sleep 30");
+        audit_with(&lib, &a, &dirs.library, true, &|| true, Some(slow));
+        assert_eq!(
+            lib.audits.next().as_ref(),
+            Some(&a),
+            "the interrupted file is first"
+        );
+        assert!(
+            lib.audits.report(&a, sig).is_some(),
+            "its quick audit stands"
+        );
+        assert_eq!(
+            lib.audits.deep_view(&a, sig, true).unwrap().state,
+            "pending"
+        );
+        lib.audits.finish();
+
+        let quick = fake_ffmpeg(t.path(), "exit 0");
+        audit_with(&lib, &a, &dirs.library, true, &|| false, Some(quick));
+        assert_eq!(lib.audits.deep_view(&a, sig, true).unwrap().state, "clean");
+        assert!(lib.audits.status().running.is_none());
     }
 }

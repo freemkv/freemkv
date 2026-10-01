@@ -15,18 +15,23 @@ pub struct TmdbResult {
 }
 
 // Shared agent for all TMDB calls: ureq sets NO connect/read timeout by default, so a hung
-// connection would wedge the rip thread or a web handler indefinitely.
-static AGENT: once_cell::sync::Lazy<ureq::Agent> = once_cell::sync::Lazy::new(|| {
+// connection would wedge the rip thread or a web handler indefinitely. The body gets its own
+// bound: headers arriving in time says nothing about a body that then stalls.
+static AGENT: once_cell::sync::Lazy<ureq::Agent> =
+    once_cell::sync::Lazy::new(|| build_agent(std::time::Duration::from_secs(10)));
+
+fn build_agent(recv_body: std::time::Duration) -> ureq::Agent {
     let config = ureq::config::Config::builder()
         .timeout_connect(Some(std::time::Duration::from_secs(5)))
         .timeout_recv_response(Some(std::time::Duration::from_secs(10)))
+        .timeout_recv_body(Some(recv_body))
         // Follow NO redirects: the URL carries the operator's api_key in its
         // query string, so a 3xx (TMDB compromised/tampered on-path) would
         // hand that key to an arbitrary host; `fetch_multi` reports it as "no result".
         .max_redirects(0)
         .build();
     ureq::Agent::new_with_config(config)
-});
+}
 
 // Build the `search/multi` URL. Both `api_key` and `query` are percent-encoded:
 // a stray space/&/#/= in a copy-pasted key would otherwise yield a malformed
@@ -72,8 +77,11 @@ fn read_capped_json(resp: ureq::http::Response<ureq::Body>) -> std::io::Result<s
 // out 401 (bad key, throttled warning) from other status/transport errors
 // instead of collapsing every failure to "no results", hiding the cause.
 fn fetch_multi(query: &str, api_key: &str) -> Option<serde_json::Value> {
-    let url = search_multi_url(query, api_key);
-    match AGENT.get(&url).call() {
+    fetch_url(&search_multi_url(query, api_key), query)
+}
+
+fn fetch_url(url: &str, query: &str) -> Option<serde_json::Value> {
+    match AGENT.get(url).call() {
         Ok(resp) => match read_capped_json(resp) {
             Ok(json) => Some(json),
             Err(e) => {
@@ -116,11 +124,11 @@ fn warn_bad_key_throttled() {
             .is_ok()
     {
         tracing::warn!(
-            "tmdb: API key rejected (HTTP 401) — check the TMDB_API_KEY in Settings; \
+            "tmdb: API key rejected (HTTP 401) — check the TMDB API key in Settings; \
              titles will fall through to the needs-review queue until it is fixed"
         );
         crate::server::log::syslog(
-            "TMDB API key rejected (HTTP 401) — check TMDB_API_KEY in Settings",
+            "TMDB API key rejected (HTTP 401) — check the TMDB API key in Settings",
         );
     }
 }
@@ -137,6 +145,14 @@ pub fn lookup(label: &str, api_key: &str) -> Option<TmdbResult> {
     if api_key.is_empty() {
         return None;
     }
+    lookup_with(label, |variant| fetch_multi(variant, api_key))
+}
+
+// `lookup`'s variant loop over any `search/multi` source.
+fn lookup_with(
+    label: &str,
+    fetch: impl Fn(&str) -> Option<serde_json::Value>,
+) -> Option<TmdbResult> {
     // A separator-only label yields no query variants; short-circuit rather
     // than firing `query=&...` (TMDB answers HTTP 422). A season marker
     // ("… Season 5") means TV — bias the pick so it can't be outranked.
@@ -146,7 +162,7 @@ pub fn lookup(label: &str, api_key: &str) -> Option<TmdbResult> {
         if variant.trim().is_empty() {
             continue;
         }
-        let Some(resp) = fetch_multi(&variant, api_key) else {
+        let Some(resp) = fetch(&variant) else {
             continue;
         };
         let Some(results) = resp["results"].as_array() else {
@@ -736,11 +752,15 @@ fn runtime_plausible(secs: f64, ep_min: u16) -> bool {
     (title_min - ep_min as f64).abs() <= tol
 }
 
+// A better offset must beat the fallback's fit by this many minutes of average runtime
+// distance. TMDB runtimes are whole minutes and crowd-sourced, so less is noise.
+const ALIGN_MIN_GAIN_MIN: f64 = 1.0;
+
 /// Choose the starting episode number for a disc by aligning its title runtimes against the
 /// TMDB season's episode runtimes (instead of counting an offset), so a disc with any
 /// distinctively-timed episode is pinned to its true position regardless of how earlier discs
 /// split. Returns `fallback` on any absence of signal (no episodes/runtimes, a disc that can't
-/// fit, or a tie).
+/// fit, a tie, or no offset clearly better than the fallback).
 pub fn align_disc_offset(title_secs: &[f64], episodes: &[Episode], fallback: u16) -> u16 {
     let count = title_secs.len();
     if count == 0 || episodes.is_empty() {
@@ -769,6 +789,7 @@ pub fn align_disc_offset(title_secs: &[f64], episodes: &[Episode], fallback: u16
     let mut best_start = fallback;
     let mut best_avg = f64::INFINITY;
     let mut best_signal = 0u32;
+    let mut fallback_avg: Option<f64> = None;
     for start in min_ep..=last_start {
         let mut dist = 0.0f64;
         let mut signal = 0u32;
@@ -787,6 +808,9 @@ pub fn align_disc_offset(title_secs: &[f64], episodes: &[Episode], fallback: u16
             continue;
         }
         let avg = dist / signal as f64;
+        if start == fallback {
+            fallback_avg = Some(avg);
+        }
         let closer =
             (start as i32 - fallback as i32).abs() < (best_start as i32 - fallback as i32).abs();
         let better =
@@ -798,6 +822,9 @@ pub fn align_disc_offset(title_secs: &[f64], episodes: &[Episode], fallback: u16
         }
     }
     if best_signal == 0 {
+        return fallback;
+    }
+    if fallback_avg.is_some_and(|fa| fa - best_avg < ALIGN_MIN_GAIN_MIN) {
         return fallback;
     }
     best_start
@@ -1148,9 +1175,6 @@ mod tests {
         );
     }
 
-    // Verify the error_kind string produced for transport/status errors in
-    // fetch_multi never contains the api_key (which lives in the URL query
-    // string); replicates fetch_multi's summary logic so a future edit is caught.
     #[test]
     fn tmdb_agent_follows_no_redirects() {
         // The request URL carries the api_key in its query string, so
@@ -1164,37 +1188,61 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Default)]
+    struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // A BadUri failure whose own Display prints the rejected URL (and so the api_key in
+    // its query string) must reach the log only as a fixed label.
     #[test]
-    fn fetch_multi_error_summary_no_api_key_leak() {
-        // Verify the Status variant: just a code, no URL.
-        // We can't construct a live ureq::Error::Status without a server, but
-        // we can assert the format! template that fetch_multi emits.
-        let api_key = "my_secret_api_key";
-        let url = search_multi_url("some query", api_key);
-        // The URL must contain the key (it's in the query string) — that's the
-        // leak risk this test guards against.
-        assert!(
-            url.contains(api_key) || url.contains("my_secret_api_key"),
-            "precondition: api_key must be in the URL"
+    fn a_transport_failure_never_logs_the_api_key() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let buf = LogBuf::default();
+        let sink = buf.clone();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(move || sink.clone())
+                .with_ansi(false),
         );
+        let got = tracing::subscriber::with_default(subscriber, || {
+            fetch_url("api_key=SECRETKEY123", "q")
+        });
+        assert!(got.is_none());
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(out.contains("tmdb: request failed"), "logged: {out}");
+        assert!(!out.contains("SECRETKEY123"), "key leaked: {out}");
+    }
 
-        // The Status arm produces "HTTP {code}" with no URL in it.
-        let status_summary = format!("HTTP {}", 429u16);
+    #[test]
+    fn a_body_that_stalls_after_the_headers_times_out() {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            let _ = c.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{");
+            std::thread::sleep(std::time::Duration::from_secs(4));
+        });
+        let agent = build_agent(std::time::Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        let resp = agent
+            .get(format!("http://127.0.0.1:{port}/"))
+            .call()
+            .unwrap();
+        assert!(read_capped_json(resp).is_err());
         assert!(
-            !status_summary.contains(api_key),
-            "api_key leaked in status summary: {status_summary}"
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "the body read has its own deadline"
         );
-        assert!(
-            !status_summary.contains("themoviedb.org"),
-            "URL leaked in status summary: {status_summary}"
-        );
-
-        // A representative transport kind string also must not contain the key.
-        let transport_summary = "connection failed";
-        assert!(
-            !transport_summary.contains(api_key),
-            "api_key leaked in transport summary"
-        );
+        server.join().unwrap();
     }
 
     // --- read_capped_bytes: the DoS-cap boundary itself ----------------------
@@ -1657,5 +1705,123 @@ mod tests {
             !is_confident_match("ALIEN_3", "Alien", 1979),
             "a sequel label must never confidently resolve to the original film"
         );
+    }
+
+    #[test]
+    fn urlencoded_percent_encodes_each_utf8_byte() {
+        assert_eq!(urlencoded("Amélie"), "Am%C3%A9lie");
+        assert_eq!(urlencoded("千"), "%E5%8D%83");
+    }
+
+    #[test]
+    fn parse_result_carries_poster_overview_id_and_the_right_date() {
+        let movie = serde_json::json!({"media_type": "movie", "title": "Heat", "id": 949,
+            "release_date": "1995-12-15", "first_air_date": "2001-01-01",
+            "poster_path": "/h.jpg", "overview": "A heist.", "popularity": 3.0});
+        let (r, pop) = parse_result(&movie).unwrap();
+        assert_eq!(
+            (r.year, r.tmdb_id, r.overview.as_str()),
+            (1995, 949, "A heist.")
+        );
+        assert_eq!(r.poster_url, "https://image.tmdb.org/t/p/w300/h.jpg");
+        assert_eq!(pop, 3.0);
+        let tv = serde_json::json!({"media_type": "tv", "name": "Severance", "id": 95396,
+            "release_date": "1999-01-01", "first_air_date": "2022-02-18"});
+        let (r, _) = parse_result(&tv).unwrap();
+        assert_eq!(
+            (r.year, r.tmdb_id, r.title.as_str()),
+            (2022, 95396, "Severance")
+        );
+        let slashless = serde_json::json!({"media_type": "movie", "title": "X",
+            "poster_path": "h.jpg"});
+        assert_eq!(parse_result(&slashless).unwrap().0.poster_url, "");
+        let untitled = serde_json::json!({"media_type": "movie", "title": ""});
+        assert!(parse_result(&untitled).is_none());
+    }
+
+    #[test]
+    fn season_and_disc_numbers_are_one_to_ninety_nine() {
+        assert_eq!(season_from_label("Show Season 0"), None);
+        assert_eq!(season_from_label("Show Season 99"), Some(99));
+        assert_eq!(season_from_label("Show Season 100"), None);
+        assert_eq!(season_from_label("Show S2019"), None);
+        assert_eq!(season_from_label("Show Season 05"), Some(5));
+        assert_eq!(season_from_label("Show Season 99999999"), None);
+        assert_eq!(disc_from_label("Show Disc 0"), None);
+        assert_eq!(disc_from_label("Show D100"), None);
+        assert_eq!(disc_from_label("Show D2"), Some(2));
+    }
+
+    #[test]
+    fn the_runtime_tolerance_is_the_larger_of_five_minutes_and_a_quarter() {
+        // 25% of 45 is 11.25: a gap of 8 is fine, 12 is not.
+        assert!(runtime_plausible(53.0 * 60.0, 45));
+        assert!(!runtime_plausible(57.0 * 60.0, 45));
+        // 25% of 10 is 2.5, so the 5-minute floor decides: 4 is fine, 6 is not.
+        assert!(runtime_plausible(14.0 * 60.0, 10));
+        assert!(!runtime_plausible(16.0 * 60.0, 10));
+    }
+
+    #[test]
+    fn a_season_word_inside_a_longer_word_is_not_a_season_marker() {
+        assert_eq!(strip_trailing_season("offseason 2"), None);
+        assert_eq!(strip_trailing_season("postseason 3"), None);
+        assert_eq!(strip_trailing_season("off season 2"), Some("off"));
+        assert_eq!(strip_trailing_season("season 2"), Some(""));
+    }
+
+    #[test]
+    fn align_keeps_the_fallback_unless_another_offset_is_clearly_better() {
+        // Runtimes differ by under a minute: noise, not a reason to renumber disc 2.
+        let eps = season(&[22, 23, 22, 22]);
+        let disc2 = [22.8 * 60.0, 22.8 * 60.0];
+        assert_eq!(align_disc_offset(&disc2, &eps, 3), 3);
+    }
+
+    fn results_for(title: &str, year: &str, kind: &str) -> serde_json::Value {
+        let (name, date) = if kind == "tv" {
+            ("name", "first_air_date")
+        } else {
+            ("title", "release_date")
+        };
+        serde_json::json!({"results": [{"media_type": kind, name: title, date: year,
+            "popularity": 1.0}]})
+    }
+
+    #[test]
+    fn lookup_returns_the_first_confident_variant_else_the_first_fallback() {
+        // "Heat UE" peels to "Heat". The full label finds a loose, undated guess; the
+        // peeled variant finds the exact dated film, which must win.
+        let found = lookup_with("HEAT_UE", |q| match q {
+            "Heat Ue" => Some(results_for("Heat Wave", "", "movie")),
+            "Heat" => Some(results_for("Heat", "1995-12-15", "movie")),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!((found.title.as_str(), found.year), ("Heat", 1995));
+        // No variant is confident: the first variant's guess is kept, not a later one.
+        let guess = lookup_with("HEAT_UE", |q| match q {
+            "Heat Ue" => Some(results_for("Heat Wave", "2001-01-01", "movie")),
+            "Heat" => Some(results_for("Heated", "2002-02-02", "movie")),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(guess.title, "Heat Wave");
+        // An exact title with no year is not confident either.
+        let undated = lookup_with("HEAT", |_| Some(results_for("Heat", "", "movie")));
+        assert_eq!(undated.unwrap().year, 0);
+    }
+
+    #[test]
+    fn lookup_prefers_the_series_for_a_season_marked_label() {
+        let both = serde_json::json!({"results": [
+            {"media_type": "movie", "title": "Longacre", "release_date": "2003-01-01",
+             "popularity": 500.0},
+            {"media_type": "tv", "name": "Longacre", "first_air_date": "2012-01-08",
+             "popularity": 30.0}]});
+        let tv = lookup_with("Longacre Season 5", |_| Some(both.clone())).unwrap();
+        assert_eq!(tv.media_type, "tv");
+        let film = lookup_with("Longacre", |_| Some(both.clone())).unwrap();
+        assert_eq!(film.media_type, "movie");
     }
 }

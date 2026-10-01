@@ -19,6 +19,8 @@ const TIMEOUT: Duration = Duration::from_secs(3 * 3600);
 const RETRY_BASE_SECS: u64 = 600;
 const RETRY_CAP_SECS: u64 = 6 * 3600;
 const STDERR_TAIL_BYTES: u64 = 2_000_000;
+// ffmpeg is stopped and the file judged once its stderr passes this.
+const STDERR_CAP_BYTES: u64 = 256 << 20;
 
 /// One ffmpeg run's outcome, judged. Carried whole to the details dialog.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -116,6 +118,8 @@ pub struct Run {
     pub lines: Vec<String>,
     pub peak_rss_mib: u64,
     pub runaway: bool,
+    /// Its stderr outgrew the cap: a desync flood no clean file produces.
+    pub overflow: bool,
     pub timed_out: bool,
     pub cancelled: bool,
     pub flood: u64,
@@ -134,13 +138,14 @@ pub fn classify(run: &Run, stage: &str, now: u64) -> Verdict {
     let signal = run.signal.map(signal_name);
     let (completed, clean, reason) = if run.runaway {
         (true, false, "memory_runaway")
+    } else if run.overflow {
+        (true, false, "stderr_overflow")
     } else if run.timed_out {
         (false, false, "timeout")
     } else if run.signal.is_some() {
         let oom = run.signal == Some(libc::SIGKILL);
         (false, false, if oom { "oom" } else { "killed" })
-    } else {
-        let rc = run.rc.unwrap_or(-1);
+    } else if let Some(rc) = run.rc {
         let clean = bad.is_empty() && !flood_corrupt && (rc == 0 || limited);
         let reason = if !bad.is_empty() {
             if stage == "demux" {
@@ -158,6 +163,9 @@ pub fn classify(run: &Run, stage: &str, now: u64) -> Verdict {
             "clean"
         };
         (true, clean, reason)
+    } else {
+        // No exit status: ffmpeg never ran, or could not be waited on. Says nothing of the file.
+        (false, false, "not_run")
     };
     let errors = if !bad.is_empty() {
         bad.len() as u64
@@ -224,9 +232,18 @@ pub fn run_monitored(
     stop: &dyn Fn() -> bool,
     on_secs: &(dyn Fn(f64) + Sync),
 ) -> Run {
+    run_capped(argv, err_file, STDERR_CAP_BYTES, stop, on_secs)
+}
+
+fn run_capped(
+    argv: &[&str],
+    err_file: &Path,
+    stderr_cap: u64,
+    stop: &dyn Fn() -> bool,
+    on_secs: &(dyn Fn(f64) + Sync),
+) -> Run {
     let mut run = Run::default();
     let Ok(err) = std::fs::File::create(err_file) else {
-        run.rc = Some(-1);
         run.lines = vec![format!("cannot create {}", err_file.display())];
         return run;
     };
@@ -251,7 +268,6 @@ pub fn run_monitored(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            run.rc = Some(-1);
             run.lines = vec![format!("cannot run {}: {e}", argv[0])];
             return run;
         }
@@ -271,7 +287,7 @@ pub fn run_monitored(
                 }
             });
         }
-        watch(&mut child, &mut run, started, stop);
+        watch(&mut child, &mut run, started, (err_file, stderr_cap), stop);
     });
     read_stderr(err_file, &mut run);
     let _ = std::fs::remove_file(err_file);
@@ -283,18 +299,25 @@ fn watch(
     child: &mut std::process::Child,
     run: &mut Run,
     started: Instant,
+    (err_file, stderr_cap): (&Path, u64),
     stop: &dyn Fn() -> bool,
 ) {
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
             Ok(None) => {}
-            Err(_) => break None,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
         }
         let rss = rss_mib(child.id());
         run.peak_rss_mib = run.peak_rss_mib.max(rss);
         if rss > RSS_CAP_MIB {
             run.runaway = true;
+        } else if std::fs::metadata(err_file).is_ok_and(|m| m.len() > stderr_cap) {
+            run.overflow = true;
         } else if started.elapsed() > TIMEOUT {
             run.timed_out = true;
         } else if stop() {
@@ -314,7 +337,7 @@ fn watch(
             run.signal = s.signal();
         }
     }
-    if run.runaway || run.timed_out || run.cancelled {
+    if run.runaway || run.overflow || run.timed_out || run.cancelled {
         run.signal = None;
     }
 }
@@ -502,6 +525,51 @@ mod tests {
         assert!(retry_due(30, 0, RETRY_CAP_SECS));
     }
 
+    #[test]
+    fn a_run_that_never_started_is_inconclusive_not_corrupt() {
+        let v = classify(&Run::default(), "decode", 1);
+        assert_eq!(
+            (v.completed, v.clean, v.reason.as_str()),
+            (false, false, "not_run")
+        );
+        assert_eq!(v.errors, 0);
+        let t = tempfile::tempdir().unwrap();
+        let r = run_monitored(
+            &["/nonexistent/ffmpeg"],
+            &t.path().join("err"),
+            &|| false,
+            &|_| {},
+        );
+        assert!(!classify(&r, "decode", 1).completed);
+        let r = run_monitored(
+            &["true"],
+            &t.path().join("no-such-dir/err"),
+            &|| false,
+            &|_| {},
+        );
+        assert!(!classify(&r, "decode", 1).completed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stderr_flood_is_cut_off_and_judged() {
+        let t = tempfile::tempdir().unwrap();
+        let r = run_capped(
+            &[
+                "sh",
+                "-c",
+                "i=0; while [ $i -lt 20000 ]; do echo 'error while decoding' >&2; i=$((i+1)); done; exec sleep 30",
+            ],
+            &t.path().join("err"),
+            1 << 16,
+            &|| false,
+            &|_| {},
+        );
+        assert!(r.overflow && !r.cancelled);
+        let v = classify(&r, "decode", 1);
+        assert!(v.completed && !v.clean);
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_runner_keeps_stderr_and_counts_floods() {
@@ -529,5 +597,93 @@ mod tests {
             &|t| seen.lock().unwrap().push(t),
         );
         assert_eq!(*seen.lock().unwrap(), [2.5]);
+    }
+
+    #[test]
+    fn a_nonzero_exit_without_error_lines_is_not_clean() {
+        let v = classify(&run(1, &[]), "decode", 1);
+        assert_eq!(
+            (v.completed, v.clean, v.reason.as_str(), v.errors),
+            (true, false, "nonzero_exit", 1)
+        );
+        let r = Run {
+            signal: Some(libc::SIGTERM),
+            ..Default::default()
+        };
+        let v = classify(&r, "decode", 1);
+        assert_eq!(
+            (v.completed, v.reason.as_str(), v.signal.as_deref()),
+            (false, "killed", Some("SIGTERM"))
+        );
+    }
+
+    // A fake ffmpeg: logs its arguments, prints `stderr_line`, exits `rc`.
+    #[cfg(unix)]
+    fn fake_ffmpeg(dir: &Path, stderr_line: &str, rc: i32) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (bin, log) = (dir.join("ffmpeg"), dir.join("calls.log"));
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\n{}exit {rc}\n",
+            log.display(),
+            if stderr_line.is_empty() {
+                String::new()
+            } else {
+                format!("echo '{stderr_line}' >&2\n")
+            }
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (bin, log)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_decode_demuxes_then_decodes_and_stops_at_the_first_bad_stage() {
+        let t = tempfile::tempdir().unwrap();
+        let mkv = t.path().join("A.mkv");
+        std::fs::write(&mkv, b"x").unwrap();
+        let err = t.path().join("err");
+        let (bin, log) = fake_ffmpeg(t.path(), "", 0);
+        let v = full_decode(&bin, &mkv, t.path(), &err, &|| false, &|_, _| {}).unwrap();
+        assert!(v.clean && v.completed, "{v:?}");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let calls: Vec<&str> = calls.lines().collect();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].contains("-map 0 -c copy"), "{calls:?}");
+        assert!(calls[1].contains("-map 0:v:0 -map 0:a?"), "{calls:?}");
+
+        std::fs::remove_file(&log).unwrap();
+        let (bin, log) = fake_ffmpeg(t.path(), "error while decoding", 1);
+        let v = full_decode(&bin, &mkv, t.path(), &err, &|| false, &|_, _| {}).unwrap();
+        assert_eq!(
+            (v.stage.as_str(), v.reason.as_str()),
+            ("demux", "demux_errors")
+        );
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+
+        assert!(full_decode(&bin, &mkv, t.path(), &err, &|| true, &|_, _| {}).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_while_the_share_is_gone_is_inconclusive_not_corrupt() {
+        let t = tempfile::tempdir().unwrap();
+        let err = t.path().join("err");
+        let (bin, _) = fake_ffmpeg(t.path(), "", 1);
+        let mkv = t.path().join("A.mkv");
+        std::fs::write(&mkv, b"x").unwrap();
+        let v = full_decode(&bin, &mkv, t.path(), &err, &|| false, &|_, _| {}).unwrap();
+        assert_eq!((v.completed, v.reason.as_str()), (true, "nonzero_exit"));
+        std::fs::remove_file(&mkv).unwrap();
+        let v = full_decode(&bin, &mkv, t.path(), &err, &|| false, &|_, _| {}).unwrap();
+        assert_eq!(
+            (v.completed, v.reason.as_str()),
+            (false, "media_unavailable")
+        );
+        assert_eq!(v.errors, 0);
+        std::fs::write(&mkv, b"x").unwrap();
+        let gone = t.path().join("no-library");
+        let v = full_decode(&bin, &mkv, &gone, &err, &|| false, &|_, _| {}).unwrap();
+        assert!(!v.completed);
     }
 }
