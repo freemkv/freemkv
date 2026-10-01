@@ -1108,9 +1108,9 @@ pub(crate) fn validate_fetch_url(url: &str) -> Result<Vec<SocketAddr>, String> {
     Ok(addrs)
 }
 
-// Validate an operator network output target against the SSRF guard.
-// Unlike validate_fetch_url the target is a bare host:port (no scheme) —
-// libfreemkv streams decrypted disc content to it — same blocked-address rule.
+// Validate an operator network output target. A bare host:port (no scheme);
+// libfreemkv streams to it, so its own rule decides: LAN and loopback are
+// fine, only addresses that can never be a peer are refused.
 pub(crate) fn validate_network_target(target: &str) -> Result<(), String> {
     let target = target.trim();
     if target.is_empty() {
@@ -1147,11 +1147,8 @@ pub(crate) fn validate_network_target(target: &str) -> Result<(), String> {
         return Err(RESOLVE_NO_ADDRS_MSG.to_string());
     }
     for a in &addrs {
-        if is_blocked_ip(&a.ip()) {
-            return Err(format!(
-                "refusing to stream to non-public address {} (SSRF guard)",
-                a.ip()
-            ));
+        if libfreemkv::mux::is_blocked_ip(a.ip()) {
+            return Err(format!("refusing to stream to invalid address {}", a.ip()));
         }
     }
     Ok(())
@@ -3769,21 +3766,28 @@ mod web_tests {
     }
 
     #[test]
-    fn validate_network_target_rejects_internal_hosts() {
-        // Bare host:port (no scheme). Internal/metadata literals resolve
-        // without DNS and must be rejected — at rip time decrypted content
-        // streams here.
-        assert!(validate_network_target("169.254.169.254:80").is_err());
-        assert!(validate_network_target("127.0.0.1:9000").is_err());
-        assert!(validate_network_target(&format!("{}.{}.{}.{}:9000", 10, 0, 0, 5)).is_err());
-        assert!(validate_network_target(&format!("{}.{}.{}.{}:9000", 192, 168, 0, 1)).is_err());
-        assert!(validate_network_target("[::1]:9000").is_err());
-        // RFC5737 documentation range is non-public and blocked.
-        assert!(validate_network_target("198.51.100.10:9000").is_err());
+    fn validate_network_target_matches_library_rule() {
+        // LAN, loopback, link-local, ULA and CGNAT are valid network:// peers.
+        let ok = |t: &str| assert!(validate_network_target(t).is_ok(), "{t} must be accepted");
+        ok("127.0.0.1:9000");
+        ok(&format!("{}.{}.{}.{}:9000", 10, 0, 0, 5));
+        ok(&format!("{}.{}.{}.{}:9000", 192, 168, 0, 1));
+        ok("169.254.169.254:80");
+        ok("100.64.0.1:9000");
+        ok("[::1]:9000");
+        ok("[fd12::1]:9000");
+        // Only addresses that can never be a peer are refused.
+        let bad = |t: &str| assert!(validate_network_target(t).is_err(), "{t} must be refused");
+        bad("0.0.0.0:9000");
+        bad("224.0.0.1:9000");
+        bad("255.255.255.255:9000");
+        bad("240.0.0.1:9000");
+        bad("[::]:9000");
+        bad("[ff02::1]:9000");
         // Malformed / missing port.
-        assert!(validate_network_target("nas.example.com").is_err());
-        assert!(validate_network_target("169.254.169.254").is_err());
-        assert!(validate_network_target("").is_err());
+        bad("nas.example.com");
+        bad("169.254.169.254");
+        bad("");
     }
 
     #[test]
