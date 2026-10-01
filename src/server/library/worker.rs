@@ -3,7 +3,7 @@
 //! its own job.
 
 use super::arbiter::Arbiter;
-use super::queue::{Job, JobNote, JobResult, JobState};
+use super::queue::{Job, JobNote, JobResult};
 use super::{Library, LineKind, Running, transcript};
 use crate::server::config::Config;
 use freemkv_engine::{Event, Level, Progress, Sink};
@@ -110,7 +110,7 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
         done.store(true, Ordering::SeqCst);
         ending
     });
-    sink.close_open_line(matches!(ending, Ending::Done { .. }));
+    sink.close_open_line();
     finish(lib, &job, ending, started.elapsed(), &sink);
     lib.set_running(|r| *r = None);
 }
@@ -327,7 +327,13 @@ fn error_text(e: &std::io::Error) -> String {
     if text == key {
         return raw;
     }
-    let text = crate::strings::fmt(&key, &[("detail", data), ("hash", data)]);
+    // E6000's status/sense hex tail is diagnostic noise; the CLI shows only the sector.
+    let detail = if code == 6000 {
+        data.split_whitespace().next().unwrap_or(data)
+    } else {
+        data
+    };
+    let text = crate::strings::fmt(&key, &[("detail", detail), ("hash", data)]);
     let level = format!("{}: ", error_word());
     format!("E{code} {}", text.strip_prefix(&level).unwrap_or(&text))
 }
@@ -486,7 +492,7 @@ impl JobSink<'_> {
 
     // End the job's transcript the way a terminal leaves it: an unfinished
     // "Opening ..." line, and the last progress line, stay on screen.
-    fn close_open_line(&self, _ok: bool) {
+    fn close_open_line(&self) {
         let (opened, progress) = {
             let mut t = self.term();
             (t.opened, std::mem::take(&mut t.progress))
@@ -745,8 +751,7 @@ pub fn audit_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbit
 
 // A remux running, or queued and not paused, goes before an audit; so does any rip.
 fn remux_or_rip_busy(lib: &Library, arbiter: &Arbiter) -> bool {
-    let q = lib.queue.snapshot();
-    arbiter.rip_active() || q.running().is_some() || (!q.paused && q.count(JobState::Queued) > 0)
+    arbiter.rip_active() || lib.queue.has_work()
 }
 
 // Audit one file: the quick read, then (deep on) the full decode.
@@ -758,6 +763,7 @@ pub(crate) fn audit_one(
     stop: &dyn Fn() -> bool,
 ) {
     let Some(sig) = super::probe::FileSig::stat(path) else {
+        lib.audits.finish();
         return;
     };
     let title = lib
@@ -769,32 +775,30 @@ pub(crate) fn audit_one(
         .unwrap_or_else(|| super::index::mkv_title(library, path));
     lib.audits.start(path, title);
     lib.touch_index();
+    // A "Stop all" that came after the file was taken but before it started.
+    if lib.audits.cancelled() {
+        lib.audits.finish();
+        return;
+    }
     let now = crate::server::util::epoch_secs;
-    match super::probe::audit_fast(path) {
-        Some(report) => {
-            let duration = report.duration_secs;
-            lib.audits.record_fast(path, sig, report, now());
-            let ffmpeg = super::deep::ffmpeg();
-            if let Some(ffmpeg) =
-                ffmpeg.filter(|_| deep_on && lib.audits.deep_due_for(path, sig, now()))
-            {
-                tracing::info!(file = %path.display(), "deep audit: decoding");
-                let _ = std::fs::create_dir_all(&lib.log_dir);
-                let err_file = lib.log_dir.join("deep-audit.stderr");
-                let progress =
-                    |stage: &'static str, secs: f64| lib.audits.progress(stage, secs, duration);
-                match super::deep::full_decode(&ffmpeg, path, library, &err_file, stop, &progress) {
-                    Some(v) => lib.audits.record_deep(path, sig, v, now()),
-                    None if !lib.audits.cancelled() => lib.audits.requeue_front(path.to_path_buf()),
-                    None => {}
-                }
+    // On a storage failure (no report) the next refill queues the file again, a minute on.
+    if let Some(report) = super::probe::audit_fast(path) {
+        let duration = report.duration_secs;
+        lib.audits.record_fast(path, sig, report, now());
+        let ffmpeg = super::deep::ffmpeg();
+        if let Some(ffmpeg) =
+            ffmpeg.filter(|_| deep_on && lib.audits.deep_due_for(path, sig, now()))
+        {
+            tracing::info!(file = %path.display(), "deep audit: decoding");
+            let _ = std::fs::create_dir_all(&lib.log_dir);
+            let err_file = lib.log_dir.join("deep-audit.stderr");
+            let progress =
+                |stage: &'static str, secs: f64| lib.audits.progress(stage, secs, duration);
+            match super::deep::full_decode(&ffmpeg, path, library, &err_file, stop, &progress) {
+                Some(v) => lib.audits.record_deep(path, sig, v, now()),
+                None if !lib.audits.cancelled() => lib.audits.requeue_front(path.to_path_buf()),
+                None => {}
             }
-        }
-        // The storage failed, not the file: try again after the queue.
-        None => {
-            lib.audits.finish();
-            lib.audits.enqueue([path.to_path_buf()]);
-            return;
         }
     }
     lib.audits.finish();
@@ -1175,6 +1179,40 @@ mod tests {
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.contains("first") && text.contains("second"), "{text}");
         assert!(text.contains("another attempt"));
+    }
+
+    #[test]
+    fn a_disc_read_failure_shows_the_sector_not_the_sense_bytes() {
+        let e = std::io::Error::other("E6000: 7476928 0x02/0x03/0x11/0x00");
+        let text = error_text(&e);
+        assert!(text.contains("7476928"), "{text}");
+        assert!(!text.contains("0x02"), "{text}");
+    }
+
+    #[test]
+    fn a_stop_after_the_file_was_taken_skips_its_audit() {
+        let (_t, lib, dirs) = library_with(&["A"]);
+        let path = dirs.library.join("A/A.mkv");
+        lib.audits.enqueue([path.clone()]);
+        assert_eq!(lib.audits.next().as_ref(), Some(&path));
+        lib.audits.stop_all();
+        audit_one(&lib, &path, &dirs.library, false, &|| false);
+        let sig = super::super::probe::FileSig::stat(&path).unwrap();
+        assert!(lib.audits.report(&path, sig).is_none());
+        assert!(lib.audits.status().running.is_none());
+    }
+
+    #[test]
+    fn a_file_the_storage_cannot_read_is_not_requeued_at_once() {
+        let (_t, lib, dirs) = library_with(&[]);
+        // A directory stats fine but cannot be read as a file.
+        let odd = dirs.library.join("odd.mkv");
+        std::fs::create_dir_all(&odd).unwrap();
+        lib.audits.enqueue([odd.clone()]);
+        let path = lib.audits.next().unwrap();
+        audit_one(&lib, &path, &dirs.library, false, &|| false);
+        assert!(!lib.audits.is_queued(&odd), "left for the next refill");
+        assert!(lib.audits.status().running.is_none());
     }
 
     #[test]

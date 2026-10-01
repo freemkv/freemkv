@@ -389,6 +389,13 @@ impl ProbeCache {
             .insert(path.to_path_buf(), Stamp { sig, writing_app });
     }
 
+    /// Forget the stamps of every path not in `keep`.
+    pub fn retain(&self, keep: &[(PathBuf, FileSig)]) {
+        let keep: std::collections::HashSet<&Path> =
+            keep.iter().map(|(p, _)| p.as_path()).collect();
+        self.lock_stamps().retain(|p, _| keep.contains(p.as_path()));
+    }
+
     fn lock_stamps(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Stamp>> {
         self.stamps.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -517,6 +524,22 @@ mod tests {
             cache.cached_stamp(&p, sig),
             Some(Some("freemkv 1.6.11 (g1)".into()))
         );
+    }
+
+    #[test]
+    fn stamps_of_vanished_files_are_forgotten() {
+        let t = tempfile::tempdir().unwrap();
+        let (a, b) = (t.path().join("a.mkv"), t.path().join("b.mkv"));
+        let cache = ProbeCache::default();
+        let sig = FileSig {
+            size: 1,
+            mtime_ns: 1,
+        };
+        cache.record_at(&a, sig, None);
+        cache.record_at(&b, sig, None);
+        cache.retain(&[(a.clone(), sig)]);
+        assert!(cache.cached_stamp(&a, sig).is_some());
+        assert_eq!(cache.cached_stamp(&b, sig), None);
     }
 
     #[test]

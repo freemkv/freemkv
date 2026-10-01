@@ -162,7 +162,12 @@ impl Queue {
                 let _ = std::fs::rename(&path, path.with_extension("json.unreadable"));
                 QueueFile::default()
             }),
-            Err(_) => QueueFile::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => QueueFile::default(),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "library queue unreadable; starting empty");
+                let _ = std::fs::rename(&path, path.with_extension("json.unreadable"));
+                QueueFile::default()
+            }
         };
         file.schema = SCHEMA;
         for job in &mut file.jobs {
@@ -191,6 +196,12 @@ impl Queue {
 
     pub fn snapshot(&self) -> QueueFile {
         self.lock().clone()
+    }
+
+    /// A job is running, or one waits and the queue is not paused.
+    pub fn has_work(&self) -> bool {
+        let f = self.lock();
+        f.running().is_some() || (!f.paused && f.count(JobState::Queued) > 0)
     }
 
     /// Queue `items` in order. A target already queued or running is skipped.
@@ -316,7 +327,6 @@ impl Queue {
         })
     }
 
-    /// Drop every queued job; the running one carries on.
     /// Drop every queued job and un-pause: an empty queue has nothing to
     /// hold, so it never shows as paused. The running job carries on.
     pub fn clear_queued(&self) -> usize {
@@ -416,6 +426,38 @@ mod tests {
             q.snapshot().jobs.iter().filter(|j| j.title == "a").count(),
             1
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_queue_file_that_cannot_be_read_is_kept() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join(QUEUE_FILE);
+        std::fs::write(&file, br#"{"jobs":[]}"#).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o0)).unwrap();
+        if std::fs::read(&file).is_ok() {
+            return; // root reads anything
+        }
+        Queue::open(t.path());
+        let kept = t.path().join("library-queue.json.unreadable");
+        std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&kept).unwrap(), br#"{"jobs":[]}"#);
+    }
+
+    #[test]
+    fn has_work_is_a_running_job_or_a_waiting_one_unpaused() {
+        let t = tempfile::tempdir().unwrap();
+        let q = Queue::open(t.path());
+        assert!(!q.has_work());
+        q.add(vec![job(t.path(), "a")]);
+        assert!(q.has_work());
+        q.set_paused(true);
+        assert!(!q.has_work());
+        q.set_paused(false);
+        q.claim_next().unwrap();
+        q.set_paused(true);
+        assert!(q.has_work(), "a running job still holds the disks");
     }
 
     #[test]

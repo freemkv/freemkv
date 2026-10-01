@@ -89,10 +89,19 @@ const READING_SHARE: f64 = 15.0;
 impl Audits {
     pub fn open(config_dir: &Path) -> Self {
         let file = config_dir.join(FILE);
-        let st = std::fs::read(&file)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let st = match std::fs::read(&file) {
+            Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
+                tracing::warn!(path = %file.display(), error = %e, "audit state unreadable; starting empty");
+                set_aside(&file);
+                State::default()
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
+            Err(e) => {
+                tracing::warn!(path = %file.display(), error = %e, "audit state unreadable; starting empty");
+                set_aside(&file);
+                State::default()
+            }
+        };
         Self {
             file,
             st: Mutex::new(st),
@@ -113,13 +122,19 @@ impl Audits {
 
     // Persist and tell the page. The caller still holds `st`.
     fn changed(&self, st: &State) {
-        if let Ok(json) = serde_json::to_vec(st) {
-            let tmp = self.file.with_extension("json.tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.file);
-            }
-        }
+        self.persist(st);
         self.touch();
+    }
+
+    fn persist(&self, st: &State) {
+        let tmp = self.file.with_extension("json.tmp");
+        let saved = serde_json::to_vec(st)
+            .map_err(std::io::Error::other)
+            .and_then(|json| std::fs::write(&tmp, json))
+            .and_then(|()| std::fs::rename(&tmp, &self.file));
+        if let Err(e) = saved {
+            tracing::warn!(path = %self.file.display(), error = %e, "audit state write failed");
+        }
     }
 
     fn touch(&self) {
@@ -196,16 +211,14 @@ impl Audits {
         self.changed(&st);
     }
 
-    fn is_running(&self, path: &Path) -> bool {
-        self.lock_live().as_ref().is_some_and(|l| l.path == path)
-    }
-
     /// Queue `paths` not already waiting or running. Returns how many were added.
     pub fn enqueue(&self, paths: impl IntoIterator<Item = PathBuf>) -> usize {
         let mut st = self.lock();
+        let running = self.lock_live().as_ref().map(|l| l.path.clone());
+        let mut queued: HashSet<PathBuf> = st.queue.iter().cloned().collect();
         let mut n = 0;
         for p in paths {
-            if st.queue.contains(&p) || self.is_running(&p) {
+            if running.as_ref() == Some(&p) || !queued.insert(p.clone()) {
                 continue;
             }
             st.queue.push_back(p);
@@ -266,14 +279,23 @@ impl Audits {
         self.enqueue(wanted)
     }
 
-    /// Take the next file to audit, unless paused.
+    /// Take the next file to audit, unless paused. It counts as running from here, so a
+    /// stop or an enqueue before [`Self::start`] sees it. Not persisted: a restart redoes
+    /// the file that was in flight.
     pub fn next(&self) -> Option<PathBuf> {
         let mut st = self.lock();
         if st.paused {
             return None;
         }
         let p = st.queue.pop_front()?;
-        self.changed(&st);
+        self.cancel.store(false, Ordering::SeqCst);
+        *self.lock_live() = Some(Live {
+            path: p.clone(),
+            title: String::new(),
+            stage: "quick",
+            pct: None,
+        });
+        self.touch();
         Some(p)
     }
 
@@ -303,8 +325,8 @@ impl Audits {
         self.cancel.load(Ordering::SeqCst)
     }
 
+    /// Name the file being audited; a stop asked since [`Self::next`] stays asked.
     pub fn start(&self, path: &Path, title: String) {
-        self.cancel.store(false, Ordering::SeqCst);
         *self.lock_live() = Some(Live {
             path: path.to_path_buf(),
             title,
@@ -389,6 +411,11 @@ impl Audits {
     }
 }
 
+// Keep an unreadable state file for the owner; the next write must not replace it.
+fn set_aside(file: &Path) {
+    let _ = std::fs::rename(file, file.with_extension("json.unreadable"));
+}
+
 // A file with a quick audit that has video still needs its full decode (or a due retry).
 fn deep_due(r: &Record, now: u64) -> bool {
     if r.report.video_tracks == 0 {
@@ -460,6 +487,7 @@ mod tests {
         a.fill(&[(p.clone(), sig)], true, 1, true);
         a.next();
         audited(&a, &p, sig);
+        a.finish();
         assert_eq!(a.deep_view(&p, sig, true).unwrap().state, "pending");
         assert_eq!(
             a.fill(&[(p.clone(), sig)], true, 1, true),
@@ -468,6 +496,7 @@ mod tests {
         );
         a.next();
         a.record_deep(&p, sig, verdict(false), 2);
+        a.finish();
         assert_eq!(a.deep_view(&p, sig, false).unwrap().state, "clean");
         assert_eq!(a.fill(&[(p.clone(), sig)], true, 3, true), 0);
         assert_eq!(a.reaudit(std::slice::from_ref(&p)), 1);
@@ -519,6 +548,31 @@ mod tests {
         assert_eq!(a.status().running.unwrap().pct, Some(7.5));
         a.progress("decoding", 100.0, Some(100.0));
         assert_eq!(a.status().running.unwrap().pct, Some(100.0));
+    }
+
+    #[test]
+    fn a_stop_between_next_and_start_still_stops_that_file() {
+        let t = tempfile::tempdir().unwrap();
+        let (p, sig) = file(t.path(), "A.mkv");
+        let a = Audits::open(t.path());
+        a.fill(&[(p.clone(), sig)], false, 1, true);
+        let taken = a.next().unwrap();
+        assert_eq!(a.enqueue([taken.clone()]), 0, "it is running, not waiting");
+        a.stop_all();
+        assert!(a.cancelled(), "the stop reaches the file already taken");
+        a.start(&taken, "A".into());
+        assert!(a.cancelled(), "starting does not forget the stop");
+    }
+
+    #[test]
+    fn an_unreadable_state_file_is_kept_not_overwritten() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(t.path().join(FILE), b"{ not json").unwrap();
+        let a = Audits::open(t.path());
+        let (p, sig) = file(t.path(), "A.mkv");
+        a.fill(&[(p, sig)], false, 1, true);
+        let kept = std::fs::read(t.path().join("audit.json.unreadable")).unwrap();
+        assert_eq!(kept, b"{ not json");
     }
 
     #[test]

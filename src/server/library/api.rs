@@ -146,6 +146,8 @@ pub fn handle(
                 );
                 return None;
             }
+            let eligible = wanted.len();
+            let wanted: std::collections::HashSet<PathBuf> = wanted.into_iter().collect();
             let pick = |r: &super::RowView| r.target.as_ref().is_some_and(|t| wanted.contains(t));
             let creates = lib
                 .listing(&d)
@@ -157,7 +159,7 @@ pub fn handle(
                 return None;
             }
             let n = lib.enqueue(&d, pick);
-            queued(request, n, wanted.len());
+            queued(request, n, eligible);
         }
         (_, true, "/api/library/queue/out-of-date") | (_, true, "/api/library/queue/all") => {
             if not_ready(&lib) {
@@ -187,7 +189,12 @@ pub fn handle(
             let Ok((request, body)) = read_json_body(request) else {
                 return None;
             };
-            let n = targets_of(&body)
+            let targets = targets_of(&body);
+            if targets.is_empty() {
+                err(request, 400, "missing target");
+                return None;
+            }
+            let n = targets
                 .iter()
                 .map(|t| lib.queue.remove_queued(t))
                 .sum::<usize>();
@@ -231,10 +238,13 @@ pub fn handle(
             let Ok((request, body)) = read_json_body(request) else {
                 return None;
             };
-            let on = serde_json::from_str::<serde_json::Value>(&body)
+            let Some(on) = serde_json::from_str::<serde_json::Value>(&body)
                 .ok()
                 .and_then(|v| v.get("enabled")?.as_bool())
-                .unwrap_or(false);
+            else {
+                err(request, 400, "missing enabled");
+                return None;
+            };
             lib.queue.set_debug_log(on);
             json_response(request, 200, &queue_json(&lib).to_string());
         }

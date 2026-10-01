@@ -21,7 +21,7 @@ use crate::server::config::Config;
 use index::{Row, RowKind, RowNote};
 use probe::{AuditReport, FileSig, MuxedWith, ProbeCache};
 use queue::{Job, JobResult, NewJob, Queue};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
@@ -174,6 +174,8 @@ pub struct Library {
     // The job "Stop all" cancelled (0 = none); the worker's sink polls it.
     cancel_job: AtomicU64,
     index: RwLock<Arc<Snapshot>>,
+    // Counts `note_landed` edits, so a scan that began before one is not swapped in over it.
+    landed: AtomicU64,
     index_generation: AtomicU64,
     // The indexer sleeps on this; `wake` sets it to rescan now.
     wake: (Mutex<bool>, Condvar),
@@ -292,6 +294,7 @@ impl Library {
             stall_cancel: AtomicBool::new(false),
             cancel_job: AtomicU64::new(0),
             index: RwLock::new(Arc::new(Snapshot::default())),
+            landed: AtomicU64::new(0),
             index_generation: AtomicU64::new(0),
             wake: (Mutex::new(false), Condvar::new()),
             busy: AtomicBool::new(false),
@@ -301,11 +304,6 @@ impl Library {
     /// The last scan. Cheap: an `Arc` clone under a read lock.
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.index.read().unwrap_or_else(|e| e.into_inner()).clone()
-    }
-
-    fn set_snapshot(&self, s: Snapshot) {
-        *self.index.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(s);
-        self.touch_index();
     }
 
     /// Moves whenever a scan, a header read or an audit changed what a listing shows.
@@ -354,8 +352,29 @@ impl Library {
     }
 
     /// Scan the folders and swap in a new snapshot. Filesystem work only; no
-    /// lock is held across it. Only a NotFound drops a file a scan missed.
+    /// lock is held across it. Only a NotFound drops a file a scan missed. A remux
+    /// that lands mid-scan discards it and asks for another.
     pub fn rescan(&self, d: &Dirs) {
+        let landed_at = self.landed.load(Ordering::SeqCst);
+        let scan = self.scan(d);
+        self.commit_scan(scan, landed_at);
+    }
+
+    // Swap `scan` in unless a remux landed since `landed_at`: the scan may predate its file.
+    fn commit_scan(&self, scan: Snapshot, landed_at: u64) {
+        {
+            let mut guard = self.index.write().unwrap_or_else(|e| e.into_inner());
+            if self.landed.load(Ordering::SeqCst) == landed_at {
+                *guard = Arc::new(scan);
+                drop(guard);
+                self.touch_index();
+                return;
+            }
+        }
+        self.wake_indexer();
+    }
+
+    fn scan(&self, d: &Dirs) -> Snapshot {
         let started = std::time::Instant::now();
         let mut mkvs = index::list_mkvs(&d.library);
         let mut isos = match &d.isos {
@@ -365,18 +384,24 @@ impl Library {
         let prev = self.snapshot();
         let same = prev.dirs.as_ref() == Some(d);
         if same && mkvs.incomplete {
-            for m in &prev.mkvs {
-                if !mkvs.files.iter().any(|f| f.path == m.path) && !gone(&m.path) {
-                    mkvs.files.push(m.clone());
-                }
-            }
+            let seen: HashSet<&Path> = mkvs.files.iter().map(|f| f.path.as_path()).collect();
+            let missed: Vec<_> = prev
+                .mkvs
+                .iter()
+                .filter(|m| !seen.contains(m.path.as_path()) && !gone(&m.path))
+                .cloned()
+                .collect();
+            mkvs.files.extend(missed);
         }
         if same && isos.incomplete {
-            for i in &prev.isos {
-                if !isos.files.iter().any(|f| f.path == i.path) && !gone(&i.path) {
-                    isos.files.push(i.clone());
-                }
-            }
+            let seen: HashSet<&Path> = isos.files.iter().map(|f| f.path.as_path()).collect();
+            let missed: Vec<_> = prev
+                .isos
+                .iter()
+                .filter(|i| !seen.contains(i.path.as_path()) && !gone(&i.path))
+                .cloned()
+                .collect();
+            isos.files.extend(missed);
         }
         let mut sigs = HashMap::new();
         mkvs.files.retain(|m| match std::fs::metadata(&m.path) {
@@ -395,7 +420,7 @@ impl Library {
         let links = links::load(&self.config_dir);
         let rows = index::classify(&d.library, &mkvs.files, &isos.files, &links);
         let library_empty = std::fs::read_dir(&d.library).is_ok_and(|mut r| r.next().is_none());
-        self.set_snapshot(Snapshot {
+        Snapshot {
             library_empty,
             dirs: Some(d.clone()),
             mkvs: mkvs.files,
@@ -405,7 +430,7 @@ impl Library {
             incomplete: mkvs.incomplete || isos.incomplete,
             scanned_at: Some(crate::server::util::epoch_secs()),
             scan_ms: started.elapsed().as_millis() as u64,
-        });
+        }
     }
 
     /// Queue the audits `files` still needs (new, changed, never audited, or a full decode
@@ -436,12 +461,7 @@ impl Library {
         self.take_wake();
         self.rescan(d);
         let snap = self.snapshot();
-        let files: Vec<(PathBuf, FileSig)> = snap
-            .rows
-            .iter()
-            .filter_map(|r| r.mkv.as_ref())
-            .filter_map(|m| Some((m.clone(), *snap.sigs.get(m)?)))
-            .collect();
+        let files = self.mkv_files();
         let mut complete = true;
         let mut last = std::time::Instant::now();
         let mut tick = |changed: bool| {
@@ -460,7 +480,14 @@ impl Library {
         }
         self.touch_index();
         if complete {
-            self.fill_audits(&files, !snap.incomplete);
+            // The list as of now: a remux may have landed during the header pass. An
+            // empty library may be an unmounted share, which proves nothing is gone.
+            let whole = !snap.incomplete && !snap.library_empty;
+            let files = self.mkv_files();
+            self.fill_audits(&files, whole);
+            if whole {
+                self.probes.retain(&files);
+            }
         }
         self.busy.store(false, Ordering::SeqCst);
         self.touch_index();
@@ -489,9 +516,10 @@ impl Library {
             return;
         };
         self.probes.record_at(target, sig, writing_app);
-        // Edited under the write lock, so a scan finishing now cannot lose it.
+        // Edited under the write lock; a scan that began earlier is dropped (see `commit_scan`).
         {
             let mut guard = self.index.write().unwrap_or_else(|e| e.into_inner());
+            self.landed.fetch_add(1, Ordering::SeqCst);
             let mut next = (**guard).clone();
             next.sigs.insert(target.to_path_buf(), sig);
             for row in next.rows.iter_mut() {
@@ -531,6 +559,10 @@ impl Library {
             };
         }
         let q = self.queue.snapshot();
+        let mut latest: HashMap<&Path, &Job> = HashMap::new();
+        for j in &q.jobs {
+            latest.insert(j.target.as_path(), j);
+        }
         let running = probe::running_version();
         let (mut probing, mut auditing) = (0, 0);
         let deep_on = self.deep_enabled();
@@ -569,7 +601,7 @@ impl Library {
                     r.remuxable() && (r.mkv.is_none() || (probed && muxed_with.out_of_date()));
                 let (job, result) = match &r.target {
                     Some(t) => (
-                        q.latest_for(t).cloned(),
+                        latest.get(t.as_path()).map(|j| (*j).clone()),
                         q.results.get(&*t.to_string_lossy()).cloned(),
                     ),
                     None => (None, None),
@@ -901,6 +933,56 @@ mod tests {
         std::fs::create_dir(d.library.join("Something")).unwrap();
         lib.index_now(&d);
         assert_eq!(lib.queue_block(&d, true), None);
+    }
+
+    #[test]
+    fn a_scan_that_began_before_a_remux_landed_does_not_undo_it() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        std::fs::create_dir_all(d.library.join("Other")).unwrap();
+        std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+        std::fs::write(d.isos.as_ref().unwrap().join("A (2000).iso"), b"x").unwrap();
+        let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+        lib.index_now(&d);
+        let landed_at = lib.landed.load(Ordering::SeqCst);
+        let scan = lib.scan(&d);
+        let target = d.library.join("A (2000)/A (2000).mkv");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(
+            &target,
+            probe::testmkv::mkv("freemkv 1.0.0", Some(60.0), Some(58), true),
+        )
+        .unwrap();
+        lib.note_landed(&target, None);
+        lib.commit_scan(scan, landed_at);
+        let snap = lib.snapshot();
+        assert!(snap.sigs.contains_key(&target), "the landed sig survives");
+        assert!(snap.rows.iter().any(|r| r.mkv.as_ref() == Some(&target)));
+    }
+
+    #[test]
+    fn an_empty_library_folder_does_not_erase_the_audits() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        let mkv = d.library.join("A/A.mkv");
+        std::fs::create_dir_all(mkv.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+        std::fs::write(
+            &mkv,
+            probe::testmkv::mkv("freemkv 1.0.0", Some(60.0), Some(58), true),
+        )
+        .unwrap();
+        let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+        lib.index_now(&d);
+        let sig = FileSig::stat(&mkv).unwrap();
+        let report = probe::audit_fast(&mkv).unwrap();
+        lib.audits.record_fast(&mkv, sig, report, 1);
+        std::fs::remove_dir_all(d.library.join("A")).unwrap();
+        lib.index_now(&d);
+        assert!(
+            lib.audits.report(&mkv, sig).is_some(),
+            "an empty folder may be an unmounted share"
+        );
     }
 
     #[test]
