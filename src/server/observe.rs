@@ -2,7 +2,7 @@
 //!
 //! Three sinks, written from the same tracing event stream:
 //! `{AUTORIP_DIR}/logs/autorip.log` (daily-rolling, human-readable),
-//! `{AUTORIP_DIR}/logs/autorip.jsonl` (non-rolling, tailed by
+//! `{AUTORIP_DIR}/logs/autorip.jsonl` (size-capped, tailed by
 //! `/api/debug`), and stderr (compact, captured by Docker).
 //!
 //! Filter level via `AUTORIP_LOG_LEVEL` (env-filter syntax). Default
@@ -46,6 +46,89 @@ fn with_server_targets(spec: &str) -> String {
         }
     }
     out.join(",")
+}
+
+// Live-file size at which `autorip.jsonl` rotates to `autorip.jsonl.1`. Debug logging emits
+// thousands of lines a minute, so the cap must hold a useful window of it; 256 MiB is 50x the
+// system-log cap (log.rs) and bounds total disk use to about 512 MiB.
+const JSONL_ROTATE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Append-only file that rotates itself to `<path>.1` (replacing any older one) before a
+/// write that would pass `limit`, then continues in a fresh file at `path`. Each `write` call
+/// lands whole in one file, so a line is never split as long as callers write one line per
+/// call (the tracing fmt layer does). Owned by the single non-blocking worker thread.
+struct SizeCappedFile {
+    path: std::path::PathBuf,
+    limit: u64,
+    file: Option<std::fs::File>,
+    len: u64,
+}
+
+impl SizeCappedFile {
+    fn open(path: std::path::PathBuf, limit: u64) -> std::io::Result<Self> {
+        let file = Self::open_append(&path)?;
+        let len = file.metadata()?.len();
+        Ok(Self {
+            path,
+            limit,
+            file: Some(file),
+            len,
+        })
+    }
+
+    // A writer that discards everything, for when the log file cannot be opened.
+    fn disabled() -> Self {
+        Self {
+            path: std::path::PathBuf::new(),
+            limit: u64::MAX,
+            file: None,
+            len: 0,
+        }
+    }
+
+    fn open_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    }
+
+    fn rotate(&mut self) -> std::io::Result<()> {
+        let mut backup = self.path.clone().into_os_string();
+        backup.push(".1");
+        // Close the old handle first; a failed rename still reopens the live path below.
+        self.file = None;
+        let renamed = std::fs::rename(&self.path, &backup);
+        self.file = Some(Self::open_append(&self.path)?);
+        self.len = self
+            .file
+            .as_ref()
+            .map_or(0, |f| f.metadata().map_or(0, |m| m.len()));
+        renamed
+    }
+}
+
+impl std::io::Write for SizeCappedFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.file.is_none() {
+            return Ok(buf.len());
+        }
+        if self.len > 0 && self.len + buf.len() as u64 > self.limit {
+            // A failed rotation must not drop the event; keep appending to whatever is open.
+            let _ = self.rotate();
+        }
+        let f = self.file.as_mut().ok_or(std::io::ErrorKind::NotFound)?;
+        f.write_all(buf)?;
+        self.len += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.file.as_mut() {
+            Some(f) => f.flush(),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Worker guards for the non-blocking file appenders. Must outlive the
@@ -116,10 +199,18 @@ pub fn init() {
         .with_target(true)
         .with_thread_ids(true);
 
-    // Machine-readable JSONL: NOT rolled. `/api/debug` tails a stable path;
-    // daily rotation broke lookups before (v0.13.0 regression). Growth is
-    // unbounded but small (~MB/day); an external logrotate can handle it.
-    let json_appender = rolling::never(&log_dir, "autorip.jsonl");
+    // Machine-readable JSONL: size-capped, never date-rolled. `/api/debug` tails a stable
+    // path, so the live file stays at `autorip.jsonl` and the previous one is `.1`.
+    let json_appender = match SizeCappedFile::open(
+        std::path::Path::new(&log_dir).join("autorip.jsonl"),
+        JSONL_ROTATE_BYTES,
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("autorip.jsonl unavailable, JSON log disabled: {e}");
+            SizeCappedFile::disabled()
+        }
+    };
     let (json_writer, json_guard) = tracing_appender::non_blocking(json_appender);
     guards.push(json_guard);
     let json_layer = fmt::layer()
@@ -187,6 +278,31 @@ pub fn json_log_path() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Writing past the limit must rotate to `.1`, keep the live file under the limit, and keep
+    // every line whole in exactly one of the two files.
+    #[test]
+    fn jsonl_rotates_by_size_without_splitting_lines() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("autorip.jsonl");
+        let limit = 1000u64;
+        let mut w = SizeCappedFile::open(path.clone(), limit).unwrap();
+        let line = format!("{{\"m\":\"{}\"}}\n", "x".repeat(40));
+        for _ in 0..30 {
+            w.write_all(line.as_bytes()).unwrap();
+        }
+        w.flush().unwrap();
+        let backup = dir.path().join("autorip.jsonl.1");
+        assert!(backup.exists(), "rotation must produce .1");
+        let live = std::fs::read_to_string(&path).unwrap();
+        assert!(live.len() as u64 <= limit, "live file over the limit");
+        let old = std::fs::read_to_string(&backup).unwrap();
+        assert!(old.len() as u64 <= limit, ".1 over the limit");
+        for l in live.lines().chain(old.lines()) {
+            assert_eq!(format!("{l}\n"), line, "line split across files");
+        }
+    }
 
     /// Both filter strings must parse — a typo here would mean the
     /// /api/debug toggle silently no-ops in production. This is the
