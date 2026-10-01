@@ -41,11 +41,6 @@ path = "tests/server/join_all_drain.rs"
 required-features = ["server"]
 
 [[test]]
-name = "server_reporting"
-path = "tests/server/reporting.rs"
-required-features = ["server"]
-
-[[test]]
 name = "server_resume_remux"
 path = "tests/server/resume_remux.rs"
 required-features = ["server"]

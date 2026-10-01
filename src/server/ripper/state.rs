@@ -693,7 +693,7 @@ pub(super) fn push_pass_state(
     bps: f64,
     pass: u8,
     total_passes: u8,
-    state: &std::cell::RefCell<PassProgressState>,
+    state: &std::sync::Mutex<PassProgressState>,
 ) {
     // Buckets come straight from the library's progress contract `p`.
     // GOOD = Finished, MAYBE = retry-eligible, LOST = terminal Unreadable.
@@ -713,7 +713,7 @@ pub(super) fn push_pass_state(
     // let the Pass-1 denominator grow, stalling total_pct. `bytes_lost` above
     // stays live; only this frozen figure feeds total-progress.
     let retry_denom_bytes = {
-        let mut s = state.borrow_mut();
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         *s.frozen_bytes_lost.get_or_insert(bytes_lost)
     };
     // `errors` is the user-visible skipped-sector count: terminal-bad
@@ -723,8 +723,10 @@ pub(super) fn push_pass_state(
     // v0.13.16: pass_progress_pct = work_done / work_total (per-pass).
     // The legacy progress_pct stays populated as a copy (back-compat for
     // any consumer reading the old field).
-    let last_pos = state.borrow().last_work_done;
-    let last_work_total = state.borrow().last_work_total;
+    let (last_pos, last_work_total) = {
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
+        (s.last_work_done, s.last_work_total)
+    };
     let pass_pct = if let Some(p) = (last_pos * 100).checked_div(last_work_total) {
         p.min(100) as u8
     } else {
@@ -765,7 +767,7 @@ pub(super) fn push_pass_state(
     // bytes_good rate, reading 0 during skip-forward zones where work_done
     // advances but bytes_good is frozen, even though the bar was moving.
     let (speed_mbs, pass_eta_str, total_eta_str) = {
-        let mut s = state.borrow_mut();
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
         // Patch passes (pass > 1) hold a fixed 10s speed window — bursty
         // recovery should read responsively, not be smoothed over a minute.
@@ -883,7 +885,7 @@ pub(super) fn push_pass_state(
     // pass doesn't go silent. Reports swept position (advances during a
     // skip-forward bad zone) separately from bytes_good (real recovery).
     {
-        let mut s = state.borrow_mut();
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         if s.last_log.elapsed().as_secs() >= 60 {
             s.last_log = std::time::Instant::now();
             let pos_gb = last_pos as f64 / BYTES_PER_GIB;
@@ -1971,12 +1973,12 @@ mod tests {
         ctx.tmdb_media_type = "movie".to_string();
         ctx.duration = "2:15:00".to_string();
         ctx.codecs = "HEVC/DTS-HD".to_string();
-        let pass_state = std::cell::RefCell::new(PassProgressState::new());
+        let pass_state = std::sync::Mutex::new(PassProgressState::new());
         // Mirrors what the real caller (mod.rs's sweep/patch progress
         // closures) does before invoking push_pass_state: seed the
         // per-pass work_done/work_total the library just reported.
         {
-            let mut s = pass_state.borrow_mut();
+            let mut s = pass_state.lock().unwrap();
             s.last_work_done = 1_000_000;
             s.last_work_total = 2_000_000;
         }

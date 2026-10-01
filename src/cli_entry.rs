@@ -629,7 +629,8 @@ fn info_cmd(args: &[String]) {
                 keys,
                 ..Default::default()
             };
-            match libfreemkv::input(url, &opts) {
+            let ctx = libfreemkv::Ctx::default();
+            match libfreemkv::input(url, &opts, &ctx) {
                 Ok(stream) => {
                     let meta = stream.info();
                     // LOCALIZED like the `disc://` arm above — these were the last

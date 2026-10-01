@@ -10,7 +10,7 @@ use crate::cli_entry::is_url_token;
 use crate::disc_info::sanitize;
 use crate::output::{Level::Normal, Output};
 use crate::strings;
-use libfreemkv::{MuxEvents, MuxOptions, MuxSource};
+use libfreemkv::{MuxOptions, MuxSource};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -99,10 +99,22 @@ impl CliMuxEvents {
     }
 }
 
-impl MuxEvents for CliMuxEvents {
+impl libfreemkv::Events for CliMuxEvents {
+    fn event(&self, e: &libfreemkv::Event<'_>) {
+        match *e {
+            libfreemkv::Event::OutputOpened { title } => self.on_output_opened(title),
+            libfreemkv::Event::BytesWritten { bytes, total } => {
+                self.on_write_progress(bytes, total)
+            }
+            _ => {}
+        }
+    }
+}
+
+impl CliMuxEvents {
     fn on_output_opened(&self, title: &libfreemkv::DiscTitle) {
         // The excluded-track note first, as the GUI logs it before the mux starts;
-        // MuxEvents has no hook earlier than this one that carries the title.
+        // no event earlier than this one carries the title.
         print_excluded(&self.out, &self.dest, title);
         print_stream_info(&self.out, title);
         // The destination open notice (the sink is already open here).
@@ -1615,7 +1627,7 @@ fn open_drive_scan(
     credentials: Option<libfreemkv::DriveCredentials>,
     raw: bool,
 ) -> Result<libfreemkv::DiscSession, libfreemkv::Error> {
-    let progress = libfreemkv::halt::Progress::new();
+    let progress = libfreemkv::halt::Liveness::new();
     freemkv_engine::open_scan_with(
         target,
         credentials,
@@ -1829,10 +1841,16 @@ fn pipe_disc(
         Some(set),
         dest,
         &opts,
-        crate::cli_stop::token(),
-        events.clone() as Arc<dyn MuxEvents>,
+        &cli_ctx(events.clone()),
     );
     finalize_mux(result, out, &events)
+}
+
+// The CLI's run context: the process Ctrl-C token, its renderer, env diagnostics.
+fn cli_ctx(events: Arc<CliMuxEvents>) -> libfreemkv::Ctx {
+    libfreemkv::Ctx::new(crate::cli_stop::token().clone())
+        .with_events(events)
+        .with_diag(libfreemkv::Diag::from_env())
 }
 
 fn is_metadata_sink(dest: &str) -> bool {
@@ -1900,7 +1918,7 @@ fn disc_copy_options<'a>(
     keys: Option<&libfreemkv::keys::ResolvedKeySet>,
     raw: bool,
     multipass: bool,
-    progress: &'a dyn libfreemkv::progress::Progress,
+    progress: &'a dyn libfreemkv::Events,
     halt: &libfreemkv::Halt,
 ) -> freemkv_engine::CopyOptions<'a> {
     // KU §2.1 invariant 5: "No key byte and no raw VID is written to any file" (FK6). The
@@ -1955,8 +1973,7 @@ fn pipe(
         None,
         dest,
         &mux_opts,
-        crate::cli_stop::token(),
-        events.clone() as Arc<dyn MuxEvents>,
+        &cli_ctx(events.clone()),
     );
     finalize_mux(result, out, &events)
 }
@@ -2007,7 +2024,8 @@ fn write_decrypted_image(
     halt: &libfreemkv::Halt,
 ) -> libfreemkv::error::Result<u64> {
     let mut src = set.whole_disc_reader(disc, reader, Some(halt))?;
-    libfreemkv::write_image(&mut src, dest, disc.capacity_sectors, halt, |_| {})
+    let ctx = libfreemkv::Ctx::new(halt.clone());
+    libfreemkv::write_image(&mut src, dest, disc.capacity_sectors, &ctx)
 }
 
 /// An image staged for an MKV rip holds only its titles, so it is never a whole-disc
@@ -2254,39 +2272,42 @@ fn disc_to_iso(
     out.blank(Normal);
 
     let start = std::time::Instant::now();
-    let last_update = std::cell::Cell::new(start);
     // Speed + ETA come from the ENGINE's one derivation (no local math). The CLI
     // only throttles the display and formats the numbers.
-    let speed_est = std::cell::RefCell::new(freemkv_engine::SpeedEstimator::new());
-
     struct CliProgress<'a> {
         out: &'a Output,
-        last_update: &'a std::cell::Cell<std::time::Instant>,
-        speed_est: &'a std::cell::RefCell<freemkv_engine::SpeedEstimator>,
+        last_update: Mutex<std::time::Instant>,
+        speed_est: Mutex<freemkv_engine::SpeedEstimator>,
     }
-    impl libfreemkv::progress::Progress for CliProgress<'_> {
-        fn report(&self, p: &libfreemkv::progress::PassProgress) -> bool {
+    impl libfreemkv::Events for CliProgress<'_> {
+        fn event(&self, e: &libfreemkv::Event<'_>) {
+            let libfreemkv::Event::Pass(p) = e else {
+                return;
+            };
             if !self.out.is_quiet() {
                 let now = std::time::Instant::now();
-                if now.duration_since(self.last_update.get()).as_secs_f64() >= 0.5 {
-                    self.last_update.set(now);
+                let mut last = self.last_update.lock().unwrap_or_else(|e| e.into_inner());
+                if now.duration_since(*last).as_secs_f64() >= 0.5 {
+                    *last = now;
                     let (speed_bps, eta_secs) = self
                         .speed_est
-                        .borrow_mut()
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
                         .sample(p.work_done, p.work_total);
                     print_disc_progress(p, speed_bps, eta_secs);
                 }
             }
-            // Returning false halts the copy. Consult the global SIGINT flag so
-            // the FIRST Ctrl-C stops the sweep and lets `unlock_tray()` run
-            // below, instead of waiting for `_exit(130)`, which skips it.
-            copy_should_continue(INTERRUPTED.load(Ordering::SeqCst))
+            // The copy stops at this report on the first Ctrl-C (so `unlock_tray()` runs
+            // below, not `_exit(130)`), through the token the copy observes.
+            if !copy_should_continue(INTERRUPTED.load(Ordering::SeqCst)) {
+                crate::cli_stop::token().cancel();
+            }
         }
     }
     let progress = CliProgress {
         out,
-        last_update: &last_update,
-        speed_est: &speed_est,
+        last_update: Mutex::new(start),
+        speed_est: Mutex::new(freemkv_engine::SpeedEstimator::new()),
     };
 
     let lock = match is_null {
@@ -2857,9 +2878,8 @@ fn is_keyserver_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
-/// The `Disc::copy` progress callback returns `true` to continue, `false` to
-/// halt. Halt the moment SIGINT was seen so the first Ctrl-C stops the copy
-/// cleanly (letting the tray unlock on drop) instead of being ignored.
+/// Whether the copy keeps going at a progress report: it stops the moment SIGINT was
+/// seen, so the first Ctrl-C stops the copy cleanly (the tray unlocks on drop).
 fn copy_should_continue(interrupted: bool) -> bool {
     !interrupted
 }
@@ -5316,6 +5336,7 @@ mod verdict_tests {
     fn outcome(completed: bool, bytes: u64) -> libfreemkv::MuxOutcome {
         libfreemkv::MuxOutcome {
             completed,
+            halted: false,
             output_opened: true,
             bytes_written: bytes,
             errors: 0,
@@ -5555,7 +5576,7 @@ mod verdict_tests {
 
     #[test]
     fn the_disc_copy_options_honour_raw_multipass_and_progress() {
-        let nop = |_: &libfreemkv::progress::PassProgress| true;
+        let nop = |_: &libfreemkv::Event<'_>| {};
 
         let default_flags = disc_copy_options(None, false, false, &nop, &libfreemkv::Halt::new());
         assert!(
@@ -5581,7 +5602,7 @@ mod verdict_tests {
     // `disc_copy_options` (`pipe.rs:1978`, **`halt: None` at :1996**)".
     #[test]
     fn disc_copy_options_carries_global_token() {
-        let nop = |_: &libfreemkv::progress::PassProgress| true;
+        let nop = |_: &libfreemkv::Event<'_>| {};
         let token = libfreemkv::Halt::new();
         let o = disc_copy_options(None, false, false, &nop, &token);
         let carried = o.halt.as_ref().expect("the copy takes the process token");
@@ -5596,7 +5617,7 @@ mod verdict_tests {
     #[test]
     fn disc_copy_options_persist_no_keys() {
         use crate::ku_fixtures::*;
-        let nop = |_: &libfreemkv::progress::PassProgress| true;
+        let nop = |_: &libfreemkv::Event<'_>| {};
         let fx = bd_image(&[Some(K1)], 1);
         let disc = drive_disc(&fx);
         let f = factory(&[(Answer::Keydb, &[K1])], &Calls::default());
@@ -6458,7 +6479,6 @@ mod formatter_tests {
         render_resolution_trace,
     };
     use crate::output::{Output, capture};
-    use libfreemkv::MuxEvents;
 
     fn loud() -> Output {
         Output::new(false, false)
@@ -6597,8 +6617,7 @@ mod formatter_tests {
                 None,
                 &dest,
                 &opts,
-                &libfreemkv::Halt::new(),
-                events,
+                &libfreemkv::Ctx::default().with_events(events),
             )
         });
         let _ = std::fs::remove_dir_all(&dir);

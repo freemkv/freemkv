@@ -112,7 +112,7 @@ pub fn resolve_observed(
     scope: KeyScope,
     sources: &KeySourceFactory,
     halt: &Halt,
-    progress: &libfreemkv::halt::Progress,
+    progress: &libfreemkv::halt::Liveness,
 ) -> (libfreemkv::Result<ResolvedKeySet>, Trace) {
     if scope == KeyScope::None {
         return (Ok(ResolvedKeySet::none()), Trace::new());
@@ -247,7 +247,7 @@ mod tests {
     // it ever expired, and the progress count. `observed`: the open's progress is threaded.
     fn t29_over_resolve(answer: Answer, observed: bool) -> (bool, u64) {
         const WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
-        let watched = libfreemkv::halt::Progress::new();
+        let watched = libfreemkv::halt::Liveness::new();
         let p = watched.clone();
         let (ready, built) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {

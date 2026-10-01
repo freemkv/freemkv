@@ -283,7 +283,8 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
         keys: found.clone(),
         ..Default::default()
     };
-    let stream = libfreemkv::input(&url, &opts).map_err(|e| format!("{e}"))?;
+    let ctx = libfreemkv::Ctx::new(tok.halt.clone());
+    let stream = libfreemkv::input(&url, &opts, &ctx).map_err(|e| format!("{e}"))?;
     let t = stream.info();
 
     let name = std::path::Path::new(path)
@@ -401,7 +402,7 @@ pub fn scan(path: &str) -> Result<Scanned, String> {
 #[derive(Clone, Default)]
 pub struct OpenToken {
     pub halt: libfreemkv::Halt,
-    pub progress: libfreemkv::halt::Progress,
+    pub progress: libfreemkv::halt::Liveness,
 }
 
 /// Scan an image and resolve its main title's keys once (KU §2.5 "GUI open"), so the key
@@ -1936,8 +1937,15 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
         keys: found,
         ..Default::default()
     };
-    let o = fe::mux_title(&src_url, &dest_url, input, &mux_opts(req), hint, sink)
-        .map_err(|e| format!("convert failed: {e}"))?;
+    let o = stopped_before_output(fe::mux_title(
+        &src_url,
+        &dest_url,
+        input,
+        &mux_opts(req),
+        hint,
+        sink,
+    ))
+    .map_err(|e| format!("convert failed: {e}"))?;
     if !o.completed {
         // Recovering, like every other `lines` lock in this file. A worker
         // that panicked earlier poisons `lines`, so `unwrap()` here would turn
@@ -2017,7 +2025,10 @@ fn mux_selected_titles(
         let hint = disc.titles.get(idx).map(|t| t.size_bytes).unwrap_or(0);
         let input = title_input_options(set, req, idx);
         let mux = mux_opts(req);
-        match fe::mux_title(source_url, &dest_url, input, &mux, hint, sink) {
+        let muxed = stopped_before_output(fe::mux_title(
+            source_url, &dest_url, input, &mux, hint, sink,
+        ));
+        match muxed {
             Ok(o) => {
                 if !o.completed {
                     // Cancelled or truncated: a partial file is on disk. Keep it,
@@ -3055,6 +3066,10 @@ fn mux_staged_titles(
             let target = title_dest(self.req, self.kind, self.label, *idx, self.multi).1;
             let mut lines = self.ui.0.lines.lock().unwrap_or_else(|e| e.into_inner());
             match result {
+                Ok(o) if o.halted && !o.output_opened => {
+                    let e: std::io::Error = libfreemkv::Error::Halted.into();
+                    lines.push(format!("Title {}: {}", idx + 1, explain(error_code(&e))));
+                }
                 Ok(o) if !o.completed => {
                     self.partial.fetch_add(1, Ordering::Relaxed);
                     lines.push(format!(
@@ -3135,38 +3150,48 @@ fn mux_session_title(
         fe::Level::Info,
         &format!("mux: disc title {} -> {dest} (~{hint} bytes)", idx + 1),
     );
-    with_session_bridge(sink, dest, |halt, events| {
+    stopped_before_output(with_session_bridge(sink, dest, |ctx| {
         let source = libfreemkv::MuxSource::Session {
             session,
             title_index: idx,
         };
-        libfreemkv::mux_with_keys(source, Some(set), dest, opts, halt, events)
-    })
+        libfreemkv::mux_with_keys(source, Some(set), dest, opts, ctx)
+    }))
+}
+
+// A Stop that ended a mux before its output opened is a stop, not a kept partial file.
+fn stopped_before_output(
+    r: std::io::Result<libfreemkv::MuxOutcome>,
+) -> std::io::Result<libfreemkv::MuxOutcome> {
+    match r {
+        Ok(o) if o.halted && !o.output_opened => Err(libfreemkv::Error::Halted.into()),
+        r => r,
+    }
 }
 
 /// The engine's mux watcher, for a mux the GUI starts itself: the output opening (the
 /// excluded-tracks note, `Event::OutputOpened`) ahead of any progress, progress sampled
-/// once per tick, and the Stop button as the `Halt`.
-fn with_session_bridge<T>(
-    sink: &UiSink,
-    dest: &str,
-    f: impl FnOnce(&libfreemkv::Halt, Arc<dyn libfreemkv::MuxEvents>) -> T,
-) -> T {
+/// once per tick, and the Stop button as the run context's halt.
+fn with_session_bridge<T>(sink: &UiSink, dest: &str, f: impl FnOnce(&libfreemkv::Ctx) -> T) -> T {
     use fe::Sink as _;
     #[derive(Default)]
-    struct Events {
+    struct Bridge {
         latest: Mutex<Option<(u64, u64)>>,
         opened: Mutex<Vec<libfreemkv::DiscTitle>>,
     }
-    impl libfreemkv::MuxEvents for Events {
-        fn on_write_progress(&self, done: u64, total: u64) {
-            *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some((done, total));
-        }
-        fn on_output_opened(&self, title: &libfreemkv::DiscTitle) {
-            self.opened
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(title.clone());
+    impl libfreemkv::Events for Bridge {
+        fn event(&self, e: &libfreemkv::Event<'_>) {
+            match *e {
+                libfreemkv::Event::BytesWritten { bytes, total } => {
+                    *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some((bytes, total));
+                }
+                libfreemkv::Event::OutputOpened { title } => self
+                    .opened
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(title.clone()),
+                _ => {}
+            }
         }
     }
     // Stores `true` on drop, so an unwinding mux still ends the watcher.
@@ -3176,7 +3201,7 @@ fn with_session_bridge<T>(
             self.0.store(true, Ordering::Release);
         }
     }
-    let events = Arc::new(Events::default());
+    let events = Arc::new(Bridge::default());
     let opened = || {
         let titles = std::mem::take(&mut *events.opened.lock().unwrap_or_else(|e| e.into_inner()));
         for title in &titles {
@@ -3218,7 +3243,10 @@ fn with_session_bridge<T>(
             }
         });
         let _done = Done(&done);
-        f(&watch.halt, events.clone())
+        let ctx = libfreemkv::Ctx::new(watch.halt.clone())
+            .with_events(events.clone())
+            .with_diag(libfreemkv::Diag::from_env());
+        f(&ctx)
     })
 }
 
@@ -3487,6 +3515,7 @@ mod outcome_summary_tests {
     /// The exact outcome the mp4 sink produces when it has to drop a track.
     fn lossy_outcome() -> libfreemkv::MuxOutcome {
         libfreemkv::MuxOutcome {
+            halted: false,
             completed: true,
             output_opened: true,
             bytes_written: 4 << 30,
@@ -3588,6 +3617,7 @@ mod outcome_summary_tests {
     #[test]
     fn a_stream_conversion_halted_by_cancel_says_so_not_written() {
         let cancelled = libfreemkv::MuxOutcome {
+            halted: true,
             completed: false,
             ..clean_outcome()
         };
@@ -4466,7 +4496,7 @@ mod routing_tests {
 
         // 3. The ISO/image per-title loop.
         let iso_loop = slice(
-            "        match fe::mux_title(source_url, &dest_url, input, &mux, hint, sink) {",
+            "        let muxed = stopped_before_output(fe::mux_title(",
             "            Err(e) => {",
         );
         assert!(
@@ -5024,9 +5054,13 @@ mod routing_tests {
         };
         let state = Arc::new(RunState::default());
         let sink = UiSink(state.clone());
-        super::with_session_bridge(&sink, "mp4:///out/x.mp4", |_, events| {
-            events.on_output_opened(&title);
-            events.on_write_progress(10, 100);
+        super::with_session_bridge(&sink, "mp4:///out/x.mp4", |ctx| {
+            ctx.events
+                .event(&libfreemkv::Event::OutputOpened { title: &title });
+            ctx.events.event(&libfreemkv::Event::BytesWritten {
+                bytes: 10,
+                total: 100,
+            });
         });
         let lines = state
             .lines

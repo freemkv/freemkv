@@ -2386,33 +2386,6 @@ impl Drop for SweepingGuard {
     }
 }
 
-/// Build the drive-level `on_event` handler installed on the live drive.
-///
-/// Every event resets the watchdog (`wdf`) so the "stalled" timer doesn't
-/// climb while the library is working through recovery. `BytesRead` updates
-/// the shared `latest_bytes_read` atomic the UI reads; `ReadError` logs. The
-/// closure is factored out of `rip_disc` so the BytesRead→atomic wiring (the
-/// progress contract the `/api/state` speed meter depends on) is testable in
-/// isolation rather than buried in a 2000-line orchestrator.
-pub fn make_drive_event_fn(
-    dev: String,
-    wdf: Arc<AtomicU64>,
-    latest_bytes_read: Arc<AtomicU64>,
-) -> impl Fn(libfreemkv::event::Event) + Send + 'static {
-    move |event| {
-        wdf.store(crate::server::util::epoch_secs(), Ordering::Relaxed);
-        match event.kind {
-            libfreemkv::event::EventKind::BytesRead { bytes, .. } => {
-                latest_bytes_read.store(bytes, Ordering::Relaxed);
-            }
-            libfreemkv::event::EventKind::ReadError { sector, .. } => {
-                crate::server::log::device_log(&dev, &format!("Read error at sector {}", sector));
-            }
-            _ => {}
-        }
-    }
-}
-
 // Install this rip attempt's initial Halt, CARRYING the outgoing token's cancel so a Stop
 // landing between the pre-call cancel check and this line isn't silently discarded.
 fn install_rip_halt(device: &str) {
@@ -3168,13 +3141,6 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // from this via spawn_pass_watcher. Renamed locally for clarity.
     let user_halt = halt.clone();
 
-    // Drive-level events reset the watchdog so the "stalled" timer doesn't
-    // climb while the library works through recovery. See make_drive_event_fn.
-    session.drive.on_event(make_drive_event_fn(
-        device.to_string(),
-        wd_last_frame.clone(),
-        latest_bytes_read.clone(),
-    ));
     // Multi-pass (max_retries > 0) goes through an ISO intermediate before
     // mux; single-pass streams disc→MKV directly. Lifted out of the
     // multipass branch so the outer-scope mux loop can reference it.
@@ -3353,19 +3319,23 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
         // Runs every read block (~64 KB); throttled to once every 1.5s so
         // it doesn't pound the mutex/filesystem. Tracks last-sample for ETA.
-        let pass1_state = std::cell::RefCell::new(PassProgressState::new());
+        let pass1_state = std::sync::Mutex::new(PassProgressState::new());
         let pass1_ctx = &pass_ctx;
-        let pass1_progress = |p: &libfreemkv::progress::PassProgress| -> bool {
+        let pass1_progress = |e: &libfreemkv::Event<'_>| {
+            let libfreemkv::Event::Pass(p) = e else {
+                return;
+            };
             // Stash work_done for push_pass_state to compute pass progress.
-            pass1_state.borrow_mut().last_work_done = p.work_done;
-            pass1_state.borrow_mut().last_work_total = p.work_total;
-            // Throttle: only re-read mapfile + push state every 1.5s.
-            // 250 ms UI push cadence (see the patch closure below for rationale).
-            if pass1_state.borrow().last_update.elapsed().as_millis() < 250 {
-                return true;
+            {
+                let mut s = pass1_state.lock().unwrap_or_else(|e| e.into_inner());
+                s.last_work_done = p.work_done;
+                s.last_work_total = p.work_total;
+                // 250 ms UI push cadence (see the patch closure below for rationale).
+                if s.last_update.elapsed().as_millis() < 250 {
+                    return;
+                }
             }
             push_pass_state(pass1_ctx, p, bps_progress, 1, total_passes, &pass1_state);
-            true
         };
 
         // Pass 1 with transport-failure recovery: the Initio USB-SATA bridge
@@ -3881,7 +3851,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
             // Per-pass progress state — created BEFORE the settle so the disc
             // map can be painted immediately.
-            let patch_state = std::cell::RefCell::new(PassProgressState::new());
+            let patch_state = std::sync::Mutex::new(PassProgressState::new());
             let patch_ctx = &pass_ctx;
             let patch_title = &title_for_progress;
             let patch_map = std::path::Path::new(&mapfile_path_str);
@@ -3912,16 +3882,21 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     pass, bytes_pending
                 ),
             );
-            let patch_progress = |p: &libfreemkv::progress::PassProgress| -> bool {
-                patch_state.borrow_mut().last_work_done = p.work_done;
-                patch_state.borrow_mut().last_work_total = p.work_total;
-                // 250ms UI push cadence matches libfreemkv's snapshot republish;
-                // the per-push mapfile reload is cheap for the usual handful of ranges.
-                if patch_state.borrow().last_update.elapsed().as_millis() < 250 {
-                    return true;
+            let patch_progress = |e: &libfreemkv::Event<'_>| {
+                let libfreemkv::Event::Pass(p) = e else {
+                    return;
+                };
+                {
+                    let mut s = patch_state.lock().unwrap_or_else(|e| e.into_inner());
+                    s.last_work_done = p.work_done;
+                    s.last_work_total = p.work_total;
+                    // 250ms UI push cadence matches libfreemkv's snapshot republish;
+                    // the per-push mapfile reload is cheap for the usual handful of ranges.
+                    if s.last_update.elapsed().as_millis() < 250 {
+                        return;
+                    }
                 }
                 push_pass_state(patch_ctx, p, bps_progress, pass, total_passes, &patch_state);
-                true
             };
             let pass_halt = Arc::new(AtomicBool::new(false));
             let _pass_guard = spawn_pass_watcher(pass_halt.clone(), user_halt.clone());
@@ -4653,7 +4628,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         // Entering mux phase — push final mapfile state so the UI keeps the
         // bad-range list visible through mux and into the "done" view. The lib
         // builds the snapshot from the mapfile (autorip never parses it).
-        let mux_state = std::cell::RefCell::new(PassProgressState::new());
+        let mux_state = std::sync::Mutex::new(PassProgressState::new());
         if let Some(snap) = freemkv_engine::progress_snapshot_from_mapfile(
             std::path::Path::new(&mapfile_path_str),
             Some(&title_for_progress),
