@@ -29,7 +29,11 @@ import time
 
 MIB = 1 << 20
 CHUNK = 16 * MIB
-DEFAULT_KEYS = ('dvd.iso', 'bd.iso', 'uhd.iso', 'hddvd.iso', 'keydb.cfg')
+DEFAULT_KEYS = ('dvd.iso', 'bd.iso', 'uhd.iso', 'hddvd.iso', 'keydb.cfg',
+                'synthetic-m2ts-h264-bframes-lpcm16-lpcm24.m2ts',
+                'synthetic-mkv-h264-aac-mp2-mp3.mkv',
+                'synthetic-mpg-mpeg2-interlaced-mp2-lpcm24.mpg',
+                'bd-aacs-damage.patch.json')
 
 
 class Precondition(Exception):

@@ -33,13 +33,14 @@
   "closure_roots": ["ureq", "mimalloc", "libc"],
   "closure_skip": ["freemkv-unlock", "freemkv-i18n"],
   "runner_name_re": "^ephemeral-(linux|windows)(-perf)?-(i-[0-9a-f]{8,17})$",
-  "harness": {"repository": "freemkv/freemkv-ci", "sha": "7ff716072c7063aaf4f1a7dd7200f532dab77794"},
+  "harness": {"repository": "freemkv/freemkv-ci", "sha": "7ba95b4f640a8b66038e66731dc0f481488fdde0"},
   "launch": {
     "linux": {"template": "freemkv-runner-linux", "types": ["c7i.4xlarge", "c6i.4xlarge", "m7i.4xlarge"],
               "spot_max_price": "0.72", "on_demand_fallback": true},
     "windows": {"template": "freemkv-runner-windows", "types": []}
   },
-  "fixtures": ["dvd.iso", "bd.iso", "uhd.iso", "hddvd.iso", "keydb.cfg"],
+  "fixtures": ["dvd.iso", "bd.iso", "uhd.iso", "hddvd.iso", "keydb.cfg",
+    "synthetic-m2ts-h264-bframes-lpcm16-lpcm24.m2ts", "synthetic-mkv-h264-aac-mp2-mp3.mkv", "synthetic-mpg-mpeg2-interlaced-mp2-lpcm24.mpg", "bd-aacs-damage.patch.json"],
   "canary": {"probes": [{"fixture": "uhd.iso"}]},
   "perf": {
     "enabled": false,
