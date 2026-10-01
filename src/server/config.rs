@@ -38,7 +38,7 @@ pub struct WebhookEntry {
 impl WebhookEntry {
     /// A URL entry that fires on every stage — the pre-1.6.8 "notify on
     /// completion" behaviour and the shape a bare legacy string migrates to.
-    fn both(url: String) -> Self {
+    fn all_stages(url: String) -> Self {
         Self {
             url,
             post_rip: true,
@@ -52,7 +52,7 @@ impl WebhookEntry {
     /// field (`webhook_urls[i]` or `webhook_urls[i].<flag>`); blank URLs pass.
     pub(crate) fn parse(i: usize, v: &serde_json::Value) -> Result<Self, String> {
         if let Some(s) = v.as_str() {
-            return Ok(Self::both(s.to_string()));
+            return Ok(Self::all_stages(s.to_string()));
         }
         let malformed = || format!("webhook_urls[{i}]");
         let obj = v.as_object().ok_or_else(malformed)?;
@@ -108,7 +108,7 @@ impl<'de> Deserialize<'de> for WebhookEntry {
             },
         }
         Ok(match Raw::deserialize(deserializer)? {
-            Raw::Url(url) => WebhookEntry::both(url),
+            Raw::Url(url) => WebhookEntry::all_stages(url),
             Raw::Obj {
                 url,
                 post_rip,
@@ -154,7 +154,7 @@ pub struct Config {
     pub tv_auto: bool,
     pub auto_eject: bool,
     pub on_insert: String,      // "nothing", "scan", "rip", "resume"
-    pub output_format: String,  // "mkv", "m2ts", "iso"
+    pub output_format: String,  // "mkv", "m2ts", "iso", "network"
     pub network_target: String, // e.g. "nas.example.com:9000" for network output
     pub on_read_error: String,  // "stop", "skip"
     /// Number of retry passes over the disc. 0 = single pass (read the disc
@@ -292,7 +292,7 @@ impl std::fmt::Debug for Config {
 /// Default web bind port — used by `#[serde(default)]` on `port` when an
 /// older settings.json carried the (now non-serialized) field. The live
 /// value always comes from the `PORT` env var via [`load`].
-fn default_port() -> u16 {
+pub(crate) fn default_port() -> u16 {
     8080
 }
 
@@ -363,7 +363,7 @@ pub fn default_autorip_dir() -> String {
 // Parses `PORT`'s raw string into a bind port; `None` for anything not a
 // valid 1..=65535 port (unparseable, or the reserved `0` sentinel) so the
 // caller can warn and fall back to 8080 instead of binding ephemerally.
-fn parse_port_env(s: &str) -> Option<u16> {
+pub(crate) fn parse_port_env(s: &str) -> Option<u16> {
     match s.trim().parse::<u16>() {
         Ok(p) if p != 0 => Some(p),
         _ => None,
@@ -403,10 +403,10 @@ pub fn load() -> Arc<RwLock<Config>> {
                     value = %s,
                     "PORT env var is not a valid 1-65535 port; falling back to 8080"
                 );
-                8080
+                default_port()
             }
         },
-        Err(_) => 8080,
+        Err(_) => default_port(),
     };
 
     let mut cfg = build_bootstrap_config(port, autorip_dir);
@@ -455,15 +455,11 @@ pub fn load() -> Arc<RwLock<Config>> {
 }
 
 /// Apply the configured decrypt thread count to libfreemkv's global
-/// rayon pool. 0 means "auto" — let libfreemkv fall back to its own
-/// default (all cores, capped). UI invokes this on settings POST so
+/// rayon pool. 0 means "auto" — it resets libfreemkv to its own default
+/// (all cores, capped), dropping any earlier explicit count. UI invokes this on settings POST so
 /// changes take effect without restarting the container.
 pub fn apply_decrypt_threads(n: usize) {
-    if n > 0 {
-        libfreemkv::decrypt::set_decrypt_threads(n);
-    }
-    // n == 0 leaves the existing setting in place; there's no libfreemkv
-    // "reset to default" hook, and lazy init already picked the right default.
+    libfreemkv::decrypt::set_decrypt_threads(n);
 }
 
 fn load_saved(mut cfg: Config) -> Config {
@@ -1436,6 +1432,19 @@ mod tests {
         // Values not sourced from these two env vars still come from
         // Config::default() via the struct-update.
         assert_eq!(cfg.staging_dir, Config::default().staging_dir);
+    }
+
+    /// Setting `decrypt_threads` back to 0 (auto) must reset libfreemkv's pool
+    /// to its default, not leave the previous explicit count in force.
+    #[test]
+    fn apply_decrypt_threads_zero_resets_to_auto() {
+        apply_decrypt_threads(0);
+        let auto = libfreemkv::decrypt::decrypt_threads();
+        let explicit = if auto == 2 { 3 } else { 2 };
+        apply_decrypt_threads(explicit);
+        assert_eq!(libfreemkv::decrypt::decrypt_threads(), explicit);
+        apply_decrypt_threads(0);
+        assert_eq!(libfreemkv::decrypt::decrypt_threads(), auto);
     }
 
     /// `parse_port_env` — the pure guard behind `load()`'s `PORT` handling.
