@@ -3,10 +3,22 @@
 // (module decls + global allocator live in main.rs; this is the CLI shell entry point.)
 
 /// Worker guard for the optional non-blocking file log layer. Held for the
-/// life of the process so buffered records are flushed on exit; `None` when
-/// `--log-file` isn't given.
-static LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuard> =
-    std::sync::OnceLock::new();
+/// life of the process; [`exit`] drops it so buffered records are flushed before
+/// the process ends. `None` when no diagnostic log is installed.
+static LOG_GUARD: std::sync::Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> =
+    std::sync::Mutex::new(None);
+
+/// Flush and close the diagnostic log. The process ends without running
+/// destructors, so records still queued would otherwise be lost.
+pub(crate) fn flush_log() {
+    drop(LOG_GUARD.lock().unwrap_or_else(|e| e.into_inner()).take());
+}
+
+/// `std::process::exit` after [`flush_log`].
+pub(crate) fn exit(code: i32) -> ! {
+    flush_log();
+    std::process::exit(code)
+}
 
 /// Default diagnostic log path when `--log-level` is given without an explicit
 /// `--log-file`. Written in the working directory, matching the fatal-error
@@ -112,6 +124,17 @@ fn split_log_path(path: &str) -> Option<(std::path::PathBuf, std::ffi::OsString)
     Some((dir, name))
 }
 
+// Open a `--log-file` value for append. `None` for a path with no filename, a
+// non-UTF-8 name, or a file that can't be opened (`rolling::never` would panic on it).
+fn open_log_file(path: &str) -> Option<tracing_appender::rolling::RollingFileAppender> {
+    let (dir, name) = split_log_path(path)?;
+    tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::NEVER)
+        .filename_prefix(name.to_str()?)
+        .build(dir)
+        .ok()
+}
+
 // Returns the diagnostics it could not render (see PendingDiag). The
 // subscriber is installed HERE, first thing in run(), so no tracing event
 // can be emitted before there's somewhere for it to go.
@@ -150,11 +173,12 @@ fn init_logging(args: &[String]) -> Vec<PendingDiag> {
     // File-only sink. NEVER stdout/stderr — the terminal is Channel 1 and must
     // stay free of tracing. Default to ./log.txt; ANSI off, timestamps on.
     let path = log_file.unwrap_or_else(|| DEFAULT_LOG_FILE.to_string());
-    let file_appender = match split_log_path(&path) {
-        Some((dir, name)) => tracing_appender::rolling::never(dir, name),
+    let opened = open_log_file(&path);
+    let file_appender = match opened {
+        Some(appender) => appender,
         None => {
-            // An invalid `--log-file` path is a fatal misconfiguration of the
-            // diagnostic channel — report it cleanly on the terminal (this is a
+            // An invalid or unopenable `--log-file` path is a misconfiguration of
+            // the diagnostic channel — report it cleanly on the terminal (this is a
             // CLI diagnostic, not a tracing event) and continue without a file.
             diags.push(
                 PendingDiag::new(
@@ -167,7 +191,7 @@ fn init_logging(args: &[String]) -> Vec<PendingDiag> {
         }
     };
     let (nb, guard) = tracing_appender::non_blocking(file_appender);
-    let _ = LOG_GUARD.set(guard);
+    *LOG_GUARD.lock().unwrap_or_else(|e| e.into_inner()) = Some(guard);
     let file_layer = fmt::layer().with_ansi(false).with_writer(nb);
     tracing_subscriber::registry()
         .with(env_filter)
@@ -217,7 +241,7 @@ pub fn run(args: Vec<String>) {
         // `freemkv; echo $?` sees a failure. Explicit `help`/`--help`/`-h`
         // still exits 0 (handled below).
         usage();
-        std::process::exit(2);
+        exit(2);
     }
 
     match args[1].as_str() {
@@ -232,7 +256,7 @@ pub fn run(args: Vec<String>) {
         // Only reached in the CLI build; the app build opens the window before `run`.
         "gui" => {
             eprintln!("{}", crate::strings::get("error.gui_not_in_build"));
-            std::process::exit(2);
+            exit(2);
         }
         // NOTE: deliberately no `remux`/conversion verb. The operation IS the
         // URL pair: `freemkv <source-url> <dest-url> [opts]` — source→dest is
@@ -250,7 +274,7 @@ pub fn run(args: Vec<String>) {
                     crate::strings::fmt("help.unknown_command", &[("cmd", other)])
                 );
                 usage();
-                std::process::exit(2);
+                exit(2);
             }
         },
 
@@ -263,7 +287,7 @@ pub fn run(args: Vec<String>) {
                 if code != 0 {
                     // `pipe::run` already printed the curated cause/result; just
                     // propagate its exit code (`freemkv help` documents each one).
-                    std::process::exit(code);
+                    exit(code);
                 }
             } else if urls.len() == 1 {
                 // Single URL, no dest — show info. `info_cmd` wants the URL at
@@ -282,10 +306,11 @@ pub fn run(args: Vec<String>) {
                 info_cmd(&info_args);
             } else {
                 eprintln!("{}", crate::strings::get("error.usage_hint"));
-                std::process::exit(1);
+                exit(1);
             }
         }
     }
+    flush_log();
 }
 
 /// True if `s` looks like a stream URL (`scheme://...`).
@@ -387,7 +412,7 @@ fn fatal(op_key: &str, cause: &str) -> ! {
         )
     );
     eprintln!("  {}", crate::strings::get("error.fatal_diagnostic_hint"));
-    std::process::exit(1);
+    exit(1);
 }
 
 /// The leading mark for the fatal-error block: a red `✗` on a real terminal, a
@@ -535,7 +560,7 @@ fn info_lists_streams(url: &libfreemkv::StreamUrl) -> bool {
 fn info_cmd(args: &[String]) {
     if args.is_empty() {
         eprintln!("{}", crate::strings::get("error.info_usage"));
-        std::process::exit(1);
+        exit(1);
     }
 
     let url = &args[0];
@@ -622,8 +647,19 @@ fn info_cmd(args: &[String]) {
             crate::disc_info::print_disc_titles(&disc, &flags);
         }
         u if info_lists_streams(u) => {
-            let Ok(keys) = crate::pipe::info_clip_keys(url) else {
-                std::process::exit(1);
+            // Same parser as the iso/dir/disc arms: `--keydb` is honoured, an unknown flag exits 1.
+            let flags = match crate::disc_info::parse_info_flags(&args[1..]) {
+                crate::disc_info::InfoParse::Ok(f) => f,
+                crate::disc_info::InfoParse::Help => {
+                    println!("{}", crate::strings::get("disc.usage"));
+                    return;
+                }
+                crate::disc_info::InfoParse::Unknown(opt) => {
+                    crate::disc_info::reject_unknown_option(&opt)
+                }
+            };
+            let Ok(keys) = crate::pipe::info_clip_keys(url, flags.keydb.clone()) else {
+                exit(1);
             };
             match freemkv_engine::stream_info(url, keys, &libfreemkv::Halt::new()) {
                 Ok(meta) => {
@@ -662,14 +698,14 @@ fn info_cmd(args: &[String]) {
                 "{}",
                 crate::strings::fmt("error.info_unknown_url", &[("url", url)])
             );
-            std::process::exit(1);
+            exit(1);
         }
         _ => {
             eprintln!(
                 "{}",
                 crate::strings::fmt("error.info_unsupported_url", &[("url", url)])
             );
-            std::process::exit(1);
+            exit(1);
         }
     }
 }
@@ -897,8 +933,14 @@ fn update_keys_dest(args: &[String]) -> std::path::PathBuf {
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--keydb" {
-            i += 1;
-            keydb = args.get(i).cloned();
+            // Only a real value, never the next flag or URL (as `info --keydb`).
+            if let Some(v) = args
+                .get(i + 1)
+                .filter(|v| !is_flag_token(v) && !is_url_token(v))
+            {
+                keydb = Some(v.clone());
+                i += 1;
+            }
         }
         i += 1;
     }
@@ -922,7 +964,7 @@ fn update_keys(args: &[String]) {
         Some(u) => u,
         None => {
             eprintln!("{}", crate::strings::get("keys.usage"));
-            std::process::exit(1);
+            exit(1);
         }
     };
     // The download lands at the `--keydb` path when given, else the standard
@@ -995,6 +1037,32 @@ mod tests {
             Some(3),
             "--log-level was swallowed by the flag before it"
         );
+
+        // And the reverse: a rejected --log-level value leaves --log-file intact.
+        let args: Vec<String> = ["--log-level", "--log-file", "a.log"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (level, log_file, _) = super::parse_logging_flags(&args);
+        assert_eq!(level, None, "--log-level had no value to take");
+        assert_eq!(
+            log_file.as_deref(),
+            Some("a.log"),
+            "--log-file was swallowed by --log-level"
+        );
+    }
+
+    // `rolling::never` panicked on a log it could not open; the path is reported instead.
+    #[test]
+    fn an_unopenable_log_file_is_none_instead_of_a_panic() {
+        let dir = std::env::temp_dir().join(format!("freemkv-logfile-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("as-dir.log")).unwrap();
+        assert!(super::open_log_file(dir.join("as-dir.log").to_str().unwrap()).is_none());
+        std::fs::write(dir.join("file"), b"").unwrap();
+        assert!(super::open_log_file(dir.join("file/x.log").to_str().unwrap()).is_none());
+        let ok = dir.join("ok.log");
+        assert!(super::open_log_file(ok.to_str().unwrap()).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     use super::{SUBCOMMANDS, collect_urls, stream_info_lines, update_keys_dest};
@@ -1327,6 +1395,25 @@ mod tests {
         assert_ne!(
             update_keys_dest(&args),
             std::path::PathBuf::from("/custom/path/keydb.cfg")
+        );
+        assert_eq!(
+            update_keys_dest(&args),
+            crate::pipe::resolved_keydb_path(&None)
+        );
+    }
+
+    // `--keydb` followed by a flag has no value: the flag is not the destination.
+    #[test]
+    fn update_keys_keydb_does_not_swallow_the_following_flag() {
+        let args = v(&["--keydb", "--url", "https://h/keydb.zip"]);
+        assert_eq!(
+            update_keys_dest(&args),
+            crate::pipe::resolved_keydb_path(&None)
+        );
+        let args = v(&["--keydb", "/tmp/k.cfg", "--url", "https://h/keydb.zip"]);
+        assert_eq!(
+            update_keys_dest(&args),
+            std::path::PathBuf::from("/tmp/k.cfg")
         );
     }
 

@@ -1,6 +1,6 @@
 // freemkv — shared test fixtures (WS2), MIT — freemkv project
-// Single source of truth for the `Error`-variant list, shared via `include!`
-// between `strings.rs`'s unit test and `tests/messaging_contract.rs`; hand-maintained, drift from `src/error.rs` FAILS the contract test.
+// Single source of truth for the `Error`-variant list, included via `include!`
+// by `tests/messaging_contract.rs`; hand-maintained, drift from `src/error.rs` FAILS the contract test.
 
 /// Construct one instance of every error code `libfreemkv` publishes.
 ///

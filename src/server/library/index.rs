@@ -5,11 +5,13 @@
 //! enabled). A recorded rip-time link wins; otherwise the two sides meet on
 //! [`normalise_title`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 /// `"Fast & Furious (2009)"` and `"FastAndFurious"` both become `"fastandfurious"`:
-/// lowercase, `&` read as "and", any `(YYYY)` dropped, then letters and digits only.
+/// lowercase, `&` read as "and", any `(YYYY)` dropped, then letters and digits only
+/// (any script). A title with none keeps its trimmed lowercase text, so it never
+/// shares a key with every other such title.
 pub fn normalise_title(s: &str) -> String {
     let lower = s.to_lowercase().replace('&', "and");
     let mut out = String::with_capacity(lower.len());
@@ -24,12 +26,26 @@ pub fn normalise_title(s: &str) -> String {
             i += 6;
             continue;
         }
-        if chars[i].is_ascii_alphanumeric() {
+        if chars[i].is_alphanumeric() {
             out.push(chars[i]);
         }
         i += 1;
     }
+    if out.is_empty() {
+        return lower.trim().to_string();
+    }
     out
+}
+
+/// The first `(YYYY)` in a title, which normalising drops.
+fn title_year(s: &str) -> Option<u32> {
+    let b = s.as_bytes();
+    (0..b.len().saturating_sub(5)).find_map(|i| {
+        let w = &b[i..i + 6];
+        (w[0] == b'(' && w[5] == b')' && w[1..5].iter().all(u8::is_ascii_digit))
+            .then(|| s[i + 1..i + 5].parse().ok())
+            .flatten()
+    })
 }
 
 /// One MKV found under the library folder.
@@ -229,10 +245,11 @@ pub fn classify(
     let mut rows = Vec::new();
     let mut linked_isos = std::collections::HashSet::new();
     let mut unlinked_mkvs = Vec::new();
+    let iso_at: HashMap<&Path, &IsoFile> = isos.iter().map(|f| (f.path.as_path(), f)).collect();
     for m in mkvs {
         match links
             .get(&m.path)
-            .and_then(|i| isos.iter().find(|f| &f.path == i))
+            .and_then(|i| iso_at.get(i.as_path()).copied())
         {
             Some(iso) => {
                 linked_isos.insert(iso.path.clone());
@@ -267,7 +284,33 @@ pub fn classify(
             .push(i);
     }
     for (key, (ms, is)) in groups {
-        rows.push(group_row(library, key, &ms, &is));
+        // Remakes share a name: same key, different years, different films.
+        let years: BTreeSet<u32> = ms
+            .iter()
+            .map(|m| title_year(&m.title))
+            .chain(is.iter().map(|i| title_year(&i.title)))
+            .flatten()
+            .collect();
+        if years.len() < 2 {
+            rows.push(group_row(library, key, &ms, &is));
+            continue;
+        }
+        for year in years.iter().map(|y| Some(*y)).chain([None]) {
+            let ms: Vec<&MkvFile> = ms
+                .iter()
+                .copied()
+                .filter(|m| title_year(&m.title) == year)
+                .collect();
+            let is: Vec<&IsoFile> = is
+                .iter()
+                .copied()
+                .filter(|i| title_year(&i.title) == year)
+                .collect();
+            if !ms.is_empty() || !is.is_empty() {
+                let key = year.map_or_else(|| key.clone(), |y| format!("{key}-{y}"));
+                rows.push(group_row(library, key, &ms, &is));
+            }
+        }
     }
     rows.sort_by(|a, b| {
         a.title
@@ -350,7 +393,12 @@ mod tests {
             "bladerunnerfinalcut"
         );
         assert_eq!(normalise_title("Se7en (1995) (4K)"), "se7en4k");
-        assert_eq!(normalise_title("Amélie (2001)"), "amlie");
+        assert_eq!(normalise_title("Amélie (2001)"), "amélie");
+        assert_ne!(
+            normalise_title("千と千尋の神隠し"),
+            normalise_title("もののけ姫")
+        );
+        assert_ne!(normalise_title("!!!"), normalise_title("???"));
         assert_eq!(normalise_title("(12345)"), "12345");
         assert_eq!(normalise_title(""), "");
     }
@@ -462,6 +510,27 @@ mod tests {
     }
 
     #[test]
+    fn remakes_with_different_years_are_not_paired() {
+        let t = tempfile::tempdir().unwrap();
+        let lib = t.path().join("movies");
+        let isos = t.path().join("isos");
+        touch(&lib.join("King Kong (1933)/King Kong (1933).mkv"));
+        touch(&isos.join("King Kong (2005).iso"));
+        touch(&lib.join("七人の侍/七人の侍.mkv"));
+        touch(&isos.join("羅生門.iso"));
+        let rows = classify(
+            &lib,
+            &list_mkvs(&lib).files,
+            &list_isos(&isos, false).files,
+            &HashMap::new(),
+        );
+        assert_eq!(by_title(&rows, "King Kong (1933)").kind, RowKind::MkvOnly);
+        assert_eq!(by_title(&rows, "King Kong (2005)").kind, RowKind::IsoOnly);
+        assert_eq!(by_title(&rows, "七人の侍").kind, RowKind::MkvOnly);
+        assert_eq!(by_title(&rows, "羅生門").kind, RowKind::IsoOnly);
+    }
+
+    #[test]
     fn subfolder_isos_can_make_a_match_ambiguous() {
         let (_t, lib, isos) = fixture();
         let mkvs = list_mkvs(&lib).files;
@@ -502,5 +571,33 @@ mod tests {
         let rows = classify(&lib, &mkvs, &list_isos(&isos, false).files, &links);
         assert_eq!(by_title(&rows, "Heat (1995)").kind, RowKind::Remux);
         assert!(!by_title(&rows, "Heat (1995)").linked);
+    }
+
+    #[test]
+    fn an_unreadable_or_missing_folder_is_an_incomplete_listing() {
+        let t = tempfile::tempdir().unwrap();
+        let gone = t.path().join("not-mounted");
+        assert!(list_mkvs(&gone).incomplete);
+        assert!(list_isos(&gone, true).incomplete);
+        assert!(list_mkvs(&gone).files.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_unreadable_subfolder_marks_the_listing_incomplete() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let t = tempfile::tempdir().unwrap();
+        let lib = t.path().join("movies");
+        touch(&lib.join("A/A.mkv"));
+        touch(&lib.join("B/B.mkv"));
+        let b = lib.join("B");
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o0)).unwrap();
+        let m = list_mkvs(&lib);
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if std::fs::read_dir(&b).is_ok() && m.files.len() == 2 {
+            return; // root reads anything
+        }
+        assert!(m.incomplete);
+        assert_eq!(m.files.len(), 1);
     }
 }

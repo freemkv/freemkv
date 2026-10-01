@@ -141,19 +141,23 @@ mod imp {
         }
     }
 
-    pub fn free_space_bytes(path: &str) -> Option<u64> {
-        let p = std::path::Path::new(path);
-        // A destination that does not exist yet is normal (we are about to
-        // create the file); probe the nearest existing ancestor so the number
-        // still describes the right volume.
-        let probe = std::iter::successors(Some(p), |q| q.parent())
-            .find(|q| q.exists())
-            .unwrap_or(std::path::Path::new("/"));
-        let out = std::process::Command::new("df")
-            .args(["-k", probe.to_str()?])
-            .output()
-            .ok()?;
-        let text = String::from_utf8_lossy(&out.stdout);
+    /// The nearest ancestor of `p` (itself included) that `exists`. A relative path with
+    /// nothing existing resolves to the current directory, not the root volume.
+    pub fn nearest_existing(
+        p: &std::path::Path,
+        exists: impl Fn(&std::path::Path) -> bool,
+    ) -> &std::path::Path {
+        std::iter::successors(Some(p), |q| q.parent())
+            .find(|q| !q.as_os_str().is_empty() && exists(q))
+            .unwrap_or(if p.is_absolute() {
+                std::path::Path::new("/")
+            } else {
+                std::path::Path::new(".")
+            })
+    }
+
+    /// Free bytes from `df -k` output: the "Available" column of the one data row.
+    pub fn parse_df_free(text: &str) -> Option<u64> {
         // `df` wraps a long device name onto its own line, pushing the data
         // columns onto the next — joining every line after the header back
         // into one restores the normal column order before indexing into it.
@@ -165,6 +169,19 @@ mod imp {
             .join(" ");
         let kb: u64 = merged.split_whitespace().nth(3)?.parse().ok()?;
         Some(kb.saturating_mul(1024))
+    }
+
+    pub fn free_space_bytes(path: &str) -> Option<u64> {
+        let p = std::path::Path::new(path);
+        // A destination that does not exist yet is normal (we are about to
+        // create the file); probe the nearest existing ancestor so the number
+        // still describes the right volume.
+        let probe = nearest_existing(p, |q| q.exists());
+        let out = std::process::Command::new("df")
+            .args(["-k", probe.to_str()?])
+            .output()
+            .ok()?;
+        parse_df_free(&String::from_utf8_lossy(&out.stdout))
     }
 }
 
@@ -339,11 +356,51 @@ mod tests {
         assert!(super::free_space_bytes(p.to_str().unwrap()).is_some_and(|b| b > 0));
     }
 
-    /// Nonsense input must not panic.
+    /// Nonsense input must not panic. A relative path that cannot exist is measured on the
+    /// current directory's volume on Unix and is `None` on Windows, as is an empty one.
     #[test]
-    fn a_bogus_path_is_none_not_a_panic() {
-        let _ = super::free_space_bytes("");
-        let _ = super::free_space_bytes("\0\0\0");
+    fn a_bogus_path_does_not_panic_and_a_relative_one_means_the_cwd() {
+        assert_eq!(super::free_space_bytes("\0\0\0").is_some(), cfg!(unix));
+        assert_eq!(
+            super::free_space_bytes("").is_some(),
+            cfg!(unix),
+            "an empty path means the current directory on Unix"
+        );
+    }
+
+    /// A relative destination that does not exist yet is measured on the current directory's
+    /// volume, never the root's.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_relative_destination_probes_the_current_directory() {
+        use std::path::Path;
+        let none = |_: &Path| false;
+        assert_eq!(
+            super::imp::nearest_existing(Path::new("out/new/file.mkv"), none),
+            Path::new(".")
+        );
+        assert_eq!(
+            super::imp::nearest_existing(Path::new("out/new/file.mkv"), |q| q == Path::new("out")),
+            Path::new("out")
+        );
+        assert_eq!(
+            super::imp::nearest_existing(Path::new("/gone/file.mkv"), none),
+            Path::new("/")
+        );
+    }
+
+    /// A long device name wraps `df`'s row onto two lines; the Available column is the same.
+    #[cfg(unix)]
+    #[test]
+    fn df_output_parses_whether_or_not_the_device_name_wraps() {
+        let plain = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
+                     /dev/disk1 1000 400 600 40% /\n";
+        let wrapped = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
+                       server.example.com:/export/a/very/long/name\n\
+                       1000 400 600 40% /mnt\n";
+        assert_eq!(super::imp::parse_df_free(plain), Some(600 * 1024));
+        assert_eq!(super::imp::parse_df_free(wrapped), Some(600 * 1024));
+        assert_eq!(super::imp::parse_df_free("Filesystem\n"), None);
     }
 
     /// Unit tests build real `App`s (`Settings::load`, which renames an

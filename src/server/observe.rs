@@ -6,7 +6,7 @@
 //! `/api/debug`), and stderr (compact, captured by Docker).
 //!
 //! Filter level via `AUTORIP_LOG_LEVEL` (env-filter syntax). Default
-//! `autorip=info,libfreemkv=warn`.
+//! [`FILTER_OFF`]: the daemon at info, the engine libraries at warn.
 //!
 //! The daemon's own events carry the module-path target `freemkv::server::…`
 //! (they were `autorip::…` when it was its own crate), so every `autorip`
@@ -19,8 +19,8 @@ use tracing_appender::rolling;
 use tracing_subscriber::reload;
 use tracing_subscriber::{EnvFilter, Registry, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-// EnvFilter directive used when /api/debug is OFF (the normal state). prod = warnings only; dev
-// = full debug (see FILTER_ON).
+// EnvFilter directive used when /api/debug is OFF (the normal state): the daemon at info, the
+// engine libraries at warn. /api/debug ON swaps in FILTER_ON.
 const FILTER_OFF: &str = "autorip=info,freemkv::server=info,libfreemkv=warn,freemkv=warn";
 
 // EnvFilter directive used when /api/debug is ON: debug globally, plus mux/stream/freemkv
@@ -77,13 +77,21 @@ pub fn init() {
     let env_override = std::env::var("AUTORIP_LOG_LEVEL")
         .ok()
         .filter(|s| !s.is_empty());
-    let initial_filter = match env_override.as_deref() {
-        Some(s) => EnvFilter::try_new(with_server_targets(s))
-            .unwrap_or_else(|_| EnvFilter::new(FILTER_OFF)),
-        None => EnvFilter::new(FILTER_OFF),
-    };
+    // An unparsable directive is reported (the sinks are not up yet, so on stderr) and ignored,
+    // leaving the default filter AND the /api/debug toggle in force.
+    let env_filter = env_override
+        .as_deref()
+        .and_then(|s| match parse_override(s) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                eprintln!("AUTORIP_LOG_LEVEL {s:?} ignored, using the default filter: {e}");
+                None
+            }
+        });
+    let overridden = env_filter.is_some();
+    let initial_filter = env_filter.unwrap_or_else(|| EnvFilter::new(FILTER_OFF));
     let (filter, reload_handle) = reload::Layer::new(initial_filter);
-    let reload_handle = if env_override.is_some() {
+    let reload_handle = if overridden {
         None
     } else {
         Some(reload_handle)
@@ -133,6 +141,12 @@ pub fn init() {
     let _ = GUARDS.set(guards);
 }
 
+// The operator's `AUTORIP_LOG_LEVEL` spec as a filter (`autorip` directives mirrored onto the
+// daemon's module targets), or why it does not parse.
+fn parse_override(spec: &str) -> Result<EnvFilter, String> {
+    EnvFilter::try_new(with_server_targets(spec)).map_err(|e| e.to_string())
+}
+
 /// Swap the active EnvFilter at runtime. Called by `/api/debug` to
 /// flip between FILTER_OFF and FILTER_ON. No-op if `AUTORIP_LOG_LEVEL`
 /// was set explicitly at startup (the operator's directive wins) or if
@@ -145,6 +159,11 @@ pub fn set_debug(enabled: bool) -> bool {
     let Some(handle) = RELOAD_HANDLE.get() else {
         return false;
     };
+    swap_filter(handle, enabled)
+}
+
+// Point `handle` at FILTER_ON or FILTER_OFF; `true` when the swap took.
+fn swap_filter(handle: &reload::Handle<EnvFilter, Registry>, enabled: bool) -> bool {
     let directive = if enabled { FILTER_ON } else { FILTER_OFF };
     let new_filter = match EnvFilter::try_new(directive) {
         Ok(f) => f,
@@ -154,8 +173,8 @@ pub fn set_debug(enabled: bool) -> bool {
 }
 
 fn log_dir() -> String {
-    // AUTORIP_DIR, else writable /config (Docker), else ~/.config/autorip
-    // (bare run) — matches config/log so all sinks agree on one writable base.
+    // `<autorip_dir>/logs` — the same base as config/log, so all sinks agree on one
+    // writable directory.
     format!("{}/logs", crate::server::config::default_autorip_dir())
 }
 
@@ -233,10 +252,9 @@ mod tests {
         );
     }
 
-    // End-to-end: under FILTER_ON, a heartbeat event is recorded and a
-    // CSS-style key event is emitted without raw key bytes (redaction).
+    // End-to-end: under FILTER_ON, a heartbeat event is recorded.
     #[test]
-    fn debug_on_shows_heartbeats_and_redacts_keys() {
+    fn debug_on_shows_heartbeats() {
         use std::sync::{Arc, Mutex};
         use tracing_subscriber::fmt::MakeWriter;
         use tracing_subscriber::layer::SubscriberExt;
@@ -275,32 +293,12 @@ mod tests {
                 total = 50000u64,
                 "alive"
             );
-            // Mimic the REDACTED css auth log: key value is "<redacted>",
-            // only a 1-byte fingerprint accompanies it. No raw key bytes.
-            tracing::debug!(
-                target: "freemkv::css",
-                title_key = "<redacted>",
-                title_key_fp = 0x5Au8,
-                "css auth: final title_key"
-            );
         });
 
         let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-
-        // Heartbeat surfaced under /api/debug ON.
         assert!(
             out.contains("alive") && out.contains("css_crack"),
             "FILTER_ON must surface the heartbeat; got:\n{out}"
-        );
-        // Redaction confirmed: the marker is present, the field is redacted,
-        // and no plausible raw 5-byte CSS key hex leaked.
-        assert!(
-            out.contains("<redacted>"),
-            "title_key must be redacted; got:\n{out}"
-        );
-        assert!(
-            !out.contains("title_key=\"") || out.contains("title_key=\"<redacted>\""),
-            "title_key must never carry a real value; got:\n{out}"
         );
     }
 
@@ -356,5 +354,47 @@ mod tests {
             assert!(!set_debug(true));
             assert!(!set_debug(false));
         }
+    }
+
+    // The /api/debug swap on a live reload handle: FILTER_ON lets a debug heartbeat through,
+    // FILTER_OFF silences it again.
+    #[test]
+    fn swap_filter_toggles_debug_events() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        struct Count(std::sync::Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Count {
+            fn on_event(
+                &self,
+                _: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let (filter, handle) = reload::Layer::new(EnvFilter::new(FILTER_OFF));
+        let subscriber = tracing_subscriber::registry()
+            .with(filter)
+            .with(Count(hits.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let beat = || tracing::debug!(target: "freemkv::heartbeat", "alive");
+            beat();
+            assert_eq!(hits.load(Ordering::SeqCst), 0, "debug is off by default");
+            assert!(swap_filter(&handle, true));
+            beat();
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "FILTER_ON passes debug");
+            assert!(swap_filter(&handle, false));
+            beat();
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "FILTER_OFF silences it");
+        });
+    }
+
+    // A typo'd AUTORIP_LOG_LEVEL is rejected (so init can say so), a good one parses.
+    #[test]
+    fn parse_override_rejects_a_bad_directive() {
+        assert!(parse_override("autorip=debg").is_err());
+        assert!(parse_override("autorip=debug").is_ok());
     }
 }

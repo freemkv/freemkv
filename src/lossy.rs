@@ -72,7 +72,7 @@ pub fn excluded_lines(dest: &str, title: &libfreemkv::DiscTitle) -> Vec<String> 
         lines.push(format!(
             "    - {} {}: {}",
             crate::strings::get("stream.track"),
-            idx + 1,
+            idx.saturating_add(1),
             crate::strings::fmt(reason_key(*reason), &[("container", container)])
         ));
     }
@@ -385,6 +385,17 @@ mod tests {
         assert!(lines[0].contains("/out/movie.mkv"), "{lines:?}");
         assert!(lines[0].contains("3.00"), "{lines:?}");
         assert!(lines[0].contains("lost"), "{lines:?}");
+        assert!(is_lossy(&o));
+    }
+
+    /// Lost bytes alone, with no error count, are still a loss and still named.
+    #[test]
+    fn lost_bytes_without_an_error_count_are_still_reported() {
+        crate::strings::set_locale("en");
+        let o = outcome(Vec::new(), 0, 3 << 20);
+        let lines = lossy_lines(&o, "/out/movie.mkv");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("3.00"), "{lines:?}");
         assert!(is_lossy(&o));
     }
 

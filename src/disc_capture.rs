@@ -156,6 +156,9 @@ pub(crate) struct AacsDiag {
     // Whether the SCSI AACS handshake yielded a Volume ID. The raw VID is
     // NEVER emitted — only this boolean.
     pub vid_available: bool,
+    // The disc is encrypted but the scan carried neither AACS state nor an AACS failure (a
+    // scan without keys): the state was not read, which is not "no AACS".
+    pub unread: bool,
 }
 
 // Distil the non-secret AACS diagnostics from a scanned disc. Reads only
@@ -174,6 +177,7 @@ pub(crate) fn aacs_diag(disc: &Disc) -> AacsDiag {
                 bus_encryption: Some(a.bus_encryption),
                 // Raw VID stays private — report only whether one was obtained.
                 vid_available: a.volume_id.iter().any(|&b| b != 0),
+                unread: false,
             }
         }
         None => AacsDiag {
@@ -184,6 +188,7 @@ pub(crate) fn aacs_diag(disc: &Disc) -> AacsDiag {
             mkb_version: None,
             bus_encryption: None,
             vid_available: false,
+            unread: disc.encrypted && disc.aacs_error.is_none(),
         },
     }
 }
@@ -192,6 +197,9 @@ pub(crate) fn aacs_diag(disc: &Disc) -> AacsDiag {
 fn aacs_absent_reason(d: &AacsDiag) -> String {
     match &d.error_code {
         Some(code) => format!("Not captured — the AACS step failed ({code})."),
+        None if d.unread => "Not captured — the disc is encrypted but was scanned without keys, \
+             so its AACS state was not read."
+            .to_string(),
         None => "No AACS on this disc (DVD or unencrypted Blu-ray).".to_string(),
     }
 }
@@ -206,7 +214,7 @@ pub(crate) fn aacs_json(disc: &Disc) -> String {
     s.push_str("{\n");
     s.push_str(&format!(
         "  \"aacs_present\": {},\n",
-        d.captured || d.error_code.is_some()
+        d.captured || d.error_code.is_some() || d.unread
     ));
     s.push_str(&format!("  \"aacs_captured\": {},\n", d.captured));
     if d.captured {
@@ -251,7 +259,10 @@ pub(crate) fn aacs_json(disc: &Disc) -> String {
 // Literal English/JSON — a machine artifact, not localized UI.
 pub(crate) fn selection_json(disc: &Disc) -> String {
     let esc = json_escape;
-    let pick = disc.titles.first().map(|t| t.playlist_id).unwrap_or(0);
+    let pick = match disc.titles.first() {
+        Some(t) => t.playlist_id.to_string(),
+        None => "null".to_string(),
+    };
     let mut s = String::new();
     s.push_str("{\n");
     s.push_str(&format!(
@@ -303,7 +314,7 @@ pub(crate) fn run(disc: &Disc, reader: &mut dyn SectorSource, label: &str, quiet
         }
         Err(lines) => {
             lines.iter().for_each(|l| eprintln!("{l}"));
-            std::process::exit(1);
+            crate::cli_entry::exit(1);
         }
     }
 }
@@ -438,6 +449,10 @@ fn capture_notes(disc: &Disc, summary: &DiscSummary) -> Vec<String> {
             "disc.capture_aacs_failed",
             "AACS diagnostics not captured — the AACS step failed: {error}",
             &[("error", &crate::pipe::fmt_err(e))],
+        ),
+        (None, None) if diag.unread => strings::get_or(
+            "disc.capture_aacs_unread",
+            "AACS diagnostics not captured — the disc is encrypted but was scanned without keys.",
         ),
         (None, None) => strings::get_or(
             "disc.capture_aacs_none",
@@ -612,7 +627,50 @@ mod aacs_diag_tests {
             "QUJD",
         )
         .0;
-        assert!(body.contains("No AACS on this disc"), "{body}");
+        // An encrypted disc scanned without keys is not "no AACS".
+        assert!(!body.contains("No AACS on this disc"), "{body}");
+        assert!(body.contains("scanned without keys"), "{body}");
+        assert!(json.contains("\"aacs_present\": true"), "{json}");
+    }
+
+    // No titles is "no title picked", not playlist 0.
+    #[test]
+    fn an_empty_title_list_picks_no_playlist() {
+        let sel = selection_json(&disc_with(None));
+        assert!(sel.contains("\"picked_playlist_id\": null"), "{sel}");
+    }
+
+    // aacs_diag's normalisation: a bare, prefixed or padded hash is keyed `0x<hash>`; a blank
+    // one is no hash; the VID flag follows the bytes.
+    #[test]
+    fn the_disc_hash_is_normalised_to_its_keydb_row_form() {
+        let want = Some("0xaabbccddeeff00112233445566778899aabbccdd".to_string());
+        for raw in [
+            "aabbccddeeff00112233445566778899aabbccdd",
+            "0xaabbccddeeff00112233445566778899aabbccdd",
+            "  0xaabbccddeeff00112233445566778899aabbccdd \n",
+        ] {
+            let d = aacs_diag(&disc_with(Some(aacs_with_secrets(raw))));
+            assert_eq!(d.disc_hash, want, "{raw:?}");
+        }
+        for blank in ["", "  ", "0x"] {
+            let d = aacs_diag(&disc_with(Some(aacs_with_secrets(blank))));
+            assert!(d.captured && d.disc_hash.is_none(), "{blank:?}");
+        }
+        let d = aacs_diag(&disc_with(Some(aacs_with_secrets("0xab"))));
+        assert!(d.vid_available);
+        assert_eq!(d.mkb_version, Some(77));
+        assert_eq!(d.bus_encryption, Some(true));
+        let none = libfreemkv::test_util::aacs_state()
+            .volume_id([0; 16])
+            .bus_encryption(false)
+            .mkb_version(None)
+            .disc_hash("0xab")
+            .build();
+        let d = aacs_diag(&disc_with(Some(none)));
+        assert!(!d.vid_available);
+        assert_eq!(d.mkb_version, None);
+        assert_eq!(d.bus_encryption, Some(false));
     }
 
     /// L10: the bundle names freemkv's own version, not libfreemkv's label.
@@ -826,6 +884,46 @@ mod fold_structure_tests {
             r.map(|s| s.is_some())
         );
         assert!(written.is_empty());
+    }
+
+    // `capture`'s hard failures return their stderr lines, quiet or not, and write no zip.
+    #[test]
+    fn capture_fails_with_its_reason_when_there_is_no_structure_or_no_directory() {
+        use libfreemkv::disc::DiscRegion;
+        let disc = libfreemkv::Disc {
+            volume_id: "T".to_string(),
+            meta_title: None,
+            format: libfreemkv::DiscFormat::BluRay,
+            capacity_sectors: 0,
+            capacity_bytes: 0,
+            layers: 1,
+            titles: Vec::new(),
+            region: DiscRegion::Free,
+            aacs: None,
+            css: None,
+            encrypted: false,
+            aacs_error: None,
+            css_error: None,
+            content_format: libfreemkv::ContentFormat::BdTs,
+        };
+        let base = std::env::temp_dir().join(format!("fmkv-capfail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        for quiet in [false, true] {
+            let err = super::capture(&disc, &mut Blank, &base.join(format!("p{quiet}")), quiet)
+                .err()
+                .expect("a blank source has no structure");
+            assert!(!err.is_empty(), "the reason must show, quiet={quiet}");
+            assert!(!base.join(format!("p{quiet}/profile.zip")).exists());
+        }
+        // A profile directory that cannot be created is reported, not swallowed.
+        let file = base.join("plain-file");
+        std::fs::write(&file, b"x").unwrap();
+        let err = super::capture(&disc, &mut Blank, &file.join("p"), true)
+            .err()
+            .expect("mkdir under a file fails");
+        assert_eq!(err.len(), 1, "{err:?}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 

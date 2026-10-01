@@ -404,6 +404,11 @@ fn set_icons(hwnd: &w::HWND) {
 
 // Fill the tree's STATE image list with unchecked/checked/mixed glyphs, theme-drawn and
 // sized/rebuilt per DPI.
+const CHECK_IMAGES: u32 = 7;
+
+/// The website the About box shows and opens.
+const SITE_URL: &str = "https://freemkv.org";
+
 fn build_check_images<T: 'static>(tree: &gui::TreeView<T>, dpi: u32) -> w::AnyResult<()> {
     let side =
         w::GetSystemMetricsForDpi(co::SM::CXSMICON, dpi).unwrap_or(lay::Scale::new(dpi).px(16));
@@ -413,13 +418,18 @@ fn build_check_images<T: 'static>(tree: &gui::TreeView<T>, dpi: u32) -> w::AnyRe
         tree.hwnd().SendMessage(msg::TvmGetImageList {
             kind: co::TVSIL::STATE,
         })
-    } && cur.GetImageCount() >= 4
+    } && cur.GetImageCount() >= CHECK_IMAGES
         && cur.GetIconSize().is_ok_and(|s| s.cx == side)
     {
         return Ok(());
     }
 
-    let mut il = w::HIMAGELIST::Create(w::SIZE::with(side, side), co::ILC::COLOR32, 7, 0)?;
+    let mut il = w::HIMAGELIST::Create(
+        w::SIZE::with(side, side),
+        co::ILC::COLOR32,
+        CHECK_IMAGES as i32,
+        0,
+    )?;
 
     let desktop = w::HWND::GetDesktopWindow();
     let screen_dc = desktop.GetDC()?;
@@ -434,7 +444,7 @@ fn build_check_images<T: 'static>(tree: &gui::TreeView<T>, dpi: u32) -> w::AnyRe
 
     // Index 0 is "no state image" as far as the tree is concerned, so a
     // placeholder occupies it and the real glyphs land on 1-3, disabled on 4-6.
-    let states = [
+    let states: [_; CHECK_IMAGES as usize] = [
         (co::VS::BUTTON_CHECKBOX_UNCHECKEDNORMAL, 0u32),
         (co::VS::BUTTON_CHECKBOX_UNCHECKEDNORMAL, 0u32),
         (co::VS::BUTTON_CHECKBOX_CHECKEDNORMAL, extra::DFCS_CHECKED),
@@ -652,7 +662,10 @@ impl Shell {
                 | co::WS::MINIMIZEBOX
                 | co::WS::MAXIMIZEBOX
                 | co::WS::SIZEBOX,
-            menu: build_menu(&menus).unwrap_or(w::HMENU::NULL),
+            menu: build_menu(&menus).unwrap_or_else(|e| {
+                tracing::error!("the menu bar could not be built: {e}");
+                w::HMENU::NULL
+            }),
             accel_table: build_accels(&menus).ok(),
             ..Default::default()
         });
@@ -982,7 +995,16 @@ impl Shell {
 // The View > log item's full text: core state-dependent label plus this
 // shell's accelerator hint, so build and re-title can't diverge.
 fn log_menu_text(label: &str) -> String {
-    format!("{label}\tCtrl+L")
+    use crate::ui::{Cmd, MenuAction, MenuEntry};
+    let accel = crate::ui::menu_layout(false)
+        .iter()
+        .flat_map(|g| g.entries.iter())
+        .find_map(|e| match e {
+            MenuEntry::Item(mi) if mi.action == MenuAction::Cmd(Cmd::ToggleLog) => Some(mi.accel),
+            _ => None,
+        })
+        .flatten();
+    crate::win_menu::item_text(label, accel.as_ref())
 }
 
 /// Map a shared [`crate::ui::MenuAction`] to the Windows IDM constant whose
@@ -1576,7 +1598,9 @@ fn log_text(log: &[LogLine]) -> String {
 // own leading break unless it is the pane's very first line.
 fn log_tail_text(log: &[LogLine], from: usize) -> String {
     let tail = log_text(&log[from..]);
-    if from == 0 || tail.is_empty() {
+    // A lone empty line is still a line: it needs its break, so only the first line
+    // and an empty slice go without one.
+    if from == 0 || log[from..].is_empty() {
         tail
     } else {
         format!("\r\n{tail}")
@@ -1728,10 +1752,22 @@ impl Shell {
                     }
                 }
                 Effect::OpenUrl(u) => {
-                    let _ =
+                    if let Err(e) =
                         self.wnd
                             .hwnd()
-                            .ShellExecute("open", &u, None, None, co::SW::SHOWNORMAL);
+                            .ShellExecute("open", &u, None, None, co::SW::SHOWNORMAL)
+                    {
+                        self.app_mut(|a| {
+                            a.say(
+                                LogKind::Notice,
+                                &crate::strings::fmt_or(
+                                    "gui.log.open_url_failed",
+                                    "Could not open {url}: {e}",
+                                    &[("url", &u), ("e", &e.to_string())],
+                                ),
+                            )
+                        });
+                    }
                 }
                 Effect::ShowSettings => self.prefs.show(&self.settings.borrow()),
                 Effect::ShowAbout => self.about.show(&self.settings.borrow()),
@@ -1782,10 +1818,12 @@ impl Shell {
     fn report_timer_failure(wnd: &gui::WindowMain, id: usize, elapse_ms: u32) {
         if let Err(e) = wnd.hwnd().SetTimer(id, elapse_ms, None) {
             let _ = wnd.hwnd().MessageBox(
-                &format!(
-                    "freemkv could not start its progress timer ({e}). The rip \
+                &crate::strings::fmt_or(
+                    "gui.dialog.timer_failed",
+                    "freemkv could not start its progress timer ({error}). The rip \
                      may still be running, but this window will not update. \
-                     Please restart freemkv."
+                     Please restart freemkv.",
+                    &[("error", &e.to_string())],
                 ),
                 "freemkv",
                 co::MB::ICONERROR,
@@ -2830,7 +2868,10 @@ impl Prefs {
     /// the live language switch so the form-reading rules live in one place.
     fn read_form(&self, st: &mut crate::settings::Settings) {
         for (k, f) in &self.fields {
-            st.set(k, f.text().unwrap_or_default());
+            // A control that cannot be read leaves the stored value alone, not blanked.
+            if let Ok(text) = f.text() {
+                st.set(k, text);
+            }
         }
         for (k, c) in &self.checks {
             st.set_bool(k, c.is_checked());
@@ -3008,7 +3049,7 @@ impl About {
         let btn_site = gui::Button::new(
             &wnd,
             gui::ButtonOpts {
-                text: "https://freemkv.org",
+                text: SITE_URL,
                 position: (s.px(156), y - s.px(3)),
                 width: s.px(200),
                 height: s.px(24),
@@ -3091,7 +3132,7 @@ impl About {
         });
         let sh = shell.clone();
         self.btn_site.on().bn_clicked(move || {
-            sh.perform(vec![Effect::OpenUrl("https://freemkv.org".into())]);
+            sh.perform(vec![Effect::OpenUrl(SITE_URL.into())]);
             Ok(())
         });
         // The window's close box hides it rather than destroying it: it is built
@@ -3213,7 +3254,7 @@ impl Prefs {
                 }),
                 Err(e) => sh.app_mut(|a| {
                     a.say(
-                        LogKind::Result,
+                        LogKind::Notice,
                         &crate::strings::fmt(
                             "gui.log.keyserver_rejected",
                             &[("e", &e.to_string())],
@@ -3268,7 +3309,10 @@ impl Prefs {
                 .unwrap_or_else(|_| {
                     (
                         LogKind::Notice,
-                        "keydb update failed — internal error".to_string(),
+                        crate::strings::get_or(
+                            "gui.log.keydb_worker_failed",
+                            "keydb update failed — internal error",
+                        ),
                     )
                 });
                 // RECOVER rather than skip the push (see macOS's identical worker).
@@ -3617,11 +3661,7 @@ impl Shell {
 
     /// Toggle a row exactly as the tick-box click handler does.
     fn drive_toggle_row(&self, row: usize) {
-        let on = matches!(
-            self.app.borrow().tree.check_state(row),
-            Check::Off | Check::Mixed
-        );
-        self.app_mut(|a| a.tree.set_checked(row, on));
+        self.app_mut(|a| a.tree.toggle(row));
     }
 
     // Choose an output format in the REAL dropdown and fire the same handler
@@ -4200,6 +4240,9 @@ pub fn run() {
     // The file dialogs are COM objects, so the apartment must exist for the
     // lifetime of the app. The guard uninitializes on drop.
     let _com = w::CoInitializeEx(co::COINIT::APARTMENTTHREADED | co::COINIT::DISABLE_OLE1DDE);
+    if let Err(e) = &_com {
+        tracing::error!("COM could not be initialised; the file dialogs will not open: {e:?}");
+    }
     // Before any window exists, so the taskbar and toasts share one identity.
     let _ = w::SetCurrentProcessExplicitAppUserModelID(APP_ID);
 
@@ -4638,6 +4681,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn appending_a_blank_line_keeps_its_break() {
+        for lines in [&["a", "", "b"][..], &["a", ""][..]] {
+            let log = log_of(lines);
+            for k in 1..log.len() {
+                let joined = format!("{}{}", log_text(&log[..k]), log_tail_text(&log, k));
+                assert_eq!(joined, log_text(&log), "{lines:?} split at {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_log_menu_item_shows_the_layouts_accelerator() {
+        let text = log_menu_text("Hide log");
+        assert!(text.starts_with("Hide log\t"), "{text}");
+        let layout = crate::ui::menu_layout(false);
+        let shown = layout
+            .iter()
+            .flat_map(|g| g.entries.iter())
+            .find_map(|e| match e {
+                crate::ui::MenuEntry::Item(mi) if mi.action == MenuAction::Cmd(Cmd::ToggleLog) => {
+                    mi.accel
+                }
+                _ => None,
+            })
+            .expect("ToggleLog has an accelerator");
+        assert_eq!(text, crate::win_menu::item_text("Hide log", Some(&shown)));
+    }
+
     // ── the redraw memo ───────────────────────────────────────────────────
 
     #[test]
@@ -5012,12 +5084,24 @@ mod tests {
             "no report_timer_failure (or equivalent) handler exists to \
              surface a SetTimer failure to the operator"
         );
+        // Only inside the handler's own body: the quit confirmation shows a MessageBox too.
+        let start = src.find(&handler).expect("handler present");
+        let body = &src[start..start + src[start..].find("\n    }\n").expect("handler ends")];
         let msgbox = format!("{}{}", "wnd.hwnd().Message", "Box(");
         assert!(
-            src.contains(&msgbox),
+            body.contains(&msgbox),
             "the timer-failure handler no longer shows a MessageBox — a \
              silently-swallowed SetTimer failure is indistinguishable from \
              a hung rip"
+        );
+        let caller = format!(
+            "{}{}",
+            "Effect::StartTicking => {\n                    Self::report_timer_",
+            "failure(&self.wnd, TIMER_TICK"
+        );
+        assert!(
+            src.contains(&caller),
+            "Effect::StartTicking no longer routes SetTimer through the failure handler"
         );
     }
 

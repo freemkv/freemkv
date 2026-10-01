@@ -24,30 +24,37 @@ pub struct HeldRip {
     pub reason: String,
 }
 
-/// Display metadata for a held rip, from the unified `state.json` when present,
-/// else the legacy `.review` JSON body.
-fn read_marker(dir: &Path) -> serde_json::Value {
-    if let Some(st) = crate::server::ripper::staging::read_state(dir) {
-        return serde_json::json!({
-            "title": st.title,
-            "year": st.year,
-            "media_type": st.media_type,
-            "disc_name": st.disc_name,
-        });
-    }
+/// Display metadata from the unified `state.json`.
+fn state_marker(st: &crate::server::ripper::staging::DiscState) -> serde_json::Value {
+    serde_json::json!({
+        "title": st.title,
+        "year": st.year,
+        "media_type": st.media_type,
+        "disc_name": st.disc_name,
+    })
+}
+
+/// Display metadata from the legacy `.review` JSON body.
+fn legacy_marker(dir: &Path) -> serde_json::Value {
     std::fs::read_to_string(dir.join(".review"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::Value::Null)
 }
 
-/// Is `dir` a held-for-review rip? `state == Review` in the unified store, or a
-/// legacy `.review` marker with no `.done`.
-fn is_held(dir: &Path) -> bool {
-    if let Some(st) = crate::server::ripper::staging::read_state(dir) {
-        return st.state == crate::server::ripper::staging::StagingState::Review;
-    }
+/// A legacy held rip: a `.review` marker with no `.done`.
+fn legacy_held(dir: &Path) -> bool {
     dir.join(".review").exists() && !dir.join(".done").exists()
+}
+
+/// Display metadata for `dir` when it is a held-for-review rip: `state ==
+/// Review` in the unified store, or a legacy `.review` marker with no `.done`.
+fn held_marker(dir: &Path) -> Option<serde_json::Value> {
+    if let Some(st) = crate::server::ripper::staging::read_state(dir) {
+        return (st.state == crate::server::ripper::staging::StagingState::Review)
+            .then(|| state_marker(&st));
+    }
+    legacy_held(dir).then(|| legacy_marker(dir))
 }
 
 fn media_file(dir: &Path) -> Option<String> {
@@ -82,10 +89,12 @@ pub fn list_held(staging_root: &str) -> Vec<HeldRip> {
     };
     for e in entries.flatten() {
         let dir = e.path();
-        if !dir.is_dir() || !is_held(&dir) {
+        if !dir.is_dir() {
             continue;
         }
-        let m = read_marker(&dir);
+        let Some(m) = held_marker(&dir) else {
+            continue;
+        };
         let title = m["title"].as_str().unwrap_or("").to_string();
         // Range-validate rather than a truncating `as u16`: a corrupt/
         // hand-edited year > 65535 would otherwise WRAP (e.g. 70000 → 4464).
@@ -114,6 +123,17 @@ pub fn list_held(staging_root: &str) -> Vec<HeldRip> {
     out
 }
 
+/// Operator action on a held rip.
+pub enum Resolve {
+    Proceed,
+    Retitle { title: String, year: u16 },
+    Cancel,
+}
+
+/// Serialises [`resolve`] so two requests for the same held dir can't both pass
+/// the held check and race their state writes.
+static RESOLVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Resolve a held rip. `dir` is the staging subdir name (not a path — guarded
 /// against traversal). When the unified `state.json` is present it is
 /// mutated in place (`StagingState`); otherwise the legacy marker files are
@@ -122,12 +142,6 @@ pub fn list_held(staging_root: &str) -> Vec<HeldRip> {
 /// * `Retitle{title,year}`— rewrite the title/year, then promote to `Done`.
 /// * `Cancel`             — mark `Failed` / `.failed` (so it isn't retried),
 ///   then drop `.review` in the legacy case.
-pub enum Resolve {
-    Proceed,
-    Retitle { title: String, year: u16 },
-    Cancel,
-}
-
 pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), String> {
     // Path-traversal guard: a held-rip handle is a single staging subdir
     // name. Inspect path components rather than substring-matching `..`,
@@ -142,26 +156,26 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
     }
     let d: PathBuf = Path::new(staging_root).join(dir);
     let review = d.join(".review");
-    if !d.is_dir() || !is_held(&d) {
+    let _serialised = RESOLVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // Unified store when present; else operate on the legacy marker files.
+    let unified = crate::server::ripper::staging::read_state(&d);
+    let held = match &unified {
+        Some(st) => st.state == crate::server::ripper::staging::StagingState::Review,
+        None => legacy_held(&d),
+    };
+    if !d.is_dir() || !held {
         return Err("not a held rip".into());
     }
-    // Unified store when present; else operate on the legacy marker files.
-    let unified = crate::server::ripper::staging::read_state(&d).is_some();
     match action {
         Resolve::Proceed => {
             // Promote the held rip to the mover-facing state, carrying the
             // existing metadata forward (a durable transition — no bare rename,
             // which wouldn't fsync the dirent).
-            if unified {
-                let mut ok = false;
-                crate::server::ripper::staging::mutate_state_if_present(&d, |s| {
-                    s.state = crate::server::ripper::staging::StagingState::Done;
-                    s.title_confident = true;
-                    ok = true;
-                });
-                if !ok {
-                    return Err("state.json vanished".into());
-                }
+            if let Some(mut st) = unified {
+                st.state = crate::server::ripper::staging::StagingState::Done;
+                st.title_confident = true;
+                crate::server::ripper::staging::try_write_state(&d, &st)
+                    .map_err(|e| e.to_string())?;
             } else {
                 let body = std::fs::read(&review).map_err(|e| e.to_string())?;
                 crate::server::ripper::staging::write_handoff_marker(&d.join(".done"), &body)
@@ -173,25 +187,20 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
             if title.trim().is_empty() {
                 return Err("title required".into());
             }
-            if unified {
-                let mut ok = false;
-                crate::server::ripper::staging::mutate_state_if_present(&d, |s| {
-                    s.title = title.clone();
-                    s.year = year;
-                    // A non-movie (TV) media_type must survive a retitle; only
-                    // default to "movie" when the rip has no media_type at all.
-                    if s.media_type.is_empty() {
-                        s.media_type = "movie".into();
-                    }
-                    s.state = crate::server::ripper::staging::StagingState::Done;
-                    s.title_confident = true;
-                    ok = true;
-                });
-                if !ok {
-                    return Err("state.json vanished".into());
+            if let Some(mut st) = unified {
+                st.title = title;
+                st.year = year;
+                // A non-movie (TV) media_type must survive a retitle; only
+                // default to "movie" when the rip has no media_type at all.
+                if st.media_type.is_empty() {
+                    st.media_type = "movie".into();
                 }
+                st.state = crate::server::ripper::staging::StagingState::Done;
+                st.title_confident = true;
+                crate::server::ripper::staging::try_write_state(&d, &st)
+                    .map_err(|e| e.to_string())?;
             } else {
-                let mut m = read_marker(&d);
+                let mut m = legacy_marker(&d);
                 if !m.is_object() {
                     m = serde_json::json!({});
                 }
@@ -213,9 +222,7 @@ pub fn resolve(staging_root: &str, dir: &str, action: Resolve) -> Result<(), Str
             // Terminal `.failed` (so it isn't retried). The contract requires
             // propagating a write error and preserving held state on failure,
             // so use the fallible transition, not `write_failed_marker`.
-            if unified {
-                let mut st = crate::server::ripper::staging::read_state(&d)
-                    .ok_or_else(|| "state.json vanished".to_string())?;
+            if let Some(mut st) = unified {
                 st.state = crate::server::ripper::staging::StagingState::Failed;
                 st.failure_reason = Some("cancelled by operator".to_string());
                 st.muxing = false;
@@ -477,6 +484,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[test]
+    fn media_file_finds_m2ts_and_none_for_no_media() {
+        let tmp = std::env::temp_dir().join(format!(
+            "autorip-review-media-m2ts-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert_eq!(media_file(&tmp), None, "empty dir has no media file");
+        touch(&tmp.join("notes.txt"), "x");
+        touch(&tmp.join("feature.m2ts"), "x");
+        assert_eq!(media_file(&tmp).as_deref(), Some("feature.m2ts"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// Build a `state.json` in `Review` state with a few multi-episode
     /// outputs, so the unified branches in `resolve` actually run (rather
     /// than the legacy `.review`-file path).
@@ -571,6 +594,7 @@ mod tests {
 
         let after = read_state(&held).expect("state.json must survive Retitle");
         assert_eq!(after.state, StagingState::Done);
+        assert!(after.title_confident, "a retitle is operator-confirmed");
         assert_eq!(after.title, "Real Show");
         assert_eq!(after.year, 2012);
         assert_eq!(
@@ -621,12 +645,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let held = tmp.join("Show S05");
         write_review_state(&held, "tv");
+        crate::server::ripper::staging::mutate_state_if_present(&held, |s| s.muxing = true);
         assert!(read_state(&held).is_some(), "state.json must exist");
 
         resolve(tmp.to_str().unwrap(), "Show S05", Resolve::Cancel).unwrap();
 
         let after = read_state(&held).expect("state.json must survive Cancel");
         assert_eq!(after.state, StagingState::Failed);
+        assert!(!after.muxing, "cancel must clear the muxing lock");
         assert_eq!(
             after.failure_reason.as_deref(),
             Some("cancelled by operator")
@@ -665,6 +691,170 @@ mod tests {
             StagingState::Review,
             "a rejected retitle must not mutate the held state"
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let tmp = std::env::temp_dir().join(format!(
+            "autorip-review-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        tmp
+    }
+
+    #[test]
+    fn list_held_out_of_range_year_reads_as_zero() {
+        let tmp = scratch("year-range");
+        let held = tmp.join("Big Year");
+        std::fs::create_dir_all(&held).unwrap();
+        touch(
+            &held.join(".review"),
+            r#"{"title":"Big Year","year":70000}"#,
+        );
+
+        let list = list_held(tmp.to_str().unwrap());
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].year, 0, "70000 must not wrap to 4464");
+        assert_eq!(list[0].reason, "no confident title/year match");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn list_held_unified_lists_only_review_state() {
+        use crate::server::ripper::staging::{StagingState, mutate_state_if_present};
+        let tmp = scratch("unified-list");
+        let held = tmp.join("Show S05");
+        write_review_state(&held, "tv");
+        mutate_state_if_present(&held, |s| s.year = 2012);
+        // Unified non-Review states, each with a stale legacy `.review` that
+        // the legacy scan alone would call held.
+        for (name, state) in [
+            ("Done Show", StagingState::Done),
+            ("Failed Show", StagingState::Failed),
+            ("Ripping Show", StagingState::Sweeping),
+        ] {
+            let d = tmp.join(name);
+            write_review_state(&d, "tv");
+            mutate_state_if_present(&d, |s| s.state = state);
+            touch(&d.join(".review"), r#"{"title":"Stale","year":0}"#);
+        }
+
+        let list = list_held(tmp.to_str().unwrap());
+        assert_eq!(list.len(), 1, "only the Review dir is held, got {list:?}");
+        assert_eq!(list[0].dir, "Show S05");
+        assert_eq!(list[0].title, "Guess", "title comes from state.json");
+        assert_eq!(list[0].year, 2012, "year comes from state.json");
+        assert!(resolve(tmp.to_str().unwrap(), "Done Show", Resolve::Proceed).is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Make the next `state.json` write in `dir` fail: its `.tmp` sibling is a dir.
+    fn block_state_write(dir: &Path) {
+        std::fs::create_dir(dir.join("state.json.tmp")).unwrap();
+    }
+
+    #[test]
+    fn unified_write_failure_surfaces_and_keeps_review() {
+        use crate::server::ripper::staging::{StagingState, read_state};
+        let tmp = scratch("unified-write-fail");
+        let held = tmp.join("Show S05");
+        write_review_state(&held, "tv");
+        block_state_write(&held);
+
+        for action in [
+            Resolve::Proceed,
+            Resolve::Retitle {
+                title: "Real Show".into(),
+                year: 2012,
+            },
+            Resolve::Cancel,
+        ] {
+            assert!(
+                resolve(tmp.to_str().unwrap(), "Show S05", action).is_err(),
+                "a state.json write failure must be reported"
+            );
+            let after = read_state(&held).unwrap();
+            assert_eq!(after.state, StagingState::Review, "rip must stay held");
+            assert_eq!(after.title, "Guess");
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn concurrent_resolves_on_one_held_dir_admit_only_one() {
+        use crate::server::ripper::staging::{StagingState, read_state};
+        let tmp = scratch("concurrent");
+        let root = tmp.to_str().unwrap().to_string();
+        for round in 0..20 {
+            let name = format!("Held {round}");
+            write_review_state(&tmp.join(&name), "movie");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let spawn = |action: Resolve| {
+                let (root, name, barrier) = (root.clone(), name.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    resolve(&root, &name, action).is_ok()
+                })
+            };
+            let cancel = spawn(Resolve::Cancel);
+            let proceed = spawn(Resolve::Proceed);
+            let (cancel_ok, proceed_ok) = (cancel.join().unwrap(), proceed.join().unwrap());
+            assert!(
+                cancel_ok != proceed_ok,
+                "exactly one resolve may win (round {round}): cancel={cancel_ok} proceed={proceed_ok}"
+            );
+            let want = if cancel_ok {
+                StagingState::Failed
+            } else {
+                StagingState::Done
+            };
+            assert_eq!(read_state(&tmp.join(&name)).unwrap().state, want);
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn legacy_retitle_recovers_non_object_review_body() {
+        let tmp = scratch("legacy-array");
+        let held = tmp.join("Held");
+        std::fs::create_dir_all(&held).unwrap();
+        touch(&held.join(".review"), "[]");
+
+        resolve(
+            tmp.to_str().unwrap(),
+            "Held",
+            Resolve::Retitle {
+                title: "Sample Movie".into(),
+                year: 2024,
+            },
+        )
+        .unwrap();
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(held.join(".done")).unwrap()).unwrap();
+        assert_eq!(m["title"], "Sample Movie");
+        assert_eq!(m["media_type"], "movie");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn legacy_proceed_unreadable_review_errs_without_done() {
+        let tmp = scratch("legacy-unreadable");
+        let held = tmp.join("Held");
+        std::fs::create_dir_all(held.join(".review")).unwrap();
+
+        assert!(resolve(tmp.to_str().unwrap(), "Held", Resolve::Proceed).is_err());
+        assert!(
+            !held.join(".done").exists(),
+            "no .done without a marker body"
+        );
+        assert!(held.join(".review").exists());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

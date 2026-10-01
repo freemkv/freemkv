@@ -1,6 +1,6 @@
 // freemkv — WS2 messaging CONTRACT TEST — MIT — freemkv project
 // Every live `Error` variant needs a coded bucket, an en.json message, the
-// same key/placeholders in all six locales, and a Level; plus parity checks.
+// same key/placeholders in every shipped locale, and a Level; plus parity checks.
 
 use serde_json::Value;
 
@@ -27,24 +27,20 @@ fn locale_en() -> &'static str {
     bundled("en")
 }
 
-/// The six community locales (en is held separately as the canonical source).
+/// Every shipped non-English locale (en is held separately as the canonical source).
 fn other_locales() -> Vec<(&'static str, Value)> {
-    [
-        ("es", bundled("es")),
-        ("fr", bundled("fr")),
-        ("de", bundled("de")),
-        ("it", bundled("it")),
-        ("pt", bundled("pt")),
-        ("nl", bundled("nl")),
-    ]
-    .into_iter()
-    .map(|(code, data)| {
-        (
-            code,
-            serde_json::from_str(data).unwrap_or_else(|e| panic!("{code}.json invalid: {e}")),
-        )
-    })
-    .collect()
+    freemkv::strings::SHIPPED_CODES
+        .iter()
+        .copied()
+        .filter(|code| *code != "en")
+        .map(|code| {
+            (
+                code,
+                serde_json::from_str(bundled(code))
+                    .unwrap_or_else(|e| panic!("{code}.json invalid: {e}")),
+            )
+        })
+        .collect()
 }
 
 /// Look up a dotted key; returns the dotted key verbatim on a miss (the

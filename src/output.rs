@@ -22,6 +22,16 @@ pub enum Level {
     Verbose,
 }
 
+// Write `text` and flush, dropping any error. `println!` panics when the reader has gone
+// (`freemkv info ... | head -1`: Rust ignores SIGPIPE), which would abort a rip mid-mux.
+fn write_quietly(w: &mut impl Write, text: &str, newline: bool) {
+    let _ = w.write_all(text.as_bytes());
+    if newline {
+        let _ = w.write_all(b"\n");
+    }
+    let _ = w.flush();
+}
+
 /// Single filter point for all CLI output.
 ///
 /// Holds the configured verbosity; each `print`/`raw`/`blank` call passes the
@@ -90,11 +100,9 @@ impl Output {
                 return;
             }
             if self.stderr {
-                eprint!("{}", text);
-                let _ = std::io::stderr().flush();
+                write_quietly(&mut std::io::stderr().lock(), text, false);
             } else {
-                print!("{}", text);
-                let _ = std::io::stdout().flush();
+                write_quietly(&mut std::io::stdout().lock(), text, false);
             }
         }
     }
@@ -106,9 +114,9 @@ impl Output {
             return;
         }
         if self.stderr {
-            eprintln!("{}", text);
+            write_quietly(&mut std::io::stderr().lock(), text, true);
         } else {
-            println!("{}", text);
+            write_quietly(&mut std::io::stdout().lock(), text, true);
         }
     }
 
@@ -174,7 +182,27 @@ fn intercept(_text: &str, _newline: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Level, Output};
+    use super::{Level, Output, write_quietly};
+
+    struct BrokenPipe;
+    impl std::io::Write for BrokenPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    /// A closed reader is not a failure of ours: the line is dropped, never a panic.
+    #[test]
+    fn a_closed_reader_drops_the_line_instead_of_panicking() {
+        write_quietly(&mut BrokenPipe, "x", true);
+        write_quietly(&mut BrokenPipe, "x", false);
+        let mut buf = Vec::new();
+        write_quietly(&mut buf, "x", true);
+        assert_eq!(buf, b"x\n");
+    }
 
     // Exercises the full quiet/normal/verbose 3x3 grid directly; previously
     // only one point of it was checked, and only via a whole subprocess.

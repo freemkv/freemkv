@@ -87,4 +87,14 @@ mod tests {
             "the starts stay visible after release"
         );
     }
+
+    #[test]
+    fn no_rip_since_the_epoch_means_not_preempted() {
+        let a = Arbiter::new();
+        let e = a.epoch();
+        assert!(!a.rip_started_since(e));
+        drop(a.rip());
+        assert!(a.rip_started_since(e));
+        assert!(!a.rip_started_since(a.epoch()), "a later epoch is clean");
+    }
 }

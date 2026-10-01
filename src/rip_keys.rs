@@ -71,7 +71,7 @@ pub fn drive_scan(
         _ => libfreemkv::DeviceTarget::Autodetect,
     };
     let mut session = fe::open_scan(target, credentials, false)?;
-    Ok(session.take_disc().expect("scan populated the disc"))
+    session.take_disc().ok_or(Error::NoStreams)
 }
 
 // The GUI's (the CLI's copies scope their keys in the engine's `run`); the CLI binary builds

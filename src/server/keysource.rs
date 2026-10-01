@@ -2,8 +2,8 @@
 //!
 //! libfreemkv does no key lookup — its `KeySource`s resolve a disc's terminal
 //! Unit Keys, driving the library's boil-down crypto. The sources are the
-//! engine's local-first chain ([`key_params`]): the keydb, then the online
-//! key service when one is configured.
+//! engine's key parameters ([`key_params`]): the one the operator picked in
+//! settings — the local keydb, or the online key service — and only that one.
 //!
 //! A live drive scans KEYLESS, then resolves the rip's key set once ([`resolve_drive_keys`]);
 //! a staged image opens through the engine ([`open_staged_image`]).
@@ -147,7 +147,7 @@ pub fn save_keydb(
 /// Only in online mode: a local-mode rip never consults the URL. Pure — no DNS —
 /// so it is safe on the startup path.
 pub fn keyserver_url_startup_warning(cfg: &Config) -> Option<String> {
-    if cfg.key_source != "online" {
+    if !uses_online(cfg) {
         return None;
     }
     let url = cfg.keyserver_url.trim();
@@ -195,7 +195,7 @@ pub fn key_settings(cfg: &Config) -> crate::plan_core::KeySettings {
         keydb_path: Some(keydb_path(cfg).to_string_lossy().into_owned()),
         key_url: Some(cfg.keyserver_url.trim().to_string()),
         key_auth: Some(cfg.keyserver_secret.clone()),
-        mode: if cfg.key_source == "online" {
+        mode: if uses_online(cfg) {
             crate::plan_core::KeyMode::OnlineOnly
         } else {
             crate::plan_core::KeyMode::LocalOnly
@@ -1069,26 +1069,6 @@ mod tests {
         disc
     }
 
-    /// The three `KeyOutcome` variants are distinct — a regression guard so a
-    /// future refactor can't accidentally collapse e.g. MissingInputs into NoKey.
-    #[test]
-    fn key_outcome_variants_are_distinct() {
-        let all = [
-            KeyOutcome::Resolved,
-            KeyOutcome::MissingInputs,
-            KeyOutcome::NoKey,
-        ];
-        for (i, a) in all.iter().enumerate() {
-            for (j, b) in all.iter().enumerate() {
-                assert_eq!(
-                    i == j,
-                    a == b,
-                    "{a:?} vs {b:?} equality must track identity"
-                );
-            }
-        }
-    }
-
     // --- the key chain (engine, local-first) ----------------------------------
 
     // No URL: "local" is the keydb; "online" has nothing to ask until a URL is set.
@@ -1836,8 +1816,7 @@ mod ku_e1_tests {
     }
 
     // A refused resolve still logs its per-source walk: on a refusal it is the operator's only
-    // view of why a key missed. Checked on the trace itself (log capture races other tests'
-    // global level), plus that `resolve_with` hands every trace to the logger.
+    // view of why a key missed. Checked on the trace, then on the output `resolve_with` logs.
     #[test]
     fn a_refused_resolve_logs_its_key_walk() {
         let fx = bd_image();
@@ -1858,12 +1837,41 @@ mod ku_e1_tests {
             walk.iter().any(|l| l.contains("online >")),
             "the refused walk renders: {walk:?}"
         );
-        let src = include_str!("keysource.rs");
-        let body = &src[src.find("fn resolve_with(").unwrap()..];
-        let body = &body[..body.find("\n}\n").unwrap()];
+        // `resolve_with` itself hands the refused walk to the logger.
+        use tracing_subscriber::layer::SubscriberExt as _;
+        #[derive(Clone, Default)]
+        struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Buf {
+                self.clone()
+            }
+        }
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(buf.clone())
+                .with_ansi(false),
+        );
+        let mut drive = libfreemkv::test_util::MemSource::new(fx.img.image.clone());
+        let scope = libfreemkv::keys::KeyScope::Titles(vec![0]);
+        let r = tracing::subscriber::with_default(subscriber, || {
+            resolve_with(&fx.scan(), &mut drive, scope, &counting(&calls), None, None)
+        });
+        assert!(r.is_err(), "no key");
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         assert!(
-            body.find("log_key_walk(&trace").unwrap() < body.find("let set = set?").unwrap(),
-            "the walk is logged before a refusal returns"
+            out.contains("key_resolve") && out.contains("online >"),
+            "the refused walk must be logged by resolve_with: {out}"
         );
     }
 

@@ -175,6 +175,14 @@ pub(crate) fn print_share_help() {
     );
 }
 
+// GET_CONFIG feature 0x0108 (Logical Unit Serial Number): after its 4-byte feature header the
+// data is the drive's serial, which `--mask` hides.
+const FEATURE_SERIAL: u16 = 0x0108;
+const FEATURE_HEADER_LEN: usize = 4;
+
+// The Pioneer READ_BUFFER 0xF1 reply opens with the drive's 12-byte serial.
+const RB_F1_SERIAL_LEN: usize = 12;
+
 pub fn run(device: Option<&str>, args: &[String]) {
     let DriveFlags {
         share,
@@ -196,11 +204,11 @@ pub fn run(device: Option<&str>, args: &[String]) {
                     &[("device", p), ("error", &e.to_string())]
                 )
             );
-            std::process::exit(1);
+            crate::cli_entry::exit(1);
         }),
         None => libfreemkv::find_drive().unwrap_or_else(|| {
             eprintln!("{}", strings::get("error.no_drive"));
-            std::process::exit(1);
+            crate::cli_entry::exit(1);
         }),
     };
 
@@ -249,9 +257,6 @@ pub fn run(device: Option<&str>, args: &[String]) {
     out.blank(Normal);
     if !share {
         out.print(Normal, "drive.share_hint");
-    }
-
-    if !share {
         return;
     }
 
@@ -267,7 +272,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
                     &[("error", &crate::pipe::fmt_err(&e))]
                 )
             );
-            std::process::exit(1);
+            crate::cli_entry::exit(1);
         }
     };
 
@@ -294,7 +299,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
                 ]
             )
         );
-        std::process::exit(1);
+        crate::cli_entry::exit(1);
     }
 
     // Every file this run writes, in order. Only these are archived — see
@@ -310,9 +315,10 @@ pub fn run(device: Option<&str>, args: &[String]) {
         let mut feat_data = feat.data.clone();
 
         // Mask serial in GET_CONFIG 0108
-        if feat.code == 0x0108 && mask && feat_data.len() > 4 {
-            let masked = freemkv_engine::mask_bytes(&feat_data[4..]);
-            feat_data[4..4 + masked.len()].copy_from_slice(&masked);
+        if feat.code == FEATURE_SERIAL && mask && feat_data.len() > FEATURE_HEADER_LEN {
+            let masked = freemkv_engine::mask_bytes(&feat_data[FEATURE_HEADER_LEN..]);
+            feat_data[FEATURE_HEADER_LEN..FEATURE_HEADER_LEN + masked.len()]
+                .copy_from_slice(&masked);
         }
 
         let fname = format!("gc_{:04x}.bin", feat.code);
@@ -339,9 +345,9 @@ pub fn run(device: Option<&str>, args: &[String]) {
     // Save READ_BUFFER 0xF1 (Pioneer)
     if let Some(ref data) = capture.rb_f1 {
         let mut data = data.clone();
-        if mask && data.len() >= 12 {
-            let masked = freemkv_engine::mask_bytes(&data[0..12]);
-            data[0..12].copy_from_slice(&masked);
+        if mask && data.len() >= RB_F1_SERIAL_LEN {
+            let masked = freemkv_engine::mask_bytes(&data[..RB_F1_SERIAL_LEN]);
+            data[..RB_F1_SERIAL_LEN].copy_from_slice(&masked);
         }
         save_bin(&profile_dir, "rb_f1.bin", &data, &mut written);
     }
@@ -409,7 +415,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
     toml.push_str(&format!("profile_matched = {}\n\n", session.has_profile()));
     toml.push_str("[files]\n");
     toml.push_str("inquiry = \"inquiry.bin\"\n");
-    toml.push_str("mode_2a = \"mode_2a.bin\"\n\n");
+    toml.push_str(&files_mode_2a_line(capture.mode_2a.is_some()));
     toml.push_str("[features]\n");
     for line in &feat_lines {
         toml.push_str(line);
@@ -462,7 +468,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
                 ]
             )
         );
-        std::process::exit(1);
+        crate::cli_entry::exit(1);
     }
     written.push("drive.toml".to_string());
 
@@ -538,7 +544,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
         Err(e) => {
             println!();
             eprintln!("{}", zip_failed_line(&*e));
-            std::process::exit(1);
+            crate::cli_entry::exit(1);
         }
     };
     let zip_path = profile_dir.join("profile.zip");
@@ -553,7 +559,7 @@ pub fn run(device: Option<&str>, args: &[String]) {
                 ]
             )
         );
-        std::process::exit(1);
+        crate::cli_entry::exit(1);
     }
     let zip_b64 = base64_encode(&zip_data);
     println!("{} bytes", zip_data.len());
@@ -773,7 +779,7 @@ pub(crate) fn present_for_submission(
 
     println!();
     println!("{}", strings::get("drive.submit_manual"));
-    println!("  https://github.com/freemkv/bdemu/issues/new");
+    println!("  https://github.com/{SUBMIT_REPO}/issues/new");
     println!();
     println!(
         "{}",
@@ -798,6 +804,16 @@ fn consent_granted(n: usize, answer: &str, affirmative: &str) -> bool {
     n > 0 && !answer.is_empty() && answer.eq_ignore_ascii_case(affirmative)
 }
 
+// The `[files]` entry for mode_2a.bin, which is written only when the drive answered MODE SENSE
+// 2A; the section ends with it.
+fn files_mode_2a_line(captured: bool) -> String {
+    if captured {
+        "mode_2a = \"mode_2a.bin\"\n\n".to_string()
+    } else {
+        "\n".to_string()
+    }
+}
+
 // POST a drive-profile issue to `freemkv/bdemu` via the GitHub Issues API.
 // Returns the `html_url` on success, `None` on any failure (caller falls
 // back to the manual print path). Uses `curl` to avoid an HTTP stack dep.
@@ -808,7 +824,11 @@ fn submit_issue(token: &str, title: &str, body: &str, payload_file: &Path) -> Op
         json_escape(body)
     );
     // By file, not argv: a BD-sized payload overflows the OS argv/command-line limits.
-    std::fs::write(payload_file, payload).ok()?;
+    if std::fs::write(payload_file, payload).is_err() {
+        // A part-written payload (disk full) holds the drive profile: don't leave it behind.
+        let _ = std::fs::remove_file(payload_file);
+        return None;
+    }
     let response = run_submit_curl(token, &payload_file.to_string_lossy());
     let _ = std::fs::remove_file(payload_file);
     response
@@ -844,9 +864,21 @@ fn run_submit_curl(token: &str, payload_file: &str) -> Option<String> {
     let _ = child.wait();
 
     let response = String::from_utf8_lossy(&stdout_bytes);
-    // Pull out "html_url":"…/issues/N" (skip the repo/user html_url fields).
-    for (idx, _) in response.match_indices("\"html_url\":\"") {
-        let rest = &response[idx + "\"html_url\":\"".len()..];
+    issue_url_from_reply(&response)
+}
+
+// Pull out "html_url": "…/issues/N" (skip the repo/user html_url fields). GitHub pretty-prints
+// its reply, so whitespace around the colon is allowed.
+fn issue_url_from_reply(response: &str) -> Option<String> {
+    const KEY: &str = "\"html_url\"";
+    for (idx, _) in response.match_indices(KEY) {
+        let rest = response[idx + KEY.len()..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('"') else {
+            continue;
+        };
         if let Some(end) = rest.find('"') {
             let url = &rest[..end];
             if url.contains("/issues/") {
@@ -1018,7 +1050,7 @@ pub(crate) fn save_bin(dir: &std::path::Path, name: &str, data: &[u8], written: 
                 ],
             )
         );
-        std::process::exit(1);
+        crate::cli_entry::exit(1);
     }
     written.push(name.to_string());
 }
@@ -1201,10 +1233,70 @@ fn toml_basic_unescape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CAPTURE_COMMAND, DriveFlags, DriveParse, base64_decode, base64_encode, format_date,
-        hex_dump, json_escape, parse_drive_flags, sanitize_component, toml_basic_unescape,
-        toml_escape,
+        CAPTURE_COMMAND, DriveFlags, DriveParse, base64_decode, base64_encode, files_mode_2a_line,
+        format_date, hex_dump, issue_url_from_reply, json_escape, parse_drive_flags,
+        sanitize_component, toml_basic_unescape, toml_escape,
     };
+
+    // GitHub pretty-prints its reply; the new issue's url has a space after the colon.
+    #[test]
+    fn the_issue_url_is_found_in_a_pretty_printed_reply() {
+        let reply = "{\n  \"url\": \"https://api.github.com/repos/o/r/issues/7\",\n  \
+            \"html_url\": \"https://github.com/o/r/issues/7\",\n  \"user\": {\n    \
+            \"html_url\": \"https://github.com/someone\"\n  }\n}";
+        assert_eq!(
+            issue_url_from_reply(reply).as_deref(),
+            Some("https://github.com/o/r/issues/7")
+        );
+        assert_eq!(
+            issue_url_from_reply("{\"html_url\":\"https://github.com/o/r/issues/8\"}").as_deref(),
+            Some("https://github.com/o/r/issues/8")
+        );
+        assert_eq!(
+            issue_url_from_reply("{\"message\": \"Bad credentials\"}"),
+            None
+        );
+    }
+
+    // drive.toml lists only files that were written.
+    #[test]
+    fn mode_2a_is_listed_only_when_captured() {
+        assert!(files_mode_2a_line(true).contains("mode_2a.bin"));
+        assert!(!files_mode_2a_line(false).contains("mode_2a"));
+    }
+
+    // `--mask` decides whether the serial is published, so the parser must set it.
+    #[test]
+    fn the_mask_and_short_flags_set_their_fields() {
+        for f in ["--mask", "-m"] {
+            let DriveParse::Ok(flags) = parse_drive_flags(&[f.to_string()]) else {
+                panic!("{f}")
+            };
+            assert!(flags.mask && !flags.share, "{f}");
+        }
+        let DriveParse::Ok(flags) = parse_drive_flags(&["-s".to_string(), "--quiet".to_string()])
+        else {
+            panic!()
+        };
+        assert!(flags.share && flags.quiet && !flags.mask);
+        for f in ["-v", "-vv", "-vvv", "--verbose"] {
+            let DriveParse::Ok(flags) = parse_drive_flags(&[f.to_string()]) else {
+                panic!("{f}")
+            };
+            assert!(flags.verbose, "{f}");
+        }
+    }
+
+    // The boundary: level 2 already widens the output, level 1 does not.
+    #[test]
+    fn log_level_two_is_verbose_and_one_is_not() {
+        let at = |n: &str| match parse_drive_flags(&["--log-level".to_string(), n.to_string()]) {
+            DriveParse::Ok(f) => f.verbose,
+            _ => panic!(),
+        };
+        assert!(at("2"));
+        assert!(!at("1"));
+    }
 
     #[test]
     fn capture_command_is_a_real_subcommand() {
@@ -1605,8 +1697,18 @@ mod tests {
         assert_eq!(hex_dump(&[0x00, 0x0f, 0xa0, 0xff]), "00 0f a0 ff");
         let data: Vec<u8> = (0..33u8).collect();
         let dump = hex_dump(&data);
-        assert!(dump.contains('\n'), "should wrap after 32 bytes: {dump}");
         assert!(dump.starts_with("00 01 02"), "{dump}");
+        let lines: Vec<&str> = dump.split('\n').collect();
+        assert_eq!(lines.len(), 2, "{dump}");
+        assert_eq!(
+            lines[0].split(' ').count(),
+            32,
+            "wrap after 32 bytes: {dump}"
+        );
+        assert_eq!(
+            lines[1], "  20",
+            "continuation indent, then byte 32: {dump}"
+        );
     }
 }
 

@@ -977,4 +977,102 @@ mod tests {
         assert_eq!(mode["options"][1]["value"], "multi");
         assert_eq!(s["groups"].as_array().unwrap().len(), Group::ALL.len());
     }
+
+    #[test]
+    fn an_untouched_form_keeps_the_masked_values() {
+        let mut c = Config {
+            tmdb_api_key: "k".into(),
+            keyserver_secret: "s".into(),
+            keyserver_url: "https://h.example/tok/decode".into(),
+            keydb_path: Some("/secret/place/keydb.cfg".into()),
+            ..Config::default()
+        };
+        let before = c.clone();
+        let body = redacted(&c);
+        let p = parse_patch(&body, &c).unwrap();
+        apply(&mut c, &p);
+        assert_eq!(c.tmdb_api_key, before.tmdb_api_key);
+        assert_eq!(c.keyserver_secret, before.keyserver_secret);
+        assert_eq!(c.keyserver_url, before.keyserver_url);
+        assert_eq!(c.keydb_path, before.keydb_path);
+    }
+
+    #[test]
+    fn save_time_path_rules_refuse_bad_paths() {
+        let c = Config::default();
+        for body in [
+            json!({"staging_dir": "../../etc"}),
+            json!({"output_dir": "relative"}),
+            json!({"output_dir": "/a/../b"}),
+            json!({"movie_dir": "../escape"}),
+            json!({"keydb_path": "relative/keydb.cfg"}),
+            json!({"keydb_path": "/a/../keydb.cfg"}),
+            json!({"keydb_path": "/a/keydb.txt"}),
+        ] {
+            assert!(parse_patch(&body, &c).is_err(), "{body} must be refused");
+        }
+        assert!(
+            parse_patch(
+                &json!({"staging_dir": "/ok/stage", "keydb_path": "/k/keydb.cfg"}),
+                &c
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_legacy_abort_flag_maps_to_on_read_error() {
+        let mut c = Config::default();
+        let p = parse_patch(&json!({"abort_on_error": true}), &c).unwrap();
+        apply(&mut c, &p);
+        assert_eq!(c.on_read_error, "stop");
+        let p = parse_patch(&json!({"abort_on_error": false}), &c).unwrap();
+        apply(&mut c, &p);
+        assert_eq!(c.on_read_error, "skip");
+        // An explicit on_read_error wins over the old flag.
+        let p = parse_patch(
+            &json!({"abort_on_error": true, "on_read_error": "skip"}),
+            &c,
+        )
+        .unwrap();
+        apply(&mut c, &p);
+        assert_eq!(c.on_read_error, "skip");
+
+        let mut c = Config::default();
+        load_into(&mut c, &json!({"abort_on_error": true}));
+        assert_eq!(c.on_read_error, "stop");
+        load_into(&mut c, &json!({"abort_on_error": false}));
+        assert_eq!(c.on_read_error, "skip");
+        load_into(
+            &mut c,
+            &json!({"abort_on_error": true, "on_read_error": "skip"}),
+        );
+        assert_eq!(c.on_read_error, "skip");
+    }
+
+    #[test]
+    fn numbers_clamp_ports_validate_and_bad_loads_keep_the_default() {
+        let mut c = Config::default();
+        let p = parse_patch(&json!({"log_retention_days": 999_999_999u64}), &c).unwrap();
+        apply(&mut c, &p);
+        assert_eq!(c.log_retention_days, MAX_RETENTION_DAYS);
+
+        for port in [0u64, 65_536, 70_000] {
+            assert!(
+                parse_patch(&json!({"port": port}), &c).is_err(),
+                "port {port}"
+            );
+        }
+        let p = parse_patch(&json!({"port": 65_535}), &c).unwrap();
+        apply(&mut c, &p);
+        assert_eq!(c.port, 65_535);
+
+        let mut c = Config::default();
+        load_into(
+            &mut c,
+            &json!({"on_insert": "bogus", "log_retention_days": 7}),
+        );
+        assert_eq!(c.on_insert, Config::default().on_insert);
+        assert_eq!(c.log_retention_days, 7);
+    }
 }

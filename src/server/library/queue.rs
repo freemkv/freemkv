@@ -162,7 +162,12 @@ impl Queue {
                 let _ = std::fs::rename(&path, path.with_extension("json.unreadable"));
                 QueueFile::default()
             }),
-            Err(_) => QueueFile::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => QueueFile::default(),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "library queue unreadable; starting empty");
+                let _ = std::fs::rename(&path, path.with_extension("json.unreadable"));
+                QueueFile::default()
+            }
         };
         file.schema = SCHEMA;
         for job in &mut file.jobs {
@@ -191,6 +196,12 @@ impl Queue {
 
     pub fn snapshot(&self) -> QueueFile {
         self.lock().clone()
+    }
+
+    /// A job is running, or one waits and the queue is not paused.
+    pub fn has_work(&self) -> bool {
+        let f = self.lock();
+        f.running().is_some() || (!f.paused && f.count(JobState::Queued) > 0)
     }
 
     /// Queue `items` in order. A target already queued or running is skipped.
@@ -316,7 +327,6 @@ impl Queue {
         })
     }
 
-    /// Drop every queued job; the running one carries on.
     /// Drop every queued job and un-pause: an empty queue has nothing to
     /// hold, so it never shows as paused. The running job carries on.
     pub fn clear_queued(&self) -> usize {
@@ -416,6 +426,38 @@ mod tests {
             q.snapshot().jobs.iter().filter(|j| j.title == "a").count(),
             1
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_queue_file_that_cannot_be_read_is_kept() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join(QUEUE_FILE);
+        std::fs::write(&file, br#"{"jobs":[]}"#).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o0)).unwrap();
+        if std::fs::read(&file).is_ok() {
+            return; // root reads anything
+        }
+        Queue::open(t.path());
+        let kept = t.path().join("library-queue.json.unreadable");
+        std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&kept).unwrap(), br#"{"jobs":[]}"#);
+    }
+
+    #[test]
+    fn has_work_is_a_running_job_or_a_waiting_one_unpaused() {
+        let t = tempfile::tempdir().unwrap();
+        let q = Queue::open(t.path());
+        assert!(!q.has_work());
+        q.add(vec![job(t.path(), "a")]);
+        assert!(q.has_work());
+        q.set_paused(true);
+        assert!(!q.has_work());
+        q.set_paused(false);
+        q.claim_next().unwrap();
+        q.set_paused(true);
+        assert!(q.has_work(), "a running job still holds the disks");
     }
 
     #[test]
@@ -553,5 +595,46 @@ mod tests {
         let back: QueueFile =
             serde_json::from_slice(&std::fs::read(t.path().join(QUEUE_FILE)).unwrap()).unwrap();
         assert_eq!(back.schema, SCHEMA);
+    }
+
+    #[test]
+    fn removing_and_dropping_touch_only_what_they_name() {
+        let t = tempfile::tempdir().unwrap();
+        let q = Queue::open(t.path());
+        q.add(vec![
+            job(t.path(), "a"),
+            job(t.path(), "b"),
+            job(t.path(), "c"),
+        ]);
+        let a = q.claim_next().unwrap();
+        assert_eq!(
+            q.remove_queued(&a.target),
+            0,
+            "a running job is not removable"
+        );
+        assert_eq!(q.remove_queued(&job(t.path(), "b").target), 1);
+        q.note_running(a.id, JobNote::Stalled);
+        assert_eq!(q.snapshot().running().unwrap().note, Some(JobNote::Stalled));
+        q.note_running(a.id + 100, JobNote::Cancelled);
+        assert_eq!(q.snapshot().running().unwrap().note, Some(JobNote::Stalled));
+        q.drop_job(a.id + 1);
+        let titles: Vec<_> = q.snapshot().jobs.iter().map(|j| j.title.clone()).collect();
+        assert_eq!(titles, ["a", "c"].map(String::from), "b went, a and c stay");
+        q.drop_job(a.id);
+        assert_eq!(q.snapshot().jobs.len(), 1);
+    }
+
+    #[test]
+    fn clearing_the_queued_jobs_unpauses_and_spares_the_running_one() {
+        let t = tempfile::tempdir().unwrap();
+        let q = Queue::open(t.path());
+        q.add(vec![job(t.path(), "a"), job(t.path(), "b")]);
+        q.claim_next().unwrap();
+        q.set_paused(true);
+        assert_eq!(q.clear_queued(), 1);
+        let f = q.snapshot();
+        assert!(!f.paused);
+        assert_eq!(f.jobs.len(), 1);
+        assert!(f.running().is_some());
     }
 }

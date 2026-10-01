@@ -6,6 +6,13 @@
 
 use freemkv::ui::*;
 
+/// Pin the catalogue to English once: these tests assert English text, and the
+/// automatic locale would otherwise follow the host's environment.
+fn en() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| freemkv::strings::set_locale("en"));
+}
+
 fn iso() -> Option<String> {
     let p = std::env::var("FMKV_TEST_ISO").ok()?;
     std::path::Path::new(&p).exists().then_some(p)
@@ -13,6 +20,7 @@ fn iso() -> Option<String> {
 
 #[test]
 fn starts_empty_with_a_ready_line() {
+    en();
     let app = App::new();
     assert_eq!(app.page, Page::Empty);
     assert!(!app.running());
@@ -89,6 +97,7 @@ fn commands_that_need_the_shell_return_an_effect() {
 
 #[test]
 fn run_is_refused_without_a_source() {
+    en();
     let mut app = App::new();
     app.dispatch(Cmd::Run);
     assert!(!app.running());
@@ -164,26 +173,26 @@ fn tri_state_reflects_partial_stream_selection() {
         .arena
         .iter()
         .position(|n| n.type_s == "Title" && !n.children.is_empty());
-    let Some(t) = title else { return };
+    let t = title.expect("the fixture has no title with streams");
     app.tree.set_checked(t, true);
     assert_eq!(app.tree.check_state(t), Check::On);
     // Untick one stream → the title becomes mixed, not off.
-    if let Some(&c) = app.tree.arena[t]
+    let c = *app.tree.arena[t]
         .children
         .iter()
         .find(|&&c| app.tree.arena[c].checkable())
-    {
-        *app.tree.arena[c].checked.borrow_mut() = false;
-        let st = app.tree.check_state(t);
-        assert!(
-            st == Check::Mixed || st == Check::Off,
-            "partial selection must not read as fully on"
-        );
-    }
+        .expect("the title has no checkable stream");
+    *app.tree.arena[c].checked.borrow_mut() = false;
+    assert_eq!(
+        app.tree.check_state(t),
+        Check::Mixed,
+        "a partly-ticked title must read mixed"
+    );
 }
 
 #[test]
 fn formatting_is_shared_so_both_shells_show_identical_text() {
+    en();
     assert_eq!(fmt_bytes(6 * 1024 * 1024 * 1024), "6.00 GB");
     assert_eq!(fmt_hms(3725), "1:02:05");
     assert_eq!(rate_text(0, true), "not reported");
@@ -232,13 +241,13 @@ fn every_command_is_handled_by_dispatch() {
         Cmd::Settings,
         Cmd::About,
         Cmd::Docs,
-        // `CheckUpdates` omitted: it does a real HTTPS request to api.github.com.
+        // `SetFormat` is checked below; `CheckUpdates` omitted: it does a real HTTPS request to api.github.com.
         Cmd::Quit,
     ];
     for &c in ALL {
         let mut a = App::new();
         // Must not panic, and must leave the app in a coherent state.
-        let _ = a.dispatch(c);
+        let fx = a.dispatch(c);
         assert!(
             matches!(
                 a.view().page,
@@ -246,7 +255,30 @@ fn every_command_is_handled_by_dispatch() {
             ),
             "{c:?} left the app on no valid page"
         );
+        // A handled command always answers: the effect it asks for, or a redraw.
+        // Only Run, Cancel and Eject may answer nothing, with no source open.
+        if !matches!(c, Cmd::Run | Cmd::Cancel | Cmd::Eject) {
+            assert!(!fx.is_empty(), "{c:?} was dispatched and did nothing");
+        }
     }
+    let mut a = App::new();
+    assert!(matches!(
+        a.dispatch(Cmd::SetOutput).as_slice(),
+        [Effect::PickOutputDir]
+    ));
+    assert!(matches!(
+        a.dispatch(Cmd::Settings).as_slice(),
+        [Effect::ShowSettings]
+    ));
+    let hidden = a.view().log_hidden;
+    a.dispatch(Cmd::ToggleLog);
+    assert_ne!(a.view().log_hidden, hidden, "ToggleLog changed nothing");
+    a.dispatch(Cmd::ClearLog);
+    assert!(a.log.is_empty(), "ClearLog left the log behind");
+    let title = "Selected titles → M2TS";
+    let f = freemkv::ui::format_by_title(title, true, true).expect(title);
+    a.dispatch(Cmd::SetFormat(f));
+    assert_eq!(a.view().format, title, "SetFormat changed nothing");
 }
 
 /// Byte formatting rolls units and never prints a bare byte count for large
@@ -287,6 +319,7 @@ fn duration_formatting_drops_the_hours_field_under_an_hour() {
 /// showing "0.0 MB/s" during a stall reads as a broken rip.
 #[test]
 fn rate_text_is_honest_when_unmeasured() {
+    en();
     assert_eq!(rate_text(0, false), "—");
     assert!(
         rate_text(0, true).contains("not reported"),
@@ -493,9 +526,10 @@ fn the_decrypted_folder_row_is_offered_for_a_disc_or_iso_but_never_a_container()
 
 /// Opening a source clears the previous one — no stale tree behind a new disc.
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn opening_a_second_source_replaces_the_first() {
-    let Ok(iso) = std::env::var("FMKV_TEST_ISO") else {
-        return;
+    let Some(iso) = iso() else {
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
     };
     let mut a = App::new();
     a.open(&iso);
@@ -515,9 +549,10 @@ fn opening_a_second_source_replaces_the_first() {
 /// Eject is meaningless for a file source and must not be offered — a control
 /// that does not do what it says is worse than no control.
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn eject_is_offered_only_for_a_real_drive() {
-    let Ok(iso) = std::env::var("FMKV_TEST_ISO") else {
-        return;
+    let Some(iso) = iso() else {
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
     };
     let mut a = App::new();
     a.open(&iso);
@@ -572,9 +607,10 @@ fn format_titles_resolve_through_the_core() {
 
 /// Dispatching SetFormat changes what the app will actually write.
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn choosing_a_format_changes_the_output_extension() {
-    let Ok(iso) = std::env::var("FMKV_TEST_ISO") else {
-        return;
+    let Some(iso) = iso() else {
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
     };
     for (title, ext) in [
         ("Selected titles → MP4", ".mp4"),
@@ -621,9 +657,10 @@ fn mp4_is_not_offered_when_the_video_cannot_go_in_one() {
 
 /// A real DVD hides MP4; unknown codecs never hide anything.
 #[test]
+#[ignore = "needs a real disc fixture; run with --ignored"]
 fn a_dvd_hides_mp4_end_to_end() {
-    let Ok(iso) = std::env::var("FMKV_TEST_ISO") else {
-        return;
+    let Some(iso) = iso() else {
+        panic!("set FMKV_TEST_ISO to a real disc image to run this test");
     };
     let mut a = App::new();
     a.open(&iso);

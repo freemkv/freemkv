@@ -736,7 +736,8 @@ fn eject_source_with(
 /// Host certs / credentials for the AACS bus handshake, from the keydb — the
 /// same input the CLI's `drive_credentials` builds. Passed to the shared `fe::open_scan`.
 fn session_credentials(keys: &KeyConfig) -> Option<libfreemkv::DriveCredentials> {
-    let host_certs = freemkv_keysources::KeydbSource::new(keys.keydb_path.clone()).host_certs();
+    let path = key_settings(keys).keydb_path?;
+    let host_certs = freemkv_keysources::KeydbSource::new(path).host_certs();
     (!host_certs.is_empty()).then_some(libfreemkv::DriveCredentials { host_certs })
 }
 
@@ -907,8 +908,13 @@ fn drive_error(e: &libfreemkv::Error) -> String {
         libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
             "No optical drive found. Connect a Blu-ray/DVD drive with a disc.".to_string()
         }
-        _ => format!("{e}"),
+        _ => explain(e.code()),
     }
+}
+
+// `what` and the catalog explanation of a library failure: `Display` alone is the bare E-code.
+fn failed_with(what: &str, e: &libfreemkv::Error) -> String {
+    format!("{what}: {}", explain(e.code()))
 }
 
 /// Ask the engine whether a job can run, without executing it.
@@ -1253,7 +1259,9 @@ pub fn summarize_outcome(
             Ok(with_partial("Cancelled".to_string()))
         }
         fe::RipOutcome::Ok { .. } if written == 0 => Ok("Nothing was written".to_string()),
-        fe::RipOutcome::Ok { .. } => Ok(format!("{written} title(s) written to {dest_dir}")),
+        fe::RipOutcome::Ok { .. } => Ok(with_partial(format!(
+            "{written} title(s) written to {dest_dir}"
+        ))),
     }
 }
 
@@ -1374,7 +1382,7 @@ pub fn summarize_extract(res: &libfreemkv::ExtractResult, dest: &std::path::Path
         )
     } else if res.bytes_unreadable > 0 {
         format!(
-            "Decrypted file tree written to {} — {} file(s), {:.1} MB unreadable",
+            "Decrypted file tree written to {} — {} file(s), {:.1} MiB unreadable",
             dest.display(),
             n,
             res.bytes_unreadable as f64 / 1_048_576.0
@@ -1701,7 +1709,7 @@ fn run_extract_folder(
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .push(format!(
-                            "  {} — {:.1} MB unreadable",
+                            "  {} — {:.1} MiB unreadable",
                             f.path.display(),
                             f.bytes_unreadable as f64 / 1_048_576.0
                         ));
@@ -1995,6 +2003,15 @@ fn run_stream(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Result<
             // file's own name as {title}.
             let base = title_basename(&req.filename_template, &name, 1);
             let out = format!("{}/{}.{}", req.dest_dir, base, scheme);
+            // Every sink truncates its output before the source is read.
+            if crate::file_identity::same_file(
+                Some(std::path::Path::new(&req.source)),
+                std::path::Path::new(&out),
+            ) {
+                return Err("The output would overwrite the source. \
+                     Choose a different output folder."
+                    .into());
+            }
             (format!("{scheme}://{out}"), out)
         }
         OutKind::Demux(scheme) => {
@@ -2107,6 +2124,7 @@ fn mux_selected_titles(
         // metadata / index sinks, or a demux directory (its own per-track
         // naming) for separate track files.
         let (dest_url, target) = title_dest(req, kind, &label, idx, multi);
+        let before = output_stamp(&target);
         // Every title reads through the rip's one set (no lookup); an image title is never
         // raw here.
         let plan = title_plan(req, source_url, &dest_url, idx, false);
@@ -2153,7 +2171,7 @@ fn mux_selected_titles(
                 // looks like output. Remove it so the folder never shows a broken
                 // result. (Demux writes into a directory — nothing to clean.)
                 if matches!(kind, OutKind::File(_)) {
-                    let _ = std::fs::remove_file(&target);
+                    remove_failed_output(&target, before);
                 }
                 Err(e)
             }
@@ -2263,9 +2281,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(format!("selection resolved to titles {indices:?}"));
-        if indices.is_empty() {
-            return Err("Nothing selected to rip.".into());
-        }
+        require_selection(whole, &indices)?;
         indices
     };
     // KU §2.1 invariant 1: ONE resolve over what this rip decrypts, before any output,
@@ -2342,7 +2358,7 @@ fn run_blocking(req: &RipRequest, sink: &UiSink, state: &Arc<RunState>) -> Resul
             };
             let halted = matches!(&copied, Ok(r) if r.halted);
             let res = copied
-                .map_err(|e| format!("image decrypt failed: {e}"))
+                .map_err(|e| failed_with("image decrypt failed", &e))
                 .and_then(|result| {
                     if recovery_produced_no_data(result.bytes_good) {
                         let _ = std::fs::remove_file(&dest);
@@ -2546,7 +2562,7 @@ enum DiscPlan {
 
 // Which of those two a request wants: want_iso || multipass (not &&). As &&
 // a --multipass title rip silently loses recovery passes; an ISO request
-// without multipass would panic in the per-title unreachable!().
+// without multipass would reach `title_dest`'s unreachable!().
 fn recovery_plan(kind: OutKind, multipass: bool) -> DiscPlan {
     let deliver_iso = matches!(kind, OutKind::IsoImage);
     if deliver_iso || multipass {
@@ -2559,11 +2575,8 @@ fn recovery_plan(kind: OutKind, multipass: bool) -> DiscPlan {
 // The `raw` flag a recovery job carries: the user's, except that an image staged for a title
 // mux stays RAW on disk (decrypted on the ordinary iso:// re-open into the container). A
 // multipass recovery to an ISO decrypts unless the user kept it raw (EO6).
-fn recovery_raw(multipass: bool, want_iso: bool, user_raw: bool) -> Result<bool, String> {
-    if multipass && !want_iso {
-        return Ok(true);
-    }
-    Ok(user_raw)
+fn recovery_raw(multipass: bool, want_iso: bool, user_raw: bool) -> bool {
+    (multipass && !want_iso) || user_raw
 }
 
 /// What a title NUMBER actually referred to, so a selection survives a
@@ -2614,6 +2627,15 @@ fn verify_selection_identity(
 ) -> Result<(), String> {
     for &t in titles {
         verify_title_identity(picked.get(t), scanned, t)?;
+    }
+    Ok(())
+}
+
+// A title output with no title selected has nothing to rip; refuse before touching the drive.
+// A whole-disc output ignores the selection.
+fn require_selection(whole: bool, indices: &[usize]) -> Result<(), String> {
+    if !whole && indices.is_empty() {
+        return Err("Nothing selected to rip.".into());
     }
     Ok(())
 }
@@ -2789,6 +2811,7 @@ fn run_disc_scanning(
     };
     let indices = fe::resolve_selection(&disc, &sel);
     let whole = matches!(kind, OutKind::DecryptedFolder | OutKind::IsoImage);
+    require_selection(whole, &indices)?;
     let scope = if whole {
         disc_copy_scope(kind, req.raw)
     } else {
@@ -2831,7 +2854,7 @@ fn run_disc_scanning(
         // image may list titles differently if damage dropped a playlist, so
         // `scanned_ids` lets the selection re-resolve by identity.
         let mut job = recovery_job(&req.source, &iso_path, &indices);
-        job.raw = recovery_raw(req.multipass, want_iso, req.raw)?;
+        job.raw = recovery_raw(req.multipass, want_iso, req.raw);
         // A decrypting copy reads through the set and refuses up front on anything it
         // lacks (E7026 for Pending forensic keys, KU §5.4); a raw one has no keys at all.
         if !job.raw {
@@ -2850,7 +2873,7 @@ fn run_disc_scanning(
             None
         } else {
             fe::mkv_staging_scope(&disc, held_source(&mut session)?, &indices, req.keep_iso)
-                .map_err(|e| format!("recovery failed: {e}"))?
+                .map_err(|e| failed_with("recovery failed", &e))?
         };
         let lock = hold_iso_lock(std::path::Path::new(&iso_path), state)?;
         let mut halted = false;
@@ -2884,7 +2907,7 @@ fn run_disc_scanning(
                 }),
                 Err(e) => Err(e),
             }
-            .map_err(|e| format!("recovery failed: {e}"))?;
+            .map_err(|e| failed_with("recovery failed", &e))?;
             halted = result.halted;
             // Read phase done: the deliverable (ISO) or the mux source is on disk,
             // so the drive is no longer needed — eject now, exactly like autorip
@@ -2910,7 +2933,8 @@ fn run_disc_scanning(
             // Title output: mux the selected titles from the recovered (encrypted, see
             // `recovery_raw`) ISO with this rip's set and the drive's scan.
             if recovery_produced_no_data(result.good_bytes) {
-                let _ = std::fs::remove_file(&iso_path);
+                let map_path = disc.mapfile_for(std::path::Path::new(&iso_path));
+                remove_staging_iso(&iso_path, &map_path);
                 return Err("Recovery produced no readable data — nothing to mux.".into());
             }
             let map_path = disc.mapfile_for(std::path::Path::new(&iso_path));
@@ -2947,9 +2971,6 @@ fn run_disc_scanning(
         return res;
     }
 
-    if indices.is_empty() {
-        return Err("Nothing selected to rip.".into());
-    }
     let multi = demux_needs_subdirs(indices.len());
     // What each selected NUMBER refers to on THIS scan, banked before the
     // drive is released. Each title below re-scans, so the index alone doesn't
@@ -2964,6 +2985,7 @@ fn run_disc_scanning(
     let partial = std::cell::Cell::new(0usize);
     let outcome = fe::run_titles(&indices, !req.titles.is_empty(), sink, |idx| {
         let (dest_url, target) = title_dest(req, kind, &label, idx, multi);
+        let before = output_stamp(&target);
 
         // KU §3.3: each title reopens the drive with `open_scan` (no key call) and reads
         // through the rip's one set, after `is_for`. A fresh session per title matches the
@@ -2978,13 +3000,12 @@ fn run_disc_scanning(
             // straight out never reaches the arm that logs a per-title reason,
             // so "no disc in the drive" reaches the user as "Write failed (Other)."
             Err(e) => {
-                let msg = format!("title {}: {e}", idx + 1);
                 state
                     .lines
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push(msg.clone());
-                return Err(std::io::Error::other(msg));
+                    .push(format!("Title {}: {}", idx + 1, explain(e.code())));
+                return Err(e.into());
             }
         };
         // This is a DIFFERENT scan from the one the selection was made against.
@@ -3059,7 +3080,7 @@ fn run_disc_scanning(
                 // looks like output; remove it. (Demux writes into a
                 // directory — nothing to clean.)
                 if matches!(kind, OutKind::File(_)) {
-                    let _ = std::fs::remove_file(&target);
+                    remove_failed_output(&target, before);
                 }
                 Err(e)
             }
@@ -3282,6 +3303,20 @@ fn run_title(
     }
 }
 
+// What is at `path` before a title's mux: length and mtime, `None` when absent.
+fn output_stamp(path: &str) -> Option<(u64, Option<std::time::SystemTime>)> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.len(), m.modified().ok()))
+}
+
+// Remove the file a failed mux left at `path`, unless it is the one `before` saw untouched:
+// an error before the output opened must not delete an earlier rip.
+fn remove_failed_output(path: &str, before: Option<(u64, Option<std::time::SystemTime>)>) {
+    if output_stamp(path) != before {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 // A Stop that ended a mux before its output opened is a stop, not a kept partial file.
 fn stopped_before_output(
     r: std::io::Result<libfreemkv::MuxOutcome>,
@@ -3292,9 +3327,6 @@ fn stopped_before_output(
     }
 }
 
-// The engine→front-end outcome contract: run_titles emits NoKey/Failed in
-// freemkv-engine, but nothing proved this crate does anything with them —
-// every variant fell through to an Ok string reported as a success.
 #[cfg(test)]
 mod run_state_poison_tests {
     // A panicking worker must not turn its verdict into "Completed" — this pins
@@ -3437,6 +3469,8 @@ mod run_state_poison_tests {
     }
 }
 
+// The engine→front-end outcome contract: run_titles emits NoKey/Failed in
+// freemkv-engine, and this crate reports each as an Err, never as an Ok success.
 #[cfg(test)]
 mod outcome_summary_tests {
     use super::{
@@ -3525,6 +3559,17 @@ mod outcome_summary_tests {
         let cancelled = summarize_outcome(&ok, 0, 1, 2, "/out").unwrap();
         assert!(cancelled.starts_with("Cancelled"), "{cancelled}");
         assert!(cancelled.contains("1 partial file(s) kept"), "{cancelled}");
+
+        // A title cancelled after earlier ones wrote still names its partial file.
+        let last_cancelled = summarize_outcome(&ok, 1, 1, 2, "/out").unwrap();
+        assert!(
+            last_cancelled.starts_with("1 title(s) written"),
+            "{last_cancelled}"
+        );
+        assert!(
+            last_cancelled.contains("1 partial file(s) kept in /out"),
+            "{last_cancelled}"
+        );
 
         let halted = summarize_outcome(&fe::RipOutcome::Halted, 1, 0, 3, "/out").unwrap();
         assert_eq!(halted, "Cancelled — 1 of 3 title(s) completed");
@@ -3797,6 +3842,16 @@ mod outcome_summary_tests {
         );
         assert!(msg.contains("2.0 MiB unreadable"), "{msg}");
         assert!(msg.contains("4.0 MiB not read"), "{msg}");
+    }
+
+    #[test]
+    fn a_lossy_extraction_reports_the_unreadable_span_in_mib() {
+        let res = extract_result(false, 3, 3 * 1_048_576);
+        let msg = summarize_extract(&res, std::path::Path::new("/out/Disc"));
+        assert_eq!(
+            msg,
+            "Decrypted file tree written to /out/Disc — 3 file(s), 3.0 MiB unreadable"
+        );
     }
 
     #[test]
@@ -4204,8 +4259,7 @@ mod routing_tests {
         assert!(multipass, "the default rip mode is a multipass plan");
         assert!(!user_raw, "raw does not apply to a title output");
 
-        let raw = recovery_raw(multipass, want_iso, user_raw)
-            .expect("the default settings must produce a runnable recovery");
+        let raw = recovery_raw(multipass, want_iso, user_raw);
         assert!(
             raw,
             "a multipass image staged for a title mux stays raw on disk; the mux decrypts"
@@ -4265,7 +4319,7 @@ mod routing_tests {
         );
         let staged = slice(
             "            // The engine's recovery over the held drive, into the image the app holds",
-            "            .map_err(|e| format!(\"recovery failed: {e}\"))?;\n            halted = result.halted;",
+            "            .map_err(|e| failed_with(\"recovery failed\", &e))?;\n            halted = result.halted;",
         );
         assert!(
             staged.contains("staging.as_deref()"),
@@ -4349,8 +4403,12 @@ mod routing_tests {
             "        // This is a DIFFERENT scan",
         );
         assert!(
-            bringup.contains(".push(msg.clone());"),
+            bringup.contains(".push(") && bringup.contains("explain(e.code())"),
             "a failed per-title drive bring-up must say why in the log pane"
+        );
+        assert!(
+            bringup.contains("return Err(e.into());"),
+            "the bring-up failure keeps its typed code"
         );
 
         let session_mux = slice("\nfn mux_session_title(", "\nfn title_plan(");
@@ -4974,17 +5032,17 @@ mod routing_tests {
     /// nobody asked for.
     #[test]
     fn a_single_pass_recovery_keeps_the_users_raw_setting() {
-        assert_eq!(recovery_raw(false, true, false), Ok(false));
-        assert_eq!(recovery_raw(false, true, true), Ok(true));
+        assert!(!recovery_raw(false, true, false));
+        assert!(recovery_raw(false, true, true));
     }
 
     /// Whole disc → ISO, multipass, raw off: a decrypted image, recovered over passes.
     #[test]
     fn a_multipass_recovery_to_an_iso_decrypts_unless_raw() {
-        assert_eq!(recovery_raw(true, true, false), Ok(false));
-        assert_eq!(recovery_raw(true, true, true), Ok(true));
+        assert!(!recovery_raw(true, true, false));
+        assert!(recovery_raw(true, true, true));
         // A staged image for a title mux stays raw on disk.
-        assert_eq!(recovery_raw(true, false, false), Ok(true));
+        assert!(recovery_raw(true, false, false));
     }
 
     // A GUI ISO or folder output from an image staged for an MKV rip is refused before
@@ -5058,6 +5116,27 @@ mod routing_tests {
                 .any(|l| l.contains("left out") && l.contains("MP4")),
             "the excluded note reaches the run log, got: {lines:?}"
         );
+    }
+
+    // A container whose name reproduces the template's output is never truncated by its own rip.
+    #[test]
+    fn a_container_rip_never_overwrites_its_own_source() {
+        let dir = std::env::temp_dir().join(format!("fmkv-own-src-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("1.mpg");
+        crate::lossy::mpg_source_fixture(&src);
+        let before = std::fs::read(&src).unwrap();
+        let mut r = req();
+        r.source = src.to_string_lossy().into_owned();
+        r.format = "Selected titles → MPG".into();
+        r.dest_dir = dir.to_string_lossy().into_owned();
+        r.filename_template = "{n}".into();
+        let state = Arc::new(RunState::default());
+        let res = run_stream(&r, &UiSink(state.clone()), &state);
+        let kept = std::fs::read(&src).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(res.is_err(), "{res:?}");
+        assert_eq!(kept, before, "the source was rewritten");
     }
 
     // D4 parity: a mux that fails before its output opens prints no pre-mux note, in the GUI
@@ -5734,10 +5813,15 @@ mod routing_tests {
             severity: fe::DamageSeverity::Cosmetic,
             ..clean_result()
         };
+        crate::strings::set_locale("en");
         let note = damage_note(&result);
+        let line = crate::strings::fmt(
+            "rip.damage_lost_movie",
+            &[("time", &super::fmt_damage_time(4.5))],
+        );
         assert!(
-            note.contains('s') || note.contains('m'),
-            "no lost-playback-time figure in: {note}"
+            note.ends_with(&format!("\n{line}")),
+            "no lost-playback-time line ({line:?}) in: {note}"
         );
     }
 
@@ -6034,6 +6118,86 @@ mod held_eject_tests {
 
 #[cfg(test)]
 mod pure_helper_tests {
+    // A drive open failure carries the catalog explanation, not the bare E-code.
+    #[test]
+    fn a_drive_open_failure_is_explained_not_a_bare_code() {
+        let e = libfreemkv::Error::DeviceNotFound {
+            path: "/dev/sr9".into(),
+        };
+        let msg = super::drive_error(&e);
+        assert_eq!(msg, super::explain(e.code()));
+        assert_ne!(msg, format!("{e}"), "Display is only the code");
+        assert!(super::failed_with("recovery failed", &e).starts_with("recovery failed: "));
+    }
+
+    // A title output with nothing selected is refused up front; a whole-disc one needs no titles.
+    #[test]
+    fn a_title_output_with_nothing_selected_is_refused() {
+        assert_eq!(
+            super::require_selection(false, &[]),
+            Err("Nothing selected to rip.".to_string())
+        );
+        assert!(super::require_selection(false, &[0]).is_ok());
+        assert!(super::require_selection(true, &[]).is_ok());
+    }
+
+    // A failed mux removes what it left, but never an earlier rip it did not touch.
+    #[test]
+    fn a_failed_mux_keeps_an_untouched_earlier_output_and_removes_its_own() {
+        use super::{output_stamp, remove_failed_output};
+        let dir = std::env::temp_dir().join(format!("fmkv-failed-out-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.mkv");
+        std::fs::write(&old, b"earlier rip").unwrap();
+        let old_s = old.to_str().unwrap();
+        remove_failed_output(old_s, output_stamp(old_s));
+        assert!(old.exists(), "an untouched earlier output must survive");
+
+        let before = output_stamp(old_s);
+        std::fs::write(&old, b"").unwrap();
+        remove_failed_output(old_s, before);
+        assert!(!old.exists(), "a truncated output is the failed mux's");
+
+        let fresh = dir.join("fresh.mkv");
+        let fresh_s = fresh.to_str().unwrap();
+        let before = output_stamp(fresh_s);
+        std::fs::write(&fresh, b"").unwrap();
+        remove_failed_output(fresh_s, before);
+        assert!(!fresh.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // `session_credentials` reads the host certs from the same `~`-expanded keydb as key lookup.
+    #[cfg(unix)]
+    #[test]
+    fn session_credentials_expand_a_tilde_keydb_path() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("fmkv-creds-home-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let hc = format!(
+            "| HC | HOST_PRIV_KEY 0x{} | HOST_CERT 0x{}\n",
+            "00".repeat(20),
+            "a1".repeat(92)
+        );
+        std::fs::write(home.join("keydb.cfg"), hc).unwrap();
+        let old = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", &home) };
+        let keys = super::KeyConfig {
+            keydb_path: "~/keydb.cfg".into(),
+            ..Default::default()
+        };
+        let creds = super::session_credentials(&keys);
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        std::fs::remove_dir_all(&home).ok();
+        assert!(creds.is_some(), "a ~/ keydb path must reach the host certs");
+    }
+
     use super::{fmt_damage_time, purpose_label};
 
     /// `fmt_damage_time` picks its unit by magnitude across all five bands.
@@ -6117,8 +6281,12 @@ mod ku_gui_tests {
         let f = factory(&[(Answer::Hang, &[K1])], &calls);
         let tok = OpenToken::default();
         let stop = tok.halt.clone();
+        let seen = calls.clone();
         let press = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while seen.len() == 0 && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             stop.cancel();
             std::time::Instant::now()
         });

@@ -1,4 +1,4 @@
-//! macOS AppKit shell — logicless preview.
+//! macOS AppKit shell — draws `ui::App::view()` and forwards input to `App::dispatch`.
 //!
 //! Layout proportions: toolbar 32px · tree 46.4% wide · log 34% tall ·
 //! Info/Output groups on the right.
@@ -56,8 +56,6 @@ const PROG_H_ONE: f64 = 246.0;
 const RESULT_H: f64 = 200.0;
 const LOG_H_PROG: f64 = 470.0;
 
-/// Development-only environment lookup. In a release build this always fails,
-/// so the shipped app has no environment switches at all.
 /// Map an AppKit selector to a core command.
 fn cmd_for(a: Sel) -> Option<crate::ui::Cmd> {
     use crate::ui::Cmd;
@@ -101,6 +99,8 @@ fn cmd_for(a: Sel) -> Option<crate::ui::Cmd> {
     })
 }
 
+/// Development-only environment lookup. In a release build this always fails,
+/// so the shipped app has no environment switches at all.
 fn dev_env(key: &str) -> Result<String, std::env::VarError> {
     if cfg!(debug_assertions) {
         std::env::var(key)
@@ -113,7 +113,7 @@ fn r(x: f64, y: f64, w: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
 }
 
-// ── stub disc model (stands in for engine::scan) ──────────────────────────
+// ── tree redraw identity ──────────────────────────────────────────────────
 
 // Row-list identity (excludes tick state) so render() can detect a real tree change vs. a
 // tick-only update.
@@ -192,7 +192,10 @@ fn keydb_outcome(r: std::thread::Result<Result<String, String>>) -> (crate::ui::
         // The payload is dropped: a panic message can quote keydb bytes.
         Err(_) => (
             LogKind::Notice,
-            "keydb update failed — internal error".to_string(),
+            crate::strings::get_or(
+                "gui.log.keydb_worker_failed",
+                "keydb update failed — internal error",
+            ),
         ),
     }
 }
@@ -622,10 +625,8 @@ struct Ivars {
     win_about: RefCell<Option<Retained<NSWindow>>>,
     /// The main window, kept so a live language switch can rebuild its content.
     win_main: RefCell<Option<Retained<NSWindow>>>,
-    tree: RefCell<Option<Retained<NSOutlineView>>>,
     src: RefCell<Option<Retained<TitlesSource>>>,
     page_empty: RefCell<Option<Retained<NSView>>>,
-    on_empty: RefCell<bool>,
     /// Worker threads push user-visible lines here; a main-thread timer drains
     /// it. AppKit objects are main-thread-only, so nothing else may cross.
     inbox: std::sync::Arc<std::sync::Mutex<Vec<(crate::ui::LogKind, String)>>>,
@@ -651,8 +652,11 @@ struct Ivars {
     result_head: RefCell<Option<Retained<NSTextField>>>,
     on_result: RefCell<bool>,
     run_btn: RefCell<Option<Retained<NSButton>>>,
+    #[cfg(debug_assertions)]
     demo_path: RefCell<String>,
+    #[cfg(debug_assertions)]
     demo_timer: RefCell<Option<Retained<NSTimer>>>,
+    #[cfg(debug_assertions)]
     demo_step: RefCell<usize>,
     two_bars: RefCell<bool>,
     bar2_row: RefCell<Vec<Retained<NSView>>>,
@@ -675,8 +679,8 @@ struct Ivars {
     /// set. Sharing the list would make `read_prefs_form` persist a single
     /// language name over the user's comma-separated codes.
     pf_langs: RefCell<Vec<(String, Retained<NSPopUpButton>)>>,
-    /// True only when the open source is a physical drive; Eject is
-    /// meaningless for an image file, so the button hides.
+    /// An Eject button, were one built. macOS has none (Eject is a menu command), so
+    /// this stays empty; `View::eject_visible` is still read through it.
     eject_btn: RefCell<Option<Retained<NSButton>>>,
     fmt_popup: RefCell<Option<Retained<NSPopUpButton>>>,
     tabs: RefCell<Option<Retained<objc2_app_kit::NSTabView>>>,
@@ -827,7 +831,26 @@ define_class!(
 
     unsafe impl NSTextFieldDelegate for Controller {}
 
-    unsafe impl NSComboBoxDelegate for Controller {}
+    unsafe impl NSComboBoxDelegate for Controller {
+        // Picking the saved destination from the dropdown sets the text without a
+        // controlTextDidChange:, so it is read from the selected item here.
+        #[unsafe(method(comboBoxSelectionDidChange:))]
+        fn combo_box_selection_did_change(&self, _n: &objc2_foundation::NSNotification) {
+            let Some(f) = self.ivars().out_field.borrow().clone() else {
+                return;
+            };
+            let Some(item) = f.objectValueOfSelectedItem() else {
+                return;
+            };
+            let Ok(text) = item.downcast::<NSString>() else {
+                return;
+            };
+            let text = text.to_string();
+            if self.ivars().app.borrow().output_dir != text {
+                self.app_mut(|a| a.output_dir = text);
+            }
+        }
+    }
 
     impl Controller {
         #[unsafe(method(onBrowseOutput:))]
@@ -861,7 +884,14 @@ define_class!(
         /// dest_dir field (OK then persists it, like any other edited field).
         #[unsafe(method(onBrowseDestDir:))]
         fn on_browse_dest_dir(&self, _s: Option<&AnyObject>) {
-            if let Some(dir) = self.pick(true, false, "Choose the default output folder") {
+            if let Some(dir) = self.pick(
+                true,
+                false,
+                &crate::strings::get_or(
+                    "gui.panel.default_output_msg",
+                    "Choose the default output folder",
+                ),
+            ) {
                 self.set_pref_field("dest_dir", &dir);
             }
         }
@@ -870,7 +900,11 @@ define_class!(
         /// not a source media type) and drop it into the keydb_path field.
         #[unsafe(method(onBrowseKeydb:))]
         fn on_browse_keydb(&self, _s: Option<&AnyObject>) {
-            if let Some(path) = self.pick(false, false, "Choose the keydb.cfg file") {
+            if let Some(path) = self.pick(
+                false,
+                false,
+                &crate::strings::get_or("gui.panel.keydb_msg", "Choose the keydb.cfg file"),
+            ) {
                 self.set_pref_field("keydb_path", &path);
             }
         }
@@ -948,7 +982,6 @@ define_class!(
         // runloop tick, because tearing down the popup mid-action crashes AppKit.
         #[unsafe(method(onPickLanguage:))]
         fn on_pick_language(&self, _s: Option<&AnyObject>) {
-            let mtm = MainThreadMarker::new().unwrap();
             unsafe {
                 NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
                     0.0,
@@ -958,7 +991,6 @@ define_class!(
                     false,
                 );
             }
-            let _ = mtm;
         }
 
         /// Apply the picked language live: persist the form, swap the catalog,
@@ -1029,7 +1061,7 @@ define_class!(
                 }),
                 Err(e) => self.app_mut(|a| {
                     a.say(
-                        crate::ui::LogKind::Result,
+                        crate::ui::LogKind::Notice,
                         &crate::strings::fmt("gui.log.keyserver_rejected", &[("e", &e.to_string())]),
                     )
                 }),
@@ -1168,6 +1200,7 @@ define_class!(
             self.act(crate::ui::Cmd::Quit);
         }
 
+        #[cfg(debug_assertions)]
         #[unsafe(method(onDemoStep:))]
         fn on_demo_step(&self, _s: Option<&AnyObject>) {
             let step = {
@@ -1445,10 +1478,21 @@ impl Controller {
                         .selectFile_inFileViewerRootedAtPath(None, &NSString::from_str(&p));
                 }
                 E::OpenUrl(u) => {
-                    if let Some(url) =
-                        objc2_foundation::NSURL::URLWithString(&NSString::from_str(&u))
-                    {
-                        objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
+                    let opened = objc2_foundation::NSURL::URLWithString(&NSString::from_str(&u))
+                        .is_some_and(|url| {
+                            objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url)
+                        });
+                    if !opened {
+                        self.app_mut(|a| {
+                            a.say(
+                                crate::ui::LogKind::Notice,
+                                &crate::strings::fmt_or(
+                                    "gui.log.open_url_failed",
+                                    "Could not open {url}",
+                                    &[("url", &u)],
+                                ),
+                            )
+                        });
                     }
                 }
                 E::ShowSettings => {
@@ -1707,7 +1751,6 @@ impl Controller {
         *iv.log_hidden.borrow_mut() = v.log_hidden;
         *iv.two_bars.borrow_mut() = v.show_overall_bar;
         *iv.on_prog.borrow_mut() = v.page == Page::Progress;
-        *iv.on_empty.borrow_mut() = v.page == Page::Empty;
         *iv.on_result.borrow_mut() = v.page == Page::Result;
         self.relayout_now();
     }
@@ -1797,7 +1840,6 @@ impl Controller {
             }
             let rx = PAD + tree_w + PAD;
             let rw = w - rx - PAD;
-            let _mk_w = 64.0;
             if let Some(g) = iv.grp_out.borrow().as_ref() {
                 g.setFrame(r(rx, ph - 110.0, rw, 110.0));
             }
@@ -2353,7 +2395,6 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
                 | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
         );
     }
-    let _add = |v: &NSView| content.addSubview(v);
 
     // No toolbar: on macOS the menu bar is global and already carries
     // every command, so a duplicate button strip is pure chrome.
@@ -2582,7 +2623,6 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     // ── right column ───────────────────────────────────────────────────
     let rx = PAD + tree_w + PAD;
     let rw = W - rx - PAD;
-    let _mk_w = 64.0;
 
     // Output folder group
     let of = group(
@@ -2904,7 +2944,6 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
     *c.ivars().log.borrow_mut() = Some(tv);
     *c.ivars().backdrop.borrow_mut() = Some(backdrop.clone());
     *c.ivars().tree_scroll.borrow_mut() = Some(scroll.clone());
-    *c.ivars().tree.borrow_mut() = Some(ov.clone());
     *c.ivars().src.borrow_mut() = Some(src.clone());
     *c.ivars().grp_out.borrow_mut() = Some(of.clone());
     *c.ivars().grp_info.borrow_mut() = Some(info.clone());
@@ -2949,9 +2988,7 @@ pub fn run() {
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     // The app follows the system Light/Dark setting. The only exception is
     // the screenshot harness, which pins Aqua so captures are comparable.
-    if cfg!(debug_assertions) && std::env::var("FMKV_SHOT").is_ok()
-        || std::env::var("FMKV_WIN").is_ok()
-    {
+    if dev_env("FMKV_SHOT").is_ok() || dev_env("FMKV_WIN").is_ok() {
         let dark = dev_env("FMKV_DARK").is_ok();
         unsafe {
             let name = if dark {
@@ -4003,6 +4040,7 @@ fn build_about(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
 
 impl Controller {
     /// Click the Run Now button exactly as a user would.
+    #[cfg(debug_assertions)]
     pub fn drive_click_run(&self) -> bool {
         if let Some(b) = self.ivars().run_btn.borrow().as_ref() {
             unsafe { b.performClick(None) };
@@ -4126,6 +4164,7 @@ impl Controller {
     }
 
     /// Tick the Nth title row — the same mutation the checkbox action makes.
+    #[cfg(debug_assertions)]
     pub fn drive_tick_title(&self, n: usize, on: bool) -> bool {
         let idx = self
             .ivars()
@@ -4144,6 +4183,7 @@ impl Controller {
     }
 
     /// Choose an output format by its visible title.
+    #[cfg(debug_assertions)]
     pub fn drive_pick_format(&self, title: &str) -> bool {
         let p = match self.ivars().fmt_popup.borrow().as_ref() {
             Some(p) => p.clone(),
@@ -4167,6 +4207,7 @@ impl Controller {
     }
 
     /// Set the output folder as typing into the field would.
+    #[cfg(debug_assertions)]
     pub fn drive_set_output(&self, path: &str) {
         if let Some(f) = self.ivars().out_field.borrow().as_ref() {
             f.setStringValue(&NSString::from_str(path));
@@ -4183,6 +4224,7 @@ impl Controller {
             .unwrap_or_default()
     }
 
+    #[cfg(debug_assertions)]
     pub fn drive_open(&self, path: &str) {
         self.step(|a| a.open(path));
     }
@@ -5077,6 +5119,12 @@ mod tests {
             src.contains(&handler),
             "no controlTextDidChange: handler exists to push the typed path \
              into App::output_dir"
+        );
+        let picked = format!("{}{}", "fn combo_box_selection_did", "_change");
+        assert!(
+            src.contains(&picked),
+            "no comboBoxSelectionDidChange: handler exists to push a dropdown \
+             pick into App::output_dir"
         );
     }
 

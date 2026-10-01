@@ -200,11 +200,14 @@ impl ServerPassHost<'_> {
         // `rip_disc`), then re-discover the drive at its original path or a
         // shifted sg number. A Stop ends either wait.
         let recovery_halt = libfreemkv::Halt::from_arc(self.halt.clone());
+        // Rediscover from where the drive is NOW: an earlier recovery may have moved it
+        // off the original sg node, which another drive may since have taken.
+        let current = self.session.device_path.clone();
         let new_path = if session::sleep_unless_halted(
             &recovery_halt,
             std::time::Duration::from_secs(self.delay_secs),
         ) {
-            rediscover_drive(self.device, self.device_path, &recovery_halt)
+            rediscover_drive(self.device, &current, &recovery_halt)
         } else {
             None
         };
@@ -216,220 +219,103 @@ impl ServerPassHost<'_> {
             self.halted = true;
             return false;
         }
-        match (new_path.as_deref(), &self.device_path) {
-            (Some(p), _) if p != self.device_path => {
-                crate::server::log::device_log(
-                    self.device,
-                    &format!(
-                        "Pass 1 attempt {attempt}: drive rediscovered at {p} (original={}), attempting re-open",
-                        self.device_path
-                    ),
-                );
-
-                // Retry Drive::open with exponential backoff (firmware may not be ready yet).
-                let mut drive =
-                    match open_drive_with_backoff(self.device, attempt, p, self.delay_secs) {
-                        Some(d) => d,
-                        None => return false,
-                    };
-
-                if let Err(e) = drive.wait_ready() {
-                    crate::server::log::device_log(
-                        self.device,
-                        &format!(
-                            "Pass 1 attempt {attempt}: Drive::wait_ready({}) failed strategy=transport_failure_recovery error={} — recovery path exhausted",
-                            p,
-                            e.code()
-                        ),
-                    );
-
-                    let failure_category = if e.code() == 4000 {
-                        "SCSI_ERROR"
-                    } else {
-                        &format!("ERROR_CODE_{}", e.code())
-                    };
-
-                    crate::server::log::device_log(
-                        self.device,
-                        &format!(
-                            "STRATEGY_FAILURE: transport_failure_recovery FAILED at Drive::wait_ready category={} error_code={}",
-                            failure_category,
-                            e.code()
-                        ),
-                    );
-
-                    return false;
-                }
-
-                if let Err(e) = drive.init() {
-                    crate::server::log::device_log(
-                        self.device,
-                        &format!(
-                            "Pass 1 attempt {attempt}: Drive::init({}) failed strategy=transport_failure_recovery error={} sense_key={:?} ASC={:?} — recovery path exhausted",
-                            p,
-                            e.code(),
-                            e.scsi_sense().map(|s| s.sense_key),
-                            e.scsi_sense().map(|s| s.asc)
-                        ),
-                    );
-
-                    log_init_recovery_failure(self.device, &e);
-
-                    return false;
-                }
-
-                // Engage disc-type read mode before any read
-                // (idempotent); mirrors scan_disc and the other
-                // open paths, which all call probe_disc() after init().
-                if let Err(e) = drive.probe_disc() {
-                    tracing::warn!(device = %self.device, error = %e, "drive probe_disc failed (continuing)");
-                }
-
-                self.session.drive = drive;
-                self.session.device_path = p.to_string();
-
-                crate::server::log::device_log(
-                    self.device,
-                    &format!(
-                        "PASS 1/{}: transport_failure_recovery SUCCESS — resuming from mapfile at {}",
-                        attempt + 1,
-                        p
-                    ),
-                );
-            }
-
-            (Some(p), _) if p == self.device_path => {
-                crate::server::log::device_log(
-                    self.device,
-                    &format!(
-                        "Pass 1 attempt {attempt}: drive still at original path {}, attempting re-open",
-                        p
-                    ),
-                );
-
-                // Retry Drive::open with exponential backoff (firmware
-                // may not be ready yet) — same as the new-path arm, since
-                // a same-sg re-enumeration leaves firmware just as cold.
-                let mut drive =
-                    match open_drive_with_backoff(self.device, attempt, p, self.delay_secs) {
-                        Some(d) => d,
-                        None => return false,
-                    };
-
-                if let Err(e) = drive.wait_ready() {
-                    crate::server::log::device_log(
-                        self.device,
-                        &format!(
-                            "Pass 1 attempt {attempt}: Drive::wait_ready({}) failed strategy=transport_failure_recovery error={} — recovery path exhausted",
-                            p,
-                            e.code()
-                        ),
-                    );
-
-                    let failure_category = if e.code() == 4000 {
-                        "SCSI_ERROR"
-                    } else {
-                        &format!("ERROR_CODE_{}", e.code())
-                    };
-
-                    crate::server::log::device_log(
-                        self.device,
-                        &format!(
-                            "STRATEGY_FAILURE: transport_failure_recovery FAILED at Drive::wait_ready category={} error_code={}",
-                            failure_category,
-                            e.code()
-                        ),
-                    );
-
-                    return false;
-                }
-
-                if let Err(e) = drive.init() {
-                    crate::server::log::device_log(
-                        self.device,
-                        &format!(
-                            "Pass 1 attempt {attempt}: Drive::init({}) failed strategy=transport_failure_recovery error={} sense_key={:?} ASC={:?} — recovery path exhausted",
-                            p,
-                            e.code(),
-                            e.scsi_sense().map(|s| s.sense_key),
-                            e.scsi_sense().map(|s| s.asc)
-                        ),
-                    );
-
-                    // Same wedged-firmware diagnostic as the
-                    // new-path arm: same-sg re-enumeration too
-                    // means the firmware needs a power-cycle.
-                    log_init_recovery_failure(self.device, &e);
-
-                    return false;
-                }
-
-                // Engage disc-type read mode before any read
-                // (idempotent); mirrors scan_disc and the other
-                // open paths, which all call probe_disc() after init().
-                if let Err(e) = drive.probe_disc() {
-                    tracing::warn!(device = %self.device, error = %e, "drive probe_disc failed (continuing)");
-                }
-
-                self.session.drive = drive;
-                self.session.device_path = p.to_string();
-
-                crate::server::log::device_log(
-                    self.device,
-                    &format!(
-                        "PASS 1/{}: transport_failure_recovery SUCCESS — resuming from mapfile at {}",
-                        attempt + 1,
-                        p
-                    ),
-                );
-            }
-
-            (None, _) => {
-                crate::server::log::device_log(
-                    self.device,
-                    "Pass 1: could not re-discover drive after transport failure strategy=usb_re_enumeration FAILED",
-                );
-
-                // Log detailed breakdown of what was tried
-                let sg_num = self
-                    .device_path
-                    .rsplit('/')
-                    .next()
-                    .and_then(|s| s.strip_prefix("sg").and_then(|n| n.parse::<i32>().ok()))
-                    .unwrap_or(-1);
-
-                crate::server::log::device_log(
-                    self.device,
-                    &format!(
-                        "usb_re_enumeration strategy tried probe paths: sg{} (original), sg{}, sg{}, sg{}, sg{}, sg{}, sg{}",
-                        sg_num,
-                        sg_num - 1,
-                        sg_num + 1,
-                        sg_num - 2,
-                        sg_num + 2,
-                        sg_num - 3,
-                        sg_num + 3
-                    ),
-                );
-
-                crate::server::log::device_log(
-                    self.device,
-                    "STRATEGY_FAILURE: usb_re_enumeration FAILED — no valid drive path found after USB re-enumeration",
-                );
-
-                return false;
-            }
-
-            // Fallback for any other case (shouldn't happen but compiler requires exhaustiveness)
-            _ => {
-                crate::server::log::device_log(
-                    self.device,
-                    "STRATEGY_FAILURE: usb_re_enumeration FAILED — unexpected match state",
-                );
-
-                return false;
-            }
+        let Some(p) = new_path.as_deref() else {
+            crate::server::log::device_log(
+                self.device,
+                "Pass 1: could not re-discover drive after transport failure strategy=usb_re_enumeration FAILED",
+            );
+            crate::server::log::device_log(
+                self.device,
+                &format!(
+                    "STRATEGY_FAILURE: usb_re_enumeration FAILED — no valid drive path found from {current} (an sgN path is also probed at its neighbouring sg numbers)"
+                ),
+            );
+            return false;
+        };
+        if p == current {
+            crate::server::log::device_log(
+                self.device,
+                &format!("Pass 1 attempt {attempt}: drive still at {p}, attempting re-open"),
+            );
+        } else {
+            crate::server::log::device_log(
+                self.device,
+                &format!(
+                    "Pass 1 attempt {attempt}: drive rediscovered at {p} (was {current}, original={}), attempting re-open",
+                    self.device_path
+                ),
+            );
         }
+
+        // Retry Drive::open with exponential backoff (firmware may not be ready yet; a
+        // same-sg re-enumeration leaves it just as cold as a shifted one).
+        let mut drive = match open_drive_with_backoff(self.device, attempt, p, self.delay_secs) {
+            Some(d) => d,
+            None => return false,
+        };
+
+        if let Err(e) = drive.wait_ready() {
+            crate::server::log::device_log(
+                self.device,
+                &format!(
+                    "Pass 1 attempt {attempt}: Drive::wait_ready({}) failed strategy=transport_failure_recovery error={} — recovery path exhausted",
+                    p,
+                    e.code()
+                ),
+            );
+
+            let failure_category = if e.code() == 4000 {
+                "SCSI_ERROR"
+            } else {
+                &format!("ERROR_CODE_{}", e.code())
+            };
+
+            crate::server::log::device_log(
+                self.device,
+                &format!(
+                    "STRATEGY_FAILURE: transport_failure_recovery FAILED at Drive::wait_ready category={} error_code={}",
+                    failure_category,
+                    e.code()
+                ),
+            );
+
+            return false;
+        }
+
+        if let Err(e) = drive.init() {
+            crate::server::log::device_log(
+                self.device,
+                &format!(
+                    "Pass 1 attempt {attempt}: Drive::init({}) failed strategy=transport_failure_recovery error={} sense_key={:?} ASC={:?} — recovery path exhausted",
+                    p,
+                    e.code(),
+                    e.scsi_sense().map(|s| s.sense_key),
+                    e.scsi_sense().map(|s| s.asc)
+                ),
+            );
+
+            // A wedged firmware needs a power-cycle, shifted sg or not.
+            log_init_recovery_failure(self.device, &e);
+
+            return false;
+        }
+
+        // Engage disc-type read mode before any read
+        // (idempotent); mirrors scan_disc and the other
+        // open paths, which all call probe_disc() after init().
+        if let Err(e) = drive.probe_disc() {
+            tracing::warn!(device = %self.device, error = %e, "drive probe_disc failed (continuing)");
+        }
+
+        self.session.drive = drive;
+        self.session.device_path = p.to_string();
+
+        crate::server::log::device_log(
+            self.device,
+            &format!(
+                "Pass 1 attempt {attempt}: transport_failure_recovery SUCCESS — resuming from mapfile at {p}"
+            ),
+        );
         true
     }
 }
@@ -583,8 +469,10 @@ impl<'a> ServerPassSink<'a> {
             }
             RecoveryEvent::PatchesStart { max, pending } => crate::server::log::device_log(
                 device,
+                // Patch passes are 2..=max+1 (pass 1 is the sweep).
                 &format!(
-                    "PASS 2-{max}: retry loop starting max_retries={max} bytes_pending={pending}"
+                    "PASS 2-{}: retry loop starting max_retries={max} bytes_pending={pending}",
+                    max + 1
                 ),
             ),
             RecoveryEvent::Stopped { pass } => crate::server::log::device_log(
