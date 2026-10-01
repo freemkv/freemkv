@@ -259,13 +259,8 @@ impl Audits {
         let wanted: Vec<PathBuf> = {
             let mut st = self.lock();
             if complete {
-                let present: HashSet<&PathBuf> = files.iter().map(|(p, _)| p).collect();
-                let before = st.results.len();
-                st.results.retain(|p, _| present.contains(p));
-                st.queue.retain(|p| present.contains(p));
-                if st.results.len() != before {
-                    self.changed(&st);
-                }
+                let present: HashSet<PathBuf> = files.iter().map(|(p, _)| p.clone()).collect();
+                prune_locked(self, &mut st, &present);
             }
             files
                 .iter()
@@ -277,6 +272,12 @@ impl Audits {
                 .collect()
         };
         self.enqueue(wanted)
+    }
+
+    /// Drop the verdicts and queued entries of every file not in `present`. The caller
+    /// guarantees `present` is a complete listing of the library.
+    pub(crate) fn prune(&self, present: &HashSet<PathBuf>) {
+        prune_locked(self, &mut self.lock(), present);
     }
 
     /// Take the next file to audit, unless paused. It counts as running from here, so a
@@ -425,6 +426,15 @@ fn deep_due(r: &Record, now: u64) -> bool {
         None => true,
         Some(d) if d.verdict.completed => false,
         Some(d) => super::deep::retry_due(d.attempts, d.last_try, now),
+    }
+}
+
+fn prune_locked(a: &Audits, st: &mut State, present: &HashSet<PathBuf>) {
+    let before = (st.results.len(), st.queue.len());
+    st.results.retain(|p, _| present.contains(p));
+    st.queue.retain(|p| present.contains(p));
+    if (st.results.len(), st.queue.len()) != before {
+        a.changed(st);
     }
 }
 

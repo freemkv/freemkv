@@ -727,10 +727,7 @@ pub fn audit_loop(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbit
         // Turning deep audit on owes every file its decode; refill now, else each minute.
         if (lib.deep_enabled() && !was) || filled.elapsed() >= Duration::from_secs(60) {
             filled = Instant::now();
-            if !lib.indexing() {
-                let complete = !lib.snapshot().incomplete;
-                lib.fill_audits(&lib.mkv_files(), complete);
-            }
+            lib.refill_audits();
         }
         if busy() {
             nap(Duration::from_secs(2));
