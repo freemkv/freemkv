@@ -11,7 +11,7 @@ Commands (all fail closed):
   fingerprint           print F for a workspace (diagnostic)
   launch-spec           the run-instances arguments for one EC2 leg, from the policy
 
-The design is freemkv-private scratch qa-media-gate-design-v4.md; the policy is
+The design is qa-media-gate-design-v4.md (private notes); the policy is
 tests/media-gate-policy.json, which is itself a required input.
 """
 

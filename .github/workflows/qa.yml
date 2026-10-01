@@ -845,6 +845,10 @@ jobs:
           FMKV_BD_ISO="$ISO_DIR/bd.iso" \
           FMKV_UHD_ISO="$ISO_DIR/uhd.iso" \
           FMKV_HDDVD_ISO="$ISO_DIR/hddvd.iso" \
+          FMKV_SYN_M2TS_LPCM="$ISO_DIR/synthetic-m2ts-h264-bframes-lpcm16-lpcm24.m2ts" \
+          FMKV_SYN_MKV_ADTS="$ISO_DIR/synthetic-mkv-h264-aac-mp2-mp3.mkv" \
+          FMKV_SYN_MPG="$ISO_DIR/synthetic-mpg-mpeg2-interlaced-mp2-lpcm24.mpg" \
+          FMKV_BD_DAMAGE_PATCH="$ISO_DIR/bd-aacs-damage.patch.json" \
           FMKV_KEYDB="$KEYDB_PATH" \
           FMKV_HASHES="$PWD/cli-${{ matrix.os }}.txt" \
             bash ci/scripts/cli-acceptance.sh 2>&1 | tee "suite-${{ matrix.os }}.log"

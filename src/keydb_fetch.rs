@@ -4,8 +4,8 @@
 //! `ureq` and returns the raw response body; hand it to
 //! `freemkv_keysources::KeydbSource::save` for verify + atomic save.
 //!
-//! Hardened like the online key service: resolves + SSRF-guards the host,
-//! pins the validated addresses into the agent, follows zero redirects,
+//! Hardened like the online key service: resolves the host, refuses
+//! unreachable addresses (LAN is fine), pins the validated addresses into the agent, follows zero redirects,
 //! and bounds the connect/read timeouts and the response body size.
 //!
 
@@ -89,7 +89,7 @@ fn read_capped(r: impl std::io::Read, cap: u64) -> std::result::Result<Vec<u8>, 
 enum Refusal {
     /// Not `http://` / `https://`; carries the scheme.
     Scheme(String),
-    /// The host resolved to a non-public address (the SSRF guard).
+    /// The host resolved to an address no connection can reach.
     Blocked(IpAddr),
     /// No usable host, or it did not resolve: a connect-class failure.
     Unreachable(String),
@@ -99,7 +99,7 @@ impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Refusal::Scheme(s) => write!(f, "unsupported scheme '{s}'"),
-            Refusal::Blocked(ip) => write!(f, "refusing non-public address {ip} (SSRF guard)"),
+            Refusal::Blocked(ip) => write!(f, "refusing invalid address {ip}"),
             Refusal::Unreachable(why) => f.write_str(why),
         }
     }
@@ -307,60 +307,7 @@ fn hardened_agent_with_timeouts(
     )
 }
 
-/// SSRF guard (mirrors freemkv-keysources::online): resolve once, reject
-/// blocked IPs, pin addresses. `is_blocked_ip` covers loopback, link-local
-/// (incl. cloud metadata), RFC1918, CGNAT, broadcast, TEST-NET, multicast,
-/// the 198.18.0.0/15 benchmarking range and 192.0.0.0/24 IETF assignments.
-fn is_blocked_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || v4.is_unspecified()
-                || v4.is_multicast()
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40)
-                // 198.18.0.0/15 — RFC 2544 benchmarking range.
-                || (v4.octets()[0] == 198 && (v4.octets()[1] & 0xfe) == 18)
-                // 192.0.0.0/24 — IETF protocol assignments (RFC 6890).
-                || (v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 0)
-                || v4.octets()[0] == 0
-                || v4.octets()[0] >= 240
-        }
-        IpAddr::V6(v6) => {
-            let seg = v6.segments();
-            // 6to4 (2002::/16) embeds an IPv4 in segments[1..3]; Teredo
-            // (2001:0000::/32) embeds the client IPv4 in the last two segments,
-            // each XOR 0xffff — re-check both, or an internal target tunnels in.
-            let sixtofour = (seg[0] == 0x2002)
-                .then(|| std::net::Ipv4Addr::from(((seg[1] as u32) << 16) | (seg[2] as u32)));
-            let teredo = (seg[0] == 0x2001 && seg[1] == 0x0000).then(|| {
-                std::net::Ipv4Addr::from(
-                    (((seg[6] ^ 0xffff) as u32) << 16) | ((seg[7] ^ 0xffff) as u32),
-                )
-            });
-            // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052) embeds the IPv4 in
-            // the last 32 bits (segments[6..8]); re-check it too so an internal
-            // target does not slip through a NAT64 translator.
-            let nat64 = (seg[0] == 0x0064 && seg[1] == 0xff9b)
-                .then(|| std::net::Ipv4Addr::from(((seg[6] as u32) << 16) | (seg[7] as u32)));
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (seg[0] & 0xfe00) == 0xfc00
-                || (seg[0] & 0xffc0) == 0xfe80
-                || v6.to_ipv4().map(|m| is_blocked_ip(&IpAddr::V4(m))) == Some(true)
-                || sixtofour.is_some_and(|v4| is_blocked_ip(&IpAddr::V4(v4)))
-                || teredo.is_some_and(|v4| is_blocked_ip(&IpAddr::V4(v4)))
-                || nat64.is_some_and(|v4| is_blocked_ip(&IpAddr::V4(v4)))
-        }
-    }
-}
-
-/// Resolve `url`'s host and validate every resulting address against the SSRF
-/// guard. Returns the pinned socket addresses on success, or why it refused.
+/// Resolve `url`'s host and refuse unreachable addresses (LAN is allowed). Returns the pinned socket addresses on success, or why it refused.
 fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, Refusal> {
     let no_route = |why: &str| Refusal::Unreachable(why.to_string());
     let (rest, default_port) = if let Some(r) = url.strip_prefix("https://") {
@@ -438,7 +385,7 @@ fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, Refusal>
         return Err(no_route("host did not resolve to any address"));
     }
     for a in &addrs {
-        if is_blocked_ip(&a.ip()) {
+        if libfreemkv::mux::is_blocked_ip(a.ip()) {
             return Err(Refusal::Blocked(a.ip()));
         }
     }
@@ -448,7 +395,7 @@ fn resolve_and_guard(url: &str) -> std::result::Result<Vec<SocketAddr>, Refusal>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::net::Ipv4Addr;
 
     // FT8 (stop design v5 §2.7, T20): "v5 **deletes `BODY_TRANSFER_BUDGET`**:
     // `timeout_recv_body(None)`". Per spec; do not change without a spec citation.
@@ -569,100 +516,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ssrf_guard_blocks_loopback_private_and_metadata() {
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(
-            169, 254, 169, 254
-        ))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))));
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0xfd00, 0, 0, 0, 0, 0, 0, 1
-        ))));
-        assert!(is_blocked_ip(&IpAddr::V6(
-            Ipv4Addr::new(127, 0, 0, 1).to_ipv6_mapped()
-        )));
-    }
-
-    #[test]
-    fn ssrf_guard_allows_public_ips() {
-        assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
-        assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
-    }
-
-    // Each disjunct of the SSRF guard, isolated — each case here trips exactly one clause, so a
-    // broken clause shows up.
-    #[test]
-    fn every_ssrf_disjunct_blocks_on_its_own() {
-        let cases: &[(&str, &str)] = &[
-            ("192.0.2.1", "documentation / TEST-NET-1"),
-            ("224.0.0.1", "multicast"),
-            ("245.0.0.1", "reserved (>= 240), not broadcast"),
-            ("100.64.0.1", "CGNAT"),
-            ("198.18.0.1", "benchmarking 198.18.0.0/15 (low half)"),
-            ("198.19.255.254", "benchmarking 198.18.0.0/15 (high half)"),
-            ("192.0.0.1", "IETF protocol assignments 192.0.0.0/24"),
-            ("0.1.2.3", "leading zero octet"),
-            ("fe80::1", "IPv6 link-local"),
-            ("fc00::1", "IPv6 unique-local"),
-        ];
-        for (ip, why) in cases {
-            let parsed: IpAddr = ip.parse().expect("test address parses");
-            assert!(
-                is_blocked_ip(&parsed),
-                "{ip} ({why}) must be blocked on its own"
-            );
-        }
-    }
-
-    // 6to4 (2002::/16) and Teredo (2001:0000::/32) tunnel an IPv4 inside an
-    // IPv6 address; the guard must decode and re-check that embedded IPv4 or an
-    // internal target slips through the tunnel — parity with keysources.
-    #[test]
-    fn ssrf_guard_blocks_embedded_ipv4_via_6to4_and_teredo() {
-        // 6to4 for 127.0.0.1: 2002:7f00:0001:: (embedded in segments[1..3]).
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x2002, 0x7f00, 0x0001, 0, 0, 0, 0, 0
-        ))));
-        // 6to4 for 169.254.169.254 (cloud metadata): 2002:a9fe:a9fe::.
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x2002, 0xa9fe, 0xa9fe, 0, 0, 0, 0, 0
-        ))));
-        // Teredo for 127.0.0.1: client IPv4 lives in the last two segments XOR
-        // 0xffff, so 0x7f00^0xffff=0x80ff and 0x0001^0xffff=0xfffe.
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x2001, 0x0000, 0, 0, 0, 0, 0x80ff, 0xfffe
-        ))));
-        // A 6to4 wrapping a PUBLIC IPv4 (8.8.8.8 → 2002:0808:0808::) is allowed.
-        assert!(!is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x2002, 0x0808, 0x0808, 0, 0, 0, 0, 0
-        ))));
-    }
-
-    // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052) translates IPv4 targets
-    // into IPv6; the guard must decode the trailing IPv4 and re-check it or an
-    // internal address slips through the translator — parity with keysources.
-    #[test]
-    fn ssrf_guard_blocks_nat64_wellknown_prefix() {
-        // NAT64 for 169.254.169.254 (cloud metadata): 64:ff9b::a9fe:a9fe.
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x0064, 0xff9b, 0, 0, 0, 0, 0xa9fe, 0xa9fe
-        ))));
-        // NAT64 for 127.0.0.1: 64:ff9b::7f00:0001.
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x0064, 0xff9b, 0, 0, 0, 0, 0x7f00, 0x0001
-        ))));
-        // NAT64 wrapping a PUBLIC IPv4 (8.8.8.8 → 64:ff9b::0808:0808) is allowed.
-        assert!(!is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x0064, 0xff9b, 0, 0, 0, 0, 0x0808, 0x0808
-        ))));
-    }
-
     // The body-size cap — the decompression-bomb defence.
     #[test]
     fn read_capped_admits_up_to_the_cap_and_rejects_past_it() {
@@ -738,27 +591,26 @@ mod tests {
         }
     }
 
-    // The CGNAT clause must not become over-broad — mutating its `&&` to `||` must not silently
-    // start blocking ordinary public addresses.
     #[test]
-    fn the_cgnat_clause_does_not_block_ordinary_public_addresses() {
-        for ip in ["8.65.0.1", "1.100.0.1", "203.0.100.7"] {
-            let parsed: IpAddr = ip.parse().expect("test address parses");
-            assert!(
-                !is_blocked_ip(&parsed),
-                "{ip} is public and must not be blocked by the CGNAT clause"
-            );
+    fn resolve_and_guard_allows_lan_literals_and_rejects_invalid_ones() {
+        // Home app: loopback, RFC1918 and link-local literals (no DNS) are valid.
+        let lan = format!("https://{}.{}.{}.{}/k", 10, 0, 0, 5);
+        for url in [
+            "http://127.0.0.1/keydb.zip",
+            "http://169.254.169.254/keydb.zip",
+            "http://[::1]:9000/k",
+            lan.as_str(),
+        ] {
+            assert!(resolve_and_guard(url).is_ok(), "{url} must be accepted");
         }
-        // And a real CGNAT address still is.
-        assert!(is_blocked_ip(&"100.127.255.254".parse::<IpAddr>().unwrap()));
-    }
-
-    #[test]
-    fn resolve_and_guard_rejects_internal_literals() {
-        assert!(resolve_and_guard("http://127.0.0.1/keydb.zip").is_err());
-        assert!(resolve_and_guard("http://169.254.169.254/keydb.zip").is_err());
-        assert!(resolve_and_guard(&format!("https://{}.{}.{}.{}/k", 10, 0, 0, 5)).is_err());
-        assert!(resolve_and_guard("http://[::1]:9000/k").is_err());
+        for url in [
+            "http://0.0.0.0/k",
+            "http://224.0.0.1/k",
+            "http://240.0.0.1/k",
+            "http://[::]/k",
+        ] {
+            assert!(resolve_and_guard(url).is_err(), "{url} must be refused");
+        }
     }
 
     #[test]
@@ -792,11 +644,10 @@ mod tests {
     // English phrase spliced into every locale's E8006 text.
     #[test]
     fn a_guard_refusal_is_not_reported_as_could_not_connect() {
-        let ip = format!("{}.{}.{}.{}", 192, 168, 1, 10);
-        let lan = fetch(&format!("http://{ip}/keydb.zip")).unwrap_err();
+        let bad = fetch("http://0.0.0.0/keydb.zip").unwrap_err();
         assert!(
-            matches!(&lan, Error::KeydbUnsupportedScheme { scheme } if *scheme == ip),
-            "an SSRF refusal must name the refused address, got {lan:?}"
+            matches!(&bad, Error::KeydbUnsupportedScheme { scheme } if scheme == "0.0.0.0"),
+            "an address refusal must name the refused address, got {bad:?}"
         );
         let ftp = fetch("ftp://example.com/k").unwrap_err();
         assert!(

@@ -239,6 +239,7 @@ fn a_hostile_template_stays_one_path_component() {
 fn the_gui_undelivered_summary_does_not_blame_mp4() {
     freemkv::strings::set_locale("en");
     let outcome = libfreemkv::MuxOutcome {
+        halted: false,
         completed: true,
         output_opened: true,
         bytes_written: 1 << 30,

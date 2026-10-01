@@ -7,6 +7,9 @@
 use libfreemkv::io::ArtifactLock;
 use std::path::Path;
 
+// The GUI's (the CLI's whole-disc copies take the lock in the engine's `run`); the CLI binary
+// builds this module without the GUI off macOS.
+#[allow(dead_code)]
 /// Take `<iso>.lock`, waiting halt-aware while another freemkv process holds it; the
 /// holder's progress is its `.partial` or its mapfile changing (§2.5 T10).
 pub(crate) fn hold_iso(iso: &Path, halt: &libfreemkv::Halt) -> libfreemkv::Result<ArtifactLock> {
@@ -14,6 +17,8 @@ pub(crate) fn hold_iso(iso: &Path, halt: &libfreemkv::Halt) -> libfreemkv::Resul
     ArtifactLock::acquire(iso, &[mapfile.as_path()], halt)
 }
 
+// The GUI's, as `hold_iso`.
+#[allow(dead_code)]
 /// End a held lock. §2.5: "**Deleted on success** (after the final rename) … **Kept**
 /// after Stop, a failure or a crash, where it guards the resumable artifact."
 pub(crate) fn release(lock: ArtifactLock, success: bool) {

@@ -144,7 +144,6 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::PesTrackTooLarge { track: 0 },
         Error::IsoTooLarge { path: p() },
         Error::NoMetadata,
-        Error::DiscUrlNotDirect,
         Error::HevcParamParse,
         Error::MuxTrackRange {
             track: 0,
@@ -181,7 +180,6 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::EmptyImage,
         Error::DirImageSsifUnsupported,
         Error::DirImagePlacement { path: p() },
-        Error::DirImageEncrypted,
         Error::DirImageUnsupportedTree,
         Error::DirImageFileChanged { path: p() },
         Error::DirImageTooLarge,
@@ -226,10 +224,11 @@ pub fn all_error_variants() -> Vec<libfreemkv::Error> {
         Error::MuxIncomplete { title: 1 },
         Error::RemuxStagingInvalid,
         Error::StagedCopySizeMismatch { have: 0, want: 1 },
-        Error::VerifyWorkerLost,
-        Error::MultipassRequiresRaw,
+        Error::WorkerLost { op: "copy" },
         Error::StreamLanguageUnknown { tag: p() },
         Error::RemuxTargetExists { path: p() },
+        // A mux batch of zero sectors, E9085.
+        Error::MuxBatchSectorsZero,
     ]
 }
 

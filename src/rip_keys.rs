@@ -1,11 +1,11 @@
 //! The rip's AACS keys, for the CLI and the GUI alike (keys-upfront design §2.5, §3.3,
-//! §4.2). KU §2.1 invariant 1: "Before R's first output byte, R holds a `ResolvedKeySet` K
-//! from exactly one `ResolvedKeySet::resolve`", kept in memory only (invariant 5). Both
+//! §4.2). KU §2.1 invariant 1: "Before R's first output byte, R holds a `KeyRing` K
+//! from exactly one `KeyRing::resolve`", kept in memory only (invariant 5). Both
 //! shells go through this module, so they make the same requests and reach the same
 //! verdicts (FK3).
 
 use freemkv_engine as fe;
-use libfreemkv::keys::{KeyScope, KeySetStatus, ResolvedKeySet};
+use libfreemkv::keys::{KeyRing, KeyScope, KeySetStatus};
 use libfreemkv::{Disc, Error, Halt, KeySourceFactory, SectorSource};
 
 /// The per-source walk of a resolution: labels, node enums and counts, never key bytes.
@@ -74,6 +74,9 @@ pub fn drive_scan(
     Ok(session.take_disc().expect("scan populated the disc"))
 }
 
+// The GUI's (the CLI's copies scope their keys in the engine's `run`); the CLI binary builds
+// this module without the GUI off macOS.
+#[allow(dead_code)]
 /// What a disc→ISO copy decrypts (KU §2.5): the whole disc, or nothing for a raw copy
 /// (“Raw copy (`--raw`, GUI "Keep encrypted", GUI `raw_copy`) | `None`: no key call”).
 pub fn copy_scope(raw: bool) -> KeyScope {
@@ -92,11 +95,11 @@ pub fn resolve(
     reader: &mut dyn SectorSource,
     scope: KeyScope,
     sources: &KeySourceFactory,
-    seed: Option<&ResolvedKeySet>,
+    seed: Option<&KeyRing>,
     halt: Option<&Halt>,
-) -> (libfreemkv::Result<ResolvedKeySet>, Trace) {
+) -> (libfreemkv::Result<KeyRing>, Trace) {
     if scope == KeyScope::None {
-        return (Ok(ResolvedKeySet::none()), Trace::new());
+        return (Ok(KeyRing::none()), Trace::new());
     }
     fe::keys::resolve_for_rip_traced(disc, reader, scope, sources, seed, halt)
 }
@@ -112,10 +115,10 @@ pub fn resolve_observed(
     scope: KeyScope,
     sources: &KeySourceFactory,
     halt: &Halt,
-    progress: &libfreemkv::halt::Progress,
-) -> (libfreemkv::Result<ResolvedKeySet>, Trace) {
+    progress: &libfreemkv::halt::Liveness,
+) -> (libfreemkv::Result<KeyRing>, Trace) {
     if scope == KeyScope::None {
-        return (Ok(ResolvedKeySet::none()), Trace::new());
+        return (Ok(KeyRing::none()), Trace::new());
     }
     fe::keys::resolve_for_rip_observed(disc, reader, scope, sources, None, Some(halt), progress)
 }
@@ -125,7 +128,7 @@ pub struct ImageOpen {
     /// What the rip decrypts.
     pub scope: KeyScope,
     /// The set from Open: asked only for what it lacks (`KeyInput::Seeded`).
-    pub seed: Option<ResolvedKeySet>,
+    pub seed: Option<KeyRing>,
     /// A drive's scan of the same disc (the GUI's Start after E7034): the VID comes with
     /// it and the image is not scanned (J14).
     pub drive_disc: Option<Disc>,
@@ -155,8 +158,8 @@ pub fn open_image(
 
 /// A per-title reopen rescans the drive with no key call; the rescan must be the disc the
 /// set was resolved for. KU §6: "A set used on the wrong disc … | E7013, plus an `error!`".
-pub fn check_reopened(set: &ResolvedKeySet, disc: &Disc) -> Result<(), Error> {
-    if set.is_for(disc) {
+pub fn check_reopened(set: &KeyRing, disc: &Disc) -> Result<(), Error> {
+    if set.is_for(&disc.media_id()) {
         return Ok(());
     }
     tracing::error!(target: "freemkv::keys", "the reopened disc is not the one the rip's keys are for");
@@ -164,12 +167,7 @@ pub fn check_reopened(set: &ResolvedKeySet, disc: &Disc) -> Result<(), Error> {
 }
 
 /// The one pre-flight decrypt gate (KU §3.5): AACS from the set, CSS from the disc.
-pub fn gate(
-    disc: &Disc,
-    raw: bool,
-    set: Option<&ResolvedKeySet>,
-    scope: &KeyScope,
-) -> Result<(), Error> {
+pub fn gate(disc: &Disc, raw: bool, set: Option<&KeyRing>, scope: &KeyScope) -> Result<(), Error> {
     libfreemkv::keys::check_decryptable(disc, raw, set, scope)
 }
 
@@ -247,7 +245,7 @@ mod tests {
     // it ever expired, and the progress count. `observed`: the open's progress is threaded.
     fn t29_over_resolve(answer: Answer, observed: bool) -> (bool, u64) {
         const WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
-        let watched = libfreemkv::halt::Progress::new();
+        let watched = libfreemkv::halt::Liveness::new();
         let p = watched.clone();
         let (ready, built) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
@@ -292,7 +290,7 @@ mod tests {
         assert!(t29_over_resolve(Answer::Slow, false).0, "negative control");
     }
     use libfreemkv::error::{E_CSS_NO_DISC_KEY, E_DECRYPT_FAILED};
-    use libfreemkv::keys::{KeyScope, ResolvedKeySet};
+    use libfreemkv::keys::{KeyRing, KeyScope};
 
     fn never_asked() -> libfreemkv::KeySourceFactory {
         std::sync::Arc::new(|| panic!("a raw copy must not build a key source"))
@@ -337,7 +335,7 @@ mod tests {
         let e = check_reopened(&set, &other).unwrap_err();
         assert_eq!(e.code(), E_DECRYPT_FAILED, "{e}");
         assert_eq!(calls.len(), 1, "the reopen asked nothing");
-        let clear = ResolvedKeySet::none();
+        let clear = KeyRing::none();
         assert!(check_reopened(&clear, &other).is_ok(), "no keys: any disc");
     }
 
@@ -379,7 +377,7 @@ mod tests {
             title_key: [1, 2, 3, 4, 5],
             crack_span: None,
         };
-        let none = ResolvedKeySet::none();
+        let none = KeyRing::none();
         assert!(gate(&dvd(Some(cracked), false), false, Some(&none), &one).is_ok());
         let e = gate(&dvd(None, true), false, Some(&none), &one).unwrap_err();
         assert_eq!(
@@ -392,7 +390,7 @@ mod tests {
     /// KU §2.6: a best-effort (HD DVD) set shows `keys.hddvd_unverified`; a proven one does not.
     #[test]
     fn only_a_best_effort_set_is_marked_unverified() {
-        let mut st = ResolvedKeySet::none().status();
+        let mut st = KeyRing::none().status();
         assert_eq!(best_effort_note(&st), None);
         st.best_effort = true;
         let note = best_effort_note(&st).expect("an unverified HD DVD key says so");

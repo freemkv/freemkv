@@ -22,7 +22,7 @@ def run(*args, cwd=None):
 
 def patches():
     lines = ["[patch.crates-io]"]
-    lines += [f'{name} = {{ path = "../{name}" }}' for name in REPOS[1:-1]]
+    lines += [f'{name} = {{ path = "../{name}" }}' for name in REPOS[1:]]
     lines += ['[patch."https://github.com/freemkv/freemkv-unlock"]',
               'freemkv-unlock = { path = "../freemkv-unlock" }']
     return "\n".join(lines) + "\n"

@@ -112,14 +112,86 @@ impl Fx {
     }
 }
 
+// The image's files, in `Fx.img.files` order.
+const FILES: [&str; 4] = [
+    "BDMV/index.bdmv",
+    "BDMV/PLAYLIST/00000.mpls",
+    "BDMV/CLIPINF/00000.clpi",
+    "BDMV/STREAM/00000.m2ts",
+];
+
+fn unit_key_ro() -> Vec<u8> {
+    libfreemkv::test_util::unit_key_ro(AacsVersion::V10, &[[0xEE; 16]], &[1u16])
+}
+
+/// The image as a disc folder under `root` (`AACS/` + `BDMV/`); returns the clip's path.
+pub(crate) fn write_folder(fx: &Fx, root: &Path) -> PathBuf {
+    let put = |rel: &str, bytes: &[u8]| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+        p
+    };
+    put("AACS/Unit_Key_RO.inf", &unit_key_ro());
+    let mut clip = PathBuf::new();
+    for (rel, &(start, sectors)) in FILES.iter().zip(&fx.img.files) {
+        let (a, n) = (start as usize * 2048, sectors as usize * 2048);
+        clip = put(rel, &fx.img.image[a..a + n]);
+    }
+    // A loose clip has no MPLS: its first two packets become PAT and PMT, re-encrypted.
+    let (start, sectors) = fx.img.files[3];
+    let a = start as usize * 2048;
+    let mut bytes = fx.img.plain[a..a + sectors as usize * 2048].to_vec();
+    bytes[..192].copy_from_slice(&psi_packet(
+        0,
+        &[0, 0, 0xB0, 13, 0, 1, 0xC1, 0, 0, 0, 1, 0xE1, 0],
+    ));
+    let pmt = [
+        2,
+        0xB0,
+        18,
+        0,
+        1,
+        0xC1,
+        0,
+        0,
+        0xE0 | (AUDIO_PID >> 8) as u8,
+        AUDIO_PID as u8,
+    ];
+    let es = [
+        0xF0,
+        0,
+        0x80,
+        0xE0 | (AUDIO_PID >> 8) as u8,
+        AUDIO_PID as u8,
+        0xF0,
+        0,
+    ];
+    bytes[192..384].copy_from_slice(&psi_packet(0x100, &[&[0][..], &pmt, &es, &[0; 4]].concat()));
+    for unit in bytes.chunks_mut(6144) {
+        assert!(libfreemkv::aacs::content::encrypt_unit(unit, &K1));
+    }
+    std::fs::write(&clip, &bytes).unwrap();
+    clip
+}
+
+// A CPI-11₂ source packet carrying one PSI section (pointer field first) on `pid`.
+fn psi_packet(pid: u16, section: &[u8]) -> [u8; 192] {
+    let mut p = [0xFF; 192];
+    p[..4].copy_from_slice(&[0xC0, 0, 0, 0]);
+    p[4..8].copy_from_slice(&[0x47, 0x40 | (pid >> 8) as u8, pid as u8, 0x10]);
+    p[8..8 + section.len()].copy_from_slice(section);
+    p
+}
+
 /// A BD image with one title whose clip is encrypted with `K1` (one declared CPS unit).
 pub(crate) fn bd_image() -> Fx {
-    let uk_ro = libfreemkv::test_util::unit_key_ro(AacsVersion::V10, &[[0xEE; 16]], &[1u16]);
+    let uk_ro = unit_key_ro();
     let files = vec![
-        BdFile::new("BDMV/index.bdmv", 1, None),
-        BdFile::new("BDMV/PLAYLIST/00000.mpls", 1, None),
-        BdFile::new("BDMV/CLIPINF/00000.clpi", 1, None),
-        BdFile::new("BDMV/STREAM/00000.m2ts", CLIP_UNITS * 3, Some(K1)),
+        BdFile::new(FILES[0], 1, None),
+        BdFile::new(FILES[1], 1, None),
+        BdFile::new(FILES[2], 1, None),
+        BdFile::new(FILES[3], CLIP_UNITS * 3, Some(K1)),
     ];
     let mut img = encrypted_bd_image(&files, &uk_ro);
     let n_packets = CLIP_UNITS * 32;

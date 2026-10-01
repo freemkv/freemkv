@@ -376,7 +376,7 @@ pub(super) struct DriveSession {
     /// classifies from the real `/decode` answer instead of re-probing.
     pub(super) key_verdict: Option<crate::server::keysource::ServiceReachability>,
     /// The rip's key set, resolved once right after the scan (KU §2.1); memory only.
-    pub(super) keys: Option<libfreemkv::keys::ResolvedKeySet>,
+    pub(super) keys: Option<libfreemkv::keys::KeyRing>,
     /// Why the scan's resolve refused (no key, a key-source failure, …), when it did.
     pub(super) key_error: Option<libfreemkv::Error>,
 }
@@ -513,7 +513,7 @@ pub(super) fn session_is_scanned(device: &str) -> bool {
 /// inserted disc lends its staged image's resume.
 pub(super) fn session_rip_keys(
     device: &str,
-) -> (Option<libfreemkv::keys::ResolvedKeySet>, Option<[u8; 16]>) {
+) -> (Option<libfreemkv::keys::KeyRing>, Option<[u8; 16]>) {
     let sessions = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(sess) = sessions.get(device) else {
         return (None, None);

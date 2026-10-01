@@ -208,7 +208,7 @@ pub(crate) fn output_scheme_for(output_format: &str) -> &'static str {
 }
 
 // The rip's key set, or why its resolve refused (KU §2.1). Memory only.
-type KeyResult = Result<libfreemkv::keys::ResolvedKeySet, libfreemkv::Error>;
+type KeyResult = Result<libfreemkv::keys::KeyRing, libfreemkv::Error>;
 
 // Resolve the rip's key set off the live drive, once (see `keysource::resolve_drive_keys`).
 fn resolve_rip_keys(
@@ -217,7 +217,7 @@ fn resolve_rip_keys(
     drive: &mut libfreemkv::Drive,
     disc: &libfreemkv::Disc,
     scope: &libfreemkv::keys::KeyScope,
-    seed: Option<&libfreemkv::keys::ResolvedKeySet>,
+    seed: Option<&libfreemkv::keys::KeyRing>,
 ) -> KeyResult {
     let halt = device_halt(device);
     crate::server::keysource::resolve_drive_keys(
@@ -230,15 +230,19 @@ fn resolve_rip_keys(
     )
 }
 
-// What a rip of `disc` decrypts (KU §2.5): nothing for an ISO output (the swept image is
-// delivered raw), else title 0 (the rip's feature) and every episode a TV plan fans out to.
+// What a rip of `disc` decrypts (KU §2.5): the whole disc for an ISO output (delivered
+// decrypted, as the CLI and GUI deliver one), else title 0 (the rip's feature) and every
+// episode a TV plan fans out to.
 fn rip_key_scope(
     disc: &libfreemkv::Disc,
     cfg: &Config,
     media_type: &str,
     disc_name: &str,
 ) -> libfreemkv::keys::KeyScope {
-    if output_is_iso_image(&cfg.output_format) || disc.titles.is_empty() {
+    if output_is_iso_image(&cfg.output_format) {
+        return libfreemkv::keys::KeyScope::WholeDisc;
+    }
+    if disc.titles.is_empty() {
         return libfreemkv::keys::KeyScope::None;
     }
     let mut titles = fanout_episode_indices(&disc.titles, cfg, media_type, disc_name);
@@ -248,16 +252,64 @@ fn rip_key_scope(
     libfreemkv::keys::KeyScope::Titles(titles)
 }
 
+/// The engine plan for a server rip of the drive at `device_path` writing `dest` (an
+/// output URL): the server's half of the one plan parser every front end shares. The
+/// server rips the main feature, decrypts (it has no raw option), and recovers over passes
+/// when `max_retries` asks for them.
+pub fn server_plan(cfg: &Config, device_path: &str, dest: &str) -> freemkv_engine::Plan {
+    crate::plan_core::plan(crate::plan_core::PlanRequest {
+        source: format!("disc://{device_path}"),
+        dest: dest.to_string(),
+        titles: freemkv_engine::Selection::MainMovie,
+        streams: freemkv_engine::StreamChoice::default(),
+        raw: false,
+        multipass: uses_multipass(cfg.max_retries),
+        keys: crate::server::keysource::key_settings(cfg),
+        force: false,
+    })
+}
+
+/// The server's log line for the plan a rip runs. Exhaustive on purpose (anti-drift §2): a
+/// field added to the engine's `Plan` fails to compile here until the server handles it.
+pub fn plan_line(p: &freemkv_engine::Plan) -> String {
+    let freemkv_engine::Plan {
+        source,
+        dest,
+        titles,
+        streams,
+        raw,
+        multipass,
+        keys,
+        force,
+    } = p;
+    let freemkv_engine::KeyParamsData {
+        keydb_path,
+        key_url,
+        key_auth,
+        online_only,
+        cert_keydb,
+    } = keys;
+    format!(
+        "plan: {source} -> {dest} titles={titles:?} streams_all={} raw={raw} multipass={multipass} \
+         force={force} keydb={} online={} auth={} online_only={online_only} certs={}",
+        streams.is_all(),
+        keydb_path.is_some(),
+        key_url.is_some(),
+        key_auth.is_some(),
+        cert_keydb.is_some(),
+    )
+}
+
 // Whether the rip's set covers `scope` for `disc`, forensic keys aside (a multipass rip asks
 // for Pending ones once, from its image). `covers` holds for any non-AACS set, so an AACS
 // disc's titles also need an AACS set.
 fn keys_cover(
     disc: &libfreemkv::Disc,
-    set: &libfreemkv::keys::ResolvedKeySet,
+    set: &libfreemkv::keys::KeyRing,
     scope: &libfreemkv::keys::KeyScope,
 ) -> bool {
     let aacs_titles = disc.aacs.is_some() && *scope != libfreemkv::keys::KeyScope::None;
-    set.is_for(disc) && set.covers(scope) && (set.is_aacs() || !aacs_titles)
+    set.is_for(&disc.media_id()) && set.covers(scope) && (set.is_aacs() || !aacs_titles)
 }
 
 // Whether the rip can decrypt what it produces: no scope needs no key; otherwise the set's
@@ -2136,14 +2188,15 @@ fn end_of_recovery_loss(
     }
 }
 
-/// Loop-top convergence gate for the patch retry loop, guarding the fail-open case the bare
-/// [`patch_pass_decision`] can't see: `Converged` fires on `scope_bad == 0`, but an EMPTY
-/// mapfile (0 sectors ripped) ALSO has zero bad bytes. "Nothing bad recorded" is not
-/// "everything good", so require that we actually read something (`bytes_good > 0`) first. A
-/// genuinely-complete rip (good spans the scope, zero bad) still converges; an empty mapfile
-/// falls through to run the pass rather than falsely reporting "100% recovered".
-fn pre_pass_converged(mux_scope_bad: u64, bytes_good: u64) -> bool {
-    bytes_good > 0 && patch_pass_decision(mux_scope_bad, None) == PatchDecision::Converged
+// The patch loop's muxable-scope bad bytes at the top of a pass; `None` (an
+// unreadable mapfile, or unscopable loss) never converges, as in the engine.
+fn loop_top_scope_bad(
+    map: std::io::Result<freemkv_engine::Mapfile>,
+    is_iso: bool,
+    title: &libfreemkv::DiscTitle,
+) -> Option<u64> {
+    let map = map.ok()?;
+    measured_scope_bad(is_iso, &map.ranges_with(&bad_sector_statuses()), title)
 }
 
 // Look at the staging dirs for a Remux-eligible entry matching the sanitized display_name of
@@ -2382,33 +2435,6 @@ struct SweepingGuard {
 impl Drop for SweepingGuard {
     fn drop(&mut self) {
         staging::clear_sweeping_marker(&self.staging);
-    }
-}
-
-/// Build the drive-level `on_event` handler installed on the live drive.
-///
-/// Every event resets the watchdog (`wdf`) so the "stalled" timer doesn't
-/// climb while the library is working through recovery. `BytesRead` updates
-/// the shared `latest_bytes_read` atomic the UI reads; `ReadError` logs. The
-/// closure is factored out of `rip_disc` so the BytesRead→atomic wiring (the
-/// progress contract the `/api/state` speed meter depends on) is testable in
-/// isolation rather than buried in a 2000-line orchestrator.
-pub fn make_drive_event_fn(
-    dev: String,
-    wdf: Arc<AtomicU64>,
-    latest_bytes_read: Arc<AtomicU64>,
-) -> impl Fn(libfreemkv::event::Event) + Send + 'static {
-    move |event| {
-        wdf.store(crate::server::util::epoch_secs(), Ordering::Relaxed);
-        match event.kind {
-            libfreemkv::event::EventKind::BytesRead { bytes, .. } => {
-                latest_bytes_read.store(bytes, Ordering::Relaxed);
-            }
-            libfreemkv::event::EventKind::ReadError { sector, .. } => {
-                crate::server::log::device_log(&dev, &format!("Read error at sector {}", sector));
-            }
-            _ => {}
-        }
     }
 }
 
@@ -3018,6 +3044,16 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     };
 
     crate::server::log::device_log(device, &format!("Ripping {} to {}", display_name, filename));
+    // The plan this rip carries out (the one plan parser every front end shares).
+    let plan_dest = if output_is_iso_image(&output_format) {
+        format!("iso://{iso_path_str}")
+    } else {
+        dest_url.clone()
+    };
+    crate::server::log::device_log(
+        device,
+        &plan_line(&server_plan(&cfg_read, device_path, &plan_dest)),
+    );
 
     update_state(
         device,
@@ -3167,13 +3203,6 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
     // from this via spawn_pass_watcher. Renamed locally for clarity.
     let user_halt = halt.clone();
 
-    // Drive-level events reset the watchdog so the "stalled" timer doesn't
-    // climb while the library works through recovery. See make_drive_event_fn.
-    session.drive.on_event(make_drive_event_fn(
-        device.to_string(),
-        wd_last_frame.clone(),
-        latest_bytes_read.clone(),
-    ));
     // Multi-pass (max_retries > 0) goes through an ISO intermediate before
     // mux; single-pass streams disc→MKV directly. Lifted out of the
     // multipass branch so the outer-scope mux loop can reference it.
@@ -3250,6 +3279,8 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         }
     }
 
+    // An ISO deliverable is decrypted in place by the passes, like the CLI's and GUI's.
+    let iso_decrypts = output_is_iso_image(&cfg_read.output_format);
     let mux_source = if uses_multipass(cfg_read.max_retries) {
         let iso_path = std::path::Path::new(&iso_path_str);
         let bytes_total_disc = (session.drive.read_capacity().unwrap_or(0) as u64) * 2048;
@@ -3352,19 +3383,23 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
         // Runs every read block (~64 KB); throttled to once every 1.5s so
         // it doesn't pound the mutex/filesystem. Tracks last-sample for ETA.
-        let pass1_state = std::cell::RefCell::new(PassProgressState::new());
+        let pass1_state = std::sync::Mutex::new(PassProgressState::new());
         let pass1_ctx = &pass_ctx;
-        let pass1_progress = |p: &libfreemkv::progress::PassProgress| -> bool {
+        let pass1_progress = |e: &libfreemkv::Event<'_>| {
+            let libfreemkv::Event::Pass(p) = e else {
+                return;
+            };
             // Stash work_done for push_pass_state to compute pass progress.
-            pass1_state.borrow_mut().last_work_done = p.work_done;
-            pass1_state.borrow_mut().last_work_total = p.work_total;
-            // Throttle: only re-read mapfile + push state every 1.5s.
-            // 250 ms UI push cadence (see the patch closure below for rationale).
-            if pass1_state.borrow().last_update.elapsed().as_millis() < 250 {
-                return true;
+            {
+                let mut s = pass1_state.lock().unwrap_or_else(|e| e.into_inner());
+                s.last_work_done = p.work_done;
+                s.last_work_total = p.work_total;
+                // 250 ms UI push cadence (see the patch closure below for rationale).
+                if s.last_update.elapsed().as_millis() < 250 {
+                    return;
+                }
             }
             push_pass_state(pass1_ctx, p, bps_progress, 1, total_passes, &pass1_state);
-            true
         };
 
         // Pass 1 with transport-failure recovery: the Initio USB-SATA bridge
@@ -3391,13 +3426,15 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // a bridge crash left it. `resume_sweep` (user clicked Resume)
             // makes even the FIRST attempt resume, skipping already-swept data.
             let sweep_opts = freemkv_engine::SweepOptions {
-                decrypt: false,
+                // An ISO output is delivered decrypted; an image staged for a title mux
+                // stays raw (the mux decrypts its titles).
+                decrypt: iso_decrypts,
                 resume: resume_sweep || attempt > 1,
                 batch_sectors: None,
                 skip_on_error: true,
                 progress: Some(&pass1_progress),
                 halt: Some(pass1_halt.clone()),
-                // A raw capture decrypts nothing; the set only stamps the identity.
+                // The rip's set: an ISO output decrypts through it; a raw staging capture only stamps the identity.
                 keys: rip_keys.as_ref().ok().cloned(),
             };
 
@@ -3829,23 +3866,21 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // Skip remaining retry passes once the *muxable* scope is 100%
             // recovered: ISO needs the whole disc clean, MKV/M2TS only the
             // muxed title. `abort_on_lost_secs` is NOT the trigger; it gates the END.
-            let mux_scope_bad =
-                match freemkv_engine::Mapfile::load(std::path::Path::new(&mapfile_path_str)) {
-                    Ok(map) => {
-                        let bad = map.ranges_with(&bad_sector_statuses());
-                        scope_bad_bytes(
-                            output_is_iso_image(&cfg_read.output_format),
-                            &bad,
-                            &title_for_progress,
-                        )
-                    }
-                    Err(_) => {
-                        // Conservative fallback if we can't read the mapfile —
-                        // fall back to the whole-disc check so we don't skip
-                        // a needed pass on a transient read error.
-                        bytes_pending + bytes_unreadable
-                    }
-                };
+            let map = freemkv_engine::Mapfile::load(std::path::Path::new(&mapfile_path_str));
+            if let Err(e) = &map {
+                crate::server::log::device_log(
+                    device,
+                    &format!(
+                        "PASS {}: could not read the mapfile ({e}); running it",
+                        retry_n + 1
+                    ),
+                );
+            }
+            let mux_scope_bad = loop_top_scope_bad(
+                map,
+                output_is_iso_image(&cfg_read.output_format),
+                &title_for_progress,
+            );
             // Loop-top convergence gate (`None` recovery ⇒ pre-pass): Converged
             // means the muxable scope is 100% recovered. Guarded by `bytes_good
             // > 0` so an EMPTY mapfile (0 good, 0 bad) isn't mistaken for done.
@@ -3882,7 +3917,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
 
             // Per-pass progress state — created BEFORE the settle so the disc
             // map can be painted immediately.
-            let patch_state = std::cell::RefCell::new(PassProgressState::new());
+            let patch_state = std::sync::Mutex::new(PassProgressState::new());
             let patch_ctx = &pass_ctx;
             let patch_title = &title_for_progress;
             let patch_map = std::path::Path::new(&mapfile_path_str);
@@ -3913,16 +3948,21 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
                     pass, bytes_pending
                 ),
             );
-            let patch_progress = |p: &libfreemkv::progress::PassProgress| -> bool {
-                patch_state.borrow_mut().last_work_done = p.work_done;
-                patch_state.borrow_mut().last_work_total = p.work_total;
-                // 250ms UI push cadence matches libfreemkv's snapshot republish;
-                // the per-push mapfile reload is cheap for the usual handful of ranges.
-                if patch_state.borrow().last_update.elapsed().as_millis() < 250 {
-                    return true;
+            let patch_progress = |e: &libfreemkv::Event<'_>| {
+                let libfreemkv::Event::Pass(p) = e else {
+                    return;
+                };
+                {
+                    let mut s = patch_state.lock().unwrap_or_else(|e| e.into_inner());
+                    s.last_work_done = p.work_done;
+                    s.last_work_total = p.work_total;
+                    // 250ms UI push cadence matches libfreemkv's snapshot republish;
+                    // the per-push mapfile reload is cheap for the usual handful of ranges.
+                    if s.last_update.elapsed().as_millis() < 250 {
+                        return;
+                    }
                 }
                 push_pass_state(patch_ctx, p, bps_progress, pass, total_passes, &patch_state);
-                true
             };
             let pass_halt = Arc::new(AtomicBool::new(false));
             let _pass_guard = spawn_pass_watcher(pass_halt.clone(), user_halt.clone());
@@ -3930,7 +3970,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // 0.18 round 3: Pass 2..N calls freemkv_engine::patch directly; these
             // PatchOptions mirror what the old patch_internal constructed.
             let patch_opts = freemkv_engine::PatchOptions {
-                decrypt: false,
+                decrypt: iso_decrypts,
                 // Enter each bad range BATCHED, not single-sector: it's mostly
                 // good skip-ahead overshoot with a small damaged core, so a batch
                 // reads the overshoot in bulk and bisects down to the real bad sector.
@@ -4654,7 +4694,7 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
         // Entering mux phase — push final mapfile state so the UI keeps the
         // bad-range list visible through mux and into the "done" view. The lib
         // builds the snapshot from the mapfile (autorip never parses it).
-        let mux_state = std::cell::RefCell::new(PassProgressState::new());
+        let mux_state = std::sync::Mutex::new(PassProgressState::new());
         if let Some(snap) = freemkv_engine::progress_snapshot_from_mapfile(
             std::path::Path::new(&mapfile_path_str),
             Some(&title_for_progress),
@@ -4943,8 +4983,16 @@ pub fn rip_disc(cfg: &Arc<RwLock<Config>>, device: &str, device_path: &str, resu
             // `fill_extents`' adaptive batch-retry only fires on the inline reader.
             let live_src = mux::LiveMuxSource {
                 reader,
-                title,
-                format,
+                title: libfreemkv::ScannedTitle {
+                    title,
+                    format,
+                    disc_name: Some(
+                        disc.meta_title
+                            .clone()
+                            .unwrap_or_else(|| disc.volume_id.clone()),
+                    ),
+                    volume_id: disc.volume_id.clone(),
+                },
                 keys: rip_keys.as_ref().ok().cloned(),
                 skip_errors: skip_read_errors(&cfg_read.on_read_error),
             };
@@ -5405,15 +5453,26 @@ pub fn eject_drive(device_path: &str) {
     if join_rip_thread(dev, Duration::from_secs(60)).is_err() {
         tracing::warn!(device = %dev, "rip thread did not drain within 60s of eject");
     }
-    drop_session(dev);
+    // Stop design §2.5: eject through `finish` on the handle the idle session holds; with
+    // none (or a dead one, e.g. after a USB re-enumeration) open the drive once.
+    let held = take_session(dev).map(|s| s.drive);
     unregister_halt(dev);
     crate::server::log::archive_device_log(dev);
     // Pre-0.25.2 both branches here used `let _ =` and any failure was
     // invisible: the user-facing symptom was "auto_eject is set but the
     // disc stayed put, no log line, no idea why". Surface both.
+    if let Some(d) = held {
+        match libfreemkv::DiscSession::from_drive(d).finish(libfreemkv::Finish::Eject) {
+            Ok(()) => return,
+            Err(e) => {
+                tracing::warn!(device = %dev, error = %e, "eject on the held handle failed; reopening")
+            }
+        }
+    }
     match libfreemkv::Drive::open(std::path::Path::new(device_path)) {
-        Ok(mut session) => {
-            if let Err(e) = session.eject() {
+        Ok(drive) => {
+            let session = libfreemkv::DiscSession::from_drive(drive);
+            if let Err(e) = session.finish(libfreemkv::Finish::Eject) {
                 crate::server::log::device_log(dev, &format!("eject failed: {e}"));
                 tracing::warn!(device = %dev, error = %e, "eject command failed");
             }
@@ -5769,8 +5828,9 @@ fn iso_output_needs_multipass(output_format: &str, max_retries: u8) -> bool {
 // `scope_converged` is reached only by this module's tests, hence the allow.
 #[allow(unused_imports)]
 use freemkv_engine::{
-    PatchDecision, bad_sector_statuses, end_of_recovery_promotion, patch_made_progress,
-    patch_pass_decision, plan_passes, scope_bad_bytes, scope_converged,
+    PatchDecision, bad_sector_statuses, end_of_recovery_promotion, measured_scope_bad,
+    patch_made_progress, patch_pass_decision, plan_passes, pre_pass_converged, scope_bad_bytes,
+    scope_converged,
 };
 
 // Pass-1 transport-failure gating decision-MIRROR, not a wired gate; `#[cfg(test)]` only.
@@ -6619,11 +6679,11 @@ mod tests {
         disk_space_required_bytes, end_of_recovery_promotion, fmts_gate_decision, fmts_gate_plan,
         format_lib_error, format_pass_error, header_phase_disposition, incomplete_mux_status,
         is_fmts_key_missing_error, is_safe_staging_segment, list_staging_basenames,
-        patch_made_progress, patch_pass_decision, plan_passes, pre_pass_converged,
-        prune_intermediate_iso, register_halt, resumable_dir_blocked, resumable_for_disc,
-        resume_remaining_iso_bytes, scope_bad_bytes, scope_converged, skip_diskcheck_value,
-        staging_dir_matches_disc, staging_disc_owned_by_worker, staging_free_bytes,
-        sweep_transport_retry,
+        loop_top_scope_bad, patch_made_progress, patch_pass_decision, plan_passes,
+        pre_pass_converged, prune_intermediate_iso, register_halt, resumable_dir_blocked,
+        resumable_for_disc, resume_remaining_iso_bytes, scope_bad_bytes, scope_converged,
+        skip_diskcheck_value, staging_dir_matches_disc, staging_disc_owned_by_worker,
+        staging_free_bytes, sweep_transport_retry,
     };
     use crate::server::ripper::session::device_halt;
     use crate::server::ripper::staging;
@@ -7316,18 +7376,51 @@ mod tests {
         // guarded gate must NOT — nothing was read, so run the pass.
         assert_eq!(patch_pass_decision(0, None), PatchDecision::Converged);
         assert!(
-            !pre_pass_converged(0, 0),
+            !pre_pass_converged(Some(0), 0),
             "empty mapfile (0 good, 0 bad) must NOT be treated as converged"
         );
         // Genuinely-complete scope: good spans the scope, zero bad → converged,
         // so redundant passes are still skipped.
         assert!(
-            pre_pass_converged(0, 4096),
+            pre_pass_converged(Some(0), 4096),
             "complete scope (good>0, bad==0) must still converge"
         );
         // Scope still bad → never converged regardless of good coverage.
-        assert!(!pre_pass_converged(2048, 4096));
-        assert!(!pre_pass_converged(2048, 0));
+        assert!(!pre_pass_converged(Some(2048), 4096));
+        assert!(!pre_pass_converged(Some(2048), 0));
+    }
+
+    // FAIL-SAFE: an unreadable mapfile, or loss outside any title extent, is
+    // unmeasured and must run the pass, as the engine's loop does.
+    #[test]
+    fn loop_top_gate_runs_the_pass_when_unmeasured() {
+        let unreadable = || Err(std::io::Error::other("unreadable mapfile"));
+        let title = test_title(0, 10);
+        let scope = loop_top_scope_bad(unreadable(), false, &title);
+        assert_eq!(scope, None, "an unreadable mapfile is unmeasured");
+        assert!(!pre_pass_converged(scope, 4096));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("gate.mapfile");
+        let size = 10 * 2048;
+        {
+            let mut map = freemkv_engine::Mapfile::create(&path, size, "test").unwrap();
+            map.record(0, size - 2048, freemkv_engine::SectorStatus::Finished)
+                .unwrap();
+            map.record(size - 2048, 2048, freemkv_engine::SectorStatus::NonTrimmed)
+                .unwrap();
+            map.flush().unwrap();
+        }
+        let mut no_extents = test_title(0, 10);
+        no_extents.extents.clear();
+        let load = || freemkv_engine::Mapfile::load(&path);
+        let scope = loop_top_scope_bad(load(), false, &no_extents);
+        assert_eq!(scope, None, "loss with no title extents is unscopable");
+        assert!(!pre_pass_converged(scope, 4096));
+
+        let scope = loop_top_scope_bad(load(), true, &title);
+        assert_eq!(scope, Some(2048), "ISO scope counts the whole disc");
+        assert!(!pre_pass_converged(scope, 4096));
     }
 
     // PROMOTION DECISION: end-of-recovery promotes NonTrimmed → Unreadable before the abort
@@ -8569,9 +8662,9 @@ mod tests {
     // KU-E1: a raw scope's keyless set never passes for a title rip's: the rip resolves.
     #[test]
     fn a_keyless_set_does_not_cover_a_title_rip() {
-        use libfreemkv::keys::{KeyScope, ResolvedKeySet};
+        use libfreemkv::keys::{KeyRing, KeyScope};
         let disc = crate::ku_fixture::bd_image().disc;
-        let none = ResolvedKeySet::none();
+        let none = KeyRing::none();
         assert!(!super::keys_cover(&disc, &none, &KeyScope::Titles(vec![0])));
         assert!(super::keys_cover(&disc, &none, &KeyScope::None));
     }
@@ -11343,6 +11436,45 @@ mod tests {
         );
 
         forget_device(device);
+    }
+}
+
+#[cfg(test)]
+mod held_eject_tests {
+    use super::{DriveSession, eject_drive, register_halt, store_session, take_session};
+    use libfreemkv::test_util::FakeTransport;
+    use libfreemkv::{Drive, Halt};
+
+    // SS-6 MMC-6 Table 633: LoEj 1, Start 0 = "Eject the disc if permitted".
+    fn is_eject(c: &[u8]) -> bool {
+        c[0] == 0x1B && c[4] & 0x03 == 0x02
+    }
+
+    // FT2 (stop design §2.5): `/api/eject` on a device whose idle session holds the drive
+    // ejects through that handle's `finish`; the device path cannot be opened a second time.
+    #[test]
+    fn eject_drive_uses_the_held_session_handle() {
+        let dev = format!("ft2_eject_{}", std::process::id());
+        let halt = Halt::new();
+        let (t, fake) = FakeTransport::new();
+        let session = DriveSession {
+            drive: Drive::from_transport(Box::new(t)),
+            disc: None,
+            scanned: false,
+            probed: false,
+            tmdb: None,
+            device_path: format!("/nonexistent/{dev}"),
+            key_verdict: None,
+            keys: None,
+            key_error: None,
+        };
+        store_session(&dev, session);
+        register_halt(&dev, halt.clone());
+        eject_drive(&format!("/nonexistent/{dev}"));
+        assert!(halt.is_cancelled());
+        assert_eq!(fake.count(is_eject), 1, "{:02x?}", fake.cdbs());
+        assert_eq!(fake.live_handles(), 0, "the held handle is closed");
+        assert!(take_session(&dev).is_none());
     }
 }
 

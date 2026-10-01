@@ -2,7 +2,7 @@ use crate::server::config::{self, Config, WebhookEntry};
 use crate::server::ripper;
 use once_cell::sync::Lazy;
 use std::io::{Read as _, Write as _};
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
@@ -923,67 +923,6 @@ fn clamp_chars(s: &str, max: usize) -> String {
     }
 }
 
-// ── SSRF guard: operator-supplied URLs are blocked at store/fetch time and
-// pinned to the validated IP (DNS-rebinding TOCTOU). Conservative: anything
-// not clearly a routable public address is blocked (loopback/RFC1918/etc).
-fn is_blocked_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local() // 169.254.0.0/16, incl. metadata 169.254.169.254
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || v4.is_unspecified()
-                || v4.is_multicast()
-                // Carrier-grade NAT 100.64.0.0/10 (not flagged by std helpers).
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40)
-                // 0.0.0.0/8 "this network".
-                || v4.octets()[0] == 0
-                // Benchmarking 198.18.0.0/15 (RFC 2544) — 198.18.x and 198.19.x
-                // (the /15 second octet is 18 with the low bit free, i.e. 18|19).
-                || (v4.octets()[0] == 198 && (v4.octets()[1] & 0xfe) == 18)
-                // IETF protocol assignments 192.0.0.0/24 (RFC 6890), which
-                // includes 192.0.0.170/171 (NAT64/DNS64 discovery). Distinct
-                // from 192.0.2.0/24 TEST-NET-1, already caught by is_documentation.
-                || (v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 0)
-                // Class-E reserved 240.0.0.0/4 (not flagged by std helpers).
-                || v4.octets()[0] >= 240
-        }
-        IpAddr::V6(v6) => {
-            let seg = v6.segments();
-            // 6to4 (2002::/16) embeds an IPv4 in segments[1..3]; Teredo
-            // (2001:0000::/32) embeds it in the last two segments, each XOR 0xffff.
-            // Re-check both as their embedded IPv4 or an internal target tunnels in.
-            let sixtofour = (seg[0] == 0x2002)
-                .then(|| std::net::Ipv4Addr::from(((seg[1] as u32) << 16) | (seg[2] as u32)));
-            let teredo = (seg[0] == 0x2001 && seg[1] == 0x0000).then(|| {
-                std::net::Ipv4Addr::from(
-                    (((seg[6] ^ 0xffff) as u32) << 16) | ((seg[7] ^ 0xffff) as u32),
-                )
-            });
-            // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052) embeds the IPv4
-            // target in the last 32 bits; re-check it or an internal address
-            // slips through a NAT64 translator.
-            let nat64 = (seg[0] == 0x0064 && seg[1] == 0xff9b)
-                .then(|| std::net::Ipv4Addr::from(((seg[6] as u32) << 16) | (seg[7] as u32)));
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                // Unique-local fc00::/7.
-                || (seg[0] & 0xfe00) == 0xfc00
-                // Link-local fe80::/10.
-                || (seg[0] & 0xffc0) == 0xfe80
-                // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d)
-                // — to_ipv4() catches both forms; re-check the unwrapped address.
-                || v6.to_ipv4().map(|m| is_blocked_ip(&IpAddr::V4(m))) == Some(true)
-                || sixtofour.is_some_and(|v4| is_blocked_ip(&IpAddr::V4(v4)))
-                || teredo.is_some_and(|v4| is_blocked_ip(&IpAddr::V4(v4)))
-                || nat64.is_some_and(|v4| is_blocked_ip(&IpAddr::V4(v4)))
-        }
-    }
-}
-
 // The three "could not find out" failure strings, as opposed to "this URL is not allowed"; kept
 // as constants so is_transient_resolve_error can classify without duplicated literals.
 pub(crate) const RESOLVE_TIMEOUT_MSG: &str = "DNS resolution timed out";
@@ -1039,8 +978,8 @@ pub(crate) fn resolve_with_timeout(host: &str, port: u16) -> Result<Vec<SocketAd
     }
 }
 
-// Validate an operator-supplied fetch/POST URL against the SSRF guard: requires http(s),
-// resolves the host once, and rejects blocked addresses. Returns resolved sockets so the caller
+// Validate an operator-supplied fetch/POST URL: requires http(s), resolves the host once, and
+// rejects only addresses that can never be reached (libfreemkv's rule; LAN is allowed). Returns resolved sockets so the caller
 // can pin the connection.
 pub(crate) fn validate_fetch_url(url: &str) -> Result<Vec<SocketAddr>, String> {
     let url = url.trim();
@@ -1098,19 +1037,16 @@ pub(crate) fn validate_fetch_url(url: &str) -> Result<Vec<SocketAddr>, String> {
         return Err(RESOLVE_NO_ADDRS_MSG.to_string());
     }
     for a in &addrs {
-        if is_blocked_ip(&a.ip()) {
-            return Err(format!(
-                "refusing to connect to non-public address {} (SSRF guard)",
-                a.ip()
-            ));
+        if libfreemkv::mux::is_blocked_ip(a.ip()) {
+            return Err(format!("refusing to connect to invalid address {}", a.ip()));
         }
     }
     Ok(addrs)
 }
 
-// Validate an operator network output target against the SSRF guard.
-// Unlike validate_fetch_url the target is a bare host:port (no scheme) —
-// libfreemkv streams decrypted disc content to it — same blocked-address rule.
+// Validate an operator network output target. A bare host:port (no scheme);
+// libfreemkv streams to it, so its own rule decides: LAN and loopback are
+// fine, only addresses that can never be a peer are refused.
 pub(crate) fn validate_network_target(target: &str) -> Result<(), String> {
     let target = target.trim();
     if target.is_empty() {
@@ -1147,11 +1083,8 @@ pub(crate) fn validate_network_target(target: &str) -> Result<(), String> {
         return Err(RESOLVE_NO_ADDRS_MSG.to_string());
     }
     for a in &addrs {
-        if is_blocked_ip(&a.ip()) {
-            return Err(format!(
-                "refusing to stream to non-public address {} (SSRF guard)",
-                a.ip()
-            ));
+        if libfreemkv::mux::is_blocked_ip(a.ip()) {
+            return Err(format!("refusing to stream to invalid address {}", a.ip()));
         }
     }
     Ok(())
@@ -3301,171 +3234,29 @@ mod web_tests {
         assert!(!is_cross_origin(Some("http://"), Some("autorip.test:80")));
     }
 
-    // ── SSRF guard ─────────────────────────────────────────────────────
+    // ── fetch-URL guard ────────────────────────────────────────────────
 
     #[test]
-    fn blocks_loopback_private_and_metadata_ips() {
-        use std::net::{Ipv4Addr, Ipv6Addr};
-        // Loopback.
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
-        // RFC1918 private ranges.
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
-        // Cloud metadata anycast (link-local).
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(
-            169, 254, 169, 254
-        ))));
-        // Carrier-grade NAT 100.64.0.0/10 and "this network" 0.0.0.0/8.
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))));
-        // IPv6 loopback, ULA, link-local.
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0xfd00, 0, 0, 0, 0, 0, 0, 1
-        ))));
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0xfe80, 0, 0, 0, 0, 0, 0, 1
-        ))));
-        // IPv4-mapped loopback ::ffff:127.0.0.1 must also be blocked.
-        assert!(is_blocked_ip(&IpAddr::V6(
-            Ipv4Addr::new(127, 0, 0, 1).to_ipv6_mapped()
-        )));
-    }
-
-    #[test]
-    fn blocks_ipv4_compat_and_class_e() {
-        use std::net::{Ipv4Addr, Ipv6Addr};
-        // IPv4-compatible ::127.0.0.1 (deprecated but still parseable).
-        // to_ipv4_mapped() would miss this; to_ipv4() catches it.
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0, 0, 0, 0, 0, 0, 0x7f00, 0x0001
-        ))));
-        // Class-E 240.0.0.0/4 — reserved, not public.
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(240, 0, 0, 1))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(
-            255, 255, 255, 254
-        ))));
-        // 239.x is multicast (already caught by is_multicast), not Class-E.
-        // Boundary check: 239.255.255.255 is multicast, 240.0.0.0 is Class-E.
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(240, 0, 0, 0))));
-    }
-
-    #[test]
-    fn allows_public_ips() {
-        use std::net::{Ipv4Addr, Ipv6Addr};
-        assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
-        assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
-        // Public IPv6 (Cloudflare DNS).
-        assert!(!is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111
-        ))));
-    }
-
-    #[test]
-    fn blocks_multicast_ipv4_and_ipv6() {
-        use std::net::{Ipv4Addr, Ipv6Addr};
-        // Pure multicast, only reachable via is_multicast(). An `||`->`&&`
-        // mutant immediately before it (folding into `is_unspecified() &&
-        // is_multicast()`, never true) would let this through.
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(230, 1, 2, 3))));
-        // IPv6 multicast, not unspecified — same shape of gap on the v6 side.
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0xff02, 0, 0, 0, 0, 0, 0, 1
-        ))));
-    }
-
-    #[test]
-    fn cgn_check_does_not_over_block_unrelated_public_space() {
-        use std::net::Ipv4Addr;
-        // Carrier-grade NAT 100.64.0.0/10: octet[0]==100 AND octet[1] top
-        // bits == 01. 100.64.0.1 is inside and blocked; 100.128.0.1 is
-        // outside and allowed. A `&&`->`||` mutant would block both.
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
-        assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(100, 128, 0, 1))));
-        // A public address whose second octet has the CGN-like bit pattern
-        // (01xxxxxx) but whose first octet is NOT 100 must NOT be blocked —
-        // pins the `&&` (not `||`) between the two octet checks.
-        assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(1, 65, 2, 3))));
-    }
-
-    // Benchmarking 198.18.0.0/15 (RFC 2544) and IETF protocol assignments
-    // 192.0.0.0/24 (RFC 6890, incl. the 192.0.0.170/171 NAT64/DNS64 anycast)
-    // are non-public and must be blocked outbound — parity with keysources.
-    #[test]
-    fn ssrf_guard_blocks_benchmarking_and_protocol_assignment_ranges() {
-        use std::net::Ipv4Addr;
-        // 198.18.0.0/15 spans 198.18.x AND 198.19.x — both octets blocked.
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(198, 18, 255, 255))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(198, 19, 0, 1))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(198, 19, 200, 5))));
-        // 198.17.x and 198.20.x are OUTSIDE the /15 — must stay allowed.
-        assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(198, 17, 0, 1))));
-        assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(198, 20, 0, 1))));
-        // 192.0.0.0/24, including 192.0.0.170 / 192.0.0.171.
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(192, 0, 0, 0))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(192, 0, 0, 170))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(192, 0, 0, 171))));
-        assert!(is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(192, 0, 0, 255))));
-        // The adjacent 192.0.1.0 is a different block — not covered here.
-        assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(192, 0, 1, 1))));
-    }
-
-    // 6to4 (2002::/16) and Teredo (2001:0000::/32) tunnel an IPv4 inside an
-    // IPv6 address; the guard must decode and re-check that embedded IPv4 or an
-    // internal target slips through the tunnel — parity with keysources.
-    #[test]
-    fn ssrf_guard_blocks_embedded_ipv4_via_6to4_and_teredo() {
-        use std::net::Ipv6Addr;
-        // 6to4 for 127.0.0.1: 2002:7f00:0001:: (embedded in segments[1..3]).
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x2002, 0x7f00, 0x0001, 0, 0, 0, 0, 0
-        ))));
-        // 6to4 for 169.254.169.254 (cloud metadata): 2002:a9fe:a9fe::.
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x2002, 0xa9fe, 0xa9fe, 0, 0, 0, 0, 0
-        ))));
-        // Teredo for 127.0.0.1: client IPv4 lives in the last two segments XOR
-        // 0xffff, so 0x7f00^0xffff=0x80ff and 0x0001^0xffff=0xfffe.
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x2001, 0x0000, 0, 0, 0, 0, 0x80ff, 0xfffe
-        ))));
-        // A 6to4 wrapping a PUBLIC IPv4 (8.8.8.8 → 2002:0808:0808::) is allowed.
-        assert!(!is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x2002, 0x0808, 0x0808, 0, 0, 0, 0, 0
-        ))));
-    }
-
-    #[test]
-    fn ssrf_guard_blocks_embedded_ipv4_via_nat64() {
-        use std::net::Ipv6Addr;
-        // NAT64 well-known prefix 64:ff9b::/96 embeds the IPv4 in the last 32
-        // bits. 127.0.0.1 → 64:ff9b::7f00:0001.
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x0064, 0xff9b, 0, 0, 0, 0, 0x7f00, 0x0001
-        ))));
-        // 169.254.169.254 (cloud metadata) → 64:ff9b::a9fe:a9fe.
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x0064, 0xff9b, 0, 0, 0, 0, 0xa9fe, 0xa9fe
-        ))));
-        // NAT64 wrapping a PUBLIC IPv4 (8.8.8.8 → 64:ff9b::0808:0808) is allowed.
-        assert!(!is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
-            0x0064, 0xff9b, 0, 0, 0, 0, 0x0808, 0x0808
-        ))));
-    }
-
-    #[test]
-    fn validate_fetch_url_rejects_internal_and_bad_scheme() {
-        // Numeric internal/metadata literals resolve without DNS and must
-        // be rejected.
-        assert!(validate_fetch_url("http://127.0.0.1/x").is_err());
-        assert!(validate_fetch_url("http://169.254.169.254/latest/meta-data/").is_err());
-        assert!(
-            validate_fetch_url(&format!("http://{}.{}.{}.{}:8080/decode", 10, 0, 0, 5)).is_err()
-        );
-        assert!(validate_fetch_url(&format!("https://{}.{}.{}.{}/", 192, 168, 0, 1)).is_err());
-        assert!(validate_fetch_url("http://[::1]:9000/").is_err());
+    fn validate_fetch_url_allows_lan_and_rejects_invalid_and_bad_scheme() {
+        // Home app: loopback, RFC1918 and link-local literals (no DNS) are valid.
+        for url in [
+            "http://127.0.0.1/x".to_string(),
+            "http://169.254.169.254/latest/meta-data/".to_string(),
+            format!("http://{}.{}.{}.{}:8080/decode", 10, 0, 0, 5),
+            format!("https://{}.{}.{}.{}/", 192, 168, 0, 1),
+            "http://[::1]:9000/".to_string(),
+        ] {
+            assert!(validate_fetch_url(&url).is_ok(), "{url} must be accepted");
+        }
+        // Addresses that can never be reached are refused.
+        for url in [
+            "http://0.0.0.0/x",
+            "http://224.0.0.1/x",
+            "http://240.0.0.1/x",
+            "http://[::]/x",
+        ] {
+            assert!(validate_fetch_url(url).is_err(), "{url} must be refused");
+        }
         // Non-http schemes and junk.
         assert!(validate_fetch_url("ftp://example.com/x").is_err());
         assert!(validate_fetch_url("file:///etc/passwd").is_err());
@@ -3474,17 +3265,11 @@ mod web_tests {
     }
 
     #[test]
-    fn guarded_get_rejects_rfc1918_before_connecting() {
-        // guarded_get must run the SSRF guard FIRST, so an RFC1918/loopback/
-        // metadata literal is rejected with no socket ever opened — the
-        // guard daemon.rs's KEYDB fetch paths route through, not bare ureq::get.
-        assert!(guarded_get(&format!("http://{}.{}.{}.{}/keydb.zip", 10, 0, 0, 5)).is_err());
-        assert!(guarded_get(&format!("http://{}.{}.{}.{}/keydb.zip", 192, 168, 1, 10)).is_err());
-        assert!(guarded_get(&format!("http://{}.{}.{}.{}/keydb.zip", 172, 20, 0, 1)).is_err());
-        assert!(guarded_get("http://127.0.0.1/keydb.zip").is_err());
-        assert!(guarded_get("http://169.254.169.254/latest/").is_err());
-        assert!(guarded_get("http://[::1]:9000/keydb.zip").is_err());
-        // Wrong scheme is rejected too (no connect attempt).
+    fn guarded_get_rejects_invalid_address_and_scheme_before_connecting() {
+        // guarded_get runs the address guard FIRST: an unreachable literal is refused with no
+        // socket opened (LAN literals pass the guard, so they would connect).
+        assert!(guarded_get("http://0.0.0.0/keydb.zip").is_err());
+        assert!(guarded_get("http://[ff02::1]:9000/keydb.zip").is_err());
         assert!(guarded_get("file:///etc/passwd").is_err());
     }
 
@@ -3755,8 +3540,8 @@ mod web_tests {
             "ftp://example.com/keys",
             "http://",
             // Literal, so no DNS is involved — the guard rejects the address.
-            "http://127.0.0.1:8080/keys",
-            "http://169.254.169.254/latest/meta-data",
+            "http://0.0.0.0:8080/keys",
+            "http://240.0.0.1/latest/meta-data",
         ] {
             let err = validate_fetch_url(url)
                 .expect_err("this URL must be rejected outright, not accepted");
@@ -3769,21 +3554,28 @@ mod web_tests {
     }
 
     #[test]
-    fn validate_network_target_rejects_internal_hosts() {
-        // Bare host:port (no scheme). Internal/metadata literals resolve
-        // without DNS and must be rejected — at rip time decrypted content
-        // streams here.
-        assert!(validate_network_target("169.254.169.254:80").is_err());
-        assert!(validate_network_target("127.0.0.1:9000").is_err());
-        assert!(validate_network_target(&format!("{}.{}.{}.{}:9000", 10, 0, 0, 5)).is_err());
-        assert!(validate_network_target(&format!("{}.{}.{}.{}:9000", 192, 168, 0, 1)).is_err());
-        assert!(validate_network_target("[::1]:9000").is_err());
-        // RFC5737 documentation range is non-public and blocked.
-        assert!(validate_network_target("198.51.100.10:9000").is_err());
+    fn validate_network_target_matches_library_rule() {
+        // LAN, loopback, link-local, ULA and CGNAT are valid network:// peers.
+        let ok = |t: &str| assert!(validate_network_target(t).is_ok(), "{t} must be accepted");
+        ok("127.0.0.1:9000");
+        ok(&format!("{}.{}.{}.{}:9000", 10, 0, 0, 5));
+        ok(&format!("{}.{}.{}.{}:9000", 192, 168, 0, 1));
+        ok("169.254.169.254:80");
+        ok("100.64.0.1:9000");
+        ok("[::1]:9000");
+        ok("[fd12::1]:9000");
+        // Only addresses that can never be a peer are refused.
+        let bad = |t: &str| assert!(validate_network_target(t).is_err(), "{t} must be refused");
+        bad("0.0.0.0:9000");
+        bad("224.0.0.1:9000");
+        bad("255.255.255.255:9000");
+        bad("240.0.0.1:9000");
+        bad("[::]:9000");
+        bad("[ff02::1]:9000");
         // Malformed / missing port.
-        assert!(validate_network_target("nas.example.com").is_err());
-        assert!(validate_network_target("169.254.169.254").is_err());
-        assert!(validate_network_target("").is_err());
+        bad("nas.example.com");
+        bad("169.254.169.254");
+        bad("");
     }
 
     #[test]
@@ -4760,10 +4552,9 @@ mod web_tests {
         }
 
         #[test]
-        fn settings_post_ssrf_url_is_rejected_400_and_not_stored() {
-            // A non-sentinel keyserver_url pointing at an internal/loopback
-            // host must be rejected before the write guard — stored value
-            // untouched.
+        fn settings_post_invalid_address_url_is_rejected_400_and_not_stored() {
+            // A non-sentinel keyserver_url naming an unreachable address must be
+            // rejected before the write guard — stored value untouched.
             let tmp = tempfile::TempDir::new().unwrap();
             let cfg = cfg_in_tempdir(tmp.path());
             cfg.write().unwrap().keyserver_url = "https://8.8.8.8/keep/decode".to_string();
@@ -4772,10 +4563,13 @@ mod web_tests {
                 &cfg,
                 "POST",
                 "/api/settings",
-                Some(r#"{"keyserver_url": "http://127.0.0.1/admin"}"#),
+                Some(r#"{"keyserver_url": "https://0.0.0.0/admin"}"#),
                 &[],
             );
-            assert_eq!(code, 400, "an SSRF keyserver_url must be rejected");
+            assert_eq!(
+                code, 400,
+                "an invalid-address keyserver_url must be rejected"
+            );
             assert_eq!(
                 cfg.read().unwrap().keyserver_url,
                 "https://8.8.8.8/keep/decode",

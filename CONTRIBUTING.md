@@ -34,6 +34,14 @@ checks all three.
 Formatting is rustfmt; clippy must be clean with warnings denied. Behavioural
 changes should come with a test.
 
+The CLI, the app and the server are three front ends over one engine. Each turns its
+inputs into an engine `Plan` through `plan_core` and renders the engine's events; the
+work itself (opening a drive, keys, copying, recovery, muxing) belongs to
+`freemkv_engine`. `tests/engine_entry_guard.rs` fails on a new direct call to that
+work from front-end code. Every line in the `Unreleased` section of `CHANGELOG.md`
+names the front ends it covers — `(CLI, app, server)` — or says why it reaches only
+some: `(CLI only: an exit code)`. `tests/changelog_coverage.rs` checks it.
+
 ## Developer Certificate of Origin (DCO)
 
 Contributions to freemkv are accepted under the

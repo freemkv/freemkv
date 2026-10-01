@@ -413,7 +413,7 @@ fn test_only_modules(root: &Path) -> Vec<PathBuf> {
 }
 
 /// FK8 (KU §2.2): no legacy key API anywhere in freemkv's `src/` or `tests/`, with no
-/// allow-path: every rip reads through its up-front `ResolvedKeySet`.
+/// allow-path: every rip reads through its up-front `KeyRing`.
 #[test]
 fn no_legacy_key_api_anywhere_in_freemkv() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -432,7 +432,7 @@ fn no_legacy_key_api_anywhere_in_freemkv() {
     }
     assert!(
         hits.is_empty(),
-        "legacy key APIs (use the rip's ResolvedKeySet, KU §2.2):\n{}",
+        "legacy key APIs (use the rip's KeyRing, KU §2.2):\n{}",
         hits.join("\n")
     );
 }

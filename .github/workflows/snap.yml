@@ -82,7 +82,7 @@ jobs:
           mkdir -p .cargo
           {
             echo '[patch.crates-io]'
-            for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n; do
+            for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do
               echo "$repo = { path = \"siblings/$repo\" }"
             done
             echo '[patch."https://github.com/freemkv/freemkv-unlock"]'
@@ -284,7 +284,7 @@ jobs:
           mkdir -p .cargo
           {
             echo '[patch.crates-io]'
-            for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n; do
+            for repo in libfreemkv freemkv-engine freemkv-keysources freemkv-i18n freemkv-unlock; do
               echo "$repo = { path = \"siblings/$repo\" }"
             done
             echo '[patch."https://github.com/freemkv/freemkv-unlock"]'

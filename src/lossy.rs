@@ -355,6 +355,7 @@ mod tests {
 
     fn outcome(undelivered: Vec<usize>, errors: u64, lost_bytes: u64) -> libfreemkv::MuxOutcome {
         libfreemkv::MuxOutcome {
+            halted: false,
             completed: true,
             output_opened: true,
             bytes_written: 4 << 30,

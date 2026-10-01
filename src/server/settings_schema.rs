@@ -77,9 +77,9 @@ pub enum PathRule {
 /// Which outbound check a URL setting gets on save.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UrlRule {
-    /// Fetched by the daemon (keydb download): http(s) and the SSRF guard.
+    /// Fetched by the daemon (keydb download): http(s) and a reachable address (LAN allowed).
     Fetch,
-    /// The key service: the keysources crate's https + SSRF rule.
+    /// The key service: the keysources crate's https + address rule.
     Keyserver,
 }
 
@@ -95,7 +95,7 @@ pub enum Kind {
     Secret,
     /// Shown with its path masked (tokens live there); a masked value is ignored.
     Url(UrlRule),
-    /// A bare `host:port` the rip streams to, behind the SSRF guard.
+    /// A bare `host:port` the rip streams to, behind libfreemkv's address rule.
     Target,
     Bool,
     /// Clamped to `max` on load and on save.
@@ -869,8 +869,8 @@ mod tests {
 
     #[test]
     fn an_unused_network_target_does_not_block_a_save() {
-        // A LAN target (refused by validation), built so it isn't a literal.
-        let lan = format!("{}.{}.{}.{}:9000", 10, 0, 0, 5);
+        // A target validation refuses (unspecified address).
+        let lan = "0.0.0.0:9000".to_string();
         let c = Config {
             output_format: "mkv".into(),
             network_target: lan.clone(),

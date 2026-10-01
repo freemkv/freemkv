@@ -665,17 +665,16 @@ mod aacs_diag_tests {
     }
 
     // The rip's up-front key set over the fixture image (KU §3.3; the type lands at KU-L2).
-    fn rip_key_set(
-        img: &libfreemkv::test_util::EncryptedBdImage,
-    ) -> libfreemkv::keys::ResolvedKeySet {
+    fn rip_key_set(img: &libfreemkv::test_util::EncryptedBdImage) -> libfreemkv::keys::KeyRing {
         let factory: libfreemkv::KeySourceFactory =
             std::sync::Arc::new(|| vec![Box::new(KnownKey) as Box<dyn libfreemkv::KeySource>]);
-        libfreemkv::keys::ResolvedKeySet::resolve(
+        libfreemkv::keys::KeyRing::acquire_for_disc(
             &scan(img),
             &mut img.source(),
             libfreemkv::keys::KeyScope::WholeDisc,
             &factory,
-            libfreemkv::keys::ResolveKeysOptions::default(),
+            libfreemkv::keys::AcquireOptions::default(),
+            &libfreemkv::Ctx::default(),
         )
         .expect("the known key is proven on the stream")
         .keys
@@ -785,7 +784,7 @@ mod aacs_diag_tests {
     fn the_capture_api_takes_no_key_set() {
         let src = include_str!("disc_capture.rs");
         let api = &src[..src.find("#[cfg(test)]").expect("test module")];
-        for banned in ["ResolvedKeySet", "KeyFetch", "DecryptKeys"] {
+        for banned in ["KeyRing", "KeyFetch", "DecryptKeys"] {
             assert!(!api.contains(banned), "disc_capture API names {banned}");
         }
     }

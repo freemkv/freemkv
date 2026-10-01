@@ -15,7 +15,7 @@ use libfreemkv::aacs::trace::ResolutionTrace;
 
 use crate::server::config::Config;
 
-// The keyserver URL gate is `freemkv_keysources::validate_keyserver_url` (https-only + SSRF):
+// The keyserver URL gate is `freemkv_keysources::validate_keyserver_url` (https-only + address rule):
 // settings save, `build_sources` and the probe all call it so they agree. web.rs keeps its own
 // guard for other operator URLs; the probe uses it only to pin DNS.
 
@@ -185,14 +185,21 @@ pub fn drive_scan_opts_for_keydb(keydb: &Path) -> libfreemkv::ScanOptions {
 /// The key source the user picked in settings, and only that one: `key_source = "online"`
 /// asks the online key service; otherwise the local keydb.
 pub fn key_params(cfg: &Config) -> freemkv_engine::KeyParams {
-    let url = cfg.keyserver_url.trim();
-    let online = cfg.key_source == "online";
-    freemkv_engine::KeyParams {
+    crate::plan_core::key_params(&key_settings(cfg)).params()
+}
+
+/// The server's key settings as the front-end-neutral ones: `key_source = "online"` asks
+/// only the key service, anything else only the local keydb.
+pub fn key_settings(cfg: &Config) -> crate::plan_core::KeySettings {
+    crate::plan_core::KeySettings {
         keydb_path: Some(keydb_path(cfg).to_string_lossy().into_owned()),
-        key_url: (online && !url.is_empty()).then(|| url.to_string()),
-        key_auth: (online && !cfg.keyserver_secret.is_empty())
-            .then(|| cfg.keyserver_secret.clone()),
-        online_only: online,
+        key_url: Some(cfg.keyserver_url.trim().to_string()),
+        key_auth: Some(cfg.keyserver_secret.clone()),
+        mode: if cfg.key_source == "online" {
+            crate::plan_core::KeyMode::OnlineOnly
+        } else {
+            crate::plan_core::KeyMode::LocalOnly
+        },
     }
 }
 
@@ -229,9 +236,9 @@ pub fn resolve_drive_keys(
     disc: &libfreemkv::Disc,
     drive: &mut dyn libfreemkv::SectorSource,
     scope: libfreemkv::keys::KeyScope,
-    seed: Option<&libfreemkv::keys::ResolvedKeySet>,
+    seed: Option<&libfreemkv::keys::KeyRing>,
     halt: Option<&libfreemkv::Halt>,
-) -> Result<libfreemkv::keys::ResolvedKeySet, libfreemkv::Error> {
+) -> Result<libfreemkv::keys::KeyRing, libfreemkv::Error> {
     warn_if_no_key_source(cfg);
     let factory = freemkv_engine::key_source_factory(&key_params(cfg));
     resolve_with(disc, drive, scope, &factory, seed, halt)
@@ -243,9 +250,9 @@ fn resolve_with(
     reader: &mut dyn libfreemkv::SectorSource,
     scope: libfreemkv::keys::KeyScope,
     factory: &libfreemkv::KeySourceFactory,
-    seed: Option<&libfreemkv::keys::ResolvedKeySet>,
+    seed: Option<&libfreemkv::keys::KeyRing>,
     halt: Option<&libfreemkv::Halt>,
-) -> Result<libfreemkv::keys::ResolvedKeySet, libfreemkv::Error> {
+) -> Result<libfreemkv::keys::KeyRing, libfreemkv::Error> {
     // Drain an earlier decode verdict so the caller's take sees only this resolve's.
     let _ = take_online_decode_reachability();
     let (set, trace) =
@@ -276,23 +283,21 @@ fn warn_if_no_key_source(cfg: &Config) {
 // A fresh rip's key set, from its `.ripped` hand-off to the mux worker's open of the same
 // ISO (the worker has no drive). Process memory only (J6): a restart forgets it.
 static RIP_KEYS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<PathBuf, libfreemkv::keys::ResolvedKeySet>>,
+    std::sync::Mutex<std::collections::HashMap<PathBuf, libfreemkv::keys::KeyRing>>,
 > = std::sync::LazyLock::new(Default::default);
 
-fn rip_keys_map() -> std::sync::MutexGuard<
-    'static,
-    std::collections::HashMap<PathBuf, libfreemkv::keys::ResolvedKeySet>,
-> {
+fn rip_keys_map()
+-> std::sync::MutexGuard<'static, std::collections::HashMap<PathBuf, libfreemkv::keys::KeyRing>> {
     RIP_KEYS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Keep the rip's key set for the staged `iso` until its mux is done (memory only).
-pub fn hold_rip_keys(iso: &Path, keys: libfreemkv::keys::ResolvedKeySet) {
+pub fn hold_rip_keys(iso: &Path, keys: libfreemkv::keys::KeyRing) {
     rip_keys_map().insert(iso.to_path_buf(), keys);
 }
 
 /// The key set held for `iso`, if this process ripped it.
-pub fn rip_keys_for(iso: &Path) -> Option<libfreemkv::keys::ResolvedKeySet> {
+pub fn rip_keys_for(iso: &Path) -> Option<libfreemkv::keys::KeyRing> {
     rip_keys_map().get(iso).cloned()
 }
 
@@ -306,7 +311,7 @@ pub enum StagedKeys {
     /// The rip's up-front set (from its drive, or the inserted disc's scan): used as-is
     /// where it covers the titles, with no key-service call; the sources are asked only
     /// for what it lacks (e.g. forensic keys it left Pending, asked once from the image).
-    Rip(libfreemkv::keys::ResolvedKeySet),
+    Rip(libfreemkv::keys::KeyRing),
     /// No set in hand (a resume after a restart): the key chain, asked once, up front.
     /// `vid` only from a drive in hand; the mapfile holds none (J6).
     Resolve { vid: Option<[u8; 16]> },
@@ -442,7 +447,7 @@ pub enum ServiceReachability {
     /// far as automatic retry goes — report the status rather than guess.
     Unexpected(u16),
     /// The configured key-service URL could not be used at all (empty, wrong
-    /// scheme, or blocked by the SSRF guard), so the service was never asked.
+    /// scheme, or an unreachable address), so the service was never asked.
     /// A standing misconfiguration, not an outage — terminal.
     NotAsked,
 }
@@ -726,35 +731,34 @@ mod tests {
     use libfreemkv::read_encrypted_units;
 
     #[test]
-    fn ssrf_guard_blocks_metadata_and_internal_hosts() {
-        // Cloud metadata endpoint — the canonical SSRF target. https:// so the
-        // ADDRESS check fires, not the scheme check.
-        let err =
-            freemkv_keysources::validate_keyserver_url("https://169.254.169.254/latest/meta-data")
-                .unwrap_err();
-        assert!(
-            err.contains("SSRF guard"),
-            "rejected for the address: {err}"
-        );
-        // Loopback and RFC1918.
-        assert!(freemkv_keysources::validate_keyserver_url("https://127.0.0.1:8443/keys").is_err());
-        // RFC1918 ranges (10/8, 192.168/16, 172.16/12). Built from octets so the
-        // literal dotted-quads don't trip the public leak-guard — these are
-        // generic examples, not infrastructure.
-        for oct in [[10u8, 0, 0, 1], [192, 168, 1, 5], [172, 20, 4, 4]] {
-            let url = format!("https://{}.{}.{}.{}/keys", oct[0], oct[1], oct[2], oct[3]);
+    fn keyserver_guard_allows_lan_and_rejects_invalid_hosts() {
+        // Home app: loopback, link-local (incl. metadata) and RFC1918 key services are valid.
+        // Built from octets so the dotted-quad doesn't trip the public leak-guard.
+        let lan = format!("https://{}.{}.{}.{}/keys", 192, 168, 1, 5);
+        for url in [
+            "https://169.254.169.254/latest/meta-data",
+            "https://127.0.0.1:8443/keys",
+            "https://[::1]:443/k",
+            "https://[fe80::1]/k",
+            "https://[::ffff:127.0.0.1]/k",
+            lan.as_str(),
+        ] {
             assert!(
-                freemkv_keysources::validate_keyserver_url(&url).is_err(),
-                "RFC1918 {url} must be rejected"
+                freemkv_keysources::validate_keyserver_url(url).is_ok(),
+                "{url} must be accepted"
             );
         }
-        // IPv6 loopback / link-local (bracketed).
-        assert!(freemkv_keysources::validate_keyserver_url("https://[::1]:443/k").is_err());
-        assert!(freemkv_keysources::validate_keyserver_url("https://[fe80::1]/k").is_err());
-        // IPv4-mapped IPv6 loopback.
-        assert!(
-            freemkv_keysources::validate_keyserver_url("https://[::ffff:127.0.0.1]/k").is_err()
-        );
+        // Unreachable addresses are refused.
+        for url in [
+            "https://0.0.0.0/keys",
+            "https://224.0.0.1/keys",
+            "https://[ff02::1]/k",
+        ] {
+            assert!(
+                freemkv_keysources::validate_keyserver_url(url).is_err(),
+                "{url} must be refused"
+            );
+        }
         // Non-http scheme rejected.
         assert!(freemkv_keysources::validate_keyserver_url("ftp://example.com/keys").is_err());
         // No host.
@@ -1118,10 +1122,10 @@ mod tests {
 
     // An SSRF-blocked URL never becomes a source, leaving online mode with none.
     #[test]
-    fn build_sources_drops_online_source_on_ssrf_blocked_url() {
+    fn build_sources_drops_online_source_on_invalid_address_url() {
         let cfg = Config {
             key_source: "online".into(),
-            keyserver_url: "https://169.254.169.254/keys".into(),
+            keyserver_url: "https://0.0.0.0/keys".into(),
             ..Config::default()
         };
         assert!(build_sources(&cfg).is_empty());
@@ -1177,7 +1181,7 @@ mod tests {
         let cfg = Config::default();
         let missing = Path::new("/nonexistent-autorip-iso-fixture-xyz.iso");
         let disc = || keyless_encrypted_disc_with_aacs();
-        let rip = StagedKeys::Rip(libfreemkv::keys::ResolvedKeySet::none());
+        let rip = StagedKeys::Rip(libfreemkv::keys::KeyRing::none());
         assert!(open_staged_image(&cfg, missing, disc(), &[0], rip, None).is_err());
         let resolve = StagedKeys::Resolve {
             vid: Some([7u8; 16]),
@@ -1392,8 +1396,8 @@ mod tests {
             "https:///keys",
             "https://8.8.8.8:notaport/keys",
             "https://[::1/keys",
-            "https://127.0.0.1/keys",
-            "https://169.254.169.254/latest/meta-data",
+            "https://0.0.0.0/keys",
+            "https://240.0.0.1/latest/meta-data",
         ] {
             let err = freemkv_keysources::validate_keyserver_url(url)
                 .expect_err("keysources must reject this URL outright");
@@ -1667,13 +1671,13 @@ mod tests {
         assert!(!probe_online_reachability(&empty).is_transient());
 
         let blocked = Config {
-            keyserver_url: "https://127.0.0.1:9/keys".into(),
+            keyserver_url: "https://0.0.0.0:9/keys".into(),
             ..Default::default()
         };
         assert_eq!(
             probe_online_reachability(&blocked),
             ServiceReachability::NotAsked,
-            "an SSRF-blocked loopback URL is a permanent config verdict, not an outage"
+            "an invalid-address URL is a permanent config verdict, not an outage"
         );
     }
 
@@ -1894,7 +1898,7 @@ mod ku_e1_tests {
     fn rip_keys_are_held_per_iso_until_forgotten() {
         let iso = Path::new("/staging/ku-e1-held/disc.iso");
         assert!(rip_keys_for(iso).is_none());
-        hold_rip_keys(iso, libfreemkv::keys::ResolvedKeySet::none());
+        hold_rip_keys(iso, libfreemkv::keys::KeyRing::none());
         assert!(rip_keys_for(iso).is_some());
         forget_rip_keys(iso);
         assert!(rip_keys_for(iso).is_none());

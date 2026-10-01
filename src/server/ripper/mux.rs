@@ -735,7 +735,7 @@ impl freemkv_engine::Sink for EngineMuxSink {
     }
 }
 
-// autorip's `libfreemkv::MuxEvents` bridge for the live single-pass mux: updates the shared
+// autorip's `libfreemkv::Events` bridge for the live single-pass mux: updates the shared
 // atomics + per-frame UI push the watchdog and `/api/state` read.
 struct AutoripMuxEvents {
     ui: UiState,
@@ -749,8 +749,23 @@ struct AutoripMuxEvents {
     opened: AtomicBool,
 }
 
-impl libfreemkv::MuxEvents for AutoripMuxEvents {
-    fn on_output_opened(&self, _title: &libfreemkv::DiscTitle) {
+impl libfreemkv::Events for AutoripMuxEvents {
+    fn event(&self, e: &libfreemkv::Event<'_>) {
+        match *e {
+            libfreemkv::Event::OutputOpened { .. } => self.on_output_opened(),
+            libfreemkv::Event::BytesRead { bytes, .. } => self.on_read_progress(bytes),
+            libfreemkv::Event::BytesWritten { bytes, .. } => self.on_write_progress(bytes),
+            libfreemkv::Event::SectorSkipped { lba } => self.on_sector_skipped(lba),
+            libfreemkv::Event::BatchSizeChanged { new_size, reason } => {
+                self.on_batch_size_changed(new_size, reason)
+            }
+            _ => {}
+        }
+    }
+}
+
+impl AutoripMuxEvents {
+    fn on_output_opened(&self) {
         self.opened.store(true, Ordering::Relaxed);
         crate::server::log::device_log(&self.ui.device, "Output opened — muxing");
         // Reset the throttles so the first progress tick lands promptly after
@@ -760,7 +775,7 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
         *self.last_log.lock().unwrap_or_else(|e| e.into_inner()) = now;
     }
 
-    fn on_read_progress(&self, bytes_read: u64, _bytes_total: u64) {
+    fn on_read_progress(&self, bytes_read: u64) {
         // Reader-side BytesRead: keeps the watchdog fresh during header reads
         // (no SCSI READ_TIMEOUT backstop on the ISO path) and feeds the
         // read-ahead position the UI prefers over write-lagged output.
@@ -772,7 +787,7 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
             .store(bytes_read, Ordering::Relaxed);
     }
 
-    fn on_write_progress(&self, bytes_written: u64, _bytes_total: u64) {
+    fn on_write_progress(&self, bytes_written: u64) {
         // Writer-side per-frame — mirrors `MuxSink::apply`. Feed the watchdog's
         // activity timestamp AND its good-byte counter (both read by
         // `spawn_mux_watchdog`), then push throttled UI state.
@@ -853,16 +868,14 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
         );
     }
 
-    fn on_sector_skipped(&self, lba: u32) {
+    fn on_sector_skipped(&self, lba: u64) {
         self.atomics
             .wd_last_frame
             .store(crate::server::util::epoch_secs(), Ordering::Relaxed);
         // Store the skipped LBA into `rip_last_lba` (UI last_sector/playhead)
         // and log the per-skip line — fires on the LIVE inline single-pass path
         // from `DiscStream::fill_extents`; `input_errors` bump surfaces the skip count.
-        self.atomics
-            .rip_last_lba
-            .store(lba as u64, Ordering::Relaxed);
+        self.atomics.rip_last_lba.store(lba, Ordering::Relaxed);
         self.atomics.input_errors.fetch_add(1, Ordering::Relaxed);
         crate::server::log::device_log(
             &self.ui.device,
@@ -870,7 +883,7 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
         );
     }
 
-    fn on_batch_size_changed(&self, batch: u16, reason: libfreemkv::event::BatchSizeReason) {
+    fn on_batch_size_changed(&self, batch: u16, reason: libfreemkv::BatchSizeReason) {
         self.atomics
             .rip_current_batch
             .store(batch, Ordering::Relaxed);
@@ -878,19 +891,13 @@ impl libfreemkv::MuxEvents for AutoripMuxEvents {
         // from the adaptive sizer in `DiscStream::fill_extents`, keeping the
         // operator-facing record of when/why the read batch adapted.
         let label = match reason {
-            libfreemkv::event::BatchSizeReason::Shrunk => "shrunk",
-            libfreemkv::event::BatchSizeReason::Probed => "probed up",
+            libfreemkv::BatchSizeReason::Shrunk => "shrunk",
+            libfreemkv::BatchSizeReason::Probed => "probed up",
         };
         crate::server::log::device_log(
             &self.ui.device,
             &format!("Batch size → {} ({})", batch, label),
         );
-    }
-
-    fn on_read_error(&self, _lba: u32) {
-        self.atomics
-            .wd_last_frame
-            .store(crate::server::util::epoch_secs(), Ordering::Relaxed);
     }
 }
 
@@ -1216,14 +1223,12 @@ pub(crate) struct LiveMuxSource {
     /// moves it into `DiscStream::new` (whose reader param is exactly
     /// `Box<dyn SectorSource>`) — the inline reader, never the highway wrapper.
     pub(crate) reader: Box<dyn libfreemkv::SectorSource>,
-    /// The scanned title to mux off the live drive.
-    pub(crate) title: libfreemkv::DiscTitle,
-    /// Container format (TS vs PS demux selection).
-    pub(crate) format: libfreemkv::ContentFormat,
+    /// The scanned title to mux off the live drive, named by its disc.
+    pub(crate) title: libfreemkv::ScannedTitle,
     /// The rip's up-front key set (KU §2.1): its keys, its FMTS forensic map and the
     /// on-arrival proof. `None` (or a non-AACS set) decrypts no AACS; a DVD cracks its CSS
     /// title key in the stream.
-    pub(crate) keys: Option<libfreemkv::keys::ResolvedKeySet>,
+    pub(crate) keys: Option<libfreemkv::keys::KeyRing>,
     /// Skip-past-read-errors (zero-fill + continue) — wired onto
     /// `DiscStream::skip_errors` (was `on_read_error == "skip"`).
     pub(crate) skip_errors: bool,
@@ -1271,7 +1276,7 @@ pub(crate) fn mux_live(
     let total_bytes = if inputs.total_bytes > 0 {
         inputs.total_bytes
     } else {
-        src.title.size_bytes
+        src.title.title.size_bytes
     };
 
     // The events bridge shares the orchestrator's watchdog/UI atomics;
@@ -1306,28 +1311,23 @@ pub(crate) fn mux_live(
         batch_sectors: inputs.batch,
         raw: false,
         selection: Default::default(),
-        // No per-frame send deadline (T27): a slow sink blocks; Stop and the hard
-        // watchdog (HARD_WATCHDOG_STALL_SECS) are the bound.
-        ..Default::default()
+        title_index: 0,
     };
 
     crate::server::log::device_log(
         inputs.device,
         &format!("Opening output: {}", inputs.dest_url),
     );
-    let source = libfreemkv::MuxSource::Live {
-        reader: src.reader,
-        title: src.title,
-        format: src.format,
-    };
+    let source = libfreemkv::Source::from_reader(src.reader, src.title);
 
     let result = libfreemkv::mux_with_keys(
         source,
         src.keys.as_ref(),
         &inputs.dest_url,
         &opts,
-        &halt_token,
-        events.clone() as Arc<dyn libfreemkv::MuxEvents>,
+        &libfreemkv::Ctx::new(halt_token.clone())
+            .with_events(events.clone())
+            .with_diag(libfreemkv::Diag::from_env()),
     );
 
     let opened = events.opened.load(Ordering::Relaxed);
@@ -1684,7 +1684,7 @@ mod tests {
     // even on the throttled early-return path, so a healthy mux never false-escalates.
     #[test]
     fn autorip_mux_events_feed_watchdog_byte_atomic() {
-        use libfreemkv::MuxEvents;
+        use libfreemkv::Events as _;
         let (atomics, wd_bytes, wd_last_frame, latest_bytes_read) = test_shared_atomics();
         let events = AutoripMuxEvents {
             ui: test_ui_state(),
@@ -1699,7 +1699,10 @@ mod tests {
         };
 
         // Reader side: feeds the UI read-ahead position + watchdog activity.
-        events.on_read_progress(4096, 8192);
+        events.event(&libfreemkv::Event::BytesRead {
+            bytes: 4096,
+            total: 8192,
+        });
         assert_eq!(
             latest_bytes_read.load(Ordering::Relaxed),
             4096,
@@ -1712,7 +1715,10 @@ mod tests {
 
         // Writer side (throttled): wd_bytes MUST still advance — this is the
         // load-bearing feed that keeps the hard watchdog from firing exit(1).
-        events.on_write_progress(500_000, 1_000_000);
+        events.event(&libfreemkv::Event::BytesWritten {
+            bytes: 500_000,
+            total: 1_000_000,
+        });
         assert_eq!(
             wd_bytes.load(Ordering::Relaxed),
             500_000,
@@ -1725,7 +1731,9 @@ mod tests {
 
         // The opened flag drives `output_opened` in the outcome mapping.
         assert!(!events.opened.load(Ordering::Relaxed));
-        events.on_output_opened(&libfreemkv::DiscTitle::empty());
+        events.event(&libfreemkv::Event::OutputOpened {
+            title: &libfreemkv::DiscTitle::empty(),
+        });
         assert!(
             events.opened.load(Ordering::Relaxed),
             "on_output_opened must set the opened flag"
@@ -1737,7 +1745,7 @@ mod tests {
     // `input_errors`, matching the pre-refactor `make_stream_event_fn`.
     #[test]
     fn on_sector_skipped_stores_lba_into_rip_last_lba() {
-        use libfreemkv::MuxEvents;
+        use libfreemkv::Events as _;
         let (atomics, _wd_bytes, wd_last_frame, _lbr) = test_shared_atomics();
         let rip_last_lba = atomics.rip_last_lba.clone();
         let input_errors = atomics.input_errors.clone();
@@ -1750,7 +1758,7 @@ mod tests {
             opened: AtomicBool::new(false),
         };
 
-        events.on_sector_skipped(4242);
+        events.event(&libfreemkv::Event::SectorSkipped { lba: 4242 });
         assert_eq!(
             rip_last_lba.load(Ordering::Relaxed),
             4242,
@@ -1768,7 +1776,7 @@ mod tests {
         );
 
         // A later skip advances the playhead to the new LBA.
-        events.on_sector_skipped(9001);
+        events.event(&libfreemkv::Event::SectorSkipped { lba: 9001 });
         assert_eq!(
             rip_last_lba.load(Ordering::Relaxed),
             9001,
@@ -1782,7 +1790,7 @@ mod tests {
     // produce; both reason variants must render without panicking.
     #[test]
     fn on_batch_size_changed_stores_batch_and_logs() {
-        use libfreemkv::MuxEvents;
+        use libfreemkv::Events as _;
         let (atomics, ..) = test_shared_atomics();
         let rip_current_batch = atomics.rip_current_batch.clone();
         let events = AutoripMuxEvents {
@@ -1794,14 +1802,20 @@ mod tests {
             opened: AtomicBool::new(false),
         };
 
-        events.on_batch_size_changed(64, libfreemkv::event::BatchSizeReason::Shrunk);
+        events.event(&libfreemkv::Event::BatchSizeChanged {
+            new_size: 64,
+            reason: libfreemkv::BatchSizeReason::Shrunk,
+        });
         assert_eq!(
             rip_current_batch.load(Ordering::Relaxed),
             64,
             "on_batch_size_changed must store the new batch into rip_current_batch"
         );
         // Both variants must render (and log) without panicking.
-        events.on_batch_size_changed(128, libfreemkv::event::BatchSizeReason::Probed);
+        events.event(&libfreemkv::Event::BatchSizeChanged {
+            new_size: 128,
+            reason: libfreemkv::BatchSizeReason::Probed,
+        });
         assert_eq!(rip_current_batch.load(Ordering::Relaxed), 128);
     }
 
@@ -1814,6 +1828,7 @@ mod tests {
         // Completed run.
         let ok = map_iso_mux_outcome(
             Ok(libfreemkv::MuxOutcome {
+                halted: false,
                 completed: true,
                 output_opened: true,
                 bytes_written: 1234,
@@ -1840,6 +1855,7 @@ mod tests {
         // `Ok(o) if o.completed` guard would file a damaged rip as good (rule 1).
         let not_done = map_iso_mux_outcome(
             Ok(libfreemkv::MuxOutcome {
+                halted: false,
                 completed: false,
                 output_opened: true,
                 bytes_written: 500,
@@ -1903,6 +1919,7 @@ mod tests {
         let start = Instant::now();
         let lossy = map_iso_mux_outcome(
             Ok(libfreemkv::MuxOutcome {
+                halted: false,
                 completed: true,
                 output_opened: true,
                 bytes_written: 1234,
@@ -2068,6 +2085,7 @@ mod tests {
         assert!(super::super::is_halt_error(&halted));
 
         let done = libfreemkv::MuxOutcome {
+            halted: false,
             completed: true,
             output_opened: true,
             bytes_written: 1234,
