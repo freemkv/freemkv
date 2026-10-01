@@ -8,7 +8,10 @@
 
 use crate::cli_entry::is_url_token;
 use crate::disc_info::sanitize;
-use crate::output::{Level::Normal, Output};
+use crate::output::{
+    Level::{Always, Normal},
+    Output,
+};
 use crate::strings;
 use std::io::Write;
 use std::sync::Arc;
@@ -88,7 +91,7 @@ impl freemkv_engine::Sink for CliTitleLoopSink<'_> {
                 );
             }
             freemkv_engine::Event::TitleFailed { error, .. } => {
-                self.out.raw(Normal, &render_error(error));
+                self.out.raw(Always, &render_error(error));
             }
             _ => {}
         }
@@ -126,7 +129,7 @@ impl CliMuxEvents {
 
     /// The instant the pump began, for the completion summary.
     fn start(&self) -> Option<Instant> {
-        *self.start.lock().expect("start mutex")
+        *self.start.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -158,8 +161,8 @@ impl CliMuxEvents {
             self.out.blank(Normal);
         }
         let now = Instant::now();
-        *self.start.lock().expect("start mutex") = Some(now);
-        *self.last_update.lock().expect("last_update mutex") = now;
+        *self.start.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
+        *self.last_update.lock().unwrap_or_else(|e| e.into_inner()) = now;
     }
 
     fn on_write_progress(&self, bytes_written: u64, bytes_total: u64) {
@@ -167,9 +170,9 @@ impl CliMuxEvents {
             return;
         }
         let now = Instant::now();
-        let mut last = self.last_update.lock().expect("last_update mutex");
+        let mut last = self.last_update.lock().unwrap_or_else(|e| e.into_inner());
         if now.duration_since(*last).as_secs_f64() >= 0.5 {
-            if let Some(start) = *self.start.lock().expect("start mutex") {
+            if let Some(start) = *self.start.lock().unwrap_or_else(|e| e.into_inner()) {
                 print_progress(bytes_written, bytes_total, &start);
             }
             *last = now;
@@ -302,10 +305,10 @@ fn check_selection_coverage(
                 &strings::fmt(&format!("warn.no_lang_match_{}", u.class), &args),
             );
         } else if first_error.is_none() {
-            first_error = Some(render_error(&strings::fmt(
+            first_error = Some(strings::fmt(
                 &format!("error.no_lang_match_{}", u.class),
                 &args,
-            )));
+            ));
         }
     }
     match first_error {
@@ -316,7 +319,8 @@ fn check_selection_coverage(
 
 /// Render a stream-selection error for the user. An unknown language tag lists
 /// the languages actually present on the scanned title, so the user can correct
-/// the typo against real data (mirroring what `disc-info` shows).
+/// the typo against real data (mirroring what `disc-info` shows). No level word: the
+/// title loop's `TitleFailed` render adds it once.
 fn render_stream_sel_error(
     e: &freemkv_engine::StreamSelError,
     title: &libfreemkv::DiscTitle,
@@ -346,10 +350,10 @@ fn render_stream_sel_error(
             } else {
                 langs.join(", ")
             };
-            render_error(&strings::fmt(
+            strings::fmt(
                 "error.unknown_language",
                 &[("tag", tag), ("available", &available)],
-            ))
+            )
         }
     }
 }
@@ -709,7 +713,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         force,
         selection_flags_used,
     ) {
-        out.raw(Normal, &msg);
+        out.raw(Always, &msg);
         return 1;
     }
     // A whole-disc output (an image, a read test, a file tree) is one engine plan: the
@@ -727,12 +731,12 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
         match scan_rip_drive(source, &keys) {
             Ok(pair) => disc_scan = Some(pair),
             Err(e) if all_titles && !matches!(e, libfreemkv::Error::Halted) => {
-                out.raw(Normal, &scan_failed_msg(&e));
-                out.raw(Normal, &disc_scan_all_titles_failed());
+                out.raw(Always, &scan_failed_msg(&e));
+                out.raw(Always, &disc_scan_all_titles_failed());
                 return 1;
             }
             Err(e) => {
-                out.raw(Normal, &render_drive_open_error(&e));
+                out.raw(Always, &render_drive_open_error(&e));
                 return 1;
             }
         }
@@ -754,7 +758,7 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
             Some(pair) => pair,
             // `-t all` without a title list must fail loudly, never rip title 1 and exit 0.
             None => {
-                out.raw(Normal, &disc_scan_all_titles_failed());
+                out.raw(Always, &disc_scan_all_titles_failed());
                 return 1;
             }
         }
@@ -884,7 +888,6 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
                         &keys,
                         &set,
                         raw,
-                        multipass,
                         &streams,
                         multi_title,
                         &out,
@@ -1108,9 +1111,20 @@ fn validate_dir_dest(path: &std::path::Path, dest: &str, force: bool) -> Result<
     // does `create_dir_all` at write time, so creating it here only risks a
     // stray empty dir if a later step fails. A missing dir reads as empty below.
     if !force {
-        let non_empty = std::fs::read_dir(path)
-            .map(|mut it| it.next().is_some())
-            .unwrap_or(false);
+        let non_empty = match std::fs::read_dir(path) {
+            Ok(mut it) => it.next().is_some(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            // An unreadable directory can't be shown empty: the guard would pass blind.
+            Err(e) => {
+                return Err(strings::fmt(
+                    "error.dest_not_writable",
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ));
+            }
+        };
         if non_empty {
             return Err(strings::fmt(
                 "error.dir_dest_not_empty",
@@ -1290,7 +1304,7 @@ fn build_jobs(
         // later with a cryptic StreamUrlInvalid/IO error instead.
         if let Err(e) = std::fs::create_dir_all(dest_dir) {
             out.raw(
-                Normal,
+                Always,
                 &strings::fmt(
                     "error.cannot_create_dir",
                     &[
@@ -1367,6 +1381,13 @@ fn build_jobs(
                 Some(demux_jobs(&indices, &demux_dir))
             } else if indices.len() == 1 && !is_dir_dest {
                 Some(vec![(Some(indices[0]), dest.to_string())])
+            } else if indices.len() > 1 && !is_dir_dest {
+                // `dir_jobs` would turn the file path into a directory.
+                out.raw(
+                    Always,
+                    &strings::fmt("error.multi_title_needs_dir", &[("dest", dest)]),
+                );
+                None
             } else {
                 let disc_name = t
                     .first()
@@ -1400,16 +1421,31 @@ fn build_jobs(
                 return Some(demux_jobs(&indices, &demux_dir));
             }
             // A single-file dest can't hold multiple titles: `dir_jobs` would
-            // silently turn `movie.mkv` into a directory. Mirror the
-            // scanned-source guard above and reject up front.
+            // silently turn `movie.mkv` into a directory. Same guard as the
+            // scanned-source branch above.
             if !is_dir_dest {
                 out.raw(
-                    Normal,
+                    Always,
                     &strings::fmt("error.multi_title_needs_dir", &[("dest", dest)]),
                 );
                 return None;
             }
             dir_jobs(&indices, "disc")
+        }
+        _ if is_disc
+            && is_dir_dest
+            && title_nums.len() == 1
+            && !is_scheme_only_sink(parsed_dest)
+            && !matches!(
+                parsed_dest,
+                libfreemkv::StreamUrl::Demux { .. }
+                    | libfreemkv::StreamUrl::Video { .. }
+                    | libfreemkv::StreamUrl::Audio { .. }
+                    | libfreemkv::StreamUrl::Sub { .. }
+            ) =>
+        {
+            // One title into a directory is still named per title, as for a scanned source.
+            dir_jobs(&[title_nums[0].saturating_sub(1)], "disc")
         }
         _ => {
             // No title list, single pass (disc all-titles, single -t, or a
@@ -1466,13 +1502,16 @@ fn scan_iso(source: &str) -> Option<(libfreemkv::Disc, Box<dyn libfreemkv::Secto
     // opening a source "as an image" silently rejected folders.
     match libfreemkv::parse_url(source) {
         libfreemkv::StreamUrl::Iso { path } => {
-            libfreemkv::scan_iso(std::path::Path::new(&path), keyless_scan_opts()).ok()
+            libfreemkv::scan_iso(std::path::Path::new(&path), keyless_scan_opts())
         }
         libfreemkv::StreamUrl::Dir { path } => {
-            libfreemkv::scan_dir(std::path::Path::new(&path), keyless_scan_opts()).ok()
+            libfreemkv::scan_dir(std::path::Path::new(&path), keyless_scan_opts())
         }
-        _ => None,
+        _ => return None,
     }
+    // The engine's own open reports a source it cannot read; the scan's reason goes to the log.
+    .map_err(|e| tracing::warn!("keyless scan of {source} failed: {e}"))
+    .ok()
 }
 
 pub(crate) fn resolved_keydb_path(keydb_path: &Option<String>) -> std::path::PathBuf {
@@ -1514,7 +1553,7 @@ fn warn_ssrf_rejected(keys: &KeyConfig, out: &Output) {
         && let Err(e) = freemkv_keysources::validate_keyserver_url(url)
     {
         out.raw(
-            Normal,
+            Always,
             &strings::fmt("error.keyserver_url_rejected", &[("error", &e)]),
         );
     }
@@ -1583,6 +1622,17 @@ fn open_drive_scan(
     )
 }
 
+// The failure of a title's drive reopen. A Ctrl-C there is a full stop, not a failed title.
+fn reopen_failure(e: &libfreemkv::Error) -> PipeFail {
+    match e {
+        libfreemkv::Error::Halted => PipeFail::halted(strings::get("rip.interrupted")),
+        libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
+            PipeFail::fatal(strings::get("error.no_drive"))
+        }
+        _ => PipeFail::fatal(format!("{e}")),
+    }
+}
+
 type DriveScan = (libfreemkv::Disc, Box<dyn libfreemkv::SectorSource>, String);
 
 /// Open and scan the drive at `source` with NO key call (KU §3.2 `open_scan`): the disc,
@@ -1591,9 +1641,9 @@ fn scan_rip_drive(source: &str, keys: &KeyConfig) -> Result<DriveScan, libfreemk
     let credentials = drive_credentials(keys.keydb_path());
     let mut session = open_drive_scan(device_target(source), credentials, false)?;
     let device = session.device_path().to_string();
-    let disc = session.take_disc().expect("scan populated the disc");
+    let disc = session.take_disc().ok_or(libfreemkv::Error::NoStreams)?;
     session.stage_drive_as_reader();
-    let reader = session.take_reader().expect("the drive was just staged");
+    let reader = session.take_reader().ok_or(libfreemkv::Error::NoStreams)?;
     Ok((disc, reader, device))
 }
 
@@ -1616,7 +1666,7 @@ fn report_keys(
             None
         }
         Err(e) => {
-            out.raw(Normal, &render_error(&e));
+            out.raw(Always, &render_error(&e));
             None
         }
     }
@@ -1658,12 +1708,19 @@ fn loose_clip_keys(
     }
 }
 
-/// The keys `info` opens a loose clip with: looked up from its disc folder with the default key
-/// sources, as a rip does (1.8.0). `Err` once the refusal is shown.
-pub(crate) fn info_clip_keys(source: &str) -> Result<Option<libfreemkv::keys::KeyRing>, ()> {
+/// The keys `info` opens a loose clip with: looked up from its disc folder as a rip does
+/// (1.8.0), in `keydb` when given, else the standard location. `Err` once the refusal is shown.
+pub(crate) fn info_clip_keys(
+    source: &str,
+    keydb: Option<String>,
+) -> Result<Option<libfreemkv::keys::KeyRing>, ()> {
     match libfreemkv::parse_url(source) {
         libfreemkv::StreamUrl::M2ts { path } => {
-            loose_clip_keys(&path, &KeyConfig::default(), &Output::new(false, false))
+            let keys = KeyConfig {
+                keydb_path: keydb,
+                ..KeyConfig::default()
+            };
+            loose_clip_keys(&path, &keys, &Output::new(false, false))
         }
         _ => Ok(None),
     }
@@ -1717,7 +1774,6 @@ fn pipe_disc(
     keys: &KeyConfig,
     set: &libfreemkv::keys::KeyRing,
     raw: bool,
-    _multipass: bool,
     streams: &freemkv_engine::StreamChoice,
     multi_title: bool,
     out: &Output,
@@ -1726,21 +1782,16 @@ fn pipe_disc(
     // KU §3.3: each title reopens the drive with `open_scan` (no key call) and reads
     // through the rip's one set, after `is_for`. Tray unlock is guaranteed by `Drive::drop`.
     let credentials = drive_credentials(keys.keydb_path());
-    let mut session = open_drive_scan(device_target(source), credentials, false).map_err(|e| {
-        PipeFail::fatal(match &e {
-            libfreemkv::Error::DeviceNotFound { path } if path.is_empty() => {
-                strings::get("error.no_drive")
-            }
-            libfreemkv::Error::Halted => strings::get("rip.interrupted"),
-            _ => format!("{}", e),
-        })
-    })?;
+    let mut session = open_drive_scan(device_target(source), credentials, false)
+        .map_err(|e| reopen_failure(&e))?;
     // ── Pre-flight validation (borrows the scanned disc; no drive I/O) ──
     let batch = libfreemkv::disc::detect_max_batch_sectors(session.device_path());
     // Resolved -a/-s PID selection for this title (default = keep all).
     let mut selection = libfreemkv::StreamSelection::default();
     {
-        let disc = session.disc().expect("scan populated the disc");
+        let disc = session
+            .disc()
+            .ok_or_else(|| PipeFail::from_typed(libfreemkv::Error::NoStreams))?;
         // The same range + identity rules from `run()`'s scanned-source path; range
         // prevents a panic on `disc.titles[title_idx]`, identity catches a diverging re-scan.
         let title =
@@ -1883,10 +1934,9 @@ fn copy_verdict(r: &freemkv_engine::CopyResult) -> CopyVerdict {
         CopyVerdict::Interrupted
     } else if !disc_copy_recovered_data(r.bytes_good) {
         CopyVerdict::NoData
-    } else if r.bytes_unreadable > 0 || r.bytes_pending > 0 {
-        // Bytes the drive never delivered. `bytes_pending` counts as loss for
-        // the same reason `bytes_unreadable` does: they were attempted and
-        // skipped, and a single-pass sweep has no later pass to fetch them.
+    } else if !r.complete {
+        // The engine's own verdict: bytes unreadable or still pending (attempted and skipped;
+        // a single-pass sweep has no later pass to fetch them).
         CopyVerdict::Lossy
     } else {
         CopyVerdict::Complete
@@ -1986,7 +2036,7 @@ fn refuse_unstaged_titles(
     match freemkv_engine::ensure_titles_staged(image, disc, &titles) {
         Ok(()) => false,
         Err(e) => {
-            out.raw(Normal, &render_error(&e));
+            out.raw(Always, &render_error(&e));
             true
         }
     }
@@ -2172,7 +2222,7 @@ pub(crate) fn whole_disc(
     if let freemkv_engine::Output::Image { path, null: false } = &output
         && same_file(source_path_of(&plan.source).as_deref(), path)
     {
-        out.raw(Normal, &strings::get("error.dest_is_source"));
+        out.raw(Always, &strings::get("error.dest_is_source"));
         return 1;
     }
     out.raw(crate::output::Level::Verbose, &plan_line(plan));
@@ -2204,10 +2254,7 @@ pub(crate) fn whole_disc(
     match r {
         Ok(freemkv_engine::Report::Image {
             copy, disc, path, ..
-        }) => {
-            let null = matches!(output, freemkv_engine::Output::Image { null: true, .. });
-            render_copy(&copy, disc.as_deref(), &path, null, start, out)
-        }
+        }) => render_copy(&copy, disc.as_deref(), &path, start, out),
         Ok(freemkv_engine::Report::Tree { extract }) => match render_extract(&extract, out) {
             true => 0,
             false => 1,
@@ -2215,7 +2262,7 @@ pub(crate) fn whole_disc(
         // A whole-disc plan never reports a title.
         Ok(freemkv_engine::Report::Title { .. }) => 1,
         Err(libfreemkv::Error::Halted) => {
-            out.raw(Normal, &interrupted_text(&target));
+            out.raw(Normal, &halted_text(&output, &target));
             1
         }
         Err(e) => {
@@ -2231,9 +2278,17 @@ pub(crate) fn whole_disc(
                 }
                 None => render_error(&e),
             };
-            out.raw(Normal, &text);
+            out.raw(Always, &text);
             1
         }
+    }
+}
+
+// What a halted whole-disc run prints. Only an image resumes; a tree does not keep progress.
+fn halted_text(output: &freemkv_engine::Output, target: &std::path::Path) -> String {
+    match output {
+        freemkv_engine::Output::Image { .. } => interrupted_text(target),
+        _ => strings::get("rip.interrupted"),
     }
 }
 
@@ -2242,11 +2297,9 @@ fn render_copy(
     r: &freemkv_engine::CopyResult,
     disc: Option<&libfreemkv::Disc>,
     iso_path: &std::path::Path,
-    is_null: bool,
     start: std::time::Instant,
     out: &Output,
 ) -> i32 {
-    let _ = is_null;
     match copy_verdict(r) {
         // Ctrl-C halted the copy. Don't print "Complete" over a partial ISO — report
         // interrupted/failure so exit is non-zero. The mapfile is preserved for a resume.
@@ -2258,7 +2311,7 @@ fn render_copy(
         // unusable (but kept). A scripted caller checking $? must see non-zero.
         CopyVerdict::NoData => {
             out.raw(
-                Normal,
+                Always,
                 &crate::disc_copy_verdict::iso_no_data_error(r.bytes_unreadable),
             );
             1
@@ -2288,7 +2341,7 @@ fn render_copy(
                     .map(|(sz, dur)| main_title_bad as f64 / sz as f64 * dur)
                     .unwrap_or(0.0);
                 out.raw(
-                    Normal,
+                    Always,
                     &strings::fmt(
                         "rip.mapfile_summary",
                         &[
@@ -2301,13 +2354,13 @@ fn render_copy(
                 if main_lost_secs > 0.0 {
                     let main_str = fmt_damage_time(main_lost_secs);
                     out.raw(
-                        Normal,
+                        Always,
                         &strings::fmt("rip.damage_lost_movie", &[("time", &main_str)]),
                     );
                 }
                 // Always shown, even after `--multipass`: residual damage is never hidden.
                 out.raw(
-                    Normal,
+                    Always,
                     &crate::disc_copy_verdict::retry_with_multipass_hint(),
                 );
             }
@@ -2341,11 +2394,11 @@ fn render_extract(res: &libfreemkv::ExtractResult, out: &Output) -> bool {
         let lost = f.bytes_unreadable;
         if lost > 0 {
             out.raw(
-                Normal,
+                Always,
                 &strings::fmt(
                     "dir.file_lossy",
                     &[
-                        ("file", &f.path.display().to_string()),
+                        ("file", &sanitize(&f.path.display().to_string())),
                         ("lost", &format!("{:.2}", lost as f64 / 1_048_576.0)),
                     ],
                 ),
@@ -2371,7 +2424,7 @@ fn render_extract(res: &libfreemkv::ExtractResult, out: &Output) -> bool {
     } else {
         let lost_mb = res.bytes_lost() as f64 / 1_048_576.0;
         out.raw(
-            Normal,
+            Always,
             &strings::fmt(
                 "dir.lossy",
                 &[
@@ -2470,12 +2523,24 @@ fn print_disc_progress(
     speed_bps: u64,
     eta_secs: Option<u64>,
 ) {
+    if let Some(line) = disc_progress_line(p, speed_bps, eta_secs) {
+        eprint!("{line}");
+        let _ = std::io::stderr().flush();
+    }
+}
+
+// The repainted progress line; `None` while the disc size is unknown.
+fn disc_progress_line(
+    p: &libfreemkv::progress::PassProgress,
+    speed_bps: u64,
+    eta_secs: Option<u64>,
+) -> Option<String> {
     // Speed + ETA are the ENGINE's derivation (freemkv_engine::SpeedEstimator);
     // the CLI only formats them. bps → MB/s for display.
     let inst_speed_mbps = speed_bps as f64 / 1_048_576.0;
     let bytes_disc = p.bytes_total_disc;
     if bytes_disc == 0 {
-        return;
+        return None;
     }
     // For Patch modes (Trim/Scrape), show work_done/work_total percentage.
     // bytes_good_total doesn't advance until sectors are recovered, leaving
@@ -2503,7 +2568,7 @@ fn print_disc_progress(
         None => "?:??".into(),
     };
     let damage = fmt_disc_damage(p);
-    eprint!(
+    Some(format!(
         "\r  {:.1}/{:.1} GB ({:.1}%)  {}  ETA {}    {}    ",
         gb_done,
         gb_total,
@@ -2511,8 +2576,7 @@ fn print_disc_progress(
         fmt_speed(inst_speed_mbps),
         eta,
         damage,
-    );
-    let _ = std::io::stderr().flush();
+    ))
 }
 
 fn print_progress(done: u64, total: u64, start: &std::time::Instant) {
@@ -2847,6 +2911,19 @@ mod staged_image_tests {
             mux.contains("refuse_unstaged_titles(&src, disc, &jobs, &out)"),
             "iso:// -> MKV"
         );
+        // Its refusal is acted on (the run stops), and it comes before the title loop opens
+        // any output.
+        let call = mux
+            .find("refuse_unstaged_titles(&src, disc, &jobs, &out)")
+            .unwrap();
+        assert!(
+            mux[call..].lines().take(3).any(|l| l.trim() == "return 1;"),
+            "a refused scope must end the run"
+        );
+        assert!(
+            !mux[..call].contains("run_titles_with("),
+            "the scope check must come before any title is muxed"
+        );
     }
 }
 
@@ -2994,6 +3071,35 @@ mod tests {
                 _ => dest.to_string(),
             };
             let parsed_dest = parse_url(&dest_owned);
+
+            // 2b. The invocation must pass the upfront validator, with a source that exists.
+            let parsed_src = parse_url(source);
+            let source_owned = match &parsed_src {
+                libfreemkv::StreamUrl::Iso { .. } => {
+                    let f = scratch.join(format!("src-{key}.iso"));
+                    std::fs::write(&f, [0u8; 16]).expect("scratch source");
+                    format!("iso://{}", f.display())
+                }
+                // A named device would have to exist; auto-detect has the same rules.
+                libfreemkv::StreamUrl::Disc { .. } => "disc://".to_string(),
+                _ => source.to_string(),
+            };
+            let selection_flags_used =
+                !flags.streams.is_all() || !flags.title_nums.is_empty() || flags.all_titles;
+            if let Err(msg) = preflight_validate(
+                &source_owned,
+                &dest_owned,
+                &parse_url(&source_owned),
+                &parsed_dest,
+                flags.raw,
+                flags.multipass,
+                flags.force,
+                selection_flags_used,
+            ) {
+                panic!(
+                    "usage.ex.{key} is printed by `freemkv --help` but is refused: {msg}\n  {line}"
+                );
+            }
 
             // 3. The job set must build. `None` is the CLI's hard rejection —
             //    the exact path `-t 1 -t 3` into `mkv://Movie.mkv` took.
@@ -3268,6 +3374,88 @@ mod tests {
         assert_eq!(PipeFail::fatal("boom".into()).result, TitleResult::Failed);
     }
 
+    // A halted tree extraction is not resumable: no "Progress kept" even though the dir exists.
+    #[test]
+    fn a_halted_tree_does_not_claim_kept_progress() {
+        let dir = temp_path("halted-tree");
+        std::fs::create_dir_all(&dir).unwrap();
+        let tree = freemkv_engine::Output::Tree { path: dir.clone() };
+        assert_eq!(
+            super::halted_text(&tree, &dir),
+            crate::strings::get("rip.interrupted")
+        );
+        let image = freemkv_engine::Output::Image {
+            path: dir.clone(),
+            null: false,
+        };
+        assert_ne!(
+            super::halted_text(&image, &dir),
+            crate::strings::get("rip.interrupted")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Under -q a failure is still reported (the exit code is 1) and a lossy tree still names
+    // its holes, with the disc-derived path neutralised.
+    #[test]
+    fn errors_and_loss_show_under_quiet() {
+        let quiet = Output::new(false, true);
+        let ((), printed) = crate::output::capture(|| {
+            let r = super::report_keys(Err(libfreemkv::Error::NoStreams), &quiet);
+            assert!(r.is_none());
+        });
+        assert!(!printed.is_empty(), "a key refusal must show under -q");
+        let res = libfreemkv::ExtractResult {
+            files: vec![libfreemkv::FileResult {
+                path: "a\u{1b}[2Jb".into(),
+                bytes_good: 0,
+                bytes_unreadable: 4096,
+                complete: false,
+            }],
+            ..Default::default()
+        };
+        let (ok, printed) = crate::output::capture(|| super::render_extract(&res, &quiet));
+        assert!(!ok);
+        assert!(!printed.contains('\u{1b}'), "{printed:?}");
+        assert!(printed.lines().count() >= 2, "{printed:?}");
+    }
+
+    // A Ctrl-C while a title reopens the drive is a full stop, not a failed title.
+    #[test]
+    fn a_ctrl_c_during_the_drive_reopen_is_a_halt() {
+        use freemkv_engine::TitleResult;
+        assert_eq!(
+            super::reopen_failure(&libfreemkv::Error::Halted).result,
+            TitleResult::Halted
+        );
+        assert_eq!(
+            super::reopen_failure(&libfreemkv::Error::DeviceNotFound {
+                path: String::new()
+            })
+            .result,
+            TitleResult::Failed
+        );
+    }
+
+    // A panic elsewhere must not turn every later progress event into another panic.
+    #[test]
+    fn a_poisoned_progress_mutex_does_not_panic_the_event_callbacks() {
+        let events = std::sync::Arc::new(super::CliMuxEvents::new(
+            Output::new(false, false),
+            "mkv://x".into(),
+            false,
+        ));
+        let e = events.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = e.start.lock().unwrap();
+            let _also = e.last_update.lock().unwrap();
+            panic!("poison both");
+        })
+        .join();
+        assert!(events.start().is_none());
+        events.on_write_progress(1, 2);
+    }
+
     // The skip/stop/fail POLICY (decide_title) is unit-tested in freemkv-engine;
     // the CLI only classifies PipeFail into a TitleResult (above), so it doesn't re-test the policy.
 
@@ -3531,6 +3719,12 @@ mod tests {
         let pct = p.work_pct();
         assert!(pct.is_finite(), "work_total==0 must not yield NaN%");
         assert_eq!(pct, 100.0);
+        // And the CLI line built from it, for a pass with a known disc size.
+        let mut p = p;
+        p.bytes_total_disc = 10_000;
+        let line = super::disc_progress_line(&p, 0, None).expect("the disc size is known");
+        assert!(!line.contains("NaN"), "{line}");
+        assert!(line.contains("(100.0%)"), "{line}");
     }
 
     #[test]
@@ -5260,6 +5454,7 @@ mod verdict_tests {
         // and nothing later in a single-pass run will pick them up.
         let mut pending = copy_result(false, 25_000_000_000, 0);
         pending.bytes_pending = 8192;
+        pending.complete = false; // as the engine derives it
         assert_ne!(
             copy_verdict(&pending),
             CopyVerdict::Complete,
@@ -5301,6 +5496,31 @@ mod verdict_tests {
         // The reporting half, source-pinned (needs a real drive): the loss block
         // must be reached by the VERDICT, never `if multipass` — and must always
         // print the retry hint, or unretried pending bytes go unmentioned.
+        let quiet = Output::new(false, true);
+        let lossy = freemkv_engine::CopyResult {
+            bytes_total: 10 << 20,
+            bytes_good: 9 << 20,
+            bytes_unreadable: 1 << 20,
+            bytes_pending: 0,
+            recovered_this_pass: 0,
+            complete: false,
+            halted: false,
+        };
+        let (code, printed) = crate::output::capture(|| {
+            super::render_copy(
+                &lossy,
+                None,
+                std::path::Path::new("/nonexistent/x.iso"),
+                std::time::Instant::now(),
+                &quiet,
+            )
+        });
+        assert_eq!(code, DISC_COPY_DAMAGED_EXIT, "{printed}");
+        assert!(
+            printed.contains("--multipass"),
+            "a damaged copy reports its loss and the retry even under -q: {printed:?}"
+        );
+
         let src = include_str!("pipe.rs").replace("\r\n", "\n");
         let start = src
             .find("\nfn render_copy(")
@@ -5427,6 +5647,13 @@ mod verdict_tests {
             err.to_lowercase().contains("eng") || err.contains("jpn"),
             "the message should name the languages involved: {err}"
         );
+        // The title loop renders the failure with the level word; it must not be there already.
+        let level = crate::strings::get(crate::messaging::Level::Error.locale_key());
+        assert_eq!(
+            super::render_error(&err).matches(&level).count(),
+            1,
+            "{err}"
+        );
 
         // Same title in a batch: warn loudly and keep going. Assert the
         // warning is actually emitted, not just that the call returns Ok, or
@@ -5522,6 +5749,49 @@ mod build_jobs_edge_tests {
         assert_eq!(jobs, vec![(Some(0), file.to_string())]);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A disc source's one title into a directory is named per title, as an image's is.
+    #[test]
+    fn one_disc_title_into_a_directory_is_named_per_title() {
+        let out = Output::new(false, true);
+        let dir = super::tests::temp_path("disc-one-into-dir");
+        let dest = format!("mkv://{}/", dir.display());
+        let parsed = parse_url(&dest);
+        let jobs = build_jobs(&None, true, &[2], true, &dest, &parsed, &out)
+            .expect("a directory dest accepts a single title");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].0, Some(1), "-t 2 is the second title, 0-based");
+        assert!(jobs[0].1.ends_with("disc_t2.mkv"), "got {}", jobs[0].1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Several titles of an image into one FILE are refused, as for a disc.
+    #[test]
+    fn several_image_titles_refuse_a_single_file_destination() {
+        let out = Output::new(false, true);
+        let dest = "mkv:///tmp/fmkv-img-multi-refuse.mkv";
+        let parsed = parse_url(dest);
+        let titles = Some(vec![
+            libfreemkv::DiscTitle::empty(),
+            libfreemkv::DiscTitle::empty(),
+        ]);
+        assert!(build_jobs(&titles, false, &[1, 2], false, dest, &parsed, &out).is_none());
+        assert!(!std::path::Path::new("/tmp/fmkv-img-multi-refuse.mkv").exists());
+    }
+
+    // A destination directory that cannot be read cannot be shown empty.
+    #[test]
+    fn an_unreadable_dir_dest_is_refused_not_read_as_empty() {
+        let base = super::tests::temp_path("unreadable-dest");
+        std::fs::create_dir_all(&base).unwrap();
+        let file = base.join("plain-file");
+        std::fs::write(&file, b"x").unwrap();
+        let under_file = file.join("sub");
+        assert!(super::validate_dir_dest(&under_file, "dir://x", false).is_err());
+        // A missing directory is still just empty.
+        assert!(super::validate_dir_dest(&base.join("missing"), "dir://x", false).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -5911,6 +6181,23 @@ mod language_escape_tests {
         );
         assert!(msg.contains("eng"), "got {msg:?}");
     }
+
+    /// The title loop prefixes the level word when it renders the failure, so the
+    /// message itself carries none ("Error: Error: ...").
+    #[test]
+    fn an_unknown_language_message_carries_no_level_word() {
+        let title = title_with_language("eng");
+        let msg = render_stream_sel_error(
+            &freemkv_engine::StreamSelError::UnknownLanguage { tag: "zz".into() },
+            &title,
+        );
+        let level = crate::strings::get(crate::messaging::Level::Error.locale_key());
+        assert_eq!(
+            super::render_error(&msg).matches(&level).count(),
+            1,
+            "{msg}"
+        );
+    }
 }
 
 // ── A title's POSITION is not its identity across an independent re-scan ──────
@@ -6260,7 +6547,7 @@ mod formatter_tests {
         let src = dir.join("src.mpg");
         crate::lossy::mpg_source_fixture(&src);
         let dest = format!("mp4://{}/missing/x.mp4", dir.display());
-        let events = std::sync::Arc::new(CliMuxEvents::new(loud(), dest.clone(), false));
+        let events = std::sync::Arc::new(super::CliMuxEvents::new(loud(), dest.clone(), false));
         let url = format!("mpg://{}", src.display());
         let opts = libfreemkv::MuxOptions {
             skip_errors: false,
