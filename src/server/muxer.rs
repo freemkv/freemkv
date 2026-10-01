@@ -448,9 +448,9 @@ pub(crate) fn persist_terminal_mux_quarantine(path_str: &str, dir: &Path, reason
     landed
 }
 
-// Raise the card for a failed worker mux. A TERMINAL failure (structural finalize error, e.g.
-// E6008) also transitions state → Failed so `mux_dispatch_verdict` stops re-Dispatching; when
-// that write doesn't land, its own card (why the dir keeps retrying) is the one kept.
+// Raise the card for a failed worker mux; true when it quarantined the dir. A TERMINAL failure
+// (structural finalize, e.g. E6008) transitions state → Failed so dispatch stops; when that
+// write doesn't land, its own card (why the dir keeps retrying) is the one kept.
 fn record_mux_failure(
     path_str: &str,
     dir: &Path,
@@ -458,11 +458,13 @@ fn record_mux_failure(
     hint: &str,
     terminal: bool,
     announce: bool,
-) {
-    if terminal && !persist_terminal_mux_quarantine(path_str, dir, reason) {
-        return;
+) -> bool {
+    let quarantined = terminal && persist_terminal_mux_quarantine(path_str, dir, reason);
+    if terminal && !quarantined {
+        return false;
     }
     record_error_announced(path_str, reason, hint, announce);
+    quarantined
 }
 
 // Find all staging dirs with a `.ripped` marker and dispatch each through
@@ -669,7 +671,10 @@ fn check_and_mux(cfg_arc: &Arc<RwLock<Config>>) {
                 is_finalize: outcome.failure_finalize,
             });
             let repeat = outcome.failure_space && prior_space_refusal;
-            record_mux_failure(&path_str, &dir, &reason, &hint, terminal, !repeat);
+            if record_mux_failure(&path_str, &dir, &reason, &hint, terminal, !repeat) {
+                // Quarantined: no later mux of this ISO will use the rip's held keys.
+                crate::server::keysource::forget_rip_keys(Path::new(&marker.iso_path));
+            }
         }
     }
 }
@@ -2022,13 +2027,16 @@ mod tests {
         std::fs::create_dir_all(dir.join(crate::server::ripper::staging::STATE_FILE)).unwrap();
         let path = dir.to_string_lossy().to_string();
         clear_error(&path);
-        record_mux_failure(
-            &path,
-            &dir,
-            "E6008 no muxable frames",
-            "generic",
-            true,
-            true,
+        assert!(
+            !record_mux_failure(
+                &path,
+                &dir,
+                "E6008 no muxable frames",
+                "generic",
+                true,
+                true
+            ),
+            "an unpersisted quarantine is not a quarantine (the dir keeps its keys)"
         );
         let hint = MUX_ERRORS
             .lock()
@@ -2038,6 +2046,29 @@ mod tests {
         clear_error(&path);
         let hint = hint.expect("a card must be raised");
         assert_ne!(hint, "generic", "the quarantine card was overwritten");
+
+        // A landed quarantine reports itself (its rip keys are then released).
+        let ok = tmp.path().join("Writable");
+        std::fs::create_dir_all(&ok).unwrap();
+        crate::server::ripper::staging::write_state(
+            &ok,
+            &crate::server::ripper::staging::DiscState::new(
+                crate::server::ripper::staging::StagingState::Ripped,
+            ),
+        );
+        let ok_path = ok.to_string_lossy().to_string();
+        assert!(record_mux_failure(
+            &ok_path, &ok, "E6008", "generic", true, true
+        ));
+        assert!(!record_mux_failure(
+            &ok_path,
+            &ok,
+            "read error",
+            "generic",
+            false,
+            true
+        ));
+        clear_error(&ok_path);
     }
 
     // TRANSITION: ripped → completed. After `.completed` is written, a
