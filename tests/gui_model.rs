@@ -28,6 +28,7 @@ fn row(type_s: &str, desc: &str, depth: u8, checkable: bool, title: usize) -> Sc
         lang: String::new(),
         forced: false,
         mirrors: None,
+        size_bytes: None,
     }
 }
 
@@ -564,6 +565,36 @@ fn a_stream_hangs_off_its_own_title_not_the_previous_one() {
 }
 
 #[test]
+fn only_title_rows_fill_the_length_and_size_columns() {
+    // Every shell draws these two cells straight from the view; the disc row
+    // and the stream rows under a title leave both blank.
+    let mut sc = two_title_disc();
+    for r in sc.rows.iter_mut().filter(|r| r.depth == 1) {
+        r.size_bytes = Some(6_800_000_000);
+    }
+    let mut app = App::new();
+    app.tree = tree(&sc, "All titles", 0.0);
+    app.page = Page::Titles;
+    let rows = app.view().title_rows;
+    let cells = |type_s: &str| -> Vec<(String, String)> {
+        rows.iter()
+            .filter(|r| r.type_s == type_s)
+            .map(|r| (r.length.clone(), r.size.clone()))
+            .collect()
+    };
+    assert_eq!(
+        cells("Title"),
+        vec![
+            ("1:30:00".to_string(), "6.8 GB".to_string()),
+            ("10:00".to_string(), "6.8 GB".to_string()),
+        ]
+    );
+    for r in rows.iter().filter(|r| r.type_s != "Title") {
+        assert!(r.length.is_empty() && r.size.is_empty(), "{r:?}");
+    }
+}
+
+#[test]
 fn row_parents_never_drops_a_row() {
     // A row the core decided to show must always be reachable. A malformed
     // list (a stream before any title) must put the orphan at the top level,
@@ -573,6 +604,8 @@ fn row_parents_never_drops_a_row() {
         depth,
         type_s: "Audio".into(),
         desc: "stray".into(),
+        length: String::new(),
+        size: String::new(),
         check: Some(Check::Off),
         check_enabled: true,
     };

@@ -39,6 +39,9 @@ pub struct Row {
     /// base 0xC0|n, "disabled and mirrors the base" (mpg-output-design v5 §3).
     /// `None` for every other row.
     pub mirrors: Option<u16>,
+    /// The title's size in bytes, for the tree's Size column. `Some` only on a
+    /// disc's Title rows; a stream source reports no size, and no other row has one.
+    pub size_bytes: Option<u64>,
 }
 
 /// What the shell needs after a scan. Pure data — no engine types.
@@ -115,6 +118,21 @@ impl KeySnapshot {
 fn fmt_dur(secs: f64) -> String {
     let s = secs.max(0.0) as u64;
     format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
+/// A disc title's Description cell: `"1. 00800.mpls (19 chapters)"`.
+///
+/// Numbered 1-based and named after the playlist, exactly as `freemkv info`
+/// lists them, so a title here and `-t N` on the CLI refer to the same thing.
+/// Running time and size are the row's Length and Size cells, not part of this
+/// text. `name` must already be sanitised for display.
+pub(crate) fn title_desc(index: usize, name: &str, chapters: usize) -> String {
+    let unit = if chapters == 1 { "chapter" } else { "chapters" };
+    if name.is_empty() {
+        format!("{}. ({chapters} {unit})", index + 1)
+    } else {
+        format!("{}. {name} ({chapters} {unit})", index + 1)
+    }
 }
 
 fn fmt_gb(bytes: u64) -> String {
@@ -256,6 +274,7 @@ fn stream_rows(t: &libfreemkv::DiscTitle, ti: usize) -> Vec<Row> {
                 lang,
                 forced,
                 mirrors,
+                size_bytes: None,
             }
         })
         .collect()
@@ -305,14 +324,12 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
         lang: String::new(),
         forced: false,
         mirrors: None,
+        size_bytes: None,
     }];
     rows.push(Row {
         type_s: "Title".into(),
-        desc: format!(
-            "{} track(s) , {}",
-            t.streams.len(),
-            fmt_dur(t.duration_secs)
-        ),
+        // The running time is the row's Length cell, not part of this text.
+        desc: format!("{} track(s)", t.streams.len()),
         depth: 1,
         checkable: true,
         title: 0,
@@ -327,6 +344,7 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
         lang: String::new(),
         forced: false,
         mirrors: None,
+        size_bytes: None,
     });
     rows.extend(stream_rows(t, 0));
 
@@ -547,29 +565,15 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
         lang: String::new(),
         forced: false,
         mirrors: None,
+        size_bytes: None,
     });
 
     for (ti, t) in disc.titles.iter().enumerate() {
         rows.push(Row {
             type_s: "Title".into(),
-            // Numbered 1-based and named after the playlist, exactly as
-            // `freemkv info` lists them, so a title here and `-t N` on the
-            // CLI refer to the same thing.
-            desc: format!(
-                "{}.  {}{} chapter(s) , {} , {}",
-                ti + 1,
-                if t.playlist.is_empty() {
-                    String::new()
-                } else {
-                    // The playlist name is a filename read off the disc, so it
-                    // is untrusted display bytes like the volume id and the
-                    // stream labels.
-                    format!("{}   ", sanitize_display(&t.playlist))
-                },
-                t.chapters.len(),
-                fmt_dur(t.duration_secs),
-                fmt_gb(t.size_bytes)
-            ),
+            // The playlist name is a filename read off the disc, so it is
+            // untrusted display bytes like the volume id and the stream labels.
+            desc: title_desc(ti, &sanitize_display(&t.playlist), t.chapters.len()),
             depth: 1,
             checkable: true,
             title: ti,
@@ -586,6 +590,7 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
             lang: String::new(),
             forced: false,
             mirrors: None,
+            size_bytes: Some(t.size_bytes),
         });
         rows.extend(stream_rows(t, ti));
     }
@@ -4739,6 +4744,7 @@ mod routing_tests {
             lang: String::new(),
             forced: false,
             mirrors: None,
+            size_bytes: None,
         };
         let mut rows = vec![Row {
             depth: 0,
@@ -6043,6 +6049,50 @@ mod display_sanitisation_tests {
                 h.info
             );
         }
+    }
+
+    /// The Length and Size columns read typed fields: a title row carries its
+    /// running time and size as data, and neither as Description text.
+    #[test]
+    fn a_title_row_carries_its_size_as_data_not_description_text() {
+        let mut disc = benign_disc();
+        let t = &mut disc.titles[0];
+        t.playlist = "VTS_01_2.VOB".into();
+        t.duration_secs = 8600.0;
+        t.size_bytes = 6_800_000_000;
+        t.chapters = (0..19)
+            .map(|i| libfreemkv::disc::Chapter {
+                time_secs: f64::from(i) * 400.0,
+                name: (i + 1).to_string(),
+            })
+            .collect();
+        let rows = scanned_from_disc(&disc, "none".into()).rows;
+        let disc_row = &rows[0];
+        assert_eq!(
+            disc_row.desc, BENIGN,
+            "the disc row shows only the volume name"
+        );
+        assert_eq!(disc_row.size_bytes, None);
+        let title = &rows[1];
+        assert_eq!(title.desc, "1. VTS_01_2.VOB (19 chapters)");
+        assert_eq!(title.duration_secs, 8600.0);
+        assert_eq!(title.size_bytes, Some(6_800_000_000));
+        for r in rows.iter().filter(|r| r.depth == 2) {
+            assert_eq!(r.size_bytes, None, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn a_title_description_counts_chapters_in_the_right_number() {
+        assert_eq!(
+            super::title_desc(0, "00800.mpls", 1),
+            "1. 00800.mpls (1 chapter)"
+        );
+        assert_eq!(
+            super::title_desc(4, "00800.mpls", 0),
+            "5. 00800.mpls (0 chapters)"
+        );
+        assert_eq!(super::title_desc(1, "", 12), "2. (12 chapters)");
     }
 
     /// The payload has to be able to fail the assertion — a filter that

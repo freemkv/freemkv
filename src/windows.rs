@@ -4451,6 +4451,7 @@ mod tests {
                 lang: String::new(),
                 forced: false,
                 mirrors: None,
+                size_bytes: None,
             }
         }
         let mut rows = vec![row("Bluray disc", "TEST_DISC", 0, false, usize::MAX)];
@@ -4609,6 +4610,8 @@ mod tests {
             depth: 2,
             type_s: "Audio".into(),
             desc: String::new(),
+            length: String::new(),
+            size: String::new(),
             check,
             check_enabled,
         };

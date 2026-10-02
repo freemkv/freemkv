@@ -381,6 +381,8 @@ mod tests {
             depth,
             type_s: t.into(),
             desc: format!("d{i}"),
+            length: String::new(),
+            size: String::new(),
             check: Some(Check::Off),
             check_enabled: true,
         }
