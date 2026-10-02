@@ -1211,7 +1211,16 @@ pub struct InfoRows {
 impl InfoRows {
     /// `dest` is the output FILE, not the folder — the label says "Output
     /// file" and showing a directory there is simply wrong.
-    pub fn starting(source: &str, dest: &str) -> Self {
+    ///
+    /// `scanned` is what the scan says the rip will read
+    /// ([`scanned_source_bytes`]). A source that is a regular file (an ISO
+    /// image, a container) shows the file's length; anything else (a drive, a
+    /// disc folder) shows `scanned`, or an em dash without it.
+    pub fn starting(source: &str, dest: &str, scanned: Option<u64>) -> Self {
+        let file_len = std::fs::metadata(source)
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| m.len());
         InfoRows {
             source: source.to_string(),
             source_file: std::path::Path::new(source)
@@ -1221,9 +1230,10 @@ impl InfoRows {
                 .to_string(),
             // Never leave the row blank — a blank Information field reads as
             // a broken panel (reported). An unknown value is an em dash.
-            source_size: std::fs::metadata(source)
-                .map(|m| fmt_bytes(m.len()))
-                .unwrap_or_else(|_| "—".into()),
+            source_size: file_len
+                .or(scanned)
+                .map(fmt_bytes)
+                .unwrap_or_else(|| "—".into()),
             read_rate: "—".into(),
             output_file: dest.to_string(),
             output_size: "0 B".into(),
@@ -1256,6 +1266,28 @@ impl InfoRows {
             &self.free_space,
         ]
     }
+}
+
+/// What a rip from a drive or disc folder reads, from the scan: the disc's
+/// capacity for a whole-disc output, else the sum of the ticked titles' sizes.
+/// `None` when any part of that is unknown (a `0` size or capacity, a title the
+/// scan does not list, nothing ticked), so the row never shows a guess.
+pub fn scanned_source_bytes(
+    format: &str,
+    titles: &[usize],
+    title_sizes: &[u64],
+    capacity: u64,
+) -> Option<u64> {
+    if format.starts_with("Whole disc") {
+        return (capacity > 0).then_some(capacity);
+    }
+    if titles.is_empty() {
+        return None;
+    }
+    titles.iter().try_fold(0u64, |sum, t| {
+        let size = *title_sizes.get(*t)?;
+        (size > 0).then(|| sum.saturating_add(size))
+    })
 }
 
 /// Read rate for display. `speed_bps` is engine-derived; never recompute it.
@@ -1772,6 +1804,11 @@ pub struct App {
     /// input to `fit`/`container_mismatch`, and gating those tests
     /// behind a fixture is why they did not run in CI.
     pub video_codecs: Vec<String>,
+    /// Each title's size and the disc's capacity, from the scan
+    /// (`Scanned::title_sizes`, `Scanned::capacity_bytes`): the Source size row
+    /// of a source that is not a file.
+    pub title_sizes: Vec<u64>,
+    pub capacity_bytes: u64,
     /// What each title NUMBER referred to on the scan the tree was built from,
     /// indexed by canonical title index.
     ///
@@ -1994,6 +2031,8 @@ impl App {
             result_outcome: crate::engine::RunOutcome::default(),
             selected_row: None,
             video_codecs: Vec::new(),
+            title_sizes: Vec::new(),
+            capacity_bytes: 0,
             title_ids: Vec::new(),
             disc_label: String::new(),
             seed: None,
@@ -2528,6 +2567,8 @@ impl App {
                     self.say(LogKind::Detail, line);
                 }
                 self.video_codecs = sc.video_codecs.clone();
+                self.title_sizes = sc.title_sizes.clone();
+                self.capacity_bytes = sc.capacity_bytes;
                 // What the tree's title numbers refer to, kept so the request
                 // can carry it to the engine's own (later) scan.
                 self.title_ids = sc.title_ids.clone();
@@ -2726,7 +2767,13 @@ impl App {
             &self.settings.filename_template,
             &self.disc_label,
         );
-        self.info = Some(InfoRows::starting(&self.source, &out_file));
+        let scanned = scanned_source_bytes(
+            &self.effective_format(),
+            &titles,
+            &self.title_sizes,
+            self.capacity_bytes,
+        );
+        self.info = Some(InfoRows::starting(&self.source, &out_file, scanned));
         self.page = Page::Progress;
         self.say(
             LogKind::Result,
@@ -4323,12 +4370,99 @@ mod tests {
             key_summary: "none".to_string(),
             title_count: 1,
             video_codecs: vec!["HEVC".to_string()],
+            title_sizes: Vec::new(),
+            capacity_bytes: 0,
             title_ids: Vec::new(),
             details: Vec::new(),
             keys: None,
             needs_disc: false,
             refusal: None,
         }
+    }
+
+    /// A drive's Source size is what the scan says the rip reads: the ticked titles' total,
+    /// or the disc's capacity for a whole-disc output.
+    #[test]
+    fn a_drive_source_sizes_from_the_scan() {
+        let sizes = [4_000_000_000, 0, 1_500_000_000];
+        let iso = "Whole disc → ISO image";
+        let mkv = "Selected titles → MKV";
+        assert_eq!(
+            scanned_source_bytes(mkv, &[0, 2], &sizes, 8_500_000_000),
+            Some(5_500_000_000)
+        );
+        assert_eq!(
+            scanned_source_bytes(iso, &[0], &sizes, 8_500_000_000),
+            Some(8_500_000_000)
+        );
+        assert_eq!(
+            scanned_source_bytes("Whole disc → decrypted folder", &[], &sizes, 8_500_000_000),
+            Some(8_500_000_000)
+        );
+        // Unknown is never a guess: an unsized title, a title the scan does not
+        // list, nothing ticked, or no capacity.
+        assert_eq!(scanned_source_bytes(mkv, &[0, 1], &sizes, 1), None);
+        assert_eq!(scanned_source_bytes(mkv, &[3], &sizes, 1), None);
+        assert_eq!(scanned_source_bytes(mkv, &[], &sizes, 1), None);
+        assert_eq!(scanned_source_bytes(iso, &[0], &sizes, 0), None);
+    }
+
+    /// The row shows a regular file's own length, else the scan's figure, else an em dash;
+    /// a folder's directory-entry size is never shown.
+    #[test]
+    fn the_source_size_row_uses_the_file_else_the_scan() {
+        let dir = crate::ku_fixtures::TempDir::new("info-source-size");
+        let iso = dir.path().join("Disc.iso");
+        std::fs::write(&iso, [0u8; 2048]).unwrap();
+        let iso = iso.to_str().unwrap();
+        let folder = dir.path().to_str().unwrap();
+        let row = |src: &str, scanned| InfoRows::starting(src, "/out/x.mkv", scanned);
+        assert_eq!(
+            row("disc://", Some(5 << 30)).source_size,
+            fmt_bytes(5 << 30)
+        );
+        assert_eq!(row("disc://", None).source_size, "—");
+        assert_eq!(row(folder, Some(3 << 30)).source_size, fmt_bytes(3 << 30));
+        assert_eq!(row(folder, None).source_size, "—");
+        assert_eq!(row(iso, Some(9 << 30)).source_size, fmt_bytes(2048));
+    }
+
+    /// Open keeps the scan's sizes for the Information panel, and a later
+    /// container open clears them.
+    #[test]
+    fn open_keeps_the_scans_title_sizes_and_capacity() {
+        let mut app = App::new();
+        let mut sc = probe_scan();
+        sc.title_sizes = vec![7_000_000_000];
+        sc.capacity_bytes = 8_500_000_000;
+        app.apply_scan("disc:///dev/sr0", Ok(sc), true);
+        assert_eq!(app.title_sizes, vec![7_000_000_000]);
+        assert_eq!(app.capacity_bytes, 8_500_000_000);
+        assert_eq!(
+            scanned_source_bytes(
+                &app.effective_format(),
+                &app.tree.ticked_titles(),
+                &app.title_sizes,
+                app.capacity_bytes,
+            )
+            .map(fmt_bytes),
+            Some(fmt_bytes(7_000_000_000))
+        );
+        app.apply_scan("/media/clip.mkv", Ok(probe_scan()), true);
+        assert!(app.title_sizes.is_empty());
+        assert_eq!(app.capacity_bytes, 0);
+    }
+
+    // A source pin: Start builds the panel from the scan's sizes for the ticked titles.
+    #[test]
+    fn start_sizes_the_source_row_from_the_scan() {
+        let src = include_str!("ui.rs").replace("\r\n", "\n");
+        let start = src
+            .find("\n    fn start_run(&mut self)")
+            .expect("start_run definition present");
+        let body = &src[start..start + src[start..].find("\n    }\n").unwrap()];
+        assert!(body.contains("scanned_source_bytes(\n            &self.effective_format(),\n            &titles,\n            &self.title_sizes,\n            self.capacity_bytes,\n        );"));
+        assert!(body.contains("InfoRows::starting(&self.source, &out_file, scanned)"));
     }
 
     /// FK11, GUI half (KU §4.2 “GUI (image source or staged ISO) | An "Insert the disc"
@@ -4713,6 +4847,8 @@ mod tests {
                 title_count: 0,
                 key_summary: String::new(),
                 video_codecs: vec![],
+                title_sizes: Vec::new(),
+                capacity_bytes: 0,
                 title_ids: vec![],
                 rows: vec![],
                 details: vec![],

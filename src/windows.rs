@@ -4475,6 +4475,8 @@ mod tests {
             key_summary: "keys: none needed".into(),
             title_count: 2,
             video_codecs: vec!["H.264".into(), "H.264".into()],
+            title_sizes: Vec::new(),
+            capacity_bytes: 0,
             // The identities the ticked title numbers refer to. This fixture
             // is a self-test harness, so an empty set is right: every identity
             // check is inert, which is what a synthetic disc wants.

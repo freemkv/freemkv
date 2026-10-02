@@ -60,6 +60,14 @@ pub struct Scanned {
     /// UI say "MP4 cannot hold MPEG-2" BEFORE a rip instead of surfacing a
     /// bare E9048 after one.
     pub video_codecs: Vec<String>,
+    /// Each title's size in bytes as the disc's own tables give it, indexed by
+    /// canonical title index (the shape `video_codecs` uses); `0` where the
+    /// scan does not know it. Empty for a container source, whose size is its
+    /// file's.
+    pub title_sizes: Vec<u64>,
+    /// The disc's capacity in bytes; `0` for a container source or when the
+    /// scan does not know it.
+    pub capacity_bytes: u64,
     /// The `freemkv info -v` detail block (format, capacity, region, MKB
     /// version, disc hash, VID, key state, title list) — shown in the log on
     /// open so the desktop app surfaces the same disc facts the CLI does.
@@ -354,6 +362,8 @@ pub fn scan_stream_under(path: &str, keys: &KeyConfig, tok: &OpenToken) -> Resul
                 .map(|v| v.codec.to_string())
                 .unwrap_or_default(),
         ],
+        title_sizes: Vec::new(),
+        capacity_bytes: 0,
         // A container is ONE title and it is the file itself; there is no
         // number to carry across a re-scan, but the shape stays the same as
         // the disc scan's so the request never has to special-case it.
@@ -606,6 +616,8 @@ fn scanned_from_disc(disc: &libfreemkv::Disc, summary: String) -> Scanned {
                     .unwrap_or_default()
             })
             .collect(),
+        title_sizes: disc.titles.iter().map(|t| t.size_bytes).collect(),
+        capacity_bytes: disc.capacity_bytes,
         title_ids: disc.titles.iter().map(TitleIdentity::of).collect(),
         rows,
         details,
@@ -4125,6 +4137,22 @@ mod disc_details_tests {
         assert!(!lines.iter().any(|l| l.starts_with("MKB")), "{lines:?}");
     }
 
+    /// The scan carries each title's size and the disc's capacity as numbers,
+    /// in canonical title order, for the Information panel's Source size row.
+    #[test]
+    fn a_disc_scan_carries_title_sizes_and_capacity() {
+        let mut d = disc(false);
+        d.capacity_bytes = 8_500_000_000;
+        for size in [4_000_000_000, 0] {
+            let mut t = libfreemkv::DiscTitle::empty();
+            t.size_bytes = size;
+            d.titles.push(t);
+        }
+        let sc = super::scanned_from_disc(&d, "unencrypted".into());
+        assert_eq!(sc.title_sizes, vec![4_000_000_000, 0]);
+        assert_eq!(sc.capacity_bytes, 8_500_000_000);
+    }
+
     #[test]
     fn zero_capacity_omits_the_capacity_line() {
         let mut d = disc(false);
@@ -4762,6 +4790,8 @@ mod routing_tests {
             key_summary: String::new(),
             title_count: 2,
             video_codecs: vec!["H.264".into(); 2],
+            title_sizes: Vec::new(),
+            capacity_bytes: 0,
             title_ids: Vec::new(),
             details: vec![],
             keys: None,

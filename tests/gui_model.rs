@@ -64,6 +64,8 @@ fn video_only_disc() -> Scanned {
         // list is exactly what a caller with no scan behind it promises.
         title_ids: vec![],
         video_codecs: vec!["H.264".into()],
+        title_sizes: Vec::new(),
+        capacity_bytes: 0,
         details: vec![],
         keys: None,
         needs_disc: false,
@@ -85,6 +87,8 @@ fn disc(titles: &[(f64, usize)]) -> Scanned {
         title_count: titles.len(),
         title_ids: vec![],
         video_codecs: vec!["H.264".into(); titles.len()],
+        title_sizes: Vec::new(),
+        capacity_bytes: 0,
         details: vec![],
         keys: None,
         needs_disc: false,
@@ -125,6 +129,8 @@ fn mp2_extension_disc() -> Scanned {
         title_count: 1,
         title_ids: vec![],
         video_codecs: vec!["MPEG-2".into()],
+        title_sizes: Vec::new(),
+        capacity_bytes: 0,
         details: vec![],
         keys: None,
         needs_disc: false,
@@ -1063,7 +1069,7 @@ fn a_source_with_no_stem_still_produces_a_usable_name() {
 fn the_information_panel_has_a_label_for_every_value() {
     // The shells zip labels against values positionally; a mismatch shifts
     // every row's meaning by one.
-    let rows = InfoRows::starting("/media/Disc.iso", "/out/Disc_t1.mkv");
+    let rows = InfoRows::starting("/media/Disc.iso", "/out/Disc_t1.mkv", None);
     assert_eq!(InfoRows::labels().len(), rows.as_array().len());
 }
 
@@ -1071,7 +1077,7 @@ fn the_information_panel_has_a_label_for_every_value() {
 fn no_information_row_is_ever_blank() {
     // A blank field reads as a broken panel (reported). An unknown value is an
     // em dash, which reads as "not known yet".
-    let rows = InfoRows::starting("/no/such/file.iso", "/out/file_t1.mkv");
+    let rows = InfoRows::starting("/no/such/file.iso", "/out/file_t1.mkv", None);
     for (label, value) in InfoRows::labels().iter().zip(rows.as_array()) {
         assert!(!value.is_empty(), "the {label:?} row is blank");
     }
@@ -1768,6 +1774,8 @@ fn tagged_disc(streams: &[(&str, &str, bool)]) -> Scanned {
         title_count: 1,
         title_ids: vec![],
         video_codecs: vec!["H.264".into()],
+        title_sizes: Vec::new(),
+        capacity_bytes: 0,
         details: vec![],
         keys: None,
         needs_disc: false,
