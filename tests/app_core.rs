@@ -200,7 +200,6 @@ fn formatting_is_shared_so_both_shells_show_identical_text() {
     assert!(rate_text(52_428_800, true).contains("/s"));
     assert!(bar_caption(50.0, 65, Some(120)).contains("Remaining"));
     assert!(!bar_caption(50.0, 65, None).contains("Remaining"));
-    assert_eq!(overall_pct(1, 2, 50.0), 75.0);
 }
 
 #[test]
@@ -219,7 +218,7 @@ fn source_extensions_match_the_documented_stream_urls() {
 
 use freemkv::ui::{
     App, Cmd, Effect, InfoRows, Page, bar_caption, blocked_while_running, fmt_bytes, fmt_hms,
-    is_container, output_formats, overall_pct, rate_text,
+    is_container, output_formats, rate_text,
 };
 
 /// Every `Cmd` must be handled — no silent fall-through. A new command that
@@ -333,16 +332,29 @@ fn rate_text_is_honest_when_unmeasured() {
     );
 }
 
-/// Overall progress spans the whole job, not the current title — the two
-/// identical bars the user spotted.
+/// Overall progress spans the whole job by bytes, not the current title.
 #[test]
 fn overall_progress_spans_the_whole_job() {
-    assert_eq!(overall_pct(0, 4, 0.0), 0.0);
-    assert_eq!(overall_pct(0, 4, 100.0), 25.0);
-    assert_eq!(overall_pct(2, 4, 50.0), 62.5);
-    assert_eq!(overall_pct(4, 4, 0.0), 100.0);
-    // A single title makes overall identical to current — nothing to add.
-    assert_eq!(overall_pct(0, 1, 40.0), 40.0);
+    let st = freemkv::engine::RunState::default();
+    st.plan_titles(vec![(0, 100), (1, 100), (2, 200)]);
+    let bars = |st: &freemkv::engine::RunState| {
+        let p = *st.prog.lock().unwrap();
+        (p.title_pct, p.batch_pct)
+    };
+    assert_eq!(bars(&st), (0.0, Some(0.0)));
+    st.title_start(0);
+    st.title_end(0);
+    st.title_start(1);
+    st.progress(&freemkv_engine::Progress {
+        bytes_done: 50,
+        bytes_total: 100,
+        ..Default::default()
+    });
+    assert_eq!(bars(&st), (50.0, Some(37.5)));
+    st.title_end(1);
+    st.title_start(2);
+    st.title_end(2);
+    assert_eq!(bars(&st).1, Some(100.0));
 }
 
 /// A caption always says something; an unknown ETA is never rendered as "0".
