@@ -1493,11 +1493,17 @@ pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
             ("Debug", g("gui.set.log_debug")),
         ],
         // Language: canonical is the locale code, label the endonym (shown
-        // as-is in every locale). Driven straight from the shipped list, so
-        // the picker can never drift from what freemkv-i18n can load.
+        // as-is in every locale) or, for "auto", the localized word. Driven straight from
+        // the shipped list, so the picker can never drift from what freemkv-i18n can load.
         "language" => LOCALES
             .iter()
-            .map(|(endonym, code)| (*code, (*endonym).to_string()))
+            .map(|(endonym, code)| match *code {
+                "auto" => (
+                    *code,
+                    crate::strings::get_or("gui.set.language_auto", "Auto"),
+                ),
+                _ => (*code, (*endonym).to_string()),
+            })
             .collect(),
         _ => vec![],
     }
