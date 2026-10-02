@@ -5382,7 +5382,7 @@ mod verdict_tests {
     // that closes the title after the error.
     #[test]
     fn a_failed_title_prints_its_error_before_the_closing_blank() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::ku_fixtures::TempDir::new("title-blank");
         let dest = format!("mkv://{}", dir.path().join("out.mkv").display());
         let (code, printed) = crate::output::capture(|| super::run("null://", &dest, &[]));
         assert_eq!(code, 1, "{printed}");
