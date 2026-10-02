@@ -434,8 +434,9 @@ impl Settings {
         Ok(())
     }
 
-    /// Keydb status line for the Keys tab and the source strip.
+    /// Keydb status line for the Keys tab and the source strip, in the active locale.
     pub fn keydb_status(&self) -> String {
+        use crate::strings::{fmt_or, get_or};
         let p = PathBuf::from(shellexpand(&self.keydb_path));
         match std::fs::metadata(&p) {
             Ok(m) => {
@@ -447,17 +448,25 @@ impl Settings {
                     .map(|d| {
                         let days = d.as_secs() / 86_400;
                         if days == 0 {
-                            "today".to_string()
+                            get_or("gui.set.keydb_age_today", "today")
                         } else if days == 1 {
-                            "yesterday".to_string()
+                            get_or("gui.set.keydb_age_yesterday", "yesterday")
                         } else {
-                            format!("{days} days ago")
+                            fmt_or(
+                                "gui.set.keydb_age_days",
+                                "{days} days ago",
+                                &[("days", &days.to_string())],
+                            )
                         }
                     })
-                    .unwrap_or_else(|| "unknown".into());
-                format!("keydb found — {kb} KB, updated {age}")
+                    .unwrap_or_else(|| get_or("gui.set.keydb_age_unknown", "unknown"));
+                fmt_or(
+                    "gui.set.keydb_found",
+                    "keydb found — {kb} KB, updated {age}",
+                    &[("kb", &kb.to_string()), ("age", &age)],
+                )
             }
-            Err(_) => "no keydb.cfg found".to_string(),
+            Err(_) => get_or("gui.set.keydb_not_found", "no keydb.cfg found"),
         }
     }
 }
@@ -478,32 +487,52 @@ pub fn shellexpand(p: &str) -> String {
 /// by hand would be a second, worse implementation.
 /// Blocking — call off the UI thread.
 pub fn update_keydb(url: &str, dest: &str) -> Result<String, String> {
+    use crate::strings::{fmt_or, get_or};
     if url.trim().is_empty() {
-        return Err("No keydb update URL set — add one in Settings ▸ Keys".into());
+        return Err(get_or(
+            "gui.log.keydb_no_url",
+            "No keydb update URL set — add one in Settings ▸ Keys",
+        ));
     }
     let dest = shellexpand(dest);
     if dest.trim().is_empty() {
-        return Err("No keydb.cfg location set — add one in Settings ▸ Keys".into());
+        return Err(get_or(
+            "gui.log.keydb_no_path",
+            "No keydb.cfg location set — add one in Settings ▸ Keys",
+        ));
     }
     // Route through the SAME hardened fetch the CLI's `update-keys` uses
     // (SSRF/private-IP guard, zero redirects, body cap). Used to be a bare
     // `ureq::get`, so the GUI lacked every guard the CLI applies to this URL.
-    let buf = crate::keydb_fetch::fetch(url).map_err(|e| format!("Download failed: {e}"))?;
+    let buf = crate::keydb_fetch::fetch(url).map_err(|e| {
+        fmt_or(
+            "gui.log.keydb_download_failed",
+            "Download failed: {error}",
+            &[("error", &e.to_string())],
+        )
+    })?;
     if buf.is_empty() {
-        return Err("Download was empty".into());
+        return Err(get_or("gui.log.keydb_download_empty", "Download was empty"));
     }
     if let Some(parent) = std::path::Path::new(&dest).parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{e}"))?;
     }
     let src = freemkv_keysources::KeydbSource::new(&dest);
     match src.save(&buf) {
-        Ok(r) => Ok(format!(
-            "keydb updated — {} entries ({} KB) written to {}",
-            r.entries,
-            r.bytes / 1024,
-            r.path.display()
+        Ok(r) => Ok(fmt_or(
+            "gui.log.keydb_updated",
+            "keydb updated — {entries} entries ({kb} KB) written to {path}",
+            &[
+                ("entries", &r.entries.to_string()),
+                ("kb", &(r.bytes / 1024).to_string()),
+                ("path", &r.path.display().to_string()),
+            ],
         )),
-        Err(e) => Err(format!("keydb rejected: E{}", e.code())),
+        Err(e) => Err(fmt_or(
+            "gui.log.keydb_rejected",
+            "keydb rejected: E{code}",
+            &[("code", &e.code().to_string())],
+        )),
     }
 }
 
@@ -560,7 +589,16 @@ fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
+fn update_failed(e: &dyn std::fmt::Display) -> String {
+    crate::strings::fmt_or(
+        "gui.log.update_failed",
+        "Update check failed: {error}",
+        &[("error", &e.to_string())],
+    )
+}
+
 fn check_for_update_at(url: &str, current: &str, t: UpdateTimeouts) -> String {
+    use crate::strings::{fmt_or, get_or};
     let resp = crate::keydb_fetch::idle_agent(update_config(t), t.idle)
         .get(url)
         .header("User-Agent", "freemkv-gui")
@@ -572,15 +610,22 @@ fn check_for_update_at(url: &str, current: &str, t: UpdateTimeouts) -> String {
         // `limit()` — no need for `keydb_fetch::read_capped` (the larger, uncapped path).
         Ok(r) => match r.into_body().read_to_string() {
             Ok(b) => b,
-            Err(e) => return format!("Update check failed: {e}"),
+            Err(e) => return update_failed(&e),
         },
         Err(ureq::Error::StatusCode(404)) => {
-            return "Update check: no releases published yet.".into();
+            return get_or(
+                "gui.log.update_none_published",
+                "Update check: no releases published yet.",
+            );
         }
         Err(ureq::Error::StatusCode(code)) => {
-            return format!("Update check failed: server returned {code}");
+            return fmt_or(
+                "gui.log.update_http_status",
+                "Update check failed: server returned {code}",
+                &[("code", &code.to_string())],
+            );
         }
-        Err(e) => return format!("Update check failed: {e}"),
+        Err(e) => return update_failed(&e),
     };
 
     let tag = match serde_json::from_str::<serde_json::Value>(&body) {
@@ -588,17 +633,30 @@ fn check_for_update_at(url: &str, current: &str, t: UpdateTimeouts) -> String {
             .get("tag_name")
             .and_then(|t| t.as_str())
             .map(|s| s.trim_start_matches('v').to_string()),
-        Err(e) => return format!("Update check failed: bad response ({e})"),
+        Err(e) => {
+            return fmt_or(
+                "gui.log.update_bad_response",
+                "Update check failed: bad response ({error})",
+                &[("error", &e.to_string())],
+            );
+        }
     };
 
     match tag {
-        Some(latest) if !is_newer(&latest, current) => {
-            format!("You are running the latest version ({current}).")
-        }
-        Some(latest) => {
-            format!("Update available: {latest} (you have {current}) — https://freemkv.org")
-        }
-        None => "Update check failed: no version in response".into(),
+        Some(latest) if !is_newer(&latest, current) => fmt_or(
+            "gui.log.update_latest",
+            "You are running the latest version ({current}).",
+            &[("current", current)],
+        ),
+        Some(latest) => fmt_or(
+            "gui.log.update_available",
+            "Update available: {latest} (you have {current}) — https://freemkv.org",
+            &[("latest", &latest), ("current", current)],
+        ),
+        None => get_or(
+            "gui.log.update_no_version",
+            "Update check failed: no version in response",
+        ),
     }
 }
 

@@ -2406,9 +2406,10 @@ impl App {
         let msg = match self.update_check.as_ref().map(|rx| rx.try_recv()) {
             None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
             Some(Ok(m)) => m,
-            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                "Update check failed: worker stopped before returning a result".into()
-            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => crate::strings::get_or(
+                "gui.log.update_worker_stopped",
+                "Update check failed: worker stopped before returning a result",
+            ),
         };
         self.update_check = None;
         self.say(LogKind::Result, &msg);
@@ -2420,9 +2421,10 @@ impl App {
         let verdict = match self.ejecting.as_ref().map(|(_, rx)| rx.try_recv()) {
             None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
             Some(Ok(v)) => v,
-            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                Err("eject worker stopped before returning a result".into())
-            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Err(crate::strings::get_or(
+                "gui.log.eject_worker_stopped",
+                "eject worker stopped before returning a result",
+            )),
         };
         let ejected = self.ejecting.take().map(|(src, _)| src);
         match verdict {
