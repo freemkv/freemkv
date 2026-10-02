@@ -89,9 +89,11 @@ impl freemkv_engine::Sink for CliTitleLoopSink<'_> {
                     Normal,
                     &strings::fmt(key, &[("num", &(idx + 1).to_string())]),
                 );
+                self.out.blank(Normal);
             }
             freemkv_engine::Event::TitleFailed { error, .. } => {
                 self.out.raw(Always, &render_error(error));
+                self.out.blank(Normal);
             }
             _ => {}
         }
@@ -925,7 +927,10 @@ pub fn run(source: &str, dest: &str, args: &[String]) -> i32 {
                 };
                 pipe(source, dest_url, &opts, &keys, &out)
             })();
-            out.blank(Normal);
+            // A failed title's blank follows its notice, which `CliTitleLoopSink` prints.
+            if r.is_ok() {
+                out.blank(Normal);
+            }
             r.map_err(|e| freemkv_engine::TitleError {
                 result: e.result,
                 error: std::io::Error::other(e.display),
@@ -5371,6 +5376,26 @@ mod verdict_tests {
     /// which `Level::Normal` lines are observable.
     fn loud() -> Output {
         Output::new(false, false)
+    }
+
+    // A failed title prints its error straight after the source's `OK`, and the blank
+    // that closes the title after the error.
+    #[test]
+    fn a_failed_title_prints_its_error_before_the_closing_blank() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = format!("mkv://{}", dir.path().join("out.mkv").display());
+        let (code, printed) = crate::output::capture(|| super::run("null://", &dest, &[]));
+        assert_eq!(code, 1, "{printed}");
+        let error = printed
+            .lines()
+            .position(|l| l.contains("E9001"))
+            .unwrap_or_else(|| panic!("no E9001 line: {printed:?}"));
+        let lines: Vec<&str> = printed.lines().collect();
+        assert!(
+            lines[error - 1].ends_with(&crate::strings::get("rip.ok")),
+            "the error must follow the open notice: {printed:?}"
+        );
+        assert_eq!(lines.get(error + 1), Some(&""), "{printed:?}");
     }
 
     #[test]
