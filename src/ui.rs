@@ -1230,11 +1230,16 @@ impl InfoRows {
             .map(|m| m.len());
         InfoRows {
             source: source.to_string(),
-            source_file: std::path::Path::new(source)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string(),
+            // A drive source (`disc://…`) has no file name: a dash, not the URL's tail.
+            source_file: if source.contains("://") {
+                "—".to_string()
+            } else {
+                std::path::Path::new(source)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("—")
+                    .to_string()
+            },
             // Never leave the row blank — a blank Information field reads as
             // a broken panel (reported). An unknown value is an em dash.
             source_size: file_len

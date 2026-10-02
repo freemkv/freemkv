@@ -1118,6 +1118,14 @@ fn no_information_row_is_ever_blank() {
     assert_eq!(rows.source_size, "—");
 }
 
+#[test]
+fn a_drive_source_has_no_source_file_name() {
+    let drive = InfoRows::starting("disc:///dev/sr0", "/out/x.mkv", None);
+    assert_eq!(drive.source_file, "—");
+    let iso = InfoRows::starting("/no/such/Disc.iso", "/out/x.mkv", None);
+    assert_eq!(iso.source_file, "Disc.iso");
+}
+
 // ══ settings dropdowns ═════════════════════════════════════════════════════
 
 #[test]
