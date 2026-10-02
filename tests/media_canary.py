@@ -33,8 +33,9 @@ MIN_SAMPLE_UNITS = 8            # libfreemkv keysource::MIN_SAMPLE_UNITS: the cl
 SAMPLES = 64                    # OnlineSource asks its context for this many
 PROBES_PER_FILE, CHUNK_UNITS = 8, 15   # libfreemkv keysource::read_encrypted_units
 KEY_PROOF_PACKETS = 4           # libfreemkv aacs::content: synced packets that prove a key
-MAX_MKB = 64 << 20              # OnlineSource MAX_MKB_BYTES
-MAX_INF = 1 << 20
+MAX_FILE = 64 << 20             # libfreemkv udf MAX_FILE_BYTES: a larger Unit_Key_RO.inf is never read
+MKB_START = 16 << 20            # libfreemkv Disc::read_mkb_content START_BYTES
+MAX_MKB = 64 << 20              # libfreemkv Disc::read_mkb_content MAX_BYTES (= OnlineSource MAX_MKB_BYTES)
 MAX_RESPONSE = 1 << 20          # OnlineSource MAX_RESPONSE_BYTES
 TIMEOUT = 180                   # OnlineSource TIMEOUT_SECS
 AACS_IV = bytes.fromhex('0BA0F8DDFEA61FB3D8DF9F566A050F78')
@@ -414,12 +415,38 @@ class Udf:
 
 # ── The probe ──────────────────────────────────────────────────────────────
 
+def mkb_records_end(udf, entry, limit):
+    """libfreemkv aacs::mkb::mkb_content_len over the file's first `limit` bytes: where the
+    framed record stream (type, BE24 length) ends. Reads only the record headers."""
+    pos = 0
+    while pos + 4 <= limit:
+        head = udf.read_entry(entry, pos, 4)
+        length = int.from_bytes(head[1:4], 'big')
+        if (head[0] == 0 and length == 0) or length < 4 or pos + length > limit:
+            break
+        pos += length
+    return pos
+
+
+def mkb_content(udf, entry):
+    """The MKB OnlineSource sends: libfreemkv Disc::read_mkb_content, a growing prefix of
+    MKB_RO.inf (MKB_START up to MAX_MKB) trimmed to its record stream, never the file's
+    fixed-size zero padding (a UHD MKB_RO.inf is a 128 MiB file around a few MiB of records)."""
+    want = MKB_START
+    while True:
+        have = min(want, entry['size'])
+        n = mkb_records_end(udf, entry, have)
+        if 0 < n < have or have < want or want >= MAX_MKB:
+            return udf.read_entry(entry, 0, n if 0 < n < have else have)
+        want = min(want * 2, MAX_MKB)
+
+
 def disc_inputs(udf, count=SAMPLES):
     """(Unit_Key_RO.inf, MKB, encrypted sample units) as OnlineSource would send them."""
     inf_entry, mkb_entry = udf.lookup('/AACS/Unit_Key_RO.inf'), udf.lookup('/AACS/MKB_RO.inf')
-    if inf_entry['size'] > MAX_INF or mkb_entry['size'] > MAX_MKB:
-        raise CanaryError('Unit_Key_RO.inf or MKB_RO.inf is oversized')
-    inf, mkb = udf.read_entry(inf_entry, 0, inf_entry['size']), udf.read_entry(mkb_entry, 0, mkb_entry['size'])
+    if inf_entry['size'] > MAX_FILE:
+        raise CanaryError('Unit_Key_RO.inf is over the size libfreemkv reads')
+    inf, mkb = udf.read_entry(inf_entry, 0, inf_entry['size']), mkb_content(udf, mkb_entry)
     stream = udf.lookup('/BDMV/STREAM')
     clips = [(name, udf.entry(*icb)) for name, icb in udf.listdir(stream).items() if name.lower().endswith('.m2ts')]
     if not clips:
