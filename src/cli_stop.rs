@@ -12,11 +12,12 @@ pub(crate) static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 pub(crate) const CTRL_C_EVENT: u32 = 0;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const CTRL_BREAK_EVENT: u32 = 1;
-#[cfg_attr(not(windows), allow(dead_code))]
+/// Close, logoff and shutdown: [`on_ctrl`] leaves them to the system default.
+#[cfg(test)]
 pub(crate) const CTRL_CLOSE_EVENT: u32 = 2;
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg(test)]
 pub(crate) const CTRL_LOGOFF_EVENT: u32 = 5;
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg(test)]
 pub(crate) const CTRL_SHUTDOWN_EVENT: u32 = 6;
 
 /// What the console handler does with one control event (§4.3 item 3).
