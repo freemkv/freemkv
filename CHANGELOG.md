@@ -43,6 +43,7 @@
 - Preserve PGS clear-event timestamps when remuxing, addressing the reproduced issue in #52. A fresh rip is needed to confirm the fix on affected discs.
 - Improve audio frame handling and preserve opening audio and MKV timing metadata.
 - Keep the Linux desktop interface responsive while opening and scanning sources.
+- The app's preferred audio, subtitle and forced-subtitle language pickers name each language in the interface language (e.g. "Deutsch, Englisch" under German), as do their summaries; the stored ISO codes are unchanged. The interface-language dropdown's Auto entry, the keydb status line, the keydb-update and update-check messages, and the progress caption's chapter and track words are translated too. (app only)
 
 ### Linux packages
 
