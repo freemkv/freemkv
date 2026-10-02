@@ -1459,18 +1459,36 @@ impl Shell {
     /// two are right-aligned like their cells.
     fn sync_tree_head(&self) {
         let g = crate::strings::get;
-        let items = self.tree_head.items();
-        items
-            .get(0)
-            .set_text(&format!("{} / {}", g("gui.col.type"), g("gui.col.desc")));
-        items
-            .get(1)
-            .set_text(&crate::strings::get_or("gui.col.duration", "Length"))
-            .set_justify(gui::HeaderJustify::Right);
-        items
-            .get(2)
-            .set_text(&crate::strings::get_or("gui.col.size", "Size"))
-            .set_justify(gui::HeaderJustify::Right);
+        let set = |i: u32, text: &str, hdf: co::HDF| {
+            // `HDF::STRING` must ride along: an item made empty has no string
+            // format, and comctl32 then ignores the text it is given.
+            let mut hdi = w::HDITEM::default();
+            hdi.mask = co::HDI::TEXT | co::HDI::FORMAT;
+            hdi.fmt = co::HDF::STRING | hdf;
+            let mut wtext = w::WString::from_str(text);
+            hdi.set_pszText(Some(&mut wtext));
+            unsafe {
+                self.tree_head.hwnd().SendMessage(msg::HdmSetItem {
+                    index: i,
+                    hditem: &hdi,
+                });
+            }
+        };
+        set(
+            0,
+            &format!("{} / {}", g("gui.col.type"), g("gui.col.desc")),
+            co::HDF::LEFT,
+        );
+        set(
+            1,
+            &crate::strings::get_or("gui.col.duration", "Length"),
+            co::HDF::RIGHT,
+        );
+        set(
+            2,
+            &crate::strings::get_or("gui.col.size", "Size"),
+            co::HDF::RIGHT,
+        );
     }
 
     /// Mirror the title tree and its header under a right-to-left interface
