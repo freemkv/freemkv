@@ -29,6 +29,9 @@ pub struct Node {
     pub title_idx: usize,
     /// Arena index of the row whose tick this row shows (see [`Node::mirrors`]).
     mirror: Option<usize>,
+    /// The Length and Size cells, empty where the row has none ([`title_cells`]).
+    pub length: String,
+    pub size: String,
 }
 
 impl Node {
@@ -322,6 +325,7 @@ impl Tree {
                 }
             }
             let idx = arena.len();
+            let (length, size) = title_cells(r);
             arena.push(Node {
                 type_s: r.type_s.clone(),
                 desc: r.desc.clone(),
@@ -332,6 +336,8 @@ impl Tree {
                 pid: r.pid,
                 title_idx: r.title,
                 mirror: None,
+                length,
+                size,
             });
             match r.depth {
                 0 => roots.push(idx),
@@ -1531,6 +1537,92 @@ pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
             .map(|(endonym, code)| (*code, (*endonym).to_string()))
             .collect(),
         _ => vec![],
+    }
+}
+
+// ── title-row cells: the tree's Length and Size columns ───────────────────
+
+/// A row's Length and Size cells, as `(length, size)`.
+///
+/// Length is the running time of a Title row (depth 1), [`fmt_hms`]-formatted,
+/// and empty on every other row. Size is [`fmt_title_size`] of the row's
+/// `size_bytes`, empty where the scan reports none.
+pub fn title_cells(r: &crate::engine::Row) -> (String, String) {
+    let length = if r.depth == 1 {
+        fmt_hms(r.duration_secs.max(0.0) as u64)
+    } else {
+        String::new()
+    };
+    (length, r.size_bytes.map(fmt_title_size).unwrap_or_default())
+}
+
+/// A title's size in decimal units, as `freemkv info` reports it: `"6.8 GB"`,
+/// or whole megabytes below what would round to 1.0 GB (`"734 MB"`).
+pub fn fmt_title_size(bytes: u64) -> String {
+    if bytes >= 999_500_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else {
+        format!("{:.0} MB", bytes as f64 / 1e6)
+    }
+}
+
+#[cfg(test)]
+mod title_cell_tests {
+    use super::{fmt_title_size, title_cells};
+    use crate::engine::Row;
+
+    fn row(depth: u8, duration_secs: f64, size_bytes: Option<u64>) -> Row {
+        Row {
+            type_s: String::new(),
+            desc: String::new(),
+            depth,
+            checkable: depth > 0,
+            title: 0,
+            info: String::new(),
+            pid: None,
+            duration_secs,
+            lang: String::new(),
+            forced: false,
+            mirrors: None,
+            size_bytes,
+        }
+    }
+
+    #[test]
+    fn a_title_size_reads_in_gigabytes_or_whole_megabytes() {
+        assert_eq!(fmt_title_size(6_800_000_000), "6.8 GB");
+        assert_eq!(fmt_title_size(48_123_456_789), "48.1 GB");
+        assert_eq!(fmt_title_size(1_000_000_000), "1.0 GB");
+        assert_eq!(fmt_title_size(999_500_000), "1.0 GB");
+        assert_eq!(fmt_title_size(999_499_999), "999 MB");
+        assert_eq!(fmt_title_size(734_003_200), "734 MB");
+        assert_eq!(fmt_title_size(0), "0 MB");
+    }
+
+    #[test]
+    fn a_title_row_fills_both_cells() {
+        let cells = title_cells(&row(1, 8600.0, Some(6_800_000_000)));
+        assert_eq!(cells, ("2:23:20".to_string(), "6.8 GB".to_string()));
+        assert_eq!(title_cells(&row(1, 1290.9, Some(734_003_200))).0, "21:30");
+    }
+
+    #[test]
+    fn a_title_without_a_reported_size_leaves_size_empty() {
+        assert_eq!(
+            title_cells(&row(1, 600.0, None)),
+            ("10:00".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn disc_and_stream_rows_leave_both_cells_empty() {
+        for depth in [0, 2] {
+            assert_eq!(
+                title_cells(&row(depth, 0.0, None)),
+                (String::new(), String::new()),
+                "depth {depth}"
+            );
+        }
     }
 }
 
@@ -3213,6 +3305,8 @@ impl App {
                 depth,
                 type_s: n.type_s.clone(),
                 desc: n.desc.clone(),
+                length: n.length.clone(),
+                size: n.size.clone(),
                 check: if n.checkable() {
                     Some(self.tree.check_state(i))
                 } else {
@@ -3245,6 +3339,10 @@ pub struct Row {
     pub depth: u8,
     pub type_s: String,
     pub desc: String,
+    /// The Length cell (`"2:23:20"`); empty on every row but a title.
+    pub length: String,
+    /// The Size cell (`"6.8 GB"`); empty where the scan reports no size.
+    pub size: String,
     /// `None` means the row carries no checkbox at all.
     pub check: Option<Check>,
     /// Whether a click on the box does anything. `false` for a mirror row
@@ -3445,6 +3543,7 @@ mod tests {
             lang: lang.to_string(),
             forced,
             mirrors: None,
+            size_bytes: None,
         }
     }
 
@@ -4450,6 +4549,8 @@ mod tests {
             pid,
             title_idx,
             mirror: None,
+            length: String::new(),
+            size: String::new(),
         }
     }
 
@@ -4486,7 +4587,7 @@ mod tests {
             volume_id: "PROBE_DISC".to_string(),
             rows: vec![crate::engine::Row {
                 type_s: "Title".to_string(),
-                desc: "1.  0 chapter(s)".to_string(),
+                desc: "1. (0 chapters)".to_string(),
                 depth: 1,
                 checkable: true,
                 title: 0,
@@ -4496,6 +4597,7 @@ mod tests {
                 lang: String::new(),
                 forced: false,
                 mirrors: None,
+                size_bytes: None,
             }],
             key_summary: "none".to_string(),
             title_count: 1,
