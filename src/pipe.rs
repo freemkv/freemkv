@@ -1332,6 +1332,32 @@ fn build_jobs(
         )
     };
 
+    // Several titles onto a single-file name: one `<stem>_t<N>.<ext>` per title beside it
+    // (`-t 3 -t 4 mkv://d/out.mkv` -> `d/out_t3.mkv`, `d/out_t4.mkv`); `<ext>` is the
+    // scheme when the name has none.
+    let sibling_jobs = |indices: &[usize]| -> Vec<(Option<usize>, String)> {
+        let path = std::path::Path::new(parsed_dest.path_str());
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "disc".to_string());
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_else(|| parsed_dest.scheme().to_string());
+        let parent = path.parent().unwrap_or(std::path::Path::new(""));
+        indices
+            .iter()
+            .map(|&idx| {
+                let file = parent.join(format!("{stem}_t{}.{ext}", idx + 1));
+                (
+                    Some(idx),
+                    format!("{}://{}", parsed_dest.scheme(), file.display()),
+                )
+            })
+            .collect()
+    };
+
     // A scheme-only sink (null://, stdio://) has no filesystem path, so it
     // can never get per-title naming; all titles route to the SAME sink URL.
     // Without this, `dir_jobs` derives an invalid path and `null://` wrongly fails.
@@ -1386,9 +1412,9 @@ fn build_jobs(
                 Some(demux_jobs(&indices, &demux_dir))
             } else if indices.len() == 1 && !is_dir_dest {
                 Some(vec![(Some(indices[0]), dest.to_string())])
+            } else if !is_dir_dest {
+                Some(sibling_jobs(&indices))
             } else {
-                // Several titles fan out into a directory at the given path, one file per
-                // title (a single-file dest name such as `movie.mkv` becomes that directory).
                 let disc_name = t
                     .first()
                     .and_then(|ti| {
@@ -1420,14 +1446,8 @@ fn build_jobs(
                 // demux:// — directory sink with its own per-track naming.
                 return Some(demux_jobs(&indices, &demux_dir));
             }
-            // A single-file dest can't hold multiple titles of an unscanned disc: refuse
-            // rather than turn `movie.mkv` into a directory.
             if !is_dir_dest {
-                out.raw(
-                    Always,
-                    &strings::fmt("error.multi_title_needs_dir", &[("dest", dest)]),
-                );
-                return None;
+                return Some(sibling_jobs(&indices));
             }
             dir_jobs(&indices, "disc")
         }
@@ -3880,38 +3900,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dest_dir);
     }
 
+    // Several titles of an unscanned disc onto a single-file name: one file per title beside
+    // it, as for an image or folder (`-t 1 -t 2 mkv://d/movie.mkv` -> `d/movie_t1.mkv`, `_t2`).
     #[test]
-    fn disc_multiple_titles_to_file_dest_rejected() {
-        // Regression (MEDIUM): a disc multi-title rip to a single-FILE dest
-        // used to fall into dir_jobs, silently turning `movie.mkv` into a
-        // directory. Must now be rejected (build returns None) instead.
+    fn disc_multiple_titles_to_file_dest_fan_out_beside_it() {
         let out = Output::new(false, true);
-        // A unique temp path, not the process CWD or a shared name: the
-        // assertion below is that a directory does NOT exist, so a stray
-        // one from another test process would fail this for the wrong reason.
         let file = temp_path("multi-to-file").join("movie.mkv");
         let _ = std::fs::remove_dir_all(&file);
         let dest = format!("mkv://{}", file.display());
         let parsed_dest = libfreemkv::parse_url(&dest);
-        let jobs = build_jobs(
-            &None,
-            true, // is_disc
-            &[1usize, 2usize],
-            false, // is_dir_dest — a single file can't hold two titles
-            &dest,
-            &parsed_dest,
-            &out,
-        );
-        assert!(
-            jobs.is_none(),
-            "multi-title disc to a file dest must be rejected, not silently turned into a dir"
-        );
-        // The file must NOT have been created as a directory.
-        assert!(
-            !file.is_dir(),
-            "must not have created a directory at the file dest"
-        );
+        let jobs = build_jobs(&None, true, &[1, 2], false, &dest, &parsed_dest, &out)
+            .expect("several disc titles onto a file name fan out, not refuse");
+        let made_dir = file.is_dir();
         let _ = std::fs::remove_dir_all(file.parent().unwrap());
+        assert!(!made_dir, "the file name is not turned into a directory");
+        let beside = |n: u32| {
+            format!(
+                "mkv://{}",
+                file.with_file_name(format!("movie_t{n}.mkv")).display()
+            )
+        };
+        assert_eq!(
+            jobs,
+            vec![(Some(0), beside(1)), (Some(1), beside(2))],
+            "one file per title beside the given name"
+        );
     }
 
     #[test]
@@ -5785,39 +5798,27 @@ mod build_jobs_edge_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Several titles of an image onto a single-file name fan out into a directory of that
-    // name, one file per title (`-t 3 -t 4 mkv://sel.mkv` -> `sel.mkv/disc_t3.mkv`, `_t4`).
+    // Several titles of an image onto a single-file name: one file per title beside it
+    // (`-t 3 -t 4 mkv://d/sel.mkv` -> `d/sel_t3.mkv`, `d/sel_t4.mkv`).
     #[test]
-    fn several_image_titles_fan_out_under_a_single_file_name() {
+    fn several_image_titles_fan_out_beside_a_single_file_name() {
         let out = Output::new(false, true);
-        let dir = super::tests::temp_path("img-multi-fanout.mkv");
-        let dest = format!("mkv://{}", dir.display());
+        let file = super::tests::temp_path("img-multi-fanout").join("sel.mkv");
+        let dest = format!("mkv://{}", file.display());
         let parsed = parse_url(&dest);
-        let titles = Some(vec![
-            libfreemkv::DiscTitle::empty(),
-            libfreemkv::DiscTitle::empty(),
-            libfreemkv::DiscTitle::empty(),
-            libfreemkv::DiscTitle::empty(),
-        ]);
+        let titles = Some(vec![libfreemkv::DiscTitle::empty(); 4]);
         let jobs = build_jobs(&titles, false, &[3, 4], false, &dest, &parsed, &out);
-        let made_dir = dir.is_dir();
-        let _ = std::fs::remove_dir_all(&dir);
+        let made_dir = file.is_dir();
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
         let jobs = jobs.expect("several titles onto a file name must fan out, not refuse");
-        assert!(made_dir, "the file name becomes the output directory");
-        assert_eq!(jobs.len(), 2);
-        assert_eq!(jobs[0].0, Some(2));
-        assert_eq!(jobs[1].0, Some(3));
-        let base = format!("mkv://{}", dir.display());
-        assert!(
-            jobs[0].1.starts_with(&base) && jobs[0].1.ends_with("_t3.mkv"),
-            "got {}",
-            jobs[0].1
-        );
-        assert!(
-            jobs[1].1.starts_with(&base) && jobs[1].1.ends_with("_t4.mkv"),
-            "got {}",
-            jobs[1].1
-        );
+        assert!(!made_dir, "the file name is not turned into a directory");
+        let beside = |n: u32| {
+            format!(
+                "mkv://{}",
+                file.with_file_name(format!("sel_t{n}.mkv")).display()
+            )
+        };
+        assert_eq!(jobs, vec![(Some(2), beside(3)), (Some(3), beside(4))]);
     }
 
     // A destination directory that cannot be read cannot be shown empty.
@@ -5836,16 +5837,22 @@ mod build_jobs_edge_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // `-t all` of a disc onto one file name writes one file per title beside it.
     #[test]
-    fn an_expanded_disc_selection_refuses_a_single_file_destination() {
+    fn an_expanded_disc_selection_fans_out_beside_a_single_file_name() {
         let out = Output::new(false, true);
-        let dest = "mkv:///tmp/fmkv-t-all-refuse.mkv";
+        let dest = "mkv:///tmp/fmkv-t-all.mkv";
         let parsed = parse_url(dest);
         let nums = disc_title_nums(true, &[], 12);
-        assert!(
-            build_jobs(&None, true, &nums, false, dest, &parsed, &out).is_none(),
-            "twelve titles were accepted into one file"
-        );
+        let jobs = build_jobs(&None, true, &nums, false, dest, &parsed, &out)
+            .expect("twelve titles fan out, not refuse");
+        let beside = |n: u32| {
+            let file = std::path::Path::new("/tmp").join(format!("fmkv-t-all_t{n}.mkv"));
+            format!("mkv://{}", file.display())
+        };
+        assert_eq!(jobs.len(), 12);
+        assert_eq!(jobs[0], (Some(0), beside(1)));
+        assert_eq!(jobs[11], (Some(11), beside(12)));
     }
 }
 
@@ -6797,6 +6804,56 @@ mod ku_cli_tests {
             assert_eq!(files_under(&out).len(), 3, "{text}");
             assert_no_secret_on_disk(dir.path(), &[K1, K2, VID]);
         }
+    }
+
+    // `-t 1 -t 2 mkv://<dir>/out.mkv` from `src` writes `out_t1.mkv` and `out_t2.mkv` beside
+    // the given name, and no `out.mkv`.
+    fn assert_fans_out_beside(src: &str, dir: &std::path::Path) {
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let dest = format!("mkv://{}", out.join("out.mkv").display());
+        let (code, text) = with_sources(factory(&[], &Calls::default()), || {
+            run_cli(src, &dest, &["-t", "1", "-t", "2"])
+        });
+        assert_eq!(code, 0, "{text}");
+        let mut names: Vec<String> = files_under(&out)
+            .iter()
+            .map(|p| p.strip_prefix(&out).unwrap().display().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["out_t1.mkv", "out_t2.mkv"], "{text}");
+    }
+
+    /// Several titles of an image onto a file name fan out beside it, one file per title.
+    #[test]
+    fn image_titles_onto_a_file_name_fan_out_beside_it() {
+        let fx = bd_image(&[None, None], 1);
+        let dir = TempDir::new("fanout-iso");
+        let iso = fx.write(dir.path(), "disc.iso");
+        assert_fans_out_beside(&format!("iso://{}", iso.display()), dir.path());
+    }
+
+    /// Several titles of a folder onto a file name fan out beside it, as for an image.
+    #[test]
+    fn folder_titles_onto_a_file_name_fan_out_beside_it() {
+        let fx = bd_image(&[None, None], 1);
+        let dir = TempDir::new("fanout-dir");
+        // The image's files, written out as a disc folder.
+        let tree = dir.path().join("tree");
+        let mut src = fx.source();
+        let fs = libfreemkv::read_filesystem(&mut src).unwrap();
+        let mut paths = vec!["BDMV/index.bdmv".to_string(), "AACS/Unit_Key_RO.inf".into()];
+        for i in 0..2 {
+            paths.push(format!("BDMV/PLAYLIST/{i:05}.mpls"));
+            paths.push(format!("BDMV/CLIPINF/{i:05}.clpi"));
+            paths.push(format!("BDMV/STREAM/{i:05}.m2ts"));
+        }
+        for p in &paths {
+            let at = tree.join(p);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(&at, fs.read_file(&mut src, &format!("/{p}")).unwrap()).unwrap();
+        }
+        assert_fans_out_beside(&format!("dir://{}", tree.display()), dir.path());
     }
 
     /// FK1/FK10 for a decrypted image: iso:// → iso:// resolves the whole disc once (both

@@ -100,7 +100,7 @@ All URLs use the `scheme://path` format. No bare paths — always include the sc
 ```bash
 freemkv disc:// mkv://Movie.mkv                     # Main feature (the default since 1.6.0)
 freemkv disc:// mkv://Movie.mkv -t 1                # Title 1 explicitly
-freemkv disc:// mkv://out/ -t 1 -t 3                # Titles 1 and 3 (multiple titles need a directory)
+freemkv disc:// mkv://out.mkv -t 1 -t 3             # Titles 1 and 3: out_t1.mkv and out_t3.mkv beside out.mkv
 freemkv disc:// mkv://out/ -t all                   # Every title
 freemkv disc:// iso://Disc.iso                      # Full disc to ISO (decrypted)
 freemkv disc:// iso://Disc.iso --raw                # Full disc to ISO (encrypted)
