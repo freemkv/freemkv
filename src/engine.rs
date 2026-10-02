@@ -659,6 +659,30 @@ fn disc_device(source: &str) -> Option<String> {
     (!dev.is_empty()).then(|| dev.to_string())
 }
 
+/// Whether the disc behind a `disc://` source is still in a drive, `None` when a drive
+/// gives no clear answer. Bare `disc://` asks every drive, as its autodetect would.
+/// Media presence only (IOKit registry on macOS, TEST UNIT READY elsewhere): no
+/// exclusive open, so it never takes the drive from a later open.
+#[cfg_attr(test, allow(dead_code))] // unit tests swap in a fake that touches no drive
+pub fn disc_present(source: &str) -> Option<bool> {
+    let paths = match disc_device(source) {
+        Some(p) => vec![p],
+        None => libfreemkv::list_drives()
+            .into_iter()
+            .map(|d| d.path)
+            .collect(),
+    };
+    let mut unknown = false;
+    for p in paths {
+        match libfreemkv::drive_has_disc(std::path::Path::new(&p)) {
+            Ok(true) => return Some(true),
+            Ok(false) => {}
+            Err(_) => unknown = true,
+        }
+    }
+    (!unknown).then_some(false)
+}
+
 /// `DeviceTarget` for a `disc://` source: an explicit path, or autodetect.
 fn disc_target(source: &str) -> libfreemkv::DeviceTarget {
     match disc_device(source) {
