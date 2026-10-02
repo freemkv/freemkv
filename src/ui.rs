@@ -1502,12 +1502,6 @@ pub fn locale_code(sel: &str) -> &'static str {
     "auto"
 }
 
-/// Overall progress across a multi-title run.
-pub fn overall_pct(titles_done: usize, total: usize, current_pct: f64) -> f64 {
-    let total = total.max(1) as f64;
-    ((titles_done as f64 + current_pct / 100.0) / total * 100.0).min(100.0)
-}
-
 // ── settings dropdowns ────────────────────────────────────────────────────
 
 /// The option table for a settings dropdown: `(canonical, localized_label)`
@@ -3244,12 +3238,11 @@ impl App {
             .as_ref()
             .map(|st| *st.prog.lock().unwrap_or_else(|e| e.into_inner()))
             .unwrap_or_default();
-        let pct = if p.bytes_total > 0 {
-            p.bytes_done as f64 / p.bytes_total as f64 * 100.0
-        } else {
-            0.0
-        };
+        // Top bar: the current title; bottom bar: the whole run (a single title's mirrors it).
+        let pct = p.title_pct;
+        let overall = p.batch_pct.unwrap_or(pct);
         let elapsed = self.run_started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let title_elapsed = p.title_started.map_or(elapsed, |t| t.elapsed().as_secs());
         let titles_done = self
             .run
             .as_ref()
@@ -3267,13 +3260,9 @@ impl App {
                 .as_ref()
                 .map(|i| i.as_array().map(|s| s.to_string())),
             bar_current: pct,
-            bar_overall: overall_pct(titles_done, self.run_titles, pct),
-            caption_current: bar_caption(pct, elapsed, p.eta_secs),
-            caption_overall: bar_caption(
-                overall_pct(titles_done, self.run_titles, pct),
-                elapsed,
-                None,
-            ),
+            bar_overall: overall,
+            caption_current: bar_caption(pct, title_elapsed, p.eta_secs),
+            caption_overall: bar_caption(overall, elapsed, None),
             show_overall_bar: self.run_titles > 1,
             saving_current: stop_caption(stopping, titles_done, self.run_titles).unwrap_or_else(
                 || {
@@ -5310,6 +5299,154 @@ mod tests {
             (v.saving_current, v.saving_overall),
             (finishing.clone(), finishing)
         );
+    }
+
+    // A run's progress as its worker reports it, with both bars sampled after every step.
+    struct Bars {
+        app: App,
+        st: Arc<RunState>,
+        seen: Vec<(f64, f64)>,
+        // The sample at which the last title's final byte was written.
+        last_byte: Option<usize>,
+    }
+
+    impl Bars {
+        fn new(sizes: &[u64]) -> Self {
+            let mut app = App::new();
+            let st: Arc<RunState> = Arc::default();
+            app.run = Some(st.clone());
+            app.run_titles = sizes.len();
+            st.plan_titles(sizes.iter().copied().enumerate().collect());
+            let mut b = Bars {
+                app,
+                st,
+                seen: vec![],
+                last_byte: None,
+            };
+            b.sample();
+            b
+        }
+
+        fn sample(&mut self) -> (f64, f64) {
+            let v = self.app.view();
+            self.seen.push((v.bar_current, v.bar_overall));
+            (v.bar_current, v.bar_overall)
+        }
+
+        fn tick(&mut self, pass: &'static str, done: u64, total: u64) -> (f64, f64) {
+            self.st.progress(&freemkv_engine::Progress {
+                pass: pass.into(),
+                bytes_done: done,
+                bytes_total: total,
+                ..Default::default()
+            });
+            self.sample()
+        }
+
+        // One title written in four ticks, counted the way the worker counts it.
+        fn title(&mut self, idx: usize, size: u64) -> (f64, f64) {
+            self.st.title_start(idx);
+            assert_eq!(self.sample().0, 0.0, "title {idx} starts its bar at 0");
+            for q in 1..=4 {
+                self.tick("mux", size * q / 4, size);
+            }
+            if idx + 1 == self.app.run_titles {
+                self.last_byte = Some(self.seen.len() - 1);
+            }
+            self.st.titles_done.fetch_add(1, Ordering::SeqCst);
+            self.sample();
+            self.st.title_end(idx);
+            self.sample()
+        }
+
+        // The bottom bar never decreases; the top one only at a title's start (checked there).
+        fn assert_overall_monotonic(&self) {
+            for w in self.seen.windows(2) {
+                assert!(w[1].1 >= w[0].1, "overall went backwards: {:?}", self.seen);
+            }
+        }
+
+        fn assert_full_only_at_end(&self) {
+            assert_eq!(self.seen.last().unwrap().1, 100.0, "overall ends full");
+            let before = &self.seen[..self.last_byte.expect("the last title ran")];
+            assert!(
+                before.iter().all(|s| s.1 < 100.0),
+                "overall full before the last title ended: {:?}",
+                self.seen
+            );
+        }
+    }
+
+    #[test]
+    fn two_titles_reset_the_top_bar_and_fill_the_bottom_bar_by_halves() {
+        let mut b = Bars::new(&[1000, 1000]);
+        assert_eq!(b.title(0, 1000), (100.0, 50.0));
+        b.title(1, 1000);
+        // Halfway through the second title: the top bar is its half, the bottom three quarters.
+        assert!(b.seen.contains(&(50.0, 75.0)), "{:?}", b.seen);
+        b.assert_overall_monotonic();
+        b.assert_full_only_at_end();
+    }
+
+    #[test]
+    fn three_titles_never_run_either_bar_backwards_across_a_boundary() {
+        let mut b = Bars::new(&[600, 600, 600]);
+        let ends: Vec<f64> = (0..3).map(|i| b.title(i, 600).1).collect();
+        for (e, want) in ends.iter().zip([100.0 / 3.0, 200.0 / 3.0, 100.0]) {
+            assert!((e - want).abs() < 1e-9, "{ends:?}");
+        }
+        b.assert_overall_monotonic();
+        b.assert_full_only_at_end();
+        // Within a title the top bar only rises; it drops only at a start.
+        let resets = b.seen.windows(2).filter(|w| w[1].0 < w[0].0).count();
+        assert_eq!(
+            resets, 2,
+            "top bar resets once per later title: {:?}",
+            b.seen
+        );
+    }
+
+    #[test]
+    fn the_bottom_bar_weighs_titles_by_bytes_not_by_count() {
+        let mut b = Bars::new(&[100, 300, 600]);
+        assert_eq!(b.title(0, 100).1, 10.0);
+        assert_eq!(b.title(1, 300).1, 40.0);
+        assert_eq!(b.title(2, 600).1, 100.0);
+        b.assert_overall_monotonic();
+        b.assert_full_only_at_end();
+    }
+
+    #[test]
+    fn a_multipass_read_counts_toward_the_bottom_bar_and_never_rewinds_it() {
+        let mut b = Bars::new(&[1000, 1000]);
+        b.st.begin_read();
+        b.sample();
+        for q in 1..=4 {
+            b.tick("sweep", 500 * q, 2000);
+        }
+        assert_eq!(b.sample(), (100.0, 50.0), "read done: half the run's bytes");
+        // A patch pass is its own pass on the top bar; the read stays counted below.
+        assert_eq!(b.tick("patch-scrape", 0, 64), (0.0, 50.0));
+        assert_eq!(b.title(0, 1000).1, 75.0);
+        assert_eq!(b.title(1, 1000).1, 100.0);
+        b.assert_overall_monotonic();
+        b.assert_full_only_at_end();
+    }
+
+    #[test]
+    fn an_unknown_title_size_shows_no_batch_percentage() {
+        let mut b = Bars::new(&[0, 1000]);
+        b.title(0, 0);
+        b.title(1, 1000);
+        assert!(b.seen.iter().all(|s| s.1 == 0.0), "{:?}", b.seen);
+    }
+
+    #[test]
+    fn a_single_title_shows_one_bar_with_the_bottom_mirroring_it() {
+        let mut b = Bars::new(&[1000]);
+        b.st.title_start(0);
+        assert_eq!(b.tick("mux", 250, 1000), (25.0, 25.0));
+        assert!(!b.app.view().show_overall_bar);
     }
 
     #[test]
