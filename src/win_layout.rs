@@ -89,6 +89,20 @@ impl Scale {
         };
         rounded as i32
     }
+
+    /// The inverse of [`px`](Self::px): physical pixels back to the 96-DPI
+    /// baseline, rounded the same way.
+    #[must_use]
+    pub fn unpx(self, v: i32) -> i32 {
+        let n = v as i64 * BASE_DPI as i64;
+        let d = self.dpi as i64;
+        let rounded = if n >= 0 {
+            (n + d / 2) / d
+        } else {
+            (n - d / 2) / d
+        };
+        rounded as i32
+    }
 }
 
 /// One control's rectangle, in physical pixels relative to the client area.
@@ -420,6 +434,200 @@ pub fn menu_column_rows(items: usize, item_h: i32, screen_h: i32) -> usize {
     }
     let cols = items.div_ceil(budget);
     items.div_ceil(cols)
+}
+
+// ── the title tree's columns ──────────────────────────────────────────────
+
+/// Height of the column header strip over the title tree.
+pub const TREE_HEAD_H: i32 = 24;
+/// Default Length and Size column widths; wide enough for "2:23:20" and
+/// "48.1 GB" and the longer translated headers ("Длительность").
+pub const COL_LENGTH_W: i32 = 92;
+pub const COL_SIZE_W: i32 = 80;
+/// Narrowest a Length or Size column may be dragged.
+pub const COL_MIN_W: i32 = 36;
+/// What the Type and Description column keeps before Length and Size give way.
+pub const TREE_COL_MIN_W: i32 = 120;
+
+/// The header strip and the tree under it, splitting the tree's area.
+#[must_use]
+pub fn split_tree_header(area: Rect, dpi: u32) -> (Rect, Rect) {
+    let hh = Scale::new(dpi).px(TREE_HEAD_H).min(area.h);
+    (
+        Rect::new(area.x, area.y, area.w, hh),
+        Rect::new(area.x, area.y + hh, area.w, area.h - hh),
+    )
+}
+
+/// The user's Length and Size widths, at the 96-DPI baseline so a DPI change
+/// rescales them like every other length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColWidths {
+    pub length: i32,
+    pub size: i32,
+}
+
+impl Default for ColWidths {
+    fn default() -> Self {
+        Self {
+            length: COL_LENGTH_W,
+            size: COL_SIZE_W,
+        }
+    }
+}
+
+/// A horizontal extent, `x .. x + w`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub x: i32,
+    pub w: i32,
+}
+
+/// Where each column falls across the tree's client area, in the control's own
+/// (logical) coordinates. Under a right-to-left locale the header and tree are
+/// mirrored windows (`WS_EX_LAYOUTRTL`), so this same layout lands mirrored on
+/// screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeColumns {
+    /// Type and Description: the tree's own label.
+    pub label: Span,
+    pub length: Span,
+    pub size: Span,
+}
+
+/// Lay the columns out across a client `client_w` wide: Length and Size keep
+/// their widths at the right, the label takes the rest. When the label would
+/// drop under [`TREE_COL_MIN_W`], Length gives way first, then Size, never
+/// below [`COL_MIN_W`].
+#[must_use]
+pub fn tree_columns(dpi: u32, client_w: i32, widths: ColWidths) -> TreeColumns {
+    let s = Scale::new(dpi);
+    let min = s.px(COL_MIN_W);
+    let mut length = s.px(widths.length).max(min);
+    let mut size = s.px(widths.size).max(min);
+    let room = (client_w - s.px(TREE_COL_MIN_W)).max(min * 2);
+    let over = length + size - room;
+    if over > 0 {
+        let take = over.min(length - min);
+        length -= take;
+        size = (size - (over - take)).max(min);
+    }
+    let label = (client_w - length - size).max(0);
+    TreeColumns {
+        label: Span { x: 0, w: label },
+        length: Span {
+            x: label,
+            w: length,
+        },
+        size: Span {
+            x: label + length,
+            w: size,
+        },
+    }
+}
+
+/// The header's three item widths for `cols`. The header spans the tree's
+/// whole outer width while the columns are measured in its client area, which
+/// starts `inset` in (the border); the last item runs on over the scroll bar.
+#[must_use]
+pub fn header_widths(cols: &TreeColumns, header_w: i32, inset: i32) -> [i32; 3] {
+    let label = cols.label.w + inset;
+    let length = cols.length.w;
+    [label, length, (header_w - label - length).max(0)]
+}
+
+/// The widths a finished header drag leaves, from the item dragged (`item`,
+/// in header order) and its new width. A divider moves between its two
+/// neighbours: dragging the label's edge trades width with Length, dragging
+/// Length's edge trades with Size; the last edge is pinned to the right.
+#[must_use]
+pub fn drag_column(dpi: u32, cols: &TreeColumns, item: usize, new_w: i32) -> ColWidths {
+    let s = Scale::new(dpi);
+    let (mut length, mut size) = (cols.length.w, cols.size.w);
+    match item {
+        0 => length -= new_w - cols.label.w,
+        1 => {
+            size -= new_w - length;
+            length = new_w;
+        }
+        _ => {}
+    }
+    let min = s.px(COL_MIN_W);
+    ColWidths {
+        length: s.unpx(length.max(min)),
+        size: s.unpx(size.max(min)),
+    }
+}
+
+/// Whether a locale tag (`"ar"`, `"he-IL"`, `"fa_IR"`) is written right to
+/// left, so the shell lays its title tree out mirrored.
+#[must_use]
+pub fn is_rtl_locale(tag: &str) -> bool {
+    let primary = tag
+        .split(['-', '_'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        primary.as_str(),
+        "ar" | "he" | "iw" | "fa" | "ur" | "ps" | "sd" | "ug" | "yi" | "dv" | "ckb"
+    )
+}
+
+// ── the Settings form ─────────────────────────────────────────────────────
+
+/// A dropdown's closed width and its open list's width, for a longest item
+/// `text_w` pixels wide. The closed box grows from `control_w` to fit the
+/// longest item, up to `max_w` (the room left on its row); the list is never
+/// narrower than the box and always wide enough for every item in full.
+#[must_use]
+pub fn combo_widths(dpi: u32, control_w: i32, text_w: i32, max_w: i32) -> (i32, i32) {
+    let s = Scale::new(dpi);
+    // The arrow button and the box's own margins; the list's margins plus a
+    // vertical scroll bar.
+    let closed = (text_w + s.px(34)).clamp(control_w, max_w.max(control_w));
+    let list = (text_w + s.px(30)).max(closed);
+    (closed, list)
+}
+
+/// What asks the Settings form to commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormCommit {
+    /// The OK button.
+    Ok,
+    /// Enter in a text field.
+    Enter,
+    /// Focus left a text field.
+    FocusLost,
+}
+
+/// What a commit does: write the form to disk, and close the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitPlan {
+    pub save: bool,
+    pub close: bool,
+}
+
+/// The form's commit rule. OK saves and closes, as it always has. Enter and
+/// leaving a text field save only what changed and keep the window open, as
+/// the GTK shell's fields do; focus also leaves while the window is being
+/// hidden, which is not an edit.
+#[must_use]
+pub fn form_commit(why: FormCommit, window_visible: bool, changed: bool) -> CommitPlan {
+    match why {
+        FormCommit::Ok => CommitPlan {
+            save: true,
+            close: true,
+        },
+        FormCommit::Enter => CommitPlan {
+            save: changed,
+            close: false,
+        },
+        FormCommit::FocusLost => CommitPlan {
+            save: changed && window_visible,
+            close: false,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -916,7 +1124,9 @@ mod tests {
                 ]
                 .iter()
                 .map(|c| body.matches(c).count())
-                .sum(),
+                .sum::<usize>()
+                    // A path row puts its field on a line of its own under the label.
+                    + body.matches("r.path(").count(),
                 body.matches("r.note(").count(),
                 body.matches("r.check(").count(),
                 body.matches("r.button(").count(),
@@ -952,6 +1162,163 @@ mod tests {
                      ({fields} rows, {notes} notes, {checks} checks, {buttons} buttons, \
                      {gaps} gaps)"
                 );
+            }
+        }
+    }
+
+    // ── the title tree's columns ──
+
+    #[test]
+    fn the_header_takes_its_strip_off_the_top_of_the_tree() {
+        let area = Rect::new(8, 12, 540, 489);
+        assert_eq!(
+            split_tree_header(area, 96),
+            (Rect::new(8, 12, 540, 24), Rect::new(8, 36, 540, 465))
+        );
+        let (head, tree) = split_tree_header(area, 144);
+        assert_eq!(head.h, 36);
+        assert_eq!(tree.y, 48);
+        assert_eq!(head.h + tree.h, area.h, "nothing lost between the two");
+    }
+
+    #[test]
+    fn length_and_size_sit_at_the_right_and_the_label_takes_the_rest() {
+        let c = tree_columns(96, 520, ColWidths::default());
+        assert_eq!(c.size, Span { x: 440, w: 80 });
+        assert_eq!(c.length, Span { x: 348, w: 92 });
+        assert_eq!(c.label, Span { x: 0, w: 348 });
+    }
+
+    #[test]
+    fn the_columns_scale_with_the_dpi() {
+        for dpi in DPIS {
+            let s = Scale::new(dpi);
+            let c = tree_columns(dpi, s.px(520), ColWidths::default());
+            assert_eq!(c.length.w, s.px(COL_LENGTH_W), "dpi {dpi}");
+            assert_eq!(c.size.w, s.px(COL_SIZE_W), "dpi {dpi}");
+            assert_eq!(
+                c.size.x + c.size.w,
+                s.px(520),
+                "dpi {dpi}: Size ends at the edge"
+            );
+            assert_eq!(c.length.x, c.label.w, "dpi {dpi}: no gap after the label");
+        }
+    }
+
+    #[test]
+    fn a_narrow_tree_takes_length_down_first_then_size() {
+        // Room for the label minimum plus 120: Length gives up 52 of its 92.
+        let c = tree_columns(96, 240, ColWidths::default());
+        assert_eq!((c.label.w, c.length.w, c.size.w), (120, 40, 80));
+        // Less still: Length stops at its minimum and Size gives way.
+        let c = tree_columns(96, 220, ColWidths::default());
+        assert_eq!((c.label.w, c.length.w, c.size.w), (120, 36, 64));
+        // Never below the column minimum, even with no room at all.
+        let c = tree_columns(96, 50, ColWidths::default());
+        assert_eq!((c.length.w, c.size.w), (COL_MIN_W, COL_MIN_W));
+        assert_eq!(c.label.w, 0);
+    }
+
+    #[test]
+    fn the_header_items_line_up_with_the_client_columns() {
+        let c = tree_columns(96, 500, ColWidths::default());
+        // A 2 px border each side and a 17 px scroll bar: 521 outer.
+        let w = header_widths(&c, 521, 2);
+        assert_eq!(w, [330, 92, 99]);
+        assert_eq!(
+            w[0],
+            c.length.x + 2,
+            "Length's header starts over its cells"
+        );
+        assert_eq!(w.iter().sum::<i32>(), 521, "the header is filled exactly");
+    }
+
+    #[test]
+    fn dragging_a_divider_trades_width_with_its_neighbour() {
+        let c = tree_columns(96, 520, ColWidths::default());
+        // The label's edge 20 px left: Length grows by 20, Size keeps its width.
+        assert_eq!(
+            drag_column(96, &c, 0, c.label.w - 20),
+            ColWidths {
+                length: 112,
+                size: 80
+            }
+        );
+        // Length's edge 10 px right: Length grows, Size shrinks by the same.
+        assert_eq!(
+            drag_column(96, &c, 1, c.length.w + 10),
+            ColWidths {
+                length: 102,
+                size: 70
+            }
+        );
+        // The last edge is pinned to the control's edge.
+        assert_eq!(drag_column(96, &c, 2, 300), ColWidths::default());
+        // Never under the minimum.
+        assert_eq!(drag_column(96, &c, 1, 5).length, COL_MIN_W);
+    }
+
+    #[test]
+    fn a_dragged_width_is_kept_at_the_baseline_so_it_survives_a_dpi_change() {
+        let c = tree_columns(144, 780, ColWidths::default());
+        let w = drag_column(144, &c, 1, c.length.w + 30);
+        assert_eq!(
+            w,
+            ColWidths {
+                length: 112,
+                size: 60
+            }
+        );
+        let at_96 = tree_columns(96, 520, w);
+        assert_eq!((at_96.length.w, at_96.size.w), (112, 60));
+    }
+
+    #[test]
+    fn arabic_and_hebrew_are_right_to_left() {
+        for tag in ["ar", "he", "ar-SA", "he_IL", "fa-IR", "ur", "AR"] {
+            assert!(is_rtl_locale(tag), "{tag}");
+        }
+        for tag in ["en", "de", "zh-hans", "pt-br", "auto", "", "hu", "fr-ca"] {
+            assert!(!is_rtl_locale(tag), "{tag}");
+        }
+    }
+
+    // ── the Settings form ──
+
+    #[test]
+    fn a_dropdown_grows_to_its_longest_item_within_its_row() {
+        // Fits already: unchanged, and the list is at least as wide as the box.
+        assert_eq!(combo_widths(96, 240, 100, 360), (240, 240));
+        // Longer: the box grows to fit, the list too.
+        assert_eq!(combo_widths(96, 240, 300, 360), (334, 334));
+        // Longer than the row: the box stops at the row, the list shows it all.
+        assert_eq!(combo_widths(96, 240, 400, 360), (360, 430));
+        // A row narrower than the control never shrinks it.
+        assert_eq!(combo_widths(96, 240, 400, 100).0, 240);
+        // Scaled margins at 150%.
+        assert_eq!(combo_widths(144, 360, 450, 900), (501, 501));
+    }
+
+    #[test]
+    fn enter_and_leaving_a_field_save_without_closing_ok_saves_and_closes() {
+        use FormCommit::*;
+        let plan = |save, close| CommitPlan { save, close };
+        assert_eq!(form_commit(Ok, true, false), plan(true, true));
+        assert_eq!(form_commit(Ok, true, true), plan(true, true));
+        assert_eq!(form_commit(Enter, true, true), plan(true, false));
+        assert_eq!(form_commit(Enter, true, false), plan(false, false));
+        assert_eq!(form_commit(FocusLost, true, true), plan(true, false));
+        assert_eq!(form_commit(FocusLost, true, false), plan(false, false));
+        // The window going away takes focus with it; that is not an edit.
+        assert_eq!(form_commit(FocusLost, false, true), plan(false, false));
+    }
+
+    #[test]
+    fn unpx_inverts_px() {
+        for dpi in DPIS {
+            let s = Scale::new(dpi);
+            for v in [0, 1, 36, 80, 92, 120] {
+                assert_eq!(s.unpx(s.px(v)), v, "dpi {dpi}, {v}");
             }
         }
     }

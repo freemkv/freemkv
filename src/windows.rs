@@ -60,6 +60,7 @@ const ID_OPEN_DISC_EMPTY: u16 = 1014;
 const ID_BAR_CUR: u16 = 1011;
 const ID_BAR_ALL: u16 = 1012;
 const ID_EJECT: u16 = 1013;
+const ID_TREE_HEAD: u16 = 1015;
 
 // Menu command ids. `cmd_for` maps these to core commands, so the enable/
 // disable rule lives in `ui::blocked_while_running` and cannot disagree with
@@ -560,16 +561,32 @@ fn log_plan(shown: Option<LogShown>, first: u64, len: usize) -> LogPlan {
     }
 }
 
-// The text one tree row shows. `SysTreeView32` has no real multi-column mode, so the
-// macOS outline's Type/Description/Length/Size columns are joined into one item label,
-// skipping empty cells; the disc root carries no type worth repeating.
+// A tree row's label: the macOS outline's Type and Description, joined (Length and
+// Size have columns of their own, `TreeCols`). The disc root's type is not repeated.
 fn row_text(r: &Row) -> String {
-    let ty = if r.depth == 0 { "" } else { r.type_s.as_str() };
-    [ty, r.desc.as_str(), r.length.as_str(), r.size.as_str()]
-        .into_iter()
-        .filter(|c| !c.is_empty())
-        .collect::<Vec<_>>()
-        .join("   ")
+    if r.depth == 0 || r.type_s.is_empty() {
+        r.desc.clone()
+    } else {
+        format!("{}   {}", r.type_s, r.desc)
+    }
+}
+
+/// The title tree's Length and Size columns. `SysTreeView32` has no columns, so
+/// a header sits above it and each row's two cells are painted into the row at
+/// the header's positions (`NM_CUSTOMDRAW`).
+#[derive(Default)]
+struct TreeCols {
+    /// The user's widths (header drags), at the 96-DPI baseline.
+    widths: lay::ColWidths,
+    /// Where the columns were last laid out, in the tree's client coordinates.
+    laid: Option<lay::TreeColumns>,
+    /// The tree's border width: where its client area starts under the header.
+    inset: i32,
+    /// Each row's `(length, size)`, by `Row::index` — the data a tree item carries.
+    cells: std::collections::HashMap<usize, (String, String)>,
+    /// Set while the shell itself resizes the header items, whose change
+    /// notifications are then not a user's drag.
+    syncing: bool,
 }
 
 // ── the shell ─────────────────────────────────────────────────────────────
@@ -591,6 +608,8 @@ struct Shell {
 
     // titles page
     tree: gui::TreeView<usize>,
+    tree_head: gui::Header,
+    cols: Rc<RefCell<TreeCols>>,
     grp_out: gui::Button,
     cmb_format: gui::ComboBox,
     edit_out: gui::Edit,
@@ -716,15 +735,33 @@ impl Shell {
             &wnd,
             gui::TreeViewOpts {
                 size: (s.px(400), s.px(400)),
-                // No TVS::CHECKBOXES: that control-owned list is two-state
-                // only. The state image list built in `build_check_images`
-                // carries the third (mixed) glyph the core can ask for.
+                // No TVS::CHECKBOXES: that list is two-state only; `build_check_images`
+                // carries the third (mixed) glyph. NOHSCROLL: a long label is cut at the
+                // Length column painted over it, rather than scrolling the columns away.
                 control_style: co::TVS::HASLINES
                     | co::TVS::LINESATROOT
                     | co::TVS::HASBUTTONS
                     | co::TVS::SHOWSELALWAYS
-                    | co::TVS::FULLROWSELECT,
+                    | co::TVS::FULLROWSELECT
+                    | co::TVS::NOHSCROLL,
                 ctrl_id: ID_TREE,
+                ..Default::default()
+            },
+        );
+        // Texts are set once the window exists (`sync_tree_head`).
+        let tree_head = gui::Header::new(
+            &wnd,
+            gui::HeaderOpts {
+                width: s.px(400),
+                height: s.px(lay::TREE_HEAD_H),
+                control_style: co::HDS::HORZ | co::HDS::FULLDRAG,
+                window_style: co::WS::CHILD | co::WS::VISIBLE,
+                ctrl_id: ID_TREE_HEAD,
+                items: &[
+                    ("", s.px(228)),
+                    ("", s.px(lay::COL_LENGTH_W)),
+                    ("", s.px(lay::COL_SIZE_W)),
+                ],
                 ..Default::default()
             },
         );
@@ -959,6 +996,8 @@ impl Shell {
             btn_open_disc,
             btn_open,
             tree,
+            tree_head,
+            cols: Rc::new(RefCell::new(TreeCols::default())),
             grp_out,
             cmb_format,
             edit_out,
@@ -1134,8 +1173,9 @@ impl Shell {
     fn relayout(&self, cw: i32, ch: i32) {
         let v = self.app.borrow().view();
         let hidden = v.log_hidden;
+        let dpi = window_dpi(self.wnd.hwnd());
         let l = lay::main_layout(
-            window_dpi(self.wnd.hwnd()),
+            dpi,
             cw,
             ch,
             lay::MainState {
@@ -1156,7 +1196,10 @@ impl Shell {
         put(&self.btn_open, l.btn_open);
 
         // ── titles page ──
-        put(&self.tree, l.tree);
+        let (head, tree) = lay::split_tree_header(l.tree, dpi);
+        put(&self.tree_head, head);
+        put(&self.tree, tree);
+        self.layout_tree_cols(dpi);
         put(&self.grp_out, l.grp_out);
         put(&self.edit_out, l.edit_out);
         put(&self.btn_browse, l.btn_browse);
@@ -1237,6 +1280,10 @@ impl Shell {
     /// Rebuild the tree from the core's rows. Only called when the row set
     /// actually changed — see `Memo`.
     fn rebuild_tree(&self, rows: &[Row]) {
+        self.cols.borrow_mut().cells = rows
+            .iter()
+            .map(|r| (r.index, (r.length.clone(), r.size.clone())))
+            .collect();
         // TreeView has no `set_redraw` wrapper (only ListView does), so the
         // message goes direct. Without it, rebuilding a large tree flickers.
         self.set_tree_redraw(false);
@@ -1347,6 +1394,143 @@ impl Shell {
     }
 }
 
+// ── the tree's columns ────────────────────────────────────────────────────
+
+impl Shell {
+    /// Lay the Length and Size columns out for the tree's current client width,
+    /// sizing the header items to match. A no-op when nothing moved, since
+    /// `render` re-runs the layout on every tick.
+    fn layout_tree_cols(&self, dpi: u32) {
+        let Ok(client) = self.tree.hwnd().GetClientRect() else {
+            return;
+        };
+        let mut info = w::WINDOWINFO::default();
+        let inset = match self.tree.hwnd().GetWindowInfo(&mut info) {
+            Ok(()) => info.cxWindowBorders as i32,
+            Err(_) => 0,
+        };
+        let widths = self.cols.borrow().widths;
+        let laid = lay::tree_columns(dpi, client.right, widths);
+        if self.cols.borrow().laid == Some(laid) {
+            return;
+        }
+        let head_w = self
+            .tree_head
+            .hwnd()
+            .GetClientRect()
+            .map(|r| r.right)
+            .unwrap_or(0);
+        {
+            let mut c = self.cols.borrow_mut();
+            c.laid = Some(laid);
+            c.inset = inset;
+            c.syncing = true;
+        }
+        for (i, wd) in lay::header_widths(&laid, head_w, inset)
+            .into_iter()
+            .enumerate()
+        {
+            self.tree_head.items().get(i as u32).set_width(wd);
+        }
+        self.cols.borrow_mut().syncing = false;
+        let _ = self.tree.hwnd().InvalidateRect(None, true);
+    }
+
+    /// The header's texts, in the current language: the tree column carries
+    /// Type and Description (one label, as `row_text` joins them), the other
+    /// two are right-aligned like their cells.
+    fn sync_tree_head(&self) {
+        let g = crate::strings::get;
+        let items = self.tree_head.items();
+        items
+            .get(0)
+            .set_text(&format!("{} / {}", g("gui.col.type"), g("gui.col.desc")));
+        items
+            .get(1)
+            .set_text(&crate::strings::get_or("gui.col.duration", "Length"))
+            .set_justify(gui::HeaderJustify::Right);
+        items
+            .get(2)
+            .set_text(&crate::strings::get_or("gui.col.size", "Size"))
+            .set_justify(gui::HeaderJustify::Right);
+    }
+
+    /// Mirror the title tree and its header under a right-to-left interface
+    /// language: `WS_EX_LAYOUTRTL` flips each window's coordinates, so the
+    /// columns, the expanders and the tick boxes all read from the right.
+    fn apply_tree_direction(&self) {
+        let lang = self.settings.borrow().language.clone();
+        let rtl = crate::app_entry::resolved_locale(&lang, system_locale_code)
+            .is_some_and(|t| lay::is_rtl_locale(&t));
+        let flag = co::WS_EX::LAYOUTRTL.raw() as isize;
+        for h in [self.tree.hwnd(), self.tree_head.hwnd()] {
+            let ex = h.GetWindowLongPtr(co::GWLP::EXSTYLE);
+            let want = if rtl { ex | flag } else { ex & !flag };
+            if want != ex {
+                unsafe { h.SetWindowLongPtr(co::GWLP::EXSTYLE, want) };
+                let _ = h.InvalidateRect(None, true);
+            }
+        }
+    }
+
+    /// Paint one row's Length and Size cells, over whatever of its label ran
+    /// under them. The tree has already drawn the row; with a mirrored tree the
+    /// DC is mirrored too, so the same client coordinates land mirrored.
+    fn paint_tree_cells(&self, cd: &w::NMCUSTOMDRAW) {
+        let cols = self.cols.borrow();
+        let Some(laid) = cols.laid else {
+            return;
+        };
+        // An item mid-insertion has no data yet, and `data()` would panic.
+        if cd.lItemlParam == 0 {
+            return;
+        }
+        let hitem = unsafe { w::HTREEITEM::from_ptr(cd.dwItemSpec as _) };
+        let idx = *self.tree.items().get(&hitem).data().borrow();
+        let hdc = &cd.hdc;
+        let (top, bottom) = (cd.rc.top, cd.rc.bottom);
+        let area = w::RECT {
+            left: laid.length.x,
+            top,
+            right: laid.size.x + laid.size.w,
+            bottom,
+        };
+        if let Ok(brush) = w::HBRUSH::GetSysColorBrush(co::COLOR::WINDOW) {
+            let _ = hdc.FillRect(area, &brush);
+        }
+        let Some((length, size)) = cols.cells.get(&idx) else {
+            return;
+        };
+        // The tree's own font: the DC is not guaranteed to still hold it after
+        // the item has painted.
+        let font = unsafe { self.tree.hwnd().SendMessage(msg::WmGetFont {}) };
+        let _font = font.as_ref().and_then(|f| hdc.SelectObject(f).ok());
+        let _ = hdc.SetBkMode(co::BKMODE::TRANSPARENT);
+        let _ = hdc.SetTextColor(w::GetSysColor(co::COLOR::WINDOWTEXT));
+        let pad = lay::Scale::new(window_dpi(self.wnd.hwnd())).px(6);
+        for (span, text) in [(laid.length, length), (laid.size, size)] {
+            if text.is_empty() {
+                continue;
+            }
+            let mut rc = w::RECT {
+                left: span.x + pad,
+                top,
+                right: span.x + span.w - pad,
+                bottom,
+            };
+            let _ = hdc.DrawText(
+                text,
+                &mut rc,
+                co::DT::RIGHT
+                    | co::DT::VCENTER
+                    | co::DT::SINGLELINE
+                    | co::DT::NOPREFIX
+                    | co::DT::END_ELLIPSIS,
+            );
+        }
+    }
+}
+
 // ── render ────────────────────────────────────────────────────────────────
 
 impl Shell {
@@ -1414,6 +1598,7 @@ impl Shell {
         }
 
         show(&self.tree, p == Page::Titles);
+        show(&self.tree_head, p == Page::Titles);
         for c in [&self.grp_out, &self.grp_info] {
             show(c, p == Page::Titles);
         }
@@ -1566,6 +1751,18 @@ impl Shell {
             self.cmb_format.items().delete_all();
             let _ = self.cmb_format.items().add(&wanted);
             self.memo.borrow_mut().formats = sig;
+            // The box keeps its layout width; the open list shows every format in full.
+            let box_w = self
+                .cmb_format
+                .hwnd()
+                .GetWindowRect()
+                .map_or(0, |r| r.right - r.left);
+            let text_w = combo_text_width(&self.cmb_format, &wanted);
+            let dpi = window_dpi(self.wnd.hwnd());
+            set_dropped_width(
+                &self.cmb_format,
+                lay::combo_widths(dpi, box_w, text_w, box_w).1,
+            );
         }
         let want_label = crate::ui::format_label(&v.format);
         let idx = wanted.iter().position(|t| *t == want_label);
@@ -1886,6 +2083,8 @@ impl Shell {
             // system DPI on a secondary display). `apply_dpi` rebuilds font AND
             // glyph image list at that DPI, replacing fixed-size `build_check_images`.
             me.apply_dpi();
+            me.sync_tree_head();
+            me.apply_tree_direction();
             // Title-bar icons need the window, so they belong here too.
             set_icons(me.wnd.hwnd());
             me.wnd.hwnd().DragAcceptFiles(true);
@@ -2148,6 +2347,46 @@ impl Shell {
             Ok(())
         });
 
+        // Length and Size, painted into each row after the tree drew it.
+        let me = self.clone();
+        self.tree.on().nm_custom_draw(move |cd| {
+            Ok(match cd.nmcd.dwDrawStage {
+                co::CDDS::PREPAINT => co::CDRF::NOTIFYITEMDRAW,
+                co::CDDS::ITEMPREPAINT => co::CDRF::NOTIFYPOSTPAINT,
+                co::CDDS::ITEMPOSTPAINT => {
+                    me.paint_tree_cells(&cd.nmcd);
+                    co::CDRF::DODEFAULT
+                }
+                _ => co::CDRF::DODEFAULT,
+            })
+        });
+
+        // A header drag moves the divider between two columns; the shell then
+        // lays every column out again from the widths it leaves.
+        let me = self.clone();
+        self.tree_head.on().hdn_item_changed(move |p| {
+            if me.cols.borrow().syncing {
+                return Ok(());
+            }
+            let Some(item) = p.pitem().filter(|it| it.mask.has(co::HDI::WIDTH)) else {
+                return Ok(());
+            };
+            let dpi = window_dpi(me.wnd.hwnd());
+            let new_w = item.cxy;
+            {
+                let mut c = me.cols.borrow_mut();
+                let Some(laid) = c.laid else {
+                    return Ok(());
+                };
+                // Item 0 spans the tree's border as well as its label.
+                let new_w = if p.iItem == 0 { new_w - c.inset } else { new_w };
+                c.widths = lay::drag_column(dpi, &laid, p.iItem as usize, new_w);
+                c.laid = None;
+            }
+            me.layout_tree_cols(dpi);
+            Ok(())
+        });
+
         self.prefs.events(self);
         self.about.events(self);
     }
@@ -2255,6 +2494,30 @@ impl Shell {
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────
+
+/// The widest of `labels` in a combo's own font, in pixels.
+fn combo_text_width(c: &gui::ComboBox, labels: &[String]) -> i32 {
+    let Ok(dc) = c.hwnd().GetDC() else {
+        return 0;
+    };
+    let font = unsafe { c.hwnd().SendMessage(msg::WmGetFont {}) };
+    let _font = font.as_ref().and_then(|f| dc.SelectObject(f).ok());
+    labels
+        .iter()
+        .filter_map(|t| dc.GetTextExtentPoint32(t).ok())
+        .map(|sz| sz.cx)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Let a combo's open list run wider than the box (`CB_SETDROPPEDWIDTH`).
+fn set_dropped_width(c: &gui::ComboBox, width: i32) {
+    let _ = unsafe {
+        c.hwnd().SendMessage(msg::CbSetDroppedWidth {
+            min_width: width.max(0) as u32,
+        })
+    };
+}
 
 // The option table for a settings dropdown: `(canonical, localized_label)`
 // pairs. Canonical value persists; label is shown. Empty = not an enum combo.
@@ -2476,26 +2739,29 @@ impl<'a> Rows<'a> {
         }
     }
 
-    /// A path row: field plus a browse button that fills it.
-    fn path(&mut self, text: &str, val: &str, wd: i32) -> (gui::Edit, gui::Button) {
+    /// A path row: the label with the browse button that fills the field, then
+    /// the field on a line of its own beneath them at the form's full width, so
+    /// a long path reads whole instead of scrolled to one end.
+    fn path(&mut self, text: &str, val: &str) -> (gui::Edit, gui::Button) {
         self.label(text);
-        let e = gui::Edit::new(
-            self.page,
-            gui::EditOpts {
-                text: val,
-                position: (self.gutter, self.y),
-                width: self.s.px(wd - 40),
-                height: self.m.field_h,
-                ..Default::default()
-            },
-        );
         let b = gui::Button::new(
             self.page,
             gui::ButtonOpts {
                 text: &crate::strings::get("gui.btn.browse"),
-                position: (self.gutter + self.s.px(wd - 36), self.y - self.s.px(1)),
+                position: (self.gutter, self.y - self.s.px(1)),
                 width: self.s.px(34),
                 height: self.s.px(24),
+                ..Default::default()
+            },
+        );
+        self.y += self.m.row_step;
+        let e = gui::Edit::new(
+            self.page,
+            gui::EditOpts {
+                text: val,
+                position: (self.s.px(16), self.y),
+                width: self.width - self.s.px(32),
+                height: self.m.field_h,
                 ..Default::default()
             },
         );
@@ -2585,6 +2851,9 @@ struct Prefs {
     fields: Vec<(&'static str, gui::Edit)>,
     checks: Vec<(&'static str, gui::CheckBox)>,
     combos: Vec<(&'static str, gui::ComboBox)>,
+    /// Each combo's width as built, in `combos` order — what `fit_combos` grows
+    /// from, so a shorter language's labels shrink it back. Read on first fit.
+    combo_w: Rc<RefCell<Vec<i32>>>,
     /// The language checklists, in the same registry shape as the rest — a
     /// control that is built but not listed here is silently write-only: it
     /// shows the stored value and OK never reads it back.
@@ -2648,7 +2917,7 @@ impl Prefs {
             "container",
             r.combo("container", &g("gui.set.default_output"), 320),
         ));
-        let (f_dest, btn_browse_dest) = r.path(&g("gui.set.default_dest"), &st.dest_dir, 320);
+        let (f_dest, btn_browse_dest) = r.path(&g("gui.set.default_dest"), &st.dest_dir);
         fields.push(("dest_dir", f_dest));
         fields.push((
             "filename_template",
@@ -2719,7 +2988,7 @@ impl Prefs {
             r.combo("key_source", &g("gui.set.key_source"), 260),
         ));
         r.gap();
-        let (f_keydb, btn_browse_keydb) = r.path(&g("gui.set.keydb_path"), &st.keydb_path, 320);
+        let (f_keydb, btn_browse_keydb) = r.path(&g("gui.set.keydb_path"), &st.keydb_path);
         fields.push(("keydb_path", f_keydb));
         fields.push((
             "keydb_url",
@@ -2803,6 +3072,7 @@ impl Prefs {
             fields,
             checks,
             combos,
+            combo_w: Rc::new(RefCell::new(Vec::new())),
             langs,
             lbl_keydb,
             btn_keydb,
@@ -2820,6 +3090,10 @@ impl Prefs {
         self.populate(st);
         let _ = self.wnd.hwnd().ShowWindow(co::SW::SHOW);
         self.relayout();
+        // The font winsafe gave the form, at the DPI it was built at; set here
+        // so the combos below are measured in the font they draw with.
+        apply_ui_font(self.wnd.hwnd(), system_dpi());
+        self.fit_combos();
         self.wnd.hwnd().SetForegroundWindow();
     }
 
@@ -2898,6 +3172,69 @@ impl Prefs {
 
     fn hide(&self) {
         let _ = self.wnd.hwnd().ShowWindow(co::SW::HIDE);
+    }
+
+    /// Size every dropdown to its choices (`lay::combo_widths`): the box grows
+    /// to show the longest in full where its row has room, and the open list is
+    /// always wide enough for each one, however long the translation.
+    fn fit_combos(&self) {
+        let dpi = system_dpi();
+        let m = lay::form_metrics(dpi);
+        let mut base = self.combo_w.borrow_mut();
+        if base.is_empty() {
+            *base = self
+                .combos
+                .iter()
+                .map(|(_, c)| c.hwnd().GetWindowRect().map_or(0, |r| r.right - r.left))
+                .collect();
+        }
+        for ((k, c), &built) in self.combos.iter().zip(base.iter()) {
+            let labels: Vec<String> = enum_options(k).into_iter().map(|(_, l)| l).collect();
+            let text_w = combo_text_width(c, &labels);
+            let (closed, list) = lay::combo_widths(dpi, built, text_w, m.width - m.gutter);
+            // The dropped rectangle's height is the list's; the box's own
+            // window rectangle is only the closed field.
+            let mut dropped = w::RECT::default();
+            let _ = unsafe {
+                c.hwnd()
+                    .SendMessage(msg::CbGetDroppedControlRect { rect: &mut dropped })
+            };
+            let _ = c.hwnd().SetWindowPos(
+                w::HwndPlace::None,
+                w::POINT::new(),
+                w::SIZE::with(closed, (dropped.bottom - dropped.top).max(m.field_h)),
+                co::SWP::NOMOVE | co::SWP::NOZORDER | co::SWP::NOACTIVATE,
+            );
+            set_dropped_width(c, list);
+        }
+    }
+
+    /// Commit the form (`lay::form_commit`): into the stored settings, into the
+    /// running `App` so it applies at once, and to disk. The live output folder
+    /// follows only when the DEFAULT destination changed, so a one-off folder
+    /// pick in the main window survives.
+    fn commit(&self, sh: &Shell, why: lay::FormCommit) {
+        let before = serde_json::to_value(&*sh.settings.borrow()).ok();
+        let mut edited = sh.settings.borrow().clone();
+        self.read_form(&mut edited);
+        let changed = serde_json::to_value(&edited).ok() != before;
+        let plan = lay::form_commit(why, self.wnd.hwnd().IsWindowVisible(), changed);
+        if plan.save {
+            let old_dest =
+                std::mem::replace(&mut *sh.settings.borrow_mut(), edited.clone()).dest_dir;
+            let new_dest = edited.dest_dir.clone();
+            let dest_changed = new_dest != old_dest && !new_dest.trim().is_empty();
+            sh.app_mut(|a| {
+                a.settings = edited;
+                if dest_changed {
+                    a.output_dir = new_dest;
+                }
+            });
+            save_settings_reporting_error(sh);
+        }
+        if plan.close {
+            self.hide();
+        }
     }
 
     // Select a tab programmatically (the screenshot harness needs this).
@@ -3175,26 +3512,36 @@ impl Prefs {
         let me = self.clone();
         let sh = shell.clone();
         self.btn_ok.on().bn_clicked(move || {
-            // Remember the default destination BEFORE reading the form so we can
-            // tell whether the user changed it in this Settings session.
-            let old_dest = sh.settings.borrow().dest_dir.clone();
-            me.read_form(&mut sh.settings.borrow_mut());
-            let edited = sh.settings.borrow().clone();
-            let new_dest = edited.dest_dir.clone();
-            // The active output directory is a separate live value (a one-off
-            // folder pick in the main window overrides the default). Re-point it
-            // ONLY when the user actually changed the default here.
-            let dest_changed = new_dest != old_dest && !new_dest.trim().is_empty();
-            sh.app_mut(|a| {
-                a.settings = edited;
-                if dest_changed {
-                    a.output_dir = new_dest.clone();
-                }
-            });
-            save_settings_reporting_error(&sh);
-            me.hide();
+            me.commit(&sh, lay::FormCommit::Ok);
             Ok(())
         });
+
+        // A text field commits on Enter and when focus leaves it, as the GTK
+        // shell's do. Enter in a field reaches the window as IDOK: the message
+        // loop's `IsDialogMessage` turns it into the dialog's default command.
+        for (_, f) in &self.fields {
+            let me = self.clone();
+            let sh = shell.clone();
+            f.on().en_kill_focus(move || {
+                me.commit(&sh, lay::FormCommit::FocusLost);
+                Ok(())
+            });
+        }
+        let me = self.clone();
+        let sh = shell.clone();
+        self.wnd
+            .on()
+            .wm_command(co::DLGID::OK.raw(), co::BN::CLICKED, move || {
+                let focus = w::HWND::GetFocus();
+                if me
+                    .fields
+                    .iter()
+                    .any(|(_, f)| focus.as_ref() == Some(f.hwnd()))
+                {
+                    me.commit(&sh, lay::FormCommit::Enter);
+                }
+                Ok(())
+            });
 
         let me = self.clone();
         self.btn_cancel.on().bn_clicked(move || {
@@ -3408,6 +3755,7 @@ impl Prefs {
             .btn_test
             .hwnd()
             .SetWindowText(&g("gui.set.test_connection"));
+        self.fit_combos();
     }
 }
 
@@ -3461,6 +3809,8 @@ impl Shell {
         for (l, text) in self.lbl_keys.iter().zip(crate::ui::InfoRows::labels()) {
             let _ = l.hwnd().SetWindowText(&text);
         }
+        self.sync_tree_head();
+        self.apply_tree_direction();
         // Force the format dropdown and the tree to repaint in the new language.
         self.memo.borrow_mut().formats.clear();
         self.memo.borrow_mut().rows = None;
@@ -3725,6 +4075,30 @@ impl Shell {
                 self.tree.items().count(),
                 v.title_rows.len()
             ),
+        );
+
+        // ── the tree's header carries the columns the macOS outline shows ──
+        let heads: Vec<String> = self
+            .tree_head
+            .items()
+            .iter()
+            .map(|it| it.map(|h| h.text()).collect())
+            .unwrap_or_default();
+        check(
+            "widget-tree-header-columns",
+            heads.len() == 3
+                && heads[1] == crate::strings::get_or("gui.col.duration", "Length")
+                && heads[2] == crate::strings::get_or("gui.col.size", "Size"),
+            format!("header items {heads:?}"),
+        );
+        let cells = &self.cols.borrow().cells;
+        check(
+            "widget-tree-cells-match-the-core",
+            v.title_rows.iter().all(|r| {
+                cells.get(&r.index).map(|(l, s)| (l.as_str(), s.as_str()))
+                    == Some((r.length.as_str(), r.size.as_str()))
+            }),
+            format!("{} rows carry cells", cells.len()),
         );
 
         // Every row's state image matches the core's tick, checked against the
@@ -4840,13 +5214,17 @@ mod tests {
         );
         assert_eq!(
             text,
-            format!("Title   {}   1:30:00   6.8 GB", title.desc),
-            "Length and Size follow the description"
+            format!("Title   {}", title.desc),
+            "Length and Size have columns of their own, not the label"
+        );
+        assert_eq!(
+            (title.length.as_str(), title.size.as_str()),
+            ("1:30:00", "6.8 GB")
         );
     }
 
     #[test]
-    fn a_stream_row_label_has_no_length_or_size() {
+    fn a_stream_row_label_is_its_type_and_description() {
         let rows = view_rows();
         let audio = rows.iter().find(|r| r.type_s == "Audio").unwrap();
         assert_eq!(row_text(audio), format!("Audio   {}", audio.desc));

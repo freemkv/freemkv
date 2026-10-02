@@ -27,6 +27,8 @@
 - The app's title list shows each title's running time and size in their own right-aligned **Length** and **Size** columns; a title's Description reads `1. 00800.mpls (19 chapters)`. On Windows, whose tree has a single column, they follow the Description in the row's label. (app only: the title list; `freemkv info` and the server's JSON are unchanged)
 - The macOS app's Settings save a text field when you press Enter or leave it, without closing the window, as the Linux app's do. Labels too long for their column wrap, dropdowns widen to their longest choice, and a long default destination or keydb path wraps onto more lines beneath its label instead of being cut off. Settings reopened after Cancel show the saved values, not the abandoned edits. (app only: the Settings window)
 - The macOS app's progress page for a single-title rip no longer cuts off the top of the Information panel, and its title list keeps the Size column in view. (app only: the macOS window layout)
+- The app's title list shows each title's running time and size in their own right-aligned **Length** and **Size** columns; a title's Description reads `1. 00800.mpls (19 chapters)`. On Windows they sit under a column header over the tree, can be resized by dragging its dividers, and read from the right under a right-to-left interface language. (app only: the title list; `freemkv info` and the server's JSON are unchanged)
+- The app's Settings keep a text field's edit when you press Enter or leave the field, on Windows as on Linux; a Windows dropdown widens to show its longest choice and its open list shows every choice in full, and the default destination and keydb paths have a full-width field under their label. (app only: the Settings window)
 
 ### Added
 

@@ -136,14 +136,21 @@ pub fn windowed_candidates(me: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// detection would fall back to English for the "Auto" setting.
 pub fn apply_locale(language: &str, system_locale: impl FnOnce() -> Option<String>) {
     let language = chosen_language(language, LAUNCH_LANGUAGE.get().map(String::as_str));
-    let code = crate::ui::locale_code(language);
-    if code == "auto" {
-        if let Some(sys) = system_locale() {
-            crate::strings::set_locale(&sys);
-        }
-    } else {
-        // Not `set_language`: its override would pin a later live "Auto".
-        crate::strings::set_locale(code);
+    // Not `set_language`: its override would pin a later live "Auto".
+    if let Some(tag) = resolved_locale(language, system_locale) {
+        crate::strings::set_locale(&tag);
+    }
+}
+
+/// The locale a language setting resolves to: its code, or for "Auto" the
+/// platform's own locale (`None` when that is unknown).
+pub fn resolved_locale(
+    language: &str,
+    system_locale: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    match crate::ui::locale_code(language) {
+        "auto" => system_locale(),
+        code => Some(code.to_string()),
     }
 }
 
@@ -213,11 +220,20 @@ pub fn init_gui_logging(log_level: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        GUI_LOG_CAP_BYTES, chosen_language, display_present, launch_language, trim_oversized_log,
-        wants_gui, windowed_candidates,
+        GUI_LOG_CAP_BYTES, chosen_language, display_present, launch_language, resolved_locale,
+        trim_oversized_log, wants_gui, windowed_candidates,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn auto_resolves_to_the_system_locale_and_a_pick_to_its_code() {
+        let sys = || Some("ar-SA".to_string());
+        assert_eq!(resolved_locale("auto", sys).as_deref(), Some("ar-SA"));
+        assert_eq!(resolved_locale("Deutsch", sys).as_deref(), Some("de"));
+        assert_eq!(resolved_locale("de", || None).as_deref(), Some("de"));
+        assert_eq!(resolved_locale("auto", || None), None);
+    }
 
     // `rolling::never` panicked on an unopenable log; the app must start without one.
     #[test]
