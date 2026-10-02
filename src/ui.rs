@@ -1772,6 +1772,18 @@ const SCANNERS: (ScanFn, ScanFn) = (scan_source, probe_source);
 #[cfg(test)]
 const SCANNERS: (ScanFn, ScanFn) = (tests::no_drive_scan, tests::no_drive_probe);
 
+/// The disc watch's media check. Unit tests get one that answers "unknown" untouched.
+#[cfg(not(test))]
+const PRESENCE: fn(&str) -> Option<bool> = crate::engine::disc_present;
+#[cfg(test)]
+const PRESENCE: fn(&str) -> Option<bool> = tests::no_drive_presence;
+
+/// How often the idle disc watch asks whether the open disc is still in its drive.
+const PRESENCE_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The longest Done or Start waits for a presence verdict before going on without it.
+const PRESENCE_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
 // The autodetect disc URL: try every drive, take the one holding media.
 // Named because the launch probe passes it through three places and a
 // typo in any of them would scan the wrong thing.
@@ -1857,6 +1869,14 @@ pub struct App {
     ejecting: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
     /// The SCSI eject the worker runs — a seam so tests never touch a drive.
     eject_fn: fn(&str) -> Result<String, String>,
+    /// The disc watch's check in flight: the source it asks about, and its verdict.
+    presence: Option<(String, std::sync::mpsc::Receiver<Option<bool>>)>,
+    /// When the disc watch last asked; `None` asks on the next tick.
+    presence_at: Option<std::time::Instant>,
+    /// The disc watch's cadence: [`PRESENCE_EVERY`], zero in tests.
+    presence_every: std::time::Duration,
+    /// The media-presence check the worker runs — a seam so tests never touch a drive.
+    presence_fn: fn(&str) -> Option<bool>,
     /// A Check for updates in flight: its worker's one-line verdict, collected on the tick.
     update_check: Option<std::sync::mpsc::Receiver<String>>,
     /// The network check the worker runs — a seam so tests never reach GitHub.
@@ -2048,6 +2068,10 @@ impl App {
             probe_scan: SCANNERS.1,
             ejecting: None,
             eject_fn: crate::engine::eject_source,
+            presence: None,
+            presence_at: None,
+            presence_every: PRESENCE_EVERY,
+            presence_fn: PRESENCE,
             update_check: None,
             update_fn: crate::settings::check_for_update,
             reported_bad: 0,
@@ -2170,7 +2194,11 @@ impl App {
                 );
                 vec![Effect::Redraw]
             }
-            Cmd::Run => self.start_run(),
+            Cmd::Run => {
+                // No presence check may overlap the rip's drive open.
+                self.settle_presence();
+                self.start_run()
+            }
             Cmd::Cancel => {
                 if let Some(st) = &self.run {
                     st.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2274,7 +2302,11 @@ impl App {
         self.stop_opens();
         self.probe = None;
         self.pending = None;
-        self.open_inner(path, false)
+        let mut fx = self.open_inner(path, false);
+        if self.watching_disc() {
+            fx.push(Effect::StartTicking);
+        }
+        fx
     }
 
     /// Scan and preflight away from the UI thread; tick applies the result.
@@ -2471,6 +2503,91 @@ impl App {
             ),
         }
         vec![Effect::Redraw]
+    }
+
+    // The disc watch runs only for an idle open disc: never during a rip, open, probe or eject.
+    fn watching_disc(&self) -> bool {
+        crate::engine::is_disc_source(&self.source)
+            && matches!(self.page, Page::Titles | Page::Result)
+            && self.run.is_none()
+            && self.probe.is_none()
+            && !self.opening()
+            && self.ejecting.is_none()
+    }
+
+    // Ask, off the UI thread, whether the open disc is still in its drive.
+    fn spawn_presence(&mut self) {
+        let (source, check) = (self.source.clone(), self.presence_fn);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("disc-presence".into())
+            .spawn(move || {
+                let _ = tx.send(check(&source));
+            });
+        self.presence_at = Some(std::time::Instant::now());
+        if spawned.is_ok() {
+            self.presence = Some((self.source.clone(), rx));
+        }
+    }
+
+    // Collect the watch's verdict, or start the next check once one is due.
+    fn poll_presence(&mut self) -> Vec<Effect> {
+        let verdict = match self.presence.as_ref().map(|(_, rx)| rx.try_recv()) {
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
+            Some(Ok(v)) => v,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => None,
+            None => {
+                let due = self
+                    .presence_at
+                    .is_none_or(|t| t.elapsed() >= self.presence_every);
+                if due && self.watching_disc() {
+                    self.spawn_presence();
+                }
+                return Vec::new();
+            }
+        };
+        let checked = self.presence.take().map(|(src, _)| src);
+        self.apply_presence(checked, verdict)
+    }
+
+    // A verdict counts only for the disc it asked about, and only while that disc sits idle.
+    fn apply_presence(&mut self, checked: Option<String>, verdict: Option<bool>) -> Vec<Effect> {
+        if verdict != Some(false)
+            || checked.as_deref() != Some(self.source.as_str())
+            || !self.watching_disc()
+        {
+            return Vec::new();
+        }
+        // The disc left its drive. A rip's Result stays up until Done, which then has no
+        // tree to return to: the end-of-rip eject must not hide the outcome.
+        let page = self.page;
+        self.close_source();
+        if page == Page::Result {
+            self.page = Page::Result;
+        }
+        vec![Effect::Redraw]
+    }
+
+    // Done and Start act on the disc's presence now, not on the watch's next verdict. A
+    // verdict that is not in within PRESENCE_SETTLE is left to the tick.
+    fn settle_presence(&mut self) {
+        if !self.watching_disc() {
+            return;
+        }
+        if self.presence.is_none() {
+            self.spawn_presence();
+        }
+        let verdict = match self
+            .presence
+            .as_ref()
+            .map(|(_, rx)| rx.recv_timeout(PRESENCE_SETTLE))
+        {
+            Some(Ok(v)) => v,
+            Some(Err(std::sync::mpsc::RecvTimeoutError::Timeout)) | None => return,
+            Some(Err(std::sync::mpsc::RecvTimeoutError::Disconnected)) => None,
+        };
+        let checked = self.presence.take().map(|(src, _)| src);
+        self.apply_presence(checked, verdict);
     }
 
     pub fn opening(&self) -> bool {
@@ -2886,6 +3003,7 @@ impl App {
         let mut probe_fx = self.poll_probe();
         probe_fx.extend(self.poll_eject());
         probe_fx.extend(self.poll_update());
+        probe_fx.extend(self.poll_presence());
         if let Some(rx) = &self.opening {
             match rx.try_recv() {
                 Ok(opened) => {
@@ -2920,7 +3038,10 @@ impl App {
                 && self.ejecting.is_none()
                 && self.update_check.is_none()
             {
-                fx.push(Effect::StopTicking);
+                // An idle disc keeps the tick for its watch, without a redraw per tick.
+                if self.presence.is_none() && !self.watching_disc() {
+                    fx.push(Effect::StopTicking);
+                }
             } else if fx.is_empty() {
                 fx.push(Effect::Redraw);
             }
@@ -2966,8 +3087,10 @@ impl App {
             self.result_outcome = st.outcome_now();
             self.run = None;
             self.page = Page::Result;
+            // The rip may have ejected its disc: the watch asks on the next tick.
+            self.presence_at = None;
             let mut fx = vec![Effect::Redraw];
-            if self.update_check.is_none() {
+            if self.update_check.is_none() && !self.watching_disc() {
                 fx.push(Effect::StopTicking);
             }
             if self.settings.notify_when_rip_finished {
@@ -2988,6 +3111,7 @@ impl App {
     }
 
     pub fn dismiss_result(&mut self) -> Vec<Effect> {
+        self.settle_presence();
         self.page = if self.tree.arena.is_empty() {
             Page::Empty
         } else {
@@ -3624,7 +3748,10 @@ mod tests {
         assert_eq!(app.source, PROBE_SOURCE, "the scanned source must be set");
         assert!(matches!(app.page, Page::Titles));
         assert_eq!(app.tree.title_count(), 1);
-        assert!(fx.contains(&Effect::StopTicking), "nothing left to poll");
+        assert!(
+            !fx.contains(&Effect::StopTicking),
+            "the open disc keeps the tick for its watch: {fx:?}"
+        );
     }
 
     /// The user did not wait. A probe landing after they opened something
@@ -3779,6 +3906,9 @@ mod tests {
         probe_source(path, keys, tok)
     }
     const NO_DRIVE_IN_TESTS: &str = "unit tests never open a drive";
+    pub(super) fn no_drive_presence(_: &str) -> Option<bool> {
+        None
+    }
 
     #[test]
     fn unit_tests_never_reach_a_real_drive() {
@@ -5103,5 +5233,169 @@ mod tests {
         drain_eject(&mut app);
         assert_eq!(app.source, "/m/Other.iso");
         assert_eq!(app.page, Page::Titles);
+    }
+
+    // ── The disc watch: a disc that left its drive never leaves its titles behind ──
+
+    fn disc_gone(_: &str) -> Option<bool> {
+        Some(false)
+    }
+
+    fn disc_still_in(_: &str) -> Option<bool> {
+        Some(true)
+    }
+
+    // An idle disc source with its title tree, as a finished rip leaves it.
+    fn idle_disc(page: Page, presence: fn(&str) -> Option<bool>) -> App {
+        let mut app = app_with_titles(&["MPEG-2"]);
+        app.source = "disc://".into();
+        app.page = page;
+        app.presence_fn = presence;
+        app.presence_every = std::time::Duration::ZERO;
+        app
+    }
+
+    fn tick_until_watched(app: &mut App) {
+        for _ in 0..2_000 {
+            app.tick();
+            if app.presence.is_none() && app.presence_at.is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("the presence check never finished");
+    }
+
+    #[test]
+    fn done_with_the_disc_gone_returns_to_the_start_screen() {
+        let mut app = idle_disc(Page::Result, disc_gone);
+        app.dismiss_result();
+        assert_eq!(app.page, Page::Empty, "no titles of a disc that is gone");
+        assert!(app.source.is_empty() && app.tree.arena.is_empty());
+    }
+
+    #[test]
+    fn done_with_the_disc_still_in_returns_to_its_titles() {
+        let mut app = idle_disc(Page::Result, disc_still_in);
+        app.dismiss_result();
+        assert_eq!(app.page, Page::Titles);
+        assert_eq!(app.source, "disc://");
+    }
+
+    #[test]
+    fn done_with_a_file_source_returns_to_its_titles() {
+        let mut app = idle_disc(Page::Result, disc_gone);
+        app.source = "/m/Movie.iso".into();
+        app.dismiss_result();
+        assert_eq!(app.page, Page::Titles);
+        assert_eq!(app.source, "/m/Movie.iso");
+    }
+
+    #[test]
+    fn a_disc_removed_while_idle_on_its_titles_resets_to_the_start_screen() {
+        let mut app = idle_disc(Page::Titles, disc_gone);
+        tick_until_watched(&mut app);
+        assert_eq!(app.page, Page::Empty);
+        assert!(app.source.is_empty() && app.tree.arena.is_empty());
+        assert!(
+            app.tick().contains(&Effect::StopTicking),
+            "nothing left to watch"
+        );
+    }
+
+    #[test]
+    fn an_idle_disc_keeps_the_tick_for_its_watch() {
+        let mut app = idle_disc(Page::Titles, disc_still_in);
+        tick_until_watched(&mut app);
+        let fx = app.tick();
+        assert!(!fx.contains(&Effect::StopTicking), "{fx:?}");
+        assert!(
+            !fx.contains(&Effect::Redraw),
+            "no redraw per idle tick: {fx:?}"
+        );
+        assert_eq!(app.page, Page::Titles);
+    }
+
+    #[test]
+    fn a_rip_that_ejected_its_disc_keeps_its_result_until_done() {
+        let mut app = idle_disc(Page::Progress, disc_gone);
+        let st = Arc::new(RunState::default());
+        st.finished.store(true, Ordering::Release);
+        app.run = Some(st);
+        let fx = app.tick();
+        assert!(
+            !fx.contains(&Effect::StopTicking),
+            "the watch needs the tick"
+        );
+        tick_until_watched(&mut app);
+        assert_eq!(app.page, Page::Result, "the outcome stays on screen");
+        assert!(
+            app.tree.arena.is_empty(),
+            "but the gone disc's titles do not"
+        );
+        app.dismiss_result();
+        assert_eq!(app.page, Page::Empty);
+    }
+
+    static PRESENCE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn counted_gone(_: &str) -> Option<bool> {
+        PRESENCE_CALLS.fetch_add(1, Ordering::SeqCst);
+        Some(false)
+    }
+
+    #[test]
+    fn the_watch_never_touches_the_drive_during_a_rip() {
+        let mut app = idle_disc(Page::Progress, counted_gone);
+        app.run = Some(Arc::default());
+        let before = PRESENCE_CALLS.load(Ordering::SeqCst);
+        for _ in 0..5 {
+            app.tick();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(app.presence.is_none(), "no check started");
+        assert_eq!(PRESENCE_CALLS.load(Ordering::SeqCst), before);
+        assert_eq!(app.page, Page::Progress);
+        assert_eq!(app.source, "disc://");
+    }
+
+    #[test]
+    fn a_verdict_that_lands_during_a_rip_is_dropped() {
+        let mut app = idle_disc(Page::Titles, disc_gone);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.presence = Some(("disc://".into(), rx));
+        app.run = Some(Arc::default());
+        app.page = Page::Progress;
+        tx.send(Some(false)).unwrap();
+        app.tick();
+        assert_eq!(app.source, "disc://");
+        assert_eq!(app.page, Page::Progress);
+    }
+
+    #[test]
+    fn an_app_eject_still_resets_and_a_late_verdict_spares_a_later_source() {
+        let mut app = idle_disc(Page::Titles, disc_still_in);
+        app.eject_fn = fake_eject_ok;
+        app.dispatch(Cmd::Eject);
+        drain_eject(&mut app);
+        assert_eq!(app.page, Page::Empty);
+        assert!(app.source.is_empty());
+        // A check still out for the ejected disc lands after a file was opened.
+        let mut app = idle_disc(Page::Titles, disc_gone);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.presence = Some(("disc://".into(), rx));
+        app.source = "/m/Other.iso".into();
+        tx.send(Some(false)).unwrap();
+        app.tick();
+        assert_eq!(app.source, "/m/Other.iso");
+        assert_eq!(app.page, Page::Titles);
+    }
+
+    #[test]
+    fn an_unknown_answer_keeps_the_disc_open() {
+        let mut app = idle_disc(Page::Titles, no_drive_presence);
+        tick_until_watched(&mut app);
+        assert_eq!(app.page, Page::Titles);
+        assert_eq!(app.source, "disc://");
     }
 }
