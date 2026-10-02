@@ -961,7 +961,7 @@ mod tests {
     // key entry for the disc is written against.
     #[test]
     fn image_info_names_the_disc_hash_of_an_aacs_image() {
-        let hash = "0x99D54532996BBE5F7D02622D627E5B2562923E1E";
+        let hash = "0xFEEDFACE00000000000000000000000000000000";
         let mut disc = synthetic_disc();
         disc.format = DiscFormat::BluRay;
         disc.aacs = Some(libfreemkv::test_util::aacs_state().disc_hash(hash).build());
