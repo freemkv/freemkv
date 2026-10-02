@@ -10,7 +10,7 @@
 pub const LONG_DEST: &str = if cfg!(windows) {
     r"C:\Users\Public\Videos\freemkv rips\Archive of my own discs"
 } else {
-    "/home/user/Videos/freemkv/Archive 2026"
+    "/mnt/library/Videos/freemkv/Archive 2026"
 };
 
 /// A rectangle of a captured image, in top-down pixel coordinates.

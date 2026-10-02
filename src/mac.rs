@@ -864,10 +864,9 @@ define_class!(
             }
         }
 
-        // A Settings text field commits when focus leaves it (Tab, a click
-        // elsewhere), through the same `commit_prefs` as OK, which writes only
-        // when something changed. Focus also leaves as Cancel or the close
-        // button takes the window away; that is not an edit.
+        // A Settings text field commits when focus leaves it, through the same
+        // `commit_prefs` as OK (writes only on a change). Focus also leaves as
+        // Cancel or close takes the window away; that is not an edit.
         #[unsafe(method(controlTextDidEndEditing:))]
         fn control_text_did_end_editing(&self, n: &objc2_foundation::NSNotification) {
             let Some(f) = { n.object() }.and_then(|o| self.pref_field(&o)) else {
