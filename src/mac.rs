@@ -551,6 +551,10 @@ impl TitlesSource {
             tf.setEditable(false);
             tf.setSelectable(false);
             tf.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+            // A narrow column ends the text in "…" rather than cutting it at a
+            // word; hovering shows it whole.
+            tf.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+            tf.setAllowsExpansionToolTips(true);
         }
         Some(unsafe { Retained::cast_unchecked(tf) })
     }
@@ -1909,6 +1913,13 @@ impl Controller {
             let tree_w = (w - PAD * 2.0) * 0.464;
             if let Some(sv) = iv.tree_scroll.borrow().as_ref() {
                 sv.setFrame(r(PAD, 0.0, tree_w, ph));
+                // Fit the columns to the new width (Description takes up the
+                // change), so Size stays in view.
+                if let Some(doc) = sv.documentView()
+                    && let Some(ov) = doc.downcast_ref::<NSOutlineView>()
+                {
+                    ov.sizeToFit();
+                }
             }
             let rx = PAD + tree_w + PAD;
             let rw = w - rx - PAD;
@@ -2642,7 +2653,9 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         col
     };
 
-    let c_check = mk_col("check", "", 26.0);
+    // Wide enough for a stream row's tick past the indent and disclosure
+    // triangle: left to grow on expand, it pushed Size out of the view.
+    let c_check = mk_col("check", "", 72.0);
     let cell = NSButtonCell::new(mtm);
     unsafe {
         cell.setButtonType(NSButtonType::Switch);
@@ -2650,7 +2663,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         c_check.setDataCell(&cell);
     }
     let c_type = mk_col("type", &crate::strings::get("gui.col.type"), 96.0);
-    let c_desc = mk_col("desc", &crate::strings::get("gui.col.desc"), tree_w - 290.0);
+    let c_desc = mk_col("desc", &crate::strings::get("gui.col.desc"), tree_w - 336.0);
     let c_length = mk_col(
         "length",
         &crate::strings::get_or("gui.col.duration", "Length"),
@@ -2675,6 +2688,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         ov.addTableColumn(&c_length);
         ov.addTableColumn(&c_size);
         ov.setOutlineTableColumn(Some(&c_check));
+        ov.setAutoresizesOutlineColumn(false);
         ov.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::Regular);
         ov.setUsesAlternatingRowBackgroundColors(false);
         ov.setIndentationPerLevel(14.0);
@@ -5442,6 +5456,20 @@ mod tests {
             arm.contains(".filter(|w| w.isVisible())"),
             "a hidden Settings window must be rebuilt, or Cancel's discarded \
              edits reappear and the next OK commits them"
+        );
+    }
+
+    // Source inspection only: column geometry needs a real window.
+    #[test]
+    fn the_size_column_stays_in_view_source_inspection_only() {
+        let ui = fn_body(prod_src(), "fn build_ui(");
+        assert!(
+            ui.contains("ov.setAutoresizesOutlineColumn(false);"),
+            "the tick column grows on expand and pushes Size out of the tree"
+        );
+        assert!(
+            fn_body(prod_src(), "fn relayout(").contains("ov.sizeToFit()"),
+            "the columns must refit when the tree changes width"
         );
     }
 
