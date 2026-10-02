@@ -158,12 +158,24 @@ pub struct Snapshot {
     pub scan_ms: u64,
 }
 
+impl Snapshot {
+    /// A finished scan of `d` that read every folder and found the library populated:
+    /// only then does an MKV missing from `mkvs` mean the file is gone. An empty
+    /// library may be an unmounted share.
+    fn lists_everything(&self, d: &Dirs) -> bool {
+        self.dirs.as_ref() == Some(d)
+            && self.scanned_at.is_some()
+            && !self.incomplete
+            && !self.library_empty
+    }
+}
+
 /// The Library's state: the queue, the probe cache, the index and the console.
 pub struct Library {
     pub queue: Queue,
     pub probes: ProbeCache,
     pub audits: audit::Audits,
-    // The deep_audit setting as the deep loop last read it.
+    // The deep_audit setting as the quick-lane loop last read it.
     deep_on: AtomicBool,
     config_dir: PathBuf,
     log_dir: PathBuf,
@@ -208,7 +220,7 @@ pub fn wake() {
     }
 }
 
-/// Start the remux worker and the background indexer.
+/// Start the remux worker, the background indexer and both audit lanes.
 pub fn start(cfg: &Arc<RwLock<Config>>) -> std::thread::JoinHandle<()> {
     let lib = instance(&cfg.read().unwrap_or_else(|e| e.into_inner()));
     {
@@ -222,6 +234,12 @@ pub fn start(cfg: &Arc<RwLock<Config>>) -> std::thread::JoinHandle<()> {
         let _ = std::thread::Builder::new()
             .name("library-audit".into())
             .spawn(move || worker::audit_loop(&lib, &cfg, &arbiter::ARBITER));
+    }
+    {
+        let (lib, cfg) = (lib.clone(), cfg.clone());
+        let _ = std::thread::Builder::new()
+            .name("library-deep-audit".into())
+            .spawn(move || worker::deep_audit_loop(&lib, &cfg, &arbiter::ARBITER));
     }
     let cfg = cfg.clone();
     std::thread::Builder::new()
@@ -320,7 +338,11 @@ impl Library {
         self.deep_on.load(Ordering::SeqCst)
     }
 
+    /// Turning deep audit off empties the deep lane; turning it on is followed by a refill.
     pub(crate) fn set_deep_enabled(&self, on: bool) {
+        if !on {
+            self.audits.clear_deep();
+        }
         if self.deep_on.swap(on, Ordering::SeqCst) != on {
             self.touch_index();
         }
@@ -434,12 +456,18 @@ impl Library {
     }
 
     /// Queue the audits `files` still needs (new, changed, never audited, or a full decode
-    /// owed while deep audit is on). `complete`: the scan saw every file.
-    pub(crate) fn fill_audits(&self, files: &[(PathBuf, FileSig)], complete: bool) {
+    /// owed while deep audit is on). Never drops a stored verdict.
+    pub(crate) fn fill_audits(&self, files: &[(PathBuf, FileSig)]) {
         let now = crate::server::util::epoch_secs();
-        if self.audits.fill(files, self.deep_enabled(), now, complete) > 0 {
+        if self.audits.fill(files, self.deep_enabled(), now, false) > 0 {
             self.touch_index();
         }
+    }
+
+    /// The audit worker's periodic refill from the last scan. Queues only: before the
+    /// first scan the snapshot is empty, which proves nothing about the library.
+    pub(crate) fn refill_audits(&self) {
+        self.fill_audits(&self.mkv_files());
     }
 
     /// The MKVs of the last scan, at the size and mtime it saw.
@@ -460,7 +488,6 @@ impl Library {
         // This pass is the answer to any wake that came before it.
         self.take_wake();
         self.rescan(d);
-        let snap = self.snapshot();
         let files = self.mkv_files();
         let mut complete = true;
         let mut last = std::time::Instant::now();
@@ -480,12 +507,13 @@ impl Library {
         }
         self.touch_index();
         if complete {
-            // The list as of now: a remux may have landed during the header pass. An
-            // empty library may be an unmounted share, which proves nothing is gone.
-            let whole = !snap.incomplete && !snap.library_empty;
+            // The list as of now: a remux may have landed during the header pass.
+            let snap = self.snapshot();
             let files = self.mkv_files();
-            self.fill_audits(&files, whole);
-            if whole {
+            self.fill_audits(&files);
+            if snap.lists_everything(d) {
+                let present: HashSet<PathBuf> = snap.mkvs.iter().map(|m| m.path.clone()).collect();
+                self.audits.prune(&present);
                 self.probes.retain(&files);
             }
         }
@@ -567,7 +595,7 @@ impl Library {
         let (mut probing, mut auditing) = (0, 0);
         let deep_on = self.deep_enabled();
         let queued = self.audits.queued_set();
-        let running_audit = self.audits.status().running.map(|l| l.path);
+        let running_audits = self.audits.running_set();
         let rows = snap
             .rows
             .iter()
@@ -595,7 +623,7 @@ impl Library {
                     .filter(|_| audit.is_some())
                     .and_then(|(m, s)| self.audits.deep_view(m, s, deep_on));
                 let audit_queued = r.mkv.as_ref().is_some_and(|m| queued.contains(m));
-                let audit_running = r.mkv.is_some() && r.mkv == running_audit;
+                let audit_running = r.mkv.as_ref().is_some_and(|m| running_audits.contains(m));
                 auditing += usize::from(audit_queued || audit_running);
                 let needs_remux =
                     r.remuxable() && (r.mkv.is_none() || (probed && muxed_with.out_of_date()));
@@ -983,6 +1011,70 @@ mod tests {
             lib.audits.report(&mkv, sig).is_some(),
             "an empty folder may be an unmounted share"
         );
+    }
+
+    #[test]
+    fn a_restart_keeps_every_stored_audit_until_a_file_is_really_gone() {
+        let t = tempfile::tempdir().unwrap();
+        let d = Dirs {
+            library: t.path().join("media/movies"),
+            isos: Some(t.path().join("media/iso")),
+            iso_subfolders: false,
+        };
+        let cfg = t.path().join("config");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::create_dir_all(d.isos.as_ref().unwrap()).unwrap();
+        std::fs::write(
+            d.isos.as_ref().unwrap().join("2 Fast 2 Furious (2003).iso"),
+            b"x",
+        )
+        .unwrap();
+        let bytes = probe::testmkv::mkv("freemkv 1.0.0", Some(60.0), Some(58), true);
+        let names = [
+            "2 Fast 2 Furious (2003)/2 Fast 2 Furious (2003).mkv",
+            "Constantine (2005)/Constantine (2005).mkv",
+            "Dune (1984)/Dune (1984).mkv",
+            "Dune (2021)/Dune (2021).mkv",
+            // Two cuts, neither the feature: an ambiguous row with no MKV of its own.
+            "Alien (1979)/Alien Theatrical.mkv",
+            "Alien (1979)/Alien Director.mkv",
+        ];
+        let mut stored = Vec::new();
+        {
+            let audits = audit::Audits::open(&cfg);
+            for n in names {
+                let p = d.library.join(n);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, &bytes).unwrap();
+                let sig = FileSig::stat(&p).unwrap();
+                audits.record_fast(&p, sig, probe::audit_fast(&p).unwrap(), 1);
+                stored.push((p, sig));
+            }
+        }
+        let lib = Library::open(&cfg, &t.path().join("logs"));
+        lib.set_deep_enabled(true);
+        // The audit worker's first refill can run before the indexer's first scan.
+        lib.refill_audits();
+        lib.index_now(&d);
+        lib.refill_audits();
+        lib.index_now(&d);
+        let reopened = audit::Audits::open(&cfg);
+        for (p, sig) in &stored {
+            assert!(
+                reopened.report(p, *sig).is_some(),
+                "{} kept its audit",
+                p.display()
+            );
+        }
+        let (gone, gone_sig) = stored[1].clone();
+        std::fs::remove_file(&gone).unwrap();
+        lib.index_now(&d);
+        assert!(
+            lib.audits.report(&gone, gone_sig).is_none(),
+            "a deleted file loses it"
+        );
+        assert!(lib.audits.report(&stored[0].0, stored[0].1).is_some());
+        assert!(lib.audits.report(&stored[4].0, stored[4].1).is_some());
     }
 
     #[test]

@@ -1,10 +1,10 @@
-//! The audit queue: each MKV's audit verdict, persisted, and the queue that produces them.
+//! The audit queues: each MKV's audit verdict, persisted, and the two lanes that produce them.
 //!
-//! One audit is the quick structural read ([`super::probe::audit_fast`]) and, while the
-//! Deep audit setting is on, the full decode ([`super::deep`]). The queue fills itself
-//! with new, changed and never-audited files; Re-audit puts files back on it. The worker
-//! runs it one file at a time, after rips and remuxes. Verdicts live in `audit.json`, so a
-//! restart or a page refresh never loses them.
+//! The quick lane runs the structural read ([`super::probe::audit_fast`]) on every new,
+//! changed and never-audited file, whatever the Deep audit setting says. The deep lane runs
+//! the full decode ([`super::deep`]) while that setting is on, on files whose quick audit
+//! stands. Each lane runs one file at a time, after rips and remuxes, and neither waits on
+//! the other. Verdicts live in `audit.json`, so a restart or a page refresh never loses them.
 
 use super::deep::Verdict;
 use super::probe::{AuditReport, FileSig};
@@ -42,8 +42,18 @@ struct DeepRecord {
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     results: HashMap<PathBuf, Record>,
+    /// The quick lane.
     queue: VecDeque<PathBuf>,
+    /// The deep lane; absent from a file written before it existed.
+    #[serde(default)]
+    deep_queue: VecDeque<PathBuf>,
     paused: bool,
+}
+
+impl State {
+    fn queued(&self) -> HashSet<&PathBuf> {
+        self.queue.iter().chain(&self.deep_queue).collect()
+    }
 }
 
 /// A row's full-decode state as the Library shows it.
@@ -54,7 +64,7 @@ pub struct DeepView {
     pub verdict: Option<Verdict>,
 }
 
-/// The file being audited now.
+/// A file being audited now.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Live {
     pub path: PathBuf,
@@ -65,19 +75,38 @@ pub struct Live {
     pub pct: Option<f64>,
 }
 
-/// The queue at a glance, for the activity strip.
+/// The queues at a glance, for the activity strip.
 #[derive(Clone, Debug, Serialize)]
 pub struct Status {
     pub paused: bool,
+    /// Files waiting in either lane, each counted once.
     pub queued: usize,
+    /// The deep decode while one runs, else the quick read.
     pub running: Option<Live>,
+}
+
+// One lane's running file and its stop flag.
+#[derive(Default)]
+struct Slot {
+    live: Mutex<Option<Live>>,
+    cancel: AtomicBool,
+}
+
+impl Slot {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Live>> {
+        self.live.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn path(&self) -> Option<PathBuf> {
+        self.lock().as_ref().map(|l| l.path.clone())
+    }
 }
 
 pub struct Audits {
     file: PathBuf,
     st: Mutex<State>,
-    live: Mutex<Option<Live>>,
-    cancel: AtomicBool,
+    quick: Slot,
+    deep: Slot,
     generation: AtomicU64,
     // Progress only: the strip repaints, the listing is not refetched.
     progress_generation: AtomicU64,
@@ -105,8 +134,8 @@ impl Audits {
         Self {
             file,
             st: Mutex::new(st),
-            live: Mutex::new(None),
-            cancel: AtomicBool::new(false),
+            quick: Slot::default(),
+            deep: Slot::default(),
             generation: AtomicU64::new(0),
             progress_generation: AtomicU64::new(0),
         }
@@ -114,10 +143,6 @@ impl Audits {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.st.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn lock_live(&self) -> std::sync::MutexGuard<'_, Option<Live>> {
-        self.live.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     // Persist and tell the page. The caller still holds `st`.
@@ -141,12 +166,12 @@ impl Audits {
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Moves whenever a verdict, the queue or the running file changed.
+    /// Moves whenever a verdict, a queue or a running file changed.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
 
-    /// Moves as the running audit progresses.
+    /// Moves as the running deep decode progresses.
     pub fn progress_generation(&self) -> u64 {
         self.progress_generation.load(Ordering::SeqCst)
     }
@@ -182,22 +207,36 @@ impl Audits {
         }
     }
 
-    /// Whether `path` waits in the queue.
+    /// Whether `path` waits in either lane.
     pub fn is_queued(&self, path: &Path) -> bool {
-        self.lock().queue.iter().any(|p| p == path)
+        let st = self.lock();
+        st.queue.iter().chain(&st.deep_queue).any(|p| p == path)
     }
 
-    /// The paths waiting, as a set (one lock for a whole listing).
+    /// The paths waiting in either lane, as a set (one lock for a whole listing).
     pub fn queued_set(&self) -> HashSet<PathBuf> {
-        self.lock().queue.iter().cloned().collect()
+        self.lock().queued().into_iter().cloned().collect()
+    }
+
+    /// The files being audited now, in either lane.
+    pub(crate) fn running_set(&self) -> HashSet<PathBuf> {
+        self.quick
+            .path()
+            .into_iter()
+            .chain(self.deep.path())
+            .collect()
     }
 
     pub fn status(&self) -> Status {
         let st = self.lock();
         Status {
             paused: st.paused,
-            queued: st.queue.len(),
-            running: self.lock_live().clone(),
+            queued: st.queued().len(),
+            running: self
+                .deep
+                .lock()
+                .clone()
+                .or_else(|| self.quick.lock().clone()),
         }
     }
 
@@ -205,33 +244,34 @@ impl Audits {
         self.lock().paused
     }
 
+    /// Pauses both lanes.
     pub fn set_paused(&self, paused: bool) {
         let mut st = self.lock();
         st.paused = paused;
         self.changed(&st);
     }
 
-    /// Queue `paths` not already waiting or running. Returns how many were added.
+    /// Queue the quick audit of `paths` not already waiting or running in that lane.
+    /// Returns how many were added.
     pub fn enqueue(&self, paths: impl IntoIterator<Item = PathBuf>) -> usize {
         let mut st = self.lock();
-        let running = self.lock_live().as_ref().map(|l| l.path.clone());
-        let mut queued: HashSet<PathBuf> = st.queue.iter().cloned().collect();
-        let mut n = 0;
-        for p in paths {
-            if running.as_ref() == Some(&p) || !queued.insert(p.clone()) {
-                continue;
-            }
-            st.queue.push_back(p);
-            n += 1;
-        }
+        let n = push_lane(&mut st.queue, self.quick.path(), paths);
         if n > 0 {
             self.changed(&st);
         }
         n
     }
 
-    /// Re-audit `paths`: the full audit again, the deep decode included. Returns how many
-    /// were queued (a file already waiting keeps its place).
+    /// Queue the full decode of `path` unless it waits or runs in the deep lane already.
+    pub(crate) fn enqueue_deep(&self, path: &Path) {
+        let mut st = self.lock();
+        if push_lane(&mut st.deep_queue, self.deep.path(), [path.to_path_buf()]) > 0 {
+            self.changed(&st);
+        }
+    }
+
+    /// Re-audit `paths`: the full audit again, the deep decode included once the quick
+    /// read is redone. Returns how many were queued (a file already waiting keeps its place).
     pub fn reaudit(&self, paths: &[PathBuf]) -> usize {
         {
             let mut st = self.lock();
@@ -240,15 +280,17 @@ impl Audits {
                     r.deep = None;
                 }
             }
+            let redo: HashSet<&PathBuf> = paths.iter().collect();
+            st.deep_queue.retain(|p| !redo.contains(p));
         }
         let n = self.enqueue(paths.iter().cloned());
         self.changed(&self.lock());
         n
     }
 
-    /// Queue what `files` still needs: never audited, changed since, or (deep audit on) no
-    /// full decode yet or an inconclusive one whose retry is due. With `complete`, verdicts
-    /// for files no longer present are dropped.
+    /// Queue what `files` still needs: the quick read when never audited or changed since;
+    /// with deep audit on, the full decode when none has finished and a retry is due. With
+    /// `complete`, verdicts for files no longer present are dropped.
     pub fn fill(
         &self,
         files: &[(PathBuf, FileSig)],
@@ -256,84 +298,132 @@ impl Audits {
         now: u64,
         complete: bool,
     ) -> usize {
-        let wanted: Vec<PathBuf> = {
-            let mut st = self.lock();
-            if complete {
-                let present: HashSet<&PathBuf> = files.iter().map(|(p, _)| p).collect();
-                let before = st.results.len();
-                st.results.retain(|p, _| present.contains(p));
-                st.queue.retain(|p| present.contains(p));
-                if st.results.len() != before {
-                    self.changed(&st);
+        let mut st = self.lock();
+        if complete {
+            let present: HashSet<PathBuf> = files.iter().map(|(p, _)| p.clone()).collect();
+            prune_locked(self, &mut st, &present);
+        }
+        let (mut quick, mut deep) = (Vec::new(), Vec::new());
+        for (p, sig) in files {
+            match st.results.get(p) {
+                Some(r) if r.matches(*sig) => {
+                    if deep_on && deep_due(r, now) {
+                        deep.push(p.clone());
+                    }
                 }
+                _ => quick.push(p.clone()),
             }
-            files
-                .iter()
-                .filter(|(p, sig)| match st.results.get(p) {
-                    Some(r) if r.matches(*sig) => deep_on && deep_due(r, now),
-                    _ => true,
-                })
-                .map(|(p, _)| p.clone())
-                .collect()
-        };
-        self.enqueue(wanted)
+        }
+        let n = push_lane(&mut st.queue, self.quick.path(), quick)
+            + push_lane(&mut st.deep_queue, self.deep.path(), deep);
+        if n > 0 {
+            self.changed(&st);
+        }
+        n
     }
 
-    /// Take the next file to audit, unless paused. It counts as running from here, so a
+    /// Drop the verdicts and queued entries of every file not in `present`. The caller
+    /// guarantees `present` is a complete listing of the library.
+    pub(crate) fn prune(&self, present: &HashSet<PathBuf>) {
+        prune_locked(self, &mut self.lock(), present);
+    }
+
+    /// Empty the deep lane (deep audit was turned off). A running decode stops on its own.
+    pub(crate) fn clear_deep(&self) {
+        let mut st = self.lock();
+        if !st.deep_queue.is_empty() {
+            st.deep_queue.clear();
+            self.changed(&st);
+        }
+    }
+
+    /// Take the next quick audit, unless paused. It counts as running from here, so a
     /// stop or an enqueue before [`Self::start`] sees it. Not persisted: a restart redoes
     /// the file that was in flight.
     pub fn next(&self) -> Option<PathBuf> {
+        self.take(&self.quick, |st| st.queue.pop_front(), "quick")
+    }
+
+    /// Take the next full decode, unless paused; as [`Self::next`] for the deep lane.
+    pub(crate) fn next_deep(&self) -> Option<PathBuf> {
+        self.take(&self.deep, |st| st.deep_queue.pop_front(), "reading")
+    }
+
+    fn take(
+        &self,
+        slot: &Slot,
+        pop: impl FnOnce(&mut State) -> Option<PathBuf>,
+        stage: &'static str,
+    ) -> Option<PathBuf> {
         let mut st = self.lock();
         if st.paused {
             return None;
         }
-        let p = st.queue.pop_front()?;
-        self.cancel.store(false, Ordering::SeqCst);
-        *self.lock_live() = Some(Live {
+        let p = pop(&mut st)?;
+        slot.cancel.store(false, Ordering::SeqCst);
+        *slot.lock() = Some(Live {
             path: p.clone(),
             title: String::new(),
-            stage: "quick",
+            stage,
             pct: None,
         });
         self.touch();
         Some(p)
     }
 
-    /// Put an interrupted file back at the front.
+    /// Put an interrupted decode back at the front of the deep lane.
     pub fn requeue_front(&self, path: PathBuf) {
         let mut st = self.lock();
-        if !st.queue.contains(&path) {
-            st.queue.push_front(path);
+        if !st.deep_queue.contains(&path) {
+            st.deep_queue.push_front(path);
             self.changed(&st);
         }
     }
 
-    /// Empty the queue and stop the audit running now. Returns how many were waiting.
+    /// Empty both lanes and stop the audits running now. Returns how many were waiting.
     pub fn stop_all(&self) -> usize {
         let mut st = self.lock();
-        let n = st.queue.len();
+        let n = st.queued().len();
         st.queue.clear();
-        if self.lock_live().is_some() {
-            self.cancel.store(true, Ordering::SeqCst);
+        st.deep_queue.clear();
+        for slot in [&self.quick, &self.deep] {
+            if slot.lock().is_some() {
+                slot.cancel.store(true, Ordering::SeqCst);
+            }
         }
         self.changed(&st);
         n
     }
 
-    /// True once after [`Self::stop_all`] asked the running audit to stop.
+    /// True once after [`Self::stop_all`] asked the running quick audit to stop.
     pub fn cancelled(&self) -> bool {
-        self.cancel.load(Ordering::SeqCst)
+        self.quick.cancel.load(Ordering::SeqCst)
     }
 
-    /// Name the file being audited; a stop asked since [`Self::next`] stays asked.
+    /// True once after [`Self::stop_all`] asked the running decode to stop.
+    pub(crate) fn cancelled_deep(&self) -> bool {
+        self.deep.cancel.load(Ordering::SeqCst)
+    }
+
+    /// Name the file the quick lane audits; a stop asked since [`Self::next`] stays asked.
     pub fn start(&self, path: &Path, title: String) {
-        *self.lock_live() = Some(Live {
+        Self::name(&self.quick, path, title, "quick");
+        self.touch();
+    }
+
+    /// Name the file the deep lane decodes; a stop asked since taking it stays asked.
+    pub(crate) fn start_deep(&self, path: &Path, title: String) {
+        Self::name(&self.deep, path, title, "reading");
+        self.touch();
+    }
+
+    fn name(slot: &Slot, path: &Path, title: String, stage: &'static str) {
+        *slot.lock() = Some(Live {
             path: path.to_path_buf(),
             title,
-            stage: "quick",
+            stage,
             pct: None,
         });
-        self.touch();
     }
 
     /// The deep stage has reached `secs` of a `duration`-second movie.
@@ -345,17 +435,28 @@ impl Audits {
             "reading" => f * READING_SHARE,
             _ => READING_SHARE + f * (100.0 - READING_SHARE),
         });
-        if let Some(l) = self.lock_live().as_mut() {
+        if let Some(l) = self.deep.lock().as_mut() {
             l.stage = stage;
             l.pct = pct.or(l.pct);
         }
         self.progress_generation.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// The quick lane's file is done.
     pub fn finish(&self) {
-        *self.lock_live() = None;
-        self.cancel.store(false, Ordering::SeqCst);
+        Self::clear(&self.quick);
         self.touch();
+    }
+
+    /// The deep lane's file is done.
+    pub(crate) fn finish_deep(&self) {
+        Self::clear(&self.deep);
+        self.touch();
+    }
+
+    fn clear(slot: &Slot) {
+        *slot.lock() = None;
+        slot.cancel.store(false, Ordering::SeqCst);
     }
 
     /// Record a quick audit; a changed file loses its deep verdict.
@@ -411,6 +512,24 @@ impl Audits {
     }
 }
 
+// Append `paths` to `lane` unless waiting there already or `running` in it.
+fn push_lane(
+    lane: &mut VecDeque<PathBuf>,
+    running: Option<PathBuf>,
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> usize {
+    let mut queued: HashSet<PathBuf> = lane.iter().cloned().collect();
+    let mut n = 0;
+    for p in paths {
+        if running.as_ref() == Some(&p) || !queued.insert(p.clone()) {
+            continue;
+        }
+        lane.push_back(p);
+        n += 1;
+    }
+    n
+}
+
 // Keep an unreadable state file for the owner; the next write must not replace it.
 fn set_aside(file: &Path) {
     let _ = std::fs::rename(file, file.with_extension("json.unreadable"));
@@ -425,6 +544,16 @@ fn deep_due(r: &Record, now: u64) -> bool {
         None => true,
         Some(d) if d.verdict.completed => false,
         Some(d) => super::deep::retry_due(d.attempts, d.last_try, now),
+    }
+}
+
+fn prune_locked(a: &Audits, st: &mut State, present: &HashSet<PathBuf>) {
+    let before = (st.results.len(), st.queue.len(), st.deep_queue.len());
+    st.results.retain(|p, _| present.contains(p));
+    st.queue.retain(|p| present.contains(p));
+    st.deep_queue.retain(|p| present.contains(p));
+    if (st.results.len(), st.queue.len(), st.deep_queue.len()) != before {
+        a.changed(st);
     }
 }
 
@@ -494,9 +623,10 @@ mod tests {
             1,
             "the decode is owed"
         );
-        a.next();
+        assert!(a.next().is_none(), "on the deep lane, not the quick one");
+        assert_eq!(a.next_deep(), Some(p.clone()));
         a.record_deep(&p, sig, verdict(false), 2);
-        a.finish();
+        a.finish_deep();
         assert_eq!(a.deep_view(&p, sig, false).unwrap().state, "clean");
         assert_eq!(a.fill(&[(p.clone(), sig)], true, 3, true), 0);
         assert_eq!(a.reaudit(std::slice::from_ref(&p)), 1);
@@ -543,7 +673,7 @@ mod tests {
     fn progress_fills_one_bar_across_both_stages() {
         let t = tempfile::tempdir().unwrap();
         let a = Audits::open(t.path());
-        a.start(Path::new("/m/A.mkv"), "A".into());
+        a.start_deep(Path::new("/m/A.mkv"), "A".into());
         a.progress("reading", 50.0, Some(100.0));
         assert_eq!(a.status().running.unwrap().pct, Some(7.5));
         a.progress("decoding", 100.0, Some(100.0));
@@ -654,12 +784,11 @@ mod tests {
     fn an_interrupted_file_goes_back_first_and_the_backoff_doubles() {
         let t = tempfile::tempdir().unwrap();
         let (p, sig) = file(t.path(), "A.mkv");
-        let (q, qs) = file(t.path(), "B.mkv");
+        let (q, _) = file(t.path(), "B.mkv");
         let a = Audits::open(t.path());
-        a.fill(&[(p.clone(), sig), (q.clone(), qs)], false, 1, true);
-        let first = a.next().unwrap();
-        a.requeue_front(first.clone());
-        assert_eq!(a.next(), Some(first), "front, not back");
+        a.enqueue_deep(&q);
+        a.requeue_front(p.clone());
+        assert_eq!(a.next_deep(), Some(p.clone()), "front, not back");
         a.requeue_front(q.clone());
         a.requeue_front(q.clone());
         assert_eq!(a.status().queued, 1, "no duplicate in the queue");
@@ -672,5 +801,66 @@ mod tests {
         assert!(a.deep_due_for(&p, sig, 2000 + 1200));
         // With deep audit off, an inconclusive try shows nothing.
         assert!(a.deep_view(&p, sig, false).is_none());
+    }
+
+    #[test]
+    fn a_state_file_from_before_the_deep_lane_loads_into_the_quick_lane() {
+        let t = tempfile::tempdir().unwrap();
+        let (p, sig) = file(t.path(), "A.mkv");
+        let (q, qs) = file(t.path(), "B.mkv");
+        {
+            let a = Audits::open(t.path());
+            audited(&a, &p, sig);
+            a.enqueue([q.clone()]);
+        }
+        let mut old: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(t.path().join(FILE)).unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("deep_queue");
+        assert_eq!(
+            old.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["paused", "queue", "results"]
+        );
+        std::fs::write(t.path().join(FILE), old.to_string()).unwrap();
+        let a = Audits::open(t.path());
+        assert!(a.report(&p, sig).is_some(), "results load unchanged");
+        assert!(!t.path().join("audit.json.unreadable").exists());
+        assert_eq!(a.status().queued, 1);
+        assert_eq!(
+            a.fill(&[(p.clone(), sig), (q.clone(), qs)], true, 1, true),
+            1,
+            "A owes its decode on the deep lane; B already waits"
+        );
+        assert_eq!(a.next(), Some(q), "the old queue is the quick lane");
+        assert_eq!(a.next_deep(), Some(p));
+    }
+
+    #[test]
+    fn stop_all_and_pause_act_on_both_lanes() {
+        let t = tempfile::tempdir().unwrap();
+        let (p, sig) = file(t.path(), "A.mkv");
+        let (q, _) = file(t.path(), "B.mkv");
+        let (r, _) = file(t.path(), "C.mkv");
+        let a = Audits::open(t.path());
+        audited(&a, &p, sig);
+        a.enqueue([q.clone(), r.clone()]);
+        a.enqueue_deep(&p);
+        a.set_paused(true);
+        assert!(a.next().is_none() && a.next_deep().is_none());
+        a.set_paused(false);
+        let deep = a.next_deep().unwrap();
+        a.start_deep(&deep, "A".into());
+        let quick = a.next().unwrap();
+        assert_eq!(a.running_set().len(), 2);
+        assert_eq!(a.status().running.unwrap().path, p, "the decode shows");
+        assert_eq!(a.stop_all(), 1);
+        assert!(a.cancelled() && a.cancelled_deep());
+        a.finish();
+        assert!(
+            !a.cancelled() && a.cancelled_deep(),
+            "each lane clears its own stop"
+        );
+        a.finish_deep();
+        assert_eq!(quick, q);
+        assert_eq!(a.status().queued, 0);
     }
 }

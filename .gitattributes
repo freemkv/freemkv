@@ -1,0 +1,6 @@
+# Checked out with LF on every OS: tests assert multi-line text of these files, and goldens
+# are compared byte for byte.
+tests/goldens/** text eol=lf
+snap/** text eol=lf
+.github/workflows/** text eol=lf
+Cargo.toml text eol=lf

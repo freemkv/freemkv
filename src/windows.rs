@@ -4430,6 +4430,7 @@ impl Shell {
 mod tests {
     use super::*;
     use crate::engine::{Row as ScanRow, Scanned};
+    use crate::ui::MenuAction;
 
     // ── fixtures ──────────────────────────────────────────────────────────
 

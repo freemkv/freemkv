@@ -394,6 +394,15 @@ fn strip_language_flag(args: &[String]) -> (Vec<String>, Option<String>, Vec<Pen
     (filtered, language, diags)
 }
 
+// The cause of a failed `info`. Everything `info` touches is the source, so an OS error
+// reads as the OS describes it, never as E5000, whose advice is about the destination.
+fn info_failure_cause(e: &libfreemkv::Error) -> String {
+    match e {
+        libfreemkv::Error::IoError { source } => crate::pipe::fmt_err(source),
+        _ => crate::pipe::fmt_err(e),
+    }
+}
+
 // Print the curated fatal-error block (Channel 1, STDERR, never a raw error code or tracing
 // event) and exit non-zero.
 fn fatal(op_key: &str, cause: &str) -> ! {
@@ -610,7 +619,7 @@ fn info_cmd(args: &[String]) {
                     libfreemkv::ScanOptions::default(),
                 ) {
                     Ok(pair) => pair,
-                    Err(e) => fatal("error.op_info", &crate::pipe::fmt_err(&e)),
+                    Err(e) => fatal("error.op_info", &info_failure_cause(&e)),
                 };
                 let label = std::path::Path::new(path)
                     .file_stem()
@@ -638,7 +647,7 @@ fn info_cmd(args: &[String]) {
                 libfreemkv::ScanOptions::default(),
             ) {
                 Ok(pair) => pair,
-                Err(e) => fatal("error.op_info", &crate::pipe::fmt_err(&e)),
+                Err(e) => fatal("error.op_info", &info_failure_cause(&e)),
             };
             if !flags.quiet {
                 println!("freemkv {}", env!("CARGO_PKG_VERSION"));
@@ -690,7 +699,7 @@ fn info_cmd(args: &[String]) {
                         println!("{line}");
                     }
                 }
-                Err(e) => fatal("error.op_info", &crate::pipe::fmt_err(&e)),
+                Err(e) => fatal("error.op_info", &info_failure_cause(&e)),
             }
         }
         libfreemkv::StreamUrl::Unknown { .. } => {
@@ -1066,6 +1075,21 @@ mod tests {
     }
 
     use super::{SUBCOMMANDS, collect_urls, stream_info_lines, update_keys_dest};
+
+    // A missing source reads as the OS reports it, not as E5000 and its destination advice.
+    #[test]
+    fn info_on_a_missing_source_names_the_os_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.mkv");
+        let url = format!("mkv://{}", path.display());
+        let Err(e) = freemkv_engine::stream_info(&url, None, &libfreemkv::Halt::new()) else {
+            panic!("{url} opened");
+        };
+        let cause = super::info_failure_cause(&e);
+        let missing = std::fs::File::open(&path).unwrap_err();
+        assert_eq!(cause, crate::pipe::fmt_err(&missing));
+        assert!(!cause.contains("E5000"), "{cause}");
+    }
 
     // G10 (design §1.1): `info` lists the streams of every stream container, mpg:// and
     // mp4:// included.

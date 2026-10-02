@@ -1487,7 +1487,7 @@ impl Controller {
                             a.say(
                                 crate::ui::LogKind::Notice,
                                 &crate::strings::fmt_or(
-                                    "gui.log.open_url_failed",
+                                    "gui.log.open_url_refused",
                                     "Could not open {url}",
                                     &[("url", &u)],
                                 ),

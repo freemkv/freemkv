@@ -51,8 +51,11 @@ def manifest(checksum):
                         "--share=network"],
         "build-options": {"append-path": "/usr/lib/sdk/rust-stable/bin",
                           "env": {"CARGO_HOME": "/run/build/freemkv/cargo"}},
+        # The SDK's rust-stable extension can trail the bins' latest-stable rust-version by a
+        # patch release; a patch release changes no language or std surface the build relies on.
         "modules": [{"name": "freemkv", "buildsystem": "simple", "build-commands": [
-            "cd freemkv && cargo build --offline --locked --release --features gui --bin freemkv",
+            "cd freemkv && cargo build --offline --locked --release --ignore-rust-version"
+            " --features gui --bin freemkv",
             "install -Dm755 freemkv/target/release/freemkv /app/bin/freemkv",
             "install -Dm644 freemkv/packaging/flatpak/org.freemkv.FreeMKV.desktop /app/share/applications/org.freemkv.FreeMKV.desktop",
             "install -Dm644 freemkv/packaging/flatpak/org.freemkv.FreeMKV.metainfo.xml /app/share/metainfo/org.freemkv.FreeMKV.metainfo.xml",

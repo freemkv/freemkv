@@ -1098,6 +1098,14 @@ LEG_TARGET = {'linux': 'x86_64-unknown-linux-musl', 'windows': 'x86_64-pc-window
               'linux-perf': 'x86_64-unknown-linux-musl', 'windows-perf': 'x86_64-pc-windows-msvc'}
 
 
+def with_record_done(jobs):
+    """The run's jobs as record's self-check sees them: record-media-evidence is still running, so
+    its own entry has no conclusion; replace it by the success it is about to have (job_named
+    returns the first match, so the running entry must not stay)."""
+    return [j for j in jobs if j.get('name') != 'record-media-evidence'] + [
+        {'name': 'record-media-evidence', 'conclusion': 'success'}]
+
+
 def check_evidence(f, run_id, evidence_bytes, lock_bytes, run, jobs, policy, request, perf_check=None,
                    finished=True):
     """Raise ValueError unless this evidence proves F (I-2). Returns warnings. `finished=False` is
@@ -1605,7 +1613,7 @@ def record(plan_dir, legs_dir, policy, env, request=gh_api, aws=aws_json, post=g
         legs_out[leg] = rec
     ev['legs'] = legs_out
     evidence_bytes = json.dumps(ev, indent=1, sort_keys=True).encode()
-    done = jobs + [{'name': 'record-media-evidence', 'conclusion': 'success'}]
+    done = with_record_done(jobs)
     check_evidence(ev['fingerprint'], run_id, evidence_bytes, lock, run, done, policy, request, finished=False)
     return write_evidence_tag(ev['fingerprint'], run_id, evidence_bytes, lock, post, request)
 

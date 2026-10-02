@@ -86,9 +86,10 @@ def clip_units(key, clear=(5,)):
 class Disc:
     """Builds the image and remembers what it put where."""
 
-    def __init__(self, key=UK, inf=None):
+    def __init__(self, key=UK, inf=None, mkb=None, inf_pad=0, mkb_pad=0):
+        """`inf_pad` / `mkb_pad` zero bytes follow the file's data as an unrecorded extent."""
         self.inf = inf or self.unit_key_ro([mc.encrypt_block(mc.expand_key(VUK), UK)])
-        self.mkb = bytes(range(256)) * 20            # 5 KiB, three sectors
+        self.mkb = mkb or bytes(range(256)) * 20     # 5 KiB, three sectors
         self.units = clip_units(key)
         self.clip = b''.join(self.units)
         self.small = bytes(3 * mc.UNIT)
@@ -132,8 +133,9 @@ class Disc:
         directory(7, 8, [fid('00001.m2ts', 11), fid('00002.m2ts', 12)], False)
         self.files = {}
 
-        def place(fe_lbn, data, extents, extended=False):
-            """Store `data` over physical extents [(lbn, sectors)], as long_ads into partition 0."""
+        def place(fe_lbn, data, extents, extended=False, pad=0):
+            """Store `data` over physical extents [(lbn, sectors)], as long_ads into partition 0,
+            then `pad` zero bytes as an allocated-not-recorded extent."""
             ads, pos = b'', 0
             for lbn, count in extents:
                 chunk = data[pos:pos + count * S]
@@ -142,9 +144,12 @@ class Disc:
                 ads += long_ad(lbn, len(chunk), 0)
                 pos += len(chunk)
             assert pos >= len(data)
-            sectors[m(fe_lbn)] = file_entry(fe_lbn, len(data), ads, 1, extended=extended)
-        place(9, self.inf, [(40, 1)])
-        place(10, self.mkb, [(42, 3)], extended=True)
+            if pad:
+                ads = ads[:-16] + long_ad(extents[-1][0], extents[-1][1] * S, 0)
+                ads += long_ad(0, (1 << 30) | pad, 0)
+            sectors[m(fe_lbn)] = file_entry(fe_lbn, len(data) + pad, ads, 1, extended=extended)
+        place(9, self.inf, [(40, 1)], pad=inf_pad)
+        place(10, self.mkb, [(42, 3)], extended=True, pad=mkb_pad)
         # The clip in two extents with a gap; 50 sectors is not a whole number of units,
         # so one unit straddles the extent boundary.
         clip_sectors = len(self.clip) // S
@@ -171,6 +176,11 @@ class Disc:
         if off < 0 or off + n > len(self.image):
             raise IOError('read past the image')
         return bytes(self.image[off:off + n])
+
+
+def rec(rtype, body):
+    """One MKB record: type, BE24 length (header included), body."""
+    return bytes([rtype]) + (4 + len(body)).to_bytes(3, 'big') + body
 
 
 class Service:
@@ -230,6 +240,36 @@ class UdfTests(unittest.TestCase):
         d.image[256 * S + 1] ^= 0xFF         # AVDP tag: checksum no longer matches
         with self.assertRaises(mc.CanaryError):
             mc.Udf(d.read)
+
+    def test_a_uhd_mkb_ro_sends_its_records_not_its_padding(self):
+        """A UHD MKB_RO.inf is a 128 MiB file: a few MiB of records, then zeros. OnlineSource sends
+        the record stream (libfreemkv read_mkb_content), so the file size is no reason to refuse."""
+        records = rec(0x10, bytes(8)) + rec(0x81, b'\x5a' * 3000) + rec(0x05, b'\xa5' * 1500)
+        d = Disc(mkb=records, mkb_pad=(128 << 20) - len(records), inf_pad=(64 << 10) - 80)
+        udf = mc.Udf(d.read)
+        self.assertEqual(udf.lookup('/AACS/MKB_RO.inf')['size'], 128 << 20)
+        inf, mkb, _ = mc.disc_inputs(udf)
+        self.assertEqual(mkb, records, 'the MKB is trimmed to its record stream')
+        self.assertEqual(inf, d.inf + bytes((64 << 10) - 80), 'Unit_Key_RO.inf is sent whole')
+        mc.probe(mc.Udf(d.read), 'https://k/d', 't', Service({'UK': UK.hex()}))
+        with self.assertRaises(mc.CanaryError):
+            mc.probe(mc.Udf(d.read), 'https://k/d', 't', Service({'UK': bytes(16).hex()}))
+
+    def test_mkb_prefix_mirrors_read_mkb_content(self):
+        d = Disc(mkb=rec(0x10, bytes(8)) + rec(0x81, bytes(16)), mkb_pad=1000)
+        udf = mc.Udf(d.read)
+        entry = udf.lookup('/AACS/MKB_RO.inf')
+        self.assertEqual(mc.mkb_records_end(udf, entry, entry['size']), 32)
+        self.assertEqual(mc.mkb_records_end(udf, entry, 31), 12, 'a record past the prefix is not framed')
+        self.assertEqual(mc.mkb_content(mc.Udf(Disc().read), mc.Udf(Disc().read).lookup('/AACS/MKB_RO.inf')),
+                         Disc().mkb, 'an MKB with no framed record is sent untrimmed')
+
+    def test_a_unit_key_ro_libfreemkv_would_not_read_is_refused(self):
+        d = Disc(inf_pad=2 << 20)
+        self.assertEqual(len(mc.disc_inputs(mc.Udf(d.read))[0]), len(d.inf) + (2 << 20), 'a 2 MiB one is sent')
+        d = Disc(inf_pad=mc.MAX_FILE)
+        with self.assertRaises(mc.CanaryError):
+            mc.disc_inputs(mc.Udf(d.read))
 
     def test_samples_are_the_encrypted_units_of_the_largest_clip(self):
         d = Disc()
@@ -310,6 +350,19 @@ class ProbeTests(unittest.TestCase):
             mc.post_decode('https://k/d', 'tok', {}, denied)
         with self.assertRaisesRegex(mc.CanaryError, 'size cap'):
             mc.post_decode('https://k/d', 'tok', {}, lambda r, timeout: Resp(b'x' * (mc.MAX_RESPONSE + 1)))
+
+    def test_post_decode_sends_any_token_a_header_can_carry(self):
+        seen = []
+
+        def opener(req, timeout):
+            seen.append(req.get_header('Authorization'))
+            return Resp(b'{"UK": "00"}')
+        mc.post_decode('https://k/d', 'tok with space\n', {}, opener)
+        mc.post_decode('https://k/d', 'tok\twith-tab', {}, opener)
+        self.assertEqual(seen, ['Bearer tok with space', 'Bearer tok\twith-tab'])
+        for bad in ('tok\ninside', 'tok\x7f', 'tok\x00'):
+            with self.assertRaisesRegex(mc.CanaryError, 'cannot carry'):
+                mc.post_decode('https://k/d', bad, {}, opener)
 
 
 class Resp(io.BytesIO):
