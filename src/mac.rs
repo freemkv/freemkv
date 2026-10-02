@@ -52,6 +52,8 @@ const PAD: f64 = 8.0;
 const PROG_H: f64 = 292.0;
 /// Height with the overall bar hidden (single-title run).
 const PROG_H_ONE: f64 = 246.0;
+/// The progress page's Cancel button, from the bottom of a two-bar page.
+const CANCEL_Y: f64 = 10.0;
 /// Result page height — fixed so its contents never drift off-screen.
 const RESULT_H: f64 = 200.0;
 const LOG_H_PROG: f64 = 470.0;
@@ -684,6 +686,8 @@ struct Ivars {
     result_head: RefCell<Option<Retained<NSTextField>>>,
     on_result: RefCell<bool>,
     run_btn: RefCell<Option<Retained<NSButton>>>,
+    /// The progress page's Cancel, moved up over the hidden second bar.
+    cancel_btn: RefCell<Option<Retained<NSButton>>>,
     #[cfg(debug_assertions)]
     demo_path: RefCell<String>,
     #[cfg(debug_assertions)]
@@ -1902,6 +1906,15 @@ impl Controller {
                     PROG_H_ONE
                 };
                 v.setFrame(r(0.0, ty - ph_prog - 2.0, w, ph_prog));
+                // With one bar the page loses the hidden second bar's band,
+                // not its top: scroll that band off the bottom and lift
+                // Cancel over it, or the Information group's title is cut off.
+                let band = PROG_H - ph_prog;
+                v.setBoundsOrigin(NSPoint::new(0.0, band));
+                if let Some(b) = iv.cancel_btn.borrow().as_ref() {
+                    let f = b.frame();
+                    b.setFrameOrigin(NSPoint::new(f.origin.x, CANCEL_Y + band));
+                }
             }
             if let Some(v) = iv.page_empty.borrow().as_ref() {
                 v.setFrame(r(0.0, py, w, ph));
@@ -2995,7 +3008,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         let cancel = btn(
             mtm,
             &crate::strings::get("gui.btn.cancel"),
-            r(W - PAD - 110.0, 10.0, 110.0, 30.0),
+            r(W - PAD - 110.0, CANCEL_Y, 110.0, 30.0),
             c,
             sel!(onCancelRip:),
         );
@@ -3004,6 +3017,7 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
             objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin,
         );
         padd(&cancel);
+        *c.ivars().cancel_btn.borrow_mut() = Some(cancel);
 
         *c.ivars().bar_cur.borrow_mut() = Some(p1);
         *c.ivars().bar_all.borrow_mut() = Some(p2);
@@ -5456,6 +5470,17 @@ mod tests {
             arm.contains(".filter(|w| w.isVisible())"),
             "a hidden Settings window must be rebuilt, or Cancel's discarded \
              edits reappear and the next OK commits them"
+        );
+    }
+
+    // Source inspection only: page geometry needs a real window.
+    #[test]
+    fn a_one_bar_progress_page_drops_the_second_bar_band_not_its_top_source_inspection_only() {
+        let body = fn_body(prod_src(), "fn relayout(");
+        assert!(body.contains("v.setBoundsOrigin(NSPoint::new(0.0, band));"));
+        assert!(body.contains("CANCEL_Y + band"));
+        assert!(
+            fn_body(prod_src(), "fn build_ui(").contains("cancel_btn.borrow_mut() = Some(cancel)")
         );
     }
 
