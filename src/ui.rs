@@ -591,7 +591,7 @@ pub enum Page {
 // `de`), where a typo was indistinguishable from "disc has no German". Shells
 // now show a checklist of names and store ISO codes; this module owns both conversions.
 
-/// The languages offered in the pickers, as (stored code, English name).
+/// The languages offered in the pickers, as (stored code, `gui.lang.<code>` English fallback).
 ///
 /// ISO 639-2/T, which is what disc streams actually carry (`deu`, not `ger`;
 /// `fra`, not `fre`) — so a stored value can be compared to a stream tag
@@ -731,7 +731,7 @@ pub fn lang_selection_to_string(codes: &[String]) -> String {
     codes.join(",")
 }
 
-/// The picker button's title: the chosen languages in English, or a word
+/// The picker button's title: the chosen languages in the active locale, or a word
 /// meaning "no preference" — never an empty button, which reads as broken.
 pub fn lang_summary(stored: &str) -> String {
     let codes = lang_selection(stored);
@@ -745,17 +745,18 @@ pub fn lang_summary(stored: &str) -> String {
         .join(", ")
 }
 
-/// The English name for a stored code, falling back to the code itself so an
-/// unknown tag is still visible rather than blank.
+/// The name for a stored code: a picker language in the active locale (English when the
+/// catalog lacks `gui.lang.<code>`), any other known code in English, and an unknown tag as
+/// itself so it is still visible rather than blank.
 pub fn lang_display_name(code: &str) -> String {
-    PICKER_LANGUAGES
+    if let Some((c, english)) = PICKER_LANGUAGES
         .iter()
         .find(|(c, _)| c.eq_ignore_ascii_case(code))
-        .map(|(_, name)| (*name).to_string())
-        .or_else(|| {
-            isolang::Language::from_639_3(&code.to_ascii_lowercase())
-                .map(|l| l.to_name().to_string())
-        })
+    {
+        return crate::strings::get_or(&format!("gui.lang.{c}"), english);
+    }
+    isolang::Language::from_639_3(&code.to_ascii_lowercase())
+        .map(|l| l.to_name().to_string())
         .unwrap_or_else(|| code.to_string())
 }
 
@@ -1342,8 +1343,19 @@ pub fn stop_caption(stopping: bool, titles_done: usize, run_titles: usize) -> Op
 /// does not produce. It used to be a local MP4/M2TS/else-MKV test here, which
 /// told every ISO, folder, demux, chapter, JSON and .fvi run that it was
 /// writing an MKV.
-pub fn container_label(format: &str) -> &'static str {
-    crate::engine::container_word(format)
+/// The engine's word, localized where it is a word rather than a format name.
+pub fn container_label(format: &str) -> String {
+    let word = crate::engine::container_word(format);
+    match word {
+        "chapter" => crate::strings::get_or("gui.progress.word_chapter", "chapter"),
+        "track" => crate::strings::get_or("gui.progress.word_track", "track"),
+        "video track" => crate::strings::get_or("gui.progress.word_video_track", "video track"),
+        "audio track" => crate::strings::get_or("gui.progress.word_audio_track", "audio track"),
+        "subtitle track" => {
+            crate::strings::get_or("gui.progress.word_subtitle_track", "subtitle track")
+        }
+        _ => word.to_string(),
+    }
 }
 
 /// The `gui.format.*` translation key for a canonical output-format string, or
@@ -1530,11 +1542,17 @@ pub fn enum_options(key: &str) -> Vec<(&'static str, String)> {
             ("Debug", g("gui.set.log_debug")),
         ],
         // Language: canonical is the locale code, label the endonym (shown
-        // as-is in every locale). Driven straight from the shipped list, so
-        // the picker can never drift from what freemkv-i18n can load.
+        // as-is in every locale) or, for "auto", the localized word. Driven straight from
+        // the shipped list, so the picker can never drift from what freemkv-i18n can load.
         "language" => LOCALES
             .iter()
-            .map(|(endonym, code)| (*code, (*endonym).to_string()))
+            .map(|(endonym, code)| match *code {
+                "auto" => (
+                    *code,
+                    crate::strings::get_or("gui.set.language_auto", "Auto"),
+                ),
+                _ => (*code, (*endonym).to_string()),
+            })
             .collect(),
         _ => vec![],
     }
@@ -2551,9 +2569,10 @@ impl App {
         let msg = match self.update_check.as_ref().map(|rx| rx.try_recv()) {
             None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
             Some(Ok(m)) => m,
-            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                "Update check failed: worker stopped before returning a result".into()
-            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => crate::strings::get_or(
+                "gui.log.update_worker_stopped",
+                "Update check failed: worker stopped before returning a result",
+            ),
         };
         self.update_check = None;
         self.say(LogKind::Result, &msg);
@@ -2565,9 +2584,10 @@ impl App {
         let verdict = match self.ejecting.as_ref().map(|(_, rx)| rx.try_recv()) {
             None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => return Vec::new(),
             Some(Ok(v)) => v,
-            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                Err("eject worker stopped before returning a result".into())
-            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Err(crate::strings::get_or(
+                "gui.log.eject_worker_stopped",
+                "eject worker stopped before returning a result",
+            )),
         };
         let ejected = self.ejecting.take().map(|(src, _)| src);
         match verdict {
@@ -2874,22 +2894,27 @@ impl App {
         }
         // A number the engine would read as 0 ("single pass", "abort on any loss") is not
         // what the user typed; say so instead of starting a rip under a different rule.
+        // Named by the Settings row's own label, minus its trailing colon.
         let bad = [
             (
-                "Max passes",
+                crate::strings::get_or("gui.set.max_passes", "Max recovery passes :"),
                 &self.settings.max_passes,
                 self.settings.max_passes.trim().parse::<u32>().is_ok(),
             ),
             (
-                "Abort if more than N s lost",
+                crate::strings::get_or("gui.set.abort_lost", "Abort on lost seconds :"),
                 &self.settings.abort_lost_secs,
                 self.settings.abort_lost_secs.trim().parse::<u64>().is_ok(),
             ),
         ]
         .into_iter()
         .find(|(_, value, ok)| !value.trim().is_empty() && !ok)
-        .map(|(name, value, _)| (name, value.escape_debug().to_string()));
-        if let Some((name, value)) = bad {
+        .map(|(label, value, _)| (label, value.escape_debug().to_string()));
+        if let Some((label, value)) = bad {
+            let name = label
+                .trim_end()
+                .trim_end_matches([':', '：'])
+                .trim_end_matches(char::is_whitespace);
             self.say(
                 LogKind::Notice,
                 &crate::strings::fmt_or(
@@ -3254,7 +3279,7 @@ impl App {
                 || {
                     crate::strings::fmt(
                         "gui.progress.saving_current",
-                        &[("container", container_label(&self.effective_format()))],
+                        &[("container", &container_label(&self.effective_format()))],
                     )
                 },
             ),
@@ -3262,7 +3287,7 @@ impl App {
                 || {
                     crate::strings::fmt(
                         "gui.progress.saving_overall",
-                        &[("container", container_label(&self.effective_format()))],
+                        &[("container", &container_label(&self.effective_format()))],
                     )
                 },
             ),
