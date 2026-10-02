@@ -192,6 +192,7 @@ fn launch_probe_enabled() -> bool {
             "FMKV_WIN",
             "FMKV_DUMP_MENUS",
             "FMKV_PAGE",
+            "FMKV_GATE",
         ]
         .iter()
         .all(|k| dev_env(k).is_err())
@@ -249,6 +250,9 @@ mod extra {
 // that does not exist yet — happens during `WM_GETMINMAXINFO` — so fall back.
 #[must_use]
 fn window_dpi(hwnd: &w::HWND) -> u32 {
+    if let Some(d) = harness_dpi() {
+        return d;
+    }
     match hwnd.GetDpiForWindow() {
         0 => system_dpi(),
         d => d,
@@ -259,10 +263,19 @@ fn window_dpi(hwnd: &w::HWND) -> u32 {
 // exists, needed to pick the initial size and build the Settings/About forms.
 #[must_use]
 fn system_dpi() -> u32 {
+    if let Some(d) = harness_dpi() {
+        return d;
+    }
     match unsafe { extra::GetDpiForSystem() } {
         0 => lay::BASE_DPI,
         d => d,
     }
+}
+
+// FMKV_DPI=144 lays the shell out as at that DPI (150%) whatever the display,
+// so a headless capture can show another scale. Debug builds only (`dev_env`).
+fn harness_dpi() -> Option<u32> {
+    dev_env("FMKV_DPI").ok().and_then(|d| d.parse().ok())
 }
 
 thread_local! {
@@ -348,6 +361,11 @@ fn apply_ui_font(hwnd: &w::HWND, dpi: u32) {
 /// language for the "Auto" case. The raw tag is returned as-is —
 /// `freemkv_i18n` normalizes and region-resolves it.
 pub fn system_locale_code() -> Option<String> {
+    // FMKV_SYSTEM_LOCALE=ar stands in for the Windows language, so a capture
+    // can show "Auto" in any locale. Debug builds only (`dev_env`).
+    if let Ok(tag) = dev_env("FMKV_SYSTEM_LOCALE") {
+        return Some(tag);
+    }
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetUserDefaultLocaleName(name: *mut u16, size: i32) -> i32;
@@ -3834,6 +3852,30 @@ fn is_blank(buf: &[u8]) -> bool {
 }
 
 fn snapshot(hwnd: &w::HWND, path: &str) -> w::AnyResult<()> {
+    let (cx, cy, buf) = capture(hwnd)?;
+    let size = buf.len();
+    let mut bi = w::BITMAPINFO::default();
+    bi.bmiHeader.biWidth = cx;
+    bi.bmiHeader.biHeight = cy;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = co::BI::RGB;
+
+    let mut bfh = w::BITMAPFILEHEADER::default();
+    bfh.bfOffBits = (std::mem::size_of::<w::BITMAPFILEHEADER>()
+        + std::mem::size_of::<w::BITMAPINFOHEADER>()) as u32;
+    bfh.bfSize = bfh.bfOffBits + size as u32;
+
+    let mut out = Vec::with_capacity(size + 64);
+    out.extend_from_slice(bfh.serialize());
+    out.extend_from_slice(bi.bmiHeader.serialize());
+    out.extend_from_slice(&buf);
+    std::fs::write(path, &out)?;
+    Ok(())
+}
+
+// A window's pixels as `(width, height, 32-bit BGRA rows bottom-up)`, the way a DIB holds them.
+fn capture(hwnd: &w::HWND) -> w::AnyResult<(i32, i32, Vec<u8>)> {
     let rc = hwnd.GetWindowRect()?;
     let (cx, cy) = ((rc.right - rc.left).max(1), (rc.bottom - rc.top).max(1));
 
@@ -3913,25 +3955,7 @@ fn snapshot(hwnd: &w::HWND, path: &str) -> w::AnyResult<()> {
     if let Some(e) = last_err {
         return Err(Box::new(e));
     }
-
-    let mut bi = w::BITMAPINFO::default();
-    bi.bmiHeader.biWidth = cx;
-    bi.bmiHeader.biHeight = cy;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = co::BI::RGB;
-
-    let mut bfh = w::BITMAPFILEHEADER::default();
-    bfh.bfOffBits = (std::mem::size_of::<w::BITMAPFILEHEADER>()
-        + std::mem::size_of::<w::BITMAPINFOHEADER>()) as u32;
-    bfh.bfSize = bfh.bfOffBits + size as u32;
-
-    let mut out = Vec::with_capacity(size + 64);
-    out.extend_from_slice(bfh.serialize());
-    out.extend_from_slice(bi.bmiHeader.serialize());
-    out.extend_from_slice(&buf);
-    std::fs::write(path, &out)?;
-    Ok(())
+    Ok((cx, cy, buf))
 }
 
 // Let Windows actually lay out and paint before capturing. Controls create
@@ -4644,6 +4668,7 @@ pub fn run() {
                 || dev_env("FMKV_SHOT").is_ok()
                 || dev_env("FMKV_WIN").is_ok()
                 || dev_env("FMKV_DUMP_MENUS").is_ok()
+                || dev_env("FMKV_GATE").is_ok()
             {
                 let _ = me.wnd.hwnd().SetTimer(TIMER_HARNESS, 400, None);
             }
@@ -4663,9 +4688,26 @@ impl Shell {
     /// Returns true when the harness handled the invocation and the app should
     /// quit rather than hand control to the user.
     fn dev_harness(&self) -> bool {
-        // FMKV_OPEN=<path> opens a source before anything else is captured.
+        // FMKV_OPEN=<path> opens a source before anything else is captured,
+        // and waits up to a minute for its scan so the capture shows the tree.
         if let Ok(src) = dev_env("FMKV_OPEN") {
             self.drive_open(&src);
+            for _ in 0..300 {
+                if self.app.borrow().view().page == Page::Titles {
+                    break;
+                }
+                pump(200);
+            }
+        }
+
+        // FMKV_GATE=<dir>: qa's GUI gate over the source FMKV_OPEN opened. This image
+        // has no console, so the report goes to `<dir>/gate.txt` and the verdict
+        // to the exit code.
+        if let Ok(dir) = dev_env("FMKV_GATE") {
+            let _ = std::fs::create_dir_all(&dir);
+            let gate = self.gate(&dir);
+            let _ = std::fs::write(format!("{dir}/gate.txt"), gate.report());
+            std::process::exit(if gate.passed() { 0 } else { 1 });
         }
 
         // FMKV_SIZE=WxH resizes before snapshotting, to test resize behaviour.
@@ -4796,6 +4838,264 @@ impl Shell {
 
         false
     }
+}
+
+// qa's GUI gate (`crate::gui_gate`): the title tree's columns and the Settings fields and
+// dropdowns, measured in the fonts they draw with and checked for ink in a capture of the
+// real window, and captures of each for review.
+#[cfg(debug_assertions)]
+impl Shell {
+    fn gate(&self, dir: &str) -> crate::gui_gate::Gate {
+        use crate::gui_gate::{Gate, Region, has_ink};
+        let mut g = Gate::default();
+        self.relayout_now();
+        pump(600);
+        let s = lay::Scale::new(window_dpi(self.wnd.hwnd()));
+        let pad = s.px(6);
+        let v = self.app.borrow().view();
+        let titles: Vec<&Row> = v.title_rows.iter().filter(|r| r.depth == 1).collect();
+        g.check(
+            "fixture-opens",
+            v.page == Page::Titles && titles.len() >= 2,
+            format!("page {:?}, {} titles", v.page, titles.len()),
+        );
+        g.check(
+            "titles-carry-length-and-size",
+            !titles.is_empty()
+                && titles
+                    .iter()
+                    .all(|r| !r.length.is_empty() && !r.size.is_empty()),
+            format!(
+                "{:?}",
+                titles
+                    .iter()
+                    .map(|r| (&r.length, &r.size))
+                    .collect::<Vec<_>>()
+            ),
+        );
+
+        // ── the header and the cells ──
+        let heads: Vec<String> = self
+            .tree_head
+            .items()
+            .iter()
+            .map(|it| it.map(|h| h.text()).collect())
+            .unwrap_or_default();
+        let want = [
+            format!(
+                "{} / {}",
+                crate::strings::get("gui.col.type"),
+                crate::strings::get("gui.col.desc")
+            ),
+            crate::strings::get_or("gui.col.duration", "Length"),
+            crate::strings::get_or("gui.col.size", "Size"),
+        ];
+        g.check("header-texts", heads == want, format!("{heads:?}"));
+        let laid = self.cols.borrow().laid;
+        g.check("columns-laid-out", laid.is_some(), format!("{laid:?}"));
+        if let Some(laid) = laid {
+            let head_w = self.tree_head.hwnd().GetClientRect().map_or(0, |r| r.right);
+            let widths = lay::header_widths(&laid, head_w, self.cols.borrow().inset);
+            for (i, text) in want.iter().enumerate().skip(1) {
+                let tw = text_width(self.tree_head.hwnd(), text);
+                g.check(
+                    "header-text-fits",
+                    tw + s.px(12) <= widths[i],
+                    format!("{text:?}: {tw} px in a {} px header item", widths[i]),
+                );
+            }
+            for r in &titles {
+                for (span, text) in [(laid.length, &r.length), (laid.size, &r.size)] {
+                    let tw = text_width(self.tree.hwnd(), text);
+                    g.check(
+                        "cell-fits-its-column",
+                        tw + pad * 2 <= span.w,
+                        format!("{text:?}: {tw} px in a {} px column", span.w),
+                    );
+                }
+            }
+        }
+
+        // ── pixels: the header and the first title's Length cell carry ink ──
+        match capture(self.wnd.hwnd()) {
+            Ok((cx, cy, px)) => {
+                let origin = self.wnd.hwnd().GetWindowRect().unwrap_or_default();
+                let region = |rc: w::RECT| Region {
+                    x: rc.left.min(rc.right) - origin.left,
+                    y: rc.top.min(rc.bottom) - origin.top,
+                    w: (rc.right - rc.left).abs(),
+                    h: (rc.bottom - rc.top).abs(),
+                };
+                let head = self.tree_head.hwnd().GetWindowRect().unwrap_or_default();
+                g.check(
+                    "header-has-ink",
+                    has_ink(&px, cx, cy, true, region(head)),
+                    format!("{:?}", region(head)),
+                );
+                let cell = titles
+                    .first()
+                    .and_then(|r| self.tree_item(r.index))
+                    .zip(laid)
+                    .and_then(|(h, laid)| {
+                        let mut rc = w::RECT::default();
+                        // TVM_GETITEMRECT takes the item in the rectangle it fills.
+                        unsafe { *(&mut rc as *mut w::RECT).cast::<isize>() = h.ptr() as isize };
+                        unsafe {
+                            self.tree.hwnd().SendMessage(msg::TvmGetItemRect {
+                                text_only: false,
+                                rect: &mut rc,
+                            })
+                        }
+                        .ok()?;
+                        let rc = w::RECT {
+                            left: laid.length.x,
+                            right: laid.length.x + laid.length.w,
+                            ..rc
+                        };
+                        self.tree.hwnd().ClientToScreenRc(rc).ok()
+                    });
+                g.check(
+                    "length-cell-has-ink",
+                    cell.is_some_and(|rc| has_ink(&px, cx, cy, true, region(rc))),
+                    format!("{:?}", cell.map(region)),
+                );
+            }
+            Err(e) => g.check("capture-main-window", false, e.to_string()),
+        }
+        let rtl =
+            crate::app_entry::resolved_locale(&self.settings.borrow().language, system_locale_code)
+                .is_some_and(|t| lay::is_rtl_locale(&t));
+        let mirrored = self.tree.hwnd().GetWindowLongPtr(co::GWLP::EXSTYLE)
+            & co::WS_EX::LAYOUTRTL.raw() as isize
+            != 0;
+        g.check(
+            "tree-direction-follows-the-language",
+            mirrored == rtl,
+            format!("mirrored {mirrored}, right-to-left language {rtl}"),
+        );
+        let shot = format!("{dir}/titles.bmp");
+        g.check(
+            "capture-titles",
+            snapshot(self.wnd.hwnd(), &shot).is_ok(),
+            &shot,
+        );
+
+        // ── Settings: a long path and every dropdown's choice read whole ──
+        self.settings.borrow_mut().dest_dir = crate::gui_gate::LONG_DEST.into();
+        self.prefs.show(&self.settings.borrow());
+        pump(600);
+        if let Some((_, f)) = self.prefs.fields.iter().find(|(k, _)| *k == "dest_dir") {
+            let mut rc = w::RECT::default();
+            let _ = unsafe { f.hwnd().SendMessage(msg::EmGetRect { rect: &mut rc }) };
+            let tw = text_width(f.hwnd(), crate::gui_gate::LONG_DEST);
+            g.check(
+                "long-destination-reads-whole",
+                f.text().unwrap_or_default() == crate::gui_gate::LONG_DEST
+                    && tw <= rc.right - rc.left,
+                format!("{tw} px of path in a {} px field", rc.right - rc.left),
+            );
+        }
+        for (k, c) in &self.prefs.combos {
+            let mut info = w::COMBOBOXINFO::default();
+            let _ = unsafe {
+                c.hwnd()
+                    .SendMessage(msg::CbGetComboBoxInfo { data: &mut info })
+            };
+            let shown = c.items().selected_text().ok().flatten().unwrap_or_default();
+            let tw = text_width(c.hwnd(), &shown);
+            let box_w = info.rcItem.right - info.rcItem.left;
+            g.check(
+                "dropdown-choice-reads-whole",
+                !shown.is_empty() && tw <= box_w,
+                format!("{k}: {shown:?} is {tw} px in a {box_w} px box"),
+            );
+            let labels: Vec<String> = enum_options(k).into_iter().map(|(_, l)| l).collect();
+            let longest = combo_text_width(c, &labels);
+            let list =
+                unsafe { c.hwnd().SendMessage(msg::CbGetDroppedWidth {}) }.unwrap_or(0) as i32;
+            g.check(
+                "dropdown-list-shows-every-choice",
+                longest < list,
+                format!("{k}: longest choice {longest} px, list {list} px"),
+            );
+        }
+        for (tab, key, name) in [
+            (0, "container", "settings-output"),
+            (3, "key_source", "settings-keys"),
+            (4, "language", "settings-advanced"),
+        ] {
+            self.prefs.select_tab(tab);
+            pump(400);
+            let shot = format!("{dir}/{name}.bmp");
+            g.check(
+                "capture-settings",
+                snapshot(self.prefs.wnd.hwnd(), &shot).is_ok(),
+                &shot,
+            );
+            let Some((_, c)) = self.prefs.combos.iter().find(|(k, _)| *k == key) else {
+                continue;
+            };
+            unsafe { c.hwnd().SendMessage(msg::CbShowDropDown { show: true }) };
+            pump(400);
+            let mut info = w::COMBOBOXINFO::default();
+            let _ = unsafe {
+                c.hwnd()
+                    .SendMessage(msg::CbGetComboBoxInfo { data: &mut info })
+            };
+            let shot = format!("{dir}/{name}-list.bmp");
+            g.check(
+                "open-dropdown-has-ink",
+                capture(&info.hwndList).is_ok_and(|(cx, cy, px)| {
+                    has_ink(
+                        &px,
+                        cx,
+                        cy,
+                        true,
+                        Region {
+                            x: 0,
+                            y: 0,
+                            w: cx,
+                            h: cy,
+                        },
+                    )
+                }) && snapshot(&info.hwndList, &shot).is_ok(),
+                format!("{key}: {shot}"),
+            );
+            unsafe { c.hwnd().SendMessage(msg::CbShowDropDown { show: false }) };
+        }
+        self.prefs.hide();
+        g
+    }
+
+    // The tree item showing core row `row`.
+    fn tree_item(&self, row: usize) -> Option<w::HTREEITEM> {
+        fn find<'a>(
+            it: impl Iterator<Item = w::gui::TreeViewItem<'a, usize>>,
+            row: usize,
+        ) -> Option<w::HTREEITEM> {
+            for item in it {
+                if *item.data().borrow() == row {
+                    return Some(unsafe { item.htreeitem().raw_copy() });
+                }
+                if let Some(found) = find(item.iter_children(), row) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        find(self.tree.items().iter_root(), row)
+    }
+}
+
+// How wide `text` draws in a control's own font, in pixels.
+#[cfg(debug_assertions)]
+fn text_width(hwnd: &w::HWND, text: &str) -> i32 {
+    let Ok(dc) = hwnd.GetDC() else {
+        return 0;
+    };
+    let font = unsafe { hwnd.SendMessage(msg::WmGetFont {}) };
+    let _font = font.as_ref().and_then(|f| dc.SelectObject(f).ok());
+    dc.GetTextExtentPoint32(text).map_or(0, |sz| sz.cx)
 }
 
 // Tests, two tiers, both via `cargo test` on Windows: pure shell decisions (no

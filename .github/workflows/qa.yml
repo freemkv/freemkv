@@ -387,6 +387,81 @@ jobs:
       - run: tests/cli-integration.sh
         working-directory: freemkv
 
+  # The desktop app checks itself (tests/gui_gate.py) over a synthetic Blu-ray folder, in
+  # English, German and Arabic at 100% and 150%: the title tree's Length and Size columns
+  # render whole, as do the Settings destination path and every dropdown's choice, with no
+  # crash on the way. A debug build, the only one with the FMKV_* hooks. Hosted runners:
+  # the fixture is generated, and the EC2 legs launch only when the rip inputs change.
+  gui-gate:
+    needs: [plan-media]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-24.04
+            bin: freemkv
+          - os: windows
+            runner: windows-latest
+            bin: freemkv-gui
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: freemkv
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: { python-version: '3.12' }
+      - name: Exact toolchain (freemkv rust-version)
+        shell: bash
+        run: bash freemkv/.github/scripts/exact-toolchain.sh install freemkv/Cargo.toml
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: media-plan, path: media-plan }
+      - name: Build from the planned candidate
+        shell: bash
+        env:
+          REVISIONS: ${{ needs.plan-media.outputs.revisions }}
+        run: |
+          set -euo pipefail
+          py=$(command -v python3 || command -v python)
+          "$py" freemkv/tests/media_gate.py checkout --workspace . --revisions "$REVISIONS"
+          "$py" freemkv/tests/media_gate.py restore --workspace . --plan-directory media-plan
+      - name: Install GTK4, libadwaita and a virtual display (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev build-essential xvfb xauth dbus
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: freemkv
+          key: gui-gate
+      - name: Build the app with its gate hooks
+        shell: bash
+        working-directory: freemkv
+        run: cargo build --locked --features gui --bin "${{ matrix.bin }}"
+      - name: GUI gate
+        shell: bash
+        working-directory: freemkv
+        run: |
+          set -euo pipefail
+          py=$(command -v python3 || command -v python)
+          if [ "${{ matrix.os }}" = linux ]; then
+            dbus-run-session -- xvfb-run -a -s '-screen 0 1920x1200x24' \
+              "$py" tests/gui_gate.py "target/debug/${{ matrix.bin }}" "$RUNNER_TEMP/gui-gate"
+          else
+            "$py" tests/gui_gate.py "target/debug/${{ matrix.bin }}.exe" "$RUNNER_TEMP/gui-gate"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: "gui-gate-${{ matrix.os }}"
+          path: |
+            ${{ runner.temp }}/gui-gate/*/*.png
+            ${{ runner.temp }}/gui-gate/*/gate.txt
+          overwrite: true
+          if-no-files-found: warn
+
   # One job per EC2 leg: launch a runner only this run can use (the run-<id>
   # label), then watch the leg and end with its conclusion, so "Re-run failed
   # jobs" re-runs both and gets a fresh instance. Teardown always runs, so a
@@ -1005,7 +1080,7 @@ jobs:
 
   # The one media answer (I-1): green only if evidence was reused or written by this run.
   media-verdict:
-    needs: [plan-media, launch, cli-matrix, compare-cli-matrix, record-media-evidence]
+    needs: [plan-media, launch, cli-matrix, compare-cli-matrix, record-media-evidence, gui-gate]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -1024,4 +1099,5 @@ jobs:
           COMPARE: ${{ needs.compare-cli-matrix.result }}
           RECORD: ${{ needs.record-media-evidence.result }}
           TAG: ${{ needs.record-media-evidence.outputs.tag }}
+          GUI: ${{ needs.gui-gate.result }}
         run: python3 freemkv/tests/media_gate.py verdict

@@ -89,6 +89,8 @@ jobs:
         with: { python-version: '3.12' }
       - run: pip install --quiet pyyaml
       - run: python3 -m unittest discover -s tests -p 'test_media*.py' -v
+      # The GUI gate's driver and disc fixture (qa's gui-gate job).
+      - run: python3 -m unittest discover -s tests -p 'test_gui*.py' -v
 
   changelog:
     runs-on: ubuntu-latest

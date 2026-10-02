@@ -5,6 +5,9 @@
 //! glue is tested through `linux_glue.rs` on every platform.
 //! File/URI operations use GTK portal-aware APIs for Flatpak compatibility.
 
+// qa's GUI gate (FMKV_GATE), a debug-build hook like FMKV_OPEN.
+#[cfg(debug_assertions)]
+mod gate;
 mod main_view;
 mod prefs;
 mod tree;
@@ -133,6 +136,10 @@ fn build_ui(gapp: &adw::Application) {
     if let Ok(src) = dev_env("FMKV_OPEN") {
         shell.open_path(&src);
     }
+    #[cfg(debug_assertions)]
+    if let Ok(dir) = dev_env("FMKV_GATE") {
+        gate::start(&shell, dir);
+    }
     if launch_probe_enabled() {
         let me = shell.clone();
         glib::timeout_add_local_once(Duration::from_millis(LAUNCH_PROBE_MS), move || {
@@ -153,7 +160,7 @@ fn dev_env(key: &str) -> Result<String, std::env::VarError> {
 // The launch probe scans the drive; a debug session that opened a fixture
 // (FMKV_OPEN) or asked for no hardware (FMKV_NO_PROBE) must never touch it.
 fn launch_probe_enabled() -> bool {
-    ["FMKV_OPEN", "FMKV_NO_PROBE"]
+    ["FMKV_OPEN", "FMKV_NO_PROBE", "FMKV_GATE"]
         .iter()
         .all(|k| dev_env(k).is_err())
 }
