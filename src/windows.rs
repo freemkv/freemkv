@@ -4131,7 +4131,12 @@ impl Shell {
             heads.len() == 3
                 && heads[1] == crate::strings::get_or("gui.col.duration", "Length")
                 && heads[2] == crate::strings::get_or("gui.col.size", "Size"),
-            format!("header items {heads:?}"),
+            format!(
+                "header items {heads:?}, formats {:?}",
+                (0..3u32)
+                    .map(|i| self.tree_head.items().get(i).format().raw())
+                    .collect::<Vec<_>>()
+            ),
         );
         let cells = &self.cols.borrow().cells;
         check(

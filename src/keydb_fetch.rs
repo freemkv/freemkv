@@ -461,16 +461,17 @@ mod tests {
     }
 
     // FT7a (T20, §5.0 pair (a)): "a local server trickles a byte every 0.5 × idle, total >
-    // the old 120 s budget (scaled) → `Ok`". Scaled: idle 400 ms, so the old total is
-    // 2.4 s (120 s at a 20 s idle); twenty bytes 200 ms apart take 4 s.
+    // the old 120 s budget (scaled) → `Ok`". Scaled: idle 1 s, so the old total is 6 s
+    // (120 s at a 20 s idle); fourteen bytes 500 ms apart take 7 s. A slow runner's late
+    // wake-up must stay inside the idle window (500 ms of slack), or the read is cut off.
     #[test]
     fn keydb_fetch_slow_body_past_old_budget_succeeds() {
         use std::io::{Read as _, Write as _};
-        let idle = Duration::from_millis(400);
+        let idle = Duration::from_millis(1000);
         let (pinned, server) = keydb_stub(
-            b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\n\r\n",
             move |sock| {
-                for _ in 0..20 {
+                for _ in 0..14 {
                     std::thread::sleep(idle / 2);
                     if sock.write_all(b"k").and_then(|()| sock.flush()).is_err() {
                         return;
@@ -501,7 +502,7 @@ mod tests {
             "a progressing body was cut off: {:?}",
             read.err()
         );
-        assert_eq!(body, vec![b'k'; 20], "the whole body must arrive");
+        assert_eq!(body, vec![b'k'; 14], "the whole body must arrive");
     }
 
     // FT7b (T20, §5.0 pair (b)): a stalled body "must fire within window + 1 s".
