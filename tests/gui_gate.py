@@ -21,6 +21,10 @@ import zlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gui_fixture  # noqa: E402
 
+# A Windows console writes the legacy code page, which cannot print the report's dashes.
+for _s in (sys.stdout, sys.stderr):
+    _s.reconfigure(encoding="utf-8", errors="replace")
+
 LANGS = ["en", "de", "ar"]
 DPIS = [96, 144]
 TIMEOUT_S = 180
