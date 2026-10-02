@@ -609,6 +609,9 @@ struct TreeCols {
 
 // ── the shell ─────────────────────────────────────────────────────────────
 
+/// How many times the header texts were applied; the widget sweep reports it.
+static TREE_HEAD_SYNCS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[derive(Clone)]
 struct Shell {
     wnd: gui::WindowMain,
@@ -1458,6 +1461,7 @@ impl Shell {
     /// Type and Description (one label, as `row_text` joins them), the other
     /// two are right-aligned like their cells.
     fn sync_tree_head(&self) {
+        TREE_HEAD_SYNCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let g = crate::strings::get;
         let set = |i: u32, text: &str, hdf: co::HDF| {
             // `HDF::STRING` must ride along: an item made empty has no string
@@ -4132,7 +4136,8 @@ impl Shell {
                 && heads[1] == crate::strings::get_or("gui.col.duration", "Length")
                 && heads[2] == crate::strings::get_or("gui.col.size", "Size"),
             format!(
-                "header items {heads:?}, formats {:?}",
+                "header items {heads:?}, syncs {}, formats {:?}",
+                TREE_HEAD_SYNCS.load(std::sync::atomic::Ordering::Relaxed),
                 (0..3u32)
                     .map(|i| self.tree_head.items().get(i).format().raw())
                     .collect::<Vec<_>>()
