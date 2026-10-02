@@ -351,6 +351,19 @@ class ProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(mc.CanaryError, 'size cap'):
             mc.post_decode('https://k/d', 'tok', {}, lambda r, timeout: Resp(b'x' * (mc.MAX_RESPONSE + 1)))
 
+    def test_post_decode_sends_any_token_a_header_can_carry(self):
+        seen = []
+
+        def opener(req, timeout):
+            seen.append(req.get_header('Authorization'))
+            return Resp(b'{"UK": "00"}')
+        mc.post_decode('https://k/d', 'tok with space\n', {}, opener)
+        mc.post_decode('https://k/d', 'tok\twith-tab', {}, opener)
+        self.assertEqual(seen, ['Bearer tok with space', 'Bearer tok\twith-tab'])
+        for bad in ('tok\ninside', 'tok\x7f', 'tok\x00'):
+            with self.assertRaisesRegex(mc.CanaryError, 'cannot carry'):
+                mc.post_decode('https://k/d', bad, {}, opener)
+
 
 class Resp(io.BytesIO):
     def __enter__(self):

@@ -525,7 +525,10 @@ def post_decode(url, auth, body, opener=None, sleep=None):
     No error message ever carries the URL or the token: anything unexpected is reported by type."""
     if not url.startswith('https://'):
         raise CanaryError('FMKV_KEY_URL is not https:// (key material is never sent in cleartext)')
-    if auth and not all(0x20 < ord(c) < 0x7F for c in auth):
+    # RFC 9110 §5.5 field-value: visible ASCII plus SP/HTAB inside, no CR/LF/controls; the
+    # surrounding whitespace a pasted secret picks up is not part of the token.
+    auth = auth.strip()
+    if auth and not all(c == '\t' or 0x20 <= ord(c) < 0x7F for c in auth):
         raise CanaryError('FMKV_KEY_AUTH holds characters an HTTP header cannot carry (not shown)')
     headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
     if auth:
