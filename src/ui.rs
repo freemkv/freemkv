@@ -2631,22 +2631,27 @@ impl App {
         }
         // A number the engine would read as 0 ("single pass", "abort on any loss") is not
         // what the user typed; say so instead of starting a rip under a different rule.
+        // Named by the Settings row's own label, minus its trailing colon.
         let bad = [
             (
-                "Max passes",
+                crate::strings::get_or("gui.set.max_passes", "Max recovery passes :"),
                 &self.settings.max_passes,
                 self.settings.max_passes.trim().parse::<u32>().is_ok(),
             ),
             (
-                "Abort if more than N s lost",
+                crate::strings::get_or("gui.set.abort_lost", "Abort on lost seconds :"),
                 &self.settings.abort_lost_secs,
                 self.settings.abort_lost_secs.trim().parse::<u64>().is_ok(),
             ),
         ]
         .into_iter()
         .find(|(_, value, ok)| !value.trim().is_empty() && !ok)
-        .map(|(name, value, _)| (name, value.escape_debug().to_string()));
-        if let Some((name, value)) = bad {
+        .map(|(label, value, _)| (label, value.escape_debug().to_string()));
+        if let Some((label, value)) = bad {
+            let name = label
+                .trim_end()
+                .trim_end_matches([':', '：'])
+                .trim_end_matches(char::is_whitespace);
             self.say(
                 LogKind::Notice,
                 &crate::strings::fmt_or(
