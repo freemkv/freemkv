@@ -3630,7 +3630,8 @@ impl Rows {
         let p = {
             NSPopUpButton::initWithFrame_pullsDown(
                 NSPopUpButton::alloc(mtm),
-                r(self.gutter, self.y - 3.0, w, 24.0),
+                // The whole row: its title names every picked language.
+                r(self.gutter, self.y - 3.0, self.room().max(w), 24.0),
                 true,
             )
         };
