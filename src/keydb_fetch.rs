@@ -460,10 +460,9 @@ mod tests {
         (pinned, server)
     }
 
-    // FT7a (T20, §5.0 pair (a)): "a local server trickles a byte every 0.5 × idle, total >
-    // the old 120 s budget (scaled) → `Ok`". Scaled: idle 1 s, so the old total is 6 s
-    // (120 s at a 20 s idle); fourteen bytes 500 ms apart take 7 s. A slow runner's late
-    // wake-up must stay inside the idle window (500 ms of slack), or the read is cut off.
+    // FT7a (T20, §5.0 pair (a)): a server trickling a byte every 0.5 x idle for longer than
+    // the old budget (scaled: idle 1 s, 14 bytes 500 ms apart = 7 s vs 6 s) -> `Ok`. The
+    // 500 ms of slack keeps a slow runner's late wake-up inside the idle window.
     #[test]
     fn keydb_fetch_slow_body_past_old_budget_succeeds() {
         use std::io::{Read as _, Write as _};
