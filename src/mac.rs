@@ -122,7 +122,7 @@ fn rows_sig(rows: &[crate::ui::Row]) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     rows.len().hash(&mut h);
     for r in rows {
-        (r.index, r.depth, &r.type_s, &r.desc).hash(&mut h);
+        (r.index, r.depth, &r.type_s, &r.desc, &r.length, &r.size).hash(&mut h);
     }
     h.finish()
 }
@@ -510,14 +510,18 @@ impl TitlesSource {
             return Some(unsafe { Retained::cast_unchecked(b) });
         }
 
-        let txt = if ident == "type" {
-            &row.type_s
-        } else {
-            &row.desc
+        let (txt, numeric) = match ident.as_str() {
+            "type" => (&row.type_s, false),
+            "length" => (&row.length, true),
+            "size" => (&row.size, true),
+            _ => (&row.desc, false),
         };
         let tf = { NSTextField::initWithFrame(NSTextField::alloc(mtm), r(0.0, 0.0, 200.0, 17.0)) };
         {
             tf.setStringValue(&NSString::from_str(txt));
+            if numeric {
+                tf.setAlignment(NSTextAlignment::Right);
+            }
             tf.setBezeled(false);
             tf.setDrawsBackground(false);
             tf.setEditable(false);
@@ -2578,18 +2582,37 @@ fn build_ui(mtm: MainThreadMarker, window: &NSWindow, c: &Controller) -> Retaine
         c_check.setDataCell(&cell);
     }
     let c_type = mk_col("type", &crate::strings::get("gui.col.type"), 96.0);
-    let c_desc = mk_col("desc", &crate::strings::get("gui.col.desc"), tree_w - 150.0);
+    let c_desc = mk_col("desc", &crate::strings::get("gui.col.desc"), tree_w - 290.0);
+    let c_length = mk_col(
+        "length",
+        &crate::strings::get_or("gui.col.duration", "Length"),
+        66.0,
+    );
+    let c_size = mk_col(
+        "size",
+        &crate::strings::get_or("gui.col.size", "Size"),
+        66.0,
+    );
+    for c in [&c_length, &c_size] {
+        c.headerCell().setAlignment(NSTextAlignment::Right);
+    }
+    // Description alone takes up a change in width; the rest keep theirs.
+    for c in [&c_check, &c_type, &c_length, &c_size] {
+        c.setResizingMask(objc2_app_kit::NSTableColumnResizingOptions::UserResizingMask);
+    }
     unsafe {
         ov.addTableColumn(&c_check);
         ov.addTableColumn(&c_type);
         ov.addTableColumn(&c_desc);
+        ov.addTableColumn(&c_length);
+        ov.addTableColumn(&c_size);
         ov.setOutlineTableColumn(Some(&c_check));
         ov.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::Regular);
         ov.setUsesAlternatingRowBackgroundColors(false);
         ov.setIndentationPerLevel(14.0);
         ov.setRowHeight(18.0);
         ov.setColumnAutoresizingStyle(
-            objc2_app_kit::NSTableViewColumnAutoresizingStyle::LastColumnOnlyAutoresizingStyle,
+            objc2_app_kit::NSTableViewColumnAutoresizingStyle::UniformColumnAutoresizingStyle,
         );
     }
 
@@ -4429,6 +4452,17 @@ impl Controller {
             cell_text(title_row, "desc").starts_with("1."),
             &format!("desc cell reads '{}'", cell_text(title_row, "desc")),
         );
+        for col in ["length", "size"] {
+            let want = match col {
+                "length" => &v.title_rows[title_row].length,
+                _ => &v.title_rows[title_row].size,
+            };
+            check(
+                &format!("render-{col}-column"),
+                cell_text(title_row, col) == *want,
+                &format!("{col} cell reads '{}'", cell_text(title_row, col)),
+            );
+        }
         snap("02-titles");
 
         // ── REAL WIDGET DRIVING: click the actual checkbox, not the model
@@ -5287,6 +5321,14 @@ mod tests {
         let mut retyped = rows.clone();
         retyped[2].type_s = "Subtitle".into();
         assert_ne!(base, rows_sig(&retyped), "a retyped row went unnoticed");
+
+        let mut relengthed = rows.clone();
+        relengthed[1].length = "1:29:59".into();
+        assert_ne!(base, rows_sig(&relengthed), "a new Length went unnoticed");
+
+        let mut resized = rows.clone();
+        resized[1].size = "6.9 GB".into();
+        assert_ne!(base, rows_sig(&resized), "a new Size went unnoticed");
 
         let mut reindented = rows.clone();
         reindented[2].depth = 1;

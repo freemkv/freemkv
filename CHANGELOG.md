@@ -24,6 +24,7 @@
 - Linux: the `.deb` is split into `freemkv` (app, `freemkv-amd64.deb`) and `freemkv-cli` (`freemkv-cli-amd64.deb`, no dependencies); each replaces the other. The Flatpak download is now `freemkv-x86_64-linux.flatpak`. (CLI, app only: Linux packaging)
 - Homebrew: the cask is now `freemkv` (was `freemkv-app`) and also links the `freemkv` command; the CLI formula is now `freemkv-cli` (was `freemkv`). Existing installs follow the rename. (CLI, app only: Homebrew packaging)
 - Versioned duplicate assets are no longer published; every asset has a stable name and a `.sha256`. (CLI, app only: release assets)
+- The app's title list shows each title's running time and size in their own right-aligned **Length** and **Size** columns; a title's Description reads `1. 00800.mpls (19 chapters)`. On Windows, whose tree has a single column, they follow the Description in the row's label. (app only: the title list; `freemkv info` and the server's JSON are unchanged)
 
 ### Added
 

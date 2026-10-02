@@ -156,7 +156,7 @@ pub fn rows_sig(rows: &[Row]) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     rows.len().hash(&mut h);
     for r in rows {
-        (r.index, r.depth, &r.type_s, &r.desc).hash(&mut h);
+        (r.index, r.depth, &r.type_s, &r.desc, &r.length, &r.size).hash(&mut h);
     }
     h.finish()
 }
@@ -416,10 +416,12 @@ mod tests {
     #[test]
     fn the_row_signature_sees_every_identity_field_and_the_row_count() {
         let a = vec![row(0, 0, "Disc"), row(1, 1, "Title"), row(2, 1, "Title")];
-        let changed: [fn(&mut Vec<Row>); 5] = [
+        let changed: [fn(&mut Vec<Row>); 7] = [
             |v| v[1].index = 7,
             |v| v[1].depth = 2,
             |v| v[1].type_s = "Audio".into(),
+            |v| v[1].length = "1:30:00".into(),
+            |v| v[1].size = "6.8 GB".into(),
             |v| {
                 v.pop();
             },

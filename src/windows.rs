@@ -528,7 +528,7 @@ fn rows_sig(rows: &[Row]) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     rows.len().hash(&mut h);
     for r in rows {
-        (r.index, r.depth, &r.type_s, &r.desc).hash(&mut h);
+        (r.index, r.depth, &r.type_s, &r.desc, &r.length, &r.size).hash(&mut h);
     }
     h.finish()
 }
@@ -560,15 +560,16 @@ fn log_plan(shown: Option<LogShown>, first: u64, len: usize) -> LogPlan {
     }
 }
 
-// The text one tree row shows. `SysTreeView32` has no real multi-column
-// mode, so the macOS outline's Type/Description columns are joined into
-// one item label; the disc root carries no type worth repeating.
+// The text one tree row shows. `SysTreeView32` has no real multi-column mode, so the
+// macOS outline's Type/Description/Length/Size columns are joined into one item label,
+// skipping empty cells; the disc root carries no type worth repeating.
 fn row_text(r: &Row) -> String {
-    if r.depth == 0 || r.type_s.is_empty() {
-        r.desc.clone()
-    } else {
-        format!("{}   {}", r.type_s, r.desc)
-    }
+    let ty = if r.depth == 0 { "" } else { r.type_s.as_str() };
+    [ty, r.desc.as_str(), r.length.as_str(), r.size.as_str()]
+        .into_iter()
+        .filter(|c| !c.is_empty())
+        .collect::<Vec<_>>()
+        .join("   ")
 }
 
 // ── the shell ─────────────────────────────────────────────────────────────
@@ -4458,6 +4459,7 @@ mod tests {
         for (ti, secs) in [(0usize, 5400.0f64), (1, 600.0)] {
             let mut t = row("Title", &format!("{}.  playlist", ti + 1), 1, true, ti);
             t.duration_secs = secs;
+            t.size_bytes = Some(6_800_000_000);
             rows.push(t);
             rows.push(row("Video", "H.264  1080p", 2, false, ti));
             let mut a = row("Audio", "DTS-HD  eng", 2, true, ti);
@@ -4833,6 +4835,18 @@ mod tests {
             text.contains(&title.desc),
             "description dropped from {text:?}"
         );
+        assert_eq!(
+            text,
+            format!("Title   {}   1:30:00   6.8 GB", title.desc),
+            "Length and Size follow the description"
+        );
+    }
+
+    #[test]
+    fn a_stream_row_label_has_no_length_or_size() {
+        let rows = view_rows();
+        let audio = rows.iter().find(|r| r.type_s == "Audio").unwrap();
+        assert_eq!(row_text(audio), format!("Audio   {}", audio.desc));
     }
 
     #[test]

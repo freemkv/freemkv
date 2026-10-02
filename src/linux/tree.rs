@@ -1,6 +1,6 @@
 //! The title tree: a `GtkColumnView` over a `GtkTreeListModel`, with a
-//! tri-state tick box in the expander column and the Type / Description
-//! columns the macOS outline shows. Rows are the core's `View::title_rows`;
+//! tri-state tick box in the expander column and the Type / Description /
+//! Length / Size columns the macOS outline shows. Rows are the core's `View::title_rows`;
 //! a click only reports WHICH row — the cascade and direction are the core's.
 
 use gtk4 as gtk;
@@ -44,18 +44,20 @@ fn paint(cb: &gtk::CheckButton, state: Check) {
     cb.set_active(state != Check::Off);
 }
 
+// `xalign` 0.0 for text, 1.0 for the right-aligned numeric cells.
 fn text_column(
     title: &str,
     rows: &Rc<RefCell<Vec<Row>>>,
     pick: fn(&Row) -> &str,
+    xalign: f32,
 ) -> gtk::ColumnViewColumn {
     let f = gtk::SignalListItemFactory::new();
-    f.connect_setup(|_, li| {
+    f.connect_setup(move |_, li| {
         let Some(li) = li.downcast_ref::<gtk::ListItem>() else {
             return;
         };
         let l = gtk::Label::new(None);
-        l.set_xalign(0.0);
+        l.set_xalign(xalign);
         l.set_ellipsize(gtk::pango::EllipsizeMode::End);
         li.set_child(Some(&l));
     });
@@ -159,12 +161,38 @@ impl TitleTree {
         let check_col = gtk::ColumnViewColumn::new(None, Some(f));
         check_col.set_fixed_width(96);
         view.append_column(&check_col);
-        let type_col = text_column(&crate::strings::get("gui.col.type"), &rows, |r| &r.type_s);
+        let type_col = text_column(
+            &crate::strings::get("gui.col.type"),
+            &rows,
+            |r| &r.type_s,
+            0.0,
+        );
         type_col.set_fixed_width(110);
         view.append_column(&type_col);
-        let desc_col = text_column(&crate::strings::get("gui.col.desc"), &rows, |r| &r.desc);
+        let desc_col = text_column(
+            &crate::strings::get("gui.col.desc"),
+            &rows,
+            |r| &r.desc,
+            0.0,
+        );
         desc_col.set_expand(true);
         view.append_column(&desc_col);
+        let length_col = text_column(
+            &crate::strings::get_or("gui.col.duration", "Length"),
+            &rows,
+            |r| &r.length,
+            1.0,
+        );
+        length_col.set_fixed_width(90);
+        view.append_column(&length_col);
+        let size_col = text_column(
+            &crate::strings::get_or("gui.col.size", "Size"),
+            &rows,
+            |r| &r.size,
+            1.0,
+        );
+        size_col.set_fixed_width(90);
+        view.append_column(&size_col);
 
         let widget = gtk::ScrolledWindow::builder()
             .child(&view)
