@@ -5812,8 +5812,10 @@ mod build_jobs_edge_tests {
         std::fs::create_dir_all(&base).unwrap();
         let file = base.join("plain-file");
         std::fs::write(&file, b"x").unwrap();
-        let under_file = file.join("sub");
-        assert!(super::validate_dir_dest(&under_file, "dir://x", false).is_err());
+        // A path under a plain file is unreadable on Unix (ENOTDIR); Windows reports it as
+        // not found, which is the missing-directory case below.
+        #[cfg(unix)]
+        assert!(super::validate_dir_dest(&file.join("sub"), "dir://x", false).is_err());
         // A missing directory is still just empty.
         assert!(super::validate_dir_dest(&base.join("missing"), "dir://x", false).is_ok());
         let _ = std::fs::remove_dir_all(&base);
