@@ -1018,7 +1018,9 @@ mod update_check_tests {
     use super::{UpdateTimeouts, check_for_update_at};
     use std::time::Duration;
 
-    // A stub release endpoint on localhost: read the request head, answer `head`, run `body`.
+    // A stub release endpoint on 127.0.0.1: read the request head, answer `head`, run `body`.
+    // The URL names the bound address: `localhost` tries `::1` first, and Windows takes
+    // about 2 s to report that refused connect, which a timing bound would count.
     fn release_stub(
         head: &'static [u8],
         body: impl FnOnce(&mut std::net::TcpStream) + Send + 'static,
@@ -1039,7 +1041,7 @@ mod update_check_tests {
             body(&mut sock);
         });
         (
-            format!("http://localhost:{port}/repos/freemkv/freemkv/releases/latest"),
+            format!("http://127.0.0.1:{port}/repos/freemkv/freemkv/releases/latest"),
             server,
         )
     }

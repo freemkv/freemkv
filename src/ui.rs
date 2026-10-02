@@ -3788,10 +3788,12 @@ mod tests {
         started.elapsed()
     }
 
+    // Released by the test once its probe has progressed for four windows.
+    static PROGRESSING_DONE: AtomicBool = AtomicBool::new(false);
+
     fn progressing_probe(_: &str, _: &KeyConfig, tok: &OpenToken) -> Result<Scanned, String> {
-        for _ in 0..8 {
-            std::thread::sleep(T29 / 2);
-            tok.progress.bump();
+        while !PROGRESSING_DONE.load(Ordering::Acquire) && !tok.halt.is_cancelled() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
         match tok.halt.is_cancelled() {
             true => Err("stopped".to_string()),
@@ -3800,16 +3802,36 @@ mod tests {
     }
 
     // FT15a (T29): "the probe's `Progress` moves every 0.5 × window for 4 windows → the
-    // result is adopted". Per spec; do not change without a spec citation.
+    // result is adopted". Per spec; do not change without a spec citation. The test moves
+    // the progress before each tick, so a slow runner's late wake-up never reads as idle.
     #[test]
     fn probe_progressing_past_30s_is_kept() {
         let mut app = App::new();
         (app.probe_scan, app.probe_window) = (progressing_probe, T29);
         app.open_probe(PROBE_SOURCE);
-        assert!(
-            settle(&mut app) > T29 * 2,
-            "the probe outlasted two windows"
-        );
+        let started = std::time::Instant::now();
+        while started.elapsed() < T29 * 4 {
+            let probe = app.probe.clone().expect("the probe is still running");
+            probe.token.progress.bump();
+            app.tick();
+            assert!(
+                !probe.token.halt.is_cancelled(),
+                "T29 left a progressing probe alone"
+            );
+            std::thread::sleep(T29 / 2);
+        }
+        PROGRESSING_DONE.store(true, Ordering::Release);
+        // Collected only once done: a tick before then would count the wake-up as idle.
+        let probe = app.probe.clone().expect("the probe is still running");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !probe.done.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < until,
+                "the probe never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        settle(&mut app);
         assert_eq!(
             app.source, PROBE_SOURCE,
             "a progressing probe's result is kept"
