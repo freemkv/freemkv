@@ -560,6 +560,16 @@ class FingerprintTests(unittest.TestCase):
 
 # ── D: evidence validation and decide() fail-safe ──────────────────────────
 
+class RecordSelfCheckTests(unittest.TestCase):
+    def test_the_running_record_job_does_not_shadow_its_success(self):
+        running = [{'name': 'cli-matrix (linux)', 'conclusion': 'success'},
+                   {'name': 'record-media-evidence', 'conclusion': None, 'status': 'in_progress'}]
+        done = mg.with_record_done(running)
+        self.assertEqual((mg.job_named(done, 'record-media-evidence') or {}).get('conclusion'), 'success')
+        self.assertEqual(sum(j['name'] == 'record-media-evidence' for j in done), 1)
+        self.assertEqual(len(mg.with_record_done([])), 1)
+
+
 def leg_record(leg):
     target = mg.LEG_TARGET[leg]
     return {'runner_name': f'ephemeral-{leg}-i-0123456789abcdef0', 'instance_id': 'i-0123456789abcdef0',
