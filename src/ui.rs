@@ -1305,8 +1305,19 @@ pub fn stop_caption(stopping: bool, titles_done: usize, run_titles: usize) -> Op
 /// does not produce. It used to be a local MP4/M2TS/else-MKV test here, which
 /// told every ISO, folder, demux, chapter, JSON and .fvi run that it was
 /// writing an MKV.
-pub fn container_label(format: &str) -> &'static str {
-    crate::engine::container_word(format)
+/// The engine's word, localized where it is a word rather than a format name.
+pub fn container_label(format: &str) -> String {
+    let word = crate::engine::container_word(format);
+    match word {
+        "chapter" => crate::strings::get_or("gui.progress.word_chapter", "chapter"),
+        "track" => crate::strings::get_or("gui.progress.word_track", "track"),
+        "video track" => crate::strings::get_or("gui.progress.word_video_track", "video track"),
+        "audio track" => crate::strings::get_or("gui.progress.word_audio_track", "audio track"),
+        "subtitle track" => {
+            crate::strings::get_or("gui.progress.word_subtitle_track", "subtitle track")
+        }
+        _ => word.to_string(),
+    }
 }
 
 /// The `gui.format.*` translation key for a canonical output-format string, or
@@ -3003,7 +3014,7 @@ impl App {
                 || {
                     crate::strings::fmt(
                         "gui.progress.saving_current",
-                        &[("container", container_label(&self.effective_format()))],
+                        &[("container", &container_label(&self.effective_format()))],
                     )
                 },
             ),
@@ -3011,7 +3022,7 @@ impl App {
                 || {
                     crate::strings::fmt(
                         "gui.progress.saving_overall",
-                        &[("container", container_label(&self.effective_format()))],
+                        &[("container", &container_label(&self.effective_format()))],
                     )
                 },
             ),
