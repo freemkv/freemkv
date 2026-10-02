@@ -1386,14 +1386,9 @@ fn build_jobs(
                 Some(demux_jobs(&indices, &demux_dir))
             } else if indices.len() == 1 && !is_dir_dest {
                 Some(vec![(Some(indices[0]), dest.to_string())])
-            } else if indices.len() > 1 && !is_dir_dest {
-                // `dir_jobs` would turn the file path into a directory.
-                out.raw(
-                    Always,
-                    &strings::fmt("error.multi_title_needs_dir", &[("dest", dest)]),
-                );
-                None
             } else {
+                // Several titles fan out into a directory at the given path, one file per
+                // title (a single-file dest name such as `movie.mkv` becomes that directory).
                 let disc_name = t
                     .first()
                     .and_then(|ti| {
@@ -1425,9 +1420,8 @@ fn build_jobs(
                 // demux:// — directory sink with its own per-track naming.
                 return Some(demux_jobs(&indices, &demux_dir));
             }
-            // A single-file dest can't hold multiple titles: `dir_jobs` would
-            // silently turn `movie.mkv` into a directory. Same guard as the
-            // scanned-source branch above.
+            // A single-file dest can't hold multiple titles of an unscanned disc: refuse
+            // rather than turn `movie.mkv` into a directory.
             if !is_dir_dest {
                 out.raw(
                     Always,
@@ -5791,18 +5785,39 @@ mod build_jobs_edge_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Several titles of an image into one FILE are refused, as for a disc.
+    // Several titles of an image onto a single-file name fan out into a directory of that
+    // name, one file per title (`-t 3 -t 4 mkv://sel.mkv` -> `sel.mkv/disc_t3.mkv`, `_t4`).
     #[test]
-    fn several_image_titles_refuse_a_single_file_destination() {
+    fn several_image_titles_fan_out_under_a_single_file_name() {
         let out = Output::new(false, true);
-        let dest = "mkv:///tmp/fmkv-img-multi-refuse.mkv";
-        let parsed = parse_url(dest);
+        let dir = super::tests::temp_path("img-multi-fanout.mkv");
+        let dest = format!("mkv://{}", dir.display());
+        let parsed = parse_url(&dest);
         let titles = Some(vec![
             libfreemkv::DiscTitle::empty(),
             libfreemkv::DiscTitle::empty(),
+            libfreemkv::DiscTitle::empty(),
+            libfreemkv::DiscTitle::empty(),
         ]);
-        assert!(build_jobs(&titles, false, &[1, 2], false, dest, &parsed, &out).is_none());
-        assert!(!std::path::Path::new("/tmp/fmkv-img-multi-refuse.mkv").exists());
+        let jobs = build_jobs(&titles, false, &[3, 4], false, &dest, &parsed, &out);
+        let made_dir = dir.is_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        let jobs = jobs.expect("several titles onto a file name must fan out, not refuse");
+        assert!(made_dir, "the file name becomes the output directory");
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].0, Some(2));
+        assert_eq!(jobs[1].0, Some(3));
+        let base = format!("mkv://{}", dir.display());
+        assert!(
+            jobs[0].1.starts_with(&base) && jobs[0].1.ends_with("_t3.mkv"),
+            "got {}",
+            jobs[0].1
+        );
+        assert!(
+            jobs[1].1.starts_with(&base) && jobs[1].1.ends_with("_t4.mkv"),
+            "got {}",
+            jobs[1].1
+        );
     }
 
     // A destination directory that cannot be read cannot be shown empty.
