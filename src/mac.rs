@@ -342,6 +342,30 @@ fn quit_choice(response: isize) -> QuitChoice {
     }
 }
 
+/// What committing the Settings form does with the stored settings before and
+/// after reading it back.
+#[derive(Debug, PartialEq)]
+enum PrefsCommit {
+    /// Nothing changed: no write and no "Settings saved" line, so a commit on
+    /// every focus change stays silent.
+    Unchanged,
+    /// Save; `new_dest` re-points the active output folder, set only when the
+    /// default destination itself changed, so a one-off folder pick survives.
+    Save { new_dest: Option<String> },
+}
+
+fn prefs_commit(
+    before: &crate::settings::Settings,
+    after: &crate::settings::Settings,
+) -> PrefsCommit {
+    if serde_json::to_value(before).ok() == serde_json::to_value(after).ok() {
+        return PrefsCommit::Unchanged;
+    }
+    let dest = &after.dest_dir;
+    let new_dest = (*dest != before.dest_dir && !dest.trim().is_empty()).then(|| dest.clone());
+    PrefsCommit::Save { new_dest }
+}
+
 // One place to set a tick box: written by both `cell_for` and
 // `sync_check_states`. `allowsMixedState` must move with the state, or
 // an NSButton that no longer allows mixed silently clamps -1 to 1.
@@ -831,6 +855,37 @@ define_class!(
                 self.app_mut(|a| a.output_dir = text);
             }
         }
+
+        // A Settings text field commits when focus leaves it (Tab, a click
+        // elsewhere), through the same `commit_prefs` as OK, which writes only
+        // when something changed. Focus also leaves as Cancel or the close
+        // button takes the window away; that is not an edit.
+        #[unsafe(method(controlTextDidEndEditing:))]
+        fn control_text_did_end_editing(&self, n: &objc2_foundation::NSNotification) {
+            let Some(f) = { n.object() }.and_then(|o| self.pref_field(&o)) else {
+                return;
+            };
+            fit_wrapping_field(&f);
+            if f.window().is_some_and(|w| w.isVisible()) {
+                self.commit_prefs();
+            }
+        }
+
+        // Enter in a Settings text field commits without closing the window;
+        // claiming the newline keeps it from also pressing the default OK.
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn control_text_view_do_command(
+            &self,
+            control: &objc2_app_kit::NSControl,
+            _tv: &NSTextView,
+            cmd: Sel,
+        ) -> objc2::runtime::Bool {
+            if cmd != sel!(insertNewline:) || self.pref_field(control).is_none() {
+                return objc2::runtime::Bool::NO;
+            }
+            self.commit_prefs();
+            objc2::runtime::Bool::YES
+        }
     }
 
     unsafe impl NSTextFieldDelegate for Controller {}
@@ -930,26 +985,7 @@ define_class!(
 
         #[unsafe(method(onClosePrefs:))]
         fn on_close_prefs(&self, _s: Option<&AnyObject>) {
-            // Remember the default destination BEFORE reading the form so we can
-            // tell whether the user changed it in this Settings session.
-            let old_dest = self.ivars().settings.borrow().dest_dir.clone();
-            self.read_prefs_form();
-            // Push edited settings into the running App so changes take effect
-            // at once — App holds its own copy loaded at startup, which would
-            // otherwise stay stale until the next launch.
-            let edited = self.ivars().settings.borrow().clone();
-            // The active output dir is a separate live value (a one-off folder
-            // pick overrides the default); re-point it ONLY when the default
-            // actually changed, so this can't clobber a one-off pick.
-            let new_dest = edited.dest_dir.clone();
-            let dest_changed = new_dest != old_dest && !new_dest.trim().is_empty();
-            self.app_mut(|a| {
-                a.settings = edited;
-                if dest_changed {
-                    a.output_dir = new_dest.clone();
-                }
-            });
-            self.save_settings_reporting_error();
+            self.commit_prefs();
             if let Some(w) = self.ivars().win_prefs.borrow().as_ref() {
                 w.close();
             }
@@ -1004,8 +1040,7 @@ define_class!(
         fn on_apply_language(&self, _s: Option<&AnyObject>) {
             let mtm = MainThreadMarker::new().unwrap();
             // Commit every field first so switching language loses no edits.
-            self.read_prefs_form();
-            self.save_settings_reporting_error();
+            self.commit_prefs();
             let code = self.ivars().settings.borrow().language.clone();
             // Remember the visible tab so we can restore it after the rebuild.
             let tab_idx = self.ivars().tabs.borrow().as_ref().and_then(|tv| {
@@ -1417,6 +1452,35 @@ impl Controller {
         choice
     }
 
+    // Commit the Settings form without closing it: read it back, push it into
+    // the running App (which holds its own copy) and save, only when something
+    // changed. OK, Enter, leaving a field and the language switch all land here.
+    fn commit_prefs(&self) {
+        let before = self.ivars().settings.borrow().clone();
+        self.read_prefs_form();
+        let edited = self.ivars().settings.borrow().clone();
+        let PrefsCommit::Save { new_dest } = prefs_commit(&before, &edited) else {
+            return;
+        };
+        self.app_mut(|a| {
+            a.settings = edited;
+            if let Some(dest) = new_dest {
+                a.output_dir = dest;
+            }
+        });
+        self.save_settings_reporting_error();
+    }
+
+    /// The Settings text field `obj` is, if it is one.
+    fn pref_field(&self, obj: &AnyObject) -> Option<Retained<NSTextField>> {
+        self.ivars()
+            .pf_fields
+            .borrow()
+            .iter()
+            .find(|(_, f)| std::ptr::eq(&**f as *const NSTextField as *const AnyObject, obj))
+            .map(|(_, f)| f.clone())
+    }
+
     // Save `Settings` to disk and tell the operator whether it worked. One policy, one call
     // site.
     fn save_settings_reporting_error(&self) {
@@ -1500,11 +1564,12 @@ impl Controller {
                     }
                 }
                 E::ShowSettings => {
-                    let w = self
-                        .ivars()
-                        .win_prefs
-                        .borrow()
-                        .clone()
+                    // Built fresh unless already open, so a window left by
+                    // Cancel or its close button shows the stored settings
+                    // rather than the edits that were walked away from.
+                    let open = self.ivars().win_prefs.borrow().clone();
+                    let w = open
+                        .filter(|w| w.isVisible())
                         .unwrap_or_else(|| build_prefs(mtm, self));
                     *self.ivars().win_prefs.borrow_mut() = Some(w.clone());
                     w.center();
@@ -1544,6 +1609,9 @@ impl Controller {
         for (k, f) in self.ivars().pf_fields.borrow().iter() {
             if k == key {
                 f.setStringValue(&NSString::from_str(value));
+                if PATH_KEYS.contains(&key) {
+                    fit_wrapping_field(f);
+                }
             }
         }
     }
@@ -3325,7 +3393,10 @@ fn set_lang_picker(mtm: MainThreadMarker, p: &NSPopUpButton, stored: &str, c: &C
     // Item 0 is the pull-down's title; never blank, because `lang_summary`
     // answers "Any" for an empty selection.
     if let Some(title) = menu.itemAtIndex(0) {
-        title.setTitle(&NSString::from_str(&crate::ui::lang_summary(stored)));
+        let summary = NSString::from_str(&crate::ui::lang_summary(stored));
+        title.setTitle(&summary);
+        // A long set is cut to the button's width; the tooltip names it all.
+        p.setToolTip(Some(&summary));
         unsafe { title.setRepresentedObject(Some(&NSString::from_str(stored))) };
     }
     for i in 1..menu.numberOfItems() {
@@ -3356,12 +3427,70 @@ fn lang_item_index(menu: &NSMenu, code: &str) -> Option<isize> {
     })
 }
 
+/// The Settings rows that hold a path: they wrap, and grow to show it whole.
+const PATH_KEYS: [&str; 2] = ["dest_dir", "keydb_path"];
+
+/// A one-line control's height, or the taller height wrapped text needs.
+fn fitted_height(need: f64, one_line: f64) -> f64 {
+    need.ceil().max(one_line)
+}
+
+/// A popup's width: its longest choice, no narrower than laid out, no wider
+/// than the row allows.
+fn popup_width(laid_out: f64, longest: f64, room: f64) -> f64 {
+    longest.max(laid_out).min(room.max(laid_out))
+}
+
+/// Whether a view whose top edge is `top` sits wholly below `edge`.
+fn sits_below(top: f64, edge: f64) -> bool {
+    top <= edge + 0.5
+}
+
+// Widen a Settings popup to its longest choice within the row; one that still
+// does not fit is cut in the middle, with the whole text as a tooltip.
+fn fit_popup(p: &NSPopUpButton, room: f64) {
+    let fr = p.frame();
+    p.sizeToFit();
+    let w = popup_width(fr.size.width, p.frame().size.width, room);
+    p.setFrame(r(fr.origin.x, fr.origin.y, w, fr.size.height));
+    p.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingMiddle);
+    p.setAllowsExpansionToolTips(true);
+}
+
+// Size a wrapping path field to the lines its text needs, top edge fixed, and
+// move every view below it by the same amount so the rows never overlap.
+fn fit_wrapping_field(f: &NSTextField) {
+    let Some(cell) = f.cell() else { return };
+    let fr = f.frame();
+    let need = cell
+        .cellSizeForBounds(r(0.0, 0.0, fr.size.width, 1e4))
+        .height;
+    let h = fitted_height(need, 22.0);
+    let delta = h - fr.size.height;
+    if delta.abs() < 0.5 {
+        return;
+    }
+    f.setFrame(r(fr.origin.x, fr.origin.y - delta, fr.size.width, h));
+    let Some(sup) = (unsafe { f.superview() }) else {
+        return;
+    };
+    for v in sup.subviews().iter() {
+        let vf = v.frame();
+        if sits_below(vf.origin.y + vf.size.height, fr.origin.y) {
+            v.setFrameOrigin(NSPoint::new(vf.origin.x, vf.origin.y - delta));
+        }
+    }
+}
+
 /// One labelled row inside a preferences tab. Right-aligned label at a fixed
 /// gutter, control to its right — the layout the reference uses throughout.
 struct Rows {
     view: Retained<NSView>,
     y: f64,
     gutter: f64,
+    /// How far the current row's wrapped label reaches below one line; the
+    /// next row starts that much lower.
+    extra: f64,
     /// (key, control) for every editable control, so OK can read them back.
     fields: Vec<(String, Retained<NSTextField>)>,
     checks: Vec<(String, Retained<NSButton>)>,
@@ -3376,6 +3505,7 @@ impl Rows {
             view,
             y: h - 40.0,
             gutter,
+            extra: 0.0,
             fields: vec![],
             checks: vec![],
             popups: vec![],
@@ -3383,11 +3513,30 @@ impl Rows {
         }
     }
     fn label(&mut self, mtm: MainThreadMarker, s: &str) {
-        let l = text(mtm, s, r(0.0, self.y, self.gutter - 8.0, 18.0), true, false);
+        let lw = self.gutter - 8.0;
+        let l = text(mtm, s, r(0.0, self.y, lw, 18.0), true, false);
         {
             l.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+            // A label longer than the gutter (a long translation) wraps onto
+            // more lines, growing down, instead of being cut off.
+            l.setUsesSingleLineMode(false);
+            if let Some(cell) = l.cell() {
+                cell.setWraps(true);
+                let h = fitted_height(cell.cellSizeForBounds(r(0.0, 0.0, lw, 1e4)).height, 18.0);
+                l.setFrame(r(0.0, self.y + 18.0 - h, lw, h));
+                self.extra = h - 18.0;
+            }
             self.view.addSubview(&l);
         }
+    }
+    /// Move to the next row, below a wrapped label if this row had one.
+    fn advance(&mut self, step: f64) {
+        self.y -= step + self.extra;
+        self.extra = 0.0;
+    }
+    /// The width a control starting at the gutter may grow to.
+    fn room(&self) -> f64 {
+        self.view.frame().size.width - self.gutter - 16.0
     }
     fn check(&mut self, mtm: MainThreadMarker, key: &str, s: &str, on: bool) {
         self.label(mtm, s);
@@ -3400,7 +3549,7 @@ impl Rows {
             self.view.addSubview(&b);
         }
         self.checks.push((key.to_string(), b));
-        self.y -= 28.0;
+        self.advance(28.0);
     }
     /// Insert a prebuilt popup (used so Preferences and the main window share
     /// one output-format list rather than drifting apart).
@@ -3415,10 +3564,11 @@ impl Rows {
         self.label(mtm, s);
         {
             p.setFrame(r(self.gutter, self.y - 3.0, w, 24.0));
+            fit_popup(&p, self.room());
             self.view.addSubview(&p);
         }
         self.popups.push((key.to_string(), p));
-        self.y -= 30.0;
+        self.advance(30.0);
     }
 
     /// A settings dropdown. Items come from `enum_options(key)` (localized
@@ -3436,9 +3586,10 @@ impl Rows {
         for (_canon, label) in enum_options(key) {
             p.addItemWithTitle(&NSString::from_str(&label));
         }
+        fit_popup(&p, self.room());
         self.view.addSubview(&p);
         self.popups.push((key.to_string(), p));
-        self.y -= 30.0;
+        self.advance(30.0);
     }
 
     // Multi-select language row: pull-down listing every offered language with checkmarks.
@@ -3465,12 +3616,13 @@ impl Rows {
             menu.addItem(&lang_menu_item(mtm, code, c));
         }
         p.setMenu(Some(&menu));
+        fit_popup(&p, self.room());
         self.view.addSubview(&p);
         // Empty until the populate loop fills it from disk; going through the
         // same setter keeps the "never a blank button" rule in one place.
         set_lang_picker(mtm, &p, "", c);
         self.langs.push((key.to_string(), p));
-        self.y -= 30.0;
+        self.advance(30.0);
     }
     // A plain text row. MUST register `(key, control)` in `self.fields`: it is the only thing
     // `read_prefs_form` and the populate loop use, so a row missing from it is write-only.
@@ -3488,7 +3640,7 @@ impl Rows {
             self.view.addSubview(&f);
         }
         self.fields.push((key.to_string(), f));
-        self.y -= 30.0;
+        self.advance(30.0);
     }
 
     // Same contract as `field`, but for a secret (keyserver bearer token): an
@@ -3511,7 +3663,7 @@ impl Rows {
         // storage type with every ordinary text row.
         let f: Retained<NSTextField> = unsafe { Retained::cast_unchecked(f) };
         self.fields.push((key.to_string(), f));
-        self.y -= 30.0;
+        self.advance(30.0);
     }
 
     fn path(
@@ -3533,11 +3685,20 @@ impl Rows {
         {
             f.setStringValue(&NSString::from_str(val));
             f.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+            // A long path wraps and the field grows beneath its label (see
+            // `fit_wrapping_field`) rather than showing only its start.
+            f.setUsesSingleLineMode(false);
+            f.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByWordWrapping);
+            if let Some(cell) = f.cell() {
+                cell.setWraps(true);
+                cell.setScrollable(false);
+            }
             self.view.addSubview(&f);
         }
         self.fields.push((key.to_string(), f));
         // The browse "…" opens a picker that fills THIS field: dest_dir picks a
         // folder, keydb_path picks a file.
+        debug_assert!(PATH_KEYS.contains(&key));
         let action = match key {
             "dest_dir" => sel!(onBrowseDestDir:),
             "keydb_path" => sel!(onBrowseKeydb:),
@@ -3551,7 +3712,7 @@ impl Rows {
             action,
         );
         self.view.addSubview(&b);
-        self.y -= 30.0;
+        self.advance(30.0);
     }
     fn button(
         &mut self,
@@ -3563,7 +3724,7 @@ impl Rows {
     ) -> Retained<NSButton> {
         let b = btn(mtm, title, r(self.gutter, self.y - 4.0, w, 26.0), c, a);
         self.view.addSubview(&b);
-        self.y -= 32.0;
+        self.advance(32.0);
         b
     }
     fn note(&mut self, mtm: MainThreadMarker, s: &str, w: f64) -> Retained<NSTextField> {
@@ -3572,11 +3733,11 @@ impl Rows {
             l.setUsesSingleLineMode(false);
             self.view.addSubview(&l);
         }
-        self.y -= 44.0;
+        self.advance(44.0);
         l
     }
     fn gap(&mut self) {
-        self.y -= 14.0;
+        self.advance(14.0);
     }
 }
 
@@ -3925,6 +4086,14 @@ fn build_prefs(mtm: MainThreadMarker, c: &Controller) -> Retained<NSWindow> {
         // several languages, or one this build does not list.
         for (k, p) in &all_langs {
             set_lang_picker(mtm, p, &st.get(k), c);
+        }
+    }
+    // Every text field reports to the controller, which commits on Enter and
+    // when focus leaves; a path field is sized to its stored value.
+    for (k, f) in &all_fields {
+        unsafe { f.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(c))) };
+        if PATH_KEYS.contains(&k.as_str()) {
+            fit_wrapping_field(f);
         }
     }
     *c.ivars().pf_fields.borrow_mut() = all_fields;
@@ -5185,15 +5354,149 @@ mod tests {
             src.contains(&helper),
             "the shared save_settings_reporting_error helper is gone"
         );
-        let language_call = format!(
-            "{}{}",
-            "self.read_prefs_form();\n            self.save_settings_reporting", "_error();"
-        );
+        let commit = fn_body(prod_src(), "fn commit_prefs(");
         assert!(
-            src.contains(&language_call),
-            "onApplyLanguage: no longer calls save_settings_reporting_error \
-             right after committing the form — a failed save on the \
-             language-switch path would go unreported again"
+            commit.contains("self.save_settings_reporting_error();"),
+            "commit_prefs no longer saves through save_settings_reporting_error \
+             — a failed save from Settings would go unreported again"
+        );
+        let language = fn_body(prod_src(), "fn on_apply_language(");
+        assert!(
+            language.contains("self.commit_prefs();"),
+            "onApplyLanguage: no longer commits the form through commit_prefs \
+             before switching — edits would be lost or the save unreported"
+        );
+    }
+
+    // ── Settings text fields commit like the Linux shell's ───────────────────
+    // Source inspection only: the Enter/blur wiring needs a real window. Every
+    // route that writes the form goes through the one `commit_prefs`.
+    #[test]
+    fn a_settings_field_commits_on_enter_and_on_leaving_it_source_inspection_only() {
+        let src = prod_src();
+        for sig in [
+            "fn on_close_prefs(",
+            "fn control_text_did_end_editing(",
+            "fn control_text_view_do_command(",
+        ] {
+            assert!(
+                fn_body(src, sig).contains("self.commit_prefs();"),
+                "{sig} must commit through commit_prefs"
+            );
+        }
+        assert!(src.contains("#[unsafe(method(controlTextDidEndEditing:))]"));
+        assert!(src.contains("#[unsafe(method(control:textView:doCommandBySelector:))]"));
+        // Enter claims the newline, or the default OK button closes the window.
+        let enter = fn_body(src, "fn control_text_view_do_command(");
+        assert!(enter.contains("sel!(insertNewline:)") && enter.contains("Bool::YES"));
+        // Focus leaving a closing window is not an edit.
+        assert!(fn_body(src, "fn control_text_did_end_editing(").contains("isVisible()"));
+        // Every field reports to the controller.
+        assert!(fn_body(src, "fn build_prefs(").contains("f.setDelegate("));
+        // Cancel stays a discard: it never reads the form.
+        assert!(!fn_body(src, "fn on_cancel_prefs(").contains("commit_prefs"));
+    }
+
+    #[test]
+    fn a_commit_writes_only_what_changed_and_follows_only_a_new_default_folder() {
+        let before = crate::settings::Settings::default();
+        assert_eq!(
+            prefs_commit(&before, &before.clone()),
+            PrefsCommit::Unchanged
+        );
+
+        let mut other = before.clone();
+        other.filename_template = "{title}".into();
+        assert_eq!(
+            prefs_commit(&before, &other),
+            PrefsCommit::Save { new_dest: None },
+            "an edit elsewhere must not re-point a one-off output folder"
+        );
+
+        let mut moved = before.clone();
+        moved.dest_dir = "/Volumes/Media/Rips".into();
+        assert_eq!(
+            prefs_commit(&before, &moved),
+            PrefsCommit::Save {
+                new_dest: Some("/Volumes/Media/Rips".into())
+            }
+        );
+
+        let mut blank = before.clone();
+        blank.dest_dir = "  ".into();
+        assert_eq!(
+            prefs_commit(&before, &blank),
+            PrefsCommit::Save { new_dest: None },
+            "a cleared default saves but leaves the active folder alone"
+        );
+    }
+
+    #[test]
+    fn a_settings_window_left_by_cancel_is_rebuilt_on_reopen_source_inspection_only() {
+        let body = fn_body(prod_src(), "fn perform(&self, effects");
+        let at = body
+            .find("E::ShowSettings =>")
+            .expect("ShowSettings arm moved");
+        let arm = &body[at..at + 600.min(body.len() - at)];
+        assert!(
+            arm.contains(".filter(|w| w.isVisible())"),
+            "a hidden Settings window must be rebuilt, or Cancel's discarded \
+             edits reappear and the next OK commits them"
+        );
+    }
+
+    #[test]
+    fn wrapped_rows_size_to_their_text_and_push_down_only_what_is_below() {
+        assert_eq!(
+            fitted_height(15.2, 18.0),
+            18.0,
+            "one line keeps the row height"
+        );
+        assert_eq!(fitted_height(44.3, 22.0), 45.0);
+        assert!(sits_below(100.0, 100.0));
+        assert!(sits_below(80.0, 100.0));
+        assert!(
+            !sits_below(120.0, 100.0),
+            "the field's own label and browse button stay"
+        );
+    }
+
+    #[test]
+    fn a_popup_widens_to_its_longest_choice_within_the_row() {
+        assert_eq!(
+            popup_width(220.0, 180.0, 330.0),
+            220.0,
+            "never narrower than laid out"
+        );
+        assert_eq!(popup_width(220.0, 290.0, 330.0), 290.0);
+        assert_eq!(popup_width(220.0, 400.0, 330.0), 330.0, "capped at the row");
+        assert_eq!(
+            popup_width(300.0, 400.0, 250.0),
+            300.0,
+            "a cramped row keeps its width"
+        );
+    }
+
+    #[test]
+    fn long_paths_and_dropdowns_are_not_cut_off_source_inspection_only() {
+        let src = prod_src();
+        let path = fn_body(src, "    fn path(");
+        assert!(path.contains("setWraps(true)") && path.contains("setUsesSingleLineMode(false)"));
+        let label = fn_body(src, "    fn label(");
+        assert!(label.contains("setWraps(true)") && label.contains("self.extra"));
+        for sig in ["    fn combo(", "    fn langs(", "    fn popup("] {
+            assert!(
+                fn_body(src, sig).contains("fit_popup("),
+                "{sig} must fit its popup"
+            );
+        }
+        assert!(fn_body(src, "fn build_prefs(").contains("fit_wrapping_field(f)"));
+        assert!(fn_body(src, "fn set_pref_field(").contains("fit_wrapping_field(f)"));
+        let rows = &src[src.find("impl Rows {").unwrap()..src.find("fn build_prefs(").unwrap()];
+        assert_eq!(
+            rows.matches("self.y -= ").count(),
+            1,
+            "a row must advance through `advance`, or a wrapped label overlaps the next row"
         );
     }
 

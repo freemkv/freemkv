@@ -25,6 +25,7 @@
 - Homebrew: the cask is now `freemkv` (was `freemkv-app`) and also links the `freemkv` command; the CLI formula is now `freemkv-cli` (was `freemkv`). Existing installs follow the rename. (CLI, app only: Homebrew packaging)
 - Versioned duplicate assets are no longer published; every asset has a stable name and a `.sha256`. (CLI, app only: release assets)
 - The app's title list shows each title's running time and size in their own right-aligned **Length** and **Size** columns; a title's Description reads `1. 00800.mpls (19 chapters)`. On Windows, whose tree has a single column, they follow the Description in the row's label. (app only: the title list; `freemkv info` and the server's JSON are unchanged)
+- The macOS app's Settings save a text field when you press Enter or leave it, without closing the window, as the Linux app's do. Labels too long for their column wrap, dropdowns widen to their longest choice, and a long default destination or keydb path wraps onto more lines beneath its label instead of being cut off. Settings reopened after Cancel show the saved values, not the abandoned edits. (app only: the Settings window)
 
 ### Added
 
