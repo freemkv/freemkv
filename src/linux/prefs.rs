@@ -113,6 +113,49 @@ fn group(desc: Option<&str>) -> adw::PreferencesGroup {
     grp
 }
 
+/// A dropdown popup row for a `GtkStringList`: the label wraps instead of
+/// ellipsizing, with a tick on the current choice as the default list has.
+fn wrapping_list_factory() -> gtk::SignalListItemFactory {
+    let f = gtk::SignalListItemFactory::new();
+    f.connect_setup(|_, obj| {
+        let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let label = gtk::Label::new(None);
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        label.set_max_width_chars(48);
+        let tick = gtk::Image::from_icon_name("object-select-symbolic");
+        item.bind_property("selected", &tick, "opacity")
+            .transform_to(|_, sel: bool| Some(if sel { 1.0_f64 } else { 0.0 }))
+            .sync_create()
+            .build();
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.append(&label);
+        row.append(&tick);
+        item.set_child(Some(&row));
+    });
+    f.connect_bind(|_, obj| {
+        let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let text = item
+            .item()
+            .and_downcast::<gtk::StringObject>()
+            .map(|s| s.string());
+        let label = item
+            .child()
+            .and_then(|row| row.first_child())
+            .and_downcast::<gtk::Label>();
+        if let (Some(label), Some(text)) = (label, text) {
+            label.set_text(&text);
+        }
+    });
+    f
+}
+
 impl Form {
     fn entry(
         &mut self,
@@ -151,9 +194,13 @@ impl Form {
             .map(|(_, l)| l)
             .collect();
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        // The choice shows in full under the title, and the popup wraps long
+        // labels: the default factory cuts both at about 20 characters.
         let r = adw::ComboRow::builder()
             .title(row_title(label))
             .model(&gtk::StringList::new(&refs))
+            .use_subtitle(true)
+            .list_factory(&wrapping_list_factory())
             .build();
         grp.add(&r);
         self.combos.push((key, r.clone()));
