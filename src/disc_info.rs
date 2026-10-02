@@ -327,6 +327,10 @@ pub(crate) fn print_disc_titles(disc: &Disc, flags: &InfoFlags) {
     // the encryption generation with the SAME renderer the drive path uses
     // (`emit_encryption_line`) — no duplicated match. Unencrypted discs print no line.
     if emit_encryption_line(&out, disc) {
+        // The keydb lookup key, read from the image without any key.
+        if let Some(aacs) = disc.aacs.as_ref().filter(|a| !a.disc_hash.is_empty()) {
+            out.raw(Normal, &format!("Disc hash: {}", aacs.disc_hash));
+        }
         out.blank(Normal);
     }
     print_titles(&out, disc, full, flags.verbose, flags.basic);
@@ -951,6 +955,24 @@ mod tests {
             css_error: None,
             content_format: ContentFormat::BdTs,
         }
+    }
+
+    // `info iso://` names an AACS image's keydb lookup key without any key: the hash a
+    // key entry for the disc is written against.
+    #[test]
+    fn image_info_names_the_disc_hash_of_an_aacs_image() {
+        let hash = "0x99D54532996BBE5F7D02622D627E5B2562923E1E";
+        let mut disc = synthetic_disc();
+        disc.format = DiscFormat::BluRay;
+        disc.aacs = Some(libfreemkv::test_util::aacs_state().disc_hash(hash).build());
+        let flags = InfoFlags::default();
+        let ((), text) = crate::output::capture(|| print_disc_titles(&disc, &flags));
+        assert!(text.contains(&format!("Disc hash: {hash}")), "{text}");
+        // A CSS or clear image has no such line.
+        disc.aacs = None;
+        disc.encrypted = false;
+        let ((), text) = crate::output::capture(|| print_disc_titles(&disc, &flags));
+        assert!(!text.contains("Disc hash"), "{text}");
     }
 
     #[test]
