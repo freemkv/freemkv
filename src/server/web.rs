@@ -67,6 +67,11 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("web/assets/details.js"),
     ),
     (
+        "auditview.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/auditview.js"),
+    ),
+    (
         "console.js",
         "text/javascript; charset=utf-8",
         include_bytes!("web/assets/console.js"),

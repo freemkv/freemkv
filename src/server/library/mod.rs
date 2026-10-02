@@ -2,7 +2,7 @@
 //! queue that remuxes out-of-date titles from their ISO through the engine.
 //!
 //! [`index`] builds the cross-list, [`probe`] reads the muxed-with stamp and
-//! runs the fast audit, [`queue`] persists the jobs, [`worker`] runs them one
+//! runs the fast audit ([`media`] reads what each MKV carries), [`queue`] persists the jobs, [`worker`] runs them one
 //! at a time, [`arbiter`] gives rips the mux slot first, [`audit`] queues each MKV's
 //! audit ([`deep`] decodes it in full when the setting is on), and [`api`] serves `/api/library*`.
 
@@ -12,6 +12,7 @@ pub mod audit;
 pub mod deep;
 pub mod index;
 pub mod links;
+pub mod media;
 pub mod probe;
 pub mod queue;
 pub mod transcript;
@@ -615,7 +616,8 @@ impl Library {
                     .mkv
                     .as_deref()
                     .zip(sig)
-                    .and_then(|(m, s)| self.audits.report(m, s));
+                    .and_then(|(m, s)| self.audits.report(m, s))
+                    .map(without_raw);
                 let deep = r
                     .mkv
                     .as_deref()
@@ -862,6 +864,14 @@ impl Library {
 }
 
 // A file a scan did not list is gone only when a stat says NotFound.
+// The raw header report is served on its own (`/api/library/raw`), not in every listing.
+fn without_raw(mut a: AuditReport) -> AuditReport {
+    if let Some(d) = a.detail.as_mut() {
+        d.raw.clear();
+    }
+    a
+}
+
 fn gone(p: &Path) -> bool {
     matches!(std::fs::metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }

@@ -165,6 +165,19 @@ pub struct AuditReport {
     pub audio: Vec<TrackFacts>,
     /// Subtitle languages, in track order.
     pub subtitles: Vec<String>,
+    /// What each track carries; `None` in a report stored before it was read, until the
+    /// quick lane fills it in.
+    #[serde(default)]
+    pub detail: Option<super::media::MediaDetail>,
+}
+
+impl AuditReport {
+    /// The stored report predates the current media reader.
+    pub fn needs_detail(&self) -> bool {
+        self.detail
+            .as_ref()
+            .is_none_or(|d| d.version < super::media::VERSION)
+    }
 }
 
 /// One audio track as the Library shows it.
@@ -235,6 +248,7 @@ pub fn audit_fast(path: &Path) -> Option<AuditReport> {
         video: Vec::new(),
         audio: Vec::new(),
         subtitles: Vec::new(),
+        detail: Some(super::media::empty()),
     };
     let magic_ok = std::fs::File::open(path).and_then(|mut f| {
         let mut m = [0u8; 4];
@@ -283,6 +297,8 @@ pub fn audit_fast(path: &Path) -> Option<AuditReport> {
     }
     report.duration_secs = probe.duration_secs;
     report.runtime_secs = probe.last_cue_secs;
+    // A storage failure here leaves the detail to a later pass; the verdict stands.
+    report.detail = super::media::read(path);
     if report.video_tracks == 0 {
         report.issues.push(AuditIssue::NoVideo);
     }
@@ -698,6 +714,33 @@ mod tests {
             ]
         );
         assert_eq!(r.subtitles, ["deu"]);
+        let d = r.detail.as_ref().unwrap();
+        assert!(!r.needs_detail());
+        assert_eq!(d.audio[0].format, "TrueHD");
+        assert_eq!(d.subtitles[0].language, "deu");
+    }
+
+    #[test]
+    fn every_verdict_carries_a_current_detail_so_nothing_is_read_twice() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("a.mkv");
+        std::fs::write(&p, vec![0x47; 4096]).unwrap();
+        let r = audit_fast(&p).unwrap();
+        assert_eq!(r.issues, [AuditIssue::NotMkv]);
+        assert!(!r.needs_detail());
+        let old = AuditReport {
+            detail: None,
+            ..r.clone()
+        };
+        assert!(old.needs_detail());
+        let stale = AuditReport {
+            detail: Some(crate::server::library::media::MediaDetail::default()),
+            ..r
+        };
+        assert!(
+            stale.needs_detail(),
+            "an older reader's detail is read again"
+        );
     }
 
     #[test]

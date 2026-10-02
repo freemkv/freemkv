@@ -54,7 +54,7 @@ pub fn format_iso_datetime() -> String {
     iso_datetime_at(epoch_secs())
 }
 
-fn iso_datetime_at(secs: u64) -> String {
+pub(crate) fn iso_datetime_at(secs: u64) -> String {
     let (y, mo, d) = civil_from_days((secs / 86400) as i64);
     let day = (secs % 86400) as u32;
     let h = day / 3600;

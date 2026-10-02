@@ -4,6 +4,7 @@
 import { esc, modal, bytes, runtime, when, api, act, toast, confirmButton } from './ui.js';
 import { openTitleLog } from './console.js';
 import { refreshNow } from './libdata.js';
+import { tierLabel, hdrLabel, audioLabel, radar, timelineText, videoSection, audioSection, subtitleSection, mediaFindings, deepWhy, deepVerified, forensicTable, rawHtml } from './auditview.js';
 
 /** Out of date: an MKV written by anything but this freemkv. The one
     definition both pages count with. */
@@ -93,6 +94,7 @@ export function auditHtml(r) {
   return '<span title="' + esc(tip) + '" style="color:' + color + ';font-size:1rem">' + glyph + '</span>';
 }
 
+// The tracks as the quick audit stored them before it read the media detail.
 function trackRows(a) {
   const v = (a.video || []).map((c, i) => '<tr><td>' + (i + 1) + '</td><td>Video</td><td>' + esc(c) + '</td><td></td></tr>');
   const au = (a.audio || []).map(t => '<tr><td></td><td>Audio</td><td>' + esc(t.codec) + '</td><td>' + esc(t.language) + '</td></tr>');
@@ -100,34 +102,75 @@ function trackRows(a) {
   return v.concat(au, s).join('');
 }
 
-/** The details dialog for one row. */
-export function openDetails(r, ctx = {}) {
+function verdictBadge(r) {
   const a = r.audit;
   const [cls] = auditState(r);
-  const verdict = !r.mkv ? '<span class="badge badge-muted">no MKV</span>'
+  return !r.mkv ? '<span class="badge badge-muted">no MKV</span>'
     : !a ? '<span class="badge badge-warn">not audited yet</span>'
     : cls === 'dot-bad' ? '<span class="badge badge-bad">issue</span>'
     : cls === 'dot-warn' ? '<span class="badge badge-warn">checks out, with a note</span>'
     : '<span class="badge badge-ok">✓ checks out</span>';
-  let body = '<div class="chips" style="margin-bottom:1rem">' + verdict
-    + (a && a.duration_secs ? ' <span class="badge badge-muted">' + runtime(a.duration_secs) + '</span>' : '')
-    + (r.size_bytes ? ' <span class="badge badge-muted">' + bytes(r.size_bytes) + '</span>' : '')
-    + (r.muxed_with && (r.muxed_with.state === 'older' || r.muxed_with.state === 'other') ? ' <span class="badge badge-warn">made by an older version or another program</span>' : '')
+}
+
+function chips(r) {
+  const a = r.audit;
+  const d = a && a.detail;
+  const muted = (t) => ' <span class="badge badge-muted">' + esc(t) + '</span>';
+  const teal = (t) => t ? ' <span class="badge badge-teal">' + esc(t) + '</span>' : '';
+  const best = d && d.audio && d.audio[d.best_audio];
+  return '<div class="chips" style="margin-bottom:1rem">' + verdictBadge(r)
+    + (a && a.duration_secs ? muted(runtime(a.duration_secs)) : '')
+    + (r.size_bytes ? muted(bytes(r.size_bytes)) : '')
+    + (d ? teal(tierLabel(d.tier)) + teal(hdrLabel(d.hdr)) + teal(best && audioLabel(best)) : '')
+    + (outdated(r) ? ' <span class="badge badge-warn">made by an older version or another program</span>' : '')
     + '</div>';
-  if (a && a.issues.length) {
-    body += '<h3>Findings</h3>' + a.issues.map(i => '<div class="issue"><span class="dot ' + (i.kind === 'no_cues' ? 'dot-warn' : 'dot-bad') + '"></span>' + esc(issueText(i)) + '</div>').join('');
+}
+
+function findings(a) {
+  const rows = (a.issues || []).map(i => [i.kind === 'no_cues' ? 'dot-warn' : 'dot-bad', issueText(i)])
+    .concat(a.detail ? mediaFindings(a.detail) : []);
+  const timeline = a.detail && a.detail.timeline && a.detail.timeline.state !== 'unknown'
+    ? '<p class="small muted" style="margin:0.25rem 0 0">Timeline: ' + esc(timelineText(a.detail.timeline)) + '</p>' : '';
+  const list = rows.length ? rows.map(([dot, t]) => '<div class="issue"><span class="dot ' + dot + '"></span>' + esc(t) + '</div>').join('')
+    : '<div class="issue"><span class="dot dot-ok"></span>The structure checks out: tracks, length and index.</div>';
+  return '<h3>Audit findings</h3>' + list + timeline;
+}
+
+function deepSection(r) {
+  const v = r.deep.verdict;
+  const bad = r.deep.state === 'corrupt';
+  let out = '<h3>Deep audit</h3><div class="issue"><span class="dot ' + (bad ? 'dot-bad' : r.deep.state === 'clean' ? 'dot-ok' : 'dot-warn') + '"></span>'
+    + esc(deepText(r).replace(/^Deep audit: /, '')) + (v && v.scanned ? ' <span class="muted small">' + esc(when(v.scanned)) + '</span>' : '') + '</div>';
+  if (bad) {
+    const why = deepWhy(v);
+    out += '<dl class="kv"><dt>What failed</dt><dd>' + esc(why.what) + '</dd><dt>Where</dt><dd>' + esc(why.where) + '</dd>'
+      + (why.advice ? '<dt>What to do</dt><dd>' + esc(why.advice) + '</dd>' : '') + '</dl>' + forensicTable(v.forensic);
+  } else if (r.deep.state === 'clean') {
+    out += '<p class="small" style="margin:0.25rem 0 0">' + esc(deepVerified(v, r.audit)) + '</p>';
   }
-  if (r.deep) {
-    const v = r.deep.verdict;
-    const bad = r.deep.state === 'corrupt';
-    body += '<h3>Deep audit</h3><div class="issue"><span class="dot ' + (bad ? 'dot-bad' : r.deep.state === 'clean' ? 'dot-ok' : 'dot-warn') + '"></span>'
-      + esc(deepText(r).replace(/^Deep audit: /, '')) + (v && v.scanned ? ' <span class="muted small">' + esc(when(v.scanned)) + '</span>' : '') + '</div>';
-    const lines = v ? (v.bad && v.bad.length ? v.bad : v.clean ? [] : v.sample) : [];
-    if (lines.length) body += '<details><summary class="small">What the decoder said</summary><pre class="mono small" style="white-space:pre-wrap;max-height:16rem;overflow:auto">' + esc(lines.join('\n')) + '</pre></details>';
+  const lines = v ? (v.bad && v.bad.length ? v.bad : v.clean ? [] : v.sample) : [];
+  if (lines.length) out += '<details class="adv"><summary class="small">What the decoder said</summary><pre class="mono small" style="white-space:pre-wrap;max-height:16rem;overflow:auto">' + esc(lines.join('\n')) + '</pre></details>';
+  return out;
+}
+
+function radarSection(d) {
+  const r = radar(d);
+  return r ? '<h3>Upgrade radar</h3><div class="chips">' + r + '</div>' : '';
+}
+
+/** The dialog body for one row: media, audit, files, last remux. */
+export function detailsBody(r) {
+  const a = r.audit;
+  const d = a && a.detail;
+  let body = chips(r);
+  if (a && !d) {
+    body += '<p class="small muted" style="margin:0 0 0.5rem">Details pending: a quick read of this file will fill in its video, audio and subtitles.</p>'
+      + '<h3>Tracks</h3><div class="det-scroll"><table class="det"><thead><tr><th>#</th><th>Type</th><th>Codec</th><th>Language</th></tr></thead><tbody>' + trackRows(a) + '</tbody></table></div>';
   }
-  if (a) {
-    body += '<h3>Tracks</h3><table class="det"><thead><tr><th>#</th><th>Type</th><th>Codec</th><th>Language</th></tr></thead><tbody>' + trackRows(a) + '</tbody></table>';
-  }
+  if (d) body += videoSection(d) + audioSection(d) + subtitleSection(d);
+  if (a) body += findings(a);
+  if (r.deep) body += deepSection(r);
+  if (d) body += radarSection(d);
   body += '<h3>Files</h3><dl class="kv">'
     + (r.mkv ? '<dt>MKV</dt><dd class="mono">' + esc(r.mkv) + '</dd>' : '')
     + (r.mkv ? '<dt>Made with</dt><dd>' + esc(r.writing_app || 'not recorded') + '</dd>' : '')
@@ -143,6 +186,13 @@ export function openDetails(r, ctx = {}) {
         : '<span style="color:var(--bad)">✗ ' + esc(res.message) + '</span>, ' + esc(when(res.finished_at)))
       + '</p>';
   }
+  if (d) body += '<h3>Full report</h3><details class="adv" data-raw><summary class="small">Every header field, per track</summary><div data-raw-body><p class="small muted">Loading…</p></div></details>';
+  return body;
+}
+
+/** The details dialog for one row. */
+export function openDetails(r, ctx = {}) {
+  const body = detailsBody(r);
   const can = ctx.remux !== false && (r.kind === 'remux' || r.kind === 'iso_only');
   const busy = r.job && (r.job.state === 'queued' || r.job.state === 'running');
   const foot = (r.mkv ? '<button class="btn btn-ghost btn-sm" data-a="reaudit">Re-audit</button>' : '')
@@ -150,6 +200,19 @@ export function openDetails(r, ctx = {}) {
     + (can ? '<button class="btn btn-primary btn-sm" data-a="remux"' + (busy ? ' disabled' : '') + '>' + (busy ? 'Queued' : 'Remux') + '</button>' : '');
   const m = modal({ title: esc(r.title), body, foot, wide: true });
   const q = (s) => m.el.querySelector(s);
+  const raw = q('[data-raw]');
+  if (raw) raw.addEventListener('toggle', async () => {
+    if (!raw.open || raw.dataset.loaded) return;
+    raw.dataset.loaded = '1';
+    const out = q('[data-raw-body]');
+    try {
+      const res = await api('GET', '/api/library/raw?path=' + encodeURIComponent(r.mkv));
+      out.innerHTML = rawHtml(res.sections);
+    } catch (e) {
+      delete raw.dataset.loaded;
+      out.innerHTML = '<p class="small" style="color:var(--bad)">' + esc(e.message || 'Could not load the report') + '</p>';
+    }
+  });
   if (q('[data-a=log]')) q('[data-a=log]').onclick = () => openTitleLog(r.title);
   if (q('[data-a=reaudit]')) q('[data-a=reaudit]').onclick = (e) => act(e.currentTarget, async () => {
     await api('POST', '/api/library/reaudit', { paths: [r.mkv] });

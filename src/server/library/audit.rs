@@ -16,6 +16,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const FILE: &str = "audit.json";
 
+// A report stored before the media reader gets it read on the quick lane: a few files a
+// minute, and only while no other quick audit waits, so new work never queues behind it.
+const BACKFILL_BATCH: usize = 3;
+const BACKFILL_EVERY_SECS: u64 = 60;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Record {
     size: u64,
@@ -110,6 +115,8 @@ pub struct Audits {
     generation: AtomicU64,
     // Progress only: the strip repaints, the listing is not refetched.
     progress_generation: AtomicU64,
+    // When the last detail backfill was queued.
+    backfilled_at: AtomicU64,
 }
 
 // The share of the bar each deep stage fills: reading copies packets, decoding is the work.
@@ -138,6 +145,7 @@ impl Audits {
             deep: Slot::default(),
             generation: AtomicU64::new(0),
             progress_generation: AtomicU64::new(0),
+            backfilled_at: AtomicU64::new(0),
         }
     }
 
@@ -183,6 +191,13 @@ impl Audits {
             .get(path)
             .filter(|r| r.matches(sig))
             .map(|r| r.report.clone())
+    }
+
+    /// Every header field of `path` as its last quick audit read them.
+    pub fn raw(&self, path: &Path) -> Option<Vec<super::media::RawSection>> {
+        let st = self.lock();
+        let d = st.results.get(path)?.report.detail.as_ref()?;
+        Some(d.raw.clone())
     }
 
     /// The full-decode state of `path` at `sig`; `None` while deep audit is off and no
@@ -290,7 +305,9 @@ impl Audits {
 
     /// Queue what `files` still needs: the quick read when never audited or changed since;
     /// with deep audit on, the full decode when none has finished and a retry is due. With
-    /// `complete`, verdicts for files no longer present are dropped.
+    /// `complete`, verdicts for files no longer present are dropped. A stored report without
+    /// the media detail is read again on the quick lane, throttled (see `BACKFILL_BATCH`);
+    /// its verdict, deep verdict and queue places are untouched.
     pub fn fill(
         &self,
         files: &[(PathBuf, FileSig)],
@@ -312,6 +329,27 @@ impl Audits {
                     }
                 }
                 _ => quick.push(p.clone()),
+            }
+        }
+        let last = self.backfilled_at.load(Ordering::SeqCst);
+        if quick.is_empty()
+            && st.queue.is_empty()
+            && self.quick.path().is_none()
+            && now >= last.saturating_add(BACKFILL_EVERY_SECS)
+        {
+            quick.extend(
+                files
+                    .iter()
+                    .filter(|(p, sig)| {
+                        st.results
+                            .get(p)
+                            .is_some_and(|r| r.matches(*sig) && r.report.needs_detail())
+                    })
+                    .take(BACKFILL_BATCH)
+                    .map(|(p, _)| p.clone()),
+            );
+            if !quick.is_empty() {
+                self.backfilled_at.store(now, Ordering::SeqCst);
             }
         }
         let n = push_lane(&mut st.queue, self.quick.path(), quick)
@@ -832,6 +870,99 @@ mod tests {
         );
         assert_eq!(a.next(), Some(q), "the old queue is the quick lane");
         assert_eq!(a.next_deep(), Some(p));
+    }
+
+    // audit.json as 1.7.7 wrote it, before the media detail: two verdicts (one with a
+    // corrupt deep run), a quick and a deep queue.
+    const STATE_1_7_7: &str = include_str!("testdata/audit-1.7.7.json");
+
+    #[test]
+    fn a_state_file_from_1_7_7_loads_whole_and_marks_its_detail_pending() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(t.path().join(FILE), STATE_1_7_7).unwrap();
+        let check = |a: &Audits| {
+            let st = a.lock();
+            assert_eq!(st.results.len(), 2);
+            let arrival = &st.results[Path::new("/srv/movies/Arrival (2016)/Arrival (2016).mkv")];
+            assert!(arrival.report.ok && arrival.report.detail.is_none());
+            assert!(arrival.report.needs_detail());
+            assert_eq!(arrival.report.audio[0].codec, "TrueHD");
+            let deep = &arrival.deep.as_ref().unwrap().verdict;
+            assert_eq!(
+                (deep.reason.as_str(), deep.errors, deep.clean),
+                ("decode_errors", 2, false)
+            );
+            assert_eq!((deep.forensic.as_ref(), deep.reached_secs), (None, None));
+            let heat = &st.results[Path::new("/srv/movies/Heat (1995)/Heat (1995).mkv")];
+            assert!(!heat.report.ok);
+            assert!(matches!(
+                heat.report.issues[0],
+                super::super::probe::AuditIssue::RuntimeMismatch { .. }
+            ));
+            assert_eq!(st.queue.len(), 1);
+            assert_eq!(st.deep_queue.len(), 1);
+        };
+        let a = Audits::open(t.path());
+        assert!(!t.path().join("audit.json.unreadable").exists());
+        check(&a);
+        // Written back by this version and read again: nothing lost on the way.
+        a.set_paused(false);
+        check(&Audits::open(t.path()));
+    }
+
+    // A report as stored before the media detail existed.
+    fn audited_without_detail(a: &Audits, p: &Path, sig: FileSig) {
+        let mut report = super::super::probe::audit_fast(p).unwrap();
+        report.detail = None;
+        a.record_fast(p, sig, report, 1);
+    }
+
+    #[test]
+    fn stored_reports_get_their_detail_a_few_at_a_time_on_an_idle_quick_lane() {
+        let t = tempfile::tempdir().unwrap();
+        let files: Vec<(PathBuf, FileSig)> = (0..5)
+            .map(|i| file(t.path(), &format!("{i}.mkv")))
+            .collect();
+        let a = Audits::open(t.path());
+        for (p, sig) in &files {
+            audited_without_detail(&a, p, *sig);
+        }
+        let (p0, s0) = files[0].clone();
+        a.record_deep(&p0, s0, verdict(false), 5);
+        let now = 10_000;
+        assert_eq!(a.fill(&files, false, now, true), BACKFILL_BATCH);
+        assert_eq!(a.fill(&files, false, now + 1, true), 0, "they wait already");
+        while let Some(p) = a.next() {
+            let sig = FileSig::stat(&p).unwrap();
+            a.record_fast(&p, sig, super::super::probe::audit_fast(&p).unwrap(), now);
+            a.finish();
+        }
+        assert!(!a.report(&p0, s0).unwrap().needs_detail());
+        assert!(a.report(&p0, s0).unwrap().ok);
+        assert_eq!(
+            a.deep_view(&p0, s0, true).unwrap().state,
+            "clean",
+            "the deep verdict stays"
+        );
+        assert_eq!(
+            a.fill(&files, false, now + 30, true),
+            0,
+            "not before a minute has passed"
+        );
+        let a = Audits::open(t.path());
+        let (p5, s5) = file(t.path(), "new.mkv");
+        let mut with_new = files.clone();
+        with_new.push((p5.clone(), s5));
+        assert_eq!(
+            a.fill(&with_new, false, now + 120, true),
+            1,
+            "new work first, no backfill beside it"
+        );
+        assert_eq!(a.next(), Some(p5.clone()));
+        audited(&a, &p5, s5);
+        a.finish();
+        assert_eq!(a.fill(&with_new, false, now + 180, true), 2, "the rest");
+        assert_eq!(a.raw(&p0).map(|r| r.is_empty()), Some(false));
     }
 
     #[test]
