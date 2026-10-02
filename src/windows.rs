@@ -2326,7 +2326,8 @@ impl LangPicker {
             w::GetSystemMetrics(co::SM::CYSCREEN),
         );
         let cur = self.value();
-        for (i, (code, name)) in langs.iter().enumerate() {
+        for (i, (code, _english)) in langs.iter().enumerate() {
+            let name = crate::ui::lang_display_name(code);
             let mut flags = co::MF::STRING;
             if crate::ui::lang_is_selected(&cur, code) {
                 flags |= co::MF::CHECKED;
@@ -2341,7 +2342,7 @@ impl LangPicker {
                 .AppendMenu(
                     flags,
                     w::IdMenu::Id(IDM_LANG_BASE + i as u16),
-                    w::BmpPtrStr::from_str(name),
+                    w::BmpPtrStr::from_str(&name),
                 )
                 .is_err()
             {

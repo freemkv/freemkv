@@ -585,7 +585,7 @@ pub enum Page {
 // `de`), where a typo was indistinguishable from "disc has no German". Shells
 // now show a checklist of names and store ISO codes; this module owns both conversions.
 
-/// The languages offered in the pickers, as (stored code, English name).
+/// The languages offered in the pickers, as (stored code, `gui.lang.<code>` English fallback).
 ///
 /// ISO 639-2/T, which is what disc streams actually carry (`deu`, not `ger`;
 /// `fra`, not `fre`) — so a stored value can be compared to a stream tag
@@ -725,7 +725,7 @@ pub fn lang_selection_to_string(codes: &[String]) -> String {
     codes.join(",")
 }
 
-/// The picker button's title: the chosen languages in English, or a word
+/// The picker button's title: the chosen languages in the active locale, or a word
 /// meaning "no preference" — never an empty button, which reads as broken.
 pub fn lang_summary(stored: &str) -> String {
     let codes = lang_selection(stored);
@@ -739,17 +739,18 @@ pub fn lang_summary(stored: &str) -> String {
         .join(", ")
 }
 
-/// The English name for a stored code, falling back to the code itself so an
-/// unknown tag is still visible rather than blank.
+/// The name for a stored code: a picker language in the active locale (English when the
+/// catalog lacks `gui.lang.<code>`), any other known code in English, and an unknown tag as
+/// itself so it is still visible rather than blank.
 pub fn lang_display_name(code: &str) -> String {
-    PICKER_LANGUAGES
+    if let Some((c, english)) = PICKER_LANGUAGES
         .iter()
         .find(|(c, _)| c.eq_ignore_ascii_case(code))
-        .map(|(_, name)| (*name).to_string())
-        .or_else(|| {
-            isolang::Language::from_639_3(&code.to_ascii_lowercase())
-                .map(|l| l.to_name().to_string())
-        })
+    {
+        return crate::strings::get_or(&format!("gui.lang.{c}"), english);
+    }
+    isolang::Language::from_639_3(&code.to_ascii_lowercase())
+        .map(|l| l.to_name().to_string())
         .unwrap_or_else(|| code.to_string())
 }
 
