@@ -394,6 +394,21 @@ pub(super) fn show(shell: &Rc<Shell>, page_name: Option<String>) {
     keydb_row.connect_activated(move |_| p.update_keydb(&me));
     let (me, p) = (shell.clone(), prefs.clone());
     test_row.connect_activated(move |_| p.test_keyserver(&me));
+    // A text field commits on Enter and when focus leaves it, through the
+    // same `commit` as closing, which writes only when something changed.
+    // Focus also leaves while the window is torn down; that is not an edit.
+    for (_, r) in &prefs.entries {
+        let (me, p) = (shell.clone(), prefs.clone());
+        r.connect_entry_activated(move |_| p.commit(&me));
+        let focus = gtk::EventControllerFocus::new();
+        let (me, p) = (shell.clone(), prefs.clone());
+        focus.connect_leave(move |_| {
+            if p.window.is_visible() {
+                p.commit(&me);
+            }
+        });
+        r.add_controller(focus);
+    }
     // Connected after `populate`, so filling the form is not a language pick.
     let (me, p) = (shell.clone(), prefs.clone());
     language.connect_selected_notify(move |_| {
