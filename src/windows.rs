@@ -630,6 +630,8 @@ struct Shell {
     // titles page
     tree: gui::TreeView<usize>,
     tree_head: gui::Header,
+    /// The titles last applied to `tree_head`, so a render re-applies only a change.
+    tree_head_text: Rc<RefCell<Vec<String>>>,
     cols: Rc<RefCell<TreeCols>>,
     grp_out: gui::Button,
     cmb_format: gui::ComboBox,
@@ -1018,6 +1020,7 @@ impl Shell {
             btn_open,
             tree,
             tree_head,
+            tree_head_text: Rc::new(RefCell::new(Vec::new())),
             cols: Rc::new(RefCell::new(TreeCols::default())),
             grp_out,
             cmb_format,
@@ -1461,8 +1464,16 @@ impl Shell {
     /// Type and Description (one label, as `row_text` joins them), the other
     /// two are right-aligned like their cells.
     fn sync_tree_head(&self) {
-        TREE_HEAD_SYNCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let g = crate::strings::get;
+        let texts = vec![
+            format!("{} / {}", g("gui.col.type"), g("gui.col.desc")),
+            crate::strings::get_or("gui.col.duration", "Length"),
+            crate::strings::get_or("gui.col.size", "Size"),
+        ];
+        if *self.tree_head_text.borrow() == texts {
+            return;
+        }
+        TREE_HEAD_SYNCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let set = |i: u32, text: &str, hdf: co::HDF| {
             // `HDF::STRING` must ride along: an item made empty has no string
             // format, and comctl32 then ignores the text it is given.
@@ -1478,21 +1489,10 @@ impl Shell {
                 });
             }
         };
-        set(
-            0,
-            &format!("{} / {}", g("gui.col.type"), g("gui.col.desc")),
-            co::HDF::LEFT,
-        );
-        set(
-            1,
-            &crate::strings::get_or("gui.col.duration", "Length"),
-            co::HDF::RIGHT,
-        );
-        set(
-            2,
-            &crate::strings::get_or("gui.col.size", "Size"),
-            co::HDF::RIGHT,
-        );
+        set(0, &texts[0], co::HDF::LEFT);
+        set(1, &texts[1], co::HDF::RIGHT);
+        set(2, &texts[2], co::HDF::RIGHT);
+        *self.tree_head_text.borrow_mut() = texts;
     }
 
     /// Mirror the title tree and its header under a right-to-left interface
@@ -1639,6 +1639,9 @@ impl Shell {
 
         show(&self.tree, p == Page::Titles);
         show(&self.tree_head, p == Page::Titles);
+        if p == Page::Titles {
+            self.sync_tree_head();
+        }
         for c in [&self.grp_out, &self.grp_info] {
             show(c, p == Page::Titles);
         }
