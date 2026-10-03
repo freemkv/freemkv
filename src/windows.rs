@@ -4668,6 +4668,15 @@ impl Shell {
 const TIMER_HARNESS: usize = 3;
 
 pub fn run() {
+    // The gate image has no console, and a panic inside a window procedure aborts the
+    // process; the hook leaves the message where the driver prints it.
+    if let Ok(dir) = dev_env("FMKV_GATE") {
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = std::fs::create_dir_all(&dir);
+            let bt = std::backtrace::Backtrace::force_capture();
+            let _ = std::fs::write(format!("{dir}/panic.txt"), format!("{info}\n{bt}"));
+        }));
+    }
     // The file dialogs are COM objects, so the apartment must exist for the
     // lifetime of the app. The guard uninitializes on drop.
     let _com = w::CoInitializeEx(co::COINIT::APARTMENTTHREADED | co::COINIT::DISABLE_OLE1DDE);

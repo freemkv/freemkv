@@ -96,6 +96,10 @@ def main(app, root):
                                     timeout=TIMEOUT_S).returncode
             except subprocess.TimeoutExpired:
                 rc = "timeout"
+            panic = os.path.join(out, "panic.txt")
+            if os.path.exists(panic):
+                with open(panic, encoding="utf-8", errors="replace") as f:
+                    print("the app panicked:\n" + f.read(), flush=True)
             report = os.path.join(out, "gate.txt")
             if os.path.exists(report):
                 with open(report, encoding="utf-8") as f:
