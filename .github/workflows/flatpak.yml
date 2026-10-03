@@ -54,7 +54,7 @@ jobs:
             git clone --depth 1 --branch "$ref" "https://github.com/freemkv/$repo.git" "checkouts/$repo"
           done
           python checkouts/freemkv/packaging/flatpak/prepare.py --checkouts checkouts --output flatpak-package
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: flatpak-package
           path: flatpak-package
@@ -68,7 +68,7 @@ jobs:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51@sha256:78d969b18225ae107ca29497bf09c4a3f791e5f1838a9a912a529d0024fb6210
       options: --privileged
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: flatpak-package, path: flatpak-package }
       - name: Lint current manifest
         run: flatpak-builder-lint manifest flatpak-package/org.freemkv.FreeMKV.json
@@ -99,7 +99,7 @@ jobs:
             echo "Expected a running GUI; launcher exited with status $status"
             exit 1
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: flatpak-validation
@@ -107,7 +107,7 @@ jobs:
             gui-launch.log
             version.log
           retention-days: 90
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: flatpak-validated-binary
           path: freemkv.flatpak
@@ -121,9 +121,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: flatpak-package, path: flatpak-package }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: flatpak-validated-binary, path: binary }
       - name: Attach validated package to the existing release
         env:

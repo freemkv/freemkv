@@ -34,7 +34,7 @@ jobs:
           persist-credentials: false
       # Dev builds link sibling dev checkouts; a release links the tagged crates.
       - if: ${{ !inputs.release }}
-        uses: freemkv/.github/.github/actions/checkout-siblings@v1
+        uses: freemkv/.github/.github/actions/checkout-siblings@v2
         with:
           checkout: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
           patch: libfreemkv freemkv-keysources freemkv-engine freemkv-i18n freemkv-unlock
@@ -105,7 +105,7 @@ jobs:
             [ "$rc" = 124 ] || { echo "::error::GUI '$args' exited early (rc=$rc)"; exit 1; }
           done
       - if: ${{ !inputs.release }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: freemkv-appimage-${{ github.run_id }}
           path: freemkv-*.AppImage
@@ -118,7 +118,7 @@ jobs:
           mv freemkv-x86_64.AppImage "$A.AppImage"
           sha256sum "$A.AppImage" > "$A.AppImage.sha256"
       - if: ${{ inputs.release }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: freemkv-appimage-release
           path: freemkv-x86_64-linux.AppImage*
@@ -132,7 +132,7 @@ jobs:
       contents: write
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: freemkv-appimage-release
       - name: Upload to the release
