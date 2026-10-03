@@ -77,6 +77,7 @@ export default {
       <div class="page-head">
         <div><h1>Library</h1><p class="lede" id="lede">Loading…</p></div>
         <div class="actions">
+          <a class="btn btn-ghost btn-sm" id="to-remux" href="/remux" data-link>Remux ISOs</a>
           <div class="menu"><button class="icon-btn" id="more" aria-label="More actions">${ICON.more}</button>
             <div class="menu-list" id="more-list" hidden>
               <button data-a="rescan">Rescan the folders now</button>
@@ -227,6 +228,18 @@ export default {
       const txt = cell.querySelector('.txt');
       if (txt && txt.firstChild && txt.firstChild.nodeType === 3) txt.firstChild.nodeValue = liveText(p);
     }
+    // A remux in progress shows as a dot on the link to the Remux page.
+    const paintRemuxLink = (running) => {
+      const a = $('#to-remux', view);
+      if (!a) return;
+      a.classList.toggle('busy', !!running);
+      a.title = running ? 'Remuxing ' + running.title : '';
+      let b = a.querySelector('.nav-badge');
+      if (running && !b) { b = document.createElement('span'); b.className = 'nav-badge dot'; b.setAttribute('aria-label', 'A remux is running'); a.appendChild(b); }
+      if (!running && b) b.remove();
+    };
+    ctx.onLibrary((f) => paintRemuxLink(f.running));
+    api('GET', '/api/library/console').then(c => paintRemuxLink(c.running)).catch(() => {});
     ctx.cleanup.push(watch((d, err, liveOnly) => {
       if (err && !d) { put($('#lede', view), '<span style="color:var(--bad)">Could not load the library: ' + esc(err.message) + '</span>'); return; }
       last = d;

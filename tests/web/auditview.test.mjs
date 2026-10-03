@@ -163,3 +163,11 @@ test('the raw report escapes every field', () => {
   assert.ok(html.includes('&lt;b&gt;x&lt;/b&gt;'));
   assert.match(v.rawHtml([]), /No header fields/);
 });
+
+test('every raw report section shares one fixed-column table, so values line up', () => {
+  const html = v.rawHtml([
+    { title: 'Track 1 (video)', fields: [['Video › DisplayWidth', '3840']] },
+    { title: 'Track 2 (audio)', fields: [['TrackNumber', '2']] },
+  ]);
+  assert.equal((html.match(/<table class="det raw">/g) || []).length, 2);
+});

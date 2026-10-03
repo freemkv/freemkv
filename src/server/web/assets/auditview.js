@@ -210,7 +210,7 @@ export function forensicTable(f) {
 /** The raw report: every header field, per section. */
 export function rawHtml(sections) {
   if (!sections || !sections.length) return '<p class="small muted">No header fields were recorded.</p>';
-  return sections.map(s => '<h3>' + esc(s.title) + '</h3><div class="det-scroll"><table class="det"><tbody>'
+  return sections.map(s => '<h3>' + esc(s.title) + '</h3><div class="det-scroll"><table class="det raw"><tbody>'
     + s.fields.map(([k, v]) => '<tr><td class="muted">' + esc(k) + '</td><td class="mono">' + esc(v) + '</td></tr>').join('')
     + '</tbody></table></div>').join('');
 }
