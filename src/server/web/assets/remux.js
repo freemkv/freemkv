@@ -9,13 +9,12 @@ import { chipFilter } from './chips.js';
 import { muxedHtml, openDetails, noteText, queueOne, outdated } from './details.js';
 import { dotHtml } from './library.js';
 import { openConsole, openTitleLog } from './console.js';
+import { folderBanner, queuedNote } from './folders.js';
 
 const can = r => r.kind === 'remux' || r.kind === 'iso_only';
 const active = r => r.job && (r.job.state === 'queued' || r.job.state === 'running');
-const NOTE = { restarted: 'after a restart', preempted: 'a rip took the slot', interrupted: 'interrupted', stalled: 'stalled' };
-
-// The row's state as pills: live progress, queued, done or failed.
-function statePills(r) {
+// The row's state as pills: live progress, queued (and why it waits), done or failed.
+function statePills(r, hold) {
   const j = r.job, res = r.result;
   const log = (j || res) ? '<button class="pill link" type="button" data-log>' + (j && j.state === 'running' ? 'console' : 'log') + '</button>' : '';
   if (j && j.state === 'running') {
@@ -23,7 +22,9 @@ function statePills(r) {
     return '<span class="pill live" data-keep="1"><span class="cellbar" data-live="' + j.id + '"><span class="bar"><i></i></span><span class="txt">starting…</span></span></span>' + log;
   }
   if (j && j.state === 'queued') {
-    return '<span class="pill warn" data-keep="1">Queued' + (j.note ? ' · ' + esc(NOTE[j.note] || j.note) : '') + '</span>';
+    const why = queuedNote(j, hold, Date.now() / 1000);
+    const tip = j.failure ? ' title="' + esc(j.failure.message) + '"' : '';
+    return '<span class="pill warn" data-keep="1"' + tip + '>Queued' + (why ? ' · ' + esc(why) : '') + '</span>' + log;
   }
   if (res && res.outcome === 'done') {
     return '<span class="pill ok" data-keep="1" title="Remuxed in ' + esc(runtime(res.secs) || res.secs + 's') + ', ' + esc(when(res.finished_at)) + '">✓ Done · ' + bytes(res.size_bytes) + '</span>' + log;
@@ -90,6 +91,7 @@ export default {
             </div></div>
         </div>
       </div>
+      <div id="folders" class="folder-banners"></div>
       <div class="stats" id="stats"></div>
       <div class="now" id="now" hidden>
         <span class="now-ico" id="now-ico"></span>
@@ -132,7 +134,7 @@ export default {
         tip: r.iso ? 'ISO: ' + r.iso : noteText(r),
         meta: r.kind === 'ambiguous' ? '<span>' + esc(noteText(r)) + '</span>' : '',
         pills: (r.mkv ? '<span class="mux-pill" data-keep="1">' + muxedHtml(r) + '</span>'
-          : r.kind === 'iso_only' && !active(r) ? '<span class="pill warn" data-keep="1">no MKV yet</span>' : '') + statePills(r),
+          : r.kind === 'iso_only' && !active(r) ? '<span class="pill warn" data-keep="1">no MKV yet</span>' : '') + statePills(r, last && last.hold),
         side: mkvHtml(r),
         act: actHtml(r),
       }),
@@ -298,6 +300,9 @@ export default {
       } else if (live) {
         put($('#now-t', view), 'Remuxing ' + esc(live.title));
         put($('#now-s', view), esc(liveText(live)) + (queued ? ' · ' + queued + ' more queued' : ''));
+      } else if (last && last.hold) {
+        put($('#now-t', view), 'Waiting for the ' + esc(last.hold.role) + ' folder');
+        put($('#now-s', view), plural(queued, 'title') + ' queued · ' + esc(last.hold.message) + ' Starts on its own once the folder answers.');
       } else {
         put($('#now-t', view), 'Waiting to start');
         put($('#now-s', view), plural(queued, 'title') + ' queued · starts when no rip needs the drive');
@@ -316,8 +321,10 @@ export default {
 
     ctx.cleanup.push(watch((d, err, liveOnly) => {
       if (err && !d) { put($('#lede', view), '<span style="color:var(--bad)">Could not load the library: ' + esc(err.message) + '</span>'); return; }
+      const held = !!(last && last.hold) !== !!d.hold;
       last = d;
-      if (liveOnly) paintLive(d.live); else paint();
+      if (liveOnly && !held) paintLive(d.live); else paint();
+      put($('#folders', view), folderBanner(d.folders, d.hold, true));
     }));
   },
 };

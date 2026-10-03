@@ -3,9 +3,10 @@
 //! its own job.
 
 use super::arbiter::Arbiter;
-use super::queue::{Job, JobNote, JobResult};
-use super::{Library, LineKind, Running, transcript};
+use super::queue::{Failure, Job, JobNote, JobResult};
+use super::{Dirs, Library, LineKind, Running, transcript};
 use crate::server::config::Config;
+use crate::server::health::{self, Fault, Problem};
 use freemkv_engine::{Event, Level, Progress, Sink};
 use std::io::Write as _;
 use std::path::Path;
@@ -31,21 +32,48 @@ pub fn run(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
         clean_stale_staging(&dir);
     }
     while !shutting_down() {
-        let Some((job, epoch)) = next_job(lib, arbiter) else {
+        let snapshot = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let d = super::dirs(&snapshot);
+        let output = |dir: &Path| health::preflight("output", dir);
+        let now = crate::server::util::epoch_secs();
+        let Some((job, epoch)) = next_job(lib, arbiter, &d, &output, now) else {
             nap(Duration::from_secs(1));
             continue;
         };
-        let snapshot = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
         run_job(lib, &snapshot, arbiter, epoch, job);
     }
     tracing::info!("library worker stopping");
 }
 
-// The next job and the arbiter epoch it started under; nothing while a rip runs.
-fn next_job(lib: &Library, arbiter: &Arbiter) -> Option<(Job, u64)> {
+/// The bounded output-folder check a job must pass before it starts.
+pub(crate) type Preflight<'a> = &'a dyn Fn(&Path) -> Result<(), Problem>;
+
+// The next job and the arbiter epoch it started under. Nothing while a rip runs, and
+// nothing while a folder the remux needs is unhealthy: the job waits, held, in the queue.
+fn next_job(
+    lib: &Library,
+    arbiter: &Arbiter,
+    d: &Dirs,
+    preflight: Preflight<'_>,
+    now: u64,
+) -> Option<(Job, u64)> {
     if arbiter.rip_active() {
         return None;
     }
+    if lib.queue.peek_next().is_none() {
+        lib.set_hold(None);
+        return None;
+    }
+    if let Some(hold) = lib.blocked(d, now) {
+        lib.set_hold(Some(hold));
+        return None;
+    }
+    if let Err(p) = preflight(&d.library) {
+        tracing::warn!(folder = %p.path.display(), error = %p.detail, "remux held: {}", p.message);
+        lib.hold_for(&p, now);
+        return None;
+    }
+    lib.set_hold(None);
     let epoch = arbiter.epoch();
     lib.queue.claim_next().map(|j| (j, epoch))
 }
@@ -160,9 +188,7 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
 }
 
 fn remux_stage_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("FREEMKV_REMUX_STAGING_DIR")
-        .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from)
+    health::remux_stage_dir()
 }
 
 // Only this directory and these numeric job files belong to the library worker.
@@ -261,6 +287,24 @@ pub(crate) fn finish(
             );
         }
         Ending::Stopped(note @ JobNote::Stalled) => {
+            // A stall is retried only when a folder it uses is unhealthy now.
+            let phase = phase_now(lib);
+            let problem = folder_problem(lib, job);
+            if problem.is_some() {
+                let why = (None, "stalled");
+                if retry_storage_fault(
+                    lib,
+                    job,
+                    why,
+                    Fault::Unresponsive,
+                    problem.as_ref(),
+                    phase.as_deref(),
+                    now,
+                    sink,
+                ) {
+                    return;
+                }
+            }
             lib.queue.note_running(job.id, note);
             lib.queue.finish(
                 job.id,
@@ -297,23 +341,195 @@ pub(crate) fn finish(
             );
         }
         Ending::Failed(e) => {
-            let message = error_text(&e);
+            let phase = phase_of(&e).or_else(|| phase_now(lib));
+            let code = freemkv_engine::error_code(&e);
+            let text = error_text(&e);
+            let fault = storage_fault(&e);
+            let unhealthy = fault.and_then(|_| folder_problem(lib, job));
+            if let Some(f) = fault
+                && retry_storage_fault(
+                    lib,
+                    job,
+                    (code, &text),
+                    f,
+                    unhealthy.as_ref(),
+                    phase.as_deref(),
+                    now,
+                    sink,
+                )
+            {
+                return;
+            }
+            // Not retried; still name a folder that is unhealthy right now, and what is safe.
+            let message = failure_message(&text, phase.as_deref(), unhealthy.as_ref(), job, None);
             lib.queue.finish(
                 job.id,
                 JobResult::Failed {
-                    code: freemkv_engine::error_code(&e),
+                    code,
                     message: message.clone(),
                     finished_at: now,
                 },
             );
             if !sink.error_shown() {
-                sink.line(LineKind::Err, format!("{}: {message}", error_word()));
+                sink.line(LineKind::Err, format!("{}: {text}", error_word()));
             }
-            if job.replace {
-                sink.line(LineKind::Out, "The old MKV is unchanged.".into());
+            if let Some(p) = &unhealthy {
+                sink.line(LineKind::Err, format!("{} {}", p.message, p.hint));
             }
+            sink.line(LineKind::Out, safe_text(job).into());
         }
     }
+}
+
+/// The engine phase the job was in, as the running state last showed it.
+fn phase_now(lib: &Library) -> Option<String> {
+    lib.running()
+        .map(|r| r.phase)
+        .filter(|p| !p.is_empty() && p != "start")
+}
+
+// A timeout names the operation it stalled in (`E9073: copy`).
+fn phase_of(e: &std::io::Error) -> Option<String> {
+    let text = e.to_string();
+    let (code, data) = freemkv_engine::parse_error_code(&text)?;
+    (code == libfreemkv::error::E_TIMED_OUT && phase_words(data.trim()).is_some())
+        .then(|| data.trim().to_string())
+}
+
+fn phase_words(phase: &str) -> Option<&'static str> {
+    Some(match phase {
+        "open" => "opening the ISO",
+        "mux" => "muxing",
+        "sync" => "flushing the new file to disk",
+        "verify" => "verifying the new file",
+        "copy" => "copying the new MKV into the output folder",
+        "replace" => "moving the new MKV into place",
+        _ => return None,
+    })
+}
+
+/// Whether a failure is the storage's rather than the content's. A coded engine error is
+/// about the disc image or the mux, except the timeouts of a stalled read, write or flush.
+pub(crate) fn storage_fault(e: &std::io::Error) -> Option<Fault> {
+    use libfreemkv::error::{E_SYNC_TIMEOUT, E_TIMED_OUT};
+    match freemkv_engine::error_code(e) {
+        Some(E_TIMED_OUT | E_SYNC_TIMEOUT) => Some(Fault::Unresponsive),
+        Some(_) => None,
+        None => Some(Fault::of(e)).filter(|f| *f != Fault::Other),
+    }
+}
+
+/// A fresh, bounded look at every folder `job` uses: the first that fails, if any.
+pub(crate) fn folder_problem(lib: &Library, job: &Job) -> Option<Problem> {
+    let output = lib
+        .snapshot()
+        .dirs
+        .as_ref()
+        .map(|d| d.library.clone())
+        .or_else(|| job.target.parent().map(Path::to_path_buf))?;
+    if let Err(p) = health::preflight("output", &output) {
+        return Some(p);
+    }
+    if let Some(dir) = job.iso.parent() {
+        let iso_dir = dir.to_path_buf();
+        let probe = move |d: &Path| std::fs::read_dir(d).map(drop);
+        if let Err(p) =
+            health::preflight_with("source ISO", &iso_dir, health::PREFLIGHT_TIMEOUT, probe)
+        {
+            return Some(p);
+        }
+    }
+    let stage = remux_stage_dir()?;
+    health::preflight("remux staging", &stage).err()
+}
+
+// Requeue a job a storage fault stopped, given `problem` from re-checking its folders once:
+// at once if they are fine now (first time only), else after the backoff, once they check
+// out. False when the folders are fine and it failed before, or the retries are used up.
+#[allow(clippy::too_many_arguments)]
+fn retry_storage_fault(
+    lib: &Library,
+    job: &Job,
+    (code, text): (Option<u16>, &str),
+    fault: Fault,
+    problem: Option<&Problem>,
+    phase: Option<&str>,
+    now: u64,
+    sink: &dyn LineSink,
+) -> bool {
+    // With every folder fine, a missing file or a refused write is the file's problem.
+    let file_only = matches!(fault, Fault::Missing | Fault::Denied | Fault::ReadOnly);
+    if problem.is_none() && (job.attempts > 0 || file_only) {
+        return false;
+    }
+    let Some(at) = super::queue::retry_at(job, now, problem.is_none()) else {
+        sink.line(
+            LineKind::Err,
+            format!(
+                "Giving up after {} automatic retries over {}.",
+                job.attempts,
+                hms(now.saturating_sub(job.first_failed_at.unwrap_or(now)))
+            ),
+        );
+        return false;
+    };
+    // Hook for the engine keeping a finished, verified staged file: its path goes here and the
+    // job waits as `StagedWaiting` to copy it in. No engine API hands one back yet.
+    let staged: Option<std::path::PathBuf> = None;
+    let message = failure_message(text, phase, problem, job, Some(at));
+    lib.queue
+        .retry_later(job.id, Failure { code, message }, at, staged);
+    if let Some(p) = problem {
+        lib.hold_for(p, now);
+        sink.line(LineKind::Err, format!("{} {}", p.message, p.hint));
+    }
+    sink.line(LineKind::Out, safe_text(job).into());
+    sink.line(
+        LineKind::Warn,
+        if at <= now {
+            "The folders answer again: retrying now.".to_string()
+        } else {
+            format!(
+                "Waiting for the folder; retry {} in {} once it checks out.",
+                job.attempts + 1,
+                hms(at - now)
+            )
+        },
+    );
+    true
+}
+
+fn safe_text(job: &Job) -> &'static str {
+    if job.replace {
+        "Your existing MKV is unchanged."
+    } else {
+        "No MKV was written to the library."
+    }
+}
+
+/// A failed job's message: the error, the phase it stopped in, the folder at fault, what
+/// is safe, and when it is retried.
+pub(crate) fn failure_message(
+    text: &str,
+    phase: Option<&str>,
+    folder: Option<&Problem>,
+    job: &Job,
+    retry_at: Option<u64>,
+) -> String {
+    let mut out = text.trim_end_matches('.').to_string();
+    out.push('.');
+    if let Some(words) = phase.and_then(phase_words) {
+        out.push_str(&format!(" It stopped while {words}."));
+    }
+    if let Some(p) = folder {
+        out.push_str(&format!(" {} Folder: {}.", p.message, p.path.display()));
+    }
+    out.push(' ');
+    out.push_str(safe_text(job));
+    if retry_at.is_some() {
+        out.push_str(" It is retried automatically once the folder checks out.");
+    }
+    out
 }
 
 // `E<code> <message>` from the locale when it has the code, else the raw text.
@@ -1051,10 +1267,11 @@ mod tests {
         }]);
         let arbiter = Arbiter::new();
         let slot = arbiter.rip();
-        assert!(next_job(&lib, &arbiter).is_none());
+        let (d, now) = (dirs_at(Path::new("/m")), 0);
+        assert!(next_job(&lib, &arbiter, &d, &|_| Ok(()), now).is_none());
         assert_eq!(lib.queue.snapshot().count(JobState::Queued), 1);
         drop(slot);
-        assert!(next_job(&lib, &arbiter).is_some());
+        assert!(next_job(&lib, &arbiter, &d, &|_| Ok(()), now).is_some());
     }
 
     #[test]
@@ -1143,7 +1360,7 @@ mod tests {
             "the old MKV is kept"
         );
         let said = lines.0.lock().unwrap().join("\n");
-        assert!(said.contains("The old MKV is unchanged"), "{said}");
+        assert!(said.contains("Your existing MKV is unchanged"), "{said}");
     }
 
     #[test]
@@ -1301,6 +1518,10 @@ mod tests {
             finished_at: None,
             note: None,
             failure: None,
+            attempts: 0,
+            first_failed_at: None,
+            not_before: None,
+            staged: None,
         }
     }
 
@@ -1543,6 +1764,268 @@ mod tests {
         assert!(
             !quick_turn(&lib, &dirs.library, true),
             "a rip or remux goes first"
+        );
+    }
+
+    fn dirs_at(library: &Path) -> Dirs {
+        Dirs {
+            library: library.to_path_buf(),
+            isos: None,
+            iso_subfolders: false,
+        }
+    }
+
+    fn stale() -> Problem {
+        Problem::new(
+            "output",
+            Path::new("/nas/movies"),
+            Fault::Stale,
+            "Stale file handle (os error 116)".into(),
+        )
+    }
+
+    #[test]
+    fn a_failed_preflight_holds_the_job_and_it_starts_once_the_folder_answers() {
+        let _g = crate::server::health::tests::LAST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_t, lib, dirs) = library_with(&["A"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        let arbiter = Arbiter::new();
+        let now = 1_000;
+        let calls = AtomicU64::new(0);
+        let failing = |_: &Path| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(stale())
+        };
+        assert!(next_job(&lib, &arbiter, &dirs, &failing, now).is_none());
+        let hold = lib.hold().expect("held");
+        assert!(hold.message.contains("remounted"), "{hold:?}");
+        assert_eq!(
+            lib.queue.snapshot().count(JobState::Queued),
+            1,
+            "still queued, not failed"
+        );
+        // Until the recheck time it is not even probed again.
+        let fine = |_: &Path| Ok(());
+        assert!(next_job(&lib, &arbiter, &dirs, &fine, now + 5).is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let (job, _) = next_job(&lib, &arbiter, &dirs, &fine, now + health::INTERVAL_SECS)
+            .expect("resumes on its own");
+        assert_eq!(job.title, "A");
+        assert!(lib.hold().is_none());
+    }
+
+    #[test]
+    fn an_unhealthy_folder_holds_new_jobs_but_never_stops_the_running_one() {
+        use crate::server::health::tests::{LAST_LOCK, bad_mount, ok_mount, set_mounts};
+        let _g = LAST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_t, lib, dirs) = library_with(&["A", "B"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        let arbiter = Arbiter::new();
+        let ok = |_: &Path| Ok(());
+        let (a, _) = next_job(&lib, &arbiter, &dirs, &ok, 1).unwrap();
+        set_mounts(vec![bad_mount("Library", &dirs.library, Fault::Stale)]);
+        let sink = test_sink(&lib, &arbiter);
+        assert!(
+            !sink.should_cancel(),
+            "the probe never cancels running work"
+        );
+        lib.queue.drop_job(a.id);
+        assert!(next_job(&lib, &arbiter, &dirs, &ok, 2).is_none());
+        let hold = lib.hold().unwrap();
+        assert_eq!(
+            (hold.role, hold.path.as_path()),
+            ("output", dirs.library.as_path())
+        );
+        assert!(
+            hold.message.starts_with("The output folder is unreachable"),
+            "{}",
+            hold.message
+        );
+        set_mounts(vec![ok_mount("Library", &dirs.library)]);
+        assert_eq!(
+            next_job(&lib, &arbiter, &dirs, &ok, 3).unwrap().0.title,
+            "B"
+        );
+        assert!(lib.hold().is_none());
+        set_mounts(Vec::new());
+    }
+
+    fn running_in(lib: &Library, job: &Job, phase: &str) {
+        lib.set_running(|r| {
+            *r = Some(Running {
+                job_id: job.id,
+                phase: phase.into(),
+                ..Default::default()
+            })
+        });
+    }
+
+    #[test]
+    fn a_stale_output_folder_requeues_the_job_with_a_backoff_and_says_why() {
+        let _g = crate::server::health::tests::LAST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (t, lib, dirs) = library_with(&["A"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        let a = lib.queue.claim_next().unwrap();
+        running_in(&lib, &a, "copy");
+        // The share went away under the library: its folder no longer answers.
+        std::fs::rename(&dirs.library, t.path().join("unmounted")).unwrap();
+        let lines = Lines(Mutex::new(Vec::new()));
+        #[cfg(unix)]
+        let e = std::io::Error::from_raw_os_error(libc::ESTALE);
+        #[cfg(not(unix))]
+        let e = std::io::Error::from(std::io::ErrorKind::StaleNetworkFileHandle);
+        finish(&lib, &a, Ending::Failed(e), Duration::ZERO, &lines);
+        let q = lib.queue.snapshot();
+        let j = &q.jobs[0];
+        assert_eq!(
+            (j.state, j.note, j.attempts),
+            (JobState::Queued, Some(JobNote::WaitingForFolder), 1)
+        );
+        let now = crate::server::util::epoch_secs();
+        assert!(j.not_before.unwrap() >= now + 50, "{:?}", j.not_before);
+        let msg = &j.failure.as_ref().unwrap().message;
+        assert!(
+            msg.contains("stopped while copying the new MKV into the output folder"),
+            "{msg}"
+        );
+        assert!(msg.contains("The output folder is missing"), "{msg}");
+        assert!(msg.contains("Your existing MKV is unchanged"), "{msg}");
+        assert!(
+            !q.results.contains_key(&*a.target.to_string_lossy()),
+            "not recorded as failed"
+        );
+        assert!(lib.hold().is_some(), "the queue holds for the folder");
+        let said = lines.0.lock().unwrap().join("\n");
+        assert!(said.contains("Remount the share"), "{said}");
+    }
+
+    #[test]
+    fn a_timeout_with_the_folders_fine_is_retried_once_then_left_failed() {
+        let _g = crate::server::health::tests::LAST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_t, lib, dirs) = library_with(&["A"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        let lines = Lines(Mutex::new(Vec::new()));
+        let a = lib.queue.claim_next().unwrap();
+        finish(
+            &lib,
+            &a,
+            Ending::Failed(std::io::Error::other("E9073: copy")),
+            Duration::ZERO,
+            &lines,
+        );
+        let now = crate::server::util::epoch_secs();
+        let again = lib
+            .queue
+            .claim_next()
+            .expect("re-resolved: retried at once");
+        assert!(again.not_before.unwrap() <= now);
+        assert_eq!(again.attempts, 1);
+        finish(
+            &lib,
+            &again,
+            Ending::Failed(std::io::Error::other("E9073: copy")),
+            Duration::ZERO,
+            &lines,
+        );
+        let q = lib.queue.snapshot();
+        assert_eq!(q.jobs[0].state, JobState::Failed);
+        let msg = &q.jobs[0].failure.as_ref().unwrap().message;
+        assert!(msg.starts_with("E9073"), "{msg}");
+        assert!(msg.contains("stopped while copying"), "{msg}");
+        assert!(msg.contains("Your existing MKV is unchanged"), "{msg}");
+    }
+
+    #[test]
+    fn content_failures_are_never_retried() {
+        let (_t, lib, dirs) = library_with(&["A", "B"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        let lines = Lines(Mutex::new(Vec::new()));
+        for err in ["E9077: runtime-mismatch 10.0/60.0 /x", "E9078: 1"] {
+            let j = lib.queue.claim_next().unwrap();
+            assert_eq!(storage_fault(&std::io::Error::other(err)), None);
+            finish(
+                &lib,
+                &j,
+                Ending::Failed(std::io::Error::other(err)),
+                Duration::ZERO,
+                &lines,
+            );
+        }
+        let q = lib.queue.snapshot();
+        assert_eq!(q.count(JobState::Failed), 2);
+        assert!(lib.queue.claim_next().is_none());
+    }
+
+    #[test]
+    fn storage_errors_are_told_from_content_errors() {
+        assert_eq!(
+            storage_fault(&std::io::Error::other("E9073: verify")),
+            Some(Fault::Unresponsive)
+        );
+        assert_eq!(
+            storage_fault(&std::io::Error::other("E9056")),
+            Some(Fault::Unresponsive)
+        );
+        assert_eq!(storage_fault(&std::io::Error::other("E7013: aa")), None);
+        assert_eq!(
+            storage_fault(&std::io::ErrorKind::TimedOut.into()),
+            Some(Fault::Unresponsive)
+        );
+        #[cfg(unix)]
+        for (n, f) in [
+            (libc::ESTALE, Fault::Stale),
+            (libc::EIO, Fault::Io),
+            (libc::EROFS, Fault::ReadOnly),
+        ] {
+            assert_eq!(
+                storage_fault(&std::io::Error::from_raw_os_error(n)),
+                Some(f)
+            );
+        }
+        assert_eq!(
+            phase_of(&std::io::Error::other("E9073: copy")).as_deref(),
+            Some("copy")
+        );
+        assert_eq!(
+            phase_of(&std::io::Error::other("E9073: artifact_lock")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_failure_message_names_the_phase_the_folder_and_what_is_safe() {
+        let t = tempfile::tempdir().unwrap();
+        let mut job = job_for(t.path(), 1);
+        let m = failure_message(
+            "E9073 Timed out",
+            Some("sync"),
+            Some(&stale()),
+            &job,
+            Some(5),
+        );
+        assert_eq!(
+            m,
+            "E9073 Timed out. It stopped while flushing the new file to disk. The output folder is \
+             unreachable — the network share needs to be remounted (stale file handle). \
+             Folder: /nas/movies. Your existing MKV is unchanged. It is retried automatically once the \
+             folder checks out."
+        );
+        job.replace = false;
+        let m = failure_message("E9077 x", Some("verify"), None, &job, None);
+        assert_eq!(
+            m,
+            "E9077 x. It stopped while verifying the new file. No MKV was written to the library."
         );
     }
 }

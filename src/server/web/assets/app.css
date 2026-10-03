@@ -54,6 +54,7 @@ a:hover { color: var(--teal-darker); }
 
 /* Activity badge on a nav tab: busy drives on Drives, a running remux on Remux. */
 .nav-links a { position: relative; }
+.nav-badge.bad { background: var(--bad); animation: none; }
 .nav-badge.dot { min-width: 0.55rem; width: 0.55rem; height: 0.55rem; padding: 0; vertical-align: 0.2em; }
 .nav-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 1.1rem; height: 1.1rem; padding: 0 0.3rem; margin-left: 0.35rem; border-radius: 999px; background: var(--teal); color: #fff; font: 700 0.68rem var(--font); vertical-align: 0.1em; animation: pulse 1.8s ease-in-out infinite; }
 .pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--teal); flex: none; animation: pulse 1.6s ease-in-out infinite; }
@@ -228,6 +229,7 @@ table.list tr.grey td.title b { font-weight: 500; }
 .banner.info { background: var(--teal-tint); color: var(--teal-darker); border-color: var(--teal-line); }
 .banner.warn { background: var(--warn-tint); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
 .banner a { color: inherit; text-decoration: underline; }
+.folder-banners .banner { margin: 0 0 1rem; }
 .pipe-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.55rem 0; border-bottom: 1px solid var(--line); font-size: 0.88rem; }
 .pipe-row:last-child { border-bottom: 0; }
 .pipe-row .grow { flex: 1; min-width: 0; }

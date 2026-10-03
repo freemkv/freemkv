@@ -72,6 +72,11 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("web/assets/auditview.js"),
     ),
     (
+        "folders.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("web/assets/folders.js"),
+    ),
+    (
         "console.js",
         "text/javascript; charset=utf-8",
         include_bytes!("web/assets/console.js"),
@@ -4257,6 +4262,11 @@ mod web_tests {
             assert!(body.contains("\"paused\":true"), "{body}");
             let (code, _) = roundtrip(&cfg, "GET", "/api/library/console", None, &[]);
             assert_eq!(code, 200);
+            let (code, body) = roundtrip(&cfg, "GET", "/api/library/folders", None, &[]);
+            assert_eq!(code, 200);
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["folders"][0]["role"], "output", "{body}");
+            assert!(v.get("hold").is_some(), "{body}");
             let (code, _) = roundtrip(
                 &cfg,
                 "GET",
@@ -6789,7 +6799,8 @@ fn handle_sse(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
             break;
         }
         let mut frame = format!("data: {}\n\n", get_state_json(&staging_dir()));
-        if let Some(lib) = crate::server::library::api::sse_frame(&mut library) {
+        let dirs = crate::server::library::dirs(&cfg.read().unwrap_or_else(|e| e.into_inner()));
+        if let Some(lib) = crate::server::library::api::sse_frame(&mut library, Some(&dirs)) {
             frame.push_str(&lib);
         }
         if stream.write_all(frame.as_bytes()).is_err() {

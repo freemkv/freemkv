@@ -3,6 +3,7 @@
 
 import { esc, $, put, api, act, toast, bytes, ago } from './ui.js';
 import { openDeviceTerminal } from './ripper.js';
+import { folderHealthRow } from './folders.js';
 
 function mountRow(m) {
   const used = m.total_bytes ? 100 - (m.free_bytes / m.total_bytes) * 100 : null;
@@ -28,7 +29,9 @@ export default {
           <p class="small muted" id="logdir" style="margin:.9rem 0 0"></p></section>
       </div>
       <section class="table-card" style="margin-top:1.25rem"><div class="toolbar"><b>Storage</b><span class="muted small" id="mounts-note"></span></div>
-        <div class="table-scroll"><table class="list"><thead><tr><th>Folder</th><th>State</th><th>Space</th><th class="num">Response</th></tr></thead><tbody id="mounts"></tbody></table></div></section>`;
+        <div class="table-scroll"><table class="list"><thead><tr><th>Folder</th><th>State</th><th>Space</th><th class="num">Response</th></tr></thead><tbody id="mounts"></tbody></table></div></section>
+      <section class="table-card" style="margin-top:1.25rem"><div class="toolbar"><b>Folders</b><span class="muted small">checked every 30 s, and before each remux and move</span></div>
+        <div class="table-scroll"><table class="list"><thead><tr><th>Folder</th><th>Health</th><th>Last good access</th><th>Last error</th></tr></thead><tbody id="folder-health"></tbody></table></div></section>`;
     let sys = null;
     const paint = () => {
       const d = sys;
@@ -39,6 +42,7 @@ export default {
         + '<dt>Rip library</dt><dd class="mono">' + esc(d.libfreemkv) + '</dd>'
         + '<dt>Debug logging</dt><dd>' + (d.debug_enabled ? 'on' : 'off') + '</dd>');
       put($('#mounts', view), (d.mounts || []).map(mountRow).join('') || '<tr><td colspan="4" class="muted">Checking the folders…</td></tr>');
+      put($('#folder-health', view), (d.mounts || []).map(folderHealthRow).join('') || '<tr><td colspan="4" class="muted">Checking the folders…</td></tr>');
       const checked = (d.mounts || []).map(m => m.checked_at).sort()[0];
       put($('#mounts-note', view), checked ? 'checked ' + ago(checked) : '');
       const dbg = $('#debug', view);

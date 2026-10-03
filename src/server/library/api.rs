@@ -84,6 +84,9 @@ pub fn handle(
             }
         }
         (true, _, "/api/library/console") => json_response(request, 200, &console_json(&lib)),
+        (true, _, "/api/library/folders") => {
+            json_response(request, 200, &folders_json(&lib, &d).to_string())
+        }
         (true, _, "/api/library/log") => {
             let title = query_param(&url, "title").unwrap_or_default();
             if title.is_empty() {
@@ -312,6 +315,14 @@ fn audit_json(lib: &Library) -> serde_json::Value {
     json!(lib.audits.status())
 }
 
+// The folders a remux uses, each with its last check, and why the queue waits (if it does).
+fn folders_json(lib: &Library, d: &super::Dirs) -> serde_json::Value {
+    json!({
+        "folders": super::folder_views(d),
+        "hold": lib.hold(),
+    })
+}
+
 /// The body of `GET /api/library`. Reads memory only.
 pub fn library_json(lib: &Library, cfg: &Config) -> String {
     let d = dirs(cfg);
@@ -336,6 +347,8 @@ pub fn library_json(lib: &Library, cfg: &Config) -> String {
         "live": lib.running(),
         "audits": audit_json(lib),
         "deep_audit": lib.deep_enabled(),
+        "folders": super::folder_views(&d),
+        "hold": lib.hold(),
     })
     .to_string()
 }
@@ -375,14 +388,15 @@ fn log_tail(lib: &Library, title: &str) -> String {
 /// What an `/events` client has already been sent.
 #[derive(Default)]
 pub struct SseCursor {
-    generation: (u64, u64, u64, u64, u64),
+    generation: (u64, u64, u64, u64, u64, u64),
     seq: u64,
     started: bool,
 }
 
 /// A `library` event for the SSE stream when anything moved since `cursor`.
 /// Named, so a page that only listens for the rip state never sees it.
-pub fn sse_frame(cursor: &mut SseCursor) -> Option<String> {
+/// `dirs` names the folders whose health the frame carries.
+pub fn sse_frame(cursor: &mut SseCursor, dirs: Option<&super::Dirs>) -> Option<String> {
     let lib = super::get()?;
     if !cursor.started {
         // A new client fetches the console once; the stream only adds to it.
@@ -396,6 +410,7 @@ pub fn sse_frame(cursor: &mut SseCursor) -> Option<String> {
         lib.index_generation(),
         lib.audits.generation(),
         lib.audits.progress_generation(),
+        crate::server::health::generation(),
     );
     if generation == cursor.generation {
         return None;
@@ -417,6 +432,8 @@ pub fn sse_frame(cursor: &mut SseCursor) -> Option<String> {
         "paused": snap.paused,
         "queued": snap.count(JobState::Queued),
         "lines": lines,
+        "hold": lib.hold(),
+        "folders": dirs.map(super::folder_views),
     });
     Some(format!("event: library\ndata: {body}\n\n"))
 }

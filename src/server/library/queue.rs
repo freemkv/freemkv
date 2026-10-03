@@ -37,6 +37,12 @@ pub enum JobNote {
     Stalled,
     /// Stopped from the UI ("Stop all").
     Cancelled,
+    /// Held: the output (or ISO) folder failed its check; it starts once the folder is back.
+    WaitingForFolder,
+    /// Muxed and verified on local staging, waiting for the output folder to copy it in.
+    /// The hook for keeping a finished staged file: nothing sets it until the engine can
+    /// hand that file back, so today a job only ever waits as `WaitingForFolder`.
+    StagedWaiting,
 }
 
 /// One queued remux.
@@ -59,6 +65,56 @@ pub struct Job {
     /// Why the job failed, kept on the job itself so the queue explains it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<Failure>,
+    /// Automatic retries after a storage fault so far.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_failed_at: Option<u64>,
+    /// Not started again before this time (the backoff after a storage fault).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<u64>,
+    /// With `StagedWaiting`: the finished file on local staging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged: Option<PathBuf>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+impl Job {
+    /// Queued and past any backoff.
+    pub fn ready(&self, now: u64) -> bool {
+        self.state == JobState::Queued && self.not_before.is_none_or(|t| t <= now)
+    }
+}
+
+/// A storage fault is retried for this long after the first one, then left failed.
+pub const RETRY_GIVE_UP_SECS: u64 = 24 * 3600;
+const RETRY_MAX_ATTEMPTS: u32 = 30;
+
+/// The wait before retry number `attempt` (1-based): 1 min, 5 min, 15 min, then hourly.
+pub fn retry_delay(attempt: u32) -> u64 {
+    match attempt {
+        0 | 1 => 60,
+        2 => 5 * 60,
+        3 => 15 * 60,
+        _ => 3600,
+    }
+}
+
+/// When `job`, just failed by a storage fault at `now`, may start again; `None` to give up.
+/// `resolved` says a fresh check of its folders passed, so the first retry need not wait.
+pub fn retry_at(job: &Job, now: u64, resolved: bool) -> Option<u64> {
+    let first = job.first_failed_at.unwrap_or(now);
+    let attempt = job.attempts + 1;
+    if now.saturating_sub(first) >= RETRY_GIVE_UP_SECS || attempt > RETRY_MAX_ATTEMPTS {
+        return None;
+    }
+    if resolved && job.attempts == 0 {
+        return Some(now);
+    }
+    Some(now + retry_delay(attempt))
 }
 
 /// A failed job's reason: the library error code, when there is one, and the text.
@@ -116,6 +172,11 @@ pub struct QueueFile {
 impl QueueFile {
     pub fn running(&self) -> Option<&Job> {
         self.jobs.iter().find(|j| j.state == JobState::Running)
+    }
+
+    /// The job `claim_next` would take at `now`, ignoring pause and a running job.
+    pub fn next_ready(&self, now: u64) -> Option<&Job> {
+        self.jobs.iter().find(|j| j.ready(now))
     }
 
     pub fn count(&self, state: JobState) -> usize {
@@ -201,7 +262,17 @@ impl Queue {
     /// A job is running, or one waits and the queue is not paused.
     pub fn has_work(&self) -> bool {
         let f = self.lock();
-        f.running().is_some() || (!f.paused && f.count(JobState::Queued) > 0)
+        let now = crate::server::util::epoch_secs();
+        f.running().is_some() || (!f.paused && f.next_ready(now).is_some())
+    }
+
+    /// The job that would start next, if the queue is free to start one.
+    pub fn peek_next(&self) -> Option<Job> {
+        let f = self.lock();
+        if f.paused || f.running().is_some() {
+            return None;
+        }
+        f.next_ready(crate::server::util::epoch_secs()).cloned()
     }
 
     /// Queue `items` in order. A target already queued or running is skipped.
@@ -227,6 +298,10 @@ impl Queue {
                     finished_at: None,
                     note: None,
                     failure: None,
+                    attempts: 0,
+                    first_failed_at: None,
+                    not_before: None,
+                    staged: None,
                 });
                 n += 1;
             }
@@ -234,12 +309,13 @@ impl Queue {
         })
     }
 
-    /// Take the oldest queued job and mark it running. `None` while paused.
-    /// An idle queue is left alone: no generation bump, no write.
+    /// Take the oldest queued job past its backoff and mark it running. `None` while
+    /// paused. An idle queue is left alone: no generation bump, no write.
     pub fn claim_next(&self) -> Option<Job> {
+        let now = crate::server::util::epoch_secs();
         {
             let f = self.lock();
-            if f.paused || f.running().is_some() || f.count(JobState::Queued) == 0 {
+            if f.paused || f.running().is_some() || f.next_ready(now).is_none() {
                 return None;
             }
         }
@@ -247,7 +323,7 @@ impl Queue {
             if f.paused || f.running().is_some() {
                 return None;
             }
-            let job = f.jobs.iter_mut().find(|j| j.state == JobState::Queued)?;
+            let job = f.jobs.iter_mut().find(|j| j.ready(now))?;
             job.state = JobState::Running;
             job.failure = None;
             job.started_at = Some(crate::server::util::epoch_secs());
@@ -289,6 +365,37 @@ impl Queue {
             job.state = JobState::Queued;
             job.started_at = None;
             job.note = Some(note);
+            let head = f
+                .jobs
+                .iter()
+                .position(|j| j.state == JobState::Queued)
+                .unwrap_or(f.jobs.len());
+            f.jobs.insert(head, job);
+        });
+    }
+
+    /// Put a job a storage fault stopped back at the head of the queue, to start no earlier
+    /// than `not_before` and only once its folder checks out. `staged` is the hook for a
+    /// finished file kept on local staging (`StagedWaiting`); `None` waits as `WaitingForFolder`.
+    pub fn retry_later(&self, id: u64, failure: Failure, not_before: u64, staged: Option<PathBuf>) {
+        let now = crate::server::util::epoch_secs();
+        self.mutate(|f| {
+            let Some(pos) = f.jobs.iter().position(|j| j.id == id) else {
+                return;
+            };
+            let mut job = f.jobs.remove(pos);
+            job.state = JobState::Queued;
+            job.started_at = None;
+            job.note = Some(if staged.is_some() {
+                JobNote::StagedWaiting
+            } else {
+                JobNote::WaitingForFolder
+            });
+            job.failure = Some(failure);
+            job.attempts += 1;
+            job.first_failed_at.get_or_insert(now);
+            job.not_before = Some(not_before);
+            job.staged = staged;
             let head = f
                 .jobs
                 .iter()
@@ -622,6 +729,135 @@ mod tests {
         assert_eq!(titles, ["a", "c"].map(String::from), "b went, a and c stay");
         q.drop_job(a.id);
         assert_eq!(q.snapshot().jobs.len(), 1);
+    }
+
+    // A queue file written before the retry fields and notes existed.
+    const OLD_QUEUE: &str = r#"{
+  "schema": 1,
+  "next_id": 3,
+  "paused": false,
+  "debug_log": true,
+  "jobs": [
+    {"id": 2, "title": "B", "iso": "/i/B.iso", "target": "/m/B/B.mkv", "replace": true,
+     "state": "failed", "queued_at": 5, "started_at": 6, "finished_at": 7, "note": "stalled",
+     "failure": {"code": 9073, "message": "E9073 copy"}},
+    {"id": 3, "title": "C", "iso": "/i/C.iso", "target": "/m/C/C.mkv", "replace": false,
+     "state": "queued", "queued_at": 8, "started_at": null, "finished_at": null, "note": null}
+  ],
+  "results": {"/m/B/B.mkv": {"outcome": "failed", "code": 9073, "message": "E9073 copy", "finished_at": 7}}
+}"#;
+
+    #[test]
+    fn an_old_queue_file_still_loads() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(t.path().join(QUEUE_FILE), OLD_QUEUE).unwrap();
+        let q = Queue::open(t.path());
+        let f = q.snapshot();
+        assert!(f.debug_log);
+        assert_eq!(f.jobs.len(), 2);
+        let c = &f.jobs[1];
+        assert_eq!(
+            (c.attempts, c.not_before, c.staged.as_ref()),
+            (0, None, None)
+        );
+        assert!(!t.path().join("library-queue.json.unreadable").exists());
+        assert_eq!(q.claim_next().unwrap().title, "C");
+        // What it writes back carries none of the new fields while they are unset.
+        let back = std::fs::read_to_string(t.path().join(QUEUE_FILE)).unwrap();
+        assert!(
+            !back.contains("not_before") && !back.contains("attempts"),
+            "{back}"
+        );
+    }
+
+    #[test]
+    fn a_storage_fault_backs_off_1_5_15_then_hourly_and_gives_up_after_a_day() {
+        let t = tempfile::tempdir().unwrap();
+        let q = Queue::open(t.path());
+        q.add(vec![job(t.path(), "a")]);
+        let mut a = q.claim_next().unwrap();
+        let now = 1_000_000;
+        assert_eq!(
+            retry_at(&a, now, true),
+            Some(now),
+            "a fresh check passed: at once"
+        );
+        assert_eq!(retry_at(&a, now, false), Some(now + 60));
+        let mut waits = Vec::new();
+        for _ in 0..5 {
+            waits.push(retry_at(&a, now, false).unwrap() - now);
+            a.attempts += 1;
+            a.first_failed_at = Some(now);
+        }
+        assert_eq!(waits, [60, 300, 900, 3600, 3600]);
+        assert_eq!(
+            retry_at(&a, now, true),
+            Some(now + 3600),
+            "only the first retry skips the wait"
+        );
+        assert_eq!(
+            retry_at(&a, now + RETRY_GIVE_UP_SECS, false),
+            None,
+            "a day on: give up"
+        );
+        a.attempts = RETRY_MAX_ATTEMPTS;
+        assert_eq!(retry_at(&a, now, false), None);
+    }
+
+    #[test]
+    fn a_job_waiting_out_its_backoff_is_held_and_others_go_first() {
+        let t = tempfile::tempdir().unwrap();
+        let q = Queue::open(t.path());
+        q.add(vec![job(t.path(), "a"), job(t.path(), "b")]);
+        let a = q.claim_next().unwrap();
+        let failure = Failure {
+            code: Some(9073),
+            message: "E9073 copy".into(),
+        };
+        let later = crate::server::util::epoch_secs() + 3600;
+        q.retry_later(a.id, failure.clone(), later, None);
+        let f = q.snapshot();
+        let held = &f.jobs[0];
+        assert_eq!(
+            (held.state, held.note, held.attempts, held.not_before),
+            (
+                JobState::Queued,
+                Some(JobNote::WaitingForFolder),
+                1,
+                Some(later)
+            )
+        );
+        assert_eq!(
+            held.failure.as_ref(),
+            Some(&failure),
+            "the queue says why it waits"
+        );
+        assert!(held.first_failed_at.is_some());
+        assert_eq!(
+            q.claim_next().unwrap().title,
+            "b",
+            "a backoff never blocks the rest"
+        );
+        let b = q.snapshot().running().unwrap().id;
+        q.drop_job(b);
+        assert!(q.claim_next().is_none(), "a waits out its backoff");
+        assert!(
+            !q.has_work(),
+            "a waiting job does not hold the disks from audits"
+        );
+        assert_eq!(
+            q.add(vec![job(t.path(), "a")]),
+            0,
+            "still queued: not queued twice"
+        );
+        // The staged hook: a kept file waits under its own note and survives a restart.
+        q.retry_later(a.id, failure, 0, Some("/stage/1.mkv.partial".into()));
+        drop(q);
+        let q = Queue::open(t.path());
+        let j = q.claim_next().unwrap();
+        assert_eq!(j.note, Some(JobNote::StagedWaiting));
+        assert_eq!(j.staged.as_deref(), Some(Path::new("/stage/1.mkv.partial")));
+        assert_eq!(j.attempts, 2);
     }
 
     #[test]
