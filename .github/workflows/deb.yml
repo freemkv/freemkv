@@ -92,7 +92,7 @@ jobs:
             dpkg-deb --info "$deb"
             dpkg-deb --contents "$deb"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deb-package
           path: deb-package
@@ -104,7 +104,7 @@ jobs:
     runs-on: ubuntu-24.04
     container: ubuntu:24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: deb-package, path: deb-package }
       - name: Install app into a clean Ubuntu 24.04 runtime
         shell: bash
@@ -167,7 +167,7 @@ jobs:
           fi
           ldd /usr/bin/freemkv | grep -F libgtk-4.so
           test -f /usr/share/applications/org.freemkv.FreeMKV.desktop
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: deb-validation
@@ -184,7 +184,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: deb-package, path: deb-package }
       - name: Attach installed and validated packages to the release
         env:

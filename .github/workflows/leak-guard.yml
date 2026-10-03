@@ -8,4 +8,4 @@ concurrency:
 jobs:
   leak-guard:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork
-    uses: freemkv/.github/.github/workflows/guard-leak.yml@v1
+    uses: freemkv/.github/.github/workflows/guard-leak.yml@v2
