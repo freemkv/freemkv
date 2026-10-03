@@ -318,7 +318,7 @@ fn discard_kept(
             return Err((409, "it is being copied in right now; stop it first".into()));
         }
     }
-    freemkv_engine::discard_staged(&kept).map_err(|e| {
+    super::deliver::discard(&kept).map_err(|e| {
         tracing::warn!(path = %kept.display(), error = %e, "kept remux could not be discarded");
         (500, format!("could not delete {}: {e}", kept.display()))
     })

@@ -10,6 +10,7 @@ pub mod api;
 pub mod arbiter;
 pub mod audit;
 pub mod deep;
+mod deliver;
 pub mod index;
 pub mod links;
 pub mod media;
