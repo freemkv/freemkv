@@ -4979,7 +4979,11 @@ impl Shell {
                     .and_then(|(h, laid)| {
                         let mut rc = w::RECT::default();
                         // TVM_GETITEMRECT takes the item in the rectangle it fills.
-                        unsafe { *(&mut rc as *mut w::RECT).cast::<isize>() = h.ptr() as isize };
+                        unsafe {
+                            (&mut rc as *mut w::RECT)
+                                .cast::<isize>()
+                                .write_unaligned(h.ptr() as isize)
+                        };
                         unsafe {
                             self.tree.hwnd().SendMessage(msg::TvmGetItemRect {
                                 text_only: false,
