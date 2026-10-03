@@ -40,8 +40,6 @@ pub enum JobNote {
     /// Held: the output (or ISO) folder failed its check; it starts once the folder is back.
     WaitingForFolder,
     /// Muxed and verified on local staging, waiting for the output folder to copy it in.
-    /// The hook for keeping a finished staged file: nothing sets it until the engine can
-    /// hand that file back, so today a job only ever waits as `WaitingForFolder`.
     StagedWaiting,
 }
 
@@ -73,9 +71,66 @@ pub struct Job {
     /// Not started again before this time (the backoff after a storage fault).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before: Option<u64>,
-    /// With `StagedWaiting`: the finished file on local staging.
+    /// The finished, verified MKV the engine kept on local staging: a retry only copies it in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged: Option<PathBuf>,
+    /// Its size, and how many deliveries of it have failed so far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_attempts: Option<u32>,
+}
+
+/// A finished file kept on local staging, as a job records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagedFile {
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub attempts: u32,
+}
+
+impl Job {
+    fn set_staged(&mut self, staged: Option<StagedFile>) {
+        self.staged_bytes = staged.as_ref().map(|s| s.bytes);
+        self.staged_attempts = staged.as_ref().map(|s| s.attempts);
+        self.staged = staged.map(|s| s.path);
+    }
+
+    // A queued job with a kept file leaves the queue as failed, so the file stays offered.
+    fn park(&mut self, message: &str) {
+        self.state = JobState::Failed;
+        self.note = Some(JobNote::Cancelled);
+        self.not_before = None;
+        self.finished_at = Some(crate::server::util::epoch_secs());
+        let code = self.failure.as_ref().and_then(|f| f.code);
+        self.failure = Some(Failure {
+            code,
+            message: message.into(),
+        });
+    }
+}
+
+const GONE: &str = "The finished MKV kept on local staging is gone (it expired, or staging ran \
+                    short of space). Queue a fresh remux.";
+const PARKED: &str = "Taken out of the queue. The finished MKV is still kept on local staging: \
+                      Retry copies it in, Discard deletes it.";
+
+// Take the queued jobs `pick` names out of the queue; how many left it.
+fn unqueue(f: &mut QueueFile, pick: impl Fn(&Job) -> bool) -> usize {
+    let before = f.jobs.len();
+    let mut parked = 0;
+    f.jobs.retain_mut(|j| {
+        if j.state != JobState::Queued || !pick(j) {
+            return true;
+        }
+        if j.staged.is_none() {
+            return false;
+        }
+        j.park(PARKED);
+        parked += 1;
+        true
+    });
+    before - f.jobs.len() + parked
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -275,13 +330,17 @@ impl Queue {
         f.next_ready(crate::server::util::epoch_secs()).cloned()
     }
 
-    /// Queue `items` in order. A target already queued or running is skipped.
+    /// Queue `items` in order. A target already queued or running is skipped, and so is one
+    /// with a finished file kept on local staging (it is retried or discarded instead).
     pub fn add(&self, items: Vec<NewJob>) -> usize {
         self.mutate(|f| {
             let mut n = 0;
             let now = crate::server::util::epoch_secs();
             for item in items {
-                if f.active_for(&item.target).is_some() {
+                let kept = f
+                    .latest_for(&item.target)
+                    .is_some_and(|j| j.staged.is_some());
+                if kept || f.active_for(&item.target).is_some() {
                     continue;
                 }
                 f.jobs.retain(|j| j.target != item.target);
@@ -302,6 +361,8 @@ impl Queue {
                     first_failed_at: None,
                     not_before: None,
                     staged: None,
+                    staged_bytes: None,
+                    staged_attempts: None,
                 });
                 n += 1;
             }
@@ -350,6 +411,9 @@ impl Queue {
                 JobResult::Done { .. } => None,
             };
             job.finished_at = Some(crate::server::util::epoch_secs());
+            if matches!(result, JobResult::Done { .. }) {
+                job.set_staged(None);
+            }
             let key = job.target.to_string_lossy().into_owned();
             f.results.insert(key, result);
         });
@@ -375,9 +439,15 @@ impl Queue {
     }
 
     /// Put a job a storage fault stopped back at the head of the queue, to start no earlier
-    /// than `not_before` and only once its folder checks out. `staged` is the hook for a
-    /// finished file kept on local staging (`StagedWaiting`); `None` waits as `WaitingForFolder`.
-    pub fn retry_later(&self, id: u64, failure: Failure, not_before: u64, staged: Option<PathBuf>) {
+    /// than `not_before` and only once its folder checks out. With `staged` (a finished file
+    /// kept on local staging) it waits as `StagedWaiting`, else as `WaitingForFolder`.
+    pub fn retry_later(
+        &self,
+        id: u64,
+        failure: Failure,
+        not_before: u64,
+        staged: Option<StagedFile>,
+    ) {
         let now = crate::server::util::epoch_secs();
         self.mutate(|f| {
             let Some(pos) = f.jobs.iter().position(|j| j.id == id) else {
@@ -395,7 +465,7 @@ impl Queue {
             job.attempts += 1;
             job.first_failed_at.get_or_insert(now);
             job.not_before = Some(not_before);
-            job.staged = staged;
+            job.set_staged(staged);
             let head = f
                 .jobs
                 .iter()
@@ -403,6 +473,135 @@ impl Queue {
                 .unwrap_or(f.jobs.len());
             f.jobs.insert(head, job);
         });
+    }
+
+    /// Record the finished file job `id` keeps on local staging (`None`: it has none).
+    pub fn set_staged(&self, id: u64, staged: Option<StagedFile>) {
+        self.mutate(|f| {
+            if let Some(j) = f.jobs.iter_mut().find(|j| j.id == id) {
+                j.set_staged(staged);
+            }
+        });
+    }
+
+    /// Queue the kept file for `target` to be copied in now, at the head of the queue, with a
+    /// fresh series of automatic retries. False when there is none, or it is running.
+    pub fn retry_staged_now(&self, target: &Path) -> bool {
+        self.mutate(|f| {
+            let Some(pos) = f.jobs.iter().rposition(|j| {
+                j.target == target && j.staged.is_some() && j.state != JobState::Running
+            }) else {
+                return false;
+            };
+            let mut job = f.jobs.remove(pos);
+            job.state = JobState::Queued;
+            job.note = Some(JobNote::StagedWaiting);
+            job.started_at = None;
+            job.finished_at = None;
+            job.not_before = None;
+            job.attempts = 0;
+            job.first_failed_at = None;
+            let head = f
+                .jobs
+                .iter()
+                .position(|j| j.state == JobState::Queued)
+                .unwrap_or(f.jobs.len());
+            f.jobs.insert(head, job);
+            true
+        })
+    }
+
+    /// Detach the kept file of `target`'s job so it can be deleted: a queued job leaves the
+    /// queue, a failed one keeps its failure. `Err(true)` while that job runs, `Err(false)`
+    /// when there is no kept file.
+    pub fn take_staged(&self, target: &Path) -> Result<PathBuf, bool> {
+        self.mutate(|f| {
+            let pos = f
+                .jobs
+                .iter()
+                .rposition(|j| j.target == target && j.staged.is_some())
+                .ok_or(false)?;
+            if f.jobs[pos].state == JobState::Running {
+                return Err(true);
+            }
+            let path = f.jobs[pos].staged.clone().ok_or(false)?;
+            if f.jobs[pos].state == JobState::Queued {
+                f.jobs.remove(pos);
+            } else {
+                f.jobs[pos].set_staged(None);
+            }
+            Ok(path)
+        })
+    }
+
+    /// Match the queue to the kept files found on local staging at startup: each one is
+    /// a job waiting as `StagedWaiting` (its own, another job for that target, or a new one),
+    /// and a job whose kept file is gone forgets it. Returns how many jobs were added.
+    pub fn adopt_staged(&self, kept: Vec<(NewJob, StagedFile, Failure)>) -> usize {
+        let now = crate::server::util::epoch_secs();
+        self.mutate(|f| {
+            let found: std::collections::HashSet<PathBuf> =
+                kept.iter().map(|(_, s, _)| s.path.clone()).collect();
+            for j in f.jobs.iter_mut() {
+                if j.staged.as_ref().is_some_and(|p| !found.contains(p)) {
+                    j.set_staged(None);
+                    if j.state == JobState::Queued {
+                        j.park(GONE);
+                    }
+                }
+            }
+            let mut added = 0;
+            for (item, staged, failure) in kept {
+                if let Some(j) = f
+                    .jobs
+                    .iter_mut()
+                    .rev()
+                    .find(|j| j.target == item.target && j.state != JobState::Running)
+                {
+                    if j.state != JobState::Queued {
+                        j.state = JobState::Queued;
+                        j.not_before = None;
+                        j.finished_at = None;
+                    }
+                    j.note = Some(JobNote::StagedWaiting);
+                    j.failure.get_or_insert(failure);
+                    j.set_staged(Some(staged));
+                    continue;
+                }
+                f.next_id += 1;
+                f.jobs.push(Job {
+                    id: f.next_id,
+                    title: item.title,
+                    iso: item.iso,
+                    target: item.target,
+                    replace: item.replace,
+                    state: JobState::Queued,
+                    queued_at: now,
+                    started_at: None,
+                    finished_at: None,
+                    note: Some(JobNote::StagedWaiting),
+                    failure: Some(failure),
+                    attempts: 0,
+                    first_failed_at: None,
+                    not_before: None,
+                    staged: Some(staged.path),
+                    staged_bytes: Some(staged.bytes),
+                    staged_attempts: Some(staged.attempts),
+                });
+                added += 1;
+            }
+            added
+        })
+    }
+
+    /// The finished files kept on local staging the queue knows of: how many, and their bytes.
+    pub fn staged_total(&self) -> (usize, u64) {
+        let f = self.lock();
+        let kept = f.jobs.iter().filter(|j| j.staged.is_some());
+        (
+            kept.clone().count(),
+            kept.filter_map(|j| j.staged_bytes).sum(),
+        )
     }
 
     /// Mark the running job (it keeps running until the engine returns).
@@ -424,24 +623,18 @@ impl Queue {
         })
     }
 
-    /// Drop the queued (not running) job for `target`. Returns how many went.
+    /// Drop the queued (not running) job for `target`. Returns how many went. A job with a
+    /// kept file stays listed as failed, so the file is still offered.
     pub fn remove_queued(&self, target: &Path) -> usize {
-        self.mutate(|f| {
-            let before = f.jobs.len();
-            f.jobs
-                .retain(|j| !(j.target == target && j.state == JobState::Queued));
-            before - f.jobs.len()
-        })
+        self.mutate(|f| unqueue(f, |j| j.target == target))
     }
 
     /// Drop every queued job and un-pause: an empty queue has nothing to
     /// hold, so it never shows as paused. The running job carries on.
     pub fn clear_queued(&self) -> usize {
         self.mutate(|f| {
-            let before = f.jobs.len();
-            f.jobs.retain(|j| j.state != JobState::Queued);
             f.paused = false;
-            before - f.jobs.len()
+            unqueue(f, |_| true)
         })
     }
 
@@ -765,7 +958,7 @@ mod tests {
         // What it writes back carries none of the new fields while they are unset.
         let back = std::fs::read_to_string(t.path().join(QUEUE_FILE)).unwrap();
         assert!(
-            !back.contains("not_before") && !back.contains("attempts"),
+            !back.contains("not_before") && !back.contains("attempts") && !back.contains("staged"),
             "{back}"
         );
     }
@@ -850,13 +1043,22 @@ mod tests {
             0,
             "still queued: not queued twice"
         );
-        // The staged hook: a kept file waits under its own note and survives a restart.
-        q.retry_later(a.id, failure, 0, Some("/stage/1.mkv.partial".into()));
+        // A kept file waits under its own note and survives a restart.
+        let kept = StagedFile {
+            path: "/stage/A.0011.staged.mkv".into(),
+            bytes: 42,
+            attempts: 1,
+        };
+        q.retry_later(a.id, failure, 0, Some(kept));
         drop(q);
         let q = Queue::open(t.path());
         let j = q.claim_next().unwrap();
         assert_eq!(j.note, Some(JobNote::StagedWaiting));
-        assert_eq!(j.staged.as_deref(), Some(Path::new("/stage/1.mkv.partial")));
+        assert_eq!(
+            j.staged.as_deref(),
+            Some(Path::new("/stage/A.0011.staged.mkv"))
+        );
+        assert_eq!((j.staged_bytes, j.staged_attempts), (Some(42), Some(1)));
         assert_eq!(j.attempts, 2);
     }
 
@@ -872,5 +1074,43 @@ mod tests {
         assert!(!f.paused);
         assert_eq!(f.jobs.len(), 1);
         assert!(f.running().is_some());
+    }
+
+    #[test]
+    fn stop_all_and_unqueue_keep_a_kept_file_offered() {
+        let t = tempfile::tempdir().unwrap();
+        let q = Queue::open(t.path());
+        q.add(vec![job(t.path(), "a"), job(t.path(), "b")]);
+        let a = q.claim_next().unwrap();
+        let failure = Failure {
+            code: None,
+            message: "E5000".into(),
+        };
+        let kept = StagedFile {
+            path: "/stage/a.staged.mkv".into(),
+            bytes: 7,
+            attempts: 1,
+        };
+        q.retry_later(a.id, failure, 0, Some(kept));
+        assert_eq!(q.clear_queued(), 2);
+        let f = q.snapshot();
+        assert_eq!(f.count(JobState::Queued), 0, "nothing left queued");
+        let parked = f.jobs.iter().find(|j| j.id == a.id).unwrap();
+        assert_eq!(parked.state, JobState::Failed);
+        assert!(parked.staged.is_some(), "the kept file is still offered");
+        assert!(
+            parked
+                .failure
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("still kept")
+        );
+        assert!(q.retry_staged_now(&a.target));
+        assert_eq!(q.remove_queued(&a.target), 1);
+        assert_eq!(q.snapshot().jobs.len(), 1, "unqueued, still listed");
+        assert_eq!(q.take_staged(&a.target), Ok("/stage/a.staged.mkv".into()));
+        assert_eq!(q.take_staged(&a.target), Err(false));
+        assert_eq!(q.staged_total(), (0, 0));
     }
 }

@@ -6,7 +6,7 @@ import { watch, refreshNow } from './libdata.js';
 import { mediaList } from './medialist.js';
 import { chipFilter } from './chips.js';
 import { muxedHtml, auditState, openDetails, outdated, videoLabel, issueText } from './details.js';
-import { folderBanner, unhealthy } from './folders.js';
+import { folderBanner, unhealthy, stagedNote } from './folders.js';
 
 const FILTERS = [
   ['all', 'All'],
@@ -56,6 +56,12 @@ function liveText(p) {
 
 /** Queued or auditing, as the Remux rows show their jobs. */
 function statePill(r) {
+  const kept = r.job && r.job.staged && r.job.state !== 'running'
+    ? '<span class="pill warn" data-keep="1" title="Retry or discard it on the Remux page">' + esc(stagedNote(r.job)) + '</span>' : '';
+  return kept + auditPill(r);
+}
+
+function auditPill(r) {
   if (r.audit_running) {
     return '<span class="pill live" data-keep="1"><span class="cellbar" data-live="' + esc(r.mkv) + '"><span class="bar"><i></i></span><span class="txt">starting…</span></span></span>';
   }

@@ -371,6 +371,10 @@ pub static FIELDS: &[Field] = &[
         "Longest a rip may run across every pass."),
     field("min_pass_budget_secs", "Minimum pass budget (seconds)", G::Hidden, Kind::Number { max: MAX_DURATION_SECS }, N(5_400),
         "Per-pass time budget when the disc runtime is unknown."),
+    field("remux_staged_max_age_days", "Kept remux age limit (days)", G::Hidden, Kind::Number { max: MAX_RETENTION_DAYS }, N(0),
+        "Days a finished remux kept on local staging waits for the output folder. 0 = 7 days."),
+    field("remux_staged_max_gb", "Kept remux space limit (GB)", G::Hidden, Kind::Number { max: 1_000_000 }, N(0),
+        "Space the kept remuxes may take on local staging. 0 = a quarter of that disk, at most 500 GB."),
     field("transport_recovery_delay_secs", "USB drive reconnect wait (seconds)", G::Hidden, Kind::Number { max: MAX_DURATION_SECS }, N(5),
         "How long to wait for a USB drive to come back after it drops out."),
 ];

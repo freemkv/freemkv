@@ -6,16 +6,17 @@ import vm from 'node:vm';
 
 const asset = (name) => readFile(new URL('../../src/server/web/assets/' + name, import.meta.url), 'utf8');
 
-// The real `esc` from ui.js; `ago` and `when` are fixed so the output is stable.
+// The real `esc` from ui.js; `ago`, `when` and `bytes` are fixed so the output is stable.
 async function load() {
   const context = vm.createContext({});
   const ui = await asset('ui.js');
   const at = ui.indexOf('export function esc(');
   const esc = vm.runInContext('(' + ui.slice(at + 'export '.length, ui.indexOf('\n', at)) + ')', context);
-  const stub = new vm.SyntheticModule(['esc', 'ago', 'when'], function () {
+  const stub = new vm.SyntheticModule(['esc', 'ago', 'when', 'bytes'], function () {
     this.setExport('esc', esc);
     this.setExport('ago', (ts) => (ts ? 'ago(' + ts + ')' : 'never'));
     this.setExport('when', (ts) => 'at ' + ts);
+    this.setExport('bytes', (b) => (b / 1e9).toFixed(1) + ' GB');
   }, { context });
   const mod = new vm.SourceTextModule(await asset('folders.js'), { context });
   await mod.link(async () => stub);
@@ -91,4 +92,43 @@ test('the System Folders row shows state, last good access and last error', asyn
   assert.match(bad, /not responding after 5s.*ago\(8\)/);
   // An old payload without the new fields still renders.
   assert.match(f.folderHealthRow({ role: 'Old', path: '/o', ok: false, problem: 'missing' }), /dot-bad/);
+});
+
+test('a job with a kept file says it finished locally, its size and failed copies', async () => {
+  const f = await load();
+  assert.equal(f.stagedNote({ state: 'queued' }), '');
+  assert.equal(f.stagedNote(null), '');
+  const job = { state: 'queued', staged: '/stage/A.staged.mkv', staged_bytes: 4.2e9, staged_attempts: 2 };
+  assert.equal(f.stagedNote(job), 'Finished locally (4.2 GB) — waiting for the output folder to copy it · 2 failed copies');
+  assert.equal(f.stagedNote({ ...job, staged_attempts: 1, state: 'failed' }),
+    'Finished locally (4.2 GB) — the copy into the output folder failed · 1 failed copy');
+  const pill = f.stagedPill({ ...job, not_before: 500, failure: { message: 'E5000 <stale>' } }, 100);
+  assert.match(pill, /class="pill warn"/);
+  assert.match(pill, /retry at 500/);
+  assert.match(pill, /title="E5000 &lt;stale&gt;"/);
+  assert.ok(!pill.includes('<stale>'), 'the failure is escaped');
+  assert.match(f.stagedPill({ ...job, state: 'failed', not_before: 500 }, 100), /class="pill bad"/);
+  assert.ok(!f.stagedPill({ ...job, state: 'failed', not_before: 500 }, 100).includes('retry'), 'a failed one waits for the user');
+});
+
+test('a kept file offers Retry now and Discard, never while it is being copied in', async () => {
+  const f = await load();
+  const r = { title: 'A <b>', job: { state: 'failed', staged: '/s/A.staged.mkv' } };
+  const html = f.stagedActions(r);
+  assert.match(html, /data-staged-retry/);
+  assert.match(html, /Discard staged file/);
+  assert.match(html, /A &lt;b&gt;/);
+  assert.ok(!html.includes('A <b>'));
+  assert.equal(f.stagedActions({ ...r, job: { ...r.job, state: 'running' } }), '');
+  assert.equal(f.stagedActions({ title: 'B', job: { state: 'queued' } }), '');
+});
+
+test('the System page counts the kept staged files', async () => {
+  const f = await load();
+  assert.equal(f.stagedLine(undefined), 'Kept staged files: none');
+  assert.equal(f.stagedLine({ count: 0, bytes: 0 }), 'Kept staged files: none');
+  const line = f.stagedLine({ count: 2, bytes: 8.4e9, dir: '/stage/<x>' });
+  assert.match(line, /Kept staged files: 2 \(8\.4 GB\)/);
+  assert.match(line, /\/stage\/&lt;x&gt;/);
+  assert.match(line, /waiting for the output folder/);
 });

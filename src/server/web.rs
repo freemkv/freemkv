@@ -4267,6 +4267,13 @@ mod web_tests {
             let v: serde_json::Value = serde_json::from_str(&body).unwrap();
             assert_eq!(v["folders"][0]["role"], "output", "{body}");
             assert!(v.get("hold").is_some(), "{body}");
+            for action in ["retry", "discard"] {
+                let url = format!("/api/library/staged/{action}");
+                let (code, _) = roundtrip(&cfg, "POST", &url, Some(r#"{"target":"/x.mkv"}"#), &[]);
+                assert_eq!(code, 404, "{action}: no kept file for that title");
+                let (code, _) = roundtrip(&cfg, "POST", &url, Some("{}"), &[]);
+                assert_eq!(code, 400, "{action}: a target is required");
+            }
             let (code, _) = roundtrip(
                 &cfg,
                 "GET",
@@ -6130,9 +6137,20 @@ fn handle_system_info(request: tiny_http::Request, cfg: &Arc<RwLock<Config>>) {
         // Current runtime debug-logging state, so the System-page toggle
         // reflects reality on load (POST /api/debug flips it).
         "debug_enabled": debug_enabled(),
+        "staged_kept": staged_kept_json(),
     });
 
     json_response(request, 200, &body.to_string());
+}
+
+// The finished remuxes kept on local staging, waiting for the output folder.
+fn staged_kept_json() -> serde_json::Value {
+    let (count, bytes) = crate::server::library::get().map_or((0, 0), |l| l.queue.staged_total());
+    serde_json::json!({
+        "count": count,
+        "bytes": bytes,
+        "dir": crate::server::health::remux_stage_dir(),
+    })
 }
 
 // Where keys come from and whether each source is usable, for the System page.

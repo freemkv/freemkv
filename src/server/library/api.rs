@@ -210,6 +210,28 @@ pub fn handle(
                 .sum::<usize>();
             json_response(request, 200, &json!({"ok": true, "removed": n}).to_string());
         }
+        (_, true, "/api/library/staged/retry") | (_, true, "/api/library/staged/discard") => {
+            let Ok((request, body)) = read_json_body(request) else {
+                return None;
+            };
+            let Some(target) = targets_of(&body).pop() else {
+                err(request, 400, "missing target");
+                return None;
+            };
+            if path.ends_with("/retry") {
+                if lib.queue.retry_staged_now(&target) {
+                    json_response(request, 200, &json!({"ok": true, "queued": 1}).to_string());
+                } else {
+                    err(request, 404, "no finished file is waiting for that title");
+                }
+                return None;
+            }
+            let stage = crate::server::health::remux_stage_dir();
+            match discard_kept(&lib, &target, stage.as_deref()) {
+                Ok(()) => json_response(request, 200, r#"{"ok":true,"discarded":true}"#),
+                Err((code, msg)) => err(request, code, &msg),
+            }
+        }
         (_, true, "/api/library/queue/stop-all") => {
             let (running, removed) = lib.stop_all();
             json_response(
@@ -261,6 +283,45 @@ pub fn handle(
         _ => return Some(request),
     }
     None
+}
+
+// Delete the finished file kept for `target`. Only a kept pair directly in the staging folder
+// is deleted, and never while its job is copying it in; the job forgets it first.
+fn discard_kept(
+    lib: &Library,
+    target: &std::path::Path,
+    stage: Option<&std::path::Path>,
+) -> Result<(), (u16, String)> {
+    let kept = lib
+        .queue
+        .snapshot()
+        .jobs
+        .iter()
+        .rev()
+        .find(|j| j.target == target && j.staged.is_some())
+        .and_then(|j| j.staged.clone());
+    let Some(kept) = kept else {
+        return Err((404, "no finished file is kept for that title".into()));
+    };
+    if stage.is_none_or(|d| kept.parent() != Some(d)) {
+        return Err((
+            409,
+            "the kept file is not in the remux staging folder; nothing was deleted".into(),
+        ));
+    }
+    match lib.queue.take_staged(target) {
+        Ok(path) if path == kept => {}
+        Ok(_) | Err(false) => {
+            return Err((409, "the kept file changed; reload and try again".into()));
+        }
+        Err(true) => {
+            return Err((409, "it is being copied in right now; stop it first".into()));
+        }
+    }
+    freemkv_engine::discard_staged(&kept).map_err(|e| {
+        tracing::warn!(path = %kept.display(), error = %e, "kept remux could not be discarded");
+        (500, format!("could not delete {}: {e}", kept.display()))
+    })
 }
 
 // The listing as a file: `freemkv-library-<date>.json`, saved, not shown.
@@ -436,4 +497,69 @@ pub fn sse_frame(cursor: &mut SseCursor, dirs: Option<&super::Dirs>) -> Option<S
         "folders": dirs.map(super::folder_views),
     });
     Some(format!("event: library\ndata: {body}\n\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::queue::{Failure, JobState, NewJob, StagedFile};
+    use super::*;
+
+    fn kept_job(lib: &Library, stage: &std::path::Path) -> (PathBuf, PathBuf) {
+        let target = PathBuf::from("/m/A/A.mkv");
+        let mkv = stage.join("A.0123456789ab.staged.mkv");
+        std::fs::write(&mkv, b"finished").unwrap();
+        std::fs::write(mkv.with_extension("json"), b"{}").unwrap();
+        let job = NewJob {
+            title: "A".into(),
+            iso: "/i/A.iso".into(),
+            target: target.clone(),
+            replace: true,
+        };
+        let staged = StagedFile {
+            path: mkv.clone(),
+            bytes: 8,
+            attempts: 1,
+        };
+        let failure = Failure {
+            code: None,
+            message: "x".into(),
+        };
+        lib.queue.adopt_staged(vec![(job, staged, failure)]);
+        (target, mkv)
+    }
+
+    #[test]
+    fn discard_deletes_only_a_kept_pair_in_staging_and_never_while_it_is_copied_in() {
+        let t = tempfile::tempdir().unwrap();
+        let stage = t.path().join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        let lib = Library::open(&t.path().join("cfg"), &t.path().join("logs"));
+        let (target, mkv) = kept_job(&lib, &stage);
+        let elsewhere = t.path().join("other");
+        assert_eq!(
+            discard_kept(&lib, &target, Some(&elsewhere)).unwrap_err().0,
+            409
+        );
+        assert_eq!(discard_kept(&lib, &target, None).unwrap_err().0, 409);
+        assert!(mkv.exists(), "nothing deleted outside the staging folder");
+        let running = lib.queue.claim_next().unwrap();
+        assert_eq!(
+            discard_kept(&lib, &target, Some(&stage)).unwrap_err().0,
+            409
+        );
+        assert!(mkv.exists(), "never while it is being copied in");
+        lib.queue
+            .requeue(running.id, super::super::queue::JobNote::Interrupted);
+        discard_kept(&lib, &target, Some(&stage)).unwrap();
+        assert!(!mkv.exists() && !mkv.with_extension("json").exists());
+        assert!(
+            lib.queue.snapshot().jobs.iter().all(|j| j.target != target),
+            "the waiting job went with it"
+        );
+        assert_eq!(
+            discard_kept(&lib, &target, Some(&stage)).unwrap_err().0,
+            404
+        );
+        assert_eq!(lib.queue.snapshot().count(JobState::Queued), 0);
+    }
 }

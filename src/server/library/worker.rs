@@ -3,7 +3,7 @@
 //! its own job.
 
 use super::arbiter::Arbiter;
-use super::queue::{Failure, Job, JobNote, JobResult};
+use super::queue::{Failure, Job, JobNote, JobResult, NewJob, StagedFile};
 use super::{Dirs, Library, LineKind, Running, transcript};
 use crate::server::config::Config;
 use crate::server::health::{self, Fault, Problem};
@@ -28,8 +28,11 @@ fn nap(d: Duration) {
 /// The worker loop: waits while a rip holds the slot or the queue is paused.
 pub fn run(lib: &Arc<Library>, cfg: &Arc<RwLock<Config>>, arbiter: &Arbiter) {
     tracing::info!("library worker starting");
+    // No remux runs yet: the one moment the staging folder may be swept.
     if let Some(dir) = remux_stage_dir() {
-        clean_stale_staging(&dir);
+        let snapshot = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let library = super::dirs(&snapshot).library;
+        housekeep_staging(lib, &dir, &StagingLimits::of(&snapshot, &dir), &library);
     }
     while !shutting_down() {
         let snapshot = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
@@ -115,14 +118,19 @@ fn run_job(lib: &Library, cfg: &Config, arbiter: &Arbiter, epoch: u64, job: Job)
         last_activity: AtomicU64::new(crate::server::util::epoch_secs()),
         term: Mutex::new(Term::default()),
     };
-    sink.emit(
-        LineKind::Cmd,
-        format!(
+    let cmd = match &job.staged {
+        Some(kept) => format!(
+            "Finishing the remux kept at {}: copying it to {}",
+            kept.display(),
+            job.target.display()
+        ),
+        None => format!(
             "$ freemkv iso://{} mkv://{}",
             job.iso.display(),
             job.target.display()
         ),
-    );
+    };
+    sink.emit(LineKind::Cmd, cmd);
     sink.emit(
         LineKind::Out,
         format!("freemkv {}", crate::server::VERSION_LABEL),
@@ -163,7 +171,10 @@ fn remux(job: &Job, cfg: &Config, sink: &JobSink<'_>) -> Ending {
         replace: job.replace,
     };
     let keys = crate::server::keysource::key_params(cfg);
-    let result = if let Some(dir) = remux_stage_dir() {
+    let result = if let Some(kept) = &job.staged {
+        // Only the copy, its sync and verify, and the replacement run again.
+        freemkv_engine::finish_staged_with(kept, sink, &freemkv_engine::Halt::new())
+    } else if let Some(dir) = remux_stage_dir() {
         std::fs::create_dir_all(&dir).and_then(|()| {
             freemkv_engine::remux_iso_staged(
                 &request,
@@ -211,6 +222,112 @@ fn clean_stale_staging(dir: &Path) {
             tracing::warn!(path = %path.display(), error = %e, "stale remux stage could not be removed");
         }
     }
+}
+
+/// How long, and how many bytes, finished files may wait on local staging for the output folder.
+pub(crate) struct StagingLimits {
+    pub max_age: Duration,
+    pub max_bytes: u64,
+}
+
+/// Kept files expire after this many days unless the settings say otherwise.
+pub(crate) const STAGED_MAX_AGE_DAYS: u64 = 7;
+/// The default cap on kept files: a quarter of the staging disk, at most this much.
+pub(crate) const STAGED_MAX_BYTES: u64 = 500_000_000_000;
+
+impl StagingLimits {
+    /// The settings' limits (0 = the default) for the staging folder `dir`.
+    pub(crate) fn of(cfg: &Config, dir: &Path) -> Self {
+        let days = match cfg.remux_staged_max_age_days {
+            0 => STAGED_MAX_AGE_DAYS,
+            d => d,
+        };
+        let max_bytes = match cfg.remux_staged_max_gb {
+            0 => health::fs_capacity(dir)
+                .map_or(STAGED_MAX_BYTES, |total| (total / 4).min(STAGED_MAX_BYTES)),
+            gb => gb.saturating_mul(1_000_000_000),
+        };
+        Self {
+            max_age: Duration::from_secs(days.saturating_mul(86_400)),
+            max_bytes,
+        }
+    }
+}
+
+/// Startup sweep of the remux staging folder, run before any remux: interrupted job files,
+/// debris named like a kept file, kept files past `limits`; the rest wait in the queue to be
+/// copied in. Returns how many kept files were discarded.
+pub(crate) fn housekeep_staging(
+    lib: &Library,
+    dir: &Path,
+    limits: &StagingLimits,
+    library: &Path,
+) -> usize {
+    clean_stale_staging(dir);
+    for path in freemkv_engine::staged_orphans(dir) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::info!(path = %path.display(), "removed an incomplete kept remux"),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "incomplete kept remux could not be removed")
+            }
+        }
+    }
+    let pending = freemkv_engine::staged_pending(dir);
+    let mut discard: Vec<&freemkv_engine::StagedInfo> = pending
+        .iter()
+        .filter(|i| freemkv_engine::staged_expired(i, limits.max_age))
+        .collect();
+    let fresh: Vec<freemkv_engine::StagedInfo> = pending
+        .iter()
+        .filter(|i| !freemkv_engine::staged_expired(i, limits.max_age))
+        .cloned()
+        .collect();
+    discard.extend(freemkv_engine::staged_over_budget(&fresh, limits.max_bytes));
+    let mut gone = std::collections::HashSet::new();
+    for info in &discard {
+        match freemkv_engine::discard_staged(&info.staged) {
+            Ok(()) => {
+                tracing::info!(path = %info.staged.display(), bytes = info.size, "discarded a kept remux (too old, or staging over its budget)");
+                gone.insert(info.staged.clone());
+            }
+            Err(e) => {
+                tracing::warn!(path = %info.staged.display(), error = %e, "kept remux could not be discarded")
+            }
+        }
+    }
+    let kept = pending
+        .into_iter()
+        .filter(|i| !gone.contains(&i.staged))
+        .map(|i| adopted(i, library))
+        .collect();
+    let added = lib.queue.adopt_staged(kept);
+    if added > 0 {
+        tracing::info!(count = added, "kept remuxes queued to be copied in");
+    }
+    gone.len()
+}
+
+// A kept file found at startup, as the job that copies it in.
+fn adopted(i: freemkv_engine::StagedInfo, library: &Path) -> (NewJob, StagedFile, Failure) {
+    let job = NewJob {
+        title: super::index::mkv_title(library, &i.target),
+        iso: i.source.path().to_path_buf(),
+        target: i.target.clone(),
+        replace: i.replace,
+    };
+    let failure = Failure {
+        code: i.error_code,
+        message: format!(
+            "{}. Finished locally; waiting for the output folder to copy it in.",
+            i.error.trim_end_matches('.')
+        ),
+    };
+    let staged = StagedFile {
+        path: i.staged,
+        bytes: i.size,
+        attempts: i.attempts,
+    };
+    (job, staged, failure)
 }
 
 #[cfg(test)]
@@ -290,6 +407,7 @@ pub(crate) fn finish(
             // A stall is retried only when a folder it uses is unhealthy now.
             let phase = phase_now(lib);
             let problem = folder_problem(lib, job);
+            let kept = still_kept(job.staged.as_deref());
             if problem.is_some() {
                 let why = (None, "stalled");
                 if retry_storage_fault(
@@ -300,11 +418,13 @@ pub(crate) fn finish(
                     problem.as_ref(),
                     phase.as_deref(),
                     now,
+                    kept.clone(),
                     sink,
                 ) {
                     return;
                 }
             }
+            lib.queue.set_staged(job.id, kept);
             lib.queue.note_running(job.id, note);
             lib.queue.finish(
                 job.id,
@@ -318,6 +438,26 @@ pub(crate) fn finish(
                 LineKind::Err,
                 "Stopped: no progress. The old MKV is unchanged.".into(),
             );
+        }
+        Ending::Stopped(JobNote::Cancelled) if job.staged.is_some() => {
+            // A Stop leaves the kept file: it stays offered for Retry or Discard.
+            let kept = still_kept(job.staged.as_deref());
+            let message = if kept.is_some() {
+                "Stopped. The finished MKV is still kept on local staging: Retry copies it in, \
+                 Discard deletes it."
+            } else {
+                "Stopped."
+            };
+            lib.queue.set_staged(job.id, kept);
+            lib.queue.finish(
+                job.id,
+                JobResult::Failed {
+                    code: None,
+                    message: message.into(),
+                    finished_at: now,
+                },
+            );
+            sink.line(LineKind::Warn, format!("{message} {}", safe_text(job)));
         }
         Ending::Stopped(JobNote::Cancelled) => {
             lib.queue.drop_job(job.id);
@@ -341,10 +481,21 @@ pub(crate) fn finish(
             );
         }
         Ending::Failed(e) => {
-            let phase = phase_of(&e).or_else(|| phase_now(lib));
+            // A delivery that failed after the local verify keeps the file: judge its cause.
+            let engine_kept = freemkv_engine::staged_kept(&e);
+            let cause = engine_kept.map_or(&e, |k| &k.cause);
+            let kept = still_kept(
+                engine_kept
+                    .map(|k| k.path.as_path())
+                    .or(job.staged.as_deref()),
+            );
+            let phase = engine_kept
+                .map(|k| k.phase.to_string())
+                .or_else(|| phase_of(&e))
+                .or_else(|| phase_now(lib));
             let code = freemkv_engine::error_code(&e);
             let text = error_text(&e);
-            let fault = storage_fault(&e);
+            let fault = storage_fault(cause);
             let unhealthy = fault.and_then(|_| folder_problem(lib, job));
             if let Some(f) = fault
                 && retry_storage_fault(
@@ -355,13 +506,27 @@ pub(crate) fn finish(
                     unhealthy.as_ref(),
                     phase.as_deref(),
                     now,
+                    kept.clone(),
                     sink,
                 )
             {
                 return;
             }
             // Not retried; still name a folder that is unhealthy right now, and what is safe.
-            let message = failure_message(&text, phase.as_deref(), unhealthy.as_ref(), job, None);
+            let changed =
+                job.staged.is_some() && code == Some(libfreemkv::error::E_REMUX_TARGET_EXISTS);
+            let mut message = if changed {
+                target_changed_message(&text, job)
+            } else {
+                failure_message(&text, phase.as_deref(), unhealthy.as_ref(), job, None)
+            };
+            if let Some(k) = &kept {
+                message.push(' ');
+                message.push_str(&kept_text(k, changed));
+            } else if job.staged.is_some() {
+                message.push_str(" The finished MKV kept on local staging could not be used and was removed; queue a fresh remux.");
+            }
+            lib.queue.set_staged(job.id, kept.clone());
             lib.queue.finish(
                 job.id,
                 JobResult::Failed {
@@ -376,9 +541,55 @@ pub(crate) fn finish(
             if let Some(p) = &unhealthy {
                 sink.line(LineKind::Err, format!("{} {}", p.message, p.hint));
             }
+            if changed {
+                sink.line(LineKind::Err, target_changed_message(&text, job));
+            }
             sink.line(LineKind::Out, safe_text(job).into());
+            if let Some(k) = &kept {
+                sink.line(LineKind::Warn, kept_text(k, changed));
+            }
         }
     }
+}
+
+/// The kept file at `path` (either half of the pair), if it is still a usable one.
+fn still_kept(path: Option<&Path>) -> Option<StagedFile> {
+    let path = path.filter(|p| freemkv_engine::is_kept_staged(p))?;
+    let info = freemkv_engine::read_staged(path).ok()?;
+    Some(StagedFile {
+        path: info.staged,
+        bytes: info.size,
+        attempts: info.attempts,
+    })
+}
+
+fn gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1e9)
+}
+
+/// What a kept file means for the user: where it is, and what Retry and Discard do.
+pub(crate) fn kept_text(k: &StagedFile, changed: bool) -> String {
+    if changed {
+        format!(
+            "The finished MKV ({}) is still kept on local staging; Discard it once you have checked the library file.",
+            gb(k.bytes)
+        )
+    } else {
+        format!(
+            "The finished MKV ({}) is kept on local staging: Retry copies it in without muxing again, Discard deletes it.",
+            gb(k.bytes)
+        )
+    }
+}
+
+// E9084 on a kept file: the library file is not the one the remux set out to replace.
+fn target_changed_message(text: &str, job: &Job) -> String {
+    format!(
+        "{}. The library file {} changed after this remux began, or the finished MKV was \
+         already copied in, so it was not touched.",
+        text.trim_end_matches('.'),
+        job.target.display()
+    )
 }
 
 /// The engine phase the job was in, as the running state last showed it.
@@ -404,6 +615,7 @@ fn phase_words(phase: &str) -> Option<&'static str> {
         "verify" => "verifying the new file",
         "copy" => "copying the new MKV into the output folder",
         "replace" => "moving the new MKV into place",
+        "target" => "checking the library file it replaces",
         _ => return None,
     })
 }
@@ -455,6 +667,7 @@ fn retry_storage_fault(
     problem: Option<&Problem>,
     phase: Option<&str>,
     now: u64,
+    staged: Option<StagedFile>,
     sink: &dyn LineSink,
 ) -> bool {
     // With every folder fine, a missing file or a refused write is the file's problem.
@@ -473,10 +686,14 @@ fn retry_storage_fault(
         );
         return false;
     };
-    // Hook for the engine keeping a finished, verified staged file: its path goes here and the
-    // job waits as `StagedWaiting` to copy it in. No engine API hands one back yet.
-    let staged: Option<std::path::PathBuf> = None;
-    let message = failure_message(text, phase, problem, job, Some(at));
+    let mut message = failure_message(text, phase, problem, job, Some(at));
+    if let Some(k) = &staged {
+        message.push_str(&format!(
+            " The finished MKV ({}) waits on local staging to be copied in.",
+            gb(k.bytes)
+        ));
+    }
+    let kept = staged.as_ref().map(|k| k.bytes);
     lib.queue
         .retry_later(job.id, Failure { code, message }, at, staged);
     if let Some(p) = problem {
@@ -484,6 +701,15 @@ fn retry_storage_fault(
         sink.line(LineKind::Err, format!("{} {}", p.message, p.hint));
     }
     sink.line(LineKind::Out, safe_text(job).into());
+    if let Some(bytes) = kept {
+        sink.line(
+            LineKind::Out,
+            format!(
+                "Finished locally ({}): only the copy into the output folder is retried.",
+                gb(bytes)
+            ),
+        );
+    }
     sink.line(
         LineKind::Warn,
         if at <= now {
@@ -1522,6 +1748,8 @@ mod tests {
             first_failed_at: None,
             not_before: None,
             staged: None,
+            staged_bytes: None,
+            staged_attempts: None,
         }
     }
 
@@ -2026,6 +2254,324 @@ mod tests {
         assert_eq!(
             m,
             "E9077 x. It stopped while verifying the new file. No MKV was written to the library."
+        );
+    }
+
+    // A kept pair as the engine writes it: the MKV and its sidecar, in `stage`.
+    fn write_kept(
+        stage: &Path,
+        name: &str,
+        target: &Path,
+        mkv_bytes: &[u8],
+        created_at: u64,
+    ) -> std::path::PathBuf {
+        std::fs::create_dir_all(stage).unwrap();
+        let mkv_path = stage.join(format!("{name}.staged.mkv"));
+        std::fs::write(&mkv_path, mkv_bytes).unwrap();
+        let sidecar = serde_json::json!({
+            "format": 1, "target": target, "replace": false,
+            "target_before": {"state": "absent"}, "source": "iso:///i/A.iso",
+            "source_len": null, "source_mtime_secs": null, "title": 0,
+            "streams": {"audio": "all", "subtitles": "all", "forced_subtitles": "all"},
+            "size": mkv_bytes.len(), "runtime_secs": 60.0, "expected_secs": null,
+            "writing_app": "freemkv test", "engine_version": "0", "created_at": created_at,
+            "attempts": 1, "last_attempt_at": created_at, "failed_phase": "copy",
+            "error": "Stale file handle (os error 70)", "error_code": null,
+            "mux": {"bytes_written": 1, "errors": 0, "lost_bytes": 0, "streams": 1,
+                    "undelivered_streams": []},
+        });
+        std::fs::write(
+            stage.join(format!("{name}.staged.json")),
+            serde_json::to_vec(&sidecar).unwrap(),
+        )
+        .unwrap();
+        mkv_path
+    }
+
+    fn kept_error(path: &Path, cause: std::io::Error) -> std::io::Error {
+        let kind = cause.kind();
+        let sidecar = path.with_extension("json");
+        let kept = freemkv_engine::StagedKept {
+            path: path.to_path_buf(),
+            sidecar,
+            phase: "copy",
+            cause,
+        };
+        std::io::Error::new(kind, kept)
+    }
+
+    fn movie() -> Vec<u8> {
+        mkv(&current_stamp(), Some(60.0), Some(58), true)
+    }
+
+    #[test]
+    fn a_kept_file_after_a_storage_fault_waits_to_be_copied_in() {
+        let _g = crate::server::health::tests::LAST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (t, lib, dirs) = library_with(&["A"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        let a = lib.queue.claim_next().unwrap();
+        let kept = write_kept(&t.path().join("stage"), "A.1", &a.target, &movie(), 1);
+        std::fs::rename(&dirs.library, t.path().join("unmounted")).unwrap();
+        #[cfg(unix)]
+        let cause = std::io::Error::from_raw_os_error(libc::ESTALE);
+        #[cfg(not(unix))]
+        let cause = std::io::Error::from(std::io::ErrorKind::StaleNetworkFileHandle);
+        let lines = Lines(Mutex::new(Vec::new()));
+        let e = kept_error(&kept, cause);
+        finish(&lib, &a, Ending::Failed(e), Duration::ZERO, &lines);
+        let q = lib.queue.snapshot();
+        let j = &q.jobs[0];
+        assert_eq!(
+            (j.state, j.note, j.attempts),
+            (JobState::Queued, Some(JobNote::StagedWaiting), 1)
+        );
+        assert_eq!(j.staged.as_deref(), Some(kept.as_path()));
+        assert_eq!(j.staged_bytes, Some(movie().len() as u64));
+        let msg = &j.failure.as_ref().unwrap().message;
+        assert!(msg.contains("waits on local staging"), "{msg}");
+        assert!(lib.hold().is_some(), "held for the output folder");
+        let said = lines.0.lock().unwrap().join("\n");
+        assert!(
+            said.contains("only the copy into the output folder is retried"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_kept_file_whose_copy_did_not_match_fails_and_stays_offered() {
+        let (t, lib, dirs) = library_with(&["A"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        let a = lib.queue.claim_next().unwrap();
+        let kept = write_kept(&t.path().join("stage"), "A.1", &a.target, &movie(), 1);
+        let e = kept_error(&kept, std::io::Error::other("E9080: 10/20"));
+        let lines = Lines(Mutex::new(Vec::new()));
+        finish(&lib, &a, Ending::Failed(e), Duration::ZERO, &lines);
+        let q = lib.queue.snapshot();
+        let j = &q.jobs[0];
+        assert_eq!(
+            j.state,
+            JobState::Failed,
+            "a content failure is not retried by itself"
+        );
+        assert_eq!(j.staged.as_deref(), Some(kept.as_path()));
+        let msg = &j.failure.as_ref().unwrap().message;
+        assert!(msg.starts_with("E9080"), "{msg}");
+        assert!(msg.contains("Retry copies it in"), "{msg}");
+        assert!(lib.queue.claim_next().is_none());
+        assert_eq!(
+            lib.queue.add(vec![NewJob {
+                title: "A".into(),
+                iso: a.iso.clone(),
+                target: a.target.clone(),
+                replace: true,
+            }]),
+            0,
+            "a target with a kept file is retried or discarded, not queued again"
+        );
+        assert!(lib.queue.retry_staged_now(&a.target));
+        let again = lib.queue.claim_next().unwrap();
+        assert_eq!((again.id, again.note), (a.id, Some(JobNote::StagedWaiting)));
+    }
+
+    #[test]
+    fn a_retry_with_a_kept_file_only_copies_it_in() {
+        let (t, lib, dirs) = library_with(&["B"]);
+        let target = dirs.library.join("A/A.mkv");
+        let kept = write_kept(&t.path().join("stage"), "A.1", &target, &movie(), 1);
+        let mut job = job_for(t.path(), 7);
+        job.target = target.clone();
+        job.replace = false;
+        job.staged = Some(kept.clone());
+        let arbiter = Arbiter::new();
+        let sink = test_sink(&lib, &arbiter);
+        let cfg = Config {
+            library_dir: dirs.library.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let ending = remux(&job, &cfg, &sink);
+        assert!(matches!(ending, Ending::Done { .. }), "{ending:?}");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            movie(),
+            "the kept file landed"
+        );
+        assert!(
+            !kept.exists() && !kept.with_extension("json").exists(),
+            "and the pair is gone"
+        );
+    }
+
+    #[test]
+    fn a_library_file_that_changed_leaves_the_kept_file_and_offers_discard() {
+        let (t, lib, dirs) = library_with(&["A"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        let mut a = lib.queue.claim_next().unwrap();
+        // The sidecar says the target was absent; it is there now.
+        let kept = write_kept(&t.path().join("stage"), "A.1", &a.target, &movie(), 1);
+        a.staged = Some(kept.clone());
+        let arbiter = Arbiter::new();
+        let sink = test_sink(&lib, &arbiter);
+        let ending = remux(&a, &Config::default(), &sink);
+        let Ending::Failed(e) = ending else {
+            panic!("{ending:?}");
+        };
+        assert_eq!(
+            freemkv_engine::error_code(&e),
+            Some(libfreemkv::error::E_REMUX_TARGET_EXISTS)
+        );
+        let lines = Lines(Mutex::new(Vec::new()));
+        finish(&lib, &a, Ending::Failed(e), Duration::ZERO, &lines);
+        let j = lib.queue.snapshot().jobs[0].clone();
+        assert_eq!(j.state, JobState::Failed);
+        assert_eq!(
+            j.staged.as_deref(),
+            Some(kept.as_path()),
+            "the pair is left"
+        );
+        let msg = j.failure.unwrap().message;
+        assert!(msg.contains("changed after this remux began"), "{msg}");
+        assert!(msg.contains("Discard it"), "{msg}");
+        assert!(kept.exists());
+    }
+
+    #[test]
+    fn a_stopped_copy_in_leaves_the_kept_file() {
+        let (t, lib, dirs) = library_with(&["A"]);
+        lib.index_now(&dirs);
+        lib.enqueue(&dirs, |_| true);
+        let mut a = lib.queue.claim_next().unwrap();
+        let kept = write_kept(&t.path().join("stage"), "A.1", &a.target, &movie(), 1);
+        a.staged = Some(kept.clone());
+        let lines = Lines(Mutex::new(Vec::new()));
+        finish(
+            &lib,
+            &a,
+            Ending::Stopped(JobNote::Cancelled),
+            Duration::ZERO,
+            &lines,
+        );
+        let j = lib.queue.snapshot().jobs[0].clone();
+        assert_eq!(
+            (j.state, j.staged.as_deref()),
+            (JobState::Failed, Some(kept.as_path()))
+        );
+        assert!(kept.exists());
+    }
+
+    #[test]
+    fn startup_housekeeping_bounds_staging_and_requeues_what_survives() {
+        let t = tempfile::tempdir().unwrap();
+        let cfg_dir = t.path().join("cfg");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        // A queue file from before kept files existed, with a job for C.
+        std::fs::write(
+            cfg_dir.join(super::super::queue::QUEUE_FILE),
+            r#"{"schema":1,"next_id":1,"jobs":[{"id":1,"title":"C","iso":"/i/C.iso",
+                "target":"/m/C/C.mkv","replace":true,"state":"failed","queued_at":1}]}"#,
+        )
+        .unwrap();
+        let lib = Library::open(&cfg_dir, &t.path().join("logs"));
+        let stage = t.path().join("stage");
+        let now = crate::server::util::epoch_secs();
+        let day = 86_400;
+        let old = write_kept(
+            &stage,
+            "Old.1",
+            Path::new("/m/Old/Old.mkv"),
+            &[1; 100],
+            now - 8 * day,
+        );
+        let big = write_kept(
+            &stage,
+            "Big.1",
+            Path::new("/m/Big/Big.mkv"),
+            &[1; 300],
+            now - 2 * day,
+        );
+        let a = write_kept(&stage, "A.1", Path::new("/m/A/A.mkv"), &[1; 100], now - day);
+        let c = write_kept(&stage, "C.1", Path::new("/m/C/C.mkv"), &[1; 100], now);
+        let orphan = stage.join("Lone.2.staged.mkv");
+        std::fs::write(&orphan, b"no sidecar").unwrap();
+        let half = stage.join("A.1.staged.json.tmp");
+        std::fs::write(&half, b"{").unwrap();
+        let interrupted = stage.join("9.mkv.partial");
+        std::fs::write(&interrupted, b"x").unwrap();
+        let limits = StagingLimits {
+            max_age: Duration::from_secs(7 * day),
+            max_bytes: 250,
+        };
+        let gone = housekeep_staging(&lib, &stage, &limits, Path::new("/m"));
+        assert_eq!(gone, 2, "the expired file and the oldest over the budget");
+        for p in [&old, &big, &orphan, &half, &interrupted] {
+            assert!(!p.exists(), "{} removed", p.display());
+        }
+        assert!(a.exists() && c.exists());
+        let q = lib.queue.snapshot();
+        let job = |t: &str| {
+            q.jobs
+                .iter()
+                .find(|j| j.target == Path::new(t))
+                .unwrap()
+                .clone()
+        };
+        let ja = job("/m/A/A.mkv");
+        assert_eq!(
+            (
+                ja.state,
+                ja.note,
+                ja.staged.as_deref(),
+                ja.staged_bytes,
+                ja.title.as_str()
+            ),
+            (
+                JobState::Queued,
+                Some(JobNote::StagedWaiting),
+                Some(a.as_path()),
+                Some(100),
+                "A"
+            )
+        );
+        let jc = job("/m/C/C.mkv");
+        assert_eq!(
+            (jc.id, jc.state, jc.staged.as_deref()),
+            (1, JobState::Queued, Some(c.as_path())),
+            "the old job is reused"
+        );
+        assert_eq!(q.jobs.len(), 2);
+        // Gone on the next start: the job forgets it and leaves the queue.
+        freemkv_engine::discard_staged(&a).unwrap();
+        housekeep_staging(&lib, &stage, &limits, Path::new("/m"));
+        let ja = lib
+            .queue
+            .snapshot()
+            .jobs
+            .into_iter()
+            .find(|j| j.target == Path::new("/m/A/A.mkv"))
+            .unwrap();
+        assert_eq!((ja.state, ja.staged), (JobState::Failed, None));
+        assert!(ja.failure.unwrap().message.contains("is gone"));
+    }
+
+    #[test]
+    fn the_default_staging_budget_is_a_quarter_of_the_disk_at_most_500_gb() {
+        let t = tempfile::tempdir().unwrap();
+        let l = StagingLimits::of(&Config::default(), t.path());
+        assert_eq!(l.max_age, Duration::from_secs(7 * 86_400));
+        assert!(l.max_bytes > 0 && l.max_bytes <= STAGED_MAX_BYTES);
+        let cfg = Config {
+            remux_staged_max_age_days: 2,
+            remux_staged_max_gb: 3,
+            ..Config::default()
+        };
+        let l = StagingLimits::of(&cfg, t.path());
+        assert_eq!(
+            (l.max_age.as_secs(), l.max_bytes),
+            (2 * 86_400, 3_000_000_000)
         );
     }
 }

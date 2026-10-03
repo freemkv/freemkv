@@ -9,7 +9,7 @@ import { chipFilter } from './chips.js';
 import { muxedHtml, openDetails, noteText, queueOne, outdated } from './details.js';
 import { dotHtml } from './library.js';
 import { openConsole, openTitleLog } from './console.js';
-import { folderBanner, queuedNote } from './folders.js';
+import { folderBanner, queuedNote, stagedPill, stagedActions } from './folders.js';
 
 const can = r => r.kind === 'remux' || r.kind === 'iso_only';
 const active = r => r.job && (r.job.state === 'queued' || r.job.state === 'running');
@@ -21,6 +21,7 @@ function statePills(r, hold) {
     // Static markup: the bar and its text are filled in place by paintLive.
     return '<span class="pill live" data-keep="1"><span class="cellbar" data-live="' + j.id + '"><span class="bar"><i></i></span><span class="txt">starting…</span></span></span>' + log;
   }
+  if (j && j.staged) return stagedPill(j, Date.now() / 1000) + log;
   if (j && j.state === 'queued') {
     const why = queuedNote(j, hold, Date.now() / 1000);
     const tip = j.failure ? ' title="' + esc(j.failure.message) + '"' : '';
@@ -39,6 +40,7 @@ function statePills(r, hold) {
 }
 
 function actHtml(r) {
+  if (r.job && r.job.staged && r.job.state !== 'running') return stagedActions(r);
   if (r.job && r.job.state === 'queued') {
     return '<button class="btn btn-ghost btn-sm" data-unqueue title="Take it out of the queue" aria-label="Take ' + esc(r.title) + ' out of the queue">× Unqueue</button>';
   }
@@ -140,10 +142,33 @@ export default {
       }),
     });
     ctx.cleanup.push(() => list.destroy());
-    $('#tbl', view).addEventListener('click', (e) => {
+    $('#tbl', view).addEventListener('click', async (e) => {
       const tr = e.target.closest('.mrow');
       const r = tr && tr._row;
       if (!r) return;
+      const sr = e.target.closest('button[data-staged-retry]');
+      if (sr) {
+        e.stopPropagation();
+        const res = await act(sr, () => api('POST', '/api/library/staged/retry', { target: r.target }), 'Retry now');
+        if (res) { toast('Copying ' + r.title + ' in next', 'ok'); refreshNow(); }
+        return;
+      }
+      const sd = e.target.closest('button[data-staged-discard]');
+      if (sd) {
+        e.stopPropagation();
+        const size = r.job && r.job.staged_bytes != null ? ' (' + bytes(r.job.staged_bytes) + ')' : '';
+        const ok = await confirmDialog({
+          title: 'Discard the finished file?',
+          body: 'Deletes the finished MKV of ' + r.title + size + ' from local staging. '
+            + (r.mkv ? 'The MKV in the library is untouched.' : 'Nothing was written to the library.')
+            + ' A fresh remux muxes it again from the ISO.',
+          action: 'Discard',
+        });
+        if (!ok) return;
+        const res = await act(sd, () => api('POST', '/api/library/staged/discard', { target: r.target }), 'Discard');
+        if (res) { toast('Discarded the finished file of ' + r.title, 'info'); refreshNow(); }
+        return;
+      }
       const rb = e.target.closest('button[data-remux]');
       if (rb) { e.stopPropagation(); twoStep(rb, (b) => queueOne(r, b)); return; }
       const ub = e.target.closest('button[data-unqueue]');

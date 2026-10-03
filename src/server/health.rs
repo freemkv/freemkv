@@ -305,6 +305,11 @@ fn scaled(blocks: u64, frag: u64) -> u64 {
     blocks.saturating_mul(frag)
 }
 
+/// The size of the filesystem holding `p`, in bytes (`None` where it cannot be read).
+pub(crate) fn fs_capacity(p: &Path) -> Option<u64> {
+    statvfs(p).map(|(_, total)| total).filter(|t| *t > 0)
+}
+
 fn statvfs(p: &Path) -> Option<(u64, u64)> {
     #[cfg(unix)]
     {
