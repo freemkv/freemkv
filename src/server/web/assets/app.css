@@ -297,6 +297,10 @@ details.adv > summary::-webkit-details-marker { display: none; }
 table.det { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
 table.det th { text-align: left; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--line); }
 table.det td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); }
+/* The raw report: one fixed name column, so every section's values start at the same x. */
+table.det.raw { table-layout: fixed; }
+table.det.raw td:first-child { width: 42%; overflow-wrap: anywhere; }
+table.det.raw td:last-child { overflow-wrap: anywhere; }
 .issue { display: flex; gap: 0.5rem; align-items: baseline; font-size: 0.88rem; padding: 0.25rem 0; }
 .det-scroll { overflow-x: auto; }
 
