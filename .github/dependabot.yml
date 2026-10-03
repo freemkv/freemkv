@@ -1,52 +1,32 @@
+# Version updates are monthly and grouped into one PR per ecosystem.
+# Security updates are separate and run whenever an advisory is published.
 version: 2
-
-# Dependency updates land on `dev`, never on `main`.
-#
-# `main` here is a RELEASE POINTER that freemkv's release-orchestrate.yml
-# moves to each tag. A bot commit on it would put work there that no tag
-# contains, which is exactly the state that aborted the 1.6.2 cascade at the
-# last step -- so pointing Dependabot at main would recreate that failure on a
-# schedule.
 updates:
-  - package-ecosystem: cargo
-    directory: /
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    # One PR per week for the routine bumps instead of one per crate.
-    groups:
-      minor-and-patch:
-        update-types:
-          - minor
-          - patch
-    ignore:
-      # The freemkv crates depend on each other by GIT TAG, re-pinned by
-      # release-orchestrate.yml in the release commit. A bot bump would fight
-      # the release cascade and could pin a tag that does not exist yet.
-      - dependency-name: freemkv-unlock
-      - dependency-name: libfreemkv
-      - dependency-name: freemkv-keysources
-      - dependency-name: freemkv-i18n
-      - dependency-name: freemkv-engine
-
-  - package-ecosystem: github-actions
-    directory: /
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      actions:
-        update-types:
-          - minor
-          - patch
-    ignore:
-      # Versioned by the Rust release it installs; CI picks the toolchain via
-      # `toolchain:` on @master/@stable. Dependabot proposes Rust versions that
-      # do not exist. Toolchain bumps are a deliberate all-repo change.
-      - dependency-name: dtolnay/rust-toolchain
-      # The org's own reusable workflows/actions. @v1 and @v2 are independent
-      # moving tags (v2 is only the comment guard), not semver releases: a
-      # "bump" from v1 to v2 would move a caller onto an OLDER guard.
-      - dependency-name: "freemkv/.github*"
+- package-ecosystem: cargo
+  directory: /
+  target-branch: dev
+  schedule:
+    interval: monthly
+  open-pull-requests-limit: 5
+  groups:
+    all:
+      patterns:
+      - '*'
+  ignore:
+  - dependency-name: freemkv-unlock
+  - dependency-name: libfreemkv
+  - dependency-name: freemkv-keysources
+  - dependency-name: freemkv-i18n
+  - dependency-name: freemkv-engine
+- package-ecosystem: github-actions
+  directory: /
+  target-branch: dev
+  schedule:
+    interval: monthly
+  open-pull-requests-limit: 5
+  groups:
+    all:
+      patterns:
+      - '*'
+  ignore:
+  - dependency-name: dtolnay/rust-toolchain
