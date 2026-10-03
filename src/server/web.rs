@@ -1500,9 +1500,11 @@ mod web_tests {
         );
         assert!(asset("settings.js").contains("new-password"));
         assert!(asset("settings.js").contains("r.reachable"));
-        // Library is the MKVs and never remuxes; the header carries no job.
+        // Library is the MKVs and never remuxes: its one link to the Remux page is plain
+        // navigation, and the header carries no Remux tab.
         let library = asset("library.js");
-        assert!(!library.contains("href=\"/remux\""));
+        assert!(library.contains("id=\"to-remux\" href=\"/remux\""));
+        assert!(!super::INDEX_HTML.contains("href=\"/remux\""));
         assert!(library.contains("remux: false"));
         assert!(
             !library.contains("row-more"),
