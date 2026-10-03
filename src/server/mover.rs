@@ -896,6 +896,22 @@ fn check_and_move(cfg: &Config) {
             planned_moves.push((file_path.clone(), dest));
         }
 
+        // Nothing below touches a destination root before it passes a bounded write test:
+        // a stale or hung share holds the move (output kept in staging) and never blocks here.
+        if let Some(p) = unreachable_root(cfg, &tmdb_result, &planned_moves) {
+            record_error(
+                &dir_str,
+                &format!(
+                    "waiting for the output folder: {} ({}: {})",
+                    p.message,
+                    p.path.display(),
+                    p.detail
+                ),
+                &format!("{} The rip stays in staging until then.", p.hint),
+            );
+            continue;
+        }
+
         // Two discs of one boxset share a TMDB title/filename; `disc_variant`
         // gives disc 2 `Title (Year)_2.mkv` instead of a collision. ONE variant
         // covers the whole file set (MKV+ISO matched); a STAT failure aborts as `uncertain`.
@@ -1677,6 +1693,32 @@ fn validate_destination_root(root: &str) -> Result<(), String> {
         }
         Err(e) => Err(format!("destination root '{root}' is not writable: {e}")),
     }
+}
+
+// The first destination root of `planned` that is stale, failing or not answering. A root that
+// is missing, read-only or refused is left to `validate_destination_root`'s own messages.
+fn unreachable_root(
+    cfg: &Config,
+    tmdb: &Option<tmdb::TmdbResult>,
+    planned: &[(std::path::PathBuf, String)],
+) -> Option<crate::server::health::Problem> {
+    use crate::server::health::{self, Fault};
+    let mut roots: Vec<String> = Vec::new();
+    for (src, _) in planned {
+        let r = destination_root_for(
+            cfg,
+            tmdb,
+            &src.file_name().unwrap_or_default().to_string_lossy(),
+        );
+        if !r.is_empty() && Path::new(&r).is_absolute() && !roots.contains(&r) {
+            roots.push(r);
+        }
+    }
+    roots.iter().find_map(|r| {
+        health::preflight("output", Path::new(r))
+            .err()
+            .filter(|p| matches!(p.fault, Fault::Stale | Fault::Io | Fault::Unresponsive))
+    })
 }
 
 // Fail-loud-EARLY destination check: validates every configured, non-empty destination root
@@ -3248,6 +3290,69 @@ mod tests {
             keep_iso,
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn a_hung_destination_holds_the_move_without_blocking_the_mover() {
+        let _g = super::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let movie_dir = tmp.path().join("output/Movies");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&movie_dir).unwrap();
+        let cfg = cfg_for_staging(&staging, &movie_dir.to_string_lossy(), false);
+        let disc_dir = staging.join("Held Up");
+        std::fs::create_dir_all(&disc_dir).unwrap();
+        std::fs::write(disc_dir.join(".done"), marker_json("Held Up")).unwrap();
+        let mut mkv = vec![0x1A, 0x45, 0xDF, 0xA3];
+        mkv.extend_from_slice(&[0xAAu8; 1024]);
+        std::fs::write(disc_dir.join("Held Up.mkv"), &mkv).unwrap();
+        // A probe of the movie folder that the "kernel" never returns from.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let hung = crate::server::health::bounded(
+            &movie_dir,
+            std::time::Duration::from_millis(50),
+            move || {
+                let _ = rx.recv();
+            },
+        );
+        assert_eq!(hung, crate::server::health::Bounded::TimedOut);
+        let started = std::time::Instant::now();
+        check_and_move(&cfg);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        let dest = movie_dir.join("Held Up (2024)/Held Up (2024).mkv");
+        assert!(
+            !dest.exists() && disc_dir.join("Held Up.mkv").exists(),
+            "kept in staging"
+        );
+        let err = MOVE_ERRORS
+            .lock()
+            .unwrap()
+            .get(&*disc_dir.to_string_lossy())
+            .cloned()
+            .expect("the hold is shown");
+        assert!(
+            err.reason.contains("waiting for the output folder"),
+            "{err:?}"
+        );
+        assert!(err.reason.contains("not responding"), "{err:?}");
+        assert!(err.hint.contains("Remount the share"), "{err:?}");
+        // The share answers again: the next tick moves it.
+        drop(tx);
+        let t = std::time::Instant::now();
+        while crate::server::health::preflight("output", &movie_dir).is_err() {
+            assert!(t.elapsed() < std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        check_and_move(&cfg);
+        assert!(dest.exists(), "moved once the folder answers");
+        clear_error(&disc_dir.to_string_lossy());
     }
 
     #[test]

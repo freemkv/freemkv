@@ -136,3 +136,18 @@ test('one broken subscriber cannot freeze other live views', async () => {
   assert.equal(received, 2);
   assert.equal(h.errors.length, 2);
 });
+
+test('a folder going bad or coming back reaches the page without a refetch', async () => {
+  const h = await harness();
+  let shown, live;
+  h.lib.watch((d, err, liveOnly) => { if (!err) { shown = d; live = liveOnly; } });
+  h.requests[0].resolve(listing(1));
+  await h.flush();
+  const bad = [{ role: 'output', path: '/nas', health: { state: 'unhealthy' } }];
+  h.sources[0].send('library', { ...frame(0), hold: { role: 'output' }, folders: bad });
+  assert.equal(live, true);
+  assert.equal(shown.hold.role, 'output');
+  assert.equal(shown.folders[0].health.state, 'unhealthy');
+  h.sources[0].send('library', { ...frame(0), hold: null, folders: [] });
+  assert.equal(shown.hold, null, 'a cleared hold clears');
+});

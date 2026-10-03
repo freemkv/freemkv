@@ -6,6 +6,7 @@ import { watch, refreshNow } from './libdata.js';
 import { mediaList } from './medialist.js';
 import { chipFilter } from './chips.js';
 import { muxedHtml, auditState, openDetails, outdated, videoLabel, issueText } from './details.js';
+import { folderBanner, unhealthy, stagedNote } from './folders.js';
 
 const FILTERS = [
   ['all', 'All'],
@@ -55,6 +56,12 @@ function liveText(p) {
 
 /** Queued or auditing, as the Remux rows show their jobs. */
 function statePill(r) {
+  const kept = r.job && r.job.staged && r.job.state !== 'running'
+    ? '<span class="pill warn" data-keep="1" title="Retry or discard it on the Remux page">' + esc(stagedNote(r.job)) + '</span>' : '';
+  return kept + auditPill(r);
+}
+
+function auditPill(r) {
   if (r.audit_running) {
     return '<span class="pill live" data-keep="1"><span class="cellbar" data-live="' + esc(r.mkv) + '"><span class="bar"><i></i></span><span class="txt">starting…</span></span></span>';
   }
@@ -85,6 +92,7 @@ export default {
             </div></div>
         </div>
       </div>
+      <div id="folders" class="folder-banners"></div>
       <div class="stats" id="stats"></div>
       <div class="now" id="now" hidden>
         <span class="now-ico" id="now-ico"></span>
@@ -228,22 +236,35 @@ export default {
       const txt = cell.querySelector('.txt');
       if (txt && txt.firstChild && txt.firstChild.nodeType === 3) txt.firstChild.nodeValue = liveText(p);
     }
-    // A remux in progress shows as a dot on the link to the Remux page.
-    const paintRemuxLink = (running) => {
+    // A remux in progress shows as a dot on the link to the Remux page; a folder the
+    // remuxes need that stopped answering, as a red one.
+    let running = null;
+    const paintRemuxLink = () => {
       const a = $('#to-remux', view);
       if (!a) return;
-      a.classList.toggle('busy', !!running);
-      a.title = running ? 'Remuxing ' + running.title : '';
+      const bad = unhealthy(last && last.folders)[0];
+      const held = bad || (last && last.hold);
+      a.classList.toggle('remuxing', !!running);
+      a.title = held ? 'Remuxes are waiting: ' + (bad ? bad.message : held.message) : running ? 'Remuxing ' + running.title : '';
       let b = a.querySelector('.nav-badge');
-      if (running && !b) { b = document.createElement('span'); b.className = 'nav-badge dot'; b.setAttribute('aria-label', 'A remux is running'); a.appendChild(b); }
-      if (!running && b) b.remove();
+      if ((running || held) && !b) { b = document.createElement('span'); a.appendChild(b); }
+      if (b) {
+        b.className = 'nav-badge dot' + (held ? ' bad' : '');
+        b.setAttribute('aria-label', held ? 'Remuxes are waiting for a folder' : 'A remux is running');
+      }
+      if (!running && !held && b) b.remove();
     };
-    ctx.onLibrary((f) => paintRemuxLink(f.running));
-    api('GET', '/api/library/console').then(c => paintRemuxLink(c.running)).catch(() => {});
+    const paintFolders = (d) => {
+      put($('#folders', view), folderBanner(d.folders, d.hold, false));
+      paintRemuxLink();
+    };
+    ctx.onLibrary((f) => { running = f.running; paintRemuxLink(); });
+    api('GET', '/api/library/console').then(c => { running = c.running; paintRemuxLink(); }).catch(() => {});
     ctx.cleanup.push(watch((d, err, liveOnly) => {
       if (err && !d) { put($('#lede', view), '<span style="color:var(--bad)">Could not load the library: ' + esc(err.message) + '</span>'); return; }
       last = d;
       if (liveOnly) paintLive(d); else paint();
+      paintFolders(d);
     }));
   },
 };

@@ -229,6 +229,14 @@ pub struct Config {
     /// Library: decode every MKV in full with ffmpeg, in the background. Off by default.
     #[serde(default)]
     pub deep_audit: bool,
+    /// Remux: days a finished MKV kept on local staging waits for the output folder before
+    /// it is discarded at startup. 0 = the default (7).
+    #[serde(default)]
+    pub remux_staged_max_age_days: u64,
+    /// Remux: GB the kept MKVs may hold on local staging; the oldest go first at startup.
+    /// 0 = the default (a quarter of the staging disk, at most 500 GB).
+    #[serde(default)]
+    pub remux_staged_max_gb: u64,
 }
 
 // Manual `Debug` that redacts secret-bearing fields (tmdb_api_key,
@@ -285,6 +293,8 @@ impl std::fmt::Debug for Config {
             .field("library_iso_dir", &self.library_iso_dir)
             .field("library_iso_subfolders", &self.library_iso_subfolders)
             .field("deep_audit", &self.deep_audit)
+            .field("remux_staged_max_age_days", &self.remux_staged_max_age_days)
+            .field("remux_staged_max_gb", &self.remux_staged_max_gb)
             .finish()
     }
 }

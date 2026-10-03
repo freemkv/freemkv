@@ -194,10 +194,11 @@ export function detailsBody(r) {
 export function openDetails(r, ctx = {}) {
   const body = detailsBody(r);
   const can = ctx.remux !== false && (r.kind === 'remux' || r.kind === 'iso_only');
-  const busy = r.job && (r.job.state === 'queued' || r.job.state === 'running');
+  const kept = !!(r.job && r.job.staged);
+  const busy = kept || (r.job && (r.job.state === 'queued' || r.job.state === 'running'));
   const foot = (r.mkv ? '<button class="btn btn-ghost btn-sm" data-a="reaudit">Re-audit</button>' : '')
     + (ctx.remux !== false && (r.job || r.result) ? '<button class="btn btn-ghost btn-sm" data-a="log">Remux log</button>' : '')
-    + (can ? '<button class="btn btn-primary btn-sm" data-a="remux"' + (busy ? ' disabled' : '') + '>' + (busy ? 'Queued' : 'Remux') + '</button>' : '');
+    + (can ? '<button class="btn btn-primary btn-sm" data-a="remux"' + (busy ? ' disabled' : '') + '>' + (kept ? 'Finished locally' : busy ? 'Queued' : 'Remux') + '</button>' : '');
   const m = modal({ title: esc(r.title), body, foot, wide: true });
   const q = (s) => m.el.querySelector(s);
   const raw = q('[data-raw]');

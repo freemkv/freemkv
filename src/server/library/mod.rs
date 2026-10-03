@@ -10,6 +10,7 @@ pub mod api;
 pub mod arbiter;
 pub mod audit;
 pub mod deep;
+mod deliver;
 pub mod index;
 pub mod links;
 pub mod media;
@@ -19,6 +20,7 @@ pub mod transcript;
 pub mod worker;
 
 use crate::server::config::Config;
+use crate::server::health;
 use index::{Row, RowKind, RowNote};
 use probe::{AuditReport, FileSig, MuxedWith, ProbeCache};
 use queue::{Job, JobResult, NewJob, Queue};
@@ -140,6 +142,94 @@ struct Live {
     job_title: String,
 }
 
+/// Why the remux queue holds its next job: a folder it needs failed its check.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct Hold {
+    /// "output", "source ISO" or "remux staging".
+    pub role: &'static str,
+    pub path: PathBuf,
+    pub state: health::State,
+    pub message: String,
+    pub hint: String,
+    pub since: u64,
+    // Set when a preflight (not the background check) failed: not before this is it tried again.
+    #[serde(skip)]
+    recheck_at: Option<u64>,
+}
+
+impl Hold {
+    fn from_problem(p: &health::Problem, now: u64) -> Self {
+        Hold {
+            role: p.role,
+            path: p.path.clone(),
+            state: p.fault.state(),
+            message: p.message.clone(),
+            hint: p.hint.clone(),
+            since: now,
+            recheck_at: Some(now + health::INTERVAL_SECS),
+        }
+    }
+}
+
+/// One folder the Library depends on, as its pages show it.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct FolderView {
+    /// "output", "source ISO" or "remux staging".
+    pub role: &'static str,
+    pub path: PathBuf,
+    /// The last check of the folder (or of the configured folder that holds it).
+    pub health: Option<health::Mount>,
+    /// While it is not ok: what is wrong, named by `role`, and the fix.
+    pub message: Option<String>,
+    pub hint: Option<String>,
+}
+
+impl FolderView {
+    pub fn ok(&self) -> bool {
+        self.health
+            .as_ref()
+            .is_none_or(|m| m.state == health::State::Ok)
+    }
+}
+
+/// The folders a remux uses: where MKVs land, where the ISOs are, and the local staging.
+pub fn folder_views(d: &Dirs) -> Vec<FolderView> {
+    let mut out = vec![("output", d.library.clone())];
+    out.extend(d.isos.clone().map(|p| ("source ISO", p)));
+    out.extend(health::remux_stage_dir().map(|p| ("remux staging", p)));
+    out.into_iter()
+        .map(|(role, path)| {
+            let health = health::status_for(&path);
+            let fault = health
+                .as_ref()
+                .filter(|m| m.state != health::State::Ok)
+                .map(|m| m.fault.unwrap_or(health::Fault::Other));
+            FolderView {
+                role,
+                message: fault.map(|f| f.message(role)),
+                hint: fault.map(|f| f.hint().to_string()),
+                health,
+                path,
+            }
+        })
+        .collect()
+}
+
+// The first folder of `views` whose last check failed, as a hold.
+fn folder_gate(views: &[FolderView]) -> Option<Hold> {
+    let v = views.iter().find(|v| !v.ok())?;
+    let m = v.health.as_ref()?;
+    Some(Hold {
+        role: v.role,
+        path: v.path.clone(),
+        state: m.state,
+        message: v.message.clone().unwrap_or_default(),
+        hint: v.hint.clone().unwrap_or_default(),
+        since: m.since,
+        recheck_at: None,
+    })
+}
+
 /// What the last scan of the library and ISO folders found. Built off the
 /// request path; `GET /api/library` only ever reads it.
 #[derive(Clone, Debug, Default)]
@@ -193,6 +283,7 @@ pub struct Library {
     // The indexer sleeps on this; `wake` sets it to rescan now.
     wake: (Mutex<bool>, Condvar),
     busy: AtomicBool,
+    hold: Mutex<Option<Hold>>,
 }
 
 static INSTANCE: OnceLock<Arc<Library>> = OnceLock::new();
@@ -317,6 +408,7 @@ impl Library {
             index_generation: AtomicU64::new(0),
             wake: (Mutex::new(false), Condvar::new()),
             busy: AtomicBool::new(false),
+            hold: Mutex::new(None),
         }
     }
 
@@ -677,10 +769,12 @@ impl Library {
     /// library beside a full ISO folder looks like an unmounted share, and a
     /// new MKV would then land on the local disk under the mountpoint.
     pub fn queue_block(&self, d: &Dirs, creates: bool) -> Option<String> {
-        if crate::server::health::folder_ok(&d.library) == Some(false) {
+        if let Some(h) = folder_gate(&folder_views(d)) {
             return Some(format!(
-                "The library folder {} is not answering (see System). Nothing was queued.",
-                d.library.display()
+                "{} ({}) {} Nothing was queued.",
+                h.message,
+                h.path.display(),
+                h.hint
             ));
         }
         let snap = self.snapshot();
@@ -697,6 +791,45 @@ impl Library {
             ));
         }
         None
+    }
+
+    /// Why the queue is holding its next job, if it is.
+    pub fn hold(&self) -> Option<Hold> {
+        self.hold.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    // A hold on the same folder keeps the time it began; any change reaches the stream.
+    pub(crate) fn set_hold(&self, next: Option<Hold>) {
+        let changed = {
+            let mut h = self.hold.lock().unwrap_or_else(|e| e.into_inner());
+            let next = next.map(|mut n| {
+                if let Some(old) = h.as_ref().filter(|o| o.path == n.path) {
+                    n.since = n.since.min(old.since);
+                }
+                n
+            });
+            let changed = *h != next;
+            *h = next;
+            changed
+        };
+        if changed {
+            self.touch_live();
+        }
+    }
+
+    /// Whether the next remux must wait for a folder at `now`: one failed its last
+    /// check, or a preflight failed and its recheck time has not come.
+    pub(crate) fn blocked(&self, d: &Dirs, now: u64) -> Option<Hold> {
+        if let Some(h) = folder_gate(&folder_views(d)) {
+            return Some(h);
+        }
+        self.hold()
+            .filter(|h| h.recheck_at.is_some_and(|t| now < t))
+    }
+
+    /// Hold the queue for the preflight failure `p`.
+    pub(crate) fn hold_for(&self, p: &health::Problem, now: u64) {
+        self.set_hold(Some(Hold::from_problem(p, now)));
     }
 
     /// Stop everything: cancel the running remux (its partial is deleted and

@@ -22,6 +22,8 @@ function applyLive(d) {
   d.indexing = f.indexing;
   if (d.queue) { d.queue.paused = f.paused; d.queue.queued = f.queued; }
   if (f.audits) d.audits = f.audits;
+  if ('hold' in f) d.hold = f.hold;
+  if (f.folders) d.folders = f.folders;
 }
 
 async function fetchNow() {

@@ -57,7 +57,11 @@ env:
   # gcr.io/openssf/scorecard-action, whose Google project has billing disabled,
   # so every run fails on `docker pull` regardless of the commit. Gating on it
   # would block every release on someone else's billing page.
-  NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|promote|release-orchestrate|Release)$|^[a-z_]+ in /\. - Update #[0-9]+$'
+  #
+  # The package builds (Snap, Debian, Flatpak, AppImage) are about eight of the nine
+  # minutes of a dev push and run again on qa, where release-orchestrate does gate on
+  # them. Promote does not wait for them: a broken package is caught on qa, before main.
+  NON_GATING: '^(Dependabot Updates|CodeQL|Scorecard|pages-build-deployment|promote|release-orchestrate|Release|Snap|Debian package|Flatpak|AppImage)$|^[a-z_]+ in /\. - Update #[0-9]+$'
 
 jobs:
   promote:

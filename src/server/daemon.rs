@@ -484,48 +484,107 @@ fn run_bootstrap() {
     // In-container NFS mount (v0.25.4 feature, kept). When NFS_HOST is
     // unset this is a no-op and the operator's docker-compose volumes:
     // line is the source of truth instead.
-    if let (Ok(host), Ok(export), Ok(mountpoint)) = (
-        std::env::var("NFS_HOST"),
-        std::env::var("NFS_EXPORT"),
-        std::env::var("NFS_MOUNTPOINT"),
-    ) && !host.is_empty()
-        && !export.is_empty()
-        && !mountpoint.is_empty()
-    {
-        // Default keeps `hard` (no silent I/O errors) but adds `retry=1` and
-        // a bounded wait below, so an unreachable server at startup degrades
-        // to an empty mountpoint instead of stalling. Overridable via NFS_OPTS.
-        let opts = std::env::var("NFS_OPTS")
-            .unwrap_or_else(|_| "vers=4.1,nconnect=4,nolock,actimeo=3,hard,retry=1,_netdev".into());
-        if let Err(e) = std::fs::create_dir_all(&mountpoint) {
-            eprintln!("bootstrap: cannot create NFS mountpoint {mountpoint}: {e}");
+    if let Some(share) = nfs_share() {
+        if let Err(e) = std::fs::create_dir_all(&share.mountpoint) {
+            eprintln!(
+                "bootstrap: cannot create NFS mountpoint {}: {e}",
+                share.mountpoint
+            );
         }
-        if !is_mountpoint(&mountpoint) {
-            let source = format!("{host}:{export}");
-            eprintln!("bootstrap: mounting {source} -> {mountpoint} ({opts})");
-            let child = std::process::Command::new("/sbin/mount.nfs4")
-                .arg("-o")
-                .arg(&opts)
-                .arg(&source)
-                .arg(&mountpoint)
-                .spawn();
-            match child {
-                Ok(child) => match wait_bounded(child, std::time::Duration::from_secs(30)) {
-                    Some(s) if s.success() => eprintln!("bootstrap: NFS mount OK"),
-                    Some(s) => eprintln!(
-                        "bootstrap: NFS mount FAILED ({s}); container will start with empty {mountpoint}"
-                    ),
-                    None => eprintln!(
-                        "bootstrap: NFS mount TIMED OUT after 30s (server unreachable?); \
-                             container will start with empty {mountpoint}"
-                    ),
-                },
-                Err(e) => eprintln!("bootstrap: NFS mount FAILED to spawn ({e})"),
-            }
+        if !is_mountpoint(&share.mountpoint) {
+            mount_nfs(&share);
         } else {
-            eprintln!("bootstrap: {mountpoint} already mounted, skipping");
+            eprintln!("bootstrap: {} already mounted, skipping", share.mountpoint);
         }
     }
+}
+
+/// The in-container NFS share, when the operator configured one.
+#[cfg(unix)]
+pub(crate) struct NfsShare {
+    pub source: String,
+    pub mountpoint: String,
+    pub opts: String,
+}
+
+#[cfg(unix)]
+pub(crate) fn nfs_share() -> Option<NfsShare> {
+    let (host, export, mountpoint) = (
+        std::env::var("NFS_HOST").ok()?,
+        std::env::var("NFS_EXPORT").ok()?,
+        std::env::var("NFS_MOUNTPOINT").ok()?,
+    );
+    if host.is_empty() || export.is_empty() || mountpoint.is_empty() {
+        return None;
+    }
+    // Default keeps `hard` (no silent I/O errors) but adds `retry=1` and
+    // a bounded wait on mount, so an unreachable server degrades to an empty
+    // mountpoint instead of stalling. Overridable via NFS_OPTS.
+    let opts = std::env::var("NFS_OPTS")
+        .unwrap_or_else(|_| "vers=4.1,nconnect=4,nolock,actimeo=3,hard,retry=1,_netdev".into());
+    Some(NfsShare {
+        source: format!("{host}:{export}"),
+        mountpoint,
+        opts,
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn mount_nfs(share: &NfsShare) -> bool {
+    eprintln!(
+        "bootstrap: mounting {} -> {} ({})",
+        share.source, share.mountpoint, share.opts
+    );
+    let child = std::process::Command::new("/sbin/mount.nfs4")
+        .arg("-o")
+        .arg(&share.opts)
+        .arg(&share.source)
+        .arg(&share.mountpoint)
+        .spawn();
+    match child {
+        Ok(child) => match wait_bounded(child, std::time::Duration::from_secs(30)) {
+            Some(s) if s.success() => {
+                eprintln!("bootstrap: NFS mount OK");
+                true
+            }
+            Some(s) => {
+                eprintln!(
+                    "bootstrap: NFS mount FAILED ({s}); {} stays unmounted",
+                    share.mountpoint
+                );
+                false
+            }
+            None => {
+                eprintln!(
+                    "bootstrap: NFS mount TIMED OUT after 30s (server unreachable?); {} stays unmounted",
+                    share.mountpoint
+                );
+                false
+            }
+        },
+        Err(e) => {
+            eprintln!("bootstrap: NFS mount FAILED to spawn ({e})");
+            false
+        }
+    }
+}
+
+/// Drop a mount whose handles went stale and mount the share afresh.
+#[cfg(unix)]
+pub(crate) fn remount_nfs(share: &NfsShare) -> bool {
+    // Lazy: a stale mount may still have open files, which a plain umount refuses over.
+    let gone = std::process::Command::new("/bin/umount")
+        .arg("-l")
+        .arg(&share.mountpoint)
+        .spawn()
+        .ok()
+        .and_then(|c| wait_bounded(c, std::time::Duration::from_secs(15)))
+        .is_some_and(|s| s.success());
+    if !gone {
+        eprintln!("health: umount -l {} failed", share.mountpoint);
+        return false;
+    }
+    mount_nfs(share)
 }
 
 // Point `link` at `target`, replacing a stale symlink or file. A real directory at `link`
