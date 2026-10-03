@@ -54,9 +54,12 @@ export function stagedNote(job) {
 /** The Remux row's pill for such a job, with the reason in its tooltip and a retry that is due. */
 export function stagedPill(job, now) {
   const tone = job.state === 'failed' ? 'bad' : 'warn';
-  const tip = job.failure ? ' title="' + esc(job.failure.message) + '"' : '';
+  const tip = ' title="' + esc(job.failure ? job.failure.message : stagedNote(job)) + '"';
   const due = job.state === 'queued' && job.not_before && job.not_before > now ? ' · retry ' + when(job.not_before) : '';
-  return '<span class="pill ' + tone + '" data-keep="1"' + tip + '>' + esc(stagedNote(job) + due) + '</span>';
+  const size = job.staged_bytes != null ? ' (' + bytes(job.staged_bytes) + ')' : '';
+  const n = job.staged_attempts || 0;
+  const text = 'Finished locally' + size + (n ? ' · ' + n + (n === 1 ? ' failed copy' : ' failed copies') : '') + due;
+  return '<span class="pill ' + tone + '" data-keep="1"' + tip + '>' + esc(text) + '</span>';
 }
 
 /** Retry now and Discard for a row whose job keeps a finished file and is not running. */

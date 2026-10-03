@@ -39,6 +39,15 @@ function statePills(r, hold) {
   return '';
 }
 
+// A row's pills in order. The first one never folds into "+N", so a kept finished file
+// leads: on a narrow row the version and the "no MKV yet" pills fold instead of it.
+function rowPills(r, hold) {
+  const lead = r.mkv ? '<span class="mux-pill" data-keep="1">' + muxedHtml(r) + '</span>'
+    : r.kind === 'iso_only' && !active(r) ? '<span class="pill warn" data-keep="1">no MKV yet</span>' : '';
+  const state = statePills(r, hold);
+  return r.job && r.job.staged && r.job.state !== 'running' ? state + lead : lead + state;
+}
+
 function actHtml(r) {
   if (r.job && r.job.staged && r.job.state !== 'running') return stagedActions(r);
   if (r.job && r.job.state === 'queued') {
@@ -135,8 +144,7 @@ export default {
         title: esc(r.title),
         tip: r.iso ? 'ISO: ' + r.iso : noteText(r),
         meta: r.kind === 'ambiguous' ? '<span>' + esc(noteText(r)) + '</span>' : '',
-        pills: (r.mkv ? '<span class="mux-pill" data-keep="1">' + muxedHtml(r) + '</span>'
-          : r.kind === 'iso_only' && !active(r) ? '<span class="pill warn" data-keep="1">no MKV yet</span>' : '') + statePills(r, last && last.hold),
+        pills: rowPills(r, last && last.hold),
         side: mkvHtml(r),
         act: actHtml(r),
       }),

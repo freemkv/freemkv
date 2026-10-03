@@ -132,3 +132,14 @@ test('the System page counts the kept staged files', async () => {
   assert.match(line, /\/stage\/&lt;x&gt;/);
   assert.match(line, /waiting for the output folder/);
 });
+
+test('the Remux row pill is short; the reason stays in its tooltip', async () => {
+  const f = await load();
+  const job = { state: 'failed', staged: '/s/A.staged.mkv', staged_bytes: 52.8e9, staged_attempts: 2,
+    failure: { message: 'E9073 timed out while copying' } };
+  const pill = f.stagedPill(job, 100);
+  assert.match(pill, />Finished locally \(52\.8 GB\) · 2 failed copies</);
+  assert.ok(!pill.includes('—'), 'the long explanation is not in the pill text');
+  assert.match(pill, /title="E9073 timed out while copying"/);
+  assert.match(f.stagedPill({ ...job, failure: null }, 100), /title="Finished locally/);
+});

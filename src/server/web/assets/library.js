@@ -244,7 +244,7 @@ export default {
       if (!a) return;
       const bad = unhealthy(last && last.folders)[0];
       const held = bad || (last && last.hold);
-      a.classList.toggle('busy', !!running);
+      a.classList.toggle('remuxing', !!running);
       a.title = held ? 'Remuxes are waiting: ' + (bad ? bad.message : held.message) : running ? 'Remuxing ' + running.title : '';
       let b = a.querySelector('.nav-badge');
       if ((running || held) && !b) { b = document.createElement('span'); a.appendChild(b); }
