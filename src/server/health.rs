@@ -689,6 +689,37 @@ where
     result
 }
 
+/// The least time between two remounts of the network share.
+const REMOUNT_GAP: Duration = Duration::from_secs(60);
+
+// Whether a folder under `mountpoint` reports a stale handle and the last remount is old enough.
+fn wants_remount(mounts: &[Mount], mountpoint: &Path, last: Option<Instant>, now: Instant) -> bool {
+    let stale = mounts
+        .iter()
+        .any(|m| m.fault == Some(Fault::Stale) && m.path.starts_with(mountpoint));
+    stale && last.is_none_or(|t| now.duration_since(t) >= REMOUNT_GAP)
+}
+
+// A stale handle on the container's own NFS mount only clears by mounting it afresh, so do that.
+#[cfg(unix)]
+fn heal(cfg: &Config) {
+    static LAST_REMOUNT: Mutex<Option<Instant>> = Mutex::new(None);
+    let Some(share) = crate::server::daemon::nfs_share() else {
+        return;
+    };
+    let now = Instant::now();
+    {
+        let mut last = LAST_REMOUNT.lock().unwrap_or_else(|e| e.into_inner());
+        if !wants_remount(&mounts(), Path::new(&share.mountpoint), *last, now) {
+            return;
+        }
+        *last = Some(now);
+    }
+    if crate::server::daemon::remount_nfs(&share) {
+        refresh(cfg);
+    }
+}
+
 /// Start the health thread.
 pub fn start(cfg: &Arc<RwLock<Config>>) {
     let cfg = cfg.clone();
@@ -698,6 +729,8 @@ pub fn start(cfg: &Arc<RwLock<Config>>) {
             while !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                 let c = cfg.read().unwrap_or_else(|e| e.into_inner()).clone();
                 refresh(&c);
+                #[cfg(unix)]
+                heal(&c);
                 let until = Instant::now() + Duration::from_secs(INTERVAL_SECS);
                 while Instant::now() < until
                     && !crate::server::SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
@@ -714,6 +747,41 @@ pub(crate) mod tests {
 
     // LAST is process-wide; tests that publish to it take this.
     pub(crate) static LAST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn a_stale_share_is_remounted_once_per_gap() {
+        let mp = Path::new("/mnt/nfs");
+        let stale = vec![bad_mount(
+            "Library",
+            Path::new("/mnt/nfs/movies"),
+            Fault::Stale,
+        )];
+        let t0 = Instant::now();
+        assert!(wants_remount(&stale, mp, None, t0));
+        assert!(!wants_remount(
+            &stale,
+            mp,
+            Some(t0),
+            t0 + Duration::from_secs(5)
+        ));
+        assert!(wants_remount(&stale, mp, Some(t0), t0 + REMOUNT_GAP));
+    }
+
+    #[test]
+    fn only_a_stale_handle_under_the_share_triggers_a_remount() {
+        let mp = Path::new("/mnt/nfs");
+        let t0 = Instant::now();
+        let elsewhere = vec![bad_mount("Staging", Path::new("/data/stage"), Fault::Stale)];
+        let other_fault = vec![bad_mount(
+            "Library",
+            Path::new("/mnt/nfs/movies"),
+            Fault::Io,
+        )];
+        let healthy = vec![ok_mount("Library", Path::new("/mnt/nfs/movies"))];
+        assert!(!wants_remount(&elsewhere, mp, None, t0));
+        assert!(!wants_remount(&other_fault, mp, None, t0));
+        assert!(!wants_remount(&healthy, mp, None, t0));
+    }
 
     /// Put `mounts` in place as if a check had just published them.
     pub(crate) fn set_mounts(mounts: Vec<Mount>) {
